@@ -12925,12 +12925,14 @@ test(byte_case) {
 
 //      Bulk case conversion is exact and bounded even when a span straddles
 //      a page boundary. The sentinels on both sides catch widened tails.
-test(memory_ascii_case) {
+static bool ascii_case_pass(void) {
         p8 original[4128];
         p8 expected[4128];
         p8 actual[4128];
         positive offsets[] = {0, 1, 7, 15, 31, 4093, 4095};
-        positive lengths[] = {0, 1, 2, 7, 8, 15, 16, 17, 31, 32, 33};
+        positive lengths[] = {0, 1, 2, 7, 8, 15, 16, 17, 31, 32, 33, 47, 48,
+                              63, 64, 65, 95, 96, 97, 127, 128, 129, 255,
+                              256, 257, 1000};
 
         fail(memory_to_lower_ascii(null, 0) == null);
         fail(memory_to_upper_ascii(null, 0) == null);
@@ -12979,7 +12981,28 @@ test(memory_ascii_case) {
         return true;
 }
 
-test(memory_hash_33) {
+//      Once for each body the machine has -- the zmm one, the ymm one, and
+//      the sixteen byte one under them -- the flags put back from a copy.
+test(memory_ascii_case) {
+        bool fine = true;
+#if X64
+        p8 avx2 = cpu_has_avx2, avx512 = cpu_has_avx512;
+
+        for (positive tier = 0; tier < 3; tier++)
+        {
+                cpu_has_avx2 = tier < 2 ? avx2 : 0;
+                cpu_has_avx512 = tier < 1 ? avx512 : 0;
+                fine &= ascii_case_pass();
+        }
+        cpu_has_avx2 = avx2;
+        cpu_has_avx512 = avx512;
+#else
+        fine = ascii_case_pass();
+#endif
+        return fine;
+}
+
+static bool hash_33_pass(void) {
         p8 bytes[4128];
         positive offsets[] = {0, 1, 3, 7, 15, 4093, 4095};
 
@@ -13001,7 +13024,40 @@ test(memory_hash_33) {
                         fail(memory_hash_33(bytes + offset, length) == wanted);
                 }
 
+        for (positive length = 258; length <= 4128; length += length < 1100 ? 37 : 211)
+                for (positive oi = 0; oi < 3; oi++)
+                {
+                        positive offset = offsets[oi];
+                        positive wanted = 5381;
+
+                        if (offset + length > sizeof(bytes))
+                                continue;
+
+                        for (positive at = 0; at < length; at++)
+                                wanted = wanted * 33 + bytes[offset + at];
+
+                        fail(memory_hash_33(bytes + offset, length) == wanted);
+                }
+
         return true;
+}
+
+//      Under every body the machine has: the 32 lanes where there is AVX-512
+//      with DQ, the four byte loop where there is not, which is told by
+//      writing the two flags down and putting them back.
+test(memory_hash_33) {
+        bool fine = hash_33_pass();
+#if X64
+        p8 dq = cpu_has_avx512_dq, wide = cpu_has_avx512;
+
+        cpu_has_avx512_dq = 1;
+        fine &= hash_33_pass();
+        cpu_has_avx512_dq = dq;
+        cpu_has_avx512 = 0;
+        fine &= hash_33_pass();
+        cpu_has_avx512 = wide;
+#endif
+        return fine;
 }
 
 test(memory_span_byte) {
@@ -27240,7 +27296,12 @@ b32 main()
                 check_memory_compare();
                 check_memory_search();
                 check_memory_search_ascii_case();
+                check_frob();
+                check_checksums();
                 cpu_has_avx2 = had_avx2;
+                cpu_has_avx512 = 0;
+                check_frob();
+                check_checksums();
                 cpu_has_avx512 = had_avx512;
         }
 #endif

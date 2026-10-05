@@ -7703,11 +7703,26 @@ __asm__(
     ASM_END(memory_reverse)
 
     // XOR exactly size bytes with 42 and return the original address.
-    // Userspace retires a vector at a time; the scalar floor stays legal in
-    // kernel builds and handles the exact tail without reading past it.
+    // Userspace retires a vector at a time: a zmm from 128 bytes with the
+    // tail under a byte mask, a ymm where there is no AVX-512 and then what
+    // is left of it to the sixteen byte body below, which the scalar floor
+    // follows into kernel builds with the exact tail and nothing read past
+    // it. memory_to_lower_ascii, memory_to_upper_ascii and memory_sum_bytes
+    // have the same two bodies over theirs. On a 9950X, sh test/run bench
+    // floor, the gap to the traffic bound at 256 bytes was sum 216%, frob
+    // 211% and lower 301%, and is 17%, 62% and 180%; at 4 KiB sum 1,099%,
+    // frob 390%, lower 708% and now 106%, 7% and 48%; at 64 KiB frob and
+    // lower are at the bound. Under 128 bytes nothing moved: the wide body's
+    // constants, mask and vzeroupper cost more than the three turns of the
+    // sixteen byte one, and with the threshold at 32 frob at 32 bytes went
+    // from 3% over to 87%.
     ASM_FUNC(memory_frob)
     "mov %rdi, %rax\n"
 #ifndef KERNEL_MODE
+    "cmp $128, %rsi\n   jb .Lmemory_frob_x64_narrow\n"
+    "cmpb $0, cpu_has_avx512(%rip)\n   jne .Lmemory_frob_x64_zmm\n"
+    "cmpb $0, cpu_has_avx2(%rip)\n   jne .Lmemory_frob_x64_ymm\n"
+    ".Lmemory_frob_x64_narrow:\n"
     "cmp $16, %rsi\n   jb .Lmemory_frob_x64_words\n"
     "mov $0x2a2a2a2a, %ecx\n   movd %ecx, %xmm1\n"
     "pshufd $0, %xmm1, %xmm1\n   .balign 16\n"
@@ -7728,6 +7743,28 @@ __asm__(
     "inc %rdi\n   dec %rsi\n   jnz .Lmemory_frob_x64_one\n"
     ".Lmemory_frob_x64_done:\n"
     ASM_RET
+#ifndef KERNEL_MODE
+    ".Lmemory_frob_x64_zmm:\n   vpbroadcastb .Lmemory_case_x64_frob(%rip), %zmm1\n"
+    "cmp $64, %rsi\n   jb .Lmemory_frob_x64_zmm_tail\n"
+    ".balign 16\n.Lmemory_frob_x64_zmm_64:\n"
+    "vpxorq (%rdi), %zmm1, %zmm0\n   vmovdqu64 %zmm0, (%rdi)\n"
+    "add $64, %rdi\n   sub $64, %rsi\n   cmp $64, %rsi\n"
+    "jae .Lmemory_frob_x64_zmm_64\n"
+    ".Lmemory_frob_x64_zmm_tail:\n"
+    "test %rsi, %rsi\n   jz .Lmemory_frob_x64_wide_done\n"
+    "mov %esi, %ecx\n   mov $1, %edx\n   shl %cl, %rdx\n   dec %rdx\n"
+    "kmovq %rdx, %k1\n   vmovdqu8 (%rdi), %zmm0{%k1}{z}\n"
+    "vpxorq %zmm1, %zmm0, %zmm0\n   vmovdqu8 %zmm0, (%rdi){%k1}\n"
+    ".Lmemory_frob_x64_wide_done:\n   vzeroupper\n"
+    ASM_RET
+    ".Lmemory_frob_x64_ymm:\n   vpbroadcastb .Lmemory_case_x64_frob(%rip), %ymm1\n"
+    ".balign 16\n"
+    ".Lmemory_frob_x64_ymm_32:\n"
+    "vpxor (%rdi), %ymm1, %ymm0\n   vmovdqu %ymm0, (%rdi)\n"
+    "add $32, %rdi\n   sub $32, %rsi\n   cmp $32, %rsi\n"
+    "jae .Lmemory_frob_x64_ymm_32\n"
+    "vzeroupper\n   jmp .Lmemory_frob_x64_narrow\n"
+#endif
     ASM_END(memory_frob)
 
     // Adding 63 maps 'A'..'Z' to the signed interval -128..-103. Nothing
@@ -7736,6 +7773,10 @@ __asm__(
     ASM_FUNC(memory_to_lower_ascii)
     "mov %rdi, %rax\n"
 #ifndef KERNEL_MODE
+    "cmp $128, %rsi\n   jb .Lmemory_lower_x64_narrow\n"
+    "cmpb $0, cpu_has_avx512(%rip)\n   jne .Lmemory_lower_x64_zmm\n"
+    "cmpb $0, cpu_has_avx2(%rip)\n   jne .Lmemory_lower_x64_ymm\n"
+    ".Lmemory_lower_x64_narrow:\n"
     "cmp $16, %rsi\n   jb .Lmemory_lower_x64_tail\n"
     "movdqa .Lmemory_case_x64_add_upper(%rip), %xmm2\n"
     "movdqa .Lmemory_case_x64_limit(%rip), %xmm3\n"
@@ -7757,6 +7798,42 @@ __asm__(
     "jnz .Lmemory_lower_x64_one\n"
     ".Lmemory_lower_x64_done:\n"
     ASM_RET
+#ifndef KERNEL_MODE
+    // Sixty four bytes on AVX-512, the mask register the compare lands in
+    // taking the masked add, and the tail the same under a byte mask; thirty
+    // two on AVX2 with the sixteen byte arithmetic above, the rest left to
+    // that body.
+    ".Lmemory_lower_x64_zmm:\n"
+    "vpbroadcastb .Lmemory_case_x64_add_upper(%rip), %zmm2\n"
+    "vpbroadcastb .Lmemory_case_x64_limit(%rip), %zmm3\n"
+    "vpbroadcastb .Lmemory_case_x64_delta(%rip), %zmm4\n"
+    "cmp $64, %rsi\n   jb .Lmemory_lower_x64_zmm_tail\n"
+    ".balign 16\n.Lmemory_lower_x64_zmm_64:\n"
+    "vmovdqu64 (%rdi), %zmm0\n   vpaddb %zmm2, %zmm0, %zmm1\n"
+    "vpcmpgtb %zmm1, %zmm3, %k1\n   vpaddb %zmm4, %zmm0, %zmm0{%k1}\n"
+    "vmovdqu64 %zmm0, (%rdi)\n"
+    "add $64, %rdi\n   sub $64, %rsi\n   cmp $64, %rsi\n"
+    "jae .Lmemory_lower_x64_zmm_64\n"
+    ".Lmemory_lower_x64_zmm_tail:\n"
+    "test %rsi, %rsi\n   jz .Lmemory_lower_x64_wide_done\n"
+    "mov %esi, %ecx\n   mov $1, %edx\n   shl %cl, %rdx\n   dec %rdx\n"
+    "kmovq %rdx, %k2\n   vmovdqu8 (%rdi), %zmm0{%k2}{z}\n"
+    "vpaddb %zmm2, %zmm0, %zmm1\n   vpcmpgtb %zmm1, %zmm3, %k1{%k2}\n"
+    "vpaddb %zmm4, %zmm0, %zmm0{%k1}\n   vmovdqu8 %zmm0, (%rdi){%k2}\n"
+    ".Lmemory_lower_x64_wide_done:\n   vzeroupper\n"
+    ASM_RET
+    ".Lmemory_lower_x64_ymm:\n"
+    "vpbroadcastb .Lmemory_case_x64_add_upper(%rip), %ymm2\n"
+    "vpbroadcastb .Lmemory_case_x64_limit(%rip), %ymm3\n"
+    "vpbroadcastb .Lmemory_case_x64_delta(%rip), %ymm5\n"
+    ".balign 16\n.Lmemory_lower_x64_ymm_32:\n"
+    "vmovdqu (%rdi), %ymm0\n   vpaddb %ymm2, %ymm0, %ymm1\n"
+    "vpcmpgtb %ymm1, %ymm3, %ymm4\n   vpand %ymm5, %ymm4, %ymm4\n"
+    "vpaddb %ymm4, %ymm0, %ymm0\n   vmovdqu %ymm0, (%rdi)\n"
+    "add $32, %rdi\n   sub $32, %rsi\n   cmp $32, %rsi\n"
+    "jae .Lmemory_lower_x64_ymm_32\n"
+    "vzeroupper\n   jmp .Lmemory_lower_x64_narrow\n"
+#endif
     ASM_END(memory_to_lower_ascii)
 
     // The lower-case interval has the same shape after adding 31; only the
@@ -7764,6 +7841,10 @@ __asm__(
     ASM_FUNC(memory_to_upper_ascii)
     "mov %rdi, %rax\n"
 #ifndef KERNEL_MODE
+    "cmp $128, %rsi\n   jb .Lmemory_upper_x64_narrow\n"
+    "cmpb $0, cpu_has_avx512(%rip)\n   jne .Lmemory_upper_x64_zmm\n"
+    "cmpb $0, cpu_has_avx2(%rip)\n   jne .Lmemory_upper_x64_ymm\n"
+    ".Lmemory_upper_x64_narrow:\n"
     "cmp $16, %rsi\n   jb .Lmemory_upper_x64_tail\n"
     "movdqa .Lmemory_case_x64_add_lower(%rip), %xmm2\n"
     "movdqa .Lmemory_case_x64_limit(%rip), %xmm3\n"
@@ -7785,6 +7866,38 @@ __asm__(
     "jnz .Lmemory_upper_x64_one\n"
     ".Lmemory_upper_x64_done:\n"
     ASM_RET
+#ifndef KERNEL_MODE
+    ".Lmemory_upper_x64_zmm:\n"
+    "vpbroadcastb .Lmemory_case_x64_add_lower(%rip), %zmm2\n"
+    "vpbroadcastb .Lmemory_case_x64_limit(%rip), %zmm3\n"
+    "vpbroadcastb .Lmemory_case_x64_delta(%rip), %zmm4\n"
+    "cmp $64, %rsi\n   jb .Lmemory_upper_x64_zmm_tail\n"
+    ".balign 16\n.Lmemory_upper_x64_zmm_64:\n"
+    "vmovdqu64 (%rdi), %zmm0\n   vpaddb %zmm2, %zmm0, %zmm1\n"
+    "vpcmpgtb %zmm1, %zmm3, %k1\n   vpsubb %zmm4, %zmm0, %zmm0{%k1}\n"
+    "vmovdqu64 %zmm0, (%rdi)\n"
+    "add $64, %rdi\n   sub $64, %rsi\n   cmp $64, %rsi\n"
+    "jae .Lmemory_upper_x64_zmm_64\n"
+    ".Lmemory_upper_x64_zmm_tail:\n"
+    "test %rsi, %rsi\n   jz .Lmemory_upper_x64_wide_done\n"
+    "mov %esi, %ecx\n   mov $1, %edx\n   shl %cl, %rdx\n   dec %rdx\n"
+    "kmovq %rdx, %k2\n   vmovdqu8 (%rdi), %zmm0{%k2}{z}\n"
+    "vpaddb %zmm2, %zmm0, %zmm1\n   vpcmpgtb %zmm1, %zmm3, %k1{%k2}\n"
+    "vpsubb %zmm4, %zmm0, %zmm0{%k1}\n   vmovdqu8 %zmm0, (%rdi){%k2}\n"
+    ".Lmemory_upper_x64_wide_done:\n   vzeroupper\n"
+    ASM_RET
+    ".Lmemory_upper_x64_ymm:\n"
+    "vpbroadcastb .Lmemory_case_x64_add_lower(%rip), %ymm2\n"
+    "vpbroadcastb .Lmemory_case_x64_limit(%rip), %ymm3\n"
+    "vpbroadcastb .Lmemory_case_x64_delta(%rip), %ymm5\n"
+    ".balign 16\n.Lmemory_upper_x64_ymm_32:\n"
+    "vmovdqu (%rdi), %ymm0\n   vpaddb %ymm2, %ymm0, %ymm1\n"
+    "vpcmpgtb %ymm1, %ymm3, %ymm4\n   vpand %ymm5, %ymm4, %ymm4\n"
+    "vpsubb %ymm4, %ymm0, %ymm0\n   vmovdqu %ymm0, (%rdi)\n"
+    "add $32, %rdi\n   sub $32, %rsi\n   cmp $32, %rsi\n"
+    "jae .Lmemory_upper_x64_ymm_32\n"
+    "vzeroupper\n   jmp .Lmemory_upper_x64_narrow\n"
+#endif
     ASM_END(memory_to_upper_ascii)
 
 #ifndef KERNEL_MODE
@@ -7793,6 +7906,7 @@ __asm__(
     ".Lmemory_case_x64_add_lower:\n   .fill 16,1,31\n"
     ".Lmemory_case_x64_limit:\n   .fill 16,1,154\n"
     ".Lmemory_case_x64_delta:\n   .fill 16,1,32\n"
+    ".Lmemory_case_x64_frob:\n   .fill 16,1,42\n"
     ASM_SECTION
 #endif
 
@@ -7856,6 +7970,10 @@ __asm__(
     ASM_FUNC(memory_sum_bytes)
     "xor %eax, %eax\n"
 #ifndef KERNEL_MODE
+    "cmp $128, %rsi\n   jb .Lmemory_sum_x64_narrow\n"
+    "cmpb $0, cpu_has_avx512(%rip)\n   jne .Lmemory_sum_x64_zmm\n"
+    "cmpb $0, cpu_has_avx2(%rip)\n   jne .Lmemory_sum_x64_ymm\n"
+    ".Lmemory_sum_x64_narrow:\n"
     "cmp $16, %rsi\n   jb .Lmemory_sum_x64_tail\n"
     "pxor %xmm0, %xmm0\n   pxor %xmm1, %xmm1\n"
     ".balign 16\n.Lmemory_sum_x64_16:\n"
@@ -7870,6 +7988,36 @@ __asm__(
     ".Lmemory_sum_x64_one:\n   movzbl (%rdi), %edx\n   add %edx, %eax\n"
     "inc %rdi\n   dec %rsi\n   jnz .Lmemory_sum_x64_one\n"
     ".Lmemory_sum_x64_done:\n" ASM_RET
+#ifndef KERNEL_MODE
+    // The same sums a vector wide: vpsadbw against zero, a quadword a lane,
+    // the AVX-512 tail read under a byte mask that zeroes what is not the
+    // span's; the AVX2 body hands its lanes to the sixteen byte loop's
+    // accumulator and lets it finish.
+    ".Lmemory_sum_x64_zmm:\n   vpxord %zmm0, %zmm0, %zmm0\n   vpxord %zmm1, %zmm1, %zmm1\n"
+    "cmp $64, %rsi\n   jb .Lmemory_sum_x64_zmm_tail\n"
+    ".balign 16\n.Lmemory_sum_x64_zmm_64:\n"
+    "vpsadbw (%rdi), %zmm1, %zmm2\n   vpaddq %zmm2, %zmm0, %zmm0\n"
+    "add $64, %rdi\n   sub $64, %rsi\n   cmp $64, %rsi\n"
+    "jae .Lmemory_sum_x64_zmm_64\n"
+    ".Lmemory_sum_x64_zmm_tail:\n"
+    "test %rsi, %rsi\n   jz 1f\n"
+    "mov %esi, %ecx\n   mov $1, %edx\n   shl %cl, %rdx\n   dec %rdx\n"
+    "kmovq %rdx, %k1\n   vmovdqu8 (%rdi), %zmm2{%k1}{z}\n"
+    "vpsadbw %zmm1, %zmm2, %zmm2\n   vpaddq %zmm2, %zmm0, %zmm0\n"
+    "1:  vextracti64x4 $1, %zmm0, %ymm2\n   vpaddq %ymm2, %ymm0, %ymm0\n"
+    "vextracti128 $1, %ymm0, %xmm2\n   vpaddq %xmm2, %xmm0, %xmm0\n"
+    "vpshufd $0x4e, %xmm0, %xmm2\n   vpaddq %xmm2, %xmm0, %xmm0\n"
+    "vmovd %xmm0, %eax\n   vzeroupper\n" ASM_RET
+    ".Lmemory_sum_x64_ymm:\n   vpxor %ymm0, %ymm0, %ymm0\n   vpxor %ymm1, %ymm1, %ymm1\n"
+    ".balign 16\n.Lmemory_sum_x64_ymm_32:\n"
+    "vpsadbw (%rdi), %ymm1, %ymm2\n   vpaddq %ymm2, %ymm0, %ymm0\n"
+    "add $32, %rdi\n   sub $32, %rsi\n   cmp $32, %rsi\n"
+    "jae .Lmemory_sum_x64_ymm_32\n"
+    "vextracti128 $1, %ymm0, %xmm2\n   vpaddq %xmm2, %xmm0, %xmm0\n"
+    "vzeroupper\n   cmp $16, %rsi\n   jae .Lmemory_sum_x64_16\n"
+    "movq %xmm0, %rax\n   psrldq $8, %xmm0\n   movq %xmm0, %rdx\n"
+    "add %edx, %eax\n   jmp .Lmemory_sum_x64_tail\n"
+#endif
     ASM_END(memory_sum_bytes)
 
     /* BSD sum is a serial rotate/add recurrence. Keeping it in the 16-bit
@@ -8825,8 +8973,49 @@ __asm__(
 
     // Four bytes at once shorten DJB2's multiply dependency chain: 33^4 is
     // 1185921 and the four byte weights are 33^3, 33^2, 33 and one.
+    //
+    // From 64 bytes on an AVX-512 machine with DQ the chain is cut into
+    // thirty two: four zmm accumulators of eight quadwords, each taking
+    // eight bytes zero-extended a turn after a multiply by 33^32, and the
+    // 32 lanes weighted by 33^31 down to 33^0 and added at the end, with
+    // the seed in the lane that has the weight of one. The polynomial is
+    // linear in its bytes, so this is the same number to the last bit; what
+    // is left under 32 bytes goes round the four byte loop with the sum as
+    // its seed. DQ is vpmullq, which the feature word Spark publishes has no
+    // room to say, so the first call that gets this far asks cpuid and
+    // writes cpu_has_avx512_dq, 1 for absent and 2 for present.
     ASM_FUNC(memory_hash_33)
-    "mov $5381, %eax\n   cmp $4, %rsi\n   jb .Lmemory_hash_33_x64_tail\n"
+#ifndef KERNEL_MODE
+    "cmp $64, %rsi\n   jb .Lmemory_hash_33_x64_narrow\n"
+    "cmpb $0, cpu_has_avx512(%rip)\n   je .Lmemory_hash_33_x64_narrow\n"
+    "movzbl cpu_has_avx512_dq(%rip), %ecx\n   cmp $1, %ecx\n   je .Lmemory_hash_33_x64_narrow\n"
+    "ja .Lmemory_hash_33_x64_zmm\n"
+    "push %rbx\n   mov $7, %eax\n   xor %ecx, %ecx\n   cpuid\n"
+    "shr $17, %ebx\n   and $1, %ebx\n   inc %ebx\n   mov %bl, cpu_has_avx512_dq(%rip)\n"
+    "mov %ebx, %ecx\n   pop %rbx\n   cmp $1, %ecx\n   je .Lmemory_hash_33_x64_narrow\n"
+    ".Lmemory_hash_33_x64_zmm:\n"
+    "vpxord %zmm0, %zmm0, %zmm0\n   vpxord %zmm1, %zmm1, %zmm1\n   vpxord %zmm2, %zmm2, %zmm2\n"
+    "vmovdqu64 .Lmemory_hash_33_x64_seed(%rip), %zmm3\n"
+    "vpbroadcastq .Lmemory_hash_33_x64_step(%rip), %zmm5\n"
+    ".balign 16\n.Lmemory_hash_33_x64_wide:\n"
+    "vpmullq %zmm5, %zmm0, %zmm0\n   vpmovzxbq (%rdi), %zmm6\n   vpaddq %zmm6, %zmm0, %zmm0\n"
+    "vpmullq %zmm5, %zmm1, %zmm1\n   vpmovzxbq 8(%rdi), %zmm7\n   vpaddq %zmm7, %zmm1, %zmm1\n"
+    "vpmullq %zmm5, %zmm2, %zmm2\n   vpmovzxbq 16(%rdi), %zmm8\n   vpaddq %zmm8, %zmm2, %zmm2\n"
+    "vpmullq %zmm5, %zmm3, %zmm3\n   vpmovzxbq 24(%rdi), %zmm9\n   vpaddq %zmm9, %zmm3, %zmm3\n"
+    "add $32, %rdi\n   sub $32, %rsi\n   cmp $32, %rsi\n   jae .Lmemory_hash_33_x64_wide\n"
+    "vpmullq .Lmemory_hash_33_x64_weights(%rip), %zmm0, %zmm0\n"
+    "vpmullq .Lmemory_hash_33_x64_weights+64(%rip), %zmm1, %zmm1\n"
+    "vpmullq .Lmemory_hash_33_x64_weights+128(%rip), %zmm2, %zmm2\n"
+    "vpmullq .Lmemory_hash_33_x64_weights+192(%rip), %zmm3, %zmm3\n"
+    "vpaddq %zmm1, %zmm0, %zmm0\n   vpaddq %zmm3, %zmm2, %zmm2\n   vpaddq %zmm2, %zmm0, %zmm0\n"
+    "vextracti64x4 $1, %zmm0, %ymm1\n   vpaddq %ymm1, %ymm0, %ymm0\n"
+    "vextracti128 $1, %ymm0, %xmm1\n   vpaddq %xmm1, %xmm0, %xmm0\n"
+    "vpshufd $0x4e, %xmm0, %xmm1\n   vpaddq %xmm1, %xmm0, %xmm0\n"
+    "vmovq %xmm0, %rax\n   vzeroupper\n   jmp .Lmemory_hash_33_x64_resume\n"
+    ".Lmemory_hash_33_x64_narrow:\n"
+#endif
+    "mov $5381, %eax\n"
+    ".Lmemory_hash_33_x64_resume:\n   cmp $4, %rsi\n   jb .Lmemory_hash_33_x64_tail\n"
     ".balign 16\n.Lmemory_hash_33_x64_four:\n"
     "imul $1185921, %rax, %rax\n"
     "movzbl 0(%rdi), %r8d\n   movzbl 1(%rdi), %r9d\n"
@@ -8843,6 +9032,23 @@ __asm__(
     "inc %rdi\n   dec %rsi\n   jnz .Lmemory_hash_33_x64_one\n"
     ".Lmemory_hash_33_x64_done:\n"
     ASM_RET
+#ifndef KERNEL_MODE
+    // 33^32, the seed's lane (the byte of weight one, which is the last of
+    // thirty two), and the weights 33^31 down to 33^0.
+    ".pushsection .rodata\n   .balign 64\n"
+    ".Lmemory_hash_33_x64_step:\n   .quad 0x159176221137c401\n"
+    ".balign 64\n.Lmemory_hash_33_x64_seed:\n   .quad 0, 0, 0, 0, 0, 0, 0, 5381\n"
+    ".Lmemory_hash_33_x64_weights:\n"
+    ".quad 0x65808775655ec7e1,0xf38f87fbccc4cfc1,0xaa4a2ae899995ba1,0xc719852dd61beb81\n"
+    ".quad 0xdf3ed57d829bff61,0xa9ac921b13791741,0x14a823752f22b321,0x4671b37fac185301\n"
+    ".quad 0x11a65ac5cee976e1,0x9bafb52cc8359ec1,0x9fde895e72ac4aa1,0xc6c8aed4510cfa81\n"
+    ".quad 0xb0b0bf7acc272e61,0x2c2462e4b0da6641,0x28202206ee162221,0xcae9b37492d9e201\n"
+    ".quad 0x4bf791130c3525e1,0x76aa693ea3476dc1,0xfbd69e573b4039a1,0x172588ad4f5f0981\n"
+    ".quad 0xb38fc730f35d61,0x570f6855cb541,0x2a36040a9121,0x147747c7101\n"
+    ".quad 0x9ec41d4e1,0x4cfa3cc1,0x25528a1,0x121881\n"
+    ".quad 0x8c61,0x441,0x21,0x1\n"
+    ".popsection\n"
+#endif
     ASM_END(memory_hash_33)
 
 
@@ -52193,6 +52399,8 @@ extern p8 cpu_has_mulx;
 // Not in the word Spark publishes, which is full: 0 until the first routine
 // that wants it asks the processor, then 1 for absent and 2 for present.
 extern p8 cpu_has_avx512_vbmi2;
+// The same for DQ, which memory_hash_33's 64-bit lanes multiply with.
+extern p8 cpu_has_avx512_dq;
 /* More answers cpu_hash_detect writes on the same first call, 0 or 1 like
    cpu_has_sha: on x86_64 cpu_has_sse42 is SSE4.2 (the crc32 instruction),
    beside cpu_has_mulx above; on arm64 cpu_has_sha3 is the SHA3 extension (eor3, rax1, xar, bcax), cpu_has_sm3
@@ -52247,6 +52455,9 @@ __asm__(
     ASM_BSS_OBJECT_BEGIN(cpu_has_avx512_vbmi2, 1)
     ".zero 1\n"
     ASM_OBJECT_END(cpu_has_avx512_vbmi2)
+    ASM_BSS_OBJECT_BEGIN(cpu_has_avx512_dq, 1)
+    ".zero 1\n"
+    ASM_OBJECT_END(cpu_has_avx512_dq)
     ASM_BSS_OBJECT_BEGIN(cpu_has_sse42, 1)
     ".zero 1\n"
     ASM_OBJECT_END(cpu_has_sse42)
