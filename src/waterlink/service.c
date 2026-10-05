@@ -618,91 +618,8 @@ static fn link_socket_address(socket_address_internet6 address_to into,
         as it runs. A record lock and not flock, because the kernel will say
         who holds a record lock: `link off` asks, opens the holder as a pidfd,
         asks again, and only then signals -- so a pid that ended and was reused
-        between the two is never the one signalled.
+        between the two is never the one signalled (host_lock_signal).
 */
-typedef struct
-{
-        b16 type;
-        b16 whence;
-        b32 padding;
-        bipolar start;
-        bipolar length;
-        b32 pid;
-        b32 padding2;
-} link_record_lock;
-
-#define LINK_F_GETLK 5
-#define LINK_F_SETLK 6
-#define LINK_F_WRLCK 1
-#define LINK_F_UNLCK 2
-
-/*
-        A lock file in /run/moonwater, root's own, asked command -- F_GETLK,
-        F_SETLK or F_SETLKW -- of a write lock over all of it: the handle or
-        the error, and with owner, who holds it (0 for nobody).
-*/
-static bipolar link_lock_file(string_address path, positive command,
-                              b32 address_to owner)
-{
-        link_record_lock lock = {LINK_F_WRLCK, 0, 0, 0, 0, 0, 0};
-        bipolar handle;
-        bipolar asked;
-
-        host_state_ready();
-        handle = system_open_at_mode(AT_FDCWD, path,
-                                     FILE_READ_WRITE | FILE_CREATE | O_NOFOLLOW |
-                                             O_CLOEXEC,
-                                     0600);
-        if (handle < 0)
-                return handle;
-        do
-                asked = system_call_3(syscall(fcntl), (positive)handle, command,
-                                      (positive)address_of lock);
-        while (asked == -4);
-        if (asked < 0)
-        {
-                system_close(handle);
-                return asked;
-        }
-        if (owner)
-                address_to owner = lock.type == LINK_F_UNLCK ? 0 : lock.pid;
-        return handle;
-}
-
-static bipolar link_lock_owner(void)
-{
-        b32 owner = 0;
-        bipolar handle = link_lock_file(LINK_LOCK_PATH, LINK_F_GETLK,
-                                        address_of owner);
-
-        if (handle >= 0)
-                system_close(handle);
-        return owner;
-}
-
-static bipolar link_lock_take(void)
-{
-        return link_lock_file(LINK_LOCK_PATH, LINK_F_SETLK, null);
-}
-
-// A signal for whoever holds the lock, and never for a pid reused since.
-static bool link_lock_signal(b32 signal)
-{
-        bipolar owner = link_lock_owner();
-        bipolar handle;
-        bool sent;
-
-        if (owner <= 0)
-                return false;
-        handle = system_call_2(syscall(pidfd_open), (positive)owner, 0);
-        if (handle < 0)
-                return false;
-        sent = link_lock_owner() == owner &&
-               system_call_4(syscall(pidfd_send_signal), (positive)handle,
-                             (positive)signal, 0, 0) >= 0;
-        system_close(handle);
-        return sent;
-}
 
 // Sessions ---------------------------------------------------------------
 
@@ -3008,7 +2925,7 @@ static b32 link_serve(void)
         //      A relative path in a push is where a command's is, in /root,
         //      and not wherever whoever started the listener was.
         (void)system_call_1(syscall(chdir), (positive)(string_address) "/root");
-        lock = link_lock_take();
+        lock = host_lock_file(LINK_LOCK_PATH, HOST_FILE_SETLK, null);
         if (lock < 0)
         {
                 string_format(log_error, host_label "the link is already on\n");

@@ -202,7 +202,7 @@ static bool link_group_spent(struct link_group_record address_to record,
 */
 static bipolar link_peers_lock(void)
 {
-        return link_lock_file(LINK_PEERS_LOCK, 7, null); // F_SETLKW: wait
+        return host_lock_file(LINK_PEERS_LOCK, HOST_FILE_SETLKW, null);
 }
 
 static fn link_peers_unlock(bipolar handle)

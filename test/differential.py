@@ -57351,7 +57351,7 @@ int main(void)
     # --- 5. Netlink attribute walk (netlink_find_span). ---
     nl_find = sec(
         net,
-        "static COLD address_any netlink_find_span(",
+        "typedef bool (address_to netlink_attribute_visitor)(",
         "static COLD address_any netlink_find(")
 
     nl_clean_source = base_shim + r"""
@@ -58235,7 +58235,7 @@ def harness_security_hygiene(argv):
         ("tls12_certificate_request", ("body",)),
         ("tls_check_cert_verify", ("msg",)),
         ("dhcp_walk", ("region",)),
-        ("netlink_find_span", ("bytes",)),
+        ("netlink_attributes", ("bytes",)),
         ("dns_copy_name", ("message",)),
         ("dns_message_at", ("message",)),
         ("dns_answer_address", ("message",)),
@@ -58258,8 +58258,9 @@ def harness_security_hygiene(argv):
     #   line that is not a literal is named here: a saved init command went
     #   there whole, secrets and all, where its settings are root's alone. A
     #   new part is a review before it is a leak.
+    #   "reason" is radio_keeper_said's, a literal at each of its calls.
     kmsg_parts = {"id", "ending", "path", "answer->zone", "answer->mode",
-                  "HOST_MACHINE_SCRIPT", "name"}
+                  "HOST_MACHINE_SCRIPT", "name", "reason"}
     for file in ("src/sh/host.c", "src/moonwater/moonwater.c"):
         text = (HARNESS_ROOT / file).read_text()
         lines = re.findall(r"string_address line\[\] = \{(.*?)\};\s*host_kmsg\(line\);",
@@ -58273,6 +58274,9 @@ def harness_security_hygiene(argv):
                      re.sub(r'"(?:[^"\\]|\\.)*"', "", parts).split(",")} - {"", "null"}
             checks(names <= kmsg_parts, "%s: a kernel log line carries %s"
                    % (file, ", ".join(sorted(names - kmsg_parts))))
+        for said in re.findall(r"^\s+radio_keeper_said\((.*?)\);", text, re.M | re.S):
+            checks(said.lstrip().startswith('"'),
+                   "%s: radio_keeper_said is given a literal, not %s" % (file, said.strip()[:40]))
     wire_source = (net + (HARNESS_ROOT / "src/sh/host.c").read_text() +
                    (HARNESS_ROOT / "src/sh/net.c").read_text() +
                    (HARNESS_ROOT / "src/waterlink/discover.c").read_text() +
@@ -63733,7 +63737,8 @@ def wifi_eapol_fuzz_source(net, host, checks):
     link = src_slice(host, "#define WIFI_KEY_PAIRWISE",
                                "/* The replay counter and keys for a driver")
     step = src_slice(host, "/*\n        One EAPOL-Key frame from the access point",
-                               "/* The link's news on the mlme socket")
+                               "typedef struct\n{\n        nl80211 address_to session;\n"
+                               "        p32 index;\n        b32 reason;\n} nl80211_news_turn;")
     take = src_slice(host, "/* Whether a frame on the EAPOL socket came from",
                                "/*\n        The join's four-way handshake")
     return "\n".join((crypto, "#include <ctype.h>", WIFI_EAPOL_FUZZ_SHIM, derive, link,
@@ -63932,6 +63937,51 @@ def wifi_scan_fuzz_seeds():
     # where it sits, then each twin's signal and seconds to fail): five
     # louder and quick, four louder and slow, the real one given up on
     # first, and sixty-three of every kind.
+    # Mode 6, a generic netlink message for the nl80211 visitors, the command
+    # (as its place in the driver's list) first: interfaces with names of
+    # every length and no terminator, the family's groups whole and cut, a
+    # wiphy's features of every size, a station, and the link's news with
+    # reasons of zero and frames a byte short.
+    def u32(value):
+        return struct.pack("<I", value)
+
+    def visitor(command, *attributes):
+        return b"\x06" + bytes((command,)) + b"".join(attributes)
+
+    for size in (1, 15, 16, 17, 200):
+        seeds["visit_iface_%d.bin" % size] = visitor(
+            1, attribute(3, u32(5)), attribute(5, u32(2)), attribute(1, u32(2)),
+            attribute(4, b"w" * size), attribute(6, bytes(range(6))))
+    seeds["visit_iface_ap.bin"] = visitor(1, attribute(3, u32(6)), attribute(5, u32(3)))
+    seeds["visit_iface_cut.bin"] = visitor(1, attribute(3, u32(5)), attribute(5, u32(2)),
+                                           struct.pack("<HH", 0x40, 4) + b"wlan")
+
+    def group(index, name, ident):
+        return attribute(index | 0x8000, attribute(1, name) + attribute(2, ident))
+
+    groups = attribute(7 | 0x8000, group(1, b"config\0", u32(6)) + group(2, b"scan\0", u32(8)) +
+                       group(3, b"mlme\0", u32(7)))
+    seeds["visit_family.bin"] = visitor(0, attribute(1, b"\x1c\x00"), groups)
+    seeds["visit_family_cut.bin"] = visitor(0, attribute(1, b"\x1c\x00"), groups[:-7])
+    seeds["visit_family_short_id.bin"] = visitor(
+        0, attribute(1, b"\x1c"), attribute(7 | 0x8000, group(1, b"mlme\0", b"\x07\x00")))
+    for size in (0, 1, 2, 3):
+        seeds["visit_wiphy_%d.bin" % size] = visitor(
+            2, attribute(1, u32(1)), attribute(217, b"\x00\x80\x00"[:size]))
+    seeds["visit_station.bin"] = visitor(3, attribute(6, bytes((2, 0, 0, 0, 1, 0))))
+    seeds["visit_station_short.bin"] = visitor(3, attribute(6, bytes((2, 0, 0, 0, 1))))
+    seeds["visit_disconnect.bin"] = visitor(4, attribute(3, u32(3)), attribute(54, b"\x03\x00"))
+    seeds["visit_disconnect_zero.bin"] = visitor(4, attribute(3, u32(3)), attribute(54, b"\x00\x00"))
+    seeds["visit_disconnect_bare.bin"] = visitor(4, attribute(3, u32(3)))
+    for size in (0, 24, 25, 26, 40):
+        seeds["visit_deauth_%d.bin" % size] = visitor(
+            5, attribute(3, u32(3)), attribute(51, (bytes(24) + b"\x07\x00" + bytes(14))[:size]))
+    # A features attribute of one byte whose padding is not zero.
+    seeds["visit_wiphy_padded.bin"] = visitor(
+        2, attribute(1, u32(1)), struct.pack("<HH", 5, 217) + b"\x00\x80\x80\x80")
+    seeds["visit_wiphy_bit.bin"] = visitor(
+        2, attribute(1, u32(1)), attribute(217, b"\x00\x80"))
+    seeds["visit_disassoc_zero.bin"] = visitor(6, attribute(3, u32(3)), attribute(51, bytes(26)))
     seeds["pick_five_quick.bin"] = b"\x05" + bytes((4, 0)) + bytes((10, 0)) * 5
     seeds["pick_four_slow.bin"] = b"\x05" + bytes((3, 6)) + bytes((10, 19)) * 4
     seeds["pick_given_up.bin"] = b"\x05" + bytes((2, 1)) + bytes((20, 3, 69, 0, 5, 39))
@@ -63940,8 +63990,14 @@ def wifi_scan_fuzz_seeds():
 
 
 WIFI_SCAN_FUZZ_PRELUDE = r"""
-#define GENL_HEADER 4
 #define RADIO_SSID_MOST 32
+typedef struct
+{
+        b32 handle;
+        p16 family;
+        p32 mlme;
+        p32 scan;
+} nl80211;
 """ + HOSTED_SPAN_BYTE + r"""
 """
 
@@ -63954,13 +64010,6 @@ WIFI_PICK_FUZZ_PRELUDE = r"""
 #ifndef AT_FDCWD
 #define AT_FDCWD (-100)
 #endif
-typedef struct
-{
-        b32 handle;
-        p16 family;
-        p32 mlme;
-        p32 scan;
-} nl80211;
 static p64 air_now_ms;
 static p64 system_clock_ns(b32 clock)
 {
@@ -63990,23 +64039,30 @@ static bipolar host_write_file(const void *path, const p8 *bytes, positive lengt
         air_avoid_there = true;
         return 0;
 }
-static bool wifi_mac_set(p8 *mac)
-{
-        return (mac[0] | mac[1] | mac[2] | mac[3] | mac[4] | mac[5]) != 0;
-}
+#define RADIO_SCAN_JOIN_WIDE 2
 static void radio_air_dump(nl80211 *session, p32 index, netlink_visitor visit,
                            address_any context);
-static bool radio_air_scan(nl80211 *session, p32 index, p8 *ssid, positive ssid_length,
-                           bool joinable)
+/* The scans asked for, and how long ago the last one for the name was. */
+static positive air_scans;
+static p64 air_scan_age_ms = ~(p64)0;
+static p64 radio_scan_age(p8 *ssid, positive ssid_length)
 {
-        (void)session, (void)index, (void)ssid, (void)ssid_length, (void)joinable;
+        (void)ssid, (void)ssid_length;
+        return air_scan_age_ms;
+}
+static bool radio_air_scan(nl80211 *session, p32 index, p8 *ssid, positive ssid_length,
+                           positive tier)
+{
+        (void)session, (void)index, (void)ssid, (void)ssid_length, (void)tier;
+        air_scans++;
         return true;
 }
 """
 
 WIFI_SCAN_FUZZ_DRIVER = r"""
 /* The parser as it stood before it read through byte_reader, kept as the
-   model: an RSN element's key management, counted the long way. */
+   model: an RSN element's group cipher, pairwise ciphers, key management
+   and capabilities, counted the long way. */
 static p8 rsn_model(const p8 *element, positive length)
 {
         positive at = 2 + 4;
@@ -64348,7 +64404,8 @@ static void pick_model(const p8 *data, positive size)
                 p32 frequency = 0;
                 air_station *one = null;
 
-                if (radio_bss_choose(&session, 7, (p8 *)"moonwater", 9, true, chosen, &frequency) != 1)
+                if (radio_bss_choose(&session, 7, (p8 *)"moonwater", 9, true, chosen, &frequency,
+                                     true) != 1)
                         abort();
                 for (positive at = 0; at <= twins && !one; at++)
                         if (!memcmp(air_world[at].bssid, chosen, 6))
@@ -64368,6 +64425,70 @@ static void pick_model(const p8 *data, positive size)
                 radio_avoid_add(chosen);
                 air_now_ms += 1000;
         }
+}
+
+/* The scan a join asks for when the cache has none of the name, and when it
+   does not: asked for by a verb whatever the last scan was; by the machine's
+   own pass only when no scan for this name came in the last thirty seconds,
+   so a network out of range is scanned for once and not for every pass. */
+static void gate_model(void)
+{
+        static const struct { p64 age; bool force; bool scanned; } cases[] = {
+            {~(p64)0, false, true}, {31000, false, true}, {RADIO_AIR_STALE_MS, false, false},
+            {5000, false, false}, {0, false, false},
+            {~(p64)0, true, true}, {5000, true, true}, {0, true, true}};
+        nl80211 session = {0};
+
+        for (positive at = 0; at < sizeof cases / sizeof cases[0]; at++)
+        {
+                p8 chosen[6];
+                p32 frequency = 0;
+                bipolar answer;
+
+                air_now_ms = 0;
+                air_avoid_there = false;
+                air_avoid_size = 0;
+                air_world_count = 0;
+                air_scans = 0;
+                air_scan_age_ms = cases[at].age;
+                answer = radio_bss_choose(&session, 7, (p8 *)"moonwater", 9, true, chosen,
+                                          &frequency, cases[at].force);
+                //      Nothing was in the air before or after: not in range.
+                //      Declined to scan, and told so: not a failure of its own.
+                if (answer != 0 || (air_scans != 0) != cases[at].scanned ||
+                    radio_scan_declined != !cases[at].scanned)
+                {
+                        fprintf(stderr, "the scan gate: age %llu force %d gave %ld, %zu scans\n",
+                                (unsigned long long)cases[at].age, cases[at].force, (long)answer,
+                                (size_t)air_scans);
+                        abort();
+                }
+        }
+        //      An access point in the cache that was given up on is one to
+        //      doubt, and a scan is asked for whatever the last one was.
+        air_now_ms = 0;
+        air_avoid_there = false;
+        air_avoid_size = 0;
+        air_world_count = 1;
+        memset(air_world, 0, sizeof air_world[0]);
+        air_world[0].bssid[0] = 2;
+        air_world[0].bssid[5] = 9;
+        air_world[0].mbm = -4000;
+        radio_avoid_add(air_world[0].bssid);
+        air_scans = 0;
+        air_scan_age_ms = 1000;
+        {
+                p8 chosen[6];
+                p32 frequency = 0;
+
+                if (radio_bss_choose(&session, 7, (p8 *)"moonwater", 9, true, chosen, &frequency,
+                                     false) != 1 || air_scans != 1)
+                {
+                        fprintf(stderr, "a given-up access point in the cache is not doubted\n");
+                        abort();
+                }
+        }
+        air_scan_age_ms = ~(p64)0;
 }
 
 /* radio_channel against the channel plan, once: every frequency from 0 to
@@ -64405,6 +64526,103 @@ static void channel_model(void)
                 abort();
 }
 
+/* The nl80211 visitors on a body they were not meant for: a family's groups,
+   an interface dump, a wiphy's features, a station and the link's news, each
+   from a message in a heap block exactly its size. What they hold has to stay
+   in what it was made for: the stations to four and the others to eight, a
+   name ended inside its sixteen bytes, a reason that is a link gone and so
+   never zero. Their commands are the input's, one in each, and a command
+   of another's reads nothing. */
+static void visitors_model(const p8 *data, positive size)
+{
+        static const p8 commands[] = {1, 7, 3, 19, 48, 39, 40, 5, 17};
+        p8 command = size ? commands[data[0] % sizeof commands] : 0;
+        positive whole;
+        p8 *message;
+        nl80211 session = {.family = 0x1c};
+        nl80211_family_info info = {0};
+        nl80211_iface found;
+        nl80211_wiphy_query query = {.wiphy = 1, .seen = ~0u};
+        nl80211_news_turn turn = {.session = &session, .index = 3};
+        p8 mac[6] = {0};
+
+        if (size)
+        {
+                data++;
+                size--;
+        }
+        message = wrap_message(data, size, &whole, command);
+        memset(&found, 0, sizeof found);
+        nl80211_family_seen((netlink_header *)message, &info);
+        //      The same interface again and again, up to a dozen times, which
+        //      is more than there is room for.
+        for (positive again = 0; again < 1 + (size ? data[size - 1] % 12 : 0); again++)
+                nl80211_iface_seen((netlink_header *)message, &found);
+        nl80211_wiphy_seen((netlink_header *)message, &query);
+        {
+                //      The offload bit is bit 15 of the features: in the
+                //      second byte, so a features attribute of fewer than
+                //      two bytes has none.
+                positive fsize = 0;
+                const p8 *bits = netlink_find((netlink_header *)message, GENL_HEADER,
+                                              NL80211_ATTR_EXT_FEATURES, &fsize);
+                bool want = (command == 3 || command == 1) &&
+                            nl80211_find_u32((netlink_header *)message, NL80211_ATTR_WIPHY, ~0u) == 1 &&
+                            bits && fsize >= 2 && (bits[1] & 0x80);
+
+                if (query.offload != want)
+                {
+                        fprintf(stderr, "the offload bit is read as %d, not %d\n", query.offload, want);
+                        abort();
+                }
+        }
+        nl80211_station_seen((netlink_header *)message, mac);
+        if (nl80211_link_news_take((netlink_header *)message, &turn) == (turn.reason != 0))
+        {
+                fprintf(stderr, "news stops on no reason, or goes on past one\n");
+                abort();
+        }
+        {
+                //      The reason, counted the long way: a frame's is the
+                //      two bytes after its 24, and a frame of 25 has none;
+                //      a disconnection's is its attribute's; either one that
+                //      is zero or missing is reason 1, for the link is gone.
+                positive isize = 0, rsize = 0;
+                const p8 *frame = netlink_find((netlink_header *)message, GENL_HEADER,
+                                               NL80211_ATTR_FRAME, &isize);
+                const p8 *code = netlink_find((netlink_header *)message, GENL_HEADER,
+                                              NL80211_ATTR_REASON_CODE, &rsize);
+                bool mine = nl80211_find_u32((netlink_header *)message, NL80211_ATTR_IFINDEX, 0) == 3;
+                positive want = 0;
+
+                if (mine && (command == 39 || command == 40))
+                        want = frame && isize >= 26 ? frame[24] | frame[25] << 8 : 1;
+                if (mine && command == 48)
+                        want = code && rsize >= 2 ? code[0] | code[1] << 8 : code ? 1 : 1;
+                if (mine && want == 0 && (command == 39 || command == 40 || command == 48))
+                        want = 1;
+                if (turn.reason != want)
+                {
+                        fprintf(stderr, "the reason is %lu, not %lu\n", (unsigned long)turn.reason,
+                                (unsigned long)want);
+                        abort();
+                }
+        }
+        if (found.cards > NL80211_CARDS || found.others > 8 || turn.reason > 0xffff ||
+            (turn.reason && command != 48 && command != 39 && command != 40))
+        {
+                fprintf(stderr, "the visitors hold more than they have room for\n");
+                abort();
+        }
+        for (positive at = 0; at < found.cards; at++)
+                if (!memchr(found.card[at].name, 0, IFNAME_SIZE) || !found.card[at].index)
+                {
+                        fprintf(stderr, "a station's name is not ended in its room\n");
+                        abort();
+                }
+        free(message);
+}
+
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
         p8 mode;
@@ -64412,11 +64630,17 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         p8 *message;
 
         channel_model();
+        gate_model();
         if (!size)
                 return 0;
-        mode = data[0] % 6;
+        mode = data[0] % 7;
         data++;
         size--;
+        if (mode == 6)
+        {
+                visitors_model(data, size);
+                return 0;
+        }
         if (mode == 5)
         {
                 pick_model(data, size);
@@ -64577,6 +64801,29 @@ def harness_wifi_scan_fuzz(argv):
         netlink = src_slice(net, "#define NETLINK_HEADER 16",
                                       "#endif // STANDARD_MODERN_C_NET_NETLINK")
         wait = net_zone_fuzz_wait()
+        constants = src_slice(host, "#define GENL_ID_CTRL 16",
+                                    "typedef struct\n{\n        b32 handle;")
+        records = src_slice(host, "/* One station interface: what a join asks of the radio it is on. */",
+                                  "static COLD bipolar nl80211_disconnect(nl80211 address_to session, p32 index);")
+        family_info = src_slice(host, "typedef struct\n{\n        p16 family;\n        p32 mlme;\n        p32 scan;\n} nl80211_family_info;",
+                                      "static COLD bool nl80211_begin(")
+        finds = src_slice(host, "static COLD p32 nl80211_find_u32(",
+                                "/* The command of a generic netlink message,")
+        command = src_slice(host, "/* The command of a generic netlink message,",
+                                  "/* The command of a message of nl80211's")
+        news = src_slice(host, "/* The command of a message of nl80211's",
+                               "/* One multicast group of the family")
+        groups = src_slice(host, "/* One multicast group of the family",
+                                 "static COLD bipolar nl80211_open(")
+        iface_seen = src_slice(host, "static COLD bool nl80211_iface_seen(",
+                                     "static COLD bipolar nl80211_station(nl80211 address_to session, p32 index,\n"
+                                     "                                    p8 address_to mac);")
+        wiphy_seen = src_slice(host, "static COLD bool nl80211_ext_bit(",
+                                     "static COLD bool nl80211_psk_offload(")
+        station_seen = src_slice(host, "static COLD bool nl80211_station_seen(",
+                                       "/* Whether the link has a station, and its address in mac")
+        link_news = src_slice(host, "typedef struct\n{\n        nl80211 address_to session;\n        p32 index;\n        b32 reason;\n} nl80211_news_turn;",
+                                    "/* The link's news on the mlme socket:")
         scan = src_slice(host, "#define NL80211_CMD_NEW_SCAN_RESULTS 34",
                                    "/* Whether the station the machine is associated through is authorized")
         pick = src_slice(host, "/*\n        The access points given up on",
@@ -64587,7 +64834,9 @@ def harness_wifi_scan_fuzz(argv):
         return 1
     return tls_fuzz_run("wifi scan", wifi_scan_fuzz_seeds(),
                         NET_ZONE_FUZZ_SHIM + byte_reader_source() + wait + netlink +
-                        WIFI_SCAN_FUZZ_PRELUDE + scan + WIFI_PICK_FUZZ_PRELUDE + pick +
+                        WIFI_SCAN_FUZZ_PRELUDE + constants + records + family_info + finds +
+                        command + news + groups + iface_seen + wiphy_seen + station_seen +
+                        link_news + scan + WIFI_PICK_FUZZ_PRELUDE + pick +
                         WIFI_SCAN_FUZZ_DRIVER, 4096)
 
 
@@ -64628,6 +64877,20 @@ def harness_wifi_air(argv):
       reassoc the link held while idle; the access point gone and back,
              joined again; a twin by the same name taking over when the
              first goes, and the first again after it
+      keeper the keeper holds its lock when the join returns, is started
+             again by the machine when it is killed (a link whose keeper is
+             gone is joined again), is not asked about while it stands, ends
+             with wifi off, and a station switch pulled with rfkill stays
+             pulled until it is released
+      backoff a saved network out of range is scanned for once in thirty
+             seconds and not by every pass, one with a wrong password is
+             tried at growing intervals and not back to back, and a join
+             that works leaves no record
+      class  WPA2 that asks for protected management frames, for TKIP as
+             its group cipher or (--hostapd with CONFIG_IEEE80211R) for
+             FT-PSK alone is said and not tried, by the name of what it asks
+             for, and ranks behind a plain WPA2 twin of its name that is
+             much the quieter
       rekey  (--hostapd, a hostapd built with CONFIG_TESTING_OPTIONS) the
              access point's group and pairwise rekeys and resent messages
              answered with the link and its data intact; an access point
@@ -64783,6 +65046,10 @@ def harness_wifi_air(argv):
     prep.append("uptime_now() { cut -d' ' -f1 /proc/uptime; }")
     prep.append("took() { awk -v a=\"$1\" -v b=\"$(uptime_now)\" 'BEGIN { printf \"%.2f\\n\", b - a }'; }")
     prep.append("joined() { moonwater status 2>/dev/null | grep -c -x -F \"  wifi joined $1\"; }")
+    # Whose lock the keeper's file is held under: /proc/locks names the pid
+    # and the file by device and inode, and nobody is the empty answer.
+    prep.append("holder() { i=$(stat -c %i /run/moonwater/wifi.keeper 2>/dev/null); "
+                "awk -v i=\"$i\" '$6 ~ (\":\" i \"$\") { print $5 }' /proc/locks | head -1; }")
     # When the station last associated: how long a handshake took to fail
     # is from there, not from before the scan a join may start with.
     prep.append("associated_at() { dmesg | grep \": associated\\$\" | tail -1 | sed 's/^\\[ *\\([0-9.]*\\)\\].*/\\1/'; }")
@@ -64821,7 +65088,7 @@ def harness_wifi_air(argv):
     lines.append("for i in $(seq 60); do [ \"$(joined \"$ap0\")\" = 0 ] && break; sleep 0.5; done")
     lines.append("scen_count 'reassoc access point gone' 0 \"$(joined \"$ap0\")\"")
     lines.append("sleep 2; t0=$(uptime_now); $A $W -B -i $i0 -c /tmp/ap0.conf -D nl80211 -f /tmp/ap0.log -P /tmp/ap0.pid")
-    lines.append("for i in $(seq 120); do [ \"$(joined \"$ap0\")\" = 1 ] && break; sleep 0.25; done; echo \"wifi-time back $(took $t0)\"")
+    lines.append("for i in $(seq 360); do [ \"$(joined \"$ap0\")\" = 1 ] && break; sleep 0.25; done; echo \"wifi-time back $(took $t0)\"")
     lines.append("scen_count 'reassoc access point back, joined again' 1 \"$(joined \"$ap0\")\"")
     lines.append("scen_count 'reassoc no four-way timeout' 0 \"$(dmesg | grep -c 4WAY_HANDSHAKE_TIMEOUT)\"")
     lines.append("for i in $(seq 60); do ip addr 2>/dev/null | grep -q 192.168.77.100 && break; sleep 0.5; done")
@@ -64840,7 +65107,7 @@ def harness_wifi_air(argv):
     lines.append("t1=$(dmesg | grep -c \"$S: authenticate with $tm\")")
     lines.append("kill $(cat /tmp/ap0.pid); t0=$(uptime_now)")
     lines.append("for i in $(seq 60); do [ \"$(joined \"$ap0\")\" = 0 ] && break; sleep 0.25; done")
-    lines.append("for i in $(seq 120); do [ \"$(joined \"$ap0\")\" = 1 ] && break; sleep 0.25; done; echo \"wifi-time roam $(took $t0)\"")
+    lines.append("for i in $(seq 360); do [ \"$(joined \"$ap0\")\" = 1 ] && break; sleep 0.25; done; echo \"wifi-time roam $(took $t0)\"")
     lines.append("scen_count 'reassoc roamed to the twin, joined' 1 \"$(joined \"$ap0\")\"")
     lines.append("scen_count 'reassoc roam went to the twin' 1 \"$([ \"$(dmesg | grep -c \"$S: authenticate with $tm\")\" -gt \"$t1\" ] && echo 1 || echo 0)\"")
     lines.append("scen_count 'reassoc roam no four-way timeout' 0 \"$(dmesg | grep -c 4WAY_HANDSHAKE_TIMEOUT)\"")
@@ -64983,11 +65250,147 @@ def harness_wifi_air(argv):
     lines.append("scen_count 'starve joined through the real one' 1 \"$([ \"$(dmesg | grep -a \"$S: authenticate with\" | tail -1 | sed 's/.*authenticate with \\([0-9a-f:]*\\).*/\\1/')\" = \"$rm0\" ] && echo 1 || echo 0)\"")
     lines.append("tried=0; once=0; for k in %s; do eval \"m=\\$sm$k c=\\$c$k\"; n=$(( $(dmesg | grep -c \"$S: authenticate with $m\") - c )); [ $n -gt $tried ] && tried=$n; [ $n = 1 ] && once=$((once + 1)); done" % " ".join(str(at) for at in range(starve)))
     lines.append("scen_count 'starve no twin tried twice' 1 \"$([ $tried -le 1 ] && echo 1 || echo 0)\"")
-    lines.append("scen_count 'starve every twin tried once first' %d \"$once\"" % starve)
+    # Each join the machine makes is one access point, the loudest it has not
+    # given up on, so the real one is reached in no more joins than there are
+    # twins and one: what a twin the cache has since forgotten costs is not
+    # one of them.
+    lines.append("scen_count 'starve joins no more than the twins and the real one' 1 \"$([ \"$(dmesg | grep -a \"$S: authenticate with\" | tail -%d | grep -c -v \"$rm0\")\" -le %d ] && echo 1 || echo 0)\"" % (starve + 1, starve))
     lines.append("od -An -tx1 /run/moonwater/wifi.avoid 2>/dev/null | head -12 | sed 's/^/starve-avoid /'; cat /tmp/sc.got | sed 's/^/starve-add /'")
     lines.append("dmesg | grep -a -e \"$S: authenticate with\" | tail -12 | sed 's/^/starve-log /'")
     lines.append("kill %s; rm -f /root/wifi" % " ".join("$(cat /tmp/starve%d.pid)" % at for at in range(starve)))
     family("starve", lines)
+
+    # ---- keeper: the process that keeps a joined link's keys. Its lock is
+    # taken before the join returns, so that whatever joins next finds it to
+    # end; killed, the machine joins again and a keeper takes the link
+    # over, and a link the keeper has lost is not left to die at the
+    # access point's next rekey.
+    lines = []
+    lines.append("moonwater wifi remove \"$ap1\" > /dev/null 2>&1; moonwater wifi remove \"$ap0\" > /dev/null 2>&1; rm -f /root/wifi /run/moonwater/wifi.avoid /run/moonwater/wifi.last; sleep 3")
+    lines.append("$A /mnt/stick/hwsim_radio power $i0 20; sleep 2")
+    lines.append("printf '%%s\\n' %s | moonwater wifi add \"$ap0\" - > /tmp/sc.got 2>&1; scen_status 'keeper join' 0 $?; sed 's/^/keeper-add /' /tmp/sc.got; dmesg | grep -a -e \"$S:\" | tail -12 | sed 's/^/keeper-log /'" % q(good["password"]))
+    lines.append("k1=$(holder)")
+    lines.append("scen_count 'keeper holds its lock when the join returns' 1 \"$([ -n \"$k1\" ] && echo 1 || echo 0)\"")
+    lines.append("scen_count 'keeper is one process' 1 \"$(ls /proc/$k1 > /dev/null 2>&1 && echo 1 || echo 0)\"")
+    lines.append("kill -9 $k1; t0=$(uptime_now)")
+    lines.append("for i in $(seq 120); do k2=$(holder); [ -n \"$k2\" ] && [ \"$k2\" != \"$k1\" ] && [ \"$(joined \"$ap0\")\" = 1 ] && break; sleep 0.5; done; echo \"wifi-time keeper-restart $(took $t0)\"")
+    lines.append("scen_count 'keeper killed, a new one holds the link' 1 \"$([ -n \"$k2\" ] && [ \"$k2\" != \"$k1\" ] && echo 1 || echo 0)\"")
+    lines.append("scen_count 'keeper killed, the machine is joined again' 1 \"$(joined \"$ap0\")\"")
+    lines.append("scen_count 'keeper restart within 30 s' 1 \"$(awk -v t=\"$(took $t0)\" 'BEGIN { print (t < 30) }')\"")
+    # Left alone with its keeper standing, the machine's passes ask nothing
+    # of the kernel and join nothing: the same keeper, the same
+    # association, a quarter of a minute later.
+    lines.append("a0=$(dmesg | grep -c \"$S: authenticate with\"); sleep 10")
+    lines.append("scen_count 'keeper standing, the same keeper' \"$k2\" \"$(holder)\"")
+    lines.append("scen_count 'keeper standing, no new authentication' \"$a0\" \"$(dmesg | grep -c \"$S: authenticate with\")\"")
+    # A keeper that ends with the link: left by removing the network, no
+    # keeper holds the lock any more. (Not by wifi off, which is every wlan
+    # switch, and here the access points' radios are wlan too.)
+    lines.append("moonwater wifi remove \"$ap0\" > /dev/null 2>&1; sleep 1")
+    lines.append("scen_count 'keeper gone with the network removed' 0 \"$([ -n \"$(holder)\" ] && echo 1 || echo 0)\"")
+    lines.append("scen_count 'keeper gone, no kept marker' 0 \"$([ -e /run/moonwater/wifi.kept ] && echo 1 || echo 0)\"")
+    # A switch somebody else pulled stays pulled: rfkill block is not
+    # undone by the machine's own pass, and the machine joins again
+    # when it is released.
+    lines.append("printf '%%s\\n' %s | moonwater wifi add \"$ap0\" - > /tmp/sc.got 2>&1; scen_status 'keeper joined again' 0 $?" % q(good["password"]))
+    # The station's own switch and no other: rfkill by type is every wlan
+    # switch, and here the access points' radios are wlan too.
+    lines.append("ri=$(cat /sys/class/net/$S/phy80211/rfkill*/index | head -1); rfkill block $ri; sleep 10")
+    lines.append("scen_count 'keeper rfkill block not undone in 10 s' 1 \"$(rfkill list $ri 2>&1 | grep -c 'Soft blocked: yes')\"")
+    lines.append("scen_count 'keeper rfkill block stood, nothing joined' 0 \"$(joined \"$ap0\")\"")
+    lines.append("rfkill unblock $ri; for i in $(seq 120); do [ \"$(joined \"$ap0\")\" = 1 ] && break; sleep 0.5; done")
+    lines.append("scen_count 'keeper rfkill unblocked, joined again by the machine' 1 \"$(joined \"$ap0\")\"")
+    lines.append("rm -f /root/wifi")
+    family("keeper", lines)
+
+    # ---- backoff: a network that is not there or refuses the password is
+    # not asked again every pass. Out of range, one scan and not a scan
+    # for every pass; a wrong password, a handshake of its own every
+    # few seconds of a growing wait and not back to back.
+    lines = []
+    lines.append("moonwater wifi remove \"$ap0\" > /dev/null 2>&1; rm -f /root/wifi /run/moonwater/wifi.scan /run/moonwater/wifi.last /run/moonwater/wifi.avoid")
+    lines.append("printf '%s\\n' 'nowhere near' '' > /root/wifi; moonwater wifi on > /dev/null 2>&1")
+    lines.append("n=0; last=x; for i in $(seq 80); do cur=$(cat /run/moonwater/wifi.scan 2>/dev/null); [ \"$cur\" != \"$last\" ] && { n=$((n + 1)); last=$cur; }; sleep 0.5; done; echo \"wifi-scans-out-of-range-40s $n\"")
+    lines.append("scen_count 'backoff out of range, at most three scans in 40 s' 1 \"$([ $n -le 3 ] && echo 1 || echo 0)\"")
+    lines.append("scen_count 'backoff out of range, said so' 1 \"$(moonwater wifi 2>&1 | scen_strip | grep -c -x 'not joined: no saved network is in range')\"")
+    lines.append("printf '%%s\\n' \"$ap0\" %s > /root/wifi; rm -f /run/moonwater/wifi.last /run/moonwater/wifi.avoid; moonwater wifi on > /dev/null 2>&1" % q(wrong))
+    lines.append("d0=$(dmesg | grep -c \"$S: authenticate with\"); sleep 60; n=$(( $(dmesg | grep -c \"$S: authenticate with\") - d0 )); echo \"wifi-attempts-wrong-password-60s $n\"")
+    lines.append("scen_count 'backoff wrong password, at most four handshakes in 60 s' 1 \"$([ $n -le 4 ] && echo 1 || echo 0)\"")
+    lines.append("scen_count 'backoff wrong password, tried more than once' 1 \"$([ $n -ge 2 ] && echo 1 || echo 0)\"")
+    lines.append("scen_count 'backoff the record has its count' 1 \"$([ \"$(sed -n 3p /run/moonwater/wifi.last | wc -c)\" -gt 1 ] && [ \"$(sed -n 4p /run/moonwater/wifi.last)\" -ge 2 ] && echo 1 || echo 0)\"")
+    # Right again: the wait is not carried over a join that worked, and
+    # the machine's own pass joins at once.
+    lines.append("printf '%%s\\n' %s | moonwater wifi add \"$ap0\" - > /tmp/sc.got 2>&1; scen_status 'backoff right password joins at once' 0 $?" % q(good["password"]))
+    lines.append("scen_count 'backoff a join that worked leaves no record' 0 \"$([ -e /run/moonwater/wifi.last ] && echo 1 || echo 0)\"")
+    lines.append("rm -f /root/wifi")
+    family("backoff", lines)
+
+    # ---- class: WPA2 that asks for what the join cannot give is said, and
+    # not tried, with what it asks for as its name; and none of them ranks
+    # ahead of a plain WPA2 twin of the name that is much the quieter.
+    lines = []
+    extra = []
+    powers = {"pmf": 14, "tkip": 13, "ft": 12}
+    kinds = ["pmf"] + (["tkip", "ft"] if hostapd else [])
+    words = {"pmf": "PMF", "tkip": "TKIP", "ft": "FT/256"}
+    lines.append("moonwater wifi remove \"$ap0\" > /dev/null 2>&1; rm -f /root/wifi /run/moonwater/wifi.avoid /run/moonwater/wifi.last")
+    lines.append("H=\"$L /mnt/stick/hostapd\"")
+    for at, kind in enumerate(kinds):
+        ssid = name(plain, taken)
+        password = "".join(rng.choice("abcdefghjkmnpqrstuvwxyz23456789") for _ in range(12))
+        extra.append((kind, ssid, password))
+        lines.append("cl%d=\"$(printf '%s')\"" % (at, octal(ssid)))
+        lines.append("/mnt/stick/hwsim_radio new > /dev/null; r=$(station $S); cr%d=$(/mnt/stick/hwsim_radio move $NS $r)" % at)
+        if kind in ("ft", "tkip"):
+            # wpa_supplicant's own access point picks its group cipher from its
+            # pairwise ones and has no FT, so these two are hostapd's: a TKIP
+            # pairwise cipher beside CCMP makes TKIP the group cipher, which a
+            # station that offers CCMP as the group's is refused for.
+            conf = ["driver=nl80211", "ssid2=%s" % ssid.hex(), "hw_mode=g", "channel=%d" % (1, 6, 11)[at],
+                    "wpa=2", "wpa_passphrase=%s" % password]
+            if kind == "ft":
+                conf += ["wpa_key_mgmt=FT-PSK", "rsn_pairwise=CCMP", "mobility_domain=a1b2",
+                         "ft_psk_generate_local=1", "nas_identifier=cl.example"]
+            else:
+                conf += ["wpa_key_mgmt=WPA-PSK", "rsn_pairwise=CCMP TKIP"]
+            lines.append("printf '%%s\\n' \"interface=$cr%d\" %s > /tmp/cl%d.conf" % (at, " ".join(q(c) for c in conf), at))
+            lines.append("$A $H -B -dd -t -P /tmp/cl%d.pid -f /tmp/cl%d.log /tmp/cl%d.conf" % (at, at, at))
+        else:
+            body = ["network={", "ssid=%s" % ssid.hex(), "mode=2", "frequency=%d" % (2407 + 5 * (1, 6, 11)[at]),
+                    "proto=RSN", "key_mgmt=WPA-PSK", "psk=\"%s\"" % password,
+                    "pairwise=CCMP", "group=CCMP", "ieee80211w=2", "}"]
+            lines.append("printf '%%s\\n' %s > /tmp/cl%d.conf" % (" ".join(q(line) for line in body), at))
+            lines.append("$A $W -B -i $cr%d -c /tmp/cl%d.conf -D nl80211 -f /tmp/cl%d.log -P /tmp/cl%d.pid" % (at, at, at, at))
+        lines.append("for i in $(seq 40); do grep -q AP-ENABLED /tmp/cl%d.log 2>/dev/null && break; sleep 0.25; done" % at)
+        lines.append("$A /mnt/stick/hwsim_radio power $cr%d %d" % (at, powers[kind]))
+    lines.append("sleep 31")
+    for at, (kind, ssid, password) in enumerate(extra):
+        lines.append("t0=$(uptime_now); moonwater wifi add \"$cl%d\" %s > /tmp/sc.got 2>&1; scen_status 'class %s refused' 1 $?; echo \"wifi-time class-%s $(took $t0)\"" % (at, q(password), kind, kind))
+        lines.append("scen_count 'class %s says what it asks for' 1 \"$(grep -c 'saved, but it asks for %s, which moonwater cannot join yet' /tmp/sc.got)\"" % (kind, words[kind]))
+        lines.append("scen_count 'class %s refused without a join' 1 \"$(awk -v t=\"$(took $t0)\" 'BEGIN { print (t < 12) }')\"" % kind)
+        lines.append("scen_count 'class %s is listed under its name' 1 \"$(moonwater wifi 2>&1 | scen_strip | grep -F -e \"$cl%d\" | grep -c ' %s ')\"" % (kind, at, words[kind]))
+    # The twins: a plain WPA2 network by the name of the first, much the
+    # quieter, and the first itself, much the louder and asking for more:
+    # the machine joins the plain one, having authenticated with the other
+    # not at all.
+    kind, ssid, password = extra[0]
+    lines.append("/mnt/stick/hwsim_radio new > /dev/null; r=$(station $S); tm=$(cat /sys/class/net/$r/address); ctw=$(/mnt/stick/hwsim_radio move $NS $r)")
+    body = ["network={", "ssid=%s" % ssid.hex(), "mode=2", "frequency=%d" % (2407 + 5 * 9),
+            "proto=RSN", "pairwise=CCMP", "group=CCMP", "key_mgmt=WPA-PSK", "psk=\"%s\"" % password, "}"]
+    lines.append("printf '%%s\\n' %s > /tmp/cltwin.conf" % " ".join(q(line) for line in body))
+    lines.append("$A $W -B -i $ctw -c /tmp/cltwin.conf -D nl80211 -f /tmp/cltwin.log -P /tmp/cltwin.pid")
+    lines.append("for i in $(seq 40); do grep -q AP-ENABLED /tmp/cltwin.log 2>/dev/null && break; sleep 0.25; done")
+    lines.append("$A /mnt/stick/hwsim_radio power $ctw 3")
+    lines.append("sleep 31; q0=$(dmesg | grep -c \"$S: authenticate with\")")
+    lines.append("t0=$(uptime_now); moonwater wifi add \"$cl0\" %s > /tmp/sc.got 2>&1; scen_status 'class twin joined' 0 $?; echo \"wifi-time class-twin $(took $t0)\"" % q(password))
+    lines.append("scen_count 'class the plain one joined' 1 \"$(joined \"$cl0\")\"")
+    lines.append("scen_count 'class one authentication, with the plain one' 1 \"$(( $(dmesg | grep -c \"$S: authenticate with\") - q0 ))\"")
+    lines.append("scen_count 'class authenticated with the plain one' 1 \"$(dmesg | grep -a \"$S: authenticate with\" | tail -1 | grep -c \"$tm\")\"")
+    for at in range(len(extra)):
+        lines.append("moonwater wifi remove \"$cl%d\" > /dev/null 2>&1" % at)
+        lines.append("kill $(cat /tmp/cl%d.pid) 2>/dev/null" % at)
+    lines.append("kill $(cat /tmp/cltwin.pid); rm -f /root/wifi")
+    family("class", lines)
 
     # ---- rekey: hostapd, whose control socket starts rekeys on demand.
     # Two access points by one name, the first much the stronger, each
@@ -65027,6 +65430,17 @@ def harness_wifi_air(argv):
         lines.append("scen_count 'rekey no handshake timeout' \"$h0\" \"$(dmesg | grep -c -e 4WAY_HANDSHAKE_TIMEOUT -e GROUP_KEY_HANDSHAKE_TIMEOUT)\"")
         lines.append("n0=$(dmesg | grep -c \"lease renewed on $S\"); for i in $(seq 60); do [ \"$(dmesg | grep -c \"lease renewed on $S\")\" -gt \"$n0\" ] && break; sleep 0.5; done")
         lines.append("scen_count 'rekey data through the new keys' 1 \"$([ \"$(dmesg | grep -c \"lease renewed on $S\")\" -gt \"$n0\" ] && echo 1 || echo 0)\"")
+        # Two adds started together: the second joins as soon as the first
+        # lets go of the radio, and what keeps the first's keys must be
+        # one it can find and end by then, or the link is left with a keeper
+        # whose keys are of an association that is gone, deaf to the
+        # group rekey, whose MIC it cannot check.
+        lines.append("moonwater wifi add \"$rk\" %s > /tmp/sc.a 2>&1 & moonwater wifi add \"$rk\" %s > /tmp/sc.b 2>&1 & wait" % (q(word), q(word)))
+        lines.append("sleep 4; scen_count 'rekey two adds together, joined' 1 \"$(joined \"$rk\")\"")
+        lines.append("scen_count 'rekey two adds together, one keeper' 1 \"$(awk -v i=\"$(stat -c %i /run/moonwater/wifi.keeper)\" '$6 ~ (\":\" i \"$\") { n++ } END { print n + 0 }' /proc/locks)\"")
+        lines.append("g2=$(grep -c 'group key handshake completed' /tmp/rk0.log); $HC -i $j0 raw REKEY_GTK > /dev/null; sleep 6")
+        lines.append("scen_count 'rekey two adds together, group key handshake completed' 1 \"$(( $(grep -c 'group key handshake completed' /tmp/rk0.log) - g2 ))\"")
+        lines.append("scen_count 'rekey two adds together, still joined' 1 \"$(joined \"$rk\")\"")
         # A message 1 in the access point's own name, with an ANonce of
         # nobody's and the last replay counter there is: answered, as
         # wpa_supplicant answers it, and nothing more. Its counter is not

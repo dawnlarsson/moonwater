@@ -90,6 +90,7 @@
 #define IFLA_INFO_KIND 1
 #define IFLA_CARRIER_DOWN_COUNT 48
 #define NLA_TYPE_MASK 0x3fff
+#define NLA_F_NESTED 0x8000
 
 #define NETLINK_PREFER_ANY 0
 #define NETLINK_PREFER_WIRED 1
@@ -331,6 +332,37 @@ static COLD bool netlink_attribute_add(netlink_buffer address_to buffer, p16 typ
 }
 
 /*
+        A nested attribute, built around what it holds: the header goes in
+        with no length, the attributes of its payload are added after it
+        like any others, and the end gives it the length of all of them. The
+        start is an offset, which stays good when adding grows the buffer;
+        a request that failed on the way stays failed, and the end leaves it.
+*/
+static COLD positive netlink_nested_begin(netlink_buffer address_to buffer,
+                                          p16 type)
+{
+        positive start = buffer->used;
+
+        netlink_attribute_add(buffer, (p16)(type | NLA_F_NESTED), null, 0);
+        return start;
+}
+
+static COLD fn netlink_nested_end(netlink_buffer address_to buffer,
+                                  positive start)
+{
+        if (buffer->failed)
+                return;
+        if (buffer->used - start > 0xffffu)
+        {
+                buffer->failed = true;
+                return;
+        }
+
+        ((netlink_attribute address_to)(buffer->bytes + start))->length =
+            (p16)(buffer->used - start);
+}
+
+/*
         A netlink socket, bound.
 
         The bind is what gives this socket a port so replies can find it, and
@@ -496,6 +528,32 @@ static COLD bipolar netlink_status(netlink_header address_to header, bool empty_
         return status <= 0 ? status : -1;
 }
 
+/*
+        The messages of one datagram in turn, each to visit until it says
+        stop. False when one is cut short, a length under its own header or
+        past what arrived, and what follows it was not read: that is a
+        datagram the kernel did not make. A visitor that stops is no failure.
+*/
+static COLD bool netlink_each(netlink_buffer address_to reply,
+                              netlink_visitor visit, address_any context)
+{
+        positive at = 0;
+
+        while (at + NETLINK_HEADER <= reply->used)
+        {
+                netlink_header address_to header =
+                    (netlink_header address_to)(reply->bytes + at);
+
+                if (header->length < NETLINK_HEADER ||
+                    header->length > reply->used - at)
+                        return false;
+                at += netlink_align(header->length);
+                if (!visit(header, context))
+                        return true;
+        }
+        return true;
+}
+
 static COLD bipolar netlink_walk(b32 handle, netlink_buffer address_to request,
                             p32 sequence, netlink_buffer address_to reply,
                             netlink_visitor visit, address_any context);
@@ -516,6 +574,59 @@ static COLD bipolar netlink_transact(b32 handle, netlink_buffer address_to reque
         netlink_forget(address_of reply);
 
         return status;
+}
+
+typedef struct
+{
+        netlink_visitor visit;
+        address_any context;
+        p32 sequence;
+        p32 port;
+        bipolar status;
+        bool matched;
+        bool done;
+        bool enough;
+        bool interrupted;
+} netlink_turn;
+
+/* One message of a walk: answered to this request or dropped, and the
+   status of the one that ends it. */
+static COLD bool netlink_turn_take(netlink_header address_to header,
+                                   address_any context)
+{
+        netlink_turn address_to turn = (netlink_turn address_to)context;
+
+        /* Kernel unicast replies carry the destination socket's port id in
+           nlmsg_pid.  Match it as well as the sequence so an unrelated
+           kernel notification cannot complete this transaction. */
+        if (header->port != turn->port || header->sequence != turn->sequence)
+                return true;
+        turn->matched = true;
+
+        turn->interrupted |= (header->flags & NLM_DUMP_INTERRUPTED) != 0;
+
+        if (header->type == NLMSG_IS_DONE)
+        {
+                bipolar status = netlink_status(header, true);
+
+                turn->status = turn->interrupted && !status ? -1 : status;
+                turn->done = true;
+                return false;
+        }
+
+        if (header->type == NLMSG_IS_ERROR)
+        {
+                turn->status = netlink_status(header, false);
+                turn->done = true;
+                return false;
+        }
+
+        if (!turn->enough && !turn->interrupted &&
+            header->type != NLMSG_IS_NOOP && turn->visit &&
+            !turn->visit(header, turn->context))
+                turn->enough = true;
+
+        return true;
 }
 
 /*
@@ -545,13 +656,12 @@ static bipolar netlink_walk(b32 handle, netlink_buffer address_to request,
                             p32 sequence, netlink_buffer address_to reply,
                             netlink_visitor visit, address_any context)
 {
-        netlink_header address_to header;
+        netlink_turn turn = {.visit = visit,
+                             .context = context,
+                             .sequence = sequence};
         network_deadline deadline;
-        bool enough = false;
-        bool interrupted = false;
         positive discarded = 0;
         bipolar sent;
-        positive at;
 
         if (request->failed)
                 return -1;
@@ -566,16 +676,15 @@ static bipolar netlink_walk(b32 handle, netlink_buffer address_to request,
 
         for (;;)
         {
-                p32 local_port = 0;
-                bool matched = false;
                 bipolar got = network_wait_readable_until(
                     handle, address_of deadline);
 
                 if (got <= 0)
                         return got < 0 ? got : -1;
 
-                got = netlink_receive(handle, reply,
-                                      address_of local_port);
+                turn.port = 0;
+                turn.matched = false;
+                got = netlink_receive(handle, reply, address_of turn.port);
 
                 /* A signal may land after ppoll reported the datagram but
                    before either receive consumes it.  The packet remains
@@ -587,49 +696,11 @@ static bipolar netlink_walk(b32 handle, netlink_buffer address_to request,
                 if (got < 0)
                         return got;
 
-                at = 0;
-
-                while (at + NETLINK_HEADER <= reply->used)
-                {
-                        header = (netlink_header address_to)(reply->bytes + at);
-
-                        if (header->length < NETLINK_HEADER ||
-                            at + header->length > reply->used)
-                                return -1;
-
-                        /* Kernel unicast replies carry the destination
-                           socket's port id in nlmsg_pid.  Match it as well as
-                           the sequence so an unrelated kernel notification
-                           cannot complete this transaction. */
-                        if (header->port != local_port ||
-                            header->sequence != sequence)
-                        {
-                                at += netlink_align(header->length);
-                                continue;
-                        }
-                        matched = true;
-
-                        interrupted |= (header->flags &
-                                        NLM_DUMP_INTERRUPTED) != 0;
-
-                        if (header->type == NLMSG_IS_DONE)
-                        {
-                                bipolar status = netlink_status(header, true);
-
-                                return interrupted && !status ? -1 : status;
-                        }
-
-                        if (header->type == NLMSG_IS_ERROR)
-                                return netlink_status(header, false);
-
-                        if (!enough && !interrupted &&
-                            header->type != NLMSG_IS_NOOP && visit &&
-                            !visit(header, context))
-                                enough = true;
-
-                        at += netlink_align(header->length);
-                }
-                if (!matched && discarded++ == NETLINK_DISCARD_MAX)
+                if (!netlink_each(reply, netlink_turn_take, address_of turn))
+                        return -1;
+                if (turn.done)
+                        return turn.status;
+                if (!turn.matched && discarded++ == NETLINK_DISCARD_MAX)
                         return -1;
         }
 }
@@ -649,8 +720,18 @@ static bipolar netlink_walk(b32 handle, netlink_buffer address_to request,
         payload is a chain all by itself. So the span is the routine and the
         message form is the address of its first attribute, worked out once.
 */
-static COLD address_any netlink_find_span(p8 address_to bytes, positive length,
-                                     p16 type, positive address_to size)
+typedef bool (address_to netlink_attribute_visitor)(p16 type,
+                                                    p8 address_to value,
+                                                    positive size,
+                                                    address_any context);
+
+/* The attributes of a chain in turn, each to visit as its type (without the
+   flags), its payload and the payload's length, until it says stop. False
+   when the chain is cut short: what follows an attribute whose length is
+   under its own header or past the end was not read. */
+static COLD bool netlink_attributes(p8 address_to bytes, positive length,
+                                    netlink_attribute_visitor visit,
+                                    address_any context)
 {
         byte_reader reader = byte_reader_open(bytes, length);
 
@@ -661,17 +742,15 @@ static COLD address_any netlink_find_span(p8 address_to bytes, positive length,
                 byte_reader value;
 
                 if (whole < sizeof(netlink_attribute))
-                        return null;
+                        return false;
                 value = byte_reader_window(&reader,
                                            whole - sizeof(netlink_attribute));
                 if (!byte_reader_ok(&reader))
-                        return null;
-                if ((kind & NLA_TYPE_MASK) == type)
-                {
-                        if (size)
-                                address_to size = byte_reader_left(&value);
-                        return (address_any)byte_reader_here(&value);
-                }
+                        return false;
+                if (!visit((p16)(kind & NLA_TYPE_MASK),
+                           (p8 address_to)byte_reader_here(&value),
+                           byte_reader_left(&value), context))
+                        return true;
                 //      The next starts on a four byte boundary, which the
                 //      last one need not reach.
                 (void)byte_reader_skip(&reader,
@@ -679,7 +758,38 @@ static COLD address_any netlink_find_span(p8 address_to bytes, positive length,
                                            byte_reader_left(&reader)));
         }
 
-        return null;
+        return true;
+}
+
+typedef struct
+{
+        p16 type;
+        address_any value;
+        positive size;
+} netlink_finding;
+
+static COLD bool netlink_finding_take(p16 type, p8 address_to value,
+                                      positive size, address_any context)
+{
+        netlink_finding address_to finding = (netlink_finding address_to)context;
+
+        if (type != finding->type)
+                return true;
+        finding->value = (address_any)value;
+        finding->size = size;
+        return false;
+}
+
+static COLD address_any netlink_find_span(p8 address_to bytes, positive length,
+                                     p16 type, positive address_to size)
+{
+        netlink_finding finding = {.type = type};
+
+        netlink_attributes(bytes, length, netlink_finding_take,
+                           address_of finding);
+        if (finding.value && size)
+                address_to size = finding.size;
+        return finding.value;
 }
 
 static COLD address_any netlink_find(netlink_header address_to header, positive body,

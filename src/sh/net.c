@@ -2357,12 +2357,30 @@ static COLD fn net_wake_drain(b32 handle)
    instead. Every carrier snapshot is forgotten, so each link's next news
    counts, the held link is asked whether it kept its carrier since the
    lease, and the best link is picked again. */
+typedef struct
+{
+        net_holding address_to held;
+        bipolar acted;
+} net_event_turn;
+
+static COLD bool net_watch_event_take(netlink_header address_to header,
+                                      address_any context)
+{
+        net_event_turn address_to turn = (net_event_turn address_to)context;
+
+        if (net_link_event(header, turn->held))
+        {
+                turn->acted = 1;
+                net_reconfigure_fresh(turn->held);
+        }
+        return true;
+}
+
 static COLD bipolar net_watch_events(b32 events, netlink_buffer address_to message,
                                      net_holding address_to held)
 {
         bipolar got = netlink_receive(events, message, null);
-        positive at = 0;
-        bipolar acted = 0;
+        net_event_turn turn = {.held = held};
 
         /* recvfrom can still be interrupted in the narrow interval after the
            readiness poll.  Nothing was consumed, and the lease deadline is
@@ -2380,22 +2398,8 @@ static COLD bipolar net_watch_events(b32 events, netlink_buffer address_to messa
         if (got < 0)
                 return got;
 
-        while (at + NETLINK_HEADER <= message->used)
-        {
-                netlink_header address_to header =
-                    (netlink_header address_to)(message->bytes + at);
-
-                if (header->length < NETLINK_HEADER ||
-                    at + header->length > message->used)
-                        break;
-                at += netlink_align(header->length);
-                if (net_link_event(header, held))
-                {
-                        acted = 1;
-                        net_reconfigure_fresh(held);
-                }
-        }
-        return acted;
+        netlink_each(message, net_watch_event_take, address_of turn);
+        return turn.acted;
 }
 
 /*

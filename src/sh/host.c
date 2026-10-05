@@ -717,6 +717,136 @@ static bipolar host_lock(string_address path, bool wait)
 }
 
 /*
+        A process that holds a file, named by the file: a write lock over all
+        of one in /run/moonwater, root's own, that the kernel drops when its
+        holder goes, and F_GETLK says whose it is. The holder of the keeper's
+        and the listener's is a process of their own for as long as it lives,
+        which is what these ask of it: who it is (0 for nobody), the lock
+        itself, a signal for it that cannot land on a process that is not it,
+        and a wait for it to be gone.
+*/
+#define HOST_FILE_GETLK 5
+#define HOST_FILE_SETLK 6
+#define HOST_FILE_SETLKW 7
+#define HOST_FILE_WRLCK 1
+#define HOST_FILE_UNLCK 2
+
+typedef struct
+{
+        b16 type;
+        b16 whence;
+        b32 padding;
+        bipolar start;
+        bipolar length;
+        b32 pid;
+        b32 padding2;
+} host_record_lock;
+
+/* The file's handle, or the error, after command (F_GETLK, F_SETLK or
+   F_SETLKW) over all of it; with owner, whose lock it is. The lock is held
+   for as long as the handle is. */
+static bipolar host_lock_file(string_address path, positive command,
+                              b32 address_to owner)
+{
+        host_record_lock lock = {.type = HOST_FILE_WRLCK};
+        bipolar handle;
+        bipolar asked;
+
+        host_state_ready();
+        // Not through a link: the lock is made where it is named.
+        handle = system_open_at_mode(AT_FDCWD, path,
+                                     FILE_READ_WRITE | FILE_CREATE | O_NOFOLLOW |
+                                         O_CLOEXEC,
+                                     0600);
+        if (handle < 0)
+                return handle;
+        do
+                asked = system_call_3(syscall(fcntl), (positive)handle, command,
+                                      (positive)address_of lock);
+        while (asked == -4);
+        if (asked < 0)
+        {
+                system_close(handle);
+                return asked;
+        }
+        if (owner)
+                address_to owner = lock.type == HOST_FILE_UNLCK ? 0 : lock.pid;
+        return handle;
+}
+
+static b32 host_lock_owner(string_address path)
+{
+        b32 owner = 0;
+        bipolar handle = host_lock_file(path, HOST_FILE_GETLK, address_of owner);
+
+        if (handle >= 0)
+                system_close(handle);
+        return owner;
+}
+
+// A signal for whoever holds the lock, and never for a pid reused since.
+static bool host_lock_signal(string_address path, b32 signal)
+{
+        b32 owner = host_lock_owner(path);
+        bipolar handle;
+        bool sent;
+
+        if (!owner)
+                return false;
+        handle = system_call_2(syscall(pidfd_open), (positive)owner, 0);
+        if (handle < 0)
+                return false;
+        sent = host_lock_owner(path) == owner &&
+               system_call_4(syscall(pidfd_send_signal), (positive)handle,
+                             (positive)signal, 0, 0) >= 0;
+        system_close(handle);
+        return sent;
+}
+
+// Held until nobody holds it, and let go again at once.
+static fn host_lock_wait(string_address path)
+{
+        bipolar handle = host_lock_file(path, HOST_FILE_SETLKW, null);
+
+        if (handle >= 0)
+                system_close(handle);
+}
+
+/*
+        The child of a fork made a daemon of its own: forked once more so
+        that init reaps it and not whatever started it, a session of its
+        own, /dev/null for its three descriptors and nothing else open but
+        the two named (descriptors_none for a missing one), which are what
+        its caller made it for. True in the one that is left; false in the
+        caller, which has waited for the first child, and when nothing could
+        be forked.
+*/
+static bool host_detach(p32 keep, p32 keep_too)
+{
+        positive status = 0;
+        bipolar quiet;
+        bipolar child = system_fork();
+
+        if (child)
+        {
+                if (child > 0)
+                        system_call_4(syscall(wait4), (positive)child,
+                                      (positive)address_of status, 0, 0);
+                return false;
+        }
+        if (system_fork())
+                system_call_1(syscall(exit_group), 0);
+
+        system_call(syscall(setsid));
+        quiet = system_open_at(AT_FDCWD, "/dev/null", FILE_READ_WRITE | O_CLOEXEC);
+        for (positive at = 0; quiet >= 0 && at < 3; at++)
+                if ((positive)quiet != at)
+                        system_call_3(syscall(dup3), (positive)quiet, at, 0);
+        (void)descriptors_close_except(3, keep, keep_too);
+        return true;
+}
+
+/*
         One command at a time changes what a machine keeps.
 
         Settings are read, changed and written back whole, so two commands at
@@ -4944,9 +5074,12 @@ static b32 host_bios(string_address address_to arguments, positive count)
 #define NL80211_ATTR_CIPHER_SUITE_GROUP 74
 #define NL80211_ATTR_WPA_VERSIONS 75
 #define NL80211_ATTR_AKM_SUITES 76
-#define NL80211_ATTR_REQ_IE 77
 #define NL80211_ATTR_REKEY_DATA 122
+#define NL80211_REKEY_DATA_KEK 1
+#define NL80211_REKEY_DATA_KCK 2
+#define NL80211_REKEY_DATA_REPLAY_CTR 3
 #define NL80211_ATTR_SCAN_FLAGS 158
+#define NL80211_ATTR_SPLIT_WIPHY_DUMP 174
 #define NL80211_ATTR_EXT_FEATURES 217
 #define NL80211_ATTR_PMK 254
 
@@ -4954,7 +5087,6 @@ static b32 host_bios(string_address address_to arguments, positive count)
 #define NL80211_IFTYPE_STATION 2
 #define NL80211_IFTYPE_P2P_CLIENT 8
 #define NL80211_SCAN_FLAG_FLUSH 2
-#define NLA_F_NESTED 0x8000
 #define NL80211_AUTHTYPE_OPEN 0
 #define NL80211_WPA_VERSION_2 2
 #define NL80211_KEYTYPE_GROUP 0
@@ -4975,6 +5107,21 @@ typedef struct
         p32 scan;
 } nl80211;
 
+/* One station interface: what a join asks of the radio it is on. */
+typedef struct
+{
+        p32 index;
+        p32 wiphy;
+        bool has_mac;
+        p8 mac[6];
+        p8 name[IFNAME_SIZE];
+} nl80211_card;
+
+#define NL80211_CARDS 4
+
+/* The wireless interface the machine joins by: the first station the kernel
+   lists, or, with more than one, the one that has a station of its own, which
+   is the one that is joined. */
 typedef struct
 {
         p32 index;
@@ -4983,6 +5130,8 @@ typedef struct
         bool has_mac;
         p8 mac[6];
         p8 name[IFNAME_SIZE];
+        p8 cards;
+        nl80211_card card[NL80211_CARDS];
         p8 others;
         p32 other[8];
 } nl80211_iface;
@@ -5053,6 +5202,55 @@ static COLD bool nl80211_attr(netlink_header address_to header, p16 type)
         return netlink_find(header, GENL_HEADER, type, null) != null;
 }
 
+/* The command of a generic netlink message, 0 for one too short to hold the
+   header; no message of the family's has command 0. */
+static COLD p8 nl80211_command(netlink_header address_to header)
+{
+        return header->length < NETLINK_HEADER + GENL_HEADER
+                   ? 0
+                   : ((p8 address_to)header)[NETLINK_HEADER];
+}
+
+/* Whether a hardware address is one: all zeros is what none is. */
+static COLD bool wifi_mac_set(p8 address_to mac)
+{
+        return memory_span_byte(mac, 0, 6) != 6;
+}
+
+/* The command of a message of nl80211's about this link, and 0 for any
+   other: the news on the mlme and scan sockets is every interface's, and
+   only this one's counts. */
+static COLD p8 nl80211_news(nl80211 address_to session,
+                            netlink_header address_to header, p32 index)
+{
+        return header->type == session->family &&
+                       nl80211_find_u32(header, NL80211_ATTR_IFINDEX, 0) == index
+                   ? nl80211_command(header)
+                   : 0;
+}
+
+/* One multicast group of the family: its name and the id to join it by. */
+static COLD bool nl80211_group_seen(p16 type, p8 address_to value, positive size,
+                                    address_any context)
+{
+        nl80211_family_info address_to info = (nl80211_family_info address_to)context;
+        positive name_length = 0;
+        positive id_length = 0;
+        p8 address_to name = (p8 address_to)netlink_find_span(
+            value, size, CTRL_ATTR_MCAST_GRP_NAME, address_of name_length);
+        p8 address_to id = (p8 address_to)netlink_find_span(
+            value, size, CTRL_ATTR_MCAST_GRP_ID, address_of id_length);
+
+        (void)type;
+        if (!name || name_length < 5 || !id || id_length < 4)
+                return true;
+        if (!memory_compare(name, "mlme", 5))
+                info->mlme = memory_load_unaligned(p32, id);
+        else if (!memory_compare(name, "scan", 5))
+                info->scan = memory_load_unaligned(p32, id);
+        return true;
+}
+
 static COLD bool nl80211_family_seen(netlink_header address_to header,
                                 address_any context)
 {
@@ -5063,7 +5261,6 @@ static COLD bool nl80211_family_seen(netlink_header address_to header,
                                                        CTRL_ATTR_FAMILY_ID,
                                                        address_of size);
         p8 address_to groups;
-        positive cursor = 0;
 
         if (at && size >= 2)
                 info->family = memory_load_unaligned(p16, at);
@@ -5071,34 +5268,8 @@ static COLD bool nl80211_family_seen(netlink_header address_to header,
         groups = (p8 address_to)netlink_find(header, GENL_HEADER,
                                              CTRL_ATTR_MCAST_GROUPS,
                                              address_of groups_length);
-        while (groups && cursor + sizeof(netlink_attribute) <= groups_length)
-        {
-                netlink_attribute address_to attribute =
-                    (netlink_attribute address_to)(groups + cursor);
-                positive payload;
-                p8 address_to name;
-                p8 address_to id;
-                positive name_length = 0;
-                positive id_length = 0;
-
-                if (attribute->length < sizeof(netlink_attribute) ||
-                    cursor + attribute->length > groups_length)
-                        break;
-                payload = attribute->length - sizeof(netlink_attribute);
-                name = (p8 address_to)netlink_find_span(
-                    groups + cursor + sizeof(netlink_attribute), payload,
-                    CTRL_ATTR_MCAST_GRP_NAME, address_of name_length);
-                id = (p8 address_to)netlink_find_span(
-                    groups + cursor + sizeof(netlink_attribute), payload,
-                    CTRL_ATTR_MCAST_GRP_ID, address_of id_length);
-                if (name && name_length >= 4 && id && id_length >= 4 &&
-                    !memory_compare(name, "mlme", 4))
-                        info->mlme = memory_load_unaligned(p32, id);
-                if (name && name_length >= 5 && id && id_length >= 4 &&
-                    !memory_compare(name, "scan", 5))
-                        info->scan = memory_load_unaligned(p32, id);
-                cursor += netlink_align(attribute->length);
-        }
+        if (groups)
+                netlink_attributes(groups, groups_length, nl80211_group_seen, info);
 
         return false;
 }
@@ -5159,16 +5330,17 @@ static COLD bool nl80211_iface_seen(netlink_header address_to header,
                                address_any context)
 {
         nl80211_iface address_to found = (nl80211_iface address_to)context;
-        p8 address_to body = (p8 address_to)header + NETLINK_HEADER;
+        p8 command = nl80211_command(header);
+        nl80211_card address_to card;
         p32 type;
         p32 index;
         positive length = 0;
+        positive mac_length = 0;
         string_address name;
+        p8 address_to mac;
 
-        if (header->length < NETLINK_HEADER + GENL_HEADER)
-                return true;
-        if (body[0] != NL80211_CMD_NEW_INTERFACE &&
-            body[0] != NL80211_CMD_GET_INTERFACE)
+        if (command != NL80211_CMD_NEW_INTERFACE &&
+            command != NL80211_CMD_GET_INTERFACE)
                 return true;
 
         /* A station, and only a station: an access point, a monitor or a
@@ -5180,44 +5352,42 @@ static COLD bool nl80211_iface_seen(netlink_header address_to header,
         if (index && type != NL80211_IFTYPE_STATION && type != NL80211_IFTYPE_ADHOC &&
             type != NL80211_IFTYPE_P2P_CLIENT && found->others < 8)
                 found->other[found->others++] = index;
-        if (type != NL80211_IFTYPE_STATION || !index || found->found)
+        if (type != NL80211_IFTYPE_STATION || !index || found->cards == NL80211_CARDS)
                 return true;
 
-        name = (string_address)netlink_find(header, GENL_HEADER,
-                                            NL80211_ATTR_IFNAME,
+        card = found->card + found->cards++;
+        card->index = index;
+        card->wiphy = nl80211_find_u32(header, NL80211_ATTR_WIPHY, 0);
+        name = (string_address)netlink_find(header, GENL_HEADER, NL80211_ATTR_IFNAME,
                                             address_of length);
-        found->index = index;
-        found->found = true;
-        found->wiphy = nl80211_find_u32(header, NL80211_ATTR_WIPHY, 0);
-        found->name[0] = end;
         if (name && length)
         {
                 if (length >= IFNAME_SIZE)
                         length = IFNAME_SIZE - 1;
-                memory_copy(found->name, name, length);
-                found->name[length] = end;
+                memory_copy(card->name, name, length);
+                card->name[length] = end;
         }
-
+        mac = (p8 address_to)netlink_find(header, GENL_HEADER, NL80211_ATTR_MAC,
+                                          address_of mac_length);
+        if (mac && mac_length >= 6)
         {
-                positive mac_length = 0;
-                p8 address_to mac = (p8 address_to)netlink_find(
-                    header, GENL_HEADER, NL80211_ATTR_MAC, address_of mac_length);
-
-                if (mac && mac_length >= 6)
-                {
-                        memory_copy(found->mac, mac, 6);
-                        found->has_mac = true;
-                }
+                memory_copy(card->mac, mac, 6);
+                card->has_mac = true;
         }
 
         return true;
 }
+
+static COLD bipolar nl80211_station(nl80211 address_to session, p32 index,
+                                    p8 address_to mac);
 
 static COLD bipolar nl80211_interface(nl80211 address_to session,
                                  nl80211_iface address_to found)
 {
         netlink_buffer request = {0};
         p32 sequence = netlink_sequence_take();
+        positive chosen = 0;
+        p8 mac[6];
 
         memory_fill(found, 0, sizeof(*found));
         if (!nl80211_begin(address_of request, session->family,
@@ -5225,10 +5395,29 @@ static COLD bipolar nl80211_interface(nl80211 address_to session,
                            NLM_REQUEST | NLM_DUMP, sequence))
                 return -1;
 
-        return netlink_transact(session->handle, address_of request, sequence,
-                                nl80211_iface_seen, found) < 0
-                   ? -1
-                   : (found->found ? 0 : -19);
+        if (netlink_transact(session->handle, address_of request, sequence,
+                             nl80211_iface_seen, found) < 0)
+                return -1;
+        if (!found->cards)
+                return -19;
+
+        //      With several radios the one that is joined is the one the
+        //      machine is on, whichever the kernel listed first: a pass that
+        //      looked at the first alone joined a second time over a link
+        //      that stood on the other.
+        for (positive at = 0; at < found->cards && found->cards > 1; at++)
+                if (nl80211_station(session, found->card[at].index, mac) > 0)
+                {
+                        chosen = at;
+                        break;
+                }
+        found->found = true;
+        found->index = found->card[chosen].index;
+        found->wiphy = found->card[chosen].wiphy;
+        found->has_mac = found->card[chosen].has_mac;
+        memory_copy(found->mac, found->card[chosen].mac, sizeof(found->mac));
+        memory_copy(found->name, found->card[chosen].name, sizeof(found->name));
+        return 0;
 }
 
 /* The wifi links the watcher takes no lease on: access points, monitors,
@@ -5342,14 +5531,12 @@ static COLD bool nl80211_ext_bit(p8 address_to bits, positive length, positive w
 static COLD bool nl80211_wiphy_seen(netlink_header address_to header, address_any context)
 {
         nl80211_wiphy_query address_to query = (nl80211_wiphy_query address_to)context;
-        p8 address_to body = (p8 address_to)header + NETLINK_HEADER;
+        p8 command = nl80211_command(header);
         positive size = 0;
         p8 address_to bits;
         p32 wiphy;
 
-        if (header->length < NETLINK_HEADER + GENL_HEADER)
-                return true;
-        if (body[0] != NL80211_CMD_NEW_WIPHY && body[0] != NL80211_CMD_GET_WIPHY)
+        if (command != NL80211_CMD_NEW_WIPHY && command != NL80211_CMD_GET_WIPHY)
                 return true;
 
         wiphy = nl80211_find_u32(header, NL80211_ATTR_WIPHY, query->seen);
@@ -5378,6 +5565,10 @@ static COLD bool nl80211_psk_offload(nl80211 address_to session, p32 wiphy)
                            sequence))
                 return false;
         nl80211_attribute_u32(address_of request, NL80211_ATTR_WIPHY, wiphy);
+        //      A dump that is not split is the wiphy as the first nl80211 told
+        //      it, and has none of its extended features: iw asks for split
+        //      too, and a driver's offload was never heard of without it.
+        netlink_attribute_add(address_of request, NL80211_ATTR_SPLIT_WIPHY_DUMP, null, 0);
         if (netlink_transact(session->handle, address_of request, sequence,
                              nl80211_wiphy_seen, address_of query) < 0)
                 return false;
@@ -5387,15 +5578,13 @@ static COLD bool nl80211_psk_offload(nl80211 address_to session, p32 wiphy)
 static COLD bool nl80211_station_seen(netlink_header address_to header,
                                  address_any context)
 {
-        p8 address_to body = (p8 address_to)header + NETLINK_HEADER;
+        p8 command = nl80211_command(header);
         p8 address_to into = (p8 address_to)context;
         positive length = 0;
         p8 address_to mac;
 
-        if (header->length < NETLINK_HEADER + GENL_HEADER)
-                return true;
-        if (body[0] != NL80211_CMD_NEW_STATION &&
-            body[0] != NL80211_CMD_GET_STATION)
+        if (command != NL80211_CMD_NEW_STATION &&
+            command != NL80211_CMD_GET_STATION)
                 return true;
         mac = (p8 address_to)netlink_find(header, GENL_HEADER, NL80211_ATTR_MAC,
                                           address_of length);
@@ -5407,7 +5596,11 @@ static COLD bool nl80211_station_seen(netlink_header address_to header,
         return true;
 }
 
-static COLD bool nl80211_station(nl80211 address_to session, p32 index, p8 address_to mac)
+/* Whether the link has a station, and its address in mac: 1 when it has one,
+   0 when the kernel was asked and has none, -1 when the asking failed, which
+   says nothing of the link. */
+static COLD bipolar nl80211_station(nl80211 address_to session, p32 index,
+                                    p8 address_to mac)
 {
         netlink_buffer request = {0};
         p32 sequence = netlink_sequence_take();
@@ -5416,12 +5609,12 @@ static COLD bool nl80211_station(nl80211 address_to session, p32 index, p8 addre
         if (!nl80211_begin(address_of request, session->family,
                            NL80211_CMD_GET_STATION, NLM_REQUEST | NLM_DUMP,
                            sequence))
-                return false;
+                return -1;
         nl80211_attribute_u32(address_of request, NL80211_ATTR_IFINDEX, index);
         if (netlink_transact(session->handle, address_of request, sequence,
                              nl80211_station_seen, mac) < 0)
-                return false;
-        return mac[0] | mac[1] | mac[2] | mac[3] | mac[4] | mac[5];
+                return -1;
+        return wifi_mac_set(mac) ? 1 : 0;
 }
 
 static COLD bipolar nl80211_new_key(nl80211 address_to session, p32 index, p8 idx,
@@ -5641,33 +5834,19 @@ static COLD fn wifi_rekey_offload(wifi_link address_to link)
 {
         netlink_buffer request = {0};
         p32 sequence = netlink_sequence_take();
-        p8 nested[3 * 4 + 16 + 16 + 8];
+        positive nest;
 
-        netlink_attribute address_to kek = (netlink_attribute address_to)nested;
-        netlink_attribute address_to kck = (netlink_attribute address_to)(nested + 20);
-        netlink_attribute address_to replay = (netlink_attribute address_to)(nested + 40);
-
-        kek->length = 20;
-        kek->type = 1;
-        memory_copy(nested + 4, link->ptk + 16, 16);
-        kck->length = 20;
-        kck->type = 2;
-        memory_copy(nested + 24, link->ptk, 16);
-        replay->length = 12;
-        replay->type = 3;
-        memory_copy(nested + 44, link->replay, 8);
-        if (nl80211_begin(address_of request, link->session.family,
-                          NL80211_CMD_SET_REKEY_OFFLOAD, NLM_REQUEST | NLM_ACK, sequence))
-        {
-                nl80211_attribute_u32(address_of request, NL80211_ATTR_IFINDEX,
-                                      link->index);
-                netlink_attribute_add(address_of request,
-                                      NL80211_ATTR_REKEY_DATA | NLA_F_NESTED, nested,
-                                      sizeof(nested));
-                netlink_transact(link->session.handle, address_of request, sequence,
-                                 null, null);
-        }
-        crypto_forget(nested, sizeof(nested));
+        if (!nl80211_begin(address_of request, link->session.family,
+                           NL80211_CMD_SET_REKEY_OFFLOAD, NLM_REQUEST | NLM_ACK, sequence))
+                return;
+        nl80211_attribute_u32(address_of request, NL80211_ATTR_IFINDEX, link->index);
+        nest = netlink_nested_begin(address_of request, NL80211_ATTR_REKEY_DATA);
+        netlink_attribute_add(address_of request, NL80211_REKEY_DATA_KEK, link->ptk + 16, 16);
+        netlink_attribute_add(address_of request, NL80211_REKEY_DATA_KCK, link->ptk, 16);
+        netlink_attribute_add(address_of request, NL80211_REKEY_DATA_REPLAY_CTR,
+                              link->replay, 8);
+        netlink_nested_end(address_of request, nest);
+        netlink_transact(link->session.handle, address_of request, sequence, null, null);
 }
 
 /*
@@ -5790,6 +5969,41 @@ static COLD bipolar wifi_eapol_step(wifi_link address_to link, p8 address_to fra
         return pairwise ? 1 : 2;
 }
 
+typedef struct
+{
+        nl80211 address_to session;
+        p32 index;
+        b32 reason;
+} nl80211_news_turn;
+
+/* One message of the news: the 802.11 reason a link went away for, 1 where
+   it names none or a zero, which is still a link gone. */
+static COLD bool nl80211_link_news_take(netlink_header address_to header,
+                                        address_any context)
+{
+        nl80211_news_turn address_to turn = (nl80211_news_turn address_to)context;
+        p8 command = nl80211_news(turn->session, header, turn->index);
+        positive size = 0;
+        p8 address_to frame;
+
+        if (command == NL80211_CMD_DISCONNECT)
+                turn->reason = nl80211_find_u16(header, NL80211_ATTR_REASON_CODE, 1);
+        else if (command == NL80211_CMD_DEAUTHENTICATE ||
+                 command == NL80211_CMD_DISASSOCIATE)
+        {
+                //      The frame itself: its reason follows the 24-byte
+                //      management header.
+                frame = (p8 address_to)netlink_find(header, GENL_HEADER,
+                                                    NL80211_ATTR_FRAME,
+                                                    address_of size);
+                turn->reason = frame && size >= 26 ? frame[24] | frame[25] << 8 : 1;
+        }
+        else
+                return true;
+        turn->reason = turn->reason ? turn->reason : 1;
+        return false;
+}
+
 /* The link's news on the mlme socket: the 802.11 reason it went, 0 while
    it stands, -1 when the socket lost events and the link has to be asked
    after. Every interface's news comes here; only this one's counts. */
@@ -5797,8 +6011,7 @@ static COLD b32 nl80211_link_news(nl80211 address_to session, p32 index)
 {
         netlink_buffer reply = {0};
         p32 local_port = 0;
-        positive at = 0;
-        b32 reason = 0;
+        nl80211_news_turn turn = {.session = session, .index = index};
         bipolar got = netlink_receive(session->handle, address_of reply,
                                       address_of local_port);
 
@@ -5807,36 +6020,9 @@ static COLD b32 nl80211_link_news(nl80211 address_to session, p32 index)
                 netlink_forget(address_of reply);
                 return got == NETWORK_INTERRUPTED ? 0 : -1;
         }
-        while (!reason && at + NETLINK_HEADER <= reply.used)
-        {
-                netlink_header address_to header = (netlink_header address_to)(reply.bytes + at);
-                p8 address_to body = (p8 address_to)header + NETLINK_HEADER;
-                positive size = 0;
-                p8 address_to frame;
-
-                if (header->length < NETLINK_HEADER || header->length > reply.used - at)
-                        break;
-                at += netlink_align(header->length);
-                if (header->type != session->family ||
-                    header->length < NETLINK_HEADER + GENL_HEADER ||
-                    nl80211_find_u32(header, NL80211_ATTR_IFINDEX, 0) != index)
-                        continue;
-                if (body[0] == NL80211_CMD_DISCONNECT)
-                        reason = nl80211_find_u16(header, NL80211_ATTR_REASON_CODE, 1);
-                else if (body[0] == NL80211_CMD_DEAUTHENTICATE ||
-                         body[0] == NL80211_CMD_DISASSOCIATE)
-                {
-                        //      The frame itself: its reason follows the
-                        //      24-byte management header.
-                        frame = (p8 address_to)netlink_find(header, GENL_HEADER,
-                                                            NL80211_ATTR_FRAME,
-                                                            address_of size);
-                        reason = frame && size >= 26 ? frame[24] | frame[25] << 8 : 1;
-                        reason = reason ? reason : 1;
-                }
-        }
+        netlink_each(address_of reply, nl80211_link_news_take, address_of turn);
         netlink_forget(address_of reply);
-        return reason;
+        return turn.reason;
 }
 
 /* The link's EAPOL socket and its mlme news, waited on together until the
@@ -5952,90 +6138,113 @@ static COLD bipolar wifi_handshake(wifi_link address_to link)
 }
 
 /*
-        The keeper: the link's keys, held past the join for as long as the
-        link stands, in a process of its own with nothing else open. It
-        answers the access point's rekeys and ends when the link goes, and
-        the machine's next pass joins again. One at a time: it holds a write
-        lock on wifi.keeper, and F_GETLK names it to whatever joins or
-        leaves next, which ends it and waits until it is gone.
+        The keeper: the link the machine joined, held past the join for as long
+        as it stands, in a process of its own with nothing else open. With
+        keys of its own to keep it answers the access point's rekeys; with a
+        driver that does its own handshake, or an open network, it only
+        watches. It ends when the link goes, and the machine's next pass joins
+        again. One at a time: it holds a write lock on wifi.keeper, which
+        names it to whatever joins or leaves next (host_lock_owner), which ends
+        it and waits until it is gone; and what a pass finds of it is what
+        says the link is there, without asking the kernel. It is started with
+        the radio lock still held, and not returned from until the lock is
+        taken, so that no join can start between the two and find nobody to
+        end. wifi.kept says a keeper was started and has not ended of its
+        own: a link with no keeper and that file is one whose keeper died.
 */
 #define RADIO_KEEPER_PATH NET_STATE_DIR "/wifi.keeper"
-#define RADIO_FILE_GET_LOCK 5
-#define RADIO_FILE_SET_LOCK 6
-#define RADIO_FILE_SET_LOCK_WAIT 7
-#define RADIO_FILE_WRITE_LOCK 1
-#define RADIO_FILE_UNLOCKED 2
+#define RADIO_KEPT_PATH NET_STATE_DIR "/wifi.kept"
+#define RADIO_KEEPER_START_NANOSECONDS 1000000000
+#define RADIO_KEEPER_ASK_NANOSECONDS 2000000
 
-typedef struct
+/* What the keeper or whoever starts it has to say, in the kernel log: its
+   output is /dev/null. The reason is a literal at every call. */
+static COLD fn radio_keeper_said(string_address reason)
 {
-        b16 type;
-        b16 whence;
-        b64 start;
-        b64 length;
-        b32 pid;
-        b32 pad;
-} radio_file_lock;
+        string_address line[] = {"wifi keeper: ", reason, null};
 
-static COLD bipolar radio_keeper_open(void)
-{
-        host_state_ready();
-        return system_open_at_mode(AT_FDCWD, RADIO_KEEPER_PATH,
-                                   FILE_READ_WRITE | FILE_CREATE | O_NOFOLLOW | O_CLOEXEC,
-                                   0600);
+        host_kmsg(line);
 }
 
 static COLD fn radio_keeper_stop(void)
 {
-        radio_file_lock lock = {.type = RADIO_FILE_WRITE_LOCK};
-        bipolar handle = radio_keeper_open();
-
-        if (handle < 0)
-                return;
-        if (system_call_3(syscall(fcntl), (positive)handle, RADIO_FILE_GET_LOCK,
-                          (positive)address_of lock) >= 0 &&
-            lock.type != RADIO_FILE_UNLOCKED && lock.pid > 0)
+        if (host_lock_owner(RADIO_KEEPER_PATH))
         {
-                system_call_2(syscall(kill), (positive)lock.pid, SIGKILL);
-                lock.type = RADIO_FILE_WRITE_LOCK;
-                lock.pid = 0;
-                while (system_call_3(syscall(fcntl), (positive)handle,
-                                     RADIO_FILE_SET_LOCK_WAIT,
-                                     (positive)address_of lock) == -4)
-                        ;
+                host_lock_signal(RADIO_KEEPER_PATH, SIGKILL);
+                host_lock_wait(RADIO_KEEPER_PATH);
         }
-        system_close(handle);
+        system_remove_at(AT_FDCWD, RADIO_KEPT_PATH, 0);
 }
 
 static COLD fn radio_avoid_add(p8 address_to bssid);
 
+/* The link roamed: the station is another access point's, with a handshake
+   of its own to come. What was held of the last one is no key for it. */
+static COLD fn wifi_roam(wifi_link address_to link, p8 address_to to)
+{
+        memory_copy(link->bssid, to, 6);
+        crypto_forget(link->ptk, sizeof(link->ptk));
+        crypto_forget(link->pending, sizeof(link->pending));
+        crypto_forget(link->gtk, sizeof(link->gtk));
+        memory_fill(link->replay, 0, sizeof(link->replay));
+        link->replay_set = false;
+        link->installed = false;
+        link->pending_set = false;
+        link->nonce_used = false;
+}
+
 static COLD fn wifi_keep(wifi_link address_to link)
 {
+        network_deadline check;
+        p8 now[6];
+
+        if (!network_deadline_begin(address_of check, WIFI_KEEP_CHECK_SECONDS, 0))
+        {
+                radio_keeper_said("no clock to check the link by");
+                return;
+        }
         for (;;)
         {
-                network_deadline check;
-                bipolar ready;
-                p8 now[6];
+                positive seconds;
+                positive nanoseconds;
+                bipolar ready = wifi_wait(link, address_of check);
+                bipolar there;
 
-                if (!network_deadline_begin(address_of check, WIFI_KEEP_CHECK_SECONDS, 0))
-                        return;
-                ready = wifi_wait(link, address_of check);
                 if (ready < 0)
+                {
+                        radio_keeper_said("its sockets failed");
                         return;
+                }
                 if (ready & 2)
                 {
                         b32 news = nl80211_link_news(address_of link->session,
                                                      link->index);
 
                         if (news > 0 ||
-                            (news < 0 && !nl80211_station(address_of link->session,
-                                                          link->index, now)))
+                            (news < 0 && nl80211_station(address_of link->session,
+                                                         link->index, now) == 0))
                                 break;
                 }
                 if (ready & 1)
                         wifi_eapol_take(link);
-                if (!ready && (!nl80211_station(address_of link->session, link->index, now) ||
-                               memory_compare(now, link->bssid, 6)))
+
+                //      Whatever woke it, the link is looked at every thirty
+                //      seconds: news about other radios and frames from
+                //      anyone in range must not push the look back for good.
+                //      A question the kernel did not answer is no answer.
+                if (network_deadline_left(address_of check, address_of seconds,
+                                          address_of nanoseconds))
+                        continue;
+                if (!network_deadline_begin(address_of check, WIFI_KEEP_CHECK_SECONDS, 0))
+                {
+                        radio_keeper_said("no clock to check the link by");
+                        return;
+                }
+                there = nl80211_station(address_of link->session, link->index, now);
+                if (!there)
                         break;
+                if (there > 0 && memory_compare(now, link->bssid, 6))
+                        wifi_roam(link, now);
         }
         //      Sent away, or the access point stopped answering: the next
         //      join tries another with the same name first.
@@ -6045,54 +6254,63 @@ static COLD fn wifi_keep(wifi_link address_to link)
 /* The joined link, from the join until its keeper takes it or it is let go. */
 static wifi_link radio_joined = {.session = {.handle = -1}, .eapol = -1};
 
-/* The keeper for the link just joined, if it has keys to keep, started
-   once the joining process has said what it has to and forgotten the
-   passwords it read. Forked twice, so that init reaps it and not the
-   machine process, which waits only for its own join. */
+/* The keeper for the link just joined, started once the joining process has
+   said what it has to and forgotten the passwords it read. */
 static COLD fn radio_keeper_start(void)
 {
         wifi_link address_to link = address_of radio_joined;
-        radio_file_lock lock = {.type = RADIO_FILE_WRITE_LOCK};
-        positive status = 0;
-        bipolar quiet;
-        bipolar handle;
-        bipolar child = link->eapol >= 3 && link->session.handle >= 3 ? system_fork() : -1;
+        p64 began = system_clock_ns(HOST_CLOCK_BOOTTIME);
 
-        if (child)
+        if (link->session.handle < 0)
+                return;
+        //      The sockets are kept in its descriptors and stdio is replaced:
+        //      a socket that is itself one of the first three would be lost
+        //      to that.
+        if (link->session.handle < 3 || (link->eapol >= 0 && link->eapol < 3))
         {
-                if (child > 0)
-                        system_call_4(syscall(wait4), (positive)child,
-                                      (positive)address_of status, 0, 0);
+                radio_keeper_said("not started: its sockets are standard descriptors");
                 wifi_link_close(link);
                 return;
         }
-        if (system_fork())
-                system_call_1(syscall(exit_group), 0);
+        host_write_file(RADIO_KEPT_PATH, (p8 address_to) "1\n", 2, 0644, false);
 
-        //      Its own session, and nothing of the joining process open: not
-        //      its terminal or pipes, which would never see an end, not the
-        //      radio lock, which would never come free, and none of the
-        //      machine process's descriptors either.
-        system_call(syscall(setsid));
-        quiet = system_open_at(AT_FDCWD, "/dev/null", FILE_READ_WRITE | O_CLOEXEC);
-        for (positive at = 0; quiet >= 0 && at < 3; at++)
-                if ((positive)quiet != at)
-                        system_call_3(syscall(dup3), (positive)quiet, at, 0);
-        (void)descriptors_close_except(3, (p32)link->eapol, (p32)link->session.handle);
-        //      The join's scan news is nothing to the keeper, which would
-        //      wake for every scan anyone asked for.
-        if (link->session.scan)
-                socket_option_set(link->session.handle, SOL_NETLINK,
-                                  WIFI_NETLINK_DROP_MEMBERSHIP,
-                                  address_of link->session.scan,
-                                  sizeof(link->session.scan));
-
-        handle = radio_keeper_open();
-        if (handle >= 0 && system_call_3(syscall(fcntl), (positive)handle,
-                                         RADIO_FILE_SET_LOCK, (positive)address_of lock) >= 0)
+        if (host_detach(link->eapol >= 0 ? (p32)link->eapol : descriptors_none,
+                        (p32)link->session.handle))
+        {
+                //      Its lock first: what it holds is what the next join
+                //      looks for, and the joining process waits for it.
+                if (host_lock_file(RADIO_KEEPER_PATH, HOST_FILE_SETLK, null) < 0)
+                {
+                        radio_keeper_said("not started: it could not take its lock");
+                        system_call_1(syscall(exit_group), 1);
+                }
+                //      The join's scan news is nothing to the keeper, which
+                //      would wake for every scan anyone asked for.
+                if (link->session.scan)
+                        socket_option_set(link->session.handle, SOL_NETLINK,
+                                          WIFI_NETLINK_DROP_MEMBERSHIP,
+                                          address_of link->session.scan,
+                                          sizeof(link->session.scan));
                 wifi_keep(link);
+                system_remove_at(AT_FDCWD, RADIO_KEPT_PATH, 0);
+                wifi_link_close(link);
+                system_call_1(syscall(exit_group), 0);
+        }
         wifi_link_close(link);
-        system_call_1(syscall(exit_group), 0);
+
+        //      Not returned from until the lock is taken, so that no join can
+        //      begin between the two and find nobody to end: asked a few
+        //      times a millisecond for as long as a second.
+        while (!host_lock_owner(RADIO_KEEPER_PATH))
+        {
+                if (system_clock_ns(HOST_CLOCK_BOOTTIME) - began >= RADIO_KEEPER_START_NANOSECONDS)
+                {
+                        system_remove_at(AT_FDCWD, RADIO_KEPT_PATH, 0);
+                        radio_keeper_said("not started: it took no lock");
+                        return;
+                }
+                host_pause(RADIO_KEEPER_ASK_NANOSECONDS);
+        }
 }
 
 static COLD bool wifi_link_mac(string_address name, p8 address_to mac)
@@ -6115,52 +6333,144 @@ static COLD bool wifi_link_mac(string_address name, p8 address_to mac)
         return true;
 }
 
+typedef struct
+{
+        nl80211 address_to session;
+        p8 address_to bssid;
+        p32 sequence;
+        p32 port;
+        p32 index;
+        bipolar result;
+        bool done;
+        bool got_ack;
+        bool associated;
+} nl80211_join_turn;
+
+/* One message of a join's wait: the acknowledgment of the connect, then the
+   connect's own news. Anything that ends the wait is its result. */
+static COLD bool nl80211_join_take(netlink_header address_to header,
+                                   address_any context)
+{
+        nl80211_join_turn address_to turn = (nl80211_join_turn address_to)context;
+        p8 command;
+
+        if (header->type == NLMSG_IS_ERROR && header->sequence == turn->sequence &&
+            header->port == turn->port)
+        {
+                bipolar ack = netlink_status(header, false);
+
+                turn->got_ack = true;
+                if (ack < 0)
+                {
+                        turn->result = ack;
+                        turn->done = true;
+                }
+                return !turn->done;
+        }
+
+        command = nl80211_news(turn->session, header, turn->index);
+        if (command == NL80211_CMD_CONNECT)
+        {
+                p16 status = nl80211_find_u16(header, NL80211_ATTR_STATUS_CODE, 0);
+                positive mac_length = 0;
+                p8 address_to mac;
+
+                if (nl80211_attr(header, NL80211_ATTR_TIMED_OUT))
+                {
+                        turn->result = -110;
+                        turn->done = true;
+                }
+                else if (status)
+                {
+                        turn->result = -111;
+                        turn->done = true;
+                }
+                else
+                {
+                        mac = (p8 address_to)netlink_find(header, GENL_HEADER,
+                                                          NL80211_ATTR_MAC,
+                                                          address_of mac_length);
+                        if (mac && mac_length >= 6)
+                                memory_copy(turn->bssid, mac, 6);
+                        turn->associated = true;
+                }
+        }
+        else if (command == NL80211_CMD_DISCONNECT && turn->got_ack)
+        {
+                turn->result = -111;
+                turn->done = true;
+        }
+        return !turn->done;
+}
+
+/* How often a join on a socket with no mlme news asks the kernel whether it
+   is there yet. */
+#define NL80211_POLL_NANOSECONDS 200000000
+
+/* One wait on the join's socket: until the deadline, or, when it is the
+   asking that tells of the association (asking), until the next time to ask
+   if that comes first, which is NETWORK_TRY_AGAIN: nothing came, and the
+   deadline has not. */
+static COLD bipolar nl80211_join_wait(nl80211 address_to session,
+                                      const network_deadline address_to deadline, bool asking)
+{
+        network_deadline slice;
+        positive seconds;
+        positive nanoseconds;
+        bipolar got;
+
+        if (!asking || !network_deadline_begin(address_of slice, 0, NL80211_POLL_NANOSECONDS))
+                return network_wait_readable_until(session->handle, deadline);
+        got = network_wait_readable_until(session->handle, address_of slice);
+        return !got && network_deadline_left(deadline, address_of seconds,
+                                             address_of nanoseconds)
+                   ? NETWORK_TRY_AGAIN
+                   : got;
+}
+
 static COLD bipolar nl80211_wait_associated(nl80211 address_to session, p32 sequence,
                                        p32 index, p8 address_to bssid)
 {
         netlink_buffer reply = {0};
         network_deadline deadline;
-        bool got_ack = false;
-        bool associated = false;
-        bipolar ack = 0;
-        p64 last_poll = 0;
+        nl80211_join_turn turn = {.session = session,
+                                  .bssid = bssid,
+                                  .sequence = sequence,
+                                  .index = index};
 
         if (!network_deadline_begin(address_of deadline, NL80211_CONNECT_SECONDS, 0))
                 return -1;
 
         for (;;)
         {
-                p32 local_port = 0;
+                //      A socket that heard no mlme news is the one the join
+                //      learns of the association from by asking, so what it
+                //      waits for is the next time to ask as well as the
+                //      deadline.
+                bool asking = turn.got_ack && !turn.associated && !session->mlme;
                 bipolar got;
-                positive at = 0;
 
-                if (got_ack && !associated && !session->mlme)
+                if (asking && nl80211_station(session, index, bssid) > 0)
                 {
-                        p64 now = clock_monotonic_nanoseconds();
-
-                        if (!last_poll || now - last_poll >= 200000000)
-                        {
-                                last_poll = now;
-                                if (nl80211_station(session, index, bssid))
-                                {
-                                        netlink_forget(address_of reply);
-                                        return 0;
-                                }
-                        }
+                        netlink_forget(address_of reply);
+                        return 0;
                 }
 
-                got = network_wait_readable_until(session->handle, address_of deadline);
+                got = nl80211_join_wait(session, address_of deadline, asking);
+                if (got == NETWORK_TRY_AGAIN)
+                        continue;
                 if (got <= 0)
                 {
                         netlink_forget(address_of reply);
-                        if (got_ack && !associated &&
-                            nl80211_station(session, index, bssid))
+                        if (turn.got_ack && !turn.associated &&
+                            nl80211_station(session, index, bssid) > 0)
                                 return 0;
                         return got < 0 ? got : -110;
                 }
 
+                turn.port = 0;
                 got = netlink_receive(session->handle, address_of reply,
-                                      address_of local_port);
+                                      address_of turn.port);
                 if (got == NETWORK_INTERRUPTED)
                         continue;
                 if (got < 0)
@@ -6169,75 +6479,11 @@ static COLD bipolar nl80211_wait_associated(nl80211 address_to session, p32 sequ
                         return got;
                 }
 
-                while (at + NETLINK_HEADER <= reply.used)
-                {
-                        netlink_header address_to header =
-                            (netlink_header address_to)(reply.bytes + at);
-                        p8 address_to body;
-
-                        if (header->length < NETLINK_HEADER ||
-                            at + header->length > reply.used)
-                                break;
-                        if (header->type == NLMSG_IS_ERROR &&
-                            header->sequence == sequence &&
-                            header->port == local_port)
-                        {
-                                ack = netlink_status(header, false);
-                                got_ack = true;
-                                if (ack < 0)
-                                {
-                                        netlink_forget(address_of reply);
-                                        return ack;
-                                }
-                        }
-                        else if (header->length >= NETLINK_HEADER + GENL_HEADER &&
-                                 header->type == session->family)
-                        {
-                                body = (p8 address_to)header + NETLINK_HEADER;
-                                if (nl80211_find_u32(header, NL80211_ATTR_IFINDEX, 0) ==
-                                    index)
-                                {
-                                        if (body[0] == NL80211_CMD_CONNECT)
-                                        {
-                                                p16 status = nl80211_find_u16(
-                                                    header, NL80211_ATTR_STATUS_CODE,
-                                                    0);
-                                                positive mac_length = 0;
-                                                p8 address_to mac;
-
-                                                if (nl80211_attr(header,
-                                                                 NL80211_ATTR_TIMED_OUT))
-                                                {
-                                                        netlink_forget(address_of reply);
-                                                        return -110;
-                                                }
-                                                if (status)
-                                                {
-                                                        netlink_forget(address_of reply);
-                                                        return -111;
-                                                }
-                                                mac = (p8 address_to)netlink_find(
-                                                    header, GENL_HEADER, NL80211_ATTR_MAC,
-                                                    address_of mac_length);
-                                                if (mac && mac_length >= 6)
-                                                        memory_copy(bssid, mac, 6);
-                                                associated = true;
-                                        }
-                                        else if (body[0] == NL80211_CMD_DISCONNECT &&
-                                                 got_ack)
-                                        {
-                                                netlink_forget(address_of reply);
-                                                return -111;
-                                        }
-                                }
-                        }
-                        at += netlink_align(header->length);
-                }
-
-                if (got_ack && associated)
+                netlink_each(address_of reply, nl80211_join_take, address_of turn);
+                if (turn.done || (turn.got_ack && turn.associated))
                 {
                         netlink_forget(address_of reply);
-                        return 0;
+                        return turn.done ? turn.result : 0;
                 }
         }
 }
@@ -6315,6 +6561,9 @@ static COLD bipolar nl80211_connect(nl80211 address_to session, p32 index,
         return sequence;
 }
 
+/* Whether the wireless interface has a station: a station the kernel could
+   not be asked about counts as one, so that a failed question is no reason
+   to join again over a link that stands. */
 static COLD bool nl80211_associated(void)
 {
         nl80211 session;
@@ -6325,29 +6574,31 @@ static COLD bool nl80211_associated(void)
         if (nl80211_open(address_of session) < 0)
                 return false;
         if (!nl80211_interface(address_of session, address_of iface))
-                up = nl80211_station(address_of session, iface.index, mac);
+                up = nl80211_station(address_of session, iface.index, mac) != 0;
         nl80211_close(address_of session);
         return up;
 }
 
 static COLD bipolar radio_bss_choose(nl80211 address_to session, p32 index,
                                      p8 address_to ssid, positive ssid_length, bool secured,
-                                     p8 address_to bssid, p32 address_to frequency);
-
-static COLD bool wifi_mac_set(p8 address_to mac)
-{
-        return (mac[0] | mac[1] | mac[2] | mac[3] | mac[4] | mac[5]) != 0;
-}
+                                     p8 address_to bssid, p32 address_to frequency,
+                                     bool force);
 
 /*
-        A join, into link: on success with a four-way handshake of its own,
-        the link keeps its sockets and keys for the keeper; otherwise they
-        are let go. -113 when a scan heard no network by this name.
+        A join, into link: on success the link keeps its sockets and keys for
+        the keeper, with a four-way handshake of its own where it needs one.
+        -113 when a scan heard no network by this name. The password is the
+        one the key is made of, and it is made only once an access point is
+        chosen, since a network that is not there is not worth the four
+        thousand rounds. force asks for a scan whenever the cache has no
+        access point to join; the machine's own pass leaves that to what a
+        scan for the name found lately (radio_bss_choose).
 */
-static COLD bipolar nl80211_join(p8 address_to ssid, positive ssid_length, p8 address_to pmk,
-                                 wifi_link address_to link)
+static COLD bipolar nl80211_join(p8 address_to ssid, positive ssid_length, p8 address_to pass,
+                                 positive pass_length, bool force, wifi_link address_to link)
 {
         nl80211_iface iface;
+        p8 pmk[32];
         p8 chosen[6];
         p32 frequency = 0;
         bipolar picked = -1;
@@ -6355,6 +6606,7 @@ static COLD bipolar nl80211_join(p8 address_to ssid, positive ssid_length, p8 ad
         bipolar failed;
         bipolar sequence;
         bool offload = false;
+        bool secured = pass_length != 0;
 
         wifi_link_close(link);
         memory_fill(chosen, 0, 6);
@@ -6384,15 +6636,20 @@ static COLD bipolar nl80211_join(p8 address_to ssid, positive ssid_length, p8 ad
                 wifi_link_mac((string_address)iface.name, link->sta);
 
         picked = radio_bss_choose(address_of link->session, iface.index, ssid, ssid_length,
-                                  pmk != null, chosen, address_of frequency);
+                                  secured, chosen, address_of frequency, force);
         if (!picked)
         {
                 wifi_link_close(link);
                 return -113;
         }
 
-        if (pmk)
+        if (secured)
         {
+                if (!wifi_psk(ssid, ssid_length, pass, pass_length, pmk))
+                {
+                        wifi_link_close(link);
+                        return -22;
+                }
                 memory_copy(link->pmk, pmk, 32);
                 offload = nl80211_psk_offload(address_of link->session, iface.wiphy);
         }
@@ -6401,7 +6658,7 @@ static COLD bipolar nl80211_join(p8 address_to ssid, positive ssid_length, p8 ad
         //      if that fails, once more with this one.
         for (;;)
         {
-                if (pmk && !offload && link->eapol < 0)
+                if (secured && !offload && link->eapol < 0)
                 {
                         failed = net_packet_open(iface.index, ETH_P_PAE);
                         if (failed < 0)
@@ -6411,22 +6668,19 @@ static COLD bipolar nl80211_join(p8 address_to ssid, positive ssid_length, p8 ad
                 nl80211_disconnect(address_of link->session, iface.index);
                 memory_fill(link->bssid, 0, 6);
                 sequence = nl80211_connect(address_of link->session, iface.index, ssid,
-                                           ssid_length, pmk, offload,
+                                           ssid_length, secured ? pmk : null, offload,
                                            picked > 0 ? chosen : null, frequency);
                 failed = sequence < 0 ? sequence
                                       : nl80211_wait_associated(address_of link->session,
                                                                 (p32)sequence, iface.index,
                                                                 link->bssid);
+                if (!failed && !wifi_mac_set(link->bssid))
+                        nl80211_station(address_of link->session, iface.index, link->bssid);
                 if (!failed && link->eapol >= 0)
-                {
-                        if (!wifi_mac_set(link->bssid))
-                                nl80211_station(address_of link->session, iface.index,
-                                                link->bssid);
                         failed = wifi_mac_set(link->sta) && wifi_mac_set(link->bssid)
                                      ? wifi_handshake(link)
                                      : -1;
-                }
-                if (!failed || !pmk || !offload)
+                if (!failed || !secured || !offload)
                         break;
                 offload = false;
         }
@@ -6440,8 +6694,7 @@ static COLD bipolar nl80211_join(p8 address_to ssid, positive ssid_length, p8 ad
                                                       : null);
                 wifi_link_close(link);
         }
-        else if (link->eapol < 0)
-                wifi_link_close(link);
+        crypto_forget(pmk, sizeof(pmk));
         return failed;
 }
 
@@ -7021,6 +7274,16 @@ static bool radio_rfkill_visit(string_address directory, string_address name,
         return true;
 }
 
+/* 2 when a wireless switch is hard-blocked, 1 when only soft, else 0. */
+static p8 radio_rfkill_blocked(void)
+{
+        p8 state = 0;
+
+        host_each_entry((string_address) "/sys/class/rfkill", radio_rfkill_visit,
+                        address_of state);
+        return state;
+}
+
 /*
         What the kernel said about one device: the last firmware file a load
         failed for, and the error its last failed probe gave. A record is
@@ -7154,8 +7417,7 @@ static bool radio_wifi_why(p8 address_to why, positive room)
                 return true;
         }
 
-        host_each_entry((string_address) "/sys/class/rfkill", radio_rfkill_visit,
-                        address_of rfkill);
+        rfkill = radio_rfkill_blocked();
         if (rfkill == 2)
         {
                 radio_line(why, room,
@@ -7401,7 +7663,6 @@ static p8 radio_ies_security(p8 address_to elements, positive size, p16 capabili
 /* One access point of a scan dump: false for a message that is not one. */
 static bool radio_bss_read(netlink_header address_to header, radio_heard address_to one)
 {
-        p8 address_to body = (p8 address_to)header + NETLINK_HEADER;
         positive length = 0;
         positive size = 0;
         p8 address_to bss;
@@ -7413,8 +7674,7 @@ static bool radio_bss_read(netlink_header address_to header, radio_heard address
         bool rsn = false, wpa = false, named = false;
         p16 capability = 0;
 
-        if (header->length < NETLINK_HEADER + GENL_HEADER ||
-            body[0] != NL80211_CMD_NEW_SCAN_RESULTS)
+        if (nl80211_command(header) != NL80211_CMD_NEW_SCAN_RESULTS)
                 return false;
         bss = (p8 address_to)netlink_find(header, GENL_HEADER, NL80211_ATTR_BSS,
                                           address_of length);
@@ -7609,17 +7869,110 @@ static bool radio_authorized(nl80211 address_to session, p32 index)
         return authorized;
 }
 
-/* Milliseconds since the last whole scan asked for here, or the most there is. */
-static p64 radio_scan_age(void)
+/*
+        The whole scans asked for here, a line each: the boot-time milliseconds
+        it came in at, a space, and the name it asked for, which is none for a
+        scan of the air alone. A join asks for its own name, so what a scan
+        found of a network that does not answer to the wildcard (a hidden one)
+        is known only of the name that was asked; and what the last scan of
+        any name came to is what a status goes by. A line is kept for as long
+        as it says anything, which is the time a scan is not asked for again.
+*/
+#define RADIO_SCAN_KEEP 16
+#define RADIO_SCAN_ROOM (RADIO_SCAN_KEEP * (24 + RADIO_SSID_MOST))
+
+typedef struct
 {
-        p8 text[24];
+        p64 when;
+        string_address name;
+        positive name_length;
+        string_address next;
+} radio_scan_line;
+
+/* The line at the cursor, which moves past it: false at the end. */
+static bool radio_scan_line_next(string_address address_to cursor, radio_scan_line address_to line)
+{
+        string_address at = address_to cursor;
+        string_address end_of;
+
+        while (*at == '\n')
+                at++;
+        if (!*at)
+                return false;
+        line->when = 0;
+        for (; byte_is_digit((p8)*at); at++)
+                line->when = line->when * 10 + (p64)(*at - '0');
+        if (*at == ' ')
+                at++;
+        end_of = string_first_of_or_end(at, '\n');
+        line->name = at;
+        line->name_length = (positive)(end_of - at);
+        address_to cursor = end_of;
+        return true;
+}
+
+/* Milliseconds since the last whole scan asked for here, or the most there is.
+   With a name, only a scan that asked for that name counts: one for another
+   name, or for none, did not ask a hidden network to answer. */
+static p64 radio_scan_age(p8 address_to ssid, positive ssid_length)
+{
+        p8 text[RADIO_SCAN_ROOM];
         p64 now = system_clock_ns(HOST_CLOCK_BOOTTIME) / 1000000;
-        p64 then;
+        p64 best = ~(p64)0;
+        radio_scan_line line;
+        string_address cursor = (string_address)text;
 
         if (host_read_word(RADIO_SCAN_PATH, text, sizeof(text)) <= 0)
-                return ~(p64)0;
-        then = string_to_positive(text);
-        return then <= now ? now - then : ~(p64)0;
+                return best;
+        while (radio_scan_line_next(address_of cursor, address_of line))
+                if ((!ssid || (line.name_length == ssid_length &&
+                               !memory_compare(line.name, ssid, ssid_length))) &&
+                    line.when <= now && now - line.when < best)
+                        best = now - line.when;
+        return best;
+}
+
+/* A whole scan that asked for ssid, now: its line first, and the others as
+   long as they are within the time they stand for. */
+static fn radio_scan_note(p8 address_to ssid, positive ssid_length)
+{
+        p8 old[RADIO_SCAN_ROOM];
+        p8 text[RADIO_SCAN_ROOM];
+        p8 number[24];
+        p64 now = system_clock_ns(HOST_CLOCK_BOOTTIME) / 1000000;
+        radio_scan_line line;
+        string_address cursor = (string_address)old;
+        positive lines = 1;
+        positive used;
+
+        bipolar_into_string(number, (bipolar)now);
+        string_copy_bounded(text, number, sizeof(text));
+        string_append_bounded(text, " ", sizeof(text));
+        used = string_length(text);
+        memory_copy(text + used, ssid, ssid_length);
+        text[used + ssid_length] = '\n';
+        used += ssid_length + 1;
+        text[used] = end;
+
+        if (host_read_word(RADIO_SCAN_PATH, old, sizeof(old)) > 0)
+                while (lines < RADIO_SCAN_KEEP && radio_scan_line_next(address_of cursor, address_of line))
+                        if (line.when <= now && now - line.when <= RADIO_AIR_STALE_MS &&
+                            !(line.name_length == ssid_length &&
+                              !memory_compare(line.name, ssid, ssid_length)) &&
+                            used + 24 + line.name_length + 1 < sizeof(text))
+                        {
+                                bipolar_into_string(number, (bipolar)line.when);
+                                string_append_bounded(text, number, sizeof(text));
+                                string_append_bounded(text, " ", sizeof(text));
+                                used = string_length(text);
+                                memory_copy(text + used, line.name, line.name_length);
+                                text[used + line.name_length] = '\n';
+                                used += line.name_length + 1;
+                                text[used] = end;
+                                lines++;
+                        }
+        host_state_ready();
+        host_write_file(RADIO_SCAN_PATH, text, used, 0644, false);
 }
 
 /* The kernel's list of what the air holds, each access point to visit. */
@@ -7646,34 +7999,82 @@ static fn radio_air_dump(nl80211 address_to session, p32 index, netlink_visitor 
         and 5 GHz channels: a network at 6 GHz asks for WPA3, which the
         join cannot give, and its channels are all listened to rather than
         asked, which on a radio with that band made the whole scan outlast
-        the five seconds it is given. A radio without every one of those
-        channels refuses the list, and is scanned whole.
+        the five seconds it is given. A radio refuses a list with a channel
+        it has none of, at once, so the join asks for the widest list first
+        (channel 14, 144 and 169 to 177 as well, where a regulatory domain
+        has them), then for the list most radios take, then for the whole
+        scan.
 */
-static const p16 radio_join_channels[][3] = {
-    {2412, 2472, 5}, {5180, 5320, 20}, {5500, 5700, 20}, {5745, 5825, 20}};
+#define RADIO_SCAN_WHOLE 0
+#define RADIO_SCAN_JOIN 1
+#define RADIO_SCAN_JOIN_WIDE 2
+
+//      First, last and step in MHz, and 1 for the channels only the widest
+//      list holds.
+static const p16 radio_join_channels[][4] = {
+    {2412, 2472, 5, 0},  {5180, 5320, 20, 0}, {5500, 5700, 20, 0}, {5745, 5825, 20, 0},
+    {2484, 2484, 5, 1},  {5720, 5720, 20, 1}, {5845, 5885, 20, 1}};
+
+typedef struct
+{
+        nl80211 address_to session;
+        p8 address_to ssid;
+        positive ssid_length;
+        p32 index;
+        p32 sequence;
+        bool acked;
+        bool whole;
+        bool ended;
+        bool refused;
+        bipolar status;
+} radio_scan_turn;
+
+/* One message of a scan's wait: the acknowledgment of the trigger and then
+   the results or the abort. */
+static bool radio_scan_take(netlink_header address_to header, address_any context)
+{
+        radio_scan_turn address_to turn = (radio_scan_turn address_to)context;
+        p8 command;
+
+        // Refused for any reason but a scan already running: no results are
+        // coming, so the cached ones stand.
+        if (header->type == NLMSG_IS_ERROR && header->sequence == turn->sequence &&
+            !turn->acked)
+        {
+                turn->status = netlink_status(header, false);
+                turn->acked = true;
+                turn->whole = turn->status >= 0;
+                turn->refused = turn->status < 0 && turn->status != -16;
+                turn->ended = turn->refused;
+                return !turn->ended;
+        }
+
+        command = nl80211_news(turn->session, header, turn->index);
+        if (command != NL80211_CMD_NEW_SCAN_RESULTS && command != NL80211_CMD_SCAN_ABORTED)
+                return true;
+
+        //      When, and for which name: the next join asks the same of its own.
+        if (turn->whole && command == NL80211_CMD_NEW_SCAN_RESULTS)
+                radio_scan_note(turn->ssid, turn->ssid_length);
+        turn->whole = command == NL80211_CMD_NEW_SCAN_RESULTS;
+        turn->ended = true;
+        return false;
+}
 
 static bool radio_air_scan(nl80211 address_to session, p32 index, p8 address_to ssid,
-                           positive ssid_length, bool joinable)
+                           positive ssid_length, positive tier)
 {
         netlink_buffer request = {0};
         netlink_buffer reply = {0};
         network_deadline deadline;
         p32 sequence = netlink_sequence_take();
-        p8 names[4 + 4 + RADIO_SSID_MOST + 3];
-        netlink_attribute address_to wildcard = (netlink_attribute address_to)names;
-        netlink_attribute address_to named = (netlink_attribute address_to)(names + 4);
-        bool acked = false;
-        bool whole = false;
+        radio_scan_turn turn = {.session = session, .index = index, .sequence = sequence};
+        positive nest;
 
         if (ssid_length > RADIO_SSID_MOST)
                 ssid_length = 0;
-        memory_fill(names, 0, sizeof(names));
-        wildcard->length = 4;
-        wildcard->type = 1;
-        named->length = (p16)(4 + ssid_length);
-        named->type = 2;
-        if (ssid_length)
-                memory_copy(names + 8, ssid, ssid_length);
+        turn.ssid = ssid;
+        turn.ssid_length = ssid_length;
         if (!session->scan ||
             socket_option_set(session->handle, SOL_NETLINK, NETLINK_ADD_MEMBERSHIP,
                               address_of session->scan, sizeof(session->scan)) < 0)
@@ -7682,28 +8083,27 @@ static bool radio_air_scan(nl80211 address_to session, p32 index, p8 address_to 
                            NLM_REQUEST | NLM_ACK, sequence))
                 return false;
         nl80211_attribute_u32(address_of request, NL80211_ATTR_IFINDEX, index);
-        netlink_attribute_add(address_of request, NL80211_ATTR_SCAN_SSIDS | NLA_F_NESTED,
-                              names, ssid_length ? 4 + netlink_align(4 + ssid_length) : 4);
-        if (joinable)
+        nest = netlink_nested_begin(address_of request, NL80211_ATTR_SCAN_SSIDS);
+        netlink_attribute_add(address_of request, 1, null, 0);
+        if (ssid_length)
+                netlink_attribute_add(address_of request, 2, ssid, ssid_length);
+        netlink_nested_end(address_of request, nest);
+        if (tier)
         {
-                p8 channels[37 * 8];
-                positive used = 0;
+                p16 channel = 0;
 
-                for (positive band = 0; band < 4; band++)
+                nest = netlink_nested_begin(address_of request,
+                                            NL80211_ATTR_SCAN_FREQUENCIES);
+                for (positive band = 0;
+                     band < sizeof(radio_join_channels) / sizeof(radio_join_channels[0]);
+                     band++)
                         for (p32 mhz = radio_join_channels[band][0];
-                             mhz <= radio_join_channels[band][1] && used < sizeof(channels);
-                             mhz += radio_join_channels[band][2], used += 8)
-                        {
-                                netlink_attribute address_to one =
-                                    (netlink_attribute address_to)(channels + used);
-
-                                one->length = 8;
-                                one->type = (p16)(used / 8 + 1);
-                                memory_copy(channels + used + 4, address_of mhz, 4);
-                        }
-                netlink_attribute_add(address_of request,
-                                      NL80211_ATTR_SCAN_FREQUENCIES | NLA_F_NESTED,
-                                      channels, used);
+                             (!radio_join_channels[band][3] || tier == RADIO_SCAN_JOIN_WIDE) &&
+                             mhz <= radio_join_channels[band][1];
+                             mhz += radio_join_channels[band][2])
+                                netlink_attribute_add(address_of request, ++channel,
+                                                      address_of mhz, 4);
+                netlink_nested_end(address_of request, nest);
         }
         nl80211_attribute_u32(address_of request, NL80211_ATTR_SCAN_FLAGS,
                               NL80211_SCAN_FLAG_FLUSH);
@@ -7721,61 +8121,19 @@ static bool radio_air_scan(nl80211 address_to session, p32 index, p8 address_to 
                 p32 local_port = 0;
                 bipolar got = netlink_receive(session->handle, address_of reply,
                                               address_of local_port);
-                positive at = 0;
 
                 if (got == NETWORK_INTERRUPTED)
                         continue;
                 if (got < 0)
                         break;
-                while (at + NETLINK_HEADER <= reply.used)
+                netlink_each(address_of reply, radio_scan_take, address_of turn);
+                if (turn.ended)
                 {
-                        netlink_header address_to header =
-                            (netlink_header address_to)(reply.bytes + at);
-                        p8 address_to body = (p8 address_to)header + NETLINK_HEADER;
-
-                        if (header->length < NETLINK_HEADER || at + header->length > reply.used)
-                                break;
-                        // Refused for any reason but a scan already running:
-                        // no results are coming, so the cached ones stand.
-                        if (header->type == NLMSG_IS_ERROR && header->sequence == sequence &&
-                            !acked)
-                        {
-                                bipolar status = netlink_status(header, false);
-
-                                acked = true;
-                                whole = status >= 0;
-                                if (status < 0 && status != -16)
-                                {
-                                        netlink_forget(address_of reply);
-                                        return joinable && status == -22 &&
-                                               radio_air_scan(session, index, ssid,
-                                                              ssid_length, false);
-                                }
-                        }
-                        else if (header->type == session->family &&
-                                 header->length >= NETLINK_HEADER + GENL_HEADER &&
-                                 (body[0] == NL80211_CMD_NEW_SCAN_RESULTS ||
-                                  body[0] == NL80211_CMD_SCAN_ABORTED) &&
-                                 nl80211_find_u32(header, NL80211_ATTR_IFINDEX, 0) == index)
-                        {
-                                if (whole && body[0] == NL80211_CMD_NEW_SCAN_RESULTS)
-                                {
-                                        p8 number[24];
-
-                                        bipolar_into_string(
-                                            number,
-                                            (bipolar)(system_clock_ns(
-                                                          HOST_CLOCK_BOOTTIME) /
-                                                      1000000));
-                                        host_state_ready();
-                                        host_write_file(RADIO_SCAN_PATH, number, string_length(number),
-                                                        0644, false);
-                                }
-                                whole = body[0] == NL80211_CMD_NEW_SCAN_RESULTS;
-                                netlink_forget(address_of reply);
-                                return whole;
-                        }
-                        at += netlink_align(header->length);
+                        netlink_forget(address_of reply);
+                        return turn.refused ? tier && turn.status == -22 &&
+                                                  radio_air_scan(session, index, ssid,
+                                                                 ssid_length, tier - 1)
+                                            : turn.whole;
                 }
         }
         netlink_forget(address_of reply);
@@ -7813,7 +8171,7 @@ static bool radio_air_take(radio_air address_to air, p8 fresh)
         radio_air_dump(address_of session, iface.index, radio_air_seen, air);
         if (fresh && bowl_is_root() &&
             (fresh == RADIO_AIR_NOW || !air->any || air->freshest > RADIO_AIR_STALE_MS ||
-             radio_scan_age() > RADIO_AIR_STALE_MS))
+             radio_scan_age(null, 0) > RADIO_AIR_STALE_MS))
         {
                 bipolar route = netlink_open_groups(0);
 
@@ -7822,7 +8180,8 @@ static bool radio_air_take(radio_air address_to air, p8 fresh)
                         netlink_link_up((b32)route, iface.index);
                         socket_close((b32)route);
                 }
-                radio_air_scan(address_of session, iface.index, null, 0, joinable);
+                radio_air_scan(address_of session, iface.index, null, 0,
+                               joinable ? RADIO_SCAN_JOIN_WIDE : RADIO_SCAN_WHOLE);
                 memory_fill(air, 0, sizeof(*air));
                 radio_air_dump(address_of session, iface.index, radio_air_seen, air);
         }
@@ -7972,6 +8331,10 @@ static bool radio_pick_seen(netlink_header address_to header, address_any contex
         return true;
 }
 
+/* Whether the last choice of an access point answered "none" from the scan of
+   a moment ago and not from one of its own. */
+static bool radio_scan_declined;
+
 /*
         The access point a join asks for by its BSSID. A join by name alone
         took whatever the kernel's cache named, and the cache keeps an
@@ -7980,26 +8343,43 @@ static bool radio_pick_seen(netlink_header address_to header, address_any contex
         authentication with it timed out, again and again. So the cache is
         trusted for anything but an access point given up on, and when it
         has nothing else by the name it is flushed and the air scanned for
-        the name. 1 with one chosen, 0 when the scan heard none by this
+        the name -- by a join that was asked for, always, and by the
+        machine's own pass (force false) only when the cache has an access
+        point to doubt or no scan asked for this name came in the last
+        thirty seconds, as radio_air_take holds a status to: a saved network
+        out of range was scanned for, five seconds of it, again for every
+        network and every pass. 1 with one
+        chosen, 0 when the scan, or the one a moment ago, heard none by this
         name, -1 when no scan could be had: the join then goes by name.
 */
 static COLD bipolar radio_bss_choose(nl80211 address_to session, p32 index,
                                      p8 address_to ssid, positive ssid_length, bool secured,
-                                     p8 address_to bssid, p32 address_to frequency)
+                                     p8 address_to bssid, p32 address_to frequency,
+                                     bool force)
 {
+        radio_scan_declined = false;
         radio_avoid avoid[RADIO_AVOID_MOST];
         radio_pick pick = {
             .ssid = ssid, .ssid_length = ssid_length, .avoid = avoid, .secured = secured};
         bipolar heard = 1;
+        bool scanned = false;
 
         pick.avoid_count = radio_avoid_load(avoid);
         radio_air_dump(session, index, radio_pick_seen, address_of pick);
-        if (!pick.found || pick.until || !pick.fits)
+        if ((!pick.found || pick.until || !pick.fits) &&
+            (force || pick.found || radio_scan_age(ssid, ssid_length) > RADIO_AIR_STALE_MS))
         {
-                heard = radio_air_scan(session, index, ssid, ssid_length, true) ? 1 : -1;
+                scanned = true;
+                heard = radio_air_scan(session, index, ssid, ssid_length,
+                                       RADIO_SCAN_JOIN_WIDE)
+                            ? 1
+                            : -1;
                 pick.found = false;
                 radio_air_dump(session, index, radio_pick_seen, address_of pick);
         }
+        //      Nothing by the name and no scan asked for: not in range as of
+        //      the scan a moment ago, which is no new failure to wait longer for.
+        radio_scan_declined = !pick.found && !scanned;
         if (!pick.found)
                 return heard > 0 ? 0 : -1;
         memory_copy(bssid, pick.best.bssid, 6);
@@ -8143,29 +8523,30 @@ static bool radio_join_said(bipolar failed)
                failed == -121 || failed == -113 || (failed <= -1000 && failed > -1000 - 65536);
 }
 
-/* The network the machine last failed to join and why, for bare wifi and
-   status; gone once a join works. */
-static fn radio_last_set(string_address ssid, bipolar failed)
+/*
+        The network the machine last failed to join, why, when, and how many
+        times in a row for that reason, for bare wifi and status and for the
+        machine's own pass, which leaves a network alone for a while after
+        it was not there or refused the password (radio_join_wait): three
+        seconds, then twice as long each time, to a minute. Gone once a join
+        works. The text is the name, the code, the boot-time milliseconds and
+        the count, a line each.
+*/
+typedef struct
 {
-        p8 text[RADIO_SSID_MOST + 32];
-        p8 number[24];
+        p8 ssid[RADIO_SSID_MOST + 1];
+        bipolar failed;
+        p64 at;
+        positive count;
+} radio_last;
 
-        if (!failed || failed == -19)
-        {
-                system_remove_at(AT_FDCWD, RADIO_LAST_PATH, 0);
-                return;
-        }
-        bipolar_into_string(number, -failed);
-        radio_line(text, sizeof(text), ssid, (string_address) "\n", number,
-                   (string_address) "\n", null);
-        host_state_ready();
-        host_write_file(RADIO_LAST_PATH, text, string_length(text), 0644, false);
-}
-
-static bool radio_last_get(p8 address_to ssid, positive room, bipolar address_to failed)
+static bool radio_last_get(radio_last address_to last)
 {
-        p8 text[RADIO_SSID_MOST + 32];
-        positive at = 0;
+        p8 text[RADIO_SSID_MOST + 64];
+        p8 address_to code;
+        p8 address_to when;
+        p8 address_to count;
+        positive at;
 
         if (host_read_word(RADIO_LAST_PATH, text, sizeof(text)) <= 0)
                 return false;
@@ -8173,9 +8554,76 @@ static bool radio_last_get(p8 address_to ssid, positive room, bipolar address_to
         if (!text[at] || at > RADIO_SSID_MOST)
                 return false;
         text[at] = end;
-        string_copy_bounded(ssid, text, room);
-        *failed = -(bipolar)string_to_positive(text + at + 1);
+        string_copy_bounded(last->ssid, text, sizeof(last->ssid));
+
+        //      Each of the rest ends at its line: a number is read from its
+        //      end backwards, and runs into the next line's digits otherwise.
+        code = text + at + 1;
+        when = (p8 address_to)string_first_of_or_end(code, '\n');
+        last->at = 0;
+        last->count = 0;
+        if (*when)
+        {
+                *when++ = end;
+                count = (p8 address_to)string_first_of_or_end(when, '\n');
+                if (*count)
+                {
+                        *count++ = end;
+                        last->count = string_to_positive(count);
+                }
+                last->at = string_to_positive(when);
+        }
+        last->failed = -(bipolar)string_to_positive(code);
         return true;
+}
+
+static fn radio_last_set(string_address ssid, bipolar failed)
+{
+        p8 text[RADIO_SSID_MOST + 80];
+        p8 number[24];
+        radio_last before;
+        positive count = 1;
+        positive used;
+
+        if (!failed || failed == -19)
+        {
+                system_remove_at(AT_FDCWD, RADIO_LAST_PATH, 0);
+                return;
+        }
+        //      Another time for the same name and reason, or the first.
+        //      A pass that asked nothing of the air, and was told by the scan of
+        //      a moment ago, has not found the network no further away.
+        if (radio_last_get(address_of before) && before.failed == failed &&
+            string_equals((string_address)before.ssid, ssid))
+                count = before.count + (radio_scan_declined ? 0 : 1);
+        bipolar_into_string(number, -failed);
+        radio_line(text, sizeof(text), ssid, (string_address) "\n", number,
+                   (string_address) "\n", null);
+        used = string_length(text);
+        bipolar_into_string(number, (bipolar)(system_clock_ns(HOST_CLOCK_BOOTTIME) / 1000000));
+        radio_line(text + used, sizeof(text) - used, number, (string_address) "\n", null, null,
+                   null);
+        used = string_length(text);
+        bipolar_into_string(number, (bipolar)count);
+        radio_line(text + used, sizeof(text) - used, number, (string_address) "\n", null, null,
+                   null);
+        host_state_ready();
+        host_write_file(RADIO_LAST_PATH, text, string_length(text), 0644, false);
+}
+
+/* Milliseconds the machine's own pass leaves the network that failed this
+   way alone, from the time it did: only a network that was not there or
+   refused the password is waited on, three seconds the first time and twice
+   as long each, to a minute. */
+static p64 radio_join_wait(const radio_last address_to last)
+{
+        positive doubled = last->count > 1 ? last->count - 1 : 0;
+        p64 wait;
+
+        if ((last->failed != -113 && last->failed != -13) || !last->at)
+                return 0;
+        wait = (p64)3000 << (doubled > 5 ? 5 : doubled);
+        return wait > 60000 ? 60000 : wait;
 }
 
 /*
@@ -8287,26 +8735,25 @@ static bipolar radio_password_read(p8 address_to into, positive room,
         return result < 0 ? result : (bipolar)used;
 }
 
-static bipolar radio_wifi_join(string_address ssid, string_address pass)
+/* One network joined, asked for (force) or by the machine's own pass. */
+static bipolar radio_wifi_join(string_address ssid, string_address pass, bool force)
 {
-        p8 pmk[32];
         bipolar failed = -19;
-        bool secured = pass && pass[0];
         positive ssid_length = string_length(ssid);
+        positive pass_length = pass ? string_length(pass) : 0;
         p64 started;
 
         if (!ssid_length || ssid_length > RADIO_SSID_MOST)
                 return -22;
 
-        if (secured && !wifi_psk((p8 address_to)ssid, ssid_length,
-                                 (p8 address_to)pass, string_length(pass), pmk))
+        if (pass_length && !wifi_pass_fits((p8 address_to)pass, pass_length))
                 return -22;
 
         started = system_clock_ns(HOST_CLOCK_BOOTTIME);
         for (;;)
         {
-                failed = nl80211_join((p8 address_to)ssid, ssid_length,
-                                      secured ? pmk : null, address_of radio_joined);
+                failed = nl80211_join((p8 address_to)ssid, ssid_length, (p8 address_to)pass,
+                                      pass_length, force, address_of radio_joined);
                 if (failed != -19)
                         break;
                 //      No wireless interface yet: waited for only where the
@@ -8319,7 +8766,6 @@ static bipolar radio_wifi_join(string_address ssid, string_address pass)
                 host_pause(200000000);
         }
 
-        crypto_forget(pmk, sizeof(pmk));
         return failed;
 }
 
@@ -8361,8 +8807,7 @@ static b32 radio_wifi_bring(bool say)
         for (at = 0; at < count; at++)
         {
                 failed = radio_wifi_join((string_address)networks[at].ssid,
-                                         (string_address)networks[at].pass);
-                radio_last_set((string_address)networks[at].ssid, failed);
+                                         (string_address)networks[at].pass, say);
                 if (!failed)
                 {
                         joined = true;
@@ -8379,6 +8824,11 @@ static b32 radio_wifi_bring(bool say)
                 if (failed == -19)
                         break;
         }
+        //      One pass is one failure, whichever of the networks it was the
+        //      last of: its count is what the next pass waits by.
+        if (count)
+                radio_last_set((string_address)networks[at < count ? at : count - 1].ssid,
+                               failed);
 
         radio_net_wake();
         crypto_forget(networks, sizeof(networks));
@@ -8416,8 +8866,8 @@ static b32 radio_wifi_on(bool say)
         if (lock < 0)
                 return say ? host_fail("wifi", lock) : 1;
         result = radio_wifi_bring(say);
-        radio_unlock(lock);
         radio_keeper_start();
+        radio_unlock(lock);
         return result;
 }
 
@@ -8521,7 +8971,7 @@ static b32 radio_wifi_enter(string_address ssid, string_address pass)
         /*      No radio at all is not one that is still arriving: the join's
                 eight seconds of asking are for a card whose interface is on
                 its way at boot. */
-        failed = radio_has_interface() ? radio_wifi_join(ssid, pass) : -19;
+        failed = radio_has_interface() ? radio_wifi_join(ssid, pass, true) : -19;
         radio_last_set(ssid, failed);
 
         radio_net_wake();
@@ -8575,6 +9025,13 @@ static b32 radio_wifi_add(string_address ssid, string_address pass)
         if (lock < 0)
                 return host_fail("wifi", lock);
         result = radio_wifi_enter(ssid, pass);
+        //      The password is forgotten before the keeper is forked, which
+        //      would carry it in its memory for as long as it lives, and the
+        //      keeper is started before the lock is let go, so that nothing
+        //      joins between the join and the process that keeps it.
+        if (pass_length)
+                crypto_forget((address_any)pass, pass_length);
+        radio_keeper_start();
         radio_unlock(lock);
         return result;
 }
@@ -8629,11 +9086,10 @@ static b32 radio_wifi_forget(string_address ssid)
                 return host_fail(NET_WIFI_LIST, failed);
 
         {
-                p8 last[RADIO_SSID_MOST + 1];
-                bipolar why;
+                radio_last last;
 
-                if (radio_last_get(last, sizeof(last), address_of why) &&
-                    string_equals((string_address)last, ssid))
+                if (radio_last_get(address_of last) &&
+                    string_equals((string_address)last.ssid, ssid))
                         radio_last_set(ssid, 0);
         }
 
@@ -8743,8 +9199,7 @@ static b32 radio_wifi_status(void)
         bool off = radio_power(NET_WIFI_POWER) == 0;
         bool joined = false;
         p8 why[RADIO_WHY_ROOM];
-        p8 last[RADIO_SSID_MOST + 1];
-        bipolar failed = 0;
+        radio_last last;
         radio_air air;
 
         string_format(log, host_label "wifi %s\n",
@@ -8810,20 +9265,21 @@ static b32 radio_wifi_status(void)
         {
                 radio_heard address_to heard = null;
 
-                last[0] = end;
-                if (radio_last_get(last, sizeof(last), address_of failed))
-                        heard = radio_air_find(address_of air, last);
+                last.ssid[0] = end;
+                last.failed = 0;
+                if (radio_last_get(address_of last))
+                        heard = radio_air_find(address_of air, last.ssid);
                 p8 name[RADIO_SSID_MOST * 4 + 1];
 
-                radio_display(name, sizeof(name), last, string_length(last));
-                if (heard && !radio_security_joinable(heard->security))
+                radio_display(name, sizeof(name), last.ssid, string_length(last.ssid));
+                if (heard && !heard->joinable)
                         string_format(log, host_label "not joined: %s asks for %s, which "
                                                       "moonwater cannot join yet\n",
                                       (string_address)name,
                                       radio_security_words[heard->security]);
                 else if (heard)
                         string_format(log, host_label "not joined: %s %s\n",
-                                      (string_address)name, radio_join_words(failed));
+                                      (string_address)name, radio_join_words(last.failed));
                 else
                 {
                         bool near = false;
@@ -9026,10 +9482,11 @@ static bool radio_wifi_wanted(bipolar power)
 }
 
 /*
-        The join the machine loop forks, and only that, reaped once it ends.
-        A wait4 on -1 here took every child of the machine process with it:
-        the NTP query's status (now on a pipe) and any job the machine
-        script put in the background, whose wait then found no such child.
+        The join the machine loop forks, and only that, reaped once it ends:
+        wait4 is asked for that pid alone. A wait on -1 would take every child
+        of the machine process with it, the NTP query's status (on a pipe)
+        and any job the machine script put in the background, whose wait
+        then found no such child.
 */
 static bipolar radio_child;
 
@@ -9045,15 +9502,40 @@ static fn radio_reap(void)
 
 static fn radio_wifi_keep(void)
 {
+        radio_last last;
         bipolar lock;
         bipolar child;
+        bool lost = false;
 
-        radio_rfkill(RADIO_RFKILL_WLAN, false);
+        //      A keeper holding its lock is a link the machine joined and has
+        //      not lost: nothing to ask the kernel or walk sysfs for every
+        //      pass while it stands.
+        if (radio_child > 0 || host_lock_owner(RADIO_KEEPER_PATH))
+                return;
+        //      Blocked by somebody's `rfkill block wlan`, or by a switch on
+        //      the machine, it is left so until `moonwater wifi on` says
+        //      otherwise.
+        if (radio_rfkill_blocked())
+                return;
         /*      A saved network and no radio forked a join every pass that
                 spent eight seconds finding no interface. The radio's arrival
                 -- firmware put in place, a card rebound, a stick plugged in
                 -- is what the next pass after it notices. */
-        if (radio_child > 0 || !radio_has_interface() || nl80211_associated())
+        if (!radio_has_interface())
+                return;
+        if (nl80211_associated())
+        {
+                //      A link nobody here joined is nobody here's to keep. One
+                //      whose keeper was started and is gone has lost its keys
+                //      with it, and would die at the access point's next
+                //      rekey: it is joined again.
+                if (system_access_at(AT_FDCWD, RADIO_KEPT_PATH, 0) < 0)
+                        return;
+                lost = true;
+        }
+        else if (radio_last_get(address_of last) &&
+                 system_clock_ns(HOST_CLOCK_BOOTTIME) / 1000000 <
+                     last.at + radio_join_wait(address_of last))
                 return;
 
         lock = radio_lock(false);
@@ -9073,9 +9555,11 @@ static fn radio_wifi_keep(void)
                 return;
         }
 
+        if (lost)
+                radio_wifi_leave();
         radio_wifi_bring(false);
-        radio_unlock(lock);
         radio_keeper_start();
+        radio_unlock(lock);
         system_call_1(syscall(exit), 0);
 }
 
@@ -9204,7 +9688,6 @@ static b32 host_radio(string_address address_to arguments, positive count)
                         }
                         result = radio_wifi_add(arguments[3], pass);
                         crypto_forget(pass, sizeof(pass));
-                        radio_keeper_start();
                         return result;
                 }
                 if (string_equals(word, "remove") && count == 4)
@@ -14966,9 +15449,8 @@ static b32 host_usage(void)
 static fn host_status_wifi(void)
 {
         p8 why[RADIO_WHY_ROOM];
-        p8 last[RADIO_SSID_MOST + 1];
+        radio_last last;
         p8 name[RADIO_SSID_MOST * 4 + 1];
-        bipolar failed = 0;
         radio_air air;
 
         if (radio_wifi_why(why, sizeof(why)))
@@ -14985,11 +15467,11 @@ static fn host_status_wifi(void)
                                 string_format(log, "  wifi joined %s\n", name);
                                 return;
                         }
-        if (radio_last_get(last, sizeof(last), address_of failed))
+        if (radio_last_get(address_of last))
         {
-                radio_display(name, sizeof(name), last, string_length(last));
+                radio_display(name, sizeof(name), last.ssid, string_length(last.ssid));
                 string_format(log, "  wifi on, not joined: %s %s\n", name,
-                              radio_join_words(failed));
+                              radio_join_words(last.failed));
                 return;
         }
         string_format(log, "  wifi on\n");

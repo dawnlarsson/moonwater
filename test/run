@@ -12173,13 +12173,17 @@ fi
 
 set -- -cpu Nehalem
 [ -w /dev/kvm ] && set -- -enable-kvm -cpu host
-timeout 900 qemu-system-x86_64 -m 1G -smp 2 "$@" -kernel "$image" \
+#       The commands go in once the guest has had time to start its shell:
+#       what the console gets before it reads is cut at the terminal's
+#       4 KiB, and on a loaded host the script's first lines went with it.
+{ sleep 25; cat "$work/commands"; } |
+timeout 5400 qemu-system-x86_64 -m 1G -smp 2 "$@" -kernel "$image" \
         -no-reboot -display none -vga none -serial stdio -nic none \
         -device qemu-xhci \
         -drive "if=none,id=stick,format=raw,file=fat:ro:$work/stick,readonly=on" \
         -device usb-storage,drive=stick,removable=on \
         -append "console=ttyS0 drm_client_lib.active= mac80211_hwsim.radios=0" \
-        < "$work/commands" > "$work/transcript" 2>&1 || true
+        > "$work/transcript" 2>&1 || true
 [ -n "${MOONWATER_WIFI_TRANSCRIPT:-}" ] && cp "$work/transcript" "$MOONWATER_WIFI_TRANSCRIPT"
 
 says transcript 'simulated radios (an image with the hwsim profile)' 'no-mswh'

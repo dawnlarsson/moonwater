@@ -117,7 +117,7 @@ static b32 link_status(void)
         p32 marks[LINK_GROUPS_MAX] = {0};
         link_state state;
         positive state_length = 0;
-        bipolar owner = link_lock_owner();
+        bipolar owner = host_lock_owner(LINK_LOCK_PATH);
         p8 key[48];
 
         //      A listener that is off, or older than this, left no state.
@@ -500,40 +500,25 @@ static b32 link_grant_locked(string_address name, bool allow,
 */
 static fn link_serve_start(bool detached)
 {
-        bipolar child = system_fork();
+        string_address words[] = {"moonwater", "link", "serve", null};
 
-        if (!child)
+        if (detached ? !host_detach(descriptors_none, descriptors_none) : system_fork() != 0)
+                return;
+        if (!detached)
         {
-                string_address words[] = {"moonwater", "link", "serve", null};
-
                 (void)system_call(syscall(setsid));
-                if (detached)
-                {
-                        bipolar null_handle;
-
-                        if (system_fork())
-                                system_call_1(syscall(exit), 0);
-                        null_handle = system_open_at(AT_FDCWD, "/dev/null",
-                                                     FILE_READ_WRITE);
-                        if (null_handle >= 0)
-                                for (b32 target = 0; target < 3; target++)
-                                        system_descriptor_install(null_handle,
-                                                                  target);
-                }
                 (void)descriptors_close_except(3, descriptors_none, descriptors_none);
-                (void)shell_exec_file((string_address) "/proc/self/exe", words,
-                                      3, file_environment_all());
-                system_call_1(syscall(exit), 127);
         }
-        if (detached && child > 0)
-                (void)system_call_4(syscall(wait4), (positive)child, 0, 0, 0);
+        (void)shell_exec_file((string_address) "/proc/self/exe", words, 3,
+                              file_environment_all());
+        system_call_1(syscall(exit), 127);
 }
 
 static bool link_wait_owner(bool present)
 {
         for (positive turn = 0; turn < 60; turn++)
         {
-                if ((link_lock_owner() > 0) == present)
+                if ((host_lock_owner(LINK_LOCK_PATH) > 0) == present)
                         return true;
                 host_pause(50000000);
         }
@@ -551,7 +536,7 @@ static b32 link_switch(bool on, bool say)
 
         if (!on)
         {
-                (void)link_lock_signal(15);
+                (void)host_lock_signal(LINK_LOCK_PATH, 15);
                 if (!link_wait_owner(false))
                         return host_refuse("the listener did not stop\n");
                 if (say)
@@ -567,7 +552,7 @@ static b32 link_switch(bool on, bool say)
         link_key_text(me.public, key);
         crypto_forget(address_of me, sizeof me);
 
-        if (link_lock_owner() <= 0)
+        if (host_lock_owner(LINK_LOCK_PATH) <= 0)
                 link_serve_start(true);
         if (!link_wait_owner(true))
                 return host_refuse("the listener did not start: is udp 22348 "
@@ -1020,7 +1005,7 @@ static fn link_before_take(link_before address_to before)
 {
         before->word[0] = 0;
         (void)host_read_word(LINK_SWITCH_PATH, before->word, sizeof before->word);
-        before->running = link_lock_owner() > 0;
+        before->running = host_lock_owner(LINK_LOCK_PATH) > 0;
 }
 
 static fn link_before_restore(link_before address_to before)
@@ -1363,12 +1348,12 @@ static fn link_keep(void)
         if (!string_equals((string_address)word, "on"))
         {
                 if (string_equals((string_address)word, "off") &&
-                    link_lock_owner() > 0)
-                        (void)link_lock_signal(15);
+                    host_lock_owner(LINK_LOCK_PATH) > 0)
+                        (void)host_lock_signal(LINK_LOCK_PATH, 15);
                 return;
         }
 
-        owner = link_lock_owner();
+        owner = host_lock_owner(LINK_LOCK_PATH);
 
         if (owner > 0)
         {

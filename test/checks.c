@@ -75797,54 +75797,6 @@ static fn wifi_ptk_checks(void)
               !memory_compare(other, expect, 64));
 }
 
-//      A password is eight to sixty-three characters or sixty-four digits of
-//      hex, the one rule for the verb that takes it and the key it makes.
-static fn wifi_password_checks(void)
-{
-        static const p8 key[32] = {0x00, 0xff, 0x10, 0xab, 0xcd, 0xef, 0x01, 0x23,
-                                   0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x12, 0x34,
-                                   0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x11, 0x22,
-                                   0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa};
-        p8 text[96];
-        p8 pmk[32];
-        p8 into[4];
-
-        memory_fill(text, 'p', sizeof(text));
-        check("a password of seven characters is not one, of eight to sixty-three it is",
-              !wifi_pass_fits(text, 7) && wifi_pass_fits(text, 8) && wifi_pass_fits(text, 63) &&
-                  !wifi_pass_fits(text, 0) && !wifi_pass_fits(text, 65) &&
-                  !wifi_pass_fits(text, 64));
-        memory_into_hex(text, (address_any)key, 32);
-        check("of sixty-four hex digits it is the key", wifi_pass_fits(text, 64));
-        for (positive at = 0; at < 64; at++)
-                text[at] = byte_to_upper(text[at]);
-        check("in either case", wifi_pass_fits(text, 64));
-        text[63] = 'g';
-        check("a digit that is none makes sixty-four characters no password",
-              !wifi_pass_fits(text, 64) &&
-                  !wifi_psk((p8 address_to) "net", 3, text, 64, pmk));
-        memory_into_hex(text, (address_any)key, 32);
-        check("a key of hex is the key itself, and the name is not asked of it",
-              wifi_psk((p8 address_to) "net", 3, text, 64, pmk) &&
-                  !memory_compare(pmk, key, 32) &&
-                  wifi_psk((p8 address_to) "", 0, text, 64, pmk));
-        check("a password of eight to sixty-three is asked of a name of one to thirty-two",
-              !wifi_psk((p8 address_to) "", 0, (p8 address_to) "password", 8, pmk) &&
-                  !wifi_psk((p8 address_to) "0123456789012345678901234567890123", 34,
-                            (p8 address_to) "password", 8, pmk));
-
-        memory_fill(into, 0x77, 4);
-        check("hex text is bytes, either case", memory_from_hex(into, "00fF10aB", 4) &&
-              into[0] == 0x00 && into[1] == 0xff && into[2] == 0x10 && into[3] == 0xab);
-        memory_fill(into, 0x77, 4);
-        check("text that is no hex stops at the byte it is in, the ones before it written",
-              !memory_from_hex(into, "00zz1122", 4) && into[0] == 0 && into[1] == 0x77);
-        memory_fill(into, 0x77, 4);
-        check("text that ends is read no further than its end",
-              !memory_from_hex(into, "ab\0cd", 2) && into[0] == 0xab && into[1] == 0x77 &&
-                  !memory_from_hex(into, "abc", 2));
-}
-
 //      What an access point's RSN element asks of a station, and whether the
 //      join can answer it: key management 2, CCMP both ways, no demand for
 //      protected management frames. Anything else that asks for WPA2 is a
@@ -75975,6 +75927,759 @@ static fn wifi_rsn_checks(void)
                   !radio_security_fits(true, RADIO_TKIP) && !radio_security_fits(true, RADIO_PMF) &&
                   !radio_security_fits(true, RADIO_FT256) &&
                   !radio_security_fits(false, RADIO_WPA2) && radio_security_fits(false, RADIO_OPEN));
+}
+
+//      What the nl80211 visitors read of messages made to be hostile: the
+//      family's groups cut, interface names of every length with no
+//      terminator, more interfaces than there is room for, extended features
+//      of no, one and two bytes, a deauthentication frame a byte short and a
+//      reason of zero. A message is built the way a request is, so what is
+//      cut is cut where an attribute ends or in the middle of one.
+#define WIFI_MESSAGE(buffer, family, command)                                  \
+        (memory_zero(address_of(buffer), sizeof(buffer)),                       \
+         nl80211_begin(address_of(buffer), (family), (command), 0, 1))
+#define WIFI_HEADER(buffer) ((netlink_header address_to)(buffer).bytes)
+
+static fn wifi_group_add(netlink_buffer address_to buffer, p16 index, string_address name,
+                         positive name_size, p32 id, positive id_size)
+{
+        positive nest = netlink_nested_begin(buffer, index);
+
+        netlink_attribute_add(buffer, CTRL_ATTR_MCAST_GRP_NAME, (address_any)name, name_size);
+        netlink_attribute_add(buffer, CTRL_ATTR_MCAST_GRP_ID, address_of id, id_size);
+        netlink_nested_end(buffer, nest);
+}
+
+static fn wifi_family_checks(void)
+{
+        netlink_buffer buffer;
+        nl80211_family_info info = {0};
+        p16 family = 0x1c;
+        positive nest;
+        positive whole;
+
+        WIFI_MESSAGE(buffer, GENL_ID_CTRL, 1);
+        netlink_attribute_add(address_of buffer, CTRL_ATTR_FAMILY_ID, address_of family, 2);
+        nest = netlink_nested_begin(address_of buffer, CTRL_ATTR_MCAST_GROUPS);
+        wifi_group_add(address_of buffer, 1, "config", 7, 6, 4);
+        wifi_group_add(address_of buffer, 2, "scan", 5, 8, 4);
+        wifi_group_add(address_of buffer, 3, "regulatory", 11, 9, 4);
+        wifi_group_add(address_of buffer, 4, "mlme", 5, 7, 4);
+        netlink_nested_end(address_of buffer, nest);
+        whole = WIFI_HEADER(buffer)->length;
+        nl80211_family_seen(WIFI_HEADER(buffer), address_of info);
+        check("the family's id and its mlme and scan groups are read",
+              info.family == 0x1c && info.mlme == 7 && info.scan == 8);
+
+        //      Cut anywhere: what is read is what was whole before the cut, and
+        //      nothing is read past it.
+        {
+                bool sane = true;
+                bool never_more = true;
+                p32 seen_mlme = 7;
+
+                for (positive cut = 1; cut < whole - 20; cut++)
+                {
+                        nl80211_family_info part = {0};
+
+                        WIFI_HEADER(buffer)->length = (p32)(whole - cut);
+                        nl80211_family_seen(WIFI_HEADER(buffer), address_of part);
+                        sane &= part.family == 0x1c || part.family == 0;
+                        never_more &= (!part.mlme || part.mlme == seen_mlme) &&
+                                      (!part.scan || part.scan == 8);
+                }
+                check("a message cut anywhere gives the family and groups as they were or none",
+                      sane && never_more);
+                WIFI_HEADER(buffer)->length = (p32)whole;
+        }
+        netlink_forget(address_of buffer);
+
+        //      A name with no terminator is not "mlme", and an id of three bytes
+        //      is none.
+        WIFI_MESSAGE(buffer, GENL_ID_CTRL, 1);
+        netlink_attribute_add(address_of buffer, CTRL_ATTR_FAMILY_ID, address_of family, 2);
+        nest = netlink_nested_begin(address_of buffer, CTRL_ATTR_MCAST_GROUPS);
+        wifi_group_add(address_of buffer, 1, "mlme", 4, 7, 4);
+        wifi_group_add(address_of buffer, 2, "scan", 5, 8, 3);
+        netlink_nested_end(address_of buffer, nest);
+        info = (nl80211_family_info){0};
+        nl80211_family_seen(WIFI_HEADER(buffer), address_of info);
+        check("a group name with no terminator and an id of three bytes are not taken",
+              info.family == 0x1c && !info.mlme && !info.scan);
+        netlink_forget(address_of buffer);
+}
+
+static fn wifi_interface_add(netlink_buffer address_to buffer, p32 index, p32 type,
+                             positive name_size)
+{
+        p8 name[256];
+        p32 wiphy = 4;
+
+        memory_fill(name, 'w', sizeof(name));
+        WIFI_MESSAGE(*buffer, 0x1c, NL80211_CMD_NEW_INTERFACE);
+        nl80211_attribute_u32(buffer, NL80211_ATTR_IFINDEX, index);
+        nl80211_attribute_u32(buffer, NL80211_ATTR_IFTYPE, type);
+        nl80211_attribute_u32(buffer, NL80211_ATTR_WIPHY, wiphy);
+        if (name_size)
+                netlink_attribute_add(buffer, NL80211_ATTR_IFNAME, name, name_size);
+}
+
+static fn wifi_interface_checks(void)
+{
+        static const positive sizes[] = {1, 6, 15, 16, 17, 200};
+        netlink_buffer buffer = {0};
+        nl80211_iface found;
+        bool names = true;
+
+        for (positive at = 0; at < sizeof(sizes) / sizeof(sizes[0]); at++)
+        {
+                positive kept = sizes[at] < IFNAME_SIZE ? sizes[at] : IFNAME_SIZE - 1;
+
+                memory_zero(address_of found, sizeof(found));
+                wifi_interface_add(address_of buffer, 3, NL80211_IFTYPE_STATION, sizes[at]);
+                nl80211_iface_seen(WIFI_HEADER(buffer), address_of found);
+                names &= found.cards == 1 && found.card[0].index == 3 &&
+                         string_length((string_address)found.card[0].name) == kept &&
+                         found.card[0].name[kept] == end;
+                netlink_forget(address_of buffer);
+        }
+        check("a name of any length with no terminator is cut to the room and ended", names);
+
+        memory_zero(address_of found, sizeof(found));
+        for (p32 index = 10; index < 22; index++)
+        {
+                wifi_interface_add(address_of buffer, index, 3 + (index & 1) * 3, 5);
+                nl80211_iface_seen(WIFI_HEADER(buffer), address_of found);
+                netlink_forget(address_of buffer);
+        }
+        wifi_interface_add(address_of buffer, 40, NL80211_IFTYPE_STATION, 5);
+        nl80211_iface_seen(WIFI_HEADER(buffer), address_of found);
+        netlink_forget(address_of buffer);
+        check("twelve interfaces that are not stations are counted to eight, a station "
+              "after them is still found",
+              found.others == 8 && found.other[0] == 10 && found.other[7] == 17 &&
+                  found.cards == 1 && found.card[0].index == 40);
+
+        memory_zero(address_of found, sizeof(found));
+        for (p32 index = 50; index < 57; index++)
+        {
+                wifi_interface_add(address_of buffer, index, NL80211_IFTYPE_STATION, 5);
+                nl80211_iface_seen(WIFI_HEADER(buffer), address_of found);
+                netlink_forget(address_of buffer);
+        }
+        check("stations are kept to the first four, in the order listed",
+              found.cards == NL80211_CARDS && found.card[0].index == 50 &&
+                  found.card[3].index == 53);
+
+        memory_zero(address_of found, sizeof(found));
+        WIFI_MESSAGE(buffer, 0x1c, NL80211_CMD_GET_WIPHY);
+        nl80211_attribute_u32(address_of buffer, NL80211_ATTR_IFINDEX, 3);
+        nl80211_attribute_u32(address_of buffer, NL80211_ATTR_IFTYPE, NL80211_IFTYPE_STATION);
+        nl80211_iface_seen(WIFI_HEADER(buffer), address_of found);
+        netlink_forget(address_of buffer);
+        WIFI_MESSAGE(buffer, 0x1c, NL80211_CMD_NEW_INTERFACE);
+        WIFI_HEADER(buffer)->length = NETLINK_HEADER + 2;
+        nl80211_iface_seen(WIFI_HEADER(buffer), address_of found);
+        netlink_forget(address_of buffer);
+        check("another command's message and one too short for its header are no interface",
+              !found.cards && !found.others);
+}
+
+static fn wifi_features_checks(void)
+{
+        netlink_buffer buffer;
+        nl80211_wiphy_query query;
+        p8 bits[3];
+        p32 wiphy = 5;
+        positive size;
+        bool took[4];
+
+        for (size = 0; size < 4; size++)
+        {
+                memory_zero(bits, sizeof(bits));
+                bits[1] = 0x80;
+                WIFI_MESSAGE(buffer, 0x1c, NL80211_CMD_NEW_WIPHY);
+                nl80211_attribute_u32(address_of buffer, NL80211_ATTR_WIPHY, wiphy);
+                netlink_attribute_add(address_of buffer, NL80211_ATTR_EXT_FEATURES, bits,
+                                      size);
+                query = (nl80211_wiphy_query){.wiphy = 5, .seen = ~0u};
+                nl80211_wiphy_seen(WIFI_HEADER(buffer), address_of query);
+                took[size] = query.offload;
+                netlink_forget(address_of buffer);
+        }
+        check("the offload bit is in the second byte of the features: none, one byte "
+              "are not, two and three are",
+              !took[0] && !took[1] && took[2] && took[3]);
+
+        memory_zero(bits, sizeof(bits));
+        bits[1] = 0x40;
+        WIFI_MESSAGE(buffer, 0x1c, NL80211_CMD_NEW_WIPHY);
+        nl80211_attribute_u32(address_of buffer, NL80211_ATTR_WIPHY, wiphy);
+        netlink_attribute_add(address_of buffer, NL80211_ATTR_EXT_FEATURES, bits, 2);
+        query = (nl80211_wiphy_query){.wiphy = 5, .seen = ~0u};
+        nl80211_wiphy_seen(WIFI_HEADER(buffer), address_of query);
+        netlink_forget(address_of buffer);
+        check("the bit next to it is not it", !query.offload);
+
+        //      Another wiphy's features are not this one's, and a chunk of a
+        //      split dump with no wiphy of its own belongs to the one before.
+        memory_zero(bits, sizeof(bits));
+        bits[1] = 0x80;
+        query = (nl80211_wiphy_query){.wiphy = 5, .seen = ~0u};
+        WIFI_MESSAGE(buffer, 0x1c, NL80211_CMD_NEW_WIPHY);
+        wiphy = 6;
+        nl80211_attribute_u32(address_of buffer, NL80211_ATTR_WIPHY, wiphy);
+        netlink_attribute_add(address_of buffer, NL80211_ATTR_EXT_FEATURES, bits, 2);
+        nl80211_wiphy_seen(WIFI_HEADER(buffer), address_of query);
+        netlink_forget(address_of buffer);
+        check("another wiphy's features are not read", !query.offload);
+        WIFI_MESSAGE(buffer, 0x1c, NL80211_CMD_NEW_WIPHY);
+        wiphy = 5;
+        nl80211_attribute_u32(address_of buffer, NL80211_ATTR_WIPHY, wiphy);
+        nl80211_wiphy_seen(WIFI_HEADER(buffer), address_of query);
+        netlink_forget(address_of buffer);
+        WIFI_MESSAGE(buffer, 0x1c, NL80211_CMD_NEW_WIPHY);
+        netlink_attribute_add(address_of buffer, NL80211_ATTR_EXT_FEATURES, bits, 2);
+        nl80211_wiphy_seen(WIFI_HEADER(buffer), address_of query);
+        netlink_forget(address_of buffer);
+        check("a chunk with no wiphy of its own is the one before it's", query.offload);
+}
+
+static positive wifi_news(nl80211 address_to session, p8 command, p32 index, p32 type,
+                          const p8 address_to frame, positive frame_size, bool reason_given,
+                          p16 reason)
+{
+        netlink_buffer buffer;
+        nl80211_news_turn turn = {.session = session, .index = 9};
+
+        WIFI_MESSAGE(buffer, (p16)type, command);
+        nl80211_attribute_u32(address_of buffer, NL80211_ATTR_IFINDEX, index);
+        if (frame)
+                netlink_attribute_add(address_of buffer, NL80211_ATTR_FRAME,
+                                      (address_any)frame, frame_size);
+        if (reason_given)
+                netlink_attribute_add(address_of buffer, NL80211_ATTR_REASON_CODE,
+                                      address_of reason, 2);
+        nl80211_link_news_take(WIFI_HEADER(buffer), address_of turn);
+        netlink_forget(address_of buffer);
+        return turn.reason;
+}
+
+static fn wifi_news_checks(void)
+{
+        nl80211 session = {.family = 0x1c};
+        p8 frame[26] = {0};
+        netlink_buffer buffer;
+        nl80211_news_turn turn = {.session = address_of session, .index = 9};
+
+        check("a disconnection says its reason",
+              wifi_news(address_of session, NL80211_CMD_DISCONNECT, 9, 0x1c, null, 0, true, 3) == 3);
+        check("one that names none is reason 1",
+              wifi_news(address_of session, NL80211_CMD_DISCONNECT, 9, 0x1c, null, 0, false, 0) == 1);
+        check("one that names zero is a link gone too, reason 1",
+              wifi_news(address_of session, NL80211_CMD_DISCONNECT, 9, 0x1c, null, 0, true, 0) == 1);
+        frame[24] = 7;
+        check("a deauthentication frame's reason follows its 24 bytes",
+              wifi_news(address_of session, NL80211_CMD_DEAUTHENTICATE, 9, 0x1c, frame, 26,
+                        false, 0) == 7 &&
+                  wifi_news(address_of session, NL80211_CMD_DISASSOCIATE, 9, 0x1c, frame, 26,
+                            false, 0) == 7);
+        frame[25] = 0x12;
+        check("both bytes of it", wifi_news(address_of session, NL80211_CMD_DEAUTHENTICATE, 9,
+                                            0x1c, frame, 26, false, 0) == 0x1207);
+        check("a frame of 25 bytes, of 24 and none is reason 1: the link is gone all the same",
+              wifi_news(address_of session, NL80211_CMD_DEAUTHENTICATE, 9, 0x1c, frame, 25,
+                        false, 0) == 1 &&
+                  wifi_news(address_of session, NL80211_CMD_DEAUTHENTICATE, 9, 0x1c, frame, 24,
+                            false, 0) == 1 &&
+                  wifi_news(address_of session, NL80211_CMD_DEAUTHENTICATE, 9, 0x1c, null, 0,
+                            false, 0) == 1);
+        frame[24] = 0;
+        frame[25] = 0;
+        check("a frame with reason zero is reason 1",
+              wifi_news(address_of session, NL80211_CMD_DEAUTHENTICATE, 9, 0x1c, frame, 26,
+                        false, 0) == 1);
+        check("news of another interface, another family or another command is none",
+              !wifi_news(address_of session, NL80211_CMD_DISCONNECT, 8, 0x1c, null, 0, true, 3) &&
+                  !wifi_news(address_of session, NL80211_CMD_DISCONNECT, 9, 0x1d, null, 0, true, 3) &&
+                  !wifi_news(address_of session, NL80211_CMD_CONNECT, 9, 0x1c, null, 0, true, 3));
+        WIFI_MESSAGE(buffer, 0x1c, NL80211_CMD_DISCONNECT);
+        WIFI_HEADER(buffer)->length = NETLINK_HEADER + 1;
+        nl80211_link_news_take(WIFI_HEADER(buffer), address_of turn);
+        netlink_forget(address_of buffer);
+        check("a message too short for its header is none", !turn.reason);
+}
+
+//      The pieces a request and a reply are made and walked by: nested
+//      attributes built around what they hold, messages visited in a
+//      datagram, attributes in a chain.
+typedef struct
+{
+        positive seen;
+        positive stop_at;
+        positive lengths[8];
+} wifi_walk;
+
+static bool wifi_walk_take(netlink_header address_to header, address_any context)
+{
+        wifi_walk address_to walk = (wifi_walk address_to)context;
+
+        if (walk->seen < 8)
+                walk->lengths[walk->seen] = header->length;
+        walk->seen++;
+        return walk->seen != walk->stop_at;
+}
+
+static bool wifi_chain_take(p16 type, p8 address_to value, positive size, address_any context)
+{
+        wifi_walk address_to walk = (wifi_walk address_to)context;
+
+        (void)value;
+        if (walk->seen < 8)
+                walk->lengths[walk->seen] = (positive)type << 8 | size;
+        walk->seen++;
+        return walk->seen != walk->stop_at;
+}
+
+static fn wifi_netlink_checks(void)
+{
+        netlink_buffer buffer = {0};
+        netlink_buffer datagram = {0};
+        netlink_buffer big = {0};
+        wifi_walk walk;
+        positive nest;
+        p8 key[16];
+        p8 big_value[40000];
+        p8 expect[4 + 52];
+        netlink_attribute address_to attribute;
+
+        //      A nested attribute made the way rekey offload makes it: its
+        //      length is the sum of what it holds, padded, and the message's
+        //      follows.
+        memory_fill(key, 0x5a, sizeof(key));
+        nl80211_begin(address_of buffer, 0x1c, NL80211_CMD_SET_REKEY_OFFLOAD, 0, 1);
+        nest = netlink_nested_begin(address_of buffer, NL80211_ATTR_REKEY_DATA);
+        netlink_attribute_add(address_of buffer, NL80211_REKEY_DATA_KEK, key, 16);
+        netlink_attribute_add(address_of buffer, NL80211_REKEY_DATA_KCK, key, 16);
+        netlink_attribute_add(address_of buffer, NL80211_REKEY_DATA_REPLAY_CTR, key, 8);
+        netlink_nested_end(address_of buffer, nest);
+        attribute = (netlink_attribute address_to)(buffer.bytes + nest);
+        memory_zero(expect, sizeof(expect));
+        ((netlink_attribute address_to)expect)->length = 56;
+        ((netlink_attribute address_to)expect)->type = NL80211_ATTR_REKEY_DATA | NLA_F_NESTED;
+        ((netlink_attribute address_to)(expect + 4))->length = 20;
+        ((netlink_attribute address_to)(expect + 4))->type = NL80211_REKEY_DATA_KEK;
+        memory_copy(expect + 8, key, 16);
+        ((netlink_attribute address_to)(expect + 24))->length = 20;
+        ((netlink_attribute address_to)(expect + 24))->type = NL80211_REKEY_DATA_KCK;
+        memory_copy(expect + 28, key, 16);
+        ((netlink_attribute address_to)(expect + 44))->length = 12;
+        ((netlink_attribute address_to)(expect + 44))->type = NL80211_REKEY_DATA_REPLAY_CTR;
+        memory_copy(expect + 48, key, 8);
+        check("a nest is the length of what it holds, padded, and the message's length follows",
+              attribute->length == 56 && attribute->type == (NL80211_ATTR_REKEY_DATA | NLA_F_NESTED) &&
+                  !memory_compare(buffer.bytes + nest, expect, 56) &&
+                  WIFI_HEADER(buffer)->length == buffer.used &&
+                  buffer.used == nest + 56);
+        netlink_forget(address_of buffer);
+
+        //      Two attributes that cannot be one nest's 16 bits.
+        memory_fill(big_value, 1, sizeof(big_value));
+        nl80211_begin(address_of big, 0x1c, NL80211_CMD_SET_REKEY_OFFLOAD, 0, 1);
+        nest = netlink_nested_begin(address_of big, NL80211_ATTR_REKEY_DATA);
+        netlink_attribute_add(address_of big, 1, big_value, sizeof(big_value));
+        check("a nest of 40000 bytes is whole", !big.failed);
+        netlink_attribute_add(address_of big, 2, big_value, sizeof(big_value));
+        netlink_nested_end(address_of big, nest);
+        check("one that is over its sixteen bits fails the request", big.failed);
+        netlink_forget(address_of big);
+
+        //      The messages of one datagram: each is visited, a stop is a stop and no
+        //      failure, and one cut short stops what follows without being visited.
+        nl80211_begin(address_of datagram, 0x1c, 1, 0, 1);
+        nl80211_attribute_u32(address_of datagram, 3, 7);
+        {
+                positive first = datagram.used;
+                netlink_buffer second = {0};
+
+                nl80211_begin(address_of second, 0x1c, 2, 0, 2);
+                if (net_room(address_of datagram, datagram.used + second.used))
+                {
+                        memory_copy(datagram.bytes + datagram.used, second.bytes, second.used);
+                        datagram.used += second.used;
+                }
+                netlink_forget(address_of second);
+                memory_zero(address_of walk, sizeof(walk));
+                check("every message of a datagram is visited, each at its own length",
+                      netlink_each(address_of datagram, wifi_walk_take, address_of walk) &&
+                          walk.seen == 2 && walk.lengths[0] == first &&
+                          walk.lengths[1] == NETLINK_HEADER + GENL_HEADER);
+                memory_zero(address_of walk, sizeof(walk));
+                walk.stop_at = 1;
+                check("a visitor that says stop is no failure, and is not asked again",
+                      netlink_each(address_of datagram, wifi_walk_take, address_of walk) &&
+                          walk.seen == 1);
+                //      The second claims a length that is not in the datagram.
+                ((netlink_header address_to)(datagram.bytes + first))->length = 4000;
+                memory_zero(address_of walk, sizeof(walk));
+                check("a message longer than what arrived is refused, after the whole one",
+                      !netlink_each(address_of datagram, wifi_walk_take, address_of walk) &&
+                          walk.seen == 1);
+                ((netlink_header address_to)(datagram.bytes + first))->length = NETLINK_HEADER - 1;
+                memory_zero(address_of walk, sizeof(walk));
+                check("one shorter than its own header is refused too",
+                      !netlink_each(address_of datagram, wifi_walk_take, address_of walk) &&
+                          walk.seen == 1);
+                datagram.used = first + 8;
+                memory_zero(address_of walk, sizeof(walk));
+                check("and a tail of less than a header is not a message",
+                      netlink_each(address_of datagram, wifi_walk_take, address_of walk) &&
+                          walk.seen == 1);
+        }
+        netlink_forget(address_of datagram);
+
+        //      An attribute chain: the types without their flags, what a stop does,
+        //      what a cut chain gives.
+        nl80211_begin(address_of buffer, 0x1c, 1, 0, 1);
+        netlink_attribute_add(address_of buffer, 5 | NLA_F_NESTED, key, 3);
+        netlink_attribute_add(address_of buffer, 6, key, 0);
+        netlink_attribute_add(address_of buffer, 7, key, 8);
+        memory_zero(address_of walk, sizeof(walk));
+        check("a chain is walked with each type, flags off, and each size, padding off",
+              netlink_attributes(buffer.bytes + NETLINK_HEADER + GENL_HEADER,
+                                 buffer.used - NETLINK_HEADER - GENL_HEADER, wifi_chain_take,
+                                 address_of walk) &&
+                  walk.seen == 3 && walk.lengths[0] == (5u << 8 | 3) &&
+                  walk.lengths[1] == (6u << 8 | 0) && walk.lengths[2] == (7u << 8 | 8));
+        memory_zero(address_of walk, sizeof(walk));
+        check("a cut chain gives what was whole before it, and says it was cut",
+              !netlink_attributes(buffer.bytes + NETLINK_HEADER + GENL_HEADER,
+                                  buffer.used - NETLINK_HEADER - GENL_HEADER - 4,
+                                  wifi_chain_take, address_of walk) &&
+                  walk.seen == 2);
+        netlink_forget(address_of buffer);
+}
+
+//      A password is eight to sixty-three characters or sixty-four digits of
+//      hex, the one rule for the verb that takes it and the key it makes.
+static fn wifi_password_checks(void)
+{
+        static const p8 key[32] = {0x00, 0xff, 0x10, 0xab, 0xcd, 0xef, 0x01, 0x23,
+                                   0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x12, 0x34,
+                                   0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x11, 0x22,
+                                   0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa};
+        p8 text[96];
+        p8 pmk[32];
+        p8 into[4];
+
+        memory_fill(text, 'p', sizeof(text));
+        check("a password of seven characters is not one, of eight to sixty-three it is",
+              !wifi_pass_fits(text, 7) && wifi_pass_fits(text, 8) && wifi_pass_fits(text, 63) &&
+                  !wifi_pass_fits(text, 0) && !wifi_pass_fits(text, 65) &&
+                  !wifi_pass_fits(text, 64));
+        memory_into_hex(text, (address_any)key, 32);
+        check("of sixty-four hex digits it is the key", wifi_pass_fits(text, 64));
+        for (positive at = 0; at < 64; at++)
+                text[at] = byte_to_upper(text[at]);
+        check("in either case", wifi_pass_fits(text, 64));
+        text[63] = 'g';
+        check("a digit that is none makes sixty-four characters no password",
+              !wifi_pass_fits(text, 64) &&
+                  !wifi_psk((p8 address_to) "net", 3, text, 64, pmk));
+        memory_into_hex(text, (address_any)key, 32);
+        check("a key of hex is the key itself, and the name is not asked of it",
+              wifi_psk((p8 address_to) "net", 3, text, 64, pmk) &&
+                  !memory_compare(pmk, key, 32) &&
+                  wifi_psk((p8 address_to) "", 0, text, 64, pmk));
+        check("a password of eight to sixty-three is asked of a name of one to thirty-two",
+              !wifi_psk((p8 address_to) "", 0, (p8 address_to) "password", 8, pmk) &&
+                  !wifi_psk((p8 address_to) "0123456789012345678901234567890123", 34,
+                            (p8 address_to) "password", 8, pmk));
+
+        memory_fill(into, 0x77, 4);
+        check("hex text is bytes, either case", memory_from_hex(into, "00fF10aB", 4) &&
+              into[0] == 0x00 && into[1] == 0xff && into[2] == 0x10 && into[3] == 0xab);
+        memory_fill(into, 0x77, 4);
+        check("text that is no hex stops at the byte it is in, the ones before it written",
+              !memory_from_hex(into, "00zz1122", 4) && into[0] == 0 && into[1] == 0x77);
+        memory_fill(into, 0x77, 4);
+        check("text that ends is read no further than its end",
+              !memory_from_hex(into, "ab\0cd", 2) && into[0] == 0xab && into[1] == 0x77 &&
+                  !memory_from_hex(into, "abc", 2));
+}
+
+//      What the machine's own pass waits after a join that failed for the
+//      network not being there or for the password, and the record it reads
+//      it from.
+static fn wifi_last_checks(void)
+{
+        radio_last last;
+        bipolar kinds[] = {-110, -111, -62, -121, -1015, -19, -22, -1};
+        bool quiet = true;
+        static const p64 waits[] = {3000, 6000, 12000, 24000, 48000, 60000, 60000, 60000};
+
+        for (positive count = 1; count <= 8; count++)
+        {
+                last.failed = -113;
+                last.at = 1000;
+                last.count = count;
+                last.failed = count & 1 ? -113 : -13;
+                quiet &= radio_join_wait(address_of last) == waits[count - 1];
+        }
+        check("a network not there or refusing the password is left alone 3 s, then twice as "
+              "long, to a minute",
+              quiet);
+        quiet = true;
+        for (positive at = 0; at < sizeof(kinds) / sizeof(kinds[0]); at++)
+        {
+                last.failed = kinds[at];
+                last.at = 1000;
+                last.count = 5;
+                quiet &= !radio_join_wait(address_of last);
+        }
+        check("every other failure is joined again at the next pass", quiet);
+        last.failed = -113;
+        last.at = 0;
+        last.count = 0;
+        check("a record from before it carried a time is no wait", !radio_join_wait(address_of last));
+
+        radio_last_set("home", -113);
+        check("a failure is kept with its name, reason, a time and a count of one",
+              radio_last_get(address_of last) && !string_compare((string_address)last.ssid, "home") &&
+                  last.failed == -113 && last.at && last.count == 1);
+        radio_last_set("home", -113);
+        check("again for the same reason, the count is two",
+              radio_last_get(address_of last) && last.count == 2);
+        radio_scan_declined = true;
+        radio_last_set("home", -113);
+        radio_last_set("home", -113);
+        check("a pass that was told by the last scan and asked nothing is not another time",
+              radio_last_get(address_of last) && last.failed == -113 && last.count == 2);
+        radio_scan_declined = false;
+        radio_last_set("home", -13);
+        check("for another reason it is one", radio_last_get(address_of last) &&
+                  last.failed == -13 && last.count == 1);
+        radio_last_set("away", -13);
+        radio_last_set("away", -13);
+        radio_last_set("away", -13);
+        check("for another name it is one, and counts on", radio_last_get(address_of last) &&
+                  !string_compare((string_address)last.ssid, "away") && last.count == 3);
+        radio_last_set("away", -19);
+        check("no interface is nothing to remember", !radio_last_get(address_of last));
+        radio_last_set("away", -113);
+        radio_last_set("away", 0);
+        check("a join that worked leaves no record", !radio_last_get(address_of last));
+        {
+                p8 old[] = "home\n113\n";
+
+                host_state_ready();
+                host_write_file(RADIO_LAST_PATH, old, sizeof(old) - 1, 0644, false);
+                check("a record of the name and reason alone is read, with no time and no count",
+                      radio_last_get(address_of last) && last.failed == -113 && !last.at &&
+                          !last.count && !radio_join_wait(address_of last));
+        }
+        radio_last_set("home", 0);
+}
+
+//      The whole scans asked for here, by name: what a join may leave to the
+//      scan of a moment ago, and what a status goes by.
+static fn wifi_scan_checks(void)
+{
+        p8 text[RADIO_SCAN_ROOM];
+        positive lines = 0;
+        bool names = true;
+
+        system_remove_at(AT_FDCWD, RADIO_SCAN_PATH, 0);
+        check("with no scan on record the age is the most there is",
+              radio_scan_age(null, 0) == ~(p64)0 && radio_scan_age((p8 address_to) "home", 4) == ~(p64)0);
+        radio_scan_note((p8 address_to) "home", 4);
+        radio_scan_note((p8 address_to) "work", 4);
+        radio_scan_note(null, 0);
+        check("each name asked for has its own age, and the air alone is none of them",
+              radio_scan_age((p8 address_to) "home", 4) < 5000 &&
+                  radio_scan_age((p8 address_to) "work", 4) < 5000 &&
+                  radio_scan_age((p8 address_to) "else", 4) == ~(p64)0 &&
+                  radio_scan_age((p8 address_to) "hom", 3) == ~(p64)0 &&
+                  radio_scan_age((p8 address_to) "home!", 5) == ~(p64)0);
+        check("and without a name the age is the newest of them", radio_scan_age(null, 0) < 5000);
+
+        host_write_file(RADIO_SCAN_PATH, (p8 address_to) "1 stale\n", 8, 0644, false);
+        check("a scan that is long ago is that long ago",
+              radio_scan_age((p8 address_to) "stale", 5) > 30000 &&
+                  radio_scan_age((p8 address_to) "stale", 5) != ~(p64)0);
+        radio_scan_note((p8 address_to) "home", 4);
+        check("and is dropped by the next, which is first, with nothing else",
+              radio_scan_age((p8 address_to) "stale", 5) == ~(p64)0 &&
+                  radio_scan_age((p8 address_to) "home", 4) < 5000);
+
+        host_write_file(RADIO_SCAN_PATH, (p8 address_to) "123", 3, 0644, false);
+        check("a record of the time alone, as before names, is a scan of the air",
+              radio_scan_age(null, 0) < ~(p64)0 && radio_scan_age((p8 address_to) "x", 1) == ~(p64)0);
+
+        system_remove_at(AT_FDCWD, RADIO_SCAN_PATH, 0);
+        for (positive at = 0; at < 24; at++)
+        {
+                p8 name[3] = {'n', (p8)('a' + at), 0};
+
+                radio_scan_note(name, 2);
+        }
+        //      The text is read without its last newline.
+        host_read_word(RADIO_SCAN_PATH, text, sizeof(text));
+        for (string_address at = (string_address)text; *at; at++)
+                lines += *at == '\n';
+        lines++;
+        for (positive at = 8; at < 24; at++)
+        {
+                p8 name[3] = {'n', (p8)('a' + at), 0};
+
+                names &= radio_scan_age(name, 2) < 5000;
+        }
+        check("sixteen scans are kept, the newest, however many were made",
+              lines == 16 && names && radio_scan_age((p8 address_to) "na", 2) == ~(p64)0);
+        system_remove_at(AT_FDCWD, RADIO_SCAN_PATH, 0);
+}
+
+//      What a join waits on: the deadline, or, where the asking is what tells
+//      of the association, the next time to ask when that comes first.
+static fn wifi_wait_checks(void)
+{
+        b32 pair[2];
+        nl80211 session = {.handle = -1};
+        network_deadline deadline;
+        network_deadline brief;
+        p8 byte = 1;
+        p64 began;
+        p64 took;
+        bipolar got;
+        bipolar opened = system_call_4(syscall(socketpair), AF_UNIX, SOCK_DGRAM, 0,
+                                       (positive)pair);
+
+        check("the socket pair for a join's wait is made", opened == 0);
+        if (opened)
+                return;
+        session.handle = pair[0];
+
+        network_deadline_begin(address_of deadline, 3, 0);
+        began = clock_monotonic_nanoseconds();
+        got = nl80211_join_wait(address_of session, address_of deadline, true);
+        took = clock_monotonic_nanoseconds() - began;
+        check("where the asking tells of it, nothing in a fifth of a second is time to ask again",
+              got == NETWORK_TRY_AGAIN && took >= 150000000 && took < 1000000000);
+        socket_send(pair[1], address_of byte, 1, 0, null, 0);
+        check("what comes is what comes, asking or not",
+              nl80211_join_wait(address_of session, address_of deadline, true) > 0 &&
+                  nl80211_join_wait(address_of session, address_of deadline, false) > 0);
+        socket_receive(pair[0], address_of byte, 1, MSG_DONTWAIT, null, 0);
+
+        network_deadline_begin(address_of brief, 0, 300000000);
+        began = clock_monotonic_nanoseconds();
+        got = nl80211_join_wait(address_of session, address_of brief, false);
+        took = clock_monotonic_nanoseconds() - began;
+        check("without asking it waits for the deadline and says so",
+              got == 0 && took >= 250000000 && took < 1500000000);
+
+        network_deadline_begin(address_of brief, 0, 50000000);
+        got = nl80211_join_wait(address_of session, address_of brief, true);
+        check("a slice that ends at the deadline or after it is the deadline, not time to ask",
+              got == 0);
+        socket_close(pair[0]);
+        socket_close(pair[1]);
+}
+
+//      The process that keeps a link: named by its lock, ended by it without
+//      a pid that was somebody else's by then, and a daemon made of a fork
+//      with nothing of its maker's open.
+static bool wifi_descriptor_count(string_address directory, string_address name, address_any context)
+{
+        (void)directory, (void)name;
+        (*(positive address_to)context)++;
+        return true;
+}
+
+static fn wifi_keeper_checks(void)
+{
+        b32 ready[2];
+        positive status = 0;
+        p8 text[96];
+        p8 number[24];
+        bipolar child;
+        bipolar got;
+
+        host_state_ready();
+        system_pipe(ready, O_CLOEXEC);
+        child = system_fork();
+        if (!child)
+        {
+                bipolar handle = host_lock_file(RADIO_KEEPER_PATH, HOST_FILE_SETLK, null);
+                p8 one = handle >= 0 ? 'k' : 'f';
+
+                system_write_all(ready[1], address_of one, 1);
+                for (;;)
+                        system_call(syscall(pause));
+        }
+        got = system_read_once(ready[0], text, 1);
+        check("a process takes the keeper's lock", got == 1 && text[0] == 'k');
+        check("whose it is is named", host_lock_owner(RADIO_KEEPER_PATH) == (b32)child);
+        host_write_file(RADIO_KEPT_PATH, (p8 address_to) "1\n", 2, 0644, false);
+        radio_keeper_stop();
+        check("the keeper is ended, and its lock free when stop returns",
+              !host_lock_owner(RADIO_KEEPER_PATH));
+        got = system_call_4(syscall(wait4), (positive)child, (positive)address_of status, 0, 0);
+        check("by a kill, which is what it was ended by", got == child && (status & 0x7f) == SIGKILL);
+        check("and its marker with it", system_access_at(AT_FDCWD, RADIO_KEPT_PATH, 0) < 0);
+        check("nobody holding it is nobody to signal", !host_lock_signal(RADIO_KEEPER_PATH, SIGKILL));
+        system_close(ready[0]);
+        system_close(ready[1]);
+
+        //      A daemon: not its maker's child, a session of its own, and the
+        //      descriptors of the three that are standard and the one kept.
+        system_pipe(ready, O_CLOEXEC);
+        if (host_detach(ready[1], descriptors_none))
+        {
+                positive open = 0;
+                positive at = 0;
+
+                host_each_entry("/proc/self/fd", wifi_descriptor_count, address_of open);
+                positive_into_string(number, system_call(syscall(getppid)));
+                string_copy_bounded(text, number, sizeof(text));
+                string_append_bounded(text, " ", sizeof(text));
+                positive_into_string(number, system_call(syscall(getpid)));
+                string_append_bounded(text, number, sizeof(text));
+                string_append_bounded(text, " ", sizeof(text));
+                positive_into_string(number, system_call_1(syscall(getsid), 0));
+                string_append_bounded(text, number, sizeof(text));
+                string_append_bounded(text, " ", sizeof(text));
+                positive_into_string(number, open);
+                string_append_bounded(text, number, sizeof(text));
+                string_append_bounded(text, "\n", sizeof(text));
+                at = string_length(text);
+                system_write_all(ready[1], text, at);
+                system_call_1(syscall(exit_group), 0);
+        }
+        system_close(ready[1]);
+        memory_zero(text, sizeof(text));
+        got = system_read_once(ready[0], text, sizeof(text) - 1);
+        system_close(ready[0]);
+        {
+                //      Its parent, itself, its session and what it has open.
+                string_address at = (string_address)text;
+                positive said[4] = {0, 0, 0, 0};
+                bool whole = got > 0;
+
+                for (positive field = 0; field < 4 && whole; field++)
+                {
+                        whole = string_digits_checked(address_of at, 10, address_of said[field]);
+                        if (*at == ' ')
+                                at++;
+                }
+                check("a daemon says what it is", whole);
+                check("it is not the child of whoever made it",
+                      whole && said[0] != (positive)system_call(syscall(getpid)));
+                check("it leads a session of its own", whole && said[1] == said[2]);
+                check("it has the three descriptors that are standard, the one kept and "
+                      "a directory's open, and nothing else",
+                      whole && said[3] == 5);
+        }
 }
 
 //      A key's text and back, and text that is not quite a key.
@@ -76841,8 +77546,17 @@ b32 main(void)
         wpa_key();
         wifi_unwrap_checks();
         wifi_ptk_checks();
-        wifi_password_checks();
         wifi_rsn_checks();
+        wifi_family_checks();
+        wifi_interface_checks();
+        wifi_features_checks();
+        wifi_news_checks();
+        wifi_netlink_checks();
+        wifi_password_checks();
+        wifi_last_checks();
+        wifi_scan_checks();
+        wifi_wait_checks();
+        wifi_keeper_checks();
         wifi_source_checks();
         wifi_air_capacity();
         key_text();
