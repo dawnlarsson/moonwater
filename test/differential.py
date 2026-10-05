@@ -43017,6 +43017,58 @@ while True:
                   f"as nobody, `moonwater {command}` exits {status}" + (f" and says {words}" if words else ""),
                   repr(got)[:240])
 
+        # Output is for whoever reads it. Into a pipe or a file there are no
+        # escapes in anything the command says, where the label was bold and
+        # the notes dim; on a terminal they are there; and what a message
+        # names of the person's own words is shown and not obeyed, to either: a
+        # disk, a zone, a network, a layout and a name typed with ESC [ 2 J in
+        # them cleared the screen of whoever read the refusal.
+        quiet = ("status", "help", "help wifi", "wifi", "name", "bind", "keyboard list", "timezone list",
+                 "link", "ntp", "time", "wired", "bluetooth", "airplane", "priority", "setup")
+        hostile = ("timezone x${e}", "keyboard x${e}", "name x${e}", "wifi remove x${e}", "bluetooth remove x${e}",
+                   "bind init remove x${e}", "setup install x${e}", "setup use x${e}", "setup update x${e}",
+                   "link remove x${e}", "link x${e} abc-def", "link group x${e}", "link allow x${e} shell",
+                   "link add x${e} AAAA", "canvas x${e}", "wifi add x${e} pw", "priority x${e}", "x${e}", "help x${e}")
+        script = ("e=$(printf '\\033[2J')\n" +
+                  "".join(f"/tmp/moonwater {command} > /tmp/o 2>&1; echo \"@@escapes {command}: $(tr -cd '\\033' < /tmp/o | wc -c)\"\n"
+                          for command in quiet) +
+                  "".join(f"/tmp/moonwater {command} > /tmp/o 2>&1; "
+                          f"echo \"@@escapes {command}: $(tr -cd '\\033' < /tmp/o | wc -c)\"\n" for command in hostile) +
+                  "/tmp/moonwater timezone \"x${e}y\" 2>&1; echo \"@@status $?\"\n"
+                  "/tmp/moonwater wifi remove \"caf$(printf '\\303\\251')\" 2>&1; echo \"@@status $?\"\n")
+        lines, finished = session(script)
+        counts = {line[len("@@escapes "):].rsplit(": ", 1)[0]: line.rsplit(": ", 1)[1]
+                  for line in lines if line.startswith("@@escapes ")}
+        check(finished and len(counts) == len(quiet) + len(hostile) and set(counts.values()) == {"0"},
+              "the command's words carry no escape into a pipe, and a name that has one is shown and not obeyed",
+              repr({command: count for command, count in counts.items() if count != "0"}))
+        joined = "\n".join(lines)
+        check("unknown timezone x\\x1b[2Jy" in joined and "no saved network is called caf\u00e9" in joined,
+              "a name's escape is spelled \\x1b and a UTF-8 letter is left alone", joined[-300:])
+
+        import pty
+        master, slave = pty.openpty()
+        (sandbox / "tmp/script").write_text("/tmp/moonwater help\n")
+        wrapper = (f"mount --rbind /usr {sandbox}/usr && {private_dev}"
+                   f"mount --rbind /proc {sandbox}/proc && "
+                   f"exec chroot {sandbox} /usr/bin/sh -c 'cd / && . /tmp/script'")
+        child = subprocess.Popen(["unshare", "-Urmnu", "--fork", "sh", "-c", wrapper], stdin=subprocess.DEVNULL,
+                                 stdout=slave, stderr=slave, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
+        os.close(slave)
+        shown = b""
+        try:
+            while True:
+                chunk = os.read(master, 65536)
+                if not chunk:
+                    break
+                shown += chunk
+        except OSError:
+            pass
+        os.close(master)
+        child.wait(timeout=60)
+        check(b"\x1b[1mMoonwater\x1b[0m" in shown and b"\x1b[2m" in shown,
+              "on a terminal the page is still bold and dim", repr(shown[:80]))
+
         # A command's answer is what it did. Standard output closed, or full,
         # or a pipe whose reader has gone is none of it: `moonwater name x` >
         # /dev/full exited 1 after the name was kept, and `status | head` died
@@ -62008,7 +62060,7 @@ for holder in spaces.values():
 # a family's tally printed reversed so the console's echo never answers.
 GUEST_PRELUDE = r'''scen_ok=0
 scen_all=0
-scen_strip() { sed 's/^.\[1m\[Moonwater\].\[0m //'; }
+scen_strip() { sed -e 's/^.\[1m\[Moonwater\].\[0m //' -e 's/^\[Moonwater\] //'; }
 scen_rep() { r=$2; while [ ${#r} -lt $1 ]; do r=$r$r; done; printf '%s\n' "$r" | cut -c1-$1; }
 scen_pass() { scen_ok=$((scen_ok + 1)); scen_all=$((scen_all + 1)); }
 scen_miss() { scen_all=$((scen_all + 1)); printf 'scenario-miss %s\n' "$*"; }
@@ -64597,7 +64649,7 @@ def harness_wifi_air(argv):
     lines.append("scen_count 'join wrong password said within 6 s of associating' 1 \"$(awk -v t=\"$(took $(associated_at))\" 'BEGIN { print (t < 6) }')\"")
     lines.append("scen_count 'join wrong password says so' 1 \"$(grep -c 'saved, but the network did not accept the password' /tmp/sc.got)\"")
     lines.append("t0=$(uptime_now); moonwater wifi add \"$ap2\" < /dev/null > /tmp/sc.got 2>&1; scen_status 'join open' 0 $?; echo \"wifi-time open $(took $t0)\"")
-    lines.append("scen_count 'join open joined' 1 \"$(grep -c -x -F \"$(printf '\\033[1m[Moonwater]\\033[0m ')wifi joined $ap2\" /tmp/sc.got)\"")
+    lines.append("scen_count 'join open joined' 1 \"$(grep -c -x -F \"[Moonwater] wifi joined $ap2\" /tmp/sc.got)\"")
     lines.append("moonwater wifi add \"$ap3\" %s > /tmp/sc.got 2>&1; scen_status 'join WPA3 alone' 1 $?" % q(sae["password"]))
     lines.append("scen_count 'join WPA3 alone refused' 1 \"$(grep -c 'saved, but it asks for WPA3, which moonwater cannot join yet' /tmp/sc.got)\"")
     lines.append("scen_count 'join WPA3 still joined to the open one' 1 \"$(moonwater status 2>/dev/null | grep -c -x -F \"  wifi joined $ap2\")\"")

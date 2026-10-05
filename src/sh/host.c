@@ -58,6 +58,138 @@
 
 #include "../moonwater/moonwater.c"
 
+/*
+        What the command says is for a person at a terminal, which is why its
+        label is bold and its notes dim. Into a pipe or a file those are bytes
+        in the data (`moonwater status | grep` read ESC[1m[Moonwater]ESC[0m), so
+        the two streams it writes to are asked once what they are, and one
+        that is not a terminal has its colour sequences -- ESC [ parameters m
+        -- taken out as they pass. A sequence may come in two writes, so the
+        bytes of one in progress are kept until it ends.
+
+        What a message names, a %s, is another matter: string_format hands it
+        over with a length of nought, the writer's word for "to the
+        terminator", where everything the command writes itself has its own
+        length. Those are anybody's words -- a name typed after the verb, a
+        disk's, a network's -- and are shown and not obeyed: a byte a terminal
+        would act on, ESC and the C1 controls among them, is spelled \xNN, to
+        a terminal or a file alike, and a line or a tab is the text's own.
+        Everything below that says log or log_error says these.
+*/
+typedef struct
+{
+        p8 held[24];
+        positive used;
+        bool known;
+        bool plain;
+} host_stream;
+
+static host_stream host_streams[2];
+
+/* A word as it is seen and not as a terminal would take it. */
+static fn host_show(writer through, string_address text)
+{
+        const p8 address_to bytes = (const p8 address_to)text;
+        positive length = string_length(text);
+        positive start = 0;
+        positive at = 0;
+
+        while (at < length)
+        {
+                bool printable;
+                positive step = file_terminal_step(bytes + at, length - at, true,
+                                                   address_of printable);
+                p8 spelled[4] = {'\\', 'x'};
+
+                if (printable || bytes[at] == '\n' || bytes[at] == '\t')
+                {
+                        at += step;
+                        continue;
+                }
+                if (at > start)
+                        through((address_any)(bytes + start), at - start);
+                memory_into_hex(spelled + 2, (address_any)(bytes + at), 1);
+                through(spelled, sizeof(spelled));
+                start = ++at;
+        }
+        if (at > start)
+                through((address_any)(bytes + start), at - start);
+}
+
+static fn host_stream_write(positive which, writer through, address_any data,
+                            positive length)
+{
+        host_stream address_to stream = host_streams + which;
+        const p8 address_to bytes = data;
+        positive start = 0;
+
+        if (!length)
+        {
+                host_show(through, data);
+                return;
+        }
+        if (!stream->known)
+        {
+                stream->known = true;
+                stream->plain = !stream_is_terminal((b32)which + 1);
+        }
+        if (!stream->plain)
+        {
+                through(data, length);
+                return;
+        }
+
+        for (positive at = 0; at < length; at++)
+        {
+                p8 byte = bytes[at];
+
+                if (!stream->used)
+                {
+                        if (byte != 0x1b)
+                                continue;
+                        if (at > start)
+                                through((address_any)(bytes + start), at - start);
+                        stream->held[stream->used++] = byte;
+                        continue;
+                }
+
+                stream->held[stream->used++] = byte;
+                if ((stream->used == 2 && byte == '[') ||
+                    (stream->used > 2 && byte >= 0x20 && byte <= 0x3f &&
+                     stream->used < sizeof(stream->held)))
+                        continue;
+
+                //      The end of it, or no escape sequence after all: a colour
+                //      is dropped and anything else goes on as it was.
+                if (!(stream->used > 2 && byte == 'm'))
+                        through(stream->held, stream->used);
+                stream->used = 0;
+                start = at + 1;
+        }
+
+        if (!stream->used && start < length)
+                through((address_any)(bytes + start), length - start);
+}
+
+static fn host_out(address_any data, positive length)
+{
+        host_stream_write(0, log, data, length);
+}
+
+static fn host_err(address_any data, positive length)
+{
+        host_stream_write(1, log_error, data, length);
+}
+
+#define log host_out
+#define log_error host_err
+
+// The start of a line: the label, or the two blanks a page indents by.
+static fn host_prefix(bool label)
+{
+        string_format(log, label ? host_label : "  ");
+}
+
 #define HOST_SYSTEM_NAME "moonwater-boot"
 #define HOST_DATA_NAME "moonwater-data"
 /* The removable-media name the UEFI specification gives each machine's loader:
@@ -4370,40 +4502,49 @@ static bipolar host_canvas_request(positive request,
         return host_spark_once(SPARK_IOCTL_CANVAS, control, FILE_READ);
 }
 
-static fn host_canvas_write(string_address prefix,
+static fn host_canvas_write(bool label,
                             struct canvas_control address_to control)
 {
+        host_prefix(label);
         if (!control->running)
         {
-                string_format(log, "%sCanvas is off; moonwater canvas on starts it\n",
-                              prefix);
+                string_format(log, "Canvas is off; moonwater canvas on starts it\n");
                 return;
         }
 
-        string_format(log, "%sCanvas is on: %s, %p window%s\n", prefix,
+        string_format(log, "Canvas is on: %s, %p window%s\n",
                       (string_address)control->driver, (positive)control->windows,
                       control->windows == 1 ? "" : "s");
 
         for (positive at = 0; at < control->output_count && at < SPARK_CANVAS_OUTPUTS; at++)
-                string_format(log, "%s  %s: %p by %p, %p Hz\n", prefix,
+        {
+                host_prefix(label);
+                string_format(log, "  %s: %p by %p, %p Hz\n",
                               (string_address)control->output[at].connector,
                               (positive)control->output[at].width,
                               (positive)control->output[at].height,
                               (positive)control->output[at].refresh);
+        }
 
         if (control->detached)
-                string_format(log, "%s%p window%s still open off the desktop\n", prefix,
+        {
+                host_prefix(label);
+                string_format(log, "%p window%s still open off the desktop\n",
                               (positive)control->detached,
                               control->detached == 1 ? "" : "s");
+        }
 
         if (control->suspended)
-                string_format(log, "%sanother program holds the display; "
-                                   "Canvas ignores input until it lets go\n",
-                              prefix);
+        {
+                host_prefix(label);
+                string_format(log, "another program holds the display; "
+                                   "Canvas ignores input until it lets go\n");
+        }
 
-        string_format(log, "%slow-latency hold: %s, taken %p time%s; "
+        host_prefix(label);
+        string_format(log, "low-latency hold: %s, taken %p time%s; "
                            "canvas thread woke %p, frame timer fired %p\n",
-                      prefix, control->latency_hold ? "held" : "idle",
+                      control->latency_hold ? "held" : "idle",
                       (positive)control->latency_holds,
                       control->latency_holds == 1 ? "" : "s",
                       (positive)control->thread_passes,
@@ -4412,7 +4553,7 @@ static fn host_canvas_write(string_address prefix,
 
 static fn host_canvas_say(struct canvas_control address_to control)
 {
-        host_canvas_write(host_label, control);
+        host_canvas_write(true, control);
         log_flush();
 }
 
@@ -14391,24 +14532,25 @@ static b32 host_locale(string_address address_to arguments, positive count)
         event's default back. What is not the default is kept in the image
         and put back at the next boot.
 */
-static fn host_bind_say(string_address prefix, struct bind_control address_to control)
+static fn host_bind_say(bool label, struct bind_control address_to control)
 {
         p16 line = host_machine_event_line(control->event);
         string_address name = (string_address)control->name;
         bool said = false;
 
+        host_prefix(label);
         if (line)
-                string_format(log, "%s%s: %s:%p", prefix, name, host_machine_where(),
+                string_format(log, "%s: %s:%p", name, host_machine_where(),
                               (positive)line);
         else if (control->command[0])
-                string_format(log, "%s%s: %s", prefix, name,
+                string_format(log, "%s: %s", name,
                               host_plain((string_address)control->command));
         else if (control->flags & SPARK_BIND_DEFAULT)
-                string_format(log, "%s%s", prefix, name);
+                string_format(log, "%s", name);
         else
                 //      The kernel keeps a line somebody set from anyone but
                 //      root, and clears the DEFAULT flag so that this can say so.
-                string_format(log, "%s%s: set, and root's to read", prefix, name);
+                string_format(log, "%s: set, and root's to read", name);
 
         if (control->runs)
         {
@@ -14525,7 +14667,7 @@ static fn host_bind_apply(host_settings address_to settings)
         system_close(device);
 }
 
-static bipolar host_bind_each(string_address prefix, bool required)
+static bipolar host_bind_each(bool label, bool required)
 {
         struct bind_control control;
         bipolar device;
@@ -14548,7 +14690,7 @@ static bipolar host_bind_each(string_address prefix, bool required)
                 }
                 if (event == 1 && control.count)
                         count = control.count;
-                host_bind_say(prefix, address_of control);
+                host_bind_say(label, address_of control);
         }
 
         system_close(device);
@@ -14557,7 +14699,7 @@ static bipolar host_bind_each(string_address prefix, bool required)
 
 static b32 host_bind_events(void)
 {
-        bipolar failed = host_bind_each("  ", true);
+        bipolar failed = host_bind_each(false, true);
 
         if (failed < 0)
                 return host_fail(SPARK_DEVICE, failed);
@@ -14640,7 +14782,7 @@ static b32 host_bind_told(unsigned int event, string_address command)
 
         if (host_bind_keep(event, address_of control))
                 return 1;
-        host_bind_say(host_label, address_of control);
+        host_bind_say(true, address_of control);
         log_flush();
         return 0;
 }
@@ -14721,7 +14863,7 @@ static b32 host_bind(string_address address_to arguments, positive count)
 
                 if (failed < 0)
                         return host_fail(SPARK_DEVICE, failed);
-                host_bind_say(host_label, address_of control);
+                host_bind_say(true, address_of control);
                 log_flush();
                 return 0;
         }
@@ -15043,7 +15185,7 @@ static b32 host_status(void)
         string_format(log, "\n");
 
         if (host_canvas_request(SPARK_CANVAS_STATUS, address_of canvas) >= 0)
-                host_canvas_write("  ", address_of canvas);
+                host_canvas_write(false, address_of canvas);
 
         locale_status_lines();
 
@@ -15057,7 +15199,7 @@ static b32 host_status(void)
 
         host_status_wifi();
 
-        (void)host_bind_each("  ", false);
+        (void)host_bind_each(false, false);
 
         if (host_settings_session(address_of settings))
         {
@@ -15383,6 +15525,7 @@ static b32 host_main()
         b32 answer;
 
         host_verb = count > 1 ? arguments[1] : null;
+        memory_zero(host_streams, sizeof(host_streams));
         if (!host_verb)
         {
                 host_title(log);
@@ -15411,3 +15554,6 @@ static b32 host_main()
 
 #define MOONWATER_CLI
 #include "../moonwater/moonwater.c"
+
+#undef log
+#undef log_error
