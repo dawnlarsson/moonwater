@@ -14319,71 +14319,6 @@ static b32 host_locale(string_address address_to arguments, positive count)
 
 
 /*
-        Forget userspace, keep the machine.
-
-        /home is emptied. /root is emptied except the overlay and the files
-        an image update already leaves on the data partition. /bowls
-        stays: that is the pre-installed software a kiosk starts after wipe.
-        The builtin machine script calls this at every settled boot.
-*/
-static string_address host_wipe_keep[] = {
-    "main.moonwater.sh",
-    "wifi",
-    "wifi.power",
-    "wired.power",
-    "bluetooth",
-    "bluetooth.power",
-    "internet",
-    "tune",
-    "timezone",
-    "timezone.mode",
-    "ntp",
-    "ntp.server",
-    "ntp.sampling",
-    "keyboard",
-    "name",
-    "link",
-    "link.key",
-    "link.peers",
-    "link.port",
-    "link.groups",
-    null,
-};
-
-static bipolar host_wipe_ensure(string_address path, positive mode)
-{
-        bipolar made = system_make_directory_at(AT_FDCWD, path, mode);
-
-        return made < 0 && made != -ERROR_EXISTS ? made : 0;
-}
-
-static b32 host_wipe(void)
-{
-        bipolar failed;
-
-        host_need_root("moonwater wipe");
-
-        failed = bowl_reset_walk("/home", 0);
-        if (failed < 0)
-                return host_fail("/home", failed);
-
-        failed = host_wipe_ensure("/home", 0755);
-        if (failed < 0)
-                return host_fail("/home", failed);
-
-        failed = bowl_reset_walk_at(AT_FDCWD, "/root", 0, true, host_wipe_keep);
-        if (failed < 0)
-                return host_fail("/root", failed);
-
-        failed = host_wipe_ensure("/root", 0700);
-        if (failed < 0)
-                return host_fail("/root", failed);
-
-        host_say(log, host_label "userspace forgotten\n");
-        return 0;
-}
-
-/*
         Bound events, and the init and exit lists, as one verb.
 
         A kernel event is one line. init and exit stay lists, because more
@@ -15027,6 +14962,93 @@ static b32 host_answer(bool update, string_address disk)
 }
 
 #include "../waterlink/command.c"
+
+/*
+        Forget userspace, keep the machine.
+
+        /home is emptied. /root is emptied except the overlay and the files
+        an image update already leaves on the data partition. /bowls
+        stays: that is the pre-installed software a kiosk starts after wipe.
+        The builtin machine script calls this at every settled boot.
+
+        What /root keeps is each setting's own path, taken from the macro the
+        command that writes it names it by, so a setting added without a line
+        here is not wiped by default. A file system mounted below /home or
+        /root is not this machine's userspace and stays as it is.
+*/
+#define HOST_WIPE_KEEP(path) ((path) + sizeof("/root/") - 1)
+
+static string_address host_wipe_keep[] = {
+    HOST_WIPE_KEEP(HOST_MACHINE_SCRIPT),
+    HOST_WIPE_KEEP(NET_WIFI_LIST),
+    HOST_WIPE_KEEP(NET_WIFI_POWER),
+    HOST_WIPE_KEEP(NET_WIRED_POWER),
+    HOST_WIPE_KEEP(NET_BLUETOOTH_LIST),
+    HOST_WIPE_KEEP(NET_BLUETOOTH_POWER),
+    HOST_WIPE_KEEP(NET_INTERNET_ROOT),
+    HOST_WIPE_KEEP(TUNE_KEPT),
+    HOST_WIPE_KEEP(CLOCK_ZONE_PATH),
+    HOST_WIPE_KEEP(LOCALE_ZONE_MODE_PATH),
+    HOST_WIPE_KEEP(LOCALE_NTP_PATH),
+    HOST_WIPE_KEEP(LOCALE_NTP_SERVER_PATH),
+    HOST_WIPE_KEEP(LOCALE_NTP_SAMPLING_PATH),
+    HOST_WIPE_KEEP(LOCALE_KEYBOARD_PATH),
+    HOST_WIPE_KEEP(NAME_PATH),
+    HOST_WIPE_KEEP(LINK_SWITCH_PATH),
+    HOST_WIPE_KEEP(LINK_KEY_PATH),
+    HOST_WIPE_KEEP(LINK_PEERS_PATH),
+    HOST_WIPE_KEEP(LINK_PORT_PATH),
+    HOST_WIPE_KEEP(LINK_GROUPS_PATH),
+    HOST_WIPE_KEEP(LINK_STAMPS_PATH),
+    null,
+};
+
+//      An emptied directory that was not there is made, with the mode it is
+//      meant to have whatever the caller's umask says.
+static bipolar host_wipe_ensure(string_address path, positive mode)
+{
+        bipolar made = system_make_directory_exact_at(AT_FDCWD, path, mode);
+
+        return made < 0 && made != -ERROR_EXISTS ? made : 0;
+}
+
+static b32 host_wipe_path(string_address path, positive mode,
+                          string_address address_to keep)
+{
+        bipolar failed = bowl_reset_walk(path, BOWL_RESET_ONE_MOUNT, keep);
+
+        if (!failed)
+                failed = host_wipe_ensure(path, mode);
+        return failed < 0 ? host_fail(path, failed) : 0;
+}
+
+/*
+        One command at a time changes what /root keeps: the radio lock is what
+        wifi add and the verbs that write beside a list hold, and the settings
+        lock is bind's and an install's. A wipe between a list's write and its
+        rename took the half-written file and left `wifi add` with an error
+        for a network it had just joined.
+*/
+static b32 host_wipe(void)
+{
+        bipolar lock;
+        b32 failed;
+
+        host_need_root("moonwater wipe");
+
+        if (!host_acquire())
+                return 1;
+        lock = radio_lock(true);
+
+        failed = host_wipe_path("/home", 0755, null) ||
+                 host_wipe_path("/root", 0700, host_wipe_keep);
+
+        radio_unlock(lock);
+        host_release();
+        if (!failed)
+                host_say(log, host_label "userspace forgotten\n");
+        return failed;
+}
 
 /*
         `moonwater setup`: a live session, or one that keeps its data on a

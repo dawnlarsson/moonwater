@@ -42612,6 +42612,92 @@ while True:
         check(table and table == set(re.findall(r'strcmp\(name, "(\w+)"\)', layout_body)),
               "the layouts moonwater keyboard offers are the ones Canvas takes",
               sorted(table ^ set(re.findall(r'strcmp\(name, "(\w+)"\)', layout_body))))
+        # Wipe against what a machine really has under /home and /root.
+        #   A file system mounted there is not userspace to forget: a stick
+        #   under /home lost its files and then the wipe failed on the busy
+        #   directory, before /root was reached. The mount, and every
+        #   directory that holds one, stays; the rest goes and the status is 0.
+        #   A tree deeper than the walk's cap stopped the wipe with "Too many
+        #   levels of symbolic links", which anybody able to write /home could
+        #   use to keep a kiosk from ever forgetting anything.
+        #   Every setting a command keeps in /root is named by a macro in the
+        #   source, and each survives, so one added without a line in wipe's
+        #   list is red here and not in a user's data.
+        #   And a /home that is a link is refused like a /root that is one,
+        #   a /home made new is 0755 under a umask of 077, and a wipe waits
+        #   for the radio lock that wifi add and its siblings hold.
+        kept_names = sorted({found.group(1) for path in (HARNESS_ROOT / "src").rglob("*.c")
+                             for found in re.finditer(r'#define\s+\w+\s+"/root/([A-Za-z0-9._-]+)"',
+                                                      path.read_text(errors="replace"))
+                             if not found.group(1).endswith(".next")})
+        check(len(kept_names) > 20 and "link.stamps" in kept_names and "name" in kept_names,
+              "the source names the files /root keeps", repr(kept_names))
+        script = ("rm -rf /home/* /root/* /root/.[!.]*\n"
+                  "mkdir -p /home/stick /home/u/inner /home/u/gone /root/data /root/junk\n"
+                  "mount -t tmpfs tmpfs /home/stick && mount -t tmpfs tmpfs /home/u/inner && "
+                  "mount -t tmpfs tmpfs /root/data\n"
+                  "echo a > /home/stick/file; echo b > /home/u/inner/file; echo c > /root/data/file\n"
+                  "echo d > /home/u/gone/f; echo e > /home/loose; echo f > /root/junk/f\n" +
+                  "".join(f"echo {name} > /root/{name}\n" for name in kept_names) +
+                  say("wipe") +
+                  "echo \"@@mounts $(cat /home/stick/file /home/u/inner/file /root/data/file | tr '\\n' ,) "
+                  "$(ls /home | tr '\\n' ,) $(ls /home/u | tr '\\n' ,) $(ls /root | tr '\\n' ,)\"\n")
+        lines, finished = session(script)
+        seen = answers(lines)
+        listed = ",".join(sorted(kept_names + ["data"]))
+        mounts = [line.split(maxsplit=1)[1] for line in lines if line.startswith("@@mounts ")]
+        check(finished and seen.get("wipe", {}).get("status") == 0 and mounts and
+              mounts[0].split() == ["a,b,c,", "stick,u,", "inner,", listed + ","],
+              "wipe leaves a file system mounted under /home or /root and every directory "
+              "holding one, takes the rest, and keeps what each setting's macro names",
+              repr((seen.get("wipe"), mounts)))
+        session("rm -rf /home/* /root/* /root/.[!.]*\n")
+
+        script = ("rm -rf /home/* /root/* /root/.[!.]*\n"
+                  "mkdir -p /home/deep /root/deepr && echo kept > /root/name\n"
+                  "for top in /home/deep /root/deepr; do (cd $top; i=0; "
+                  "while [ $i -lt 130 ]; do mkdir d && cd d && echo x > f$i; i=$((i+1)); done); done\n" +
+                  say("wipe") +
+                  "echo \"@@deep $(ls -A /home | wc -l) $(ls -A /root | tr '\\n' ,) $(cat /root/name)\"\n")
+        lines, finished = session(script)
+        seen = answers(lines)
+        deep = [line.split(maxsplit=1)[1] for line in lines if line.startswith("@@deep ")]
+        check(finished and seen.get("wipe", {}).get("status") == 0 and deep and
+              deep[0].split() == ["0", "name,", "kept"],
+              "wipe empties a tree 130 directories deep, past the walk's cap, in /home and /root",
+              repr((seen.get("wipe"), deep)))
+
+        script = ("rm -rf /home/* /root/* /root/.[!.]*\n"
+                  "mkdir -p /tmp/elsewhere && echo precious > /tmp/elsewhere/f\n"
+                  "rmdir /home && ln -s /tmp/elsewhere /home\n" + say("wipe") +
+                  "echo \"@@link $(cat /tmp/elsewhere/f)\"\n"
+                  "rm /home && mkdir /home && rmdir /root && ln -s /tmp/elsewhere /root\n" + say("wipe") +
+                  "echo \"@@link $(cat /tmp/elsewhere/f)\"\n"
+                  "rm /root && mkdir -m 700 /root\n")
+        lines, finished = session(script)
+        seen = answers(lines)
+        kept = [line[len("@@link "):] for line in lines if line.startswith("@@link ")]
+        check(finished and kept == ["precious", "precious"] and
+              all(got["status"] == 1 for key, got in seen.items() if key == "wipe"),
+              "wipe goes through no link at /home or at /root",
+              repr((seen.get("wipe"), kept)))
+
+        script = ("rm -rf /home/* /root/* /root/.[!.]*\n"
+                  "rmdir /home\numask 077\n" + say("wipe") + "umask 022\n"
+                  "echo \"@@mode $(stat -c %a /home /root | tr '\\n' ' ')\"\n")
+        lines, finished = session(script)
+        modes = [line.split(maxsplit=1)[1] for line in lines if line.startswith("@@mode ")]
+        check(finished and modes and modes[0].split() == ["755", "700"],
+              "a /home that wipe makes new is 0755 whatever the umask", repr(modes))
+
+        script = ("mkdir -p /run/moonwater /home/q && echo q > /home/q/f\n"
+                  "(flock -x /run/moonwater/radio.lock sleep 4) &\nsleep 1\n"
+                  "s=$(date +%s)\n" + say("wipe") +
+                  "echo \"@@waited $(( $(date +%s) - s ))\"\nwait\n")
+        lines, finished = session(script)
+        waited = [int(line.split()[1]) for line in lines if line.startswith("@@waited ")]
+        check(finished and waited and waited[0] >= 2,
+              "wipe waits for the radio lock a wifi add holds", repr(waited))
 
         # The switches and lists the command keeps in /root, drawn as runs of
         # verbs against a model of what each leaves: the words of wifi,
