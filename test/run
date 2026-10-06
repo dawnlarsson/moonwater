@@ -16380,6 +16380,16 @@ t=$(( $(n /tmp/idle2 fired) - $(n /tmp/idle1 fired) ))
 h=$(sed -n 's/.*hold: \([a-z]*\),.*/\1/p' /tmp/idle2)
 echo "idlecheck-$h-$w-$t" > /dev/ttyS0
 ''')
+#       A holder that comes back, as KDE's wrapper brings KWin back when KWin
+#       is killed: three runs of the holder in a loop of one shell, which a
+#       key that ends only the holder would leave holding the card again.
+open(stick + "/respawn", "w").write(r'''n=0
+while [ $n -lt 3 ]; do /mnt/drmhold 6 0 0; n=$((n+1)); done
+''')
+#       How many windows Canvas has, said on the serial port.
+open(stick + "/windows", "w").write(r'''moonwater canvas > /tmp/windows 2>&1
+echo "windows-$(sed -n 's/.*Canvas is on: [^,]*, \([0-9]*\) window.*/\1/p' /tmp/windows)" > /dev/ttyS0
+''')
 #       A bowl profile that is only a program holding the display, installed
 #       where bowl profile puts one, chosen as the desktop, started, looked at,
 #       and ended from the same shell that started it. Run in one script
@@ -16810,12 +16820,55 @@ def wait_count(pattern, count, seconds):
         time.sleep(0.2)
     return False
 
-way_names = ("moonwater desktop refuses a profile that is not installed, and takes one that is",
+def type_symbols(line):
+    symbols = {">": "dot", "&": "7", "$": "4"}
+    for character in line:
+        if character in symbols:
+            chord("shift", symbols[character])
+        elif character.isupper():
+            chord("shift", character.lower())
+        else:
+            type_text(character)
+
+def windows_now():
+    type_text("/shell /mnt/windows\n")
+    time.sleep(3)
+    found = re.findall(rb"windows-(\d+)", open(work + "/leak-serial", "rb").read())
+    return found[-1].decode() if found else "no answer"
+
+way_names = ("Control-Shift-T typed at a program that holds the display starts no terminal",
+             "Control-Alt-Backspace ends a program that holds the display",
+             "and the loop that starts it again with it, not only the one run",
+             "moonwater desktop refuses a profile that is not installed, and takes one that is",
              "moonwater desktop boot starts the chosen profile, over Canvas",
              "and moonwater desktop says it is running",
              "moonwater desktop stop ends its session, and Canvas has the display back",
              "and moonwater desktop canvas puts the default back")
 if switcher and holder:
+    windows_before = windows_now()
+    masters = serial_count(rb"DRMHOLD master")
+    dones = serial_count(rb"DRMHOLD done")
+    run_holder("6 0 0")
+    held = wait_count(rb"DRMHOLD master", masters + 1, 15)
+    chord("ctrl", "shift", "t")
+    wait_count(rb"DRMHOLD done", dones + 1, 20)
+    time.sleep(3)
+    out.append((way_names[0], windows_now() if held else "the holder did not start", windows_before))
+
+    masters = serial_count(rb"DRMHOLD master")
+    type_text("setsid /shell /mnt/respawn ")
+    type_symbols("> /dev/ttyS0 2>&1 &\n")
+    started = wait_count(rb"DRMHOLD master", masters + 1, 15)
+    chord("ctrl", "alt", "backspace")
+    time.sleep(3)
+    typed_to_serial("zapped")
+    time.sleep(3)
+    back = serial_count(rb"zapped-(\d+)")
+    time.sleep(12)
+    out.append((way_names[1], str(back) if started else "the holder did not start", "1"))
+    out.append((way_names[2], str(serial_count(rb"DRMHOLD master") - masters)
+                if started else "the holder did not start", "1"))
+
     masters = serial_count(rb"DRMHOLD master")
     from_here = len(open(work + "/leak-serial", "rb").read())
     type_text("/shell /mnt/desk\n")
@@ -16825,17 +16878,17 @@ if switcher and holder:
     time.sleep(3)
     plain = re.sub(rb"\x1b\[[0-9;?]*[a-zA-Z]", b"",
                    open(work + "/leak-serial", "rb").read()[from_here:])
-    out.append((way_names[0], "yes" if b"is not installed" in plain and
+    out.append((way_names[3], "yes" if b"is not installed" in plain and
                 b"desktop desktop, from the next start" in plain else "no: " + repr(plain[:400]), "yes"))
-    out.append((way_names[1], str(serial_count(rb"DRMHOLD master") - masters), "1"))
-    out.append((way_names[2], "yes" if b"desktop desktop, running" in plain else "no", "yes"))
-    out.append((way_names[3], "yes" if finished and b"desktop stopped" in plain and
+    out.append((way_names[4], str(serial_count(rb"DRMHOLD master") - masters), "1"))
+    out.append((way_names[5], "yes" if b"desktop desktop, running" in plain else "no", "yes"))
+    out.append((way_names[6], "yes" if finished and b"desktop stopped" in plain and
                 serial_count(rb"deskback-(\d+)") == 1 else "no", "yes"))
-    out.append((way_names[4], "yes" if re.search(
+    out.append((way_names[7], "yes" if re.search(
         rb"desktop stopped.*desktop desktop, not running.*desktop canvas, from the next start"
         rb".*desktop canvas\r?\n.*desk-done", plain, re.S) else "no: " + repr(plain[-300:]), "yes"))
 else:
-    for name, want in zip(way_names, ("yes", "1", "yes", "yes", "yes")):
+    for name, want in zip(way_names, ("1", "1", "1", "yes", "1", "yes", "yes", "yes")):
         out.append((name, "not run: no static cc for the helpers", want))
 
 #       And the power button with Canvas up, which has its own input handler

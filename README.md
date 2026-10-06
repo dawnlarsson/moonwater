@@ -225,6 +225,18 @@ two meet in two headers: `src/canvas/canvas.h`, what the core asks of it, and
 `moonwater canvas off` closes every window and leaves a shell on the text
 console, from which another display server such as Weston can take the screen.
 
+A program that takes the display for itself, Weston or the KDE session of a
+bowl profile, is master of the card: Canvas stops drawing, drops every key, and
+draws the desktop again, windows and keyboard back, when that program lets go
+or ends. `moonwater canvas` says when one holds it. A compositor that has the
+card and no way to be used, with no input or no picture, would leave nothing at
+the keyboard to work with, so Control-Alt-Backspace, pressed while another
+program holds the card, ends the program and every other program of its
+session, and Canvas has the screen back. A session that is init's own, which
+is every shell on a console that was never given another, is not ended: only
+the program, which a session started there has to be ended by hand. Pressed
+with nobody holding the card it is the key it always was.
+
 `moonwater desktop` is what the machine starts as its desktop: Canvas, the
 default; `off`, which turns Canvas off as soon as it has started, for a machine
 that is a text console; or a bowl profile, whose session the machine script's

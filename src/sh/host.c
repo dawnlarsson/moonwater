@@ -4802,8 +4802,9 @@ static fn host_canvas_write(bool label,
         if (control->suspended)
         {
                 host_prefix(label);
-                string_format(log, "another program holds the display; "
-                                   "Canvas ignores input until it lets go\n");
+                string_format(log, "another program holds the display; Canvas "
+                                   "ignores input until it lets go, and "
+                                   "Control-Alt-Backspace ends it\n");
         }
 
         host_prefix(label);

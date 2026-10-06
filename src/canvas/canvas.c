@@ -556,6 +556,20 @@ static struct desktop
                 arrives before the thread has run is the same request.
         */
         atomic_t spawn;
+
+        /*
+                Control-Shift-T and Control-Alt-Backspace, as the keyboard
+                recorded them.
+
+                Neither is acted on where it is heard: the thread acts, and
+                only after it has looked at who holds the display. A terminal
+                asked for with the card in another program's hands would be
+                started and never seen, one for every press of Konsole's
+                new-tab chord, and the other chord means something only to
+                a program that has the card.
+        */
+        atomic_t spawn_key;
+        atomic_t reclaim;
         int focus_cycle_z;
 
         // The button, and where it went down. Picking a window needs the list,
@@ -9213,11 +9227,31 @@ static void keyboard_event(struct input_handle *handle, unsigned int code, int v
         {
                 if (value == 1)
                 {
-                        atomic_set(&desktop.spawn, 1);
+                        atomic_set(&desktop.spawn_key, 1);
                         canvas_thread_wake();
                 }
 
                 return;
+        }
+
+        /*
+                Control-Alt-Backspace ends a program that has the display and
+                will not give it back.
+
+                A compositor with no input, or no picture, or neither, holds
+                the card against Canvas, which drops every key while it does:
+                nothing typed gets the machine out. This one is noticed here
+                and acted on by the thread, which does it only when somebody
+                holds the card; with nobody, the key goes on to the window
+                it was typed at as it always did.
+        */
+        if ((modifiers & (WINDOW_KEY_ALT | WINDOW_KEY_SHIFT |
+                          WINDOW_KEY_CONTROL)) ==
+                (WINDOW_KEY_ALT | WINDOW_KEY_CONTROL) &&
+            code == KEY_BACKSPACE && value == 1)
+        {
+                atomic_set(&desktop.reclaim, 1);
+                canvas_thread_wake();
         }
 
         // Once an Alt-Tab traversal has started, do not leak another
@@ -10052,6 +10086,8 @@ static long canvas_turn_off(void)
         // printk keeps filling the same cells, and on will draw them again.
         mutex_lock(&canvas_list_lock);
         atomic_set(&desktop.spawn, 0);
+        atomic_set(&desktop.spawn_key, 0);
+        atomic_set(&desktop.reclaim, 0);
         canvas_thread_stop();
         mutex_unlock(&canvas_list_lock);
 
@@ -11526,6 +11562,121 @@ static void canvas_input_drop(_Bool keys)
         */
 }
 
+/*
+        The session of whatever holds the display, ended.
+
+        Only the holder dying is not enough: KDE's wrapper starts KWin again
+        and the new one takes the card straight back. So its session goes with
+        it, which is every program the desktop started -- unless the session
+        is init's own, which is every shell on a console that was never given
+        another, and which is not this key's to end: the holder alone is then.
+        Not its process group either, which a shell with no job control makes
+        of itself and everything it starts. Kernel threads and init are never
+        signalled.
+*/
+static void canvas_session_end(struct pid *process, struct pid *session)
+{
+        struct task_struct *task;
+        struct task_struct *init;
+        struct pid *shared;
+
+        kill_pid(process, SIGKILL, 1);
+
+        rcu_read_lock();
+        init = find_task_by_pid_ns(1, &init_pid_ns);
+        shared = init ? task_session(init) : NULL;
+
+        if (session && session != shared)
+                do_each_pid_task(session, PIDTYPE_SID, task)
+                {
+                        if (is_global_init(task) || (task->flags & PF_KTHREAD))
+                                continue;
+                        group_send_sig_info(SIGKILL, SEND_SIG_PRIV, task,
+                                            PIDTYPE_TGID);
+                }
+                while_each_pid_task(session, PIDTYPE_SID, task);
+        rcu_read_unlock();
+}
+
+// One card's master, found as canvas_master_holder finds it, and ended.
+static void canvas_master_end(struct drm_device *dev)
+{
+        struct drm_file *file;
+        struct pid *process = NULL;
+        struct pid *session = NULL;
+        char command[TASK_COMM_LEN] = "";
+        int number = 0;
+
+        mutex_lock(&dev->filelist_mutex);
+        list_for_each_entry(file, &dev->filelist, lhead)
+        {
+                struct task_struct *task;
+
+                if (!drm_is_current_master(file))
+                        continue;
+
+                rcu_read_lock();
+                task = pid_task(rcu_dereference(file->pid), PIDTYPE_TGID);
+                if (task)
+                {
+                        process = get_pid(task_tgid(task));
+                        session = get_pid(task_session(task));
+                        number = task_tgid_nr(task);
+                        strscpy(command, task->comm, sizeof(command));
+
+                        // A program names itself with prctl, and this goes to
+                        // the kernel log and the log window.
+                        for (char *at = command; *at; at++)
+                                if (*at < ' ' || *at > '~')
+                                        *at = '?';
+                }
+                rcu_read_unlock();
+                break;
+        }
+        mutex_unlock(&dev->filelist_mutex);
+
+        if (process)
+        {
+                pr_info("[moonwater canvas] " "Control-Alt-Backspace: %s (pid %d) holds the display, and it and its session are ended\n", command, number);
+                canvas_session_end(process, session);
+        }
+
+        put_pid(process);
+        put_pid(session);
+}
+
+/*
+        Take the display back from the program that holds it.
+
+        Outside desktop.lock and every other lock of this file: it takes a
+        card's filelist_mutex, which drm_open and drm_release hold, and the
+        cards are only referenced here, not locked, while it does.
+*/
+#define CANVAS_RECLAIM_CARDS 4
+
+static void canvas_reclaim(void)
+{
+        struct drm_device *cards[CANVAS_RECLAIM_CARDS];
+        unsigned int count = 0;
+        struct canvas *canvas;
+
+        mutex_lock(&canvas_list_lock);
+        list_for_each_entry(canvas, &canvas_list, link)
+        {
+                if (count == CANVAS_RECLAIM_CARDS)
+                        break;
+                drm_dev_get(canvas->client.dev);
+                cards[count++] = canvas->client.dev;
+        }
+        mutex_unlock(&canvas_list_lock);
+
+        while (count)
+        {
+                canvas_master_end(cards[--count]);
+                drm_dev_put(cards[count]);
+        }
+}
+
 static _Bool canvas_suspend_check(void)
 {
         _Bool taken;
@@ -11559,6 +11710,13 @@ static _Bool canvas_suspend_check(void)
         if (taken)
                 canvas_input_drop(!READ_ONCE(desktop.asleep));
 
+        /*
+                The chord is answered here, where who holds the card was just
+                asked. A card that is only asleep has no holder to end.
+        */
+        if (atomic_xchg(&desktop.reclaim, 0) && taken && !READ_ONCE(desktop.asleep))
+                canvas_reclaim();
+
         return taken;
 }
 
@@ -11579,11 +11737,20 @@ static _Bool canvas_flush_running(void)
         return rcu_access_pointer(canvas_flusher) != NULL;
 }
 
+// A terminal, for the machine script's request and for the keyboard's.
+static void canvas_terminal_start(void)
+{
+        int ret = moonwater_spawn_recorded(SPARK_TERMINAL_PROGRAM, &canvas_spawned);
+
+        pr_info("[moonwater canvas] " "terminal: %d\n", ret);
+}
+
 static int canvas_loop(void *unused)
 {
         while (!kthread_should_stop())
         {
                 _Bool input;
+                _Bool chord;
 
                 set_current_state(TASK_IDLE);
 
@@ -11596,6 +11763,8 @@ static int canvas_loop(void *unused)
                     !atomic_read(&desktop.focus_commit) &&
                     !atomic_read(&desktop.minimize) &&
                     !atomic_read(&desktop.spawn) &&
+                    !atomic_read(&desktop.spawn_key) &&
+                    !atomic_read(&desktop.reclaim) &&
                     atomic_read(&desktop.key_head) == atomic_read(&desktop.key_tail))
                         schedule_timeout(canvas_hold_sleep(
                             READ_ONCE(desktop.suspended) && !READ_ONCE(desktop.asleep)
@@ -11634,14 +11803,21 @@ static int canvas_loop(void *unused)
                         had been asked for and then never started.
                 */
                 if (atomic_xchg(&desktop.spawn, 0))
-                {
-                        int ret = moonwater_spawn_recorded(SPARK_TERMINAL_PROGRAM, &canvas_spawned);
+                        canvas_terminal_start();
 
-                        pr_info("[moonwater canvas] " "terminal: %d\n", ret);
-                }
+                /*
+                        Taken before the check and used after it: a terminal
+                        asked for at the keyboard is one for the desktop that
+                        is on the screen, and with another program's picture
+                        there nobody would see it.
+                */
+                chord = atomic_xchg(&desktop.spawn_key, 0);
 
                 if (canvas_suspend_check())
                         continue;
+
+                if (chord)
+                        canvas_terminal_start();
 
                 pointer_apply();
 

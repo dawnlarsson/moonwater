@@ -25859,6 +25859,7 @@ static unsigned long wait_timeout;
 #define KEY_A 30
 #define KEY_F9 67
 #define KEY_T 20
+#define KEY_BACKSPACE 14
 #define WINDOW_KEYS 64
 #define WINDOW_KEY_DOWN 1u
 #define WINDOW_KEY_SHIFT 2u
@@ -25904,7 +25905,7 @@ static struct {
     unsigned resize_edges;
     int resize_x,resize_y,resize_w,resize_h,press_x,press_y;
     void *resizing;
-    atomic_t spawn;
+    atomic_t spawn,spawn_key,reclaim;
     // What a suspension throws away, and the lock it is decided under.
     atomic_t frame_pending;
     int lock;
@@ -26034,7 +26035,12 @@ static _Bool desktop_taken(void) { assert(desktop.lock);return mock_taken; }
 static void desktop_resume(void) { assert(desktop.lock);mock_resumes++;desktop.suspended=0; }
 static void desktop_set_awake(_Bool awake) { assert(desktop.lock);desktop.awake=awake; }
 """
-    source += section(pointer, "#define CANVAS_SUSPENDED_POLL_MS", "static void canvas_flush_wake")
+    # What ends a program is the kernel's own (signals, a card's file list), so
+    # the check sees how often it is asked for and not what it does.
+    source += section(pointer, "#define CANVAS_SUSPENDED_POLL_MS",
+                      "/*\n        The session of whatever holds the display, ended.")
+    source += "static unsigned mock_reclaims;\nstatic void canvas_reclaim(void) { mock_reclaims++; }\n"
+    source += section(pointer, "static _Bool canvas_suspend_check", "static void canvas_flush_wake")
     # Bindings: the table, spawn without UMH, debounce, the chord, and the ioctl.
     source += r"""
 #define KEY_POWER 116
@@ -27273,11 +27279,58 @@ static void check_input_suspension(void) {
     memset(&desktop,0,sizeof(desktop));
     desktop.spawn=1;mock_taken=1;
     check(canvas_suspend_check() && desktop.spawn,
-          "Control-Shift-T is still queued while another program has the card");
+          "a terminal the machine script asked for is still wanted while another program has the card");
     memset(&desktop,0,sizeof(desktop));
     desktop.suspended=1;mock_taken=0;mock_resumes=0;
     check(!canvas_suspend_check() && !desktop.spawn && mock_resumes==1,
           "resume starts no terminal: what a desktop starts with is the machine script's");
+    memset(&desktop,0,sizeof(desktop));mock_taken=0;mock_resumes=0;
+}
+/*
+        Two chords that mean something only where the card is looked at.
+
+        Control-Shift-T asks for a terminal and the thread starts one if the
+        desktop is the one on the screen: typed at a program that holds the
+        card (Konsole's new-tab key, in KDE) it started one nobody could see,
+        for every press. Control-Alt-Backspace asks for the card back, and is
+        answered only when somebody does hold it.
+*/
+static void check_reclaim_chord(void) {
+    struct pointer_handle *a;
+    memset(&desktop,0,sizeof(desktop));
+    a=keyboard_attach(0);
+    keyboard_send(a,KEY_LEFTCTRL,1);keyboard_send(a,KEY_LEFTALT,1);
+    keyboard_send(a,KEY_BACKSPACE,1);
+    check(desktop.reclaim==1 && desktop.key_head==2 &&
+          desktop.key_ring[1].code==KEY_BACKSPACE,
+          "Control-Alt-Backspace is noted, and still goes on to the window as a key");
+    desktop.reclaim=0;
+    keyboard_send(a,KEY_BACKSPACE,2);keyboard_send(a,KEY_BACKSPACE,0);
+    check(!desktop.reclaim, "a repeat and a release of it ask for nothing");
+    keyboard_send(a,KEY_LEFTSHIFT,1);keyboard_send(a,KEY_BACKSPACE,1);
+    check(!desktop.reclaim, "with Shift as well it is another chord");
+    keyboard_send(a,KEY_LEFTSHIFT,0);keyboard_send(a,KEY_LEFTALT,0);keyboard_send(a,KEY_BACKSPACE,1);
+    check(!desktop.reclaim, "Control-Backspace alone is a key and nothing more");
+    keyboard_send(a,KEY_LEFTCTRL,0);
+    pointer_disconnect(&a->handle);
+
+    memset(&desktop,0,sizeof(desktop));
+    a=keyboard_attach(0);
+    keyboard_send(a,KEY_LEFTCTRL,1);keyboard_send(a,KEY_LEFTSHIFT,1);keyboard_send(a,KEY_T,1);
+    check(desktop.spawn_key==1 && !desktop.spawn,
+          "Control-Shift-T asks for a terminal the thread may start, not one that is started");
+    pointer_disconnect(&a->handle);
+
+    memset(&desktop,0,sizeof(desktop));
+    desktop.reclaim=1;mock_taken=1;mock_reclaims=0;
+    check(canvas_suspend_check() && mock_reclaims==1 && !desktop.reclaim,
+          "a card another program holds is taken back when the chord asked for it, once");
+    desktop.reclaim=1;mock_taken=0;
+    check(!canvas_suspend_check() && mock_reclaims==1 && !desktop.reclaim,
+          "with nobody holding the card the chord is a key and the request is forgotten");
+    desktop.reclaim=1;desktop.asleep=1;mock_taken=1;
+    check(canvas_suspend_check() && mock_reclaims==1 && !desktop.reclaim,
+          "a card that is asleep has no holder to end");
     memset(&desktop,0,sizeof(desktop));mock_taken=0;mock_resumes=0;
 }
 /* GET writes the script into a buffer the kernel is told the size of, and
@@ -28526,6 +28579,7 @@ int main(void) {
     check_machine_owner();
     check_settings_sum();
     check_input_suspension();
+    check_reclaim_chord();
     check(!copies_under_lock,
           "nothing was copied to or from a caller with snapshot_lock, machine_script_lock or settings_lock held");
     free(output);
