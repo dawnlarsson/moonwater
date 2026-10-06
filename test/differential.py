@@ -29678,7 +29678,8 @@ out.write_text("#!/usr/bin/env python3\\n"
         default = re.search(r'\{"profiles_default", "([^"]+)"\}', source).group(1).split()
         listed = sorted(path.name for path in (HARNESS_ROOT / "kernel/profile").iterdir()
                         if path.is_file() and path.name not in always)
-        essential = ["intel_pstate=active", "amd_pstate=active", "intel_pstate.hwp_dynamic_boost=1",
+        essential = ["usbhid.mousepoll=1", "usbhid.kbpoll=1",
+                     "intel_pstate=active", "amd_pstate=active", "intel_pstate.hwp_dynamic_boost=1",
                      "thash_entries=4096", "uhash_entries=1024", "mhash_entries=4096",
                      "mphash_entries=4096", "swiotlb=1024"]
         no_canvas = {"terminal", "console", "server"}

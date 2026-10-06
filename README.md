@@ -271,8 +271,9 @@ screen's, and is read there. On a KDE desktop of a bowl profile,
 each report's time; `qdbus6 org.kde.KWin /KWin supportInformation` names the
 renderer, where `llvmpipe` means the CPU is drawing the desktop and not the
 card; and `grep . /sys/module/usbhid/parameters/*poll` names the interval a
-mouse and a keyboard are asked for a report at, which is `0` when it is the
-interval the device gives (8 ms is usual).
+mouse and a keyboard are asked for a report at, which is 1 ms here and not the
+8 ms most devices give (the kernel's command line carries `usbhid.mousepoll=1
+usbhid.kbpoll=1`; `#> cmdline -usbhid.mousepoll=1` in a profile takes one out).
 
 Canvas opens no window by itself. The machine script's `moonwater_canvas`
 function opens the kernel log and a terminal when Canvas starts, at boot and

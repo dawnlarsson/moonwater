@@ -34,10 +34,18 @@ CONFIG_MOONWATER_CANVAS=y
 # drm_client_lib.active= keeps the fbdev client away from the display, which
 # is the one argument the compositor cannot do without.
 #
-# USB HID keeps the interval the device reports (typically 8 ms for a
-# mouse). Forcing mousepoll=1 used to ask for a report every millisecond,
-# which is also a wakeup every millisecond, so a plugged-in mouse stopped
-# the CPU from staying in a deep C-state. Same for kbpoll and jspoll.
+# usbhid.mousepoll=1 and kbpoll=1 ask a mouse and a keyboard for a report
+# every millisecond, where the interval the device reports is typically 8 ms:
+# a mouse that moves is then heard within one millisecond of the movement
+# and not within eight, which is the larger part of what a pointer's latency
+# is from the device to the kernel, and a keystroke likewise. They were taken
+# out for the wakeup a poll every millisecond was thought to be. It is not
+# one: a device with nothing to say answers the controller's poll with a NAK
+# in hardware and the CPU hears of it only when a report arrives, so an idle
+# machine sleeps as it did and what is paid is the controller's polling
+# while a device is plugged in. jspoll is left to the device (a gamepad's
+# reports are not a pointer's). A machine that would rather have the device's
+# own interval says `#> cmdline -usbhid.mousepoll=1 -usbhid.kbpoll=1`.
 #
 # The command line for the image is every profile's `#> cmdline` words, in the
 # order the profiles are composed (build.c writes the one CONFIG_CMDLINE from
@@ -79,7 +87,7 @@ CONFIG_CMDLINE_BOOL=y
 # above 4 GiB; with SWIOTLB_DYNAMIC, in the any profile, a device that runs
 # the pool dry gets another made for it.
 #
-#> cmdline drm_client_lib.active= intel_pstate=active amd_pstate=active intel_pstate.hwp_dynamic_boost=1 thash_entries=4096 uhash_entries=1024 mhash_entries=4096 mphash_entries=4096 swiotlb=1024
+#> cmdline drm_client_lib.active= usbhid.mousepoll=1 usbhid.kbpoll=1 intel_pstate=active amd_pstate=active intel_pstate.hwp_dynamic_boost=1 thash_entries=4096 uhash_entries=1024 mhash_entries=4096 mphash_entries=4096 swiotlb=1024
 
 #
 # Core modesetting
