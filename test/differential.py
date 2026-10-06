@@ -54045,15 +54045,16 @@ def harness_sntp_era(argv):
     exchanges whose true offset is known to the nanosecond: the client's
     clock and the server's at an instant around 2036-02-07 06:28:16 UTC
     (where the 32-bit NTP seconds wrap), 2038-01-19 03:14:08 (where a signed
-    32-bit time_t does), 2100 and the end of era 1, each with the server
-    equal, an hour ahead and an hour behind. Run twice. At the window the
-    source ships (SNTP_WALL_LEAST..SNTP_WALL_MOST, read from host.c) a
-    sample is taken exactly inside it, and with the answer right. Then again
-    with the window's far edge moved to the end of era 1, the edit the
-    source comment says is the only one the date needs: every instant the
-    wrap could break must give the true offset, so nothing about the era
-    depends on the window staying where it is.
+    32-bit time_t does), 2100 and the end of the stamps that can be read,
+    each with the server equal, an hour ahead and an hour behind. At the
+    window the source ships (SNTP_WALL_LEAST..SNTP_WALL_MOST, read from
+    host.c) a sample is taken exactly inside it, and with the answer right,
+    which is every instant here from 2026 to 2104-02-25: the window ended at
+    2036-01-01 until the clock after it could no longer be set from the
+    network, and nothing but the window ever depended on the date. An
+    instant past the window's end is refused.
 
+        python3 test/differential.py --harness sntp_era
         python3 test/differential.py --harness sntp_era
     """
     del argv
@@ -54076,25 +54077,19 @@ def harness_sntp_era(argv):
         return 1
     least = int(re.search(r"#define SNTP_WALL_LEAST (\d+)ll", host).group(1))
     most = int(re.search(r"#define SNTP_WALL_MOST (\d+)ll", host).group(1))
-    era_end = (1 << 33) - 2208988800
-    moved = "#define SNTP_WALL_MOST %dll" % (era_end - 86400)
     instants = []
     for text in ("2026-09-30 12:00:00", "2035-12-31 23:59:59", "2036-01-01 00:00:00",
                  "2036-02-07 06:28:14", "2036-02-07 06:28:15", "2036-02-07 06:28:16",
                  "2036-02-07 06:28:17", "2037-06-01 00:00:00", "2038-01-19 03:14:07",
                  "2038-01-19 03:14:08", "2040-01-01 00:00:00", "2100-01-01 00:00:00",
-                 "2104-02-25 00:00:00"):
+                 "2104-02-25 00:00:00", "2104-02-26 09:00:00", "2104-02-26 12:00:00"):
         instants.append(int(datetime.datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
                             .replace(tzinfo=datetime.timezone.utc).timestamp()))
     checks = Checks()
     with tempfile.TemporaryDirectory(prefix="sntp-era-") as temporary:
         work = Path(temporary)
-        for label, window, edit in (("the shipped window", (least, most), None),
-                                    ("the window moved to the end of era 1",
-                                     (least, era_end - 86400), moved)):
-            text = source if edit is None else re.sub(
-                r"#define SNTP_WALL_MOST \d+ll", edit, source)
-            (work / "era.c").write_text(text)
+        for label, window in (("the shipped window", (least, most)),):
+            (work / "era.c").write_text(source)
             built = subprocess.run([compiler, "-O1", "-g", "-std=gnu11", "-Wno-unused-function",
                                     "-fsanitize=address,undefined", "-fno-sanitize-recover=all",
                                     str(work / "era.c"), "-o", str(work / "era")],

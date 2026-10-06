@@ -287,7 +287,14 @@ largest it lists. Both are kept in `/root` and put back when the machine starts;
 the first frame the same.
 
 If a graphics driver draws a broken hardware cursor, boot with
-`moonwater.cursor_plane=0` and Canvas draws the pointer itself.
+`moonwater.cursor_plane=0` and Canvas draws the pointer itself. Three more
+kernel parameters switch things for diagnosis and are not settings (each is
+writable in `/sys/module/moonwater/parameters/`): `moonwater.simd=0` draws with
+plain stores instead of the wide ones, and `moonwater.dirhash_simd=0` hashes
+directory names without the wide routine, for timing one against the other or
+for a machine where either misbehaves; `moonwater.pm_dark=N` is the guest
+lane's power-management switch (see the `canvas` lane in `test/run`), and no
+machine needs it.
 
 ## Bowl
 
@@ -531,6 +538,15 @@ sh test/run shell text          named lanes only
 sh test/run bench               the benchmarks
 sh test/run bench --list        what there is to measure
 ```
+
+A few environment variables exist for the tests alone, and each says so where
+it is read: `WATERLINK_PAIR_SECONDS` and `WATERLINK_REKEY_SECONDS` (shorten the
+pairing window and the rekey interval, never lengthen them),
+`WATERLINK_NO_SEGMENTS` and `WATERLINK_STATS` (measuring the link),
+`MOONWATER_UTMP`, `MOONWATER_RFKILL_ROOT` and `MOONWATER_RFKILL_DEVICE` (fixture
+paths, ignored when the real and effective user or group differ) and
+`MOONWATER_STDBUF_LIBRARY`. Nothing on a machine sets them, and there is no
+command for any.
 
 The `boot` and `canvas` lanes need a built image (`MOONWATER_IMAGE=dist/bootx64.efi`)
 and say so rather than pass quietly.

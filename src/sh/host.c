@@ -11044,13 +11044,16 @@ static b32 tune_hibernate_verb(string_address address_to arguments, positive cou
         an answer from taking the clock back to when a revoked or expired
         certificate was still good.
 
-        SNTP_WALL_MOST ends that window at 2036-01-01, which is before the
-        NTP era rolls over rather than because of it: sntp_load_stamp reads
-        the era from the top of the seconds field and converts either one.
-        Moving the window is therefore the single edit that date needs, and
-        it is safe to move. The offset sum is two differences of four terms
-        the window bounds, and carrying the window all the way to 2104, the
-        end of era 1, leaves that sum at 8.47 of the 9.22 the type holds.
+        SNTP_WALL_MOST ends that window at the last second sntp_load_stamp
+        can read, 2104-02-26 09:42:23 UTC: a stamp whose high bit is set is
+        era 0 (1968 through 2036-02-07 06:28:16, when the 32 bit seconds
+        wrap), one whose high bit is clear is era 1 (that moment through
+        2104), and a stamp does not say which, so past 2104 the reading
+        would be wrong by 136 years. It used to end at 2036-01-01 -- a round
+        date before the wrap -- and a clock past it could no longer be set
+        from the network at all: every server's answer was out of the window.
+        The offset sum is two differences of four terms the window bounds,
+        and at 2104 it is 8.47 of the 9.22 the type holds.
 
         T1 is read, the originate stamp is written, and the packet is sent
         with nothing else in between. T4 is read the moment recv returns.
@@ -11130,7 +11133,7 @@ static b32 tune_hibernate_verb(string_address address_to arguments, positive cou
 #define SNTP_OFFSET_MOST_NS ((bipolar)24 * 3600 * (bipolar)SNTP_NANOSECONDS)
 #define SNTP_OFFSET_SYNCED_NS ((bipolar)2 * (bipolar)SNTP_NANOSECONDS)
 #define SNTP_WALL_LEAST 1788220800ll /* 2026-09-01 */
-#define SNTP_WALL_MOST 2082758400ll  /* 2036-01-01 */
+#define SNTP_WALL_MOST 4233462143ll  /* 2104-02-26 09:42:23, the era 1 stamp ends */
 #define SNTP_WALL_LEAST_NS \
         ((bipolar)SNTP_WALL_LEAST * (bipolar)SNTP_NANOSECONDS)
 #define SNTP_WALL_MOST_NS \
@@ -11162,6 +11165,13 @@ static b32 tune_hibernate_verb(string_address address_to arguments, positive cou
          ~(sizeof(positive) - 1))
 #define SNTP_TEST_NOW \
         ((bipolar)1800000000 * (bipolar)SNTP_NANOSECONDS)
+//      2035-12-31, 2036-01-01 (where the window used to end), 2036-02-07
+//      06:28:16 (the wrap), 2040-01-01 and 2100-01-01, in nanoseconds.
+#define SNTP_TEST_DATE_1 ((bipolar)2082672000 * (bipolar)SNTP_NANOSECONDS)
+#define SNTP_TEST_DATE_2 ((bipolar)2082758400 * (bipolar)SNTP_NANOSECONDS)
+#define SNTP_TEST_DATE_3 ((bipolar)2085978496 * (bipolar)SNTP_NANOSECONDS)
+#define SNTP_TEST_DATE_4 ((bipolar)2208988800 * (bipolar)SNTP_NANOSECONDS)
+#define SNTP_TEST_DATE_5 ((bipolar)4102444800 * (bipolar)SNTP_NANOSECONDS)
 
 typedef struct
 {
@@ -11713,7 +11723,8 @@ static COLD fn sntp_test_message(p8 address_to at, positive size, b32 level,
             nanoseconds;
 }
 
-//      A stamp, as the wire has it, for a time before 2036.
+//      A stamp, as the wire has it, for any time the window holds: the cast to
+//      32 bits is the era, as it is on the wire.
 static COLD fn sntp_test_stamp(p8 address_to at, bipolar ns)
 {
         network_store_32(at, (p32)(ns / (bipolar)SNTP_NANOSECONDS + SNTP_UNIX));
@@ -11827,6 +11838,9 @@ static COLD bool sntp_math_ok(void)
             /* era 1, the high bit clear: February 2036 onward */
             {0, 0, (bipolar)2085978496 * (bipolar)SNTP_NANOSECONDS},
             {1, 0, (bipolar)2085978497 * (bipolar)SNTP_NANOSECONDS},
+            /* 2040-01-01, and the last second there is a stamp for */
+            {123010304u, 0, (bipolar)2208988800 * (bipolar)SNTP_NANOSECONDS},
+            {0x7fffffffu, 0, (bipolar)4233462143ll * (bipolar)SNTP_NANOSECONDS},
         };
         static const struct
         {
@@ -11865,6 +11879,29 @@ static COLD bool sntp_math_ok(void)
             {SNTP_TEST_NOW, SNTP_TEST_NOW + 2500000000,
              SNTP_TEST_NOW + 2500000000, SNTP_TEST_NOW + 2000000, 2499000000,
              2000000, SNTP_OFFSET_MOST_NS, true},
+            /* a clock set from the network on either side of 2036-01-01, of
+               the era's wrap on 2036-02-07 and in 2040 and 2100 is stepped
+               like any other: the window ended on the first of those */
+            {SNTP_TEST_DATE_1, SNTP_TEST_DATE_1 + 1000000000,
+             SNTP_TEST_DATE_1 + 1000000000, SNTP_TEST_DATE_1 + 2000000000, 0,
+             2000000000, SNTP_OFFSET_MOST_NS, true},
+            {SNTP_TEST_DATE_2, SNTP_TEST_DATE_2 + 1000000000,
+             SNTP_TEST_DATE_2 + 1000000000, SNTP_TEST_DATE_2 + 2000000000, 0,
+             2000000000, SNTP_OFFSET_MOST_NS, true},
+            {SNTP_TEST_DATE_3, SNTP_TEST_DATE_3 + 1000000000,
+             SNTP_TEST_DATE_3 + 1000000000, SNTP_TEST_DATE_3 + 2000000000, 0,
+             2000000000, SNTP_OFFSET_SYNCED_NS, true},
+            {SNTP_TEST_DATE_4, SNTP_TEST_DATE_4 + 1000000000,
+             SNTP_TEST_DATE_4 + 1000000000, SNTP_TEST_DATE_4 + 2000000000, 0,
+             2000000000, SNTP_OFFSET_MOST_NS, true},
+            {SNTP_TEST_DATE_5, SNTP_TEST_DATE_5 + 1000000000,
+             SNTP_TEST_DATE_5 + 1000000000, SNTP_TEST_DATE_5 + 2000000000, 0,
+             2000000000, SNTP_OFFSET_MOST_NS, true},
+            /* a server that answers with a time past the window's end is
+               refused, and so is one that says it is 1970 */
+            {SNTP_TEST_DATE_5, SNTP_WALL_MOST_NS + 1000000000,
+             SNTP_WALL_MOST_NS + 1000000000, SNTP_TEST_DATE_5 + 2000000000, 0,
+             2000000000, SNTP_OFFSET_MOST_NS, false},
             /* and one 25 h out only by a hand, which the window bounds */
             {SNTP_TEST_NOW, SNTP_TEST_NOW + 90000000000000,
              SNTP_TEST_NOW + 90000000000000, SNTP_TEST_NOW + 2000000,
@@ -11934,6 +11971,22 @@ static COLD bool sntp_math_ok(void)
 
         if (!sntp_local_ok(0) || !sntp_local_ok(SNTP_WALL_MOST_NS) ||
             sntp_local_ok(SNTP_WALL_MOST_NS + 1) || sntp_local_ok(-1))
+                return false;
+
+        //      The window holds every date from this source's to the end of the
+        //      era 1 stamps, and a step that would land outside it is refused
+        //      on either side.
+        if (!sntp_wall_ok(SNTP_TEST_DATE_1) || !sntp_wall_ok(SNTP_TEST_DATE_2) ||
+            !sntp_wall_ok(SNTP_TEST_DATE_3) || !sntp_wall_ok(SNTP_TEST_DATE_4) ||
+            !sntp_wall_ok(SNTP_TEST_DATE_5) ||
+            !sntp_wall_ok(SNTP_WALL_MOST_NS) ||
+            sntp_wall_ok(SNTP_WALL_MOST_NS + 1) ||
+            sntp_wall_ok(SNTP_WALL_LEAST_NS - 1) ||
+            !sntp_target_ok(SNTP_TEST_DATE_2, 1000000000, address_of target) ||
+            target != SNTP_TEST_DATE_2 + 1000000000 ||
+            !sntp_target_ok(SNTP_TEST_DATE_4, -1000000000, address_of target) ||
+            target != SNTP_TEST_DATE_4 - 1000000000 ||
+            sntp_target_ok(SNTP_WALL_MOST_NS, 1, address_of target))
                 return false;
 
         for (at = 0; at < array_count(stamp_case); at++)

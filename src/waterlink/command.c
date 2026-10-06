@@ -905,7 +905,9 @@ static fn link_code_text(p8 address_to code, p8 address_to text)
 }
 
 /*      Five minutes, or less when the environment says so, which is how a
-        test sees a code run out. A longer wait is never taken. */
+        test sees a code run out. A longer wait is never taken.
+        WATERLINK_PAIR_SECONDS is test-only: the link lane of
+        test/differential.py sets it, and nothing on a machine does. */
 static p64 link_pair_seconds(void)
 {
         bipolar seconds = link_decimal(

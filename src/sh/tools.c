@@ -1657,6 +1657,8 @@ static fn login_message_selection_clear()
 
 static string_address login_message_utmp()
 {
+        //      MOONWATER_UTMP is test-only (see above): namespace and PTY fixtures
+        //      point it at their own database; no machine sets it.
         return file_environment_override("MOONWATER_UTMP", LOGIN_UTMP_PATH);
 }
 
@@ -29596,6 +29598,8 @@ static bool ul_rfkill_attribute(string_address directory,
 static bool ul_rfkill_take(ul_rfkill_row address_to address_to rows,
                            positive address_to count)
 {
+        //      MOONWATER_RFKILL_ROOT and _DEVICE are test-only: the rfkill fixtures
+        //      of test/differential.py point them at a fake sysfs tree and event file.
         string_address root = file_environment_override(
             (string_address)"MOONWATER_RFKILL_ROOT",
             (string_address)"/sys/class/rfkill");
@@ -29789,6 +29793,7 @@ static b32 ul_rfkill_change(ul_rfkill_row address_to rows, positive count,
                 return 0; /* The reference does nothing, quietly, and is content. */
         tools_refuse(arguments - first > UL_RFKILL_FILTER_MAX, "rfkill", "too many identifiers");
 
+        //      Test-only, as MOONWATER_RFKILL_ROOT is: a fixture's event file.
         string_address device = file_environment_override(
             (string_address)"MOONWATER_RFKILL_DEVICE",
             (string_address)"/dev/rfkill");

@@ -740,7 +740,8 @@ void canvas_glyph_wide(u32 *at, unsigned long pitch, const u8 *bits,
         with the mapping in hand.
 
         moonwater.simd=0 turns it off, for a machine where it misbehaves and
-        for timing one against the other.
+        for timing one against the other. A diagnosis switch, not a setting:
+        the README lists it with the other kernel parameters.
 */
 static bool canvas_simd = true;
 module_param_named(simd, canvas_simd, bool, 0644);
@@ -754,6 +755,7 @@ module_param_named(simd, canvas_simd, bool, 0644);
         and a hotplug is sent while the machine sleeps, as amdgpu's resume
         does. Value 2: the wake's own redraws are left undone, so only what the
         hotplug finds can bring the picture back. Value 4: no off and on cycle.
+        Test-only: the canvas lane of test/run is the one that boots with it.
 */
 static int canvas_pm_dark;
 module_param_named(pm_dark, canvas_pm_dark, int, 0644);

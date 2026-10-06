@@ -2913,7 +2913,8 @@ static b32 link_serve(void)
         link_nearby.socket = -1;
         link_self.server = true;
         //      Segment runs unless told otherwise, which is how the cost of
-        //      sending one datagram at a time is measured.
+        //      sending one datagram at a time is measured. WATERLINK_NO_SEGMENTS
+        //      is a debug switch for whoever measures it by hand: no lane sets it.
         link_self.gso = !file_environment((string_address) "WATERLINK_NO_SEGMENTS");
         link_self.state_dirty = true;
         link_stamps_load();
@@ -2951,6 +2952,7 @@ static b32 link_serve(void)
         }
 
         link_nearby_stop();
+        //      WATERLINK_STATS: debug, for whoever measures the link by hand; no lane sets it.
         if (file_environment((string_address) "WATERLINK_STATS"))
         {
                 string_format(log_error, "link: unsent %p\n",
@@ -3109,6 +3111,8 @@ static p64 link_rekey_after(void)
         bipolar seconds = link_decimal(text);
 
         //      Sooner is always safe, and is how a test sees a rekey.
+        //      WATERLINK_REKEY_SECONDS is test-only: the link lane of
+        //      test/differential.py sets it, and nothing on a machine does.
         if (seconds > 0 && seconds < WATERLINK_REKEY_SECONDS)
                 return (p64)seconds * 1000000;
         return (p64)WATERLINK_REKEY_SECONDS * 1000000;
@@ -3210,6 +3214,7 @@ static b32 link_client_run(string_address name, p8 kind,
 
         link_self.socket = link_socket_open(0, false);
         return_if(link_self.socket < 0, host_fail("a socket", link_self.socket));
+        //      WATERLINK_NO_SEGMENTS: debug, by hand; no lane sets it.
         link_self.gso = !file_environment((string_address) "WATERLINK_NO_SEGMENTS");
         //      The client greets nobody. Left at zero, the wait watched
         //      descriptor 0, standard input, as the greeting socket, and an
@@ -3446,6 +3451,7 @@ static b32 link_client_run(string_address name, p8 kind,
                         answer = 1;
         }
         //      What the link did, for whoever is measuring it.
+        //      WATERLINK_STATS: debug, for whoever measures the link by hand; no lane sets it.
         if (file_environment((string_address) "WATERLINK_STATS"))
         {
                 struct waterlink_link address_to l = s->link;

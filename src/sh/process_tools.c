@@ -227,6 +227,8 @@ static bool stdbuf_bowl_root(string_address target, p8 address_to root)
 
 static bool stdbuf_find_library(string_address preferred_root)
 {
+        //      MOONWATER_STDBUF_LIBRARY is a debug switch, for pointing stdbuf at
+        //      a library by hand; no lane sets it.
         string_address forced =
             file_environment((string_address) "MOONWATER_STDBUF_LIBRARY");
 
@@ -462,6 +464,7 @@ static b32 process_stdbuf()
             words[0], target, sizeof(target), 1, false, path);
         bool has_bowl_root = target_found &&
                              stdbuf_bowl_root(target, bowl_root);
+        //      Debug, as in stdbuf_find_library: MOONWATER_STDBUF_LIBRARY.
         string_address forced = file_environment(
             (string_address) "MOONWATER_STDBUF_LIBRARY");
 

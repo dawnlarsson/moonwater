@@ -72,7 +72,9 @@
 // The one declaration in the file that is not assembly: a module parameter,
 // moonwater.dirhash_simd=0, which turns the wide directory hash off for a
 // machine where it misbehaves and for timing one against the other. The
-// routine below reads the variable.
+// routine below reads the variable. A diagnosis switch, not a setting: the
+// README lists it with the other kernel parameters, and the directory-hash
+// harness of test/differential.py is what flips it.
 bool moonwater_dirhash_simd = true;
 module_param_named(dirhash_simd, moonwater_dirhash_simd, bool, 0644);
 #endif
