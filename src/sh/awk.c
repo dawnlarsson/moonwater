@@ -1040,28 +1040,20 @@ static decimal awk_global_number(b32 which)
 /*
         Regular expressions, out of text.c's machine.
 
-        The ones written in the program are compiled once and kept forever.
-        The ones built at run time -- a string used where a pattern goes --
-        share a small cache in the pool above the kept ones, and when it fills
-        the pool is wound back to where the kept ones end rather than to zero,
-        which is what keeps a program compiled at parse time valid for the
-        whole run.
+        The ones written in the program are compiled once and kept forever,
+        each in a block of its own, however many the program has: a program
+        with fifty /re/ rules read every record twice as slowly as gawk when
+        the rules past thirty-two compiled again at every record, and one with
+        six hundred, when the table of them was a fixed few hundred, 1.6
+        times. The ones built at run time -- a string used where a pattern
+        goes -- share a small cache, whose blocks are given back when it
+        fills.
 */
-//      Past the kept ones a pattern is compiled again every time it is asked
-//      for: a program with fifty /re/ rules read every record twice as slowly
-//      as gawk, and every rule past the cache's size cost a compile a record.
-//      The pool holds five hundred programs, and these take up to half of it.
-#define AWK_REGEX_KEPT 384
 #define AWK_REGEX_CACHED 32
-
-static regex_program awk_regex_kept[AWK_REGEX_KEPT];
-static b32 awk_regex_kept_count;
 
 static regex_program awk_regex_cache[AWK_REGEX_CACHED];
 static awk_text address_to awk_regex_cache_key[AWK_REGEX_CACHED];
 static b32 awk_regex_cache_count;
-
-static rx_mark awk_regex_mark_pool;
 
 static awk_text address_to awk_regex_escapes(string_address pattern);
 static DEAD_END fn awk_syntax(string_address reason);
@@ -1088,16 +1080,7 @@ static fn awk_regex_build(regex_program address_to into, string_address pattern)
 
 static regex_program address_to awk_regex_keep(string_address pattern)
 {
-        //      Past half of what the pool holds the rest are left to the cache,
-        //      which gives its room back when it fills, so that a program of a
-        //      few hundred long expressions is slow where it was slow and not
-        //      refused where it was run.
-        if (awk_regex_kept_count == AWK_REGEX_KEPT ||
-            regex_retained.nodes > RX_NODE_MAX / 2 || regex_retained.sets > RX_SET_MAX / 2 ||
-            regex_retained.hints > RX_HINT_MAX / 2)
-                return null;
-
-        regex_program address_to into = address_of awk_regex_kept[awk_regex_kept_count++];
+        regex_program address_to into = (regex_program address_to)awk_take(sizeof(regex_program));
 
         awk_regex_build(into, pattern);
         return into;
@@ -1114,11 +1097,12 @@ static regex_program address_to awk_regex_dynamic(awk_text address_to pattern)
         if (awk_regex_cache_count == AWK_REGEX_CACHED)
         {
                 for (b32 i = 0; i < awk_regex_cache_count; i++)
+                {
                         awk_text_drop(awk_regex_cache_key[i]);
+                        regex_release(address_of awk_regex_cache[i]);
+                }
 
                 awk_regex_cache_count = 0;
-                regex_retained = awk_regex_mark_pool;
-                regex_pool.used = regex_retained;
         }
 
         b32 which = awk_regex_cache_count++;
@@ -1598,6 +1582,9 @@ typedef struct
         bool live;
         bipolar child;
         positive used;
+        // When it was last asked for, for the one to give up when descriptors
+        // run out.
+        positive stamp;
         p8 buffer[8192];
 } awk_writer;
 
@@ -1808,6 +1795,58 @@ static bool awk_name_is(awk_text address_to name, string_address what)
 static const string_address awk_standard_names[2] = {"/dev/stdout", "-"};
 static bool awk_standard_named[2];
 
+/*
+        A program that writes to three thousand files has the kernel's
+        descriptors, a thousand or so, to open them with. The reference does
+        what it can with them: when an open meets the end of them it closes
+        the file written to least lately, and opens it again when it is next
+        written to, to append, so that what was written stays. A pipe is
+        left open, as a command is not started twice.
+*/
+static positive awk_writer_clock;
+
+static bool awk_writer_park(awk_writer address_to except)
+{
+        awk_writer address_to victim = null;
+
+        for (b32 i = 0; i < awk_writer_count; i++)
+        {
+                awk_writer address_to which = awk_writers[i];
+
+                if (which->live && which != except && which->kind != AWK_TO_PIPE &&
+                    which->handle > 2 && (!victim || which->stamp < victim->stamp))
+                        victim = which;
+        }
+
+        if (!victim)
+                return false;
+
+        awk_writer_flush(victim);
+        system_close(victim->handle);
+        victim->handle = -1;
+        victim->kind = AWK_TO_APPEND;
+        return true;
+}
+
+static fn awk_writer_open_file(awk_writer address_to which, string_address name)
+{
+        for (;;)
+        {
+                bipolar handle = text_open_handle(name, which->kind == AWK_TO_APPEND ? TEXT_APPEND : TEXT_WRITE,
+                                                  0666);
+
+                if (handle >= 0)
+                {
+                        which->handle = (b32)handle;
+                        return;
+                }
+
+                // EMFILE, ENFILE: this process's table or the system's is full.
+                if ((handle != -24 && handle != -23) || !awk_writer_park(which))
+                        awk_die(name, "cannot open for writing");
+        }
+}
+
 static awk_writer address_to awk_writer_for(awk_text address_to name, p8 kind)
 {
         b32 free_slot = -1;
@@ -1829,7 +1868,12 @@ static awk_writer address_to awk_writer_for(awk_text address_to name, p8 kind)
                 if (awk_writers[i]->live)
                 {
                         if (awk_text_is(awk_writers[i]->name, name->text, name->length))
+                        {
+                                awk_writers[i]->stamp = ++awk_writer_clock;
+                                if (awk_writers[i]->handle < 0)
+                                        awk_writer_open_file(awk_writers[i], name->text);
                                 return awk_writers[i];
+                        }
                 }
                 else if (free_slot < 0)
                         free_slot = i;
@@ -1853,6 +1897,7 @@ static awk_writer address_to awk_writer_for(awk_text address_to name, p8 kind)
         made->kind = kind;
         made->child = 0;
         made->live = true;
+        made->stamp = ++awk_writer_clock;
 
         if (kind == AWK_TO_PIPE)
         {
@@ -1876,13 +1921,7 @@ static awk_writer address_to awk_writer_for(awk_text address_to name, p8 kind)
                 return made;
         }
 
-        bipolar handle = text_open_handle(name->text,
-                                          kind == AWK_TO_APPEND ? TEXT_APPEND : TEXT_WRITE, 0666);
-
-        if (handle < 0)
-                awk_die(name->text, "cannot open for writing");
-
-        made->handle = (b32)handle;
+        awk_writer_open_file(made, name->text);
         return made;
 }
 
@@ -5909,6 +5948,23 @@ static fn awk_builtin(awk_node address_to node, awk_value address_to out)
         case B_TOUPPER:
         {
                 awk_text address_to text = awk_eval_text(first);
+
+                // Characters past ASCII change case too where the locale is UTF-8.
+                if (awk_wide(text->text, text->length))
+                {
+                        awk_text address_to cased = awk_text_room(2 * text->length);
+                        positive size = text_case_utf8(cased->text, text->text, text->length,
+                                                       node->index == B_TOLOWER
+                                                           ? UNICODE_CASE_LOWER
+                                                           : UNICODE_CASE_UPPER);
+
+                        cased->length = size;
+                        cased->text[size] = end;
+                        awk_text_drop(text);
+                        awk_set_text(out, cased);
+                        return;
+                }
+
                 awk_text address_to made = awk_text_room(text->length);
 
                 if (text->length < 256)
@@ -7017,7 +7073,6 @@ static b32 text_awk()
                                         awk_syntax("function name used as a variable");
 
         awk_parsing = false;
-        awk_regex_mark_pool = regex_retained;
 
         if (awk_field_split)
         {

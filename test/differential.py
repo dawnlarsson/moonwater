@@ -4072,6 +4072,17 @@ def awk_audit():
     cache, growth of every table, signals through system(), the C locale's
     spelling of infinities."""
     rows = [
+        #   More files than descriptors (the harness gives a program 256): the one
+        #   written to least lately is closed and opened again to append, and
+        #   what was written is all there at the end, however many times round.
+        ("BEGIN { for (r = 0; r < 3; r++) for (i = 0; i < 300; i++) print \"r\" r \" \" i > (\"o\" i);"
+         " for (i = 0; i < 300; i++) close(\"o\" i);"
+         " for (i = 0; i < 300; i++) { while ((getline l < (\"o\" i)) > 0) { n++; if (i % 97 == 0) printf \"%s;\", l };"
+         " close(\"o\" i) } print n }",),
+        ("BEGIN { for (i = 0; i < 400; i++) print i > (\"p\" i % 300); for (i = 0; i < 300; i++) close(\"p\" i);"
+         " for (i = 0; i < 300; i++) { l = \"\"; while ((getline x < (\"p\" i)) > 0) l = l x \",\"; close(\"p\" i); if (i % 41 == 0 || i < 100) print i, l } }",),
+        ("BEGIN { for (i = 0; i < 300; i++) print i >> (\"q\" i); for (i = 0; i < 300; i++) print i >> (\"q\" i);"
+         " for (i = 0; i < 300; i++) { close(\"q\" i); getline a < (\"q\" i); getline b < (\"q\" i); r = r a b } print length(r) }",),
         ("{ print (FILENAME == 0), (FILENAME == FILENAME \"\") }", "one"),
         ("function g() { return \"hi\" } function f() { return g() } BEGIN { print f(); print (f() \"\") }",),
         ("function g() { return 1 } function h() { return 2 } function f(c) { return c ? g() : h() } BEGIN { print f(1), f(0) }",),
@@ -4321,6 +4332,69 @@ AWK_REFUSED_OPTIONS = (
 )
 
 
+def text_regex_lines():
+    """Lines of two letters and now and then a word, a leading blank or a
+    NUL: enough of them that a pattern whose graph is dear is given to the
+    automaton after sixty-four asks, and that a pattern with a dozen places
+    to be in reaches more than the two thousand states the automaton's cache
+    once held, which sent it back to the graph at a second a megabyte."""
+    rng = random.Random(0x5245474C)
+    lines = []
+    for k in range(6000):
+        line = "".join(rng.choice("ab") for _ in range(rng.choice((1, 3, 8, 20, 40, 70))))
+        if k % 97 == 0:
+            line += " " + rng.choice(("word", "a_b", "ba ab"))
+        if k % 53 == 0:
+            line = " " + line
+        if k % 211 == 0:
+            line = line.replace("a", "\x00", 1) + "a"
+        lines.append(line)
+    return ("\n".join(lines) + "\n").encode("latin-1")
+
+
+INPUTS["regex_lines"] = text_regex_lines()
+
+#       A letter and the other cases it has outside ASCII: Latin-1, Greek, the
+#       final sigma, Cyrillic, the digraphs with a title case, the dotless
+#       and long forms. Each row runs under C.UTF-8, where grep -i, sed I and
+#       \U \L \u \l and awk's toupper and tolower change them as GNU's do.
+TEXT_CASE_LINES = ("caf\u00e9\nCAF\u00c9\nxyz\n\u00c9t\u00e9\n\u00e0\u00c0\u00f1\u00d1\n"
+                   "\u03a3\u03af\u03c3\u03c5\u03c6\u03bf\u03c2\n\u03c3\u03af\u03c3\u03c5\u03c6\u03bf\u03c2\n"
+                   "\u0436\u0416\u0434\u0414\n\u01c4 \u01c5 \u01c6\n\u00ff\u0178 \u00f8\u00d8\u00e5\u00c5\n"
+                   "ab\u00e9AB\u00c9 \u00df \u0131x\n")
+INPUTS["text_case_utf8"] = TEXT_CASE_LINES.encode("utf-8")
+
+
+def text_cut_long_lines():
+    """Lines of one field to three hundred, a space between, where a few are
+    short and many past the sixteen delimiters after a field a range wants,
+    where cut looks only for the end of the line; one ends in its delimiter
+    and the last has no newline."""
+    rng = random.Random(0x435554)
+    lines = []
+    for k in range(400):
+        count = rng.choice((1, 2, 3, 5, 8, 20, 40, 41, 75, 130, 300))
+        line = " ".join("f%d_%d" % (k, i) for i in range(count))
+        if k % 17 == 0:
+            line += " "
+        if k % 29 == 0:
+            line = ""
+        lines.append(line)
+    return ("\n".join(lines)).encode("latin-1")
+
+
+INPUTS["cut_long"] = text_cut_long_lines()
+TEXT_CASE_UTF8 = (("LC_ALL", "C.UTF-8"),)
+TEXT_CASE_PATTERNS = ("\u00c9", "\u00e9", "[\u00e9]", "[\u00c9x]+", "(\u00c9|X)+$", "\u00e0\u00f1", "\u03c3", "\u03a3\u03af",
+                      "\u03c2", "\u0436", "[\u0416\u0434]", "\u01c5", "\u01c4", "\u01c6 ", "\u00ff", "\u00d8\u00e5",
+                      "ab\u00e9", "(\u00e9|\u00c0)\u00f1?")
+
+#       Written so that grep, sed and awk read them alike: no word edges,
+#       which awk spells its own way.
+TEXT_REGEX_MACHINE = ("(a|b)*a(a|b){4}$", "(a|b)*a(a|b){11}$", "^a(a|b){9}b", "a{3}b", "(ab|ba){3}",
+                      "b$|^a", "(a|b)*a(a|b){2}a", "^(a|b){1,3}$", "a(a|b){10}a|b(a|b){10}b")
+TEXT_REGEX_MACHINE_WORDS = ("\\<a(b|a)*b\\>", "\\bab\\b", "\\<(a|b){2,5}\\>", "a\\B", "\\Bb(a|b){3}$")
+
 def awk_extra():
     """Every generated argv, deterministic: the seeds come from the generator
     names, so adding one does not reshuffle another."""
@@ -4349,9 +4423,15 @@ def awk_extra():
             ("broken-pipes", awk_gen_broken_pipes, 0)):
         rows.extend(generator(awk_seeded(name), count))
     rows.extend(awk_audit())
+    rows.extend({"argv": (program,), "stdin": "text_case_utf8", "env": TEXT_CASE_UTF8} for program in (
+        "{ print toupper($0); print tolower($0) }", "{ print toupper(substr($0, 2)) tolower(substr($0, 1, 1)) }",
+        "{ n = length($0); print n, length(toupper($0)), length(tolower($0)) }",
+        "{ s = $0; gsub(/[a-z]/, \"&\", s); print tolower(toupper(s)) }"))
     rows.extend(awk_refusals())
     rows.extend(AWK_REFUSED_OPTIONS)
     rows.extend(AWK_WRITE_REFUSALS)
+    rows.extend({"argv": ("/%s/{n++}END{print n+0}" % pattern,), "stdin": "regex_lines"}
+                for pattern in TEXT_REGEX_MACHINE + TEXT_REGEX_MACHINE_WORDS if "\\b" not in pattern)
     seen = set()
     unique = []
     for row in rows:
@@ -14583,9 +14663,10 @@ def shell_nesting_limits(farm):
     Every parenthesis or prefix operator is a descent through the whole
     precedence ladder, and nothing held it: 15,000 open parentheses in a
     value -- $((x)) or [[ $x -eq 1 ]] on input a script was handed -- killed
-    this shell with SIGSEGV where bash answers. Below ARITH_NESTING the
-    answers are bash's; past it the expression is refused with a diagnostic
-    and the shell lives to report a status, never a signal.
+    this shell with SIGSEGV where bash answers. Arithmetic answers as bash
+    does until the stack is a quarter used, and is refused past that with a
+    diagnostic and the shell lives to report a status, never a signal; the
+    [[ ]] form is refused past a thousand.
     """
     import shutil
     reference = shutil.which("bash")
@@ -14615,8 +14696,12 @@ def shell_nesting_limits(farm):
                                          timeout=30, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
                     answers.append(ran)
                 want, got = answers
-                if depth <= 1000:
+                if depth <= 1000 or (name != "cond" and depth <= 15000):
                     good = (want.returncode, want.stdout) == (got.returncode, got.stdout)
+                elif name != "cond":
+                    #   Past what the stack holds a quarter of: answered as bash would
+                    #   or refused, and never a signal.
+                    good = got.returncode >= 0
                 else:
                     good = got.returncode >= 0 and b"st=0" not in got.stdout and got.stderr != b""
                 if good:
@@ -21407,6 +21492,13 @@ _TEXT_GREP_STDIN = (
 )
 
 _TEXT_GREP_EXTRA = (
+    *({"argv": (*flags, "-i", "-E", "-e", pattern), "stdin": "text_case_utf8", "env": TEXT_CASE_UTF8}
+      for pattern in TEXT_CASE_PATTERNS for flags in (("-c",), ("-o",), ("-n",), ("-v", "-c"))),
+    *({"argv": ("-F", "-i", "-e", pattern), "stdin": "text_case_utf8", "env": TEXT_CASE_UTF8}
+      for pattern in TEXT_CASE_PATTERNS[:3]),
+    *({"argv": (*flags, "-E", "-e", pattern), "stdin": "regex_lines"}
+      for pattern in TEXT_REGEX_MACHINE + TEXT_REGEX_MACHINE_WORDS
+      for flags in (("-c",), ("-n",), ("-v", "-c"), ("-m", "7", "-n"), ("-w", "-c"), ("-x", "-c"))),
     #       In extended syntax a repeat with nothing before it -- at the start
     #       of the pattern, of a group or of an alternative -- repeats
     #       nothing: *a is a, a lone + matches every line, and each says so
@@ -21612,6 +21704,19 @@ def text_sed_empty_matches():
 
 
 _TEXT_SED_EXTRA = (
+    *({"argv": ("-E", "-e", "s/%s/<&>/Ig" % pattern), "stdin": "text_case_utf8", "env": TEXT_CASE_UTF8}
+      for pattern in TEXT_CASE_PATTERNS),
+    *({"argv": ("-E", "-e", script), "stdin": "text_case_utf8", "env": TEXT_CASE_UTF8} for script in (
+        "s/.*/\\U&/", "s/.*/\\L&/", "s/(.)(.*)/\\u\\1\\L\\2/", "s/(.)(.)/\\u\\2\\l\\1/", "s/x/\\U\u00e9\\E\u00e9/",
+        "s/\u00e9/\\u\u00e9\u00e9/", "s/ab/\\U\u00e9a/")),
+    #       A line is asked of a program again and again; the lines past the
+    #       sixty-fourth go to the automaton where the graph was dear, and a
+    #       pattern space that has been joined, changed or made of NULs is
+    #       the graph's, as it was.
+    *({"argv": (*flags, "-E", "-e", script % pattern), "stdin": "regex_lines"}
+      for pattern in TEXT_REGEX_MACHINE + TEXT_REGEX_MACHINE_WORDS
+      for flags, script in ((("-n",), "/%s/p"), (("-n",), "/%s/="), ((), "/%s/d"), (("-n",), "$!N;/%s/p"),
+                            (("-n",), "/%s/!p"), (("-n",), "/%s/I{p}"), (("-n",), "/%s/,/b$/p"))),
     #       Blocks past the thirty-second nesting were dropped from the table
     #       an unbalanced script jumped through, and a line address counted
     #       from the largest wrapped to a small one.
@@ -22673,7 +22778,16 @@ TEXT_UTILITIES = (
             #       rows naming utf8.txt carry the set those files are in, so
             #       the rest of cut keeps the identities its pins were taken
             #       against; in C the two counts agree and so do these.
-            extra=(*({"fixture": "text_wide", "argv": argv} for argv in (
+            extra=(*({"argv": argv, "stdin": "cut_long"} for argv in (
+                       ("-d", " ", "-f", "2"), ("-d", " ", "-f", "1"), ("-d", " ", "-f", "5-9"),
+                       ("-d", " ", "-f", "30"), ("-d", " ", "-f", "35"), ("-d", " ", "-f", "2-3"),
+                       ("-d", " ", "-f", "17"), ("-d", " ", "-f", "18"), ("-d", " ", "-f", "19-20"),
+                       ("-d", " ", "-f", "1-2"), ("-d", " ", "-f", "300"), ("-d", " ", "-f", "301"),
+                       ("-d", " ", "-s", "-f", "2"), ("-d", " ", "-s", "-f", "40-41"),
+                       ("-d", " ", "-f", "2,5"), ("-d", " ", "-f", "3-"), ("-d", " ", "--complement", "-f", "2"),
+                       ("-d", " ", "-f", "2", "--output-delimiter=X"), ("-d", " ", "-f", "200-250"),
+                       ("-d", " ", "-z", "-f", "2"))),
+                   *({"fixture": "text_wide", "argv": argv} for argv in (
                        ("-c", "1-3", "utf8.txt"), ("-c", "1-5", "utf8.txt"), ("-c", "2-4", "utf8.txt"),
                        ("-c", "1,3,5", "utf8.txt"), ("-c", "3-", "utf8.txt"), ("-c", "-3", "utf8.txt"),
                        ("-b", "1-3", "utf8.txt"), ("-b", "1-5", "utf8.txt"),

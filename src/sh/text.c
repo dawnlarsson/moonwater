@@ -2562,10 +2562,13 @@ static void big_ntt_residues(p64 address_to out, p64 address_to spare, p64 addre
 }
 
 /*
-        r = a * b, an + bn limbs. False when memory ran out.
+        r = a * b, an + bn limbs. False when memory ran out. With a radix the
+        limbs are digits below it, the product's are too, and the carries
+        between them are made in that radix and not in 2^64: a number kept in
+        decimal pieces is multiplied without being made binary first.
 */
 static bool big_multiply_ntt(p64 address_to r, const p64 address_to a, positive an,
-                             const p64 address_to b, positive bn)
+                             const p64 address_to b, positive bn, p64 radix)
 {
         positive length = 1;
 
@@ -2597,6 +2600,7 @@ static bool big_multiply_ntt(p64 address_to r, const p64 address_to a, positive 
         const p64 inverse_of_p12_square = 0x5999997fe04e04e1ull; // R^2 / (p1 p2) mod p3
         const p128 p12 = (p128)p1 * p2;
         p64 c0 = 0, c1 = 0;
+        p128 held = 0;
 
         for (positive j = 0; j + 1 < an + bn; j++)
         {
@@ -2607,6 +2611,20 @@ static bool big_multiply_ntt(p64 address_to r, const p64 address_to a, positive 
                 p64 y = big_ntt_reduce(x12, p3, n3);
                 p64 t3 = big_ntt_subtract(big_ntt_multiply(r3[j], inverse_of_p12, p3, n3),
                                           big_ntt_multiply(y, inverse_of_p12_square, p3, n3), p3);
+
+                if (radix)
+                {
+                        // The coefficient is below 2^128 here, so the wrap of
+                        // the product with the primes' own is no loss.
+                        held += x12 + p12 * t3;
+
+                        positive2 step = positive_divide_wide((p64)(held >> 64), (p64)held, radix);
+
+                        r[j] = step.y;
+                        held = step.x;
+                        continue;
+                }
+
                 p128 low = (p128)(p64)p12 * t3;
                 p128 mid = (p128)(p64)(p12 >> 64) * t3 + (p64)(low >> 64);
                 p128 s0 = (p128)(p64)x12 + (p64)low + c0;
@@ -2617,7 +2635,7 @@ static bool big_multiply_ntt(p64 address_to r, const p64 address_to a, positive 
                 c0 = (p64)s1;
                 c1 = s2;
         }
-        r[an + bn - 1] = c0;
+        r[an + bn - 1] = radix ? (p64)held : c0;
         memory_give(store);
         return true;
 }
@@ -2983,7 +3001,7 @@ static void big_nttv_residues(p64 address_to out, p64 address_to spare, const p6
         is longer than the primes reach.
 */
 static bool big_multiply_nttv(p64 address_to r, const p64 address_to a, positive an,
-                             const p64 address_to b, positive bn)
+                             const p64 address_to b, positive bn, p64 radix)
 {
         positive length = 16;
 
@@ -3040,6 +3058,17 @@ static bool big_multiply_nttv(p64 address_to r, const p64 address_to a, positive
                         if (piece >= 2 * (an + bn))
                                 break;
                         carry += (p128)low[k] + ((p128)high[k] << 32);
+                        if (radix)
+                        {
+                                // The pieces are digits below the radix, which
+                                // is below 2^32, and are put where the limbs'
+                                // halves are.
+                                positive2 step = positive_divide_wide((p64)(carry >> 64), (p64)carry, radix);
+
+                                ((p32 address_to)r)[piece] = (p32)step.y;
+                                carry = step.x;
+                                continue;
+                        }
                         if (piece & 1)
                         {
                                 r[piece / 2] = held | (p64)(carry & 0xffffffffull) << 32;
@@ -3081,10 +3110,10 @@ static fn big_multiply_into(p64 address_to r, const p64 address_to a, positive a
                 return;
         }
 #if X64
-        if (bn >= BIG_NTTV && cpu_has_avx512 && big_multiply_nttv(r, a, an, b, bn))
+        if (bn >= BIG_NTTV && cpu_has_avx512 && big_multiply_nttv(r, a, an, b, bn, 0))
                 return;
 #endif
-        if (bn >= BIG_NTT && big_multiply_ntt(r, a, an, b, bn))
+        if (bn >= BIG_NTT && big_multiply_ntt(r, a, an, b, bn, 0))
                 return;
         if (bn < BIG_KARATSUBA)
         {
@@ -6752,6 +6781,49 @@ static HOT bool text_locale_utf8()
         code += 4;
         code += *code == '-';
         return code[0] == '8' && (!code[1] || code[1] == '@');
+}
+
+/*
+        The upper (UNICODE_CASE_UPPER) or lower (UNICODE_CASE_LOWER) case of a
+        UTF-8 text, a character at a time, into a block of twice its bytes:
+        a character takes at most four bytes in either case, so no two-byte
+        one outgrows the room and no longer one needs more. A byte that is no
+        character is kept as it is. The length written.
+*/
+static positive text_case_utf8(p8 address_to into, string_address from, positive length,
+                               positive mode)
+{
+        positive made = 0;
+
+        for (positive at = 0; at < length;)
+        {
+                p8 byte = (p8)from[at];
+                memory_utf8_state state = {0};
+                positive used = 0, size = 0;
+                b32 fed = 0;
+
+                if (byte < 0x80)
+                {
+                        into[made++] = (p8)(mode == UNICODE_CASE_UPPER ? byte_to_upper(byte)
+                                                                       : byte_to_lower(byte));
+                        at++;
+                        continue;
+                }
+                while (!fed && at + used < length)
+                        fed = memory_utf8_feed(address_of state, (p8)from[at + used++]);
+                if (fed == 1)
+                        size = memory_utf8_encode(into + made, 4,
+                                                  unicode_case(state.value, mode));
+                if (!size)
+                {
+                        into[made++] = byte;
+                        at++;
+                        continue;
+                }
+                made += size;
+                at += used;
+        }
+        return made;
 }
 
 /*
@@ -21091,6 +21163,8 @@ static const argument_option cut_options[] = {
 */
 #define CUT_OFFSETS 4096
 #define CUT_FIELDS 4096
+// Delimiters past the last field a range wants before a line is long.
+#define CUT_LONG 16
 
 static p32 cut_offsets[CUT_OFFSETS];
 static p32 cut_marks[CUT_FIELDS];
@@ -21122,22 +21196,46 @@ static inline INLINE positive cut_lines_range_body(
         positive from = 0;
         positive to = positive_max;
         p8 newline = text_delimiter;
+        // How many delimiters a call looks for: all it has room for, until a
+        // line has so many past the last field wanted that the rest of it is
+        // not worth looking at, and then only as many as that line took.
+        positive limit = CUT_OFFSETS;
+        positive long_line = last != positive_max && last + CUT_LONG + 1 < CUT_OFFSETS
+                                 ? last + CUT_LONG : positive_max;
 
         for (;;)
         {
+                positive asked = limit;
                 positive count = memory_offsets_of_either(
-                    offsets, base + scan, left - scan, delimiter, newline, CUT_OFFSETS);
+                    offsets, base + scan, left - scan, delimiter, newline, asked);
 
                 for (positive i = 0; i < count; i++)
                 {
                         positive at = scan + offsets[i];
+                        bool skipped = false;
 
                         if (base[at] != newline)
                         {
                                 seen++;
                                 from = seen + 1 == first ? at + 1 : from;
                                 to = seen == last ? at : to;
-                                continue;
+
+                                if (seen != long_line)
+                                        continue;
+
+                                /*
+                                        A long line: its fields past the last
+                                        one wanted are not read, and its end is
+                                        found as a run of bytes and not by
+                                        every delimiter on the way to it.
+                                */
+                                p8 address_to eol = memory_first_of(base + at + 1, newline,
+                                                                    left - at - 1);
+
+                                if (!eol)
+                                        goto done;
+                                at = (positive)(eol - base);
+                                skipped = true;
                         }
 
                         positive start = first == 1 ? line_start : seen + 1 >= first ? from : at;
@@ -21173,14 +21271,24 @@ static inline INLINE positive cut_lines_range_body(
                         line_start = at + 1;
                         seen = 0;
                         to = positive_max;
+
+                        if (skipped)
+                        {
+                                limit = last + CUT_LONG;
+                                scan = at + 1;
+                                goto rescan;
+                        }
+                        limit = CUT_OFFSETS;
                 }
 
-                if (count < CUT_OFFSETS)
+                if (count < asked)
                         break;
 
                 scan += offsets[count - 1] + 1;
+        rescan:;
         }
 
+done:
         address_to made_out = made;
         return line_start;
 }
@@ -21728,6 +21836,11 @@ static fn cut_stream_fields(p8 delimiter, bool complement, bool only_delimited,
 
                 while (i < line)
                 {
+                        // No field from here on is listed: the rest of the line is
+                        // only its end, which the read has already found.
+                        if (which > 1 && !text_list_open && !complement && which >= text_list_used)
+                                break;
+
                         p8 address_to cut = memory_first_of(at + i, delimiter, line - i);
                         positive span = cut ? (positive)(cut - (at + i)) : line - i;
 
@@ -25789,7 +25902,7 @@ static grep_set grep_literals;
         none or a single byte gives the set up, and the machine or the graph
         asks about the lines the strings land in.
 */
-static bool grep_set_gather(const regex_program address_to program, p16 node,
+static bool grep_set_gather(const regex_program address_to program, rx_ref node,
                             bool icase, bool exact)
 {
         const rx_node address_to nodes = program->nodes;
@@ -25810,12 +25923,12 @@ static bool grep_set_gather(const regex_program address_to program, p16 node,
         positive start = set->used;
 
         if (exact)
-                for (p16 at = node; at; at = nodes[at].next)
+                for (rx_ref at = node; at; at = nodes[at].next)
                 {
                         if (nodes[at].kind != RX_BYTE || set->used == GREP_SET_BYTES)
                                 return false;
 
-                        set->bytes[set->used++] = nodes[at].argument;
+                        set->bytes[set->used++] = (p8)nodes[at].argument;
                 }
         else
         {
@@ -31713,9 +31826,55 @@ static bool sed_case_byte(sed_context address_to ctx, positive address_to have, 
         return sed_work_byte(ctx, have, sed_case_apply(ctx, value));
 }
 
+/*
+        A piece of the match or a group under \U or \L or the one-character
+        \u and \l in front of it. Where the locale is UTF-8 and the piece has
+        a byte past ASCII the characters are cased whole, one at a time (the
+        one in front by itself, so the span's case is not put on it first);
+        otherwise it is bytes, as it was.
+*/
 static bool sed_case_span_bytes(sed_context address_to ctx, positive address_to have,
                                 p8 address_to from, positive length)
 {
+        if ((ctx->case_span || ctx->case_once) &&
+            memory_ascii_span(from, length) != length && text_locale_utf8())
+        {
+                p8 how = ctx->case_once ? ctx->case_once : ctx->case_span;
+                positive first = 0;
+
+                if (!sed_space_fits(ctx, address_to have, 2 * length))
+                        return false;
+
+                p8 address_to into = ctx->work_store->bytes + address_to have;
+
+                if (ctx->case_once)
+                {
+                        memory_utf8_state state = {0};
+                        b32 fed = 0;
+
+                        while (!fed && first < length)
+                                fed = memory_utf8_feed(address_of state, from[first++]);
+                        if (fed != 1)
+                                first = 1;
+                        address_to have += text_case_utf8(into, (string_address)from, first,
+                                                          how == 'U' ? UNICODE_CASE_UPPER
+                                                                     : UNICODE_CASE_LOWER);
+                        into = ctx->work_store->bytes + address_to have;
+                        ctx->case_once = 0;
+                }
+                if (ctx->case_span && first < length)
+                        address_to have += text_case_utf8(into, (string_address)from + first,
+                                                          length - first,
+                                                          ctx->case_span == 'U' ? UNICODE_CASE_UPPER
+                                                                                : UNICODE_CASE_LOWER);
+                else if (first < length)
+                {
+                        memory_copy(into, from + first, length - first);
+                        address_to have += length - first;
+                }
+                return true;
+        }
+
         if (!sed_space_fits(ctx, address_to have, length))
                 return false;
 
@@ -32676,6 +32835,24 @@ static bool sed_address_matches(p8 type, positive line, b32 which, positive step
                 if (!sed_use_regex(which))
                         return false;
 
+                /*
+                        Whether the line has a match is what regex_test is
+                        for: it watches what the graph costs for the lines of
+                        this program and gives them to the machine when the
+                        graph is dear, where the address went to the graph
+                        every time (/(a|b)*a(a|b){4}$/ over a megabyte was
+                        530 ms to GNU's 10). It wants the line's end to be a
+                        NUL, which a pattern space is not till it is made one,
+                        in the byte the store keeps for it.
+                */
+                if (sed_pattern.bytes == sed_pattern.store->bytes &&
+                    sed_pattern.length < sed_pattern.store->room)
+                {
+                        sed_pattern.bytes[sed_pattern.length] = end;
+                        return regex_test(&sed_programs[sed_recent], sed_pattern.bytes,
+                                          sed_pattern.length);
+                }
+
                 regex_current = sed_programs[sed_recent];
                 return regex_find(REGEX_FIRST, sed_pattern.bytes, sed_pattern.length, 0);
         }
@@ -33160,6 +33337,19 @@ static inline INLINE bool sed_substitute_in(sed_context address_to ctx,
 
                                                 continue;
                                         }
+                                }
+                                else if (character >= 0xc2 && (ctx->case_span || ctx->case_once))
+                                {
+                                        // A character of the replacement is cased whole.
+                                        positive size = 1;
+
+                                        while (size < 4 && (replacement[c + size] & 0xc0) == 0x80)
+                                                size++;
+                                        if (!sed_case_span_bytes(ctx, address_of have,
+                                                                 (p8 address_to)replacement + c, size))
+                                                return false;
+                                        c += size - 1;
+                                        continue;
                                 }
                                 else
                                 {
@@ -42130,79 +42320,134 @@ static expr_value expr_big_sum(expr_value address_to left,
 }
 
 /*
-        Products and quotients are worked in 64-bit limbs, nineteen digits
-        to a limb's worth of reading and writing: lib.c's limb routines
-        multiply (base58's Karatsuba and transform above them) and Knuth's
-        algorithm D divides with positive_divide_wide, so the cost is that
-        of the limbs and not of the digits, which was a machine-word
-        multiply per pair of digits, and per digit of the quotient one
-        subtraction of the divisor a time.
+        Products and quotients are worked in the number's own digits, nine to
+        a piece, least significant first, as they were read: to turn a number
+        of a hundred thousand digits into the binary one a multiplication wants
+        and back is two conversions each of which is more work than GMP's whole
+        answer (54 ms of expr 99999...9 / 7 against its 3), so nothing is
+        converted. A quotient by a word is one pass over the pieces; a product
+        is schoolbook below a hundred pieces and the number-theoretic transform
+        of the binary arithmetic above them, which carries in the radix it is
+        given; and a quotient by more is Knuth's algorithm D in the radix.
 */
-static positive expr_limbs_read(p64 address_to limb, string_address digits, positive length)
+#define EXPR_PIECE 1000000000u
+#define EXPR_PIECE_DIGITS 9
+#define EXPR_SCHOOL 96
+
+// The digits as pieces, and how many of them are not zero. The array has a
+// piece to spare, zero, which a product by pairs of them reads.
+static positive expr_pieces_read(p32 address_to into, string_address digits, positive length)
 {
-        positive used = 0;
-        positive at = 0;
-        positive first = length % 19 ? length % 19 : 19;
+        positive count = (length + EXPR_PIECE_DIGITS - 1) / EXPR_PIECE_DIGITS;
+        positive at = length;
 
-        while (at < length)
+        for (positive piece = 0; piece < count; piece++)
         {
-                positive take = at ? 19 : first;
-                p64 chunk = 0;
-                p64 scale = 1;
+                positive take = at < EXPR_PIECE_DIGITS ? at : EXPR_PIECE_DIGITS;
+                p32 value = 0;
 
-                for (positive k = 0; k < take; k++)
-                {
-                        chunk = chunk * 10 + (p64)(digits[at + k] - '0');
-                        scale *= 10;
-                }
-                at += take;
-                p64 carry = limbs_multiply_word(limb, limb, used, scale, chunk);
-
-                if (carry)
-                        limb[used++] = carry;
+                for (positive k = at - take; k < at; k++)
+                        value = value * 10 + (p32)(digits[k] - '0');
+                into[piece] = value;
+                at -= take;
         }
-        return used;
+        into[count] = 0;
+        while (count > 1 && !into[count - 1])
+                count--;
+        return count;
 }
 
-// The limbs as digits, least significant first, in a run of 20 * (used + 2) bytes,
-// and how many were written; the limbs are used up.
-static positive expr_limbs_write(p8 address_to digits, p64 address_to limb, positive used)
+// The pieces as digits, least significant first, in 9 * count bytes.
+static positive expr_pieces_write(p8 address_to digits, const p32 address_to pieces, positive count)
 {
         positive made = 0;
 
-        while (used)
+        for (positive piece = 0; piece < count; piece++)
         {
-                p64 rest = 0;
+                p32 value = pieces[piece];
 
-                for (positive at = used; at; at--)
+                for (positive k = 0; k < EXPR_PIECE_DIGITS; k++)
                 {
-                        positive2 step = positive_divide_wide(rest, limb[at - 1], 10000000000000000000ull);
-
-                        limb[at - 1] = step.x;
-                        rest = step.y;
-                }
-                while (used && !limb[used - 1])
-                        used--;
-                for (positive k = 0; k < 19; k++)
-                {
-                        digits[made++] = (p8)(rest % 10);
-                        rest /= 10;
+                        digits[made++] = (p8)(value % 10);
+                        value /= 10;
                 }
         }
-        if (!made)
-                digits[made++] = 0;
         return made;
 }
 
+// r = a * b, an + bn + 2 pieces, a and b with a zero piece past their last.
+static bool expr_pieces_multiply(p32 address_to r, const p32 address_to a, positive an,
+                                 const p32 address_to b, positive bn)
+{
+        if (an < bn)
+        {
+                const p32 address_to swap = a;
+                positive length = an;
+
+                a = b;
+                an = bn;
+                b = swap;
+                bn = length;
+        }
+
+        memory_fill(r, 0, (an + bn + 2) * sizeof(p32));
+
+#if X64
+        if (bn >= EXPR_SCHOOL && cpu_has_avx512 && cksum_hwcap_allowed("AVX512F") &&
+            big_multiply_nttv((p64 address_to)r, (const p64 address_to)a, (an + 1) / 2,
+                              (const p64 address_to)b, (bn + 1) / 2, EXPR_PIECE))
+                return true;
+#endif
+        if (bn >= 2 * EXPR_SCHOOL)
+        {
+                p64 address_to wide = (p64 address_to)utility_arena_take((an + bn + an + bn) * sizeof(p64));
+
+                if (wide)
+                {
+                        p64 address_to x = wide;
+                        p64 address_to y = x + an;
+                        p64 address_to z = y + bn;
+
+                        for (positive at = 0; at < an; at++)
+                                x[at] = a[at];
+                        for (positive at = 0; at < bn; at++)
+                                y[at] = b[at];
+                        if (big_multiply_ntt(z, x, an, y, bn, EXPR_PIECE))
+                        {
+                                for (positive at = 0; at < an + bn; at++)
+                                        r[at] = (p32)z[at];
+                                return true;
+                        }
+                }
+        }
+
+        for (positive i = 0; i < bn; i++)
+        {
+                p64 carry = 0;
+
+                for (positive j = 0; j < an; j++)
+                {
+                        p64 sum = (p64)r[i + j] + (p64)a[j] * b[i] + carry;
+
+                        r[i + j] = (p32)(sum % EXPR_PIECE);
+                        carry = sum / EXPR_PIECE;
+                }
+                r[i + an] = (p32)carry;
+        }
+        return true;
+}
+
 /*
-        q = a / b and r = a mod b, an limbs over bn with the top limb of b
-        nonzero and an >= bn; q takes an - bn + 1 limbs and r bn. The
-        divisor is shifted up until its top bit is set, each quotient limb is
-        estimated from the two limbs above it and corrected by the divisor's
-        second limb, and the rare estimate one too big is put back.
+        q = a / b and r = a mod b, in pieces, an of them over bn with the top
+        piece of b not zero and an >= bn; q takes an - bn + 1 and r bn, and the
+        work is taken from the arena. Knuth's algorithm D with the radix for
+        its base: the divisor is scaled until its top piece is at least half
+        the radix, each quotient piece is estimated from the two above it and
+        corrected by the divisor's second, and the rare estimate one too big is
+        put back.
 */
-static bool expr_limbs_divide(p64 address_to q, p64 address_to r, const p64 address_to a,
-                              positive an, const p64 address_to b, positive bn)
+static bool expr_pieces_divide(p32 address_to q, p32 address_to r, const p32 address_to a,
+                               positive an, const p32 address_to b, positive bn)
 {
         if (bn == 1)
         {
@@ -42210,80 +42455,105 @@ static bool expr_limbs_divide(p64 address_to q, p64 address_to r, const p64 addr
 
                 for (positive at = an; at; at--)
                 {
-                        positive2 step = positive_divide_wide(rest, a[at - 1], b[0]);
+                        p64 now = rest * EXPR_PIECE + a[at - 1];
 
-                        q[at - 1] = step.x;
-                        rest = step.y;
+                        q[at - 1] = (p32)(now / b[0]);
+                        rest = now % b[0];
                 }
-                r[0] = rest;
+                r[0] = (p32)rest;
                 return true;
         }
 
-        positive shift = (positive)bits_leading_zeros(b[bn - 1]);
-        p64 address_to work = (p64 address_to)utility_arena_take((an + 1 + 2 * bn + 1) * sizeof(p64));
+        p32 address_to work = (p32 address_to)utility_arena_take((an + 1 + bn) * sizeof(p32));
 
         if (!work)
                 return false;
 
-        p64 address_to u = work;
-        p64 address_to v = work + an + 1;
-        p64 address_to product = v + bn;
+        p32 address_to u = work;
+        p32 address_to v = work + an + 1;
+        p64 scale = EXPR_PIECE / ((p64)b[bn - 1] + 1);
+        p64 carry = 0;
 
-        u[an] = shift ? a[an - 1] >> (64 - shift) : 0;
-        for (positive at = an - 1; at; at--)
-                u[at] = a[at] << shift | (shift ? a[at - 1] >> (64 - shift) : 0);
-        u[0] = a[0] << shift;
-        for (positive at = bn - 1; at; at--)
-                v[at] = b[at] << shift | (shift ? b[at - 1] >> (64 - shift) : 0);
-        v[0] = b[0] << shift;
+        for (positive at = 0; at < an; at++)
+        {
+                p64 now = (p64)a[at] * scale + carry;
+
+                u[at] = (p32)(now % EXPR_PIECE);
+                carry = now / EXPR_PIECE;
+        }
+        u[an] = (p32)carry;
+        carry = 0;
+        for (positive at = 0; at < bn; at++)
+        {
+                p64 now = (p64)b[at] * scale + carry;
+
+                v[at] = (p32)(now % EXPR_PIECE);
+                carry = now / EXPR_PIECE;
+        }
 
         for (positive j = an - bn + 1; j--;)
         {
-                p64 top = u[j + bn];
-                p64 guess, rest;
-                bool spilled = false;
+                p64 top = (p64)u[j + bn] * EXPR_PIECE + u[j + bn - 1];
+                p64 guess = top / v[bn - 1];
+                p64 rest = top % v[bn - 1];
 
-                if (top >= v[bn - 1])
+                while (guess >= EXPR_PIECE ||
+                       guess * v[bn - 2] > rest * EXPR_PIECE + u[j + bn - 2])
                 {
-                        // top is v's top limb, and so u's top two limbs are at most v's: one too big at most.
-                        guess = ~(p64)0;
-                        rest = u[j + bn - 1] + v[bn - 1];
-                        spilled = rest < v[bn - 1];
-                }
-                else
-                {
-                        positive2 step = positive_divide_wide(top, u[j + bn - 1], v[bn - 1]);
-
-                        guess = step.x;
-                        rest = step.y;
-                }
-                while (!spilled)
-                {
-                        p128 chance = (p128)guess * v[bn - 2];
-
-                        if (chance <= ((p128)rest << 64 | u[j + bn - 2]))
-                                break;
                         guess--;
                         rest += v[bn - 1];
-                        spilled = rest < v[bn - 1];
+                        if (rest >= EXPR_PIECE)
+                                break;
                 }
 
-                product[bn] = limbs_multiply_word(product, v, bn, guess, 0);
-                if (limbs_subtract(u + j, bn + 1, product, bn + 1))
+                bipolar borrow = 0;
+
+                carry = 0;
+                for (positive at = 0; at < bn; at++)
                 {
-                        guess--;
-                        limbs_add(u + j, bn + 1, v, bn);
+                        p64 product = guess * v[at] + carry;
+                        bipolar diff = (bipolar)u[at + j] - (bipolar)(product % EXPR_PIECE) - borrow;
+
+                        carry = product / EXPR_PIECE;
+                        borrow = diff < 0;
+                        u[at + j] = (p32)(diff < 0 ? diff + EXPR_PIECE : diff);
                 }
-                q[j] = guess;
+
+                bipolar diff = (bipolar)u[j + bn] - (bipolar)carry - borrow;
+
+                if (diff < 0)
+                {
+                        carry = 0;
+                        guess--;
+                        for (positive at = 0; at < bn; at++)
+                        {
+                                p64 sum = (p64)u[at + j] + v[at] + carry;
+
+                                u[at + j] = (p32)(sum % EXPR_PIECE);
+                                carry = sum / EXPR_PIECE;
+                        }
+                        diff += (bipolar)EXPR_PIECE + (bipolar)carry;
+                }
+                u[j + bn] = (p32)diff;
+                q[j] = (p32)guess;
         }
-        for (positive at = 0; at < bn; at++)
-                r[at] = u[at] >> shift | (shift ? u[at + 1] << (64 - shift) : 0);
+
+        // What is left of the scaled dividend, taken back down.
+        p64 rest = 0;
+
+        for (positive at = bn; at; at--)
+        {
+                p64 now = rest * EXPR_PIECE + u[at - 1];
+
+                r[at - 1] = (p32)(now / scale);
+                rest = now % scale;
+        }
         return true;
 }
 
-static expr_value expr_limbs_result(p64 address_to limb, positive used, bool negative)
+static expr_value expr_pieces_result(const p32 address_to pieces, positive count, bool negative)
 {
-        p8 address_to digits = (p8 address_to)utility_arena_take(20 * (used + 2));
+        p8 address_to digits = (p8 address_to)utility_arena_take(EXPR_PIECE_DIGITS * (count + 1));
         expr_value failed = {expr_empty, 0};
 
         if (!digits)
@@ -42291,7 +42561,12 @@ static expr_value expr_limbs_result(p64 address_to limb, positive used, bool neg
                 expr_stop("memory exhausted");
                 return failed;
         }
-        return expr_digits_value(digits, expr_limbs_write(digits, limb, used), negative);
+
+        positive made = expr_pieces_write(digits, pieces, count);
+
+        if (!made)
+                digits[made++] = 0;
+        return expr_digits_value(digits, made, negative);
 }
 
 static expr_value expr_big_product(expr_value address_to left,
@@ -42299,9 +42574,9 @@ static expr_value expr_big_product(expr_value address_to left,
 {
         expr_magnitude a = expr_magnitude_of(left);
         expr_magnitude b = expr_magnitude_of(right);
-        positive an = a.length / 19 + 1;
-        positive bn = b.length / 19 + 1;
-        p64 address_to x = (p64 address_to)utility_arena_take((an + bn + 2 * (an + bn)) * sizeof(p64));
+        positive an = (a.length + EXPR_PIECE_DIGITS - 1) / EXPR_PIECE_DIGITS;
+        positive bn = (b.length + EXPR_PIECE_DIGITS - 1) / EXPR_PIECE_DIGITS;
+        p32 address_to x = (p32 address_to)utility_arena_take((an + bn + an + bn + 6) * sizeof(p32));
         expr_value failed = {expr_empty, 0};
 
         if (!x)
@@ -42310,21 +42585,19 @@ static expr_value expr_big_product(expr_value address_to left,
                 return failed;
         }
 
-        p64 address_to y = x + an;
-        p64 address_to product = y + bn;
+        p32 address_to y = x + an + 2;
+        p32 address_to product = y + bn + 2;
 
-        memory_fill(x, 0, an * sizeof(p64));
-        memory_fill(y, 0, bn * sizeof(p64));
-        an = expr_limbs_read(x, a.digits, a.length);
-        bn = expr_limbs_read(y, b.digits, b.length);
-        if (!an || !bn)
-                return expr_limbs_result(product, 0, false);
-        if (!big_multiply(product, x, an, y, bn))
+        an = expr_pieces_read(x, a.digits, a.length);
+        bn = expr_pieces_read(y, b.digits, b.length);
+        if ((an == 1 && !x[0]) || (bn == 1 && !y[0]))
+                return expr_pieces_result(x, 0, false);
+        if (!expr_pieces_multiply(product, x, an, y, bn))
         {
                 expr_stop("memory exhausted");
                 return failed;
         }
-        return expr_limbs_result(product, an + bn, a.negative != b.negative);
+        return expr_pieces_result(product, an + bn + 1, a.negative != b.negative);
 }
 
 /*
@@ -42336,9 +42609,9 @@ static expr_value expr_big_divide(expr_value address_to left,
 {
         expr_magnitude a = expr_magnitude_of(left);
         expr_magnitude b = expr_magnitude_of(right);
-        positive an = a.length / 19 + 1;
-        positive bn = b.length / 19 + 1;
-        p64 address_to x = (p64 address_to)utility_arena_take((an + bn + an + 1 + bn) * sizeof(p64));
+        positive an = (a.length + EXPR_PIECE_DIGITS - 1) / EXPR_PIECE_DIGITS;
+        positive bn = (b.length + EXPR_PIECE_DIGITS - 1) / EXPR_PIECE_DIGITS;
+        p32 address_to x = (p32 address_to)utility_arena_take((an + bn + an + 1 + bn + 4) * sizeof(p32));
         expr_value failed = {expr_empty, 0};
 
         if (!x)
@@ -42347,28 +42620,26 @@ static expr_value expr_big_divide(expr_value address_to left,
                 return failed;
         }
 
-        p64 address_to y = x + an;
-        p64 address_to quotient = y + bn;
-        p64 address_to rest = quotient + an + 1;
+        p32 address_to y = x + an + 1;
+        p32 address_to quotient = y + bn + 1;
+        p32 address_to rest = quotient + an + 1;
 
-        memory_fill(x, 0, an * sizeof(p64));
-        memory_fill(y, 0, bn * sizeof(p64));
-        an = expr_limbs_read(x, a.digits, a.length);
-        bn = expr_limbs_read(y, b.digits, b.length);
-        if (!bn)
+        an = expr_pieces_read(x, a.digits, a.length);
+        bn = expr_pieces_read(y, b.digits, b.length);
+        if (bn == 1 && !y[0])
                 return failed;
-        if (!an || an < bn)
-                return remainder ? expr_limbs_result(x, an, a.negative)
-                                 : expr_limbs_result(x, 0, false);
-        memory_fill(quotient, 0, (an - bn + 1) * sizeof(p64));
-        if (!expr_limbs_divide(quotient, rest, x, an, y, bn))
+        if ((an == 1 && !x[0]) || an < bn)
+                return remainder ? expr_pieces_result(x, an, a.negative)
+                                 : expr_pieces_result(x, 0, false);
+        memory_fill(quotient, 0, (an - bn + 1) * sizeof(p32));
+        if (!expr_pieces_divide(quotient, rest, x, an, y, bn))
         {
                 expr_stop("memory exhausted");
                 return failed;
         }
         if (!remainder)
-                return expr_limbs_result(quotient, an - bn + 1, a.negative != b.negative);
-        return expr_limbs_result(rest, bn, a.negative);
+                return expr_pieces_result(quotient, an - bn + 1, a.negative != b.negative);
+        return expr_pieces_result(rest, bn, a.negative);
 }
 
 static bool expr_true(expr_value address_to value)

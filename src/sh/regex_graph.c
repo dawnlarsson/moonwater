@@ -9,12 +9,18 @@
 
         The ceilings are fixed and stated at the top: a pattern that would
         exceed one is refused rather than grown into, so no input decides
-        how much memory matching it costs.
+        how much memory matching it costs. What a pattern is made of is
+        built in scratch that grows with it, to a ceiling a pattern of some
+        megabytes is far under, and one that is kept is copied out to a
+        block of its own, so that a script of ten thousand expressions is
+        ten thousand blocks and not a table that fills.
 */
 
-#define RX_NODE_MAX 8192
-#define RX_SET_MAX 512
-#define RX_HINT_MAX 512
+#define RX_NODE_LIMIT ((positive)1 << 22)
+#define RX_SET_LIMIT 65535
+#define RX_NODE_FIRST 1024
+#define RX_SET_FIRST 16
+#define RX_FIXED_MAX 8192
 #define RX_LITERAL_MAX 256
 #define RX_GROUP_MAX 9
 #define RX_SLOT_MAX 20
@@ -66,10 +72,15 @@ enum { REGEX_EDGE_WORD, REGEX_EDGE_NOT_WORD, REGEX_EDGE_START, REGEX_EDGE_STOP }
 
 /* Zero ends a sequence. ALT owns two branch roots; CAPTURE and COUNT own
    a child sequence's first/last nodes. No node is copied for repetition. */
+// A node, by its place in the graph: the first is 1, and 0 ends a sequence.
+typedef p32 rx_ref;
+
 typedef struct
 {
-        p8 kind, argument;
-        p16 next, previous, left, right;
+        p8 kind;
+        // The byte, the set, the group, the kind of edge.
+        p16 argument;
+        rx_ref next, previous, left, right;
         b16 minimum, maximum;
 } rx_node;
 
@@ -83,7 +94,7 @@ typedef struct
         p32 serial;
         p8 verdict;
         positive2 literal_anchors, fixed_anchors;
-        p8 fixed_literal[RX_NODE_MAX];
+        p8 fixed_literal[RX_FIXED_MAX];
 } rx_hints;
 
 typedef struct
@@ -91,26 +102,35 @@ typedef struct
         const rx_node *nodes;
         const p8 (*sets)[256];
         const rx_hints *hints;
-        p16 first;
+        rx_ref first;
         p8 groups, policy, boundary, flags;
 } regex_program;
 
 typedef struct
 {
-        p16 nodes, sets, hints;
+        positive nodes, sets;
 } rx_mark;
 
+/*
+        Where one pattern is made: the nodes and the sets it has so far, the
+        one set of hints it fills in, and how far it has got. A pattern is
+        made from the start each time, over what the one before it left, and
+        a program that is to outlive the next is copied out of it
+        (regex_keep).
+*/
 typedef struct
 {
-        rx_node nodes[RX_NODE_MAX];
-        p8 sets[RX_SET_MAX][256];
-        rx_hints hints[RX_HINT_MAX];
+        rx_node *nodes;
+        positive node_room;
+        p8 (*sets)[256];
+        positive set_room;
+        rx_hints hints;
         rx_mark used;
 } rx_pool;
 
 typedef struct
 {
-        p16 first, last;
+        rx_ref first, last;
 } rx_fragment;
 
 typedef struct
@@ -167,14 +187,43 @@ static bool rx_operator(rx_compiler *c, p8 character)
                            : rx_peek(c, 0) == '\\' && rx_peek(c, 1) == character;
 }
 
-static p16 rx_emit(rx_compiler *c, rx_node node)
+// Room for the nodes a pattern has made and one more, the scratch grown for
+// it when it has not.
+static bool rx_room(rx_compiler *c, positive nodes)
 {
-        if (c->broken || c->cursor.nodes == RX_NODE_MAX)
+        rx_pool *pool = c->pool;
+
+        if (nodes <= pool->node_room)
+                return true;
+
+        positive room = pool->node_room ? 2 * pool->node_room : RX_NODE_FIRST;
+
+        while (room < nodes)
+                room *= 2;
+
+        if (room > RX_NODE_LIMIT)
+                room = RX_NODE_LIMIT;
+        if (nodes > room)
+                return false;
+
+        rx_node *grown = memory_resize(pool->nodes, room * sizeof(rx_node));
+
+        if (!grown)
+                return false;
+
+        pool->nodes = grown;
+        pool->node_room = room;
+        return true;
+}
+
+static rx_ref rx_emit(rx_compiler *c, rx_node node)
+{
+        if (c->broken || !rx_room(c, c->cursor.nodes + 1))
         {
                 c->broken = true;
                 return 0;
         }
-        p16 at = c->cursor.nodes++;
+        rx_ref at = (rx_ref)c->cursor.nodes++;
         c->pool->nodes[at] = node;
         return at;
 }
@@ -193,12 +242,28 @@ static rx_fragment rx_join(rx_compiler *c, rx_fragment one, rx_fragment two)
 
 static b32 rx_new_set(rx_compiler *c)
 {
-        if (c->cursor.sets == RX_SET_MAX)
+        rx_pool *pool = c->pool;
+
+        if (c->cursor.sets == pool->set_room)
         {
-                c->broken = true;
-                return -1;
+                positive room = pool->set_room ? 2 * pool->set_room : RX_SET_FIRST;
+
+                if (room > RX_SET_LIMIT)
+                        room = RX_SET_LIMIT;
+
+                p8 (*grown)[256] = c->cursor.sets == RX_SET_LIMIT
+                                       ? null
+                                       : memory_resize(pool->sets, room * 256);
+
+                if (!grown)
+                {
+                        c->broken = true;
+                        return -1;
+                }
+                pool->sets = grown;
+                pool->set_room = room;
         }
-        b32 set = c->cursor.sets++;
+        b32 set = (b32)c->cursor.sets++;
         memory_fill(c->pool->sets[set], 0, 256);
         return set;
 }
@@ -213,28 +278,89 @@ static fn rx_set_add(rx_compiler *c, b32 set, p8 byte)
         }
 }
 
-static rx_fragment rx_one(rx_compiler *c, p8 kind, p8 argument)
+static rx_fragment rx_one(rx_compiler *c, p8 kind, b32 argument)
 {
-        p16 at = rx_emit(c, (rx_node){.kind = kind, .argument = argument});
+        rx_ref at = rx_emit(c, (rx_node){.kind = kind, .argument = (p16)argument});
 
         return (rx_fragment){at, at};
 }
 
 static rx_fragment rx_either(rx_compiler *c, rx_fragment one, rx_fragment two)
 {
-        p16 at = rx_emit(c, (rx_node){.kind = RX_ALT, .left = one.first,
-                                      .right = two.first});
+        rx_ref at = rx_emit(c, (rx_node){.kind = RX_ALT, .left = one.first,
+                                         .right = two.first});
 
         return (rx_fragment){at, at};
+}
+
+/*
+        The small letters that are not the lower case of their own upper
+        case, which no walk from the upper case finds: the micro sign, the
+        dotless i, the long s, the title case of the four digraphs, the
+        final sigma and the Greek letters of another shape, the old-style
+        Cyrillic ones and the rest of these. They are what grep's own
+        folding names beside a character's upper and lower.
+*/
+static const p32 rx_case_lonesome[] = {
+    0xb5, 0x131, 0x17f, 0x1c5, 0x1c8, 0x1cb, 0x1f2, 0x345, 0x3c2, 0x3d0, 0x3d1, 0x3d5,
+    0x3d6, 0x3f0, 0x3f1, 0x3f5, 0x1e9b, 0x1fbe,
+};
+
+/*
+        A character of more than one byte under ignore-case is the
+        alternation of its bytes and those of every character with the same
+        upper case, which is how glibc's regular expressions and grep's
+        compare them: the upper case and the lower case of it, and the
+        lonesome ones above that go up to it. The kelvin sign has the
+        Kelvin sign for its upper case and finds only itself, the final
+        sigma and the sigma find each other and the capital. Their bytes
+        above 0x7f are never changed by the byte compare, and an ASCII one
+        is kept lower so that the compare finds it.
+*/
+static rx_fragment rx_cased(rx_compiler *c, p32 code)
+{
+        p32 upper = unicode_case(code, UNICODE_CASE_UPPER);
+        p32 lower = unicode_case(upper, UNICODE_CASE_LOWER);
+        p32 cases[3 + sizeof(rx_case_lonesome) / sizeof(rx_case_lonesome[0])] = {code, upper};
+        positive known = 2;
+        p32 seen[sizeof(cases) / sizeof(cases[0])];
+        rx_fragment all = {0};
+        positive count = 0;
+
+        if (unicode_case(lower, UNICODE_CASE_UPPER) == upper)
+                cases[known++] = lower;
+        for (positive i = 0; i < sizeof(rx_case_lonesome) / sizeof(rx_case_lonesome[0]); i++)
+                if (unicode_case(rx_case_lonesome[i], UNICODE_CASE_UPPER) == upper)
+                        cases[known++] = rx_case_lonesome[i];
+
+        for (positive i = 0; i < known; i++)
+        {
+                p32 variant = cases[i] < 0x80 ? byte_to_lower(cases[i]) : cases[i];
+                p8 bytes[4];
+                bool again = false;
+                rx_fragment run = {0};
+                positive made;
+
+                for (positive j = 0; j < count; j++)
+                        again |= seen[j] == variant;
+                if (again)
+                        continue;
+                seen[count++] = variant;
+                made = memory_utf8_encode(bytes, 4, variant);
+                for (positive b = 0; b < made; b++)
+                        run = rx_join(c, run, rx_one(c, RX_BYTE, bytes[b]));
+                all = all.first ? rx_either(c, all, run) : run;
+        }
+        return all;
 }
 
 /* A lead byte and the continuation bytes that follow it, as one sequence. */
 static rx_fragment rx_wide_run(rx_compiler *c, b32 lead, b32 tails)
 {
-        rx_fragment run = rx_one(c, RX_SET, (p8)lead);
+        rx_fragment run = rx_one(c, RX_SET, lead);
 
         for (b32 i = 0; i < tails; i++)
-                run = rx_join(c, run, rx_one(c, RX_SET, (p8)c->wide_tail));
+                run = rx_join(c, run, rx_one(c, RX_SET, c->wide_tail));
 
         return run;
 }
@@ -621,6 +747,9 @@ static rx_fragment rx_alternation(rx_compiler *c);
 static rx_fragment rx_atom(rx_compiler *c)
 {
         p8 byte = rx_peek(c, 0), kind = RX_BYTE;
+        // Which set, when the atom is one: a pattern may hold more than a byte
+        // can number.
+        b32 index = 0;
         rx_fragment child = {0};
         bool anchor = false;
 
@@ -664,6 +793,16 @@ static rx_fragment rx_atom(rx_compiler *c)
                         {
                                 rx_fragment run = {0};
 
+                                if (c->program.flags & RX_IGNORE_CASE)
+                                {
+                                        p32 code;
+
+                                        if (rx_code(c, at, address_of code) == size)
+                                        {
+                                                c->at = at + size;
+                                                return rx_cased(c, code);
+                                        }
+                                }
                                 for (positive b = 0; b < size; b++)
                                         run = rx_join(c, run,
                                                       rx_one(c, RX_BYTE, c->pattern[at + b]));
@@ -713,7 +852,7 @@ static rx_fragment rx_atom(rx_compiler *c)
                         rx_set_facts facts = {0};
 
                         kind = RX_SET;
-                        byte = (p8)rx_parse_set(c, address_of facts);
+                        index = rx_parse_set(c, address_of facts);
 
                         /*
                                 A negated bracket names every character it
@@ -731,22 +870,28 @@ static rx_fragment rx_atom(rx_compiler *c)
                                 if (facts.negated)
                                 {
                                         for (b32 i = 0x80; i < 256; i++)
-                                                c->pool->sets[byte][i] = 0;
+                                                c->pool->sets[index][i] = 0;
 
-                                        whole = rx_character(c, byte);
+                                        whole = rx_character(c, index);
                                 }
                                 else
-                                        whole = rx_one(c, RX_SET, byte);
+                                        whole = rx_one(c, RX_SET, index);
 
                                 for (b32 i = 0; i < facts.count; i++)
                                 {
                                         rx_fragment run = {0};
+                                        p32 code;
 
-                                        for (b32 b = 0; b < facts.size[i]; b++)
-                                                run = rx_join(
-                                                    c, run,
-                                                    rx_one(c, RX_BYTE,
-                                                           c->pattern[facts.at[i] + b]));
+                                        if ((c->program.flags & RX_IGNORE_CASE) &&
+                                            rx_code(c, facts.at[i], address_of code) ==
+                                                facts.size[i])
+                                                run = rx_cased(c, code);
+                                        else
+                                                for (b32 b = 0; b < facts.size[i]; b++)
+                                                        run = rx_join(
+                                                            c, run,
+                                                            rx_one(c, RX_BYTE,
+                                                                   c->pattern[facts.at[i] + b]));
 
                                         whole = rx_either(c, whole, run);
                                 }
@@ -760,12 +905,12 @@ static rx_fragment rx_atom(rx_compiler *c)
                                 classes see a byte where they would see a
                                 set: [z]{3} is zzz. The set is given back.
                         */
-                        if (!c->broken && byte == c->cursor.sets - 1)
+                        if (!c->broken && (positive)index == c->cursor.sets - 1)
                         {
                                 positive members = 0, only = 0;
 
                                 for (positive i = 0; i < 256 && members < 2; i++)
-                                        if (c->pool->sets[byte][i])
+                                        if (c->pool->sets[index][i])
                                         {
                                                 members++;
                                                 only = i;
@@ -808,7 +953,7 @@ static rx_fragment rx_atom(rx_compiler *c)
                                                 if ((space ? byte_is_space((p8)i) : text_word((p8)i)) != negate)
                                                         rx_set_add(c, set, (p8)i);
                                 kind = RX_SET;
-                                byte = (p8)(set < 0 ? 0 : set);
+                                index = set < 0 ? 0 : set;
                         }
                         else if (byte == 'b' || byte == 'B' || byte == '<' || byte == '>')
                         {
@@ -826,8 +971,9 @@ static rx_fragment rx_atom(rx_compiler *c)
                 if (kind == RX_BYTE && (c->program.flags & RX_IGNORE_CASE))
                         byte = (p8)byte_to_lower(byte);
         }
-        p16 at = rx_emit(c, (rx_node){.kind = kind, .argument = byte,
-                                     .left = child.first, .right = child.last});
+        rx_ref at = rx_emit(c, (rx_node){.kind = kind,
+                                         .argument = kind == RX_SET ? (p16)index : byte,
+                                         .left = child.first, .right = child.last});
         c->bare = anchor || kind == RX_BEGIN || kind == RX_END || kind == RX_EDGE;
         return (rx_fragment){at, at};
 }
@@ -968,7 +1114,7 @@ static bool rx_interval(rx_compiler *c, b32 *low, b32 *high)
 
 static rx_fragment rx_piece(rx_compiler *c)
 {
-        p16 body_start = c->cursor.nodes;
+        positive body_start = c->cursor.nodes;
         positive began = c->at;
         rx_fragment prefix = {0}, body = rx_atom(c);
 
@@ -1012,7 +1158,7 @@ static rx_fragment rx_piece(rx_compiler *c)
                         c->at += plain;
                         prefix = rx_join(c, prefix, body);
                         body_start = c->cursor.nodes;
-                        p16 at = rx_emit(c, (rx_node){.kind = RX_BYTE, .argument = literal});
+                        rx_ref at = rx_emit(c, (rx_node){.kind = RX_BYTE, .argument = literal});
                         body = (rx_fragment){at, at};
                         continue;
                 }
@@ -1060,9 +1206,9 @@ static rx_fragment rx_piece(rx_compiler *c)
                         if (high == low && (!body.first || low == 1))
                                 continue;
                 }
-                p16 at = rx_emit(c, (rx_node){.kind = RX_COUNT,
-                                             .left = body.first, .right = body.last,
-                                             .minimum = (b16)low, .maximum = (b16)high});
+                rx_ref at = rx_emit(c, (rx_node){.kind = RX_COUNT,
+                                                 .left = body.first, .right = body.last,
+                                                 .minimum = (b16)low, .maximum = (b16)high});
                 body = (rx_fragment){at, at};
         }
         return rx_join(c, prefix, body);
@@ -1123,8 +1269,8 @@ static rx_fragment rx_alternation(rx_compiler *c)
                         whole = branch;
                 else
                 {
-                        p16 at = rx_emit(c, (rx_node){.kind = RX_ALT,
-                                                     .left = whole.first, .right = branch.first});
+                        rx_ref at = rx_emit(c, (rx_node){.kind = RX_ALT,
+                                                         .left = whole.first, .right = branch.first});
                         whole = (rx_fragment){at, at};
                 }
                 if (c->broken || !rx_operator(c, '|'))
@@ -1136,7 +1282,7 @@ static rx_fragment rx_alternation(rx_compiler *c)
         return whole;
 }
 
-static p16 rx_tail(const rx_node *nodes, p16 at)
+static rx_ref rx_tail(const rx_node *nodes, rx_ref at)
 {
         while (at && nodes[at].next)
                 at = nodes[at].next;
@@ -1145,10 +1291,10 @@ static p16 rx_tail(const rx_node *nodes, p16 at)
 
 /* Return 0 after a consuming edge, 1 for an empty path, 2 for an unknown
    first byte. The reverse walk passes assertions but never backreferences. */
-static b32 rx_edges(const regex_program *program, p16 first, p16 last, p8 *table, bool reverse)
+static b32 rx_edges(const regex_program *program, rx_ref first, rx_ref last, p8 *table, bool reverse)
 {
         b32 result = 1;
-        for (p16 at = reverse ? last : first; at;)
+        for (rx_ref at = reverse ? last : first; at;)
         {
                 const rx_node *node = program->nodes + at;
                 result = 1;
@@ -1194,54 +1340,78 @@ static b32 rx_edges(const regex_program *program, p16 first, p16 last, p8 *table
         return result;
 }
 
-/* A literal sequence outside alternation, or inside a mandatory child, is a
-   safe block prefilter. Captures delimit runs; counted nodes are never copied. */
-static fn rx_required(const rx_node *nodes, p16 first, p8 *literal, positive *literal_length)
+/*
+        A literal sequence outside alternation, or inside a mandatory child,
+        is a safe block prefilter. A capture only groups, so the bytes in it
+        and the bytes beside it are one run: (a)(a)(a)\3 needs aaa, and the
+        longest run is the one searched for. Counted nodes are never copied,
+        and what is not a byte ends the run it is in.
+*/
+typedef struct
 {
-        for (p16 at = first; at;)
+        p8 *literal;
+        positive *literal_length;
+        p8 run[RX_LITERAL_MAX];
+        positive run_length;
+} rx_required_state;
+
+static fn rx_required_flush(rx_required_state *state)
+{
+        if (state->run_length > *state->literal_length)
+        {
+                *state->literal_length = state->run_length;
+                memory_copy_apart(state->literal, state->run, state->run_length);
+        }
+        state->run_length = 0;
+}
+
+static fn rx_required_walk(const rx_node *nodes, rx_ref first, rx_required_state *state)
+{
+        for (rx_ref at = first; at; at = nodes[at].next)
         {
                 const rx_node *node = nodes + at;
-                p16 from = at;
-                positive length = 0;
-                while (at && nodes[at].kind == RX_BYTE)
+
+                if (node->kind == RX_BYTE)
                 {
-                        length++;
-                        at = nodes[at].next;
+                        if (state->run_length == RX_LITERAL_MAX)
+                                rx_required_flush(state);
+                        state->run[state->run_length++] = (p8)node->argument;
                 }
-                if (length)
+                else if (node->kind == RX_CAPTURE)
+                        rx_required_walk(nodes, node->left, state);
+                else
                 {
-                        if (length > RX_LITERAL_MAX)
-                                length = RX_LITERAL_MAX;
-                        if (length > *literal_length)
+                        rx_required_flush(state);
+                        if (node->kind == RX_COUNT && node->minimum > 0)
                         {
-                                *literal_length = length;
-                                for (positive i = 0; i < length; i++)
-                                {
-                                        literal[i] = nodes[from].argument;
-                                        from = nodes[from].next;
-                                }
+                                rx_required_walk(nodes, node->left, state);
+                                rx_required_flush(state);
                         }
-                        continue;
                 }
-                if (node->kind == RX_CAPTURE || (node->kind == RX_COUNT && node->minimum > 0))
-                        rx_required(nodes, node->left, literal, literal_length);
-                at = node->next;
         }
+}
+
+static fn rx_required(const rx_node *nodes, rx_ref first, p8 *literal, positive *literal_length)
+{
+        rx_required_state state = {.literal = literal, .literal_length = literal_length};
+
+        rx_required_walk(nodes, first, &state);
+        rx_required_flush(&state);
 }
 
 /* A deterministic graph can reuse the prepared literal search when its
    captures are not observed. Bound both the expansion and interpreter work;
    the graph itself stays compact and remains the resource-limited fallback. */
-static bool rx_fixed(const rx_node *nodes, p16 first, rx_hints *hints, positive *work)
+static bool rx_fixed(const rx_node *nodes, rx_ref first, rx_hints *hints, positive *work)
 {
-        for (p16 at = first; at; at = nodes[at].next)
+        for (rx_ref at = first; at; at = nodes[at].next)
         {
                 const rx_node *node = nodes + at;
                 positive begin = hints->fixed_length, child_work = 0;
                 if (node->kind == RX_BYTE)
                 {
-                        if (begin < RX_NODE_MAX)
-                                hints->fixed_literal[begin] = node->argument;
+                        if (begin < RX_FIXED_MAX)
+                                hints->fixed_literal[begin] = (p8)node->argument;
                         hints->fixed_length++;
                         child_work = 1;
                 }
@@ -1256,12 +1426,12 @@ static bool rx_fixed(const rx_node *nodes, p16 first, rx_hints *hints, positive 
                         {
                                 positive size = hints->fixed_length - begin;
                                 positive count = node->minimum;
-                                if (count > RX_NODE_MAX / (child_work + 1))
+                                if (count > RX_FIXED_MAX / (child_work + 1))
                                         return false;
                                 /* Every byte costs at least one work unit, so this
                                    multiplication is bounded by the work check. */
                                 hints->fixed_length = begin + count * size;
-                                if (hints->fixed_length <= RX_NODE_MAX)
+                                if (hints->fixed_length <= RX_FIXED_MAX)
                                         for (positive i = 1; i < count && size; i++)
                                                 memory_copy_apart(hints->fixed_literal + begin + i * size,
                                                                   hints->fixed_literal + begin, size);
@@ -1270,7 +1440,7 @@ static bool rx_fixed(const rx_node *nodes, p16 first, rx_hints *hints, positive 
                 }
                 else
                         return false;
-                if (child_work > RX_NODE_MAX - *work)
+                if (child_work > RX_FIXED_MAX - *work)
                         return false;
                 *work += child_work;
         }
@@ -1291,20 +1461,25 @@ static bool rx_compile(rx_pool *pool, regex_program *out, string_address pattern
                          .length = string_length(pattern), .extended = extended,
                          .escapes = escapes, .wide_ascii = -1, .wide_two = -1,
                          .wide_three = -1, .wide_four = -1, .wide_tail = -1};
-        if (c.cursor.hints == RX_HINT_MAX)
-                return false;
         if (!c.cursor.nodes)
                 c.cursor.nodes = 1;
-        p16 first = c.cursor.nodes;
-        rx_hints *hints = pool->hints + c.cursor.hints++;
+        // Node nought is none, and the pool has it even when nothing is
+        // written: a pattern of nothing leaves the program a table to point at.
+        if (!rx_room(address_of c, c.cursor.nodes + 1))
+                return regex_failure = REGEX_FAILED_OTHER, false;
+        rx_ref first = (rx_ref)c.cursor.nodes;
+        rx_hints *hints = &pool->hints;
         /* Every accepted proof byte is constructed before publication;
-           rewinding a hint slot does not require clearing unused capacity. */
+           reusing the hints does not require clearing unused capacity. */
         memory_fill(hints, 0, __builtin_offsetof(rx_hints, fixed_literal));
         c.program = (regex_program){.nodes = pool->nodes, .sets = (const p8 (*)[256])pool->sets,
                                 .hints = hints, .policy = policy, .flags = icase ? RX_IGNORE_CASE : 0};
         hints->serial = ++rx_compiles;
         regex_warning_count = 0;
         rx_fragment root = rx_alternation(address_of c);
+        // The scratch may have moved while it grew.
+        c.program.nodes = pool->nodes;
+        c.program.sets = (const p8 (*)[256])pool->sets;
         c.program.first = root.first;
         if (!c.broken && c.at != c.length && rx_operator(address_of c, ')'))
                 c.failure = REGEX_FAILED_CLOSE;
@@ -1316,7 +1491,7 @@ static bool rx_compile(rx_pool *pool, regex_program *out, string_address pattern
                 return false;
         }
         bool literal = root.first && c.cursor.nodes - first <= RX_LITERAL_MAX;
-        for (p16 i = first; i < c.cursor.nodes; i++)
+        for (positive i = first; i < c.cursor.nodes; i++)
         {
                 const rx_node *node = pool->nodes + i;
                 if (node->kind != RX_BYTE)
@@ -1409,13 +1584,13 @@ typedef struct {
         /* Zero resumes a sequence, a positive slot closes its capture,
            and -1 resumes a counted child. The slot is also the frame tag. */
         b16 slot;
-        p16 node;
+        rx_ref node;
         p32 parent;
         positive repetitions, previous_position;
 } rx_frame;
 
 typedef struct {
-        p16 node;
+        rx_ref node;
         p32 continuation, frame_mark, undo_mark;
         positive position, lower;
 } rx_choice;
@@ -1461,7 +1636,7 @@ static p32 rx_frame_put(rx_match *match, rx_frame frame)
         return match->frame_used;
 }
 
-static bool rx_choice_put(rx_match *match, p16 node, p32 continuation,
+static bool rx_choice_put(rx_match *match, rx_ref node, p32 continuation,
                           positive position, positive lower)
 {
         if (match->choice_used == match->choice_capacity)
@@ -1555,7 +1730,7 @@ static bool rx_run(rx_match *match, positive start)
         const regex_program *program = match->program;
         string_address bytes = match->bytes;
         positive length = match->length;
-        p16 node = program->first;
+        rx_ref node = program->first;
         p32 continuation = 0;
         positive position = start, repetitions = 0, previous = positive_max;
         positive work = match->work_used, work_limit = match->work_limit;
@@ -1790,7 +1965,7 @@ static p8 rx_find(rx_match *match, const regex_program *program, p8 mode, bool c
         const rx_hints *hints = program->hints;
         bool fixed = hints->fixed_work && match->active_captures == 2 &&
                      !program->boundary && mode != REGEX_EXACT_LONGEST &&
-                     !match->pending_exhaustion && match->frame_capacity >= RX_NODE_MAX &&
+                     !match->pending_exhaustion && match->frame_capacity >= RX_FIXED_MAX &&
                      length - start < match->work_limit / hints->fixed_work;
         if (fixed && hints->fixed_length > length - start)
                 return RX_NO_MATCH;
@@ -1898,10 +2073,21 @@ static p8 rx_find(rx_match *match, const regex_program *program, p8 mode, bool c
         graph instead.
 */
 #define RX_DFA_NFA_MAX 4096
+#define RX_DFA_ORDER_MAX 8192
 #define RX_DFA_SET_MAX 128
-#define RX_DFA_STATE_MAX 2048
+/* A state's transitions are a row of one cell a class, so the cells bound
+   the states along with the arrays: 2,048 of them for a pattern that tells
+   256 kinds of byte apart, and the arrays' 16,384 for one that tells 32 or
+   fewer. (a|b)*a(a|b){12} is 8,192 states, which was the graph's
+   backtracking at a second a megabyte and is one pass over the text. The
+   states are found by a hash that begins at RX_DFA_HASH slots and doubles
+   while there are more than half as many states as slots, so a pattern of a
+   few states clears what it did before. */
+#define RX_DFA_CELLS (2048 * 256)
+#define RX_DFA_STATE_MAX 16384
 #define RX_DFA_POOL_MAX 262144
 #define RX_DFA_HASH 8192
+#define RX_DFA_HASH_MAX (RX_DFA_STATE_MAX * 2)
 #define RX_DFA_RESETS_MAX 64
 #define RX_DFA_DEPTH_MAX 256
 /* Calls the NFA build may make. Nodes are capped, but a count over a body
@@ -1931,7 +2117,7 @@ typedef struct
         p8 classes[256];
         p8 representative[256];
         p8 name[256];
-        p16 order[RX_NODE_MAX];
+        rx_ref order[RX_DFA_ORDER_MAX];
         positive nfa_count, set_count, class_count, order_top, work;
         p16 start;
         p8 boundary, delimiter, delimiter_class;
@@ -1945,17 +2131,19 @@ typedef struct
 typedef struct
 {
         const rx_dfa *dfa;
-        b32 trans[RX_DFA_STATE_MAX * 256];
+        b32 trans[RX_DFA_CELLS];
         p32 set_at[RX_DFA_STATE_MAX];
+        // Where the state hashed to, kept for the hash to be made over again.
+        p32 hashed[RX_DFA_STATE_MAX];
         p16 set_size[RX_DFA_STATE_MAX];
         p8 flags[RX_DFA_STATE_MAX];
         p16 pool[RX_DFA_POOL_MAX];
-        p32 hash[RX_DFA_HASH];
+        p32 hash[RX_DFA_HASH_MAX];
         p32 mark[RX_DFA_NFA_MAX];
         p64 bits[RX_DFA_NFA_MAX / 64];
         p16 stack[RX_DFA_NFA_MAX];
         p16 found[RX_DFA_NFA_MAX];
-        positive pool_used, state_count, generation, resets;
+        positive pool_used, state_count, state_cap, hash_slots, generation, resets;
         b32 start;
         bool failed;
 } rx_dfa_cache;
@@ -1988,7 +2176,7 @@ static p8 rx_nfa_set(rx_dfa *dfa, const p8 *table)
 
 /* The sequence from `first` along `next`, ending in `follow`, built from its
    last node back so every piece already knows where it goes. */
-static p16 rx_nfa_build(rx_dfa *dfa, const regex_program *program, p16 first,
+static p16 rx_nfa_build(rx_dfa *dfa, const regex_program *program, rx_ref first,
                         p16 follow, b32 depth)
 {
         const rx_node *nodes = program->nodes;
@@ -2002,9 +2190,9 @@ static p16 rx_nfa_build(rx_dfa *dfa, const regex_program *program, p16 first,
                 return follow;
         }
         positive base = dfa->order_top;
-        for (p16 at = first; at; at = nodes[at].next)
+        for (rx_ref at = first; at; at = nodes[at].next)
         {
-                if (dfa->order_top == RX_NODE_MAX)
+                if (dfa->order_top == RX_DFA_ORDER_MAX)
                 {
                         dfa->usable = false;
                         return follow;
@@ -2156,7 +2344,8 @@ static b32 rx_dfa_intern(rx_dfa_cache *cache, p8 flags, bool *reset)
                         cache->found[size++] = id;
                         hash = (hash ^ id) * 1099511628211ull;
                 }
-        positive slot = (positive)(hash >> 20) & (RX_DFA_HASH - 1);
+        p32 where = (p32)(hash >> 20);
+        positive slot = where & (cache->hash_slots - 1);
         for (;;)
         {
                 p32 entry = cache->hash[slot];
@@ -2167,9 +2356,9 @@ static b32 rx_dfa_intern(rx_dfa_cache *cache, p8 flags, bool *reset)
                     !memory_compare(cache->pool + cache->set_at[state], cache->found,
                                     size * sizeof(p16)))
                         return state;
-                slot = (slot + 1) & (RX_DFA_HASH - 1);
+                slot = (slot + 1) & (cache->hash_slots - 1);
         }
-        if (cache->state_count == RX_DFA_STATE_MAX ||
+        if (cache->state_count == cache->state_cap ||
             cache->pool_used + size > RX_DFA_POOL_MAX)
         {
                 if (*reset || ++cache->resets > RX_DFA_RESETS_MAX)
@@ -2181,8 +2370,25 @@ static b32 rx_dfa_intern(rx_dfa_cache *cache, p8 flags, bool *reset)
                 rx_dfa_begin(cache);
                 return rx_dfa_intern(cache, flags, reset);
         }
+        if ((cache->state_count + 1) * 2 > cache->hash_slots &&
+            cache->hash_slots < RX_DFA_HASH_MAX)
+        {
+                cache->hash_slots *= 2;
+                memory_fill(cache->hash, 0, cache->hash_slots * sizeof(p32));
+                for (positive again = 0; again < cache->state_count; again++)
+                {
+                        positive place = cache->hashed[again] & (cache->hash_slots - 1);
+                        while (cache->hash[place])
+                                place = (place + 1) & (cache->hash_slots - 1);
+                        cache->hash[place] = (p32)again + 1;
+                }
+                slot = where & (cache->hash_slots - 1);
+                while (cache->hash[slot])
+                        slot = (slot + 1) & (cache->hash_slots - 1);
+        }
         b32 state = (b32)cache->state_count++;
         cache->set_at[state] = (p32)cache->pool_used;
+        cache->hashed[state] = where;
         cache->set_size[state] = (p16)size;
         cache->flags[state] = flags;
         memory_copy_apart(cache->pool + cache->pool_used, cache->found, size * sizeof(p16));
@@ -2197,7 +2403,10 @@ static fn rx_dfa_begin(rx_dfa_cache *cache)
 {
         cache->state_count = 0;
         cache->pool_used = 0;
-        memory_fill(cache->hash, 0, sizeof(cache->hash));
+        cache->hash_slots = RX_DFA_HASH;
+        cache->state_cap = min((positive)RX_DFA_STATE_MAX,
+                               (positive)RX_DFA_CELLS / cache->dfa->class_count);
+        memory_fill(cache->hash, 0, RX_DFA_HASH * sizeof(p32));
         // The start is the one set a caller holds across a reset.
         p64 saved[RX_DFA_NFA_MAX / 64];
         memory_copy_apart(saved, cache->bits, sizeof(saved));
@@ -2616,7 +2825,6 @@ static positive rx_dfa_lanes(rx_dfa_cache *cache, string_address at,
 #define REGEX_SCRATCH_MAX 20000
 
 static rx_pool address_to regex_pool_held;
-static rx_mark regex_retained;
 static regex_program regex_current;
 static rx_frame (address_to regex_frames_held)[REGEX_SCRATCH_MAX];
 #define regex_frames UTILITY_HELD(regex_frames)
@@ -2669,19 +2877,63 @@ static rx_dfa_cache address_to regex_dfa_cache_held;
 #define regex_group_count regex_current.groups
 #define regex_boundary regex_current.boundary
 
-/* Ordinary compilations borrow the space above the retained program mark. */
+/* A compilation is made in the scratch from the start, over the one before. */
 static bool regex_compile(string_address pattern, bool extended, bool icase,
                           bool escapes, p8 policy)
 {
-        regex_pool.used = regex_retained;
+        regex_pool.used = (rx_mark){0};
         return rx_compile(&regex_pool, &regex_current, pattern, extended,
                           icase, escapes, policy);
 }
 
+/*
+        The program just compiled in `pool`, copied into a block of its own so
+        that it stands while others are made: its hints (and the fixed string
+        as far as it goes, which is most of what they weigh), then its nodes
+        and its sets, as one allocation, which regex_release gives back whole.
+        A table of them was five hundred and twelve, and a script of a
+        thousand s/// commands was "unsupported or invalid script".
+*/
+static bool rx_keep(rx_pool *pool, const regex_program *program, regex_program *into)
+{
+        positive fixed = program->hints->fixed_length < RX_FIXED_MAX
+                             ? program->hints->fixed_length : RX_FIXED_MAX;
+        positive hints = (__builtin_offsetof(rx_hints, fixed_literal) + fixed + 15) & ~(positive)15;
+        // A pattern of nothing has no nodes and no sets, and the pool may
+        // never have been given any: the program points at nothing then.
+        positive nodes = program->nodes ? pool->used.nodes * sizeof(rx_node) : 0;
+        positive sets = program->sets ? pool->used.sets * 256 : 0;
+        p8 *block = memory_take(hints + nodes + sets);
+
+        if (!block)
+                return false;
+
+        memory_copy_apart(block, program->hints, hints);
+        memory_copy_apart(block + hints, program->nodes, nodes);
+        memory_copy_apart(block + hints + nodes, program->sets, sets);
+
+        *into = *program;
+        into->hints = (const rx_hints *)block;
+        into->nodes = (const rx_node *)(block + hints);
+        into->sets = (const p8 (*)[256])(block + hints + nodes);
+        return true;
+}
+
 static fn regex_keep(regex_program *into)
 {
-        *into = regex_current;
-        regex_retained = regex_pool.used;
+        if (!rx_keep(&regex_pool, &regex_current, into))
+        {
+                string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
+                exit(1);
+        }
+}
+
+// A kept program given back, its block being its hints and what follows them.
+static fn regex_release(regex_program *program)
+{
+        if (program->hints)
+                memory_give((address_any)program->hints);
+        *program = (regex_program){0};
 }
 
 /*

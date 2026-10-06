@@ -83267,7 +83267,7 @@ static fn reuse_regex(void)
                               regex_slots[0] == 0 && regex_slots[1] == string_length(subjects[i]));
                 }
         }
-        regex_retained = regex_pool.used = (rx_mark){0};
+        regex_pool.used = (rx_mark){0};
         static p8 repeated[30002];
         for (positive i = 0; i < 4090; i++)
         {
@@ -83298,8 +83298,7 @@ static fn reuse_regex(void)
               !rx_compile(&regex_pool, &regex_current, "([", true, false, false,
                           REGEX_POLICY_DEFAULT) && regex_current.first == published.first &&
               regex_current.hints == published.hints &&
-              regex_pool.used.nodes == mark.nodes && regex_pool.used.sets == mark.sets &&
-              regex_pool.used.hints == mark.hints);
+              regex_pool.used.nodes == mark.nodes && regex_pool.used.sets == mark.sets);
         check("capture-bearing search succeeds",
               regex_compile("(a)", true, false, false, REGEX_POLICY_DEFAULT) &&
               regex_find(REGEX_LONGEST | REGEX_CAPTURES, "a", 1, 0) && regex_slots[2] == 0);
@@ -83307,7 +83306,107 @@ static fn reuse_regex(void)
               regex_compile("(b){0}x", true, false, false, REGEX_POLICY_DEFAULT) &&
               regex_find(REGEX_LONGEST | REGEX_CAPTURES, "x", 1, 0) &&
               regex_slots[2] == positive_max && regex_slots[3] == positive_max);
-        regex_retained = regex_pool.used = (rx_mark){0};
+        regex_pool.used = (rx_mark){0};
+
+        /*
+                More programs kept than a table held, and a pattern bigger
+                than the scratch began with: a thousand and a hundred of
+                them each its own block and each answering after the rest
+                were made, a pattern of three hundred brackets, which a byte
+                numbered up to two hundred and fifty-five of, and one of a
+                hundred thousand bytes, which was refused at eight thousand.
+        */
+        {
+                static regex_program many[1100];
+                static p8 pattern[32], subject[32];
+                bool made = true, answered = true, apart = true;
+
+                for (positive i = 0; i < 1100; i++)
+                {
+                        pattern[0] = 'k';
+                        positive_into_padded(pattern + 1, i, 4, '0');
+                        memory_copy_apart(pattern + 5, "[a-c]", 6);
+                        made = made && regex_compile((string_address)pattern, true, false, false,
+                                                     REGEX_POLICY_DEFAULT);
+                        if (made)
+                                regex_keep(many + i);
+                }
+                check("a thousand and a hundred programs are kept", made);
+
+                for (positive i = 0; made && i < 1100; i++)
+                {
+                        subject[0] = 'k';
+                        positive_into_padded(subject + 1, i, 4, '0');
+                        memory_copy_apart(subject + 5, "b", 2);
+                        regex_current = many[i];
+                        answered = answered &&
+                                   regex_find(REGEX_LONGEST, (string_address)subject, 6, 0) &&
+                                   regex_slots[0] == 0 && regex_slots[1] == 6;
+                        regex_current = many[(i + 1) % 1100];
+                        apart = apart && !regex_find(REGEX_LONGEST, (string_address)subject, 6, 0);
+                }
+                check("each of them still answers after the others were made", made && answered);
+                check("and only for what it was made of", made && apart);
+        }
+        {
+                static p8 brackets[260 * 5 + 6], text[262];
+
+                for (positive i = 0; i < 260; i++)
+                        memory_copy_apart(brackets + 5 * i, "[0-9]", 5);
+                memory_copy_apart(brackets + 5 * 260, "[a-z]", 6);
+                memory_fill(text, '0', 260);
+                text[260] = 'a';
+                text[261] = 0;
+                check("a pattern of more brackets than a byte numbers finds what they say",
+                      regex_compile((string_address)brackets, false, false, false, REGEX_POLICY_DEFAULT) &&
+                      regex_find(REGEX_LONGEST, (string_address)text, 261, 0) &&
+                      regex_slots[0] == 0 && regex_slots[1] == 261);
+        }
+        {
+                static p8 literal[100001], text[100011];
+
+                memory_fill(literal, 'x', 100000);
+                literal[100000] = 0;
+                memory_fill(text, 'y', 10);
+                memory_fill(text + 10, 'x', 100000);
+                text[100010] = 0;
+                check("a pattern of a hundred thousand bytes is compiled and found",
+                      regex_compile((string_address)literal, false, false, false, REGEX_POLICY_DEFAULT) &&
+                      regex_find(REGEX_LONGEST, (string_address)text, 100010, 0) &&
+                      regex_slots[0] == 10 && regex_slots[1] == 100010);
+        }
+        {
+                regex_program kept;
+
+                check("a pattern of nothing is kept, and finds the empty line",
+                      regex_compile("", false, false, false, REGEX_POLICY_EXPR) &&
+                      rx_keep(&regex_pool, &regex_current, &kept) &&
+                      (regex_current = kept, regex_find(REGEX_LONGEST, "abc", 3, 0)) &&
+                      regex_slots[0] == 0 && regex_slots[1] == 0);
+        }
+        {
+                static const struct { string_address pattern, text; positive length; bool found; } folds[] = {
+                    {"\xc3\x89", "caf\xc3\xa9", 5, true},
+                    {"caf\xc3\xa9+", "CAF\xc3\x89\xc3\x89", 7, true},
+                    {"[\xc3\xa9x]\xc3\xa0", "\xc3\x89\xc3\x80", 4, true},
+                    {"\xc3\xa9", "e", 1, false},
+                    {"\xc7\x84", "\xc7\x85", 2, true},
+                    {"\xcf\x83", "\xcf\x82", 2, true},
+                    {"\xce\xa3", "\xcf\x82", 2, true},
+                    {"\xcf\x82", "\xcf\x83", 2, true},
+                    {"\xe2\x84\xaa", "k", 1, false},
+                    {"\xc3\x85", "\xe2\x84\xab", 3, false}};
+                bool every = true;
+
+                for (positive i = 0; i < sizeof(folds) / sizeof(folds[0]); i++)
+                        every = every &&
+                                regex_compile(folds[i].pattern, true, true, false,
+                                              REGEX_POLICY_DEFAULT | REGEX_CHARACTERS) &&
+                                regex_find(REGEX_LONGEST, folds[i].text, folds[i].length, 0) ==
+                                    folds[i].found;
+                check("a character of more than one byte matches the others of its case", every);
+        }
+        regex_pool.used = (rx_mark){0};
 }
 
 b32 main(void)
@@ -98414,7 +98513,7 @@ b32 main(void)
             "", "a", "ab", "abab", "aabb", "xabab", "ABAB", "ab\nab",
         };
         static positive budgets[] = {0, 1, 5, 50, 100000000};
-        static p32 capacities[] = {0, 2, RX_NODE_MAX - 1, RX_NODE_MAX};
+        static p32 capacities[] = {0, 2, RX_FIXED_MAX - 1, RX_FIXED_MAX};
         p8 repeated[260];
         for (positive i = 0; i < sizeof(repeated); i++)
                 repeated[i] = i & 1 ? 'b' : 'a';
@@ -98474,12 +98573,12 @@ b32 main(void)
         }
         /* Reuse the same hint after its complete buffer held a maximal
            literal. Short, empty-count and unsupported proofs must not see it. */
-        p8 longest[RX_NODE_MAX];
+        p8 longest[RX_FIXED_MAX];
         memory_fill(longest, 'a', sizeof(longest) - 1);
         longest[sizeof(longest) - 1] = 0;
         string_address reuse_patterns[] = {longest, "(ab){2}", "a{0}b", "[a-z]+", "((a){0}b){2}"};
         string_address reuse_subjects[] = {longest, "abab", "b", "xyz", "bb"};
-        regex_retained = (rx_mark){0};
+        regex_pool.used = (rx_mark){0};
         for (positive round = 0; round < 4; round++)
         for (positive i = 0; i < array_count(reuse_patterns); i++)
         {
