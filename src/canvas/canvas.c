@@ -25,6 +25,7 @@
 #include <linux/workqueue.h>
 #include <linux/kthread.h>
 #include <linux/rtmutex.h>
+#include <linux/cleanup.h>
 #include <uapi/linux/sched/types.h>
 #include <linux/pm_qos.h>
 #include <linux/suspend.h>
@@ -40,6 +41,9 @@
 
 #include "window.c"
 
+/* The kernel's guard for the lock the desktop is taken under; it has one for
+   mutex and spinlock but none for rt_mutex. */
+DEFINE_GUARD(rt_mutex, struct rt_mutex *, rt_mutex_lock(_T), rt_mutex_unlock(_T))
 
 /*
         For the ones that mean there is no picture.
@@ -2960,30 +2964,21 @@ static long window_ioctl_create(struct file *file, unsigned long argument)
         if (copy_from_user(&request, (void __user *)argument, sizeof(request)))
                 return -EFAULT;
 
-        rt_mutex_lock(&desktop.lock);
+        guard(rt_mutex)(&desktop.lock);
 
         // Tested and stored under the one lock: two threads on one file used
         // to be able to both create, and the window one of them made was then
         // reachable from nothing and freed by nothing.
         if (context->pane)
-        {
-                rt_mutex_unlock(&desktop.lock);
                 return -EBUSY;
-        }
 
         if (list_empty(&desktop.outputs) || desktop.off)
-        {
-                rt_mutex_unlock(&desktop.lock);
                 return -ENODEV;
-        }
 
         pane = pane_create(request.width, request.height,
                            request.columns, request.rows, false);
         if (!pane)
-        {
-                rt_mutex_unlock(&desktop.lock);
                 return -EINVAL;
-        }
 
         bytes = pane->bytes;
 
@@ -3015,8 +3010,6 @@ static long window_ioctl_create(struct file *file, unsigned long argument)
         }
 
         desktop_recompose();
-
-        rt_mutex_unlock(&desktop.lock);
 
         // How much to map, which the program cannot work out for itself.
         return (long)bytes;
@@ -3186,7 +3179,7 @@ static long window_ioctl_commit(struct file *file)
         if (!context->pane)
                 return -EINVAL;
 
-        rt_mutex_lock(&desktop.lock);
+        guard(rt_mutex)(&desktop.lock);
 
         // Another program has the display: nothing drawn now would land, and
         // the resume draws everything once it lets go.
@@ -3198,7 +3191,6 @@ static long window_ioctl_commit(struct file *file)
                         canvas_thread_wake();
                 }
 
-                rt_mutex_unlock(&desktop.lock);
                 return 0;
         }
 
@@ -3229,10 +3221,7 @@ static long window_ioctl_commit(struct file *file)
 
                 if (desktop.awake && !READ_ONCE(pane->keyed) &&
                     now - pane->composed_ns < canvas_frame_ns())
-                {
-                        rt_mutex_unlock(&desktop.lock);
                         return 0;
-                }
 
                 pane->composed_ns = now;
                 WRITE_ONCE(pane->keyed, false);
@@ -3240,7 +3229,6 @@ static long window_ioctl_commit(struct file *file)
 
         desktop_refresh_panes();
         desktop_repaint();
-        rt_mutex_unlock(&desktop.lock);
 
         return 0;
 }
@@ -9898,24 +9886,18 @@ static void canvas_state(struct canvas_control *answer)
 */
 static long canvas_log_open(void)
 {
-        mutex_lock(&canvas_control_lock);
+        guard(mutex)(&canvas_control_lock);
 
         if (!canvas_is_on())
-        {
-                mutex_unlock(&canvas_control_lock);
                 return -ENODEV;
-        }
 
-        rt_mutex_lock(&desktop.lock);
+        guard(rt_mutex)(&desktop.lock);
         desktop.log_wanted = true;
         if (desktop.started)
         {
                 console_start();
                 desktop_recompose();
         }
-        rt_mutex_unlock(&desktop.lock);
-
-        mutex_unlock(&canvas_control_lock);
         return 0;
 }
 
