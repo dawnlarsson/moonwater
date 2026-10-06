@@ -403,6 +403,15 @@ with `--set name=value`. Building a kernel needs Linux and a case-sensitive
 filesystem, so elsewhere point `--host` (or `MOONWATER_BUILD_HOST`) at a
 machine that has them; QEMU still runs locally.
 
+The kernel's built-in command line is every composed profile's `#> cmdline`
+words, joined in the order the profiles are composed, so a profile adds words
+and none replaces the string. A word spelled with a minus, `#> cmdline
+-drm_client_lib.active=`, takes the same word out of what came before it:
+`terminal`, `console` and `server` give the screen to the framebuffer console
+that way and keep the rest. A `#> overrides CONFIG_NAME` line says the profile
+means to win over an earlier one on that option, which is what the report of
+profiles that disagree leaves out.
+
 The bundled userspace is two Kconfig options, both on by default:
 
 | `MOONWATER_SHELL` | `MOONWATER_UTILITIES` | Bundled payload |

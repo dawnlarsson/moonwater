@@ -109,7 +109,6 @@ CONFIG_PM_SLEEP_DEBUG=y
 # for ARM and for ACPI cpufreq (older AMD), and uclamp is how one task
 # asks for the top of the range without holding every core there.
 #
-CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y
 CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=n
 
 #
@@ -123,7 +122,6 @@ CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=n
 # megabytes or more, and sort, xz and zstd are as fast as they were measured
 # at THP=always (sort 1.28x, xz 1.13x slower in a process that did not ask).
 #
-CONFIG_TRANSPARENT_HUGEPAGE_MADVISE=y
 CONFIG_TRANSPARENT_HUGEPAGE_ALWAYS=n
 
 # The multi-generational LRU, which was off. It is the newer of the two page
@@ -192,7 +190,6 @@ CONFIG_DEFAULT_CUBIC=n
 # whatever the firmware chose, which is what a desktop or a laptop already
 # ships with.
 #
-CONFIG_PCIEASPM_DEFAULT=y
 CONFIG_PCIEASPM_PERFORMANCE=n
 
 #
@@ -236,8 +233,7 @@ CONFIG_X86_KERNEL_IBT=n
 # nothing at all until something actually unwinds.
 #
 # The prod profile is composed after this one and replaces ORC with the guess
-# unwinder, which costs neither and is accurate about nothing. This line is
-# what the choice falls back to when prod is not in the build.
+# unwinder, which costs neither and is accurate about nothing, so the choice
+# ends there and frame pointers stay off.
 #
-CONFIG_UNWINDER_ORC=y
 CONFIG_UNWINDER_FRAME_POINTER=n

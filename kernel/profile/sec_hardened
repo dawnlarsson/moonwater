@@ -16,13 +16,14 @@ CONFIG_INTEGRITY=n
 CONFIG_MOONWATER_STRICT=2
 
 #
-# Floodlight: the denials the default refused before 2026-09-28 (awk
-# starting programs, script and setarch starting a shell), every
-# dangerous-flag switch off, and the policy sealed at boot so no later
-# line to /dev/floodlight loosens it. Each switch's help in
-# src/moonwater/Kconfig names the exploit class it closes.
+# Floodlight: every dangerous-flag switch off, which is the denials the
+# default refused before 2026-09-28 (awk starting programs with AWK_SPAWN,
+# script and setarch starting a shell with SHELL_ESCAPES) and the rest of the
+# bundles, and the policy sealed at boot so no later line to /dev/floodlight
+# loosens it. Each switch's help in src/moonwater/Kconfig names the exploit
+# class it closes. The POLICY string stays empty: the rows it once spelled
+# are the first two switches' own.
 #
-CONFIG_MOONWATER_FLOODLIGHT_POLICY="awk spawn deny; script spawn deny; setarch spawn deny"
 CONFIG_MOONWATER_FLOODLIGHT_SEAL=y
 CONFIG_MOONWATER_FLOODLIGHT_AWK_SPAWN=n
 CONFIG_MOONWATER_FLOODLIGHT_SHELL_ESCAPES=n

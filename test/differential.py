@@ -29288,6 +29288,104 @@ out.write_text("#!/usr/bin/env python3\\n"
                 self.assertNotEqual(done.returncode, 0, "%s as %r was accepted" % (name, replacement))
                 self.assertIn(name + " is essential", done.stderr)
 
+    def cmdline_of(self, config):
+        """The last CONFIG_CMDLINE a composed file says, which is the one the
+        kernel is built with."""
+        found = re.findall(r'^CONFIG_CMDLINE="(.*)"$', config.read_text(), re.M)
+        self.assertTrue(found, "no CONFIG_CMDLINE in %s" % config)
+        return found[-1].split()
+
+    def test_every_profile_on_every_machine_keeps_the_command_line_words(self):
+        """The built-in command line is every profile's `#> cmdline` words, so a
+        profile that drops drm_client_lib.active= (the ones with no Canvas to keep
+        the fbdev client from the screen, and the Pi's, which has fbcon) does not
+        take the pstate, hash and swiotlb words with it: terminal, console and
+        server each blanked the whole string and nothing built them to notice."""
+        if platform.system() != "Linux":
+            self.skipTest("the freestanding C build tool requires Linux")
+        source = (HARNESS_ROOT / "src/build/build.c").read_text()
+        always = re.search(r'\{"profiles_always", "([^"]+)"\}', source).group(1).split()
+        default = re.search(r'\{"profiles_default", "([^"]+)"\}', source).group(1).split()
+        listed = sorted(path.name for path in (HARNESS_ROOT / "kernel/profile").iterdir()
+                        if path.is_file() and path.name not in always)
+        essential = ["intel_pstate=active", "amd_pstate=active", "intel_pstate.hwp_dynamic_boost=1",
+                     "thash_entries=4096", "uhash_entries=1024", "mhash_entries=4096",
+                     "mphash_entries=4096", "swiotlb=1024"]
+        no_canvas = {"terminal", "console", "server"}
+        composed = 0
+        for machine in ("arch/x64", "arch/arm", "arch/arm.pi", "arch/riscv"):
+            for profile in [None, "default"] + listed:
+                names = default if profile == "default" else [profile] if profile else []
+                done, config = self.compose(always + [machine] + names)
+                self.assertEqual(done.returncode, 0, "%s %s: %s" % (machine, profile, done.stderr))
+                words = self.cmdline_of(config)
+                for word in essential:
+                    self.assertEqual(words.count(word), 1, "%s with %s and %s: %s" % (word, machine, profile, words))
+                dropped = machine == "arch/arm.pi" or bool(no_canvas & set(names))
+                self.assertEqual("drm_client_lib.active=" in words, not dropped,
+                                 "%s with %s: %s" % (machine, profile, words))
+                composed += 1
+        self.assertEqual(composed, 4 * (len(listed) + 2))
+
+    def test_a_cmdline_word_with_a_minus_takes_the_earlier_word_out_and_keeps_the_order(self):
+        if platform.system() != "Linux":
+            self.skipTest("the freestanding C build tool requires Linux")
+        always = re.search(r'\{"profiles_always", "([^"]+)"\}',
+                           (HARNESS_ROOT / "src/build/build.c").read_text()).group(1).split()
+        root = self.work / "profiles"
+        shutil.rmtree(root, ignore_errors=True)
+        shutil.copytree(HARNESS_ROOT / "kernel/profile", root)
+        (root / "first").write_text("#> cmdline one=1 two\n#> cmdline three  four=4\n")
+        (root / "second").write_text("#> cmdline -two five -one=1 -absent\n#> cmdline two\n")
+        done, config = self.compose(always + ["arch/x64", "first", "second"], root)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        words = self.cmdline_of(config)
+        self.assertEqual(words[-4:], ["three", "four=4", "five", "two"])
+        self.assertNotIn("one=1", words)
+        self.assertNotIn("-absent", words)
+        #       A quote or a backslash would end the string early or escape what follows.
+        for bad in ('a"b', "a\\b"):
+            (root / "second").write_text("#> cmdline %s\n" % bad)
+            done, _ = self.compose(always + ["arch/x64", "first", "second"], root)
+            self.assertNotEqual(done.returncode, 0, bad)
+            self.assertIn("quote or a backslash", done.stderr)
+
+    def test_a_profile_can_say_it_overrides_an_option_and_the_report_leaves_it_out(self):
+        if platform.system() != "Linux":
+            self.skipTest("the freestanding C build tool requires Linux")
+        always = re.search(r'\{"profiles_always", "([^"]+)"\}',
+                           (HARNESS_ROOT / "src/build/build.c").read_text()).group(1).split()
+        root = self.work / "profiles"
+        shutil.rmtree(root, ignore_errors=True)
+        shutil.copytree(HARNESS_ROOT / "kernel/profile", root)
+        (root / "low").write_text("CONFIG_JANK_ONE=1\nCONFIG_JANK_TWO=1\n")
+        (root / "high").write_text("#> overrides CONFIG_JANK_ONE\nCONFIG_JANK_ONE=2\nCONFIG_JANK_TWO=2\n")
+        done, _ = self.compose(always + ["arch/x64", "low", "high"], root)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        report = done.stdout + done.stderr
+        self.assertIn("CONFIG_JANK_TWO", report)
+        self.assertNotIn("CONFIG_JANK_ONE", report)
+        #       The word is about the profile that has the last say: one in the
+        #       middle that names the option does not hide a later profile's
+        #       disagreement.
+        (root / "later").write_text("CONFIG_JANK_ONE=3\n")
+        done, _ = self.compose(always + ["arch/x64", "low", "high", "later"], root)
+        self.assertIn("CONFIG_JANK_ONE", done.stdout + done.stderr)
+
+    def test_the_default_composition_on_every_machine_has_no_profile_disagreement(self):
+        """What a plain build composes says nothing twice and nothing against
+        itself: a line that can never take, or two that differ, is either deleted
+        or declared with `#> overrides` by the profile that means it."""
+        if platform.system() != "Linux":
+            self.skipTest("the freestanding C build tool requires Linux")
+        source = (HARNESS_ROOT / "src/build/build.c").read_text()
+        always = re.search(r'\{"profiles_always", "([^"]+)"\}', source).group(1).split()
+        default = re.search(r'\{"profiles_default", "([^"]+)"\}', source).group(1).split()
+        for machine in ("arch/x64", "arch/arm", "arch/arm.pi", "arch/riscv"):
+            done, _ = self.compose(always + [machine] + default)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertNotIn("Profiles disagree", done.stdout + done.stderr, machine)
+
     def test_paths_preserve_spaces_globs_and_option_terminator(self):
         source = self.work / "source [literal] space.c"
         source.touch()

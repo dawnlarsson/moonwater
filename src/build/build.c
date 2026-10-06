@@ -995,6 +995,26 @@ static positive build_words_of(string_address line, positive bound,
         return count;
 }
 
+/*
+        Splitting a value that arrived as one word.
+
+        Flag lists ride in the configuration as a single key -- "#> flags -a -b"
+        -- and reach a compiler as separate arguments. The shell got that by
+        leaving the expansion unquoted, which is also how it got the empty
+        string turning into no argument at all rather than one empty one.
+*/
+static positive build_split(string_address text, string_address address_to into,
+                            positive room)
+{
+        p8 address_to store = build_text_take(BUILD_WORD_ROOM);
+
+        if (!text)
+                return 0;
+
+        return build_words_of(text, string_length(text), into, room, store,
+                              BUILD_WORD_ROOM);
+}
+
 //      The next line and its words. The walk takes one store the first time
 //      it is asked, and every line's words reuse it.
 static bool build_lines_words(build_lines address_to walk,
@@ -1303,6 +1323,54 @@ static fn build_write_field(string_address text, positive width)
         }
 }
 
+//      Whether the profile that has the last word on an option says, in a
+//      `#> overrides` line, that it means to: serial asks for the loglevel
+//      and the timestamps that debug_none quietens, which is the whole reason
+//      serial is last, and a report that named them in every default build
+//      would be read the way a report that is always there is read.
+static bool build_config_deliberate(string_address name,
+                                    string_address address_to profiles,
+                                    positive profile_count)
+{
+        positive want = string_length(name);
+
+        for (positive which = profile_count; which--;)
+        {
+                string_address path = build_join(build_setting_get("profile_root"),
+                                                 "/", profiles[which], null);
+                string_address words[BUILD_ARGUMENT_ROOM];
+                build_lines walk;
+                bool sets = false;
+                positive many;
+
+                if (file_slurp(path, build_file_two, BUILD_FILE_ROOM) < 0)
+                        continue;
+
+                build_lines_open(address_of walk, (string_address)build_file_two);
+
+                while (build_lines_next(address_of walk))
+                        sets |= walk.length > want + 1 &&
+                                !memory_compare(walk.line, name, want) &&
+                                walk.line[want] == '=';
+
+                if (!sets)
+                        continue;
+
+                many = build_split(build_key_from((string_address)build_file_two,
+                                                  "overrides", null),
+                                   (string_address address_to)words,
+                                   BUILD_ARGUMENT_ROOM);
+
+                for (positive at = 0; at < many; at++)
+                        if (string_equals(words[at], name))
+                                return true;
+
+                return false;
+        }
+
+        return false;
+}
+
 /*
         Where two profiles disagree.
 
@@ -1358,6 +1426,12 @@ static fn build_config_conflicts(string_address text,
                 {
                         string_address name = build_text_keep(
                                 build_pairs[first].name, build_pairs[first].name_length);
+
+                        if (build_config_deliberate(name, profiles, profile_count))
+                        {
+                                at = step;
+                                continue;
+                        }
 
                         if (!announced)
                         {
@@ -1632,6 +1706,69 @@ static b32 build_essentials_built(string_address config)
         return failed != 0;
 }
 
+/*
+        The kernel's built-in command line, composed.
+
+        CONFIG_CMDLINE is one string and Kconfig keeps the last assignment, so
+        a profile that wanted one word out of it had to replace all of it: the
+        terminal, console and server profiles blanked the string to be rid of
+        drm_client_lib.active= and lost the pstate, hash and swiotlb words
+        with it, and nothing built them to notice. The words ride in comments
+        instead, as every key does:
+
+            #> cmdline drm_client_lib.active= swiotlb=1024
+            #> cmdline -drm_client_lib.active=
+
+        Every profile's words are joined in the order the profiles are
+        composed, and a word with a minus in front takes the same word, as
+        spelled after the minus, out of what came before it. The result is the
+        one CONFIG_CMDLINE line at the end of the composed file, which is
+        where it wins over any string a profile still spells outright.
+*/
+static string_address build_cmdline(string_address text, bool address_to given)
+{
+        positive seen = 0;
+        string_address joined = build_key_from(text, "cmdline", address_of seen);
+        string_address words[BUILD_ARGUMENT_ROOM];
+        positive count = build_split(joined, (string_address address_to)words,
+                                     BUILD_ARGUMENT_ROOM);
+        byte_store line = {build_text_take(BUILD_WORD_ROOM), BUILD_WORD_ROOM - 1, 0};
+        string_address kept[BUILD_ARGUMENT_ROOM];
+        positive many = 0;
+
+        address_to given = seen != 0;
+
+        for (positive at = 0; at < count; at++)
+        {
+                if (words[at][0] != '-' || !words[at][1])
+                {
+                        kept[many++] = words[at];
+                        continue;
+                }
+
+                positive into = 0;
+
+                for (positive from = 0; from < many; from++)
+                        if (!string_equals(kept[from], words[at] + 1))
+                                kept[into++] = kept[from];
+
+                many = into;
+        }
+
+        for (positive at = 0; at < many; at++)
+        {
+                if (at)
+                        byte_store_append_span(address_of line, " ", 1);
+
+                byte_store_append_span(address_of line, kept[at],
+                                       string_length(kept[at]));
+        }
+
+        line.bytes[line.used] = end;
+
+        return (string_address)line.bytes;
+}
+
 static b32 build_config(string_address address_to profiles, positive count)
 {
         string_address artifacts = build_setting_get("artifacts");
@@ -1711,6 +1848,27 @@ static b32 build_config(string_address address_to profiles, positive count)
         }
 
         build_file_one[used] = end;
+
+        {
+                bool given;
+                string_address line = build_cmdline((string_address)build_file_one,
+                                                    address_of given);
+                string_address set = build_join("\nCONFIG_CMDLINE=\"", line, "\"\n",
+                                                null);
+                positive room = string_length(set);
+
+                if (given)
+                {
+                        return_if(string_first_of_set(line, "\"\\"),
+                                  build_die("a #> cmdline word has a quote or a backslash in it"));
+                        return_if(used + room >= BUILD_FILE_ROOM,
+                                  build_die("the composed configuration is too large"));
+                        memory_copy(build_file_one + used, set, room);
+                        used += room;
+                        build_file_one[used] = end;
+                }
+        }
+
         log_flush();
 
         if (!build_write_file(target, (string_address)build_file_one, used))
@@ -2526,26 +2684,6 @@ static bool build_pad(b32 handle, positive from, positive to)
         }
 
         return true;
-}
-
-/*
-        Splitting a value that arrived as one word.
-
-        Flag lists ride in the configuration as a single key -- "#> flags -a -b"
-        -- and reach a compiler as separate arguments. The shell got that by
-        leaving the expansion unquoted, which is also how it got the empty
-        string turning into no argument at all rather than one empty one.
-*/
-static positive build_split(string_address text, string_address address_to into,
-                            positive room)
-{
-        p8 address_to store = build_text_take(BUILD_WORD_ROOM);
-
-        if (!text)
-                return 0;
-
-        return build_words_of(text, string_length(text), into, room, store,
-                              BUILD_WORD_ROOM);
 }
 
 //      Appending split words onto an argument vector under construction.

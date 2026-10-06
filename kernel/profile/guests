@@ -28,8 +28,6 @@
 # The namespaces a container is made of. PID and USER were the two missing
 # pieces -- without PID a guest sees every process on the machine, and without
 # USER it cannot have its own root.
-CONFIG_NAMESPACES=y
-CONFIG_UTS_NS=y
 CONFIG_IPC_NS=y
 CONFIG_PID_NS=y
 CONFIG_USER_NS=y
@@ -37,26 +35,18 @@ CONFIG_NET_NS=y
 CONFIG_TIME_NS=y
 
 # Accounting and limits, so one guest cannot take the machine down.
-CONFIG_CGROUPS=y
 CONFIG_MEMCG=y
-CONFIG_CGROUP_SCHED=y
-CONFIG_CGROUP_PIDS=y
 CONFIG_CGROUP_FREEZER=y
-CONFIG_CGROUP_DEVICE=y
 CONFIG_CPUSETS=y
 
-# Guests bring their own binaries, which are ordinary dynamically linked ELF.
-CONFIG_BINFMT_ELF=y
-CONFIG_BINFMT_SCRIPT=y
-CONFIG_BINFMT_MISC=y
-
-# Layered roots, so several guests share one base rather than each carrying a
-# copy of it.
-CONFIG_OVERLAY_FS=y
-CONFIG_TMPFS=y
-CONFIG_TMPFS_POSIX_ACL=y
+# What a guest stands on that every build has is in any and general, composed
+# ahead of this one: the namespace and cgroup cores (NAMESPACES, UTS_NS,
+# CGROUPS, CGROUP_SCHED, CGROUP_PIDS, CGROUP_DEVICE), the binary formats a
+# guest's ordinary dynamically linked ELF and scripts need, the layered roots
+# several guests share one base through (OVERLAY_FS, TMPFS and its ACLs),
+# POSIX message queues, procfs and sysfs.
 #
-# The read only half of that: a guest's base is an image, mounted once and
+# The read only half of the layered roots: a guest's base is an image, mounted once and
 # shared, with a writable layer over it.
 #
 # EROFS rather than squashfs. Squashfs was here first and was quietly broken
@@ -99,7 +89,6 @@ CONFIG_SECCOMP=y
 CONFIG_SECCOMP_FILTER=y
 
 # Enough of a POSIX surface for a normal libc to be happy.
-CONFIG_POSIX_MQUEUE=y
 CONFIG_EVENTFD=y
 CONFIG_SIGNALFD=y
 CONFIG_TIMERFD=y
@@ -108,9 +97,6 @@ CONFIG_FUTEX=y
 CONFIG_AIO=y
 CONFIG_ADVISE_SYSCALLS=y
 CONFIG_MEMBARRIER=y
-CONFIG_KALLSYMS=y
-CONFIG_PROC_FS=y
 CONFIG_PROC_SYSCTL=y
-CONFIG_SYSFS=y
 # devpts is not a separate option any more -- UNIX98_PTYS above brings it.
 CONFIG_UNIX98_PTYS=y

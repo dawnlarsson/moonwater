@@ -23,7 +23,10 @@ CONFIG_SERIAL_CORE=y
 CONFIG_SERIAL_CORE_CONSOLE=y
 
 # pr_alert is KERN_ALERT (1), so it survives even a loglevel of 2, but leave
-# room so ordinary driver messages come through while debugging.
+# room so ordinary driver messages come through while debugging. These three
+# win over debug_none's on purpose, which the next line says so the build's
+# report of profiles that disagree does not list them in every default build.
+#> overrides CONFIG_CONSOLE_LOGLEVEL_DEFAULT CONFIG_MESSAGE_LOGLEVEL_DEFAULT CONFIG_PRINTK_TIME
 CONFIG_CONSOLE_LOGLEVEL_DEFAULT=7
 CONFIG_MESSAGE_LOGLEVEL_DEFAULT=7
 CONFIG_PRINTK=y

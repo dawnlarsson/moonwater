@@ -20,7 +20,7 @@ CONFIG_FB=y
 CONFIG_FRAMEBUFFER_CONSOLE=y
 CONFIG_VT=y
 CONFIG_VT_CONSOLE=y
-CONFIG_CMDLINE=""
+#> cmdline -drm_client_lib.active=
 
 # Servers may exceed the desktop's single-word cpumask limit.
 CONFIG_NR_CPUS=128

@@ -39,9 +39,10 @@ CONFIG_MOONWATER_CANVAS=y
 # which is also a wakeup every millisecond, so a plugged-in mouse stopped
 # the CPU from staying in a deep C-state. Same for kbpoll and jspoll.
 #
-# This is the whole command line for the image, not a line to append to. There
-# is one CONFIG_CMDLINE and the last profile to set it wins outright, so every
-# argument belongs here.
+# The command line for the image is every profile's `#> cmdline` words, in the
+# order the profiles are composed (build.c writes the one CONFIG_CMDLINE from
+# them). A profile that wants one of these words gone says `#> cmdline -WORD`
+# and keeps the rest; it does not spell the string again.
 CONFIG_CMDLINE_BOOL=y
 #
 # C-states are allowed. intel_idle.max_cstate=1 / processor.max_cstate=1
@@ -78,12 +79,11 @@ CONFIG_CMDLINE_BOOL=y
 # above 4 GiB; with SWIOTLB_DYNAMIC, in the any profile, a device that runs
 # the pool dry gets another made for it.
 #
-CONFIG_CMDLINE="drm_client_lib.active= intel_pstate=active amd_pstate=active intel_pstate.hwp_dynamic_boost=1 thash_entries=4096 uhash_entries=1024 mhash_entries=4096 mphash_entries=4096 swiotlb=1024"
+#> cmdline drm_client_lib.active= intel_pstate=active amd_pstate=active intel_pstate.hwp_dynamic_boost=1 thash_entries=4096 uhash_entries=1024 mhash_entries=4096 mphash_entries=4096 swiotlb=1024
 
 #
 # Core modesetting
 #
-CONFIG_DRM=y
 CONFIG_DRM_KMS_HELPER=y
 CONFIG_DRM_CLIENT=y
 CONFIG_DRM_CLIENT_SELECTION=y
@@ -128,10 +128,9 @@ CONFIG_DRM_QXL=y
 # to compose in.
 
 #
-# Fallback: the framebuffer the firmware set up
+# Fallback: the framebuffer the firmware set up (SIMPLEDRM and SYSFB_SIMPLEFB
+# are in general, which every build composes)
 #
-CONFIG_DRM_SIMPLEDRM=y
-CONFIG_SYSFB_SIMPLEFB=y
 
 #
 # The framebuffer console is built but normally has nothing to attach to.

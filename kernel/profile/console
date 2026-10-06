@@ -39,4 +39,4 @@ CONFIG_VT_CONSOLE=y
 
 # The built-in command line otherwise tells the fbdev client to stay away,
 # which would leave this image with nothing on screen either.
-CONFIG_CMDLINE=""
+#> cmdline -drm_client_lib.active=
