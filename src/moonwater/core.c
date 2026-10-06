@@ -185,8 +185,49 @@ static const struct
     */
 };
 
+/*
+        What the two input handlers cost a report, for `moonwater latency`:
+        the machine's key watch is counted here and Canvas's by Canvas. Event
+        counts are the rhythm of somebody's typing, so reading them needs the
+        capability the other diagnostics of somebody's hands need, and so
+        does zeroing them.
+*/
+static u64 latency_since;
+
+static long report_latency(struct latency_stats __user *out)
+{
+        struct latency_stats request, stats;
+        struct handler_cost bound = {};
+
+        if (copy_from_user(&request, out, sizeof(request)))
+                return -EFAULT;
+        if (request.request > SPARK_LATENCY_RESET || request.elapsed_ns ||
+            request.reserved)
+                return -EINVAL;
+        if (!capable(CAP_SYS_ADMIN))
+                return -EPERM;
+
+        memset(&stats, 0, sizeof(stats));
+        if (request.request == SPARK_LATENCY_RESET)
+        {
+                moonwater_cost_reset(&bind_cost);
+                WRITE_ONCE(latency_since, ktime_get_ns());
+        }
+        stats.elapsed_ns = ktime_get_ns() - READ_ONCE(latency_since);
+        canvas_latency(&stats, request.request);
+        moonwater_cost_read(&bind_cost, &bound);
+        stats.bind.events = bound.events;
+        stats.bind.samples = bound.samples;
+        stats.bind.total_ns = bound.total_ns;
+        stats.bind.worst_ns = bound.worst_ns;
+        stats.request = request.request;
+
+        return copy_to_user(out, &stats, sizeof(stats)) ? -EFAULT : 0;
+}
+
 IOCTL_IS(SPARK_IOCTL_SPAWN, IOCTL_WRITE, 1, sizeof(struct spawn));
 IOCTL_IS(SPARK_IOCTL_STATS, IOCTL_READ, 2, sizeof(struct stats));
+IOCTL_IS(SPARK_IOCTL_LATENCY, IOCTL_BOTH, 8, sizeof(struct latency_stats));
 IOCTL_IS(SPARK_IOCTL_SNAPSHOT, IOCTL_BOTH, 9, sizeof(struct snapshot_request));
 IOCTL_IS(SPARK_IOCTL_BIND, IOCTL_BOTH, 11, sizeof(struct bind_control));
 IOCTL_IS(SPARK_IOCTL_SETTINGS_GET, IOCTL_READ, 12, sizeof(struct spark_settings_request));
@@ -210,6 +251,8 @@ static long device_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
                 return report_snapshot((struct snapshot_request __user *)arg);
         case SPARK_IOCTL_BIND:
                 return report_bind((struct bind_control __user *)arg);
+        case SPARK_IOCTL_LATENCY:
+                return report_latency((struct latency_stats __user *)arg);
         case MOONWATER_IOCTL_MACHINE:
                 return report_machine(file, (struct machine_control __user *)arg);
         case MOONWATER_IOCTL_SCRIPT:

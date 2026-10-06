@@ -87,6 +87,57 @@ struct input_devices {
 };
 
 /*
+        What the input handlers cost, and when Canvas keeps out of the way.
+
+        Every report of every device goes through every handler attached to
+        it, so whatever a handler does with one it does for each of them, for
+        as long as the machine is up. These are the numbers `moonwater
+        latency` shows for the two that are Moonwater's: Canvas's, which
+        moves the cursor and takes the keys, and the machine's key watch,
+        which fires the bound events. Events are every report counted; one in
+        sixteen is timed, so the time is a sample and worst is the worst
+        sample. Reading needs nothing, reset needs CAP_SYS_ADMIN and zeroes
+        the counts: how much a handler costs over a minute of moving a mouse
+        is a reset, the minute and a read.
+
+        yielded is 1 while another program is master of a card Canvas draws
+        on. Canvas's handler then returns at once for everything but the
+        keys that make the chord that ends that program: the compositor that
+        has the card reads the same devices itself, and a handler that moved
+        a cursor nobody sees and woke a thread to say so was a wakeup for each
+        report beside it.
+*/
+struct latency_cost {
+        unsigned long events;   // reports the handler was called with
+        unsigned long samples;  // the ones that were timed
+        unsigned long total_ns; // their time, added
+        unsigned long worst_ns; // the longest of them
+};
+
+#define SPARK_LATENCY_READ 0u
+#define SPARK_LATENCY_RESET 1u
+
+struct latency_stats {
+        unsigned int request;      // SPARK_LATENCY_*
+        unsigned int yielded;      // 1 while another program has the display
+        unsigned int latency_hold; // 1 while the CPU latency hold is taken
+        unsigned int latency_holds;
+        unsigned int thread_passes; // times the canvas thread woke
+        unsigned int frame_ticks;   // times the frame timer fired
+        struct latency_cost canvas; // Canvas's input handler
+        struct latency_cost bind;   // the machine's key watch
+        unsigned long quiet;        // of the canvas events, those heard yielded
+        unsigned long elapsed_ns;   // since the counts were last reset, or boot
+        unsigned long reserved;
+};
+
+_Static_assert(sizeof(struct latency_cost) == 32, "spark latency cost ABI");
+_Static_assert(sizeof(struct latency_stats) == 112, "spark latency ABI");
+
+// _IOWR('s', 8, struct latency_stats)
+#define SPARK_IOCTL_LATENCY 0xc0707308u
+
+/*
         Canvas, on and off.
 
         Off gives the display back: every program's window is asked to close,

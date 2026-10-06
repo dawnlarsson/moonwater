@@ -42,6 +42,7 @@ moonwater canvas scale [N|auto]        device pixels to a drawn one, 1 to 4 [aut
 moonwater canvas modes [largest|preferred]  which mode a screen is driven at [largest]
 moonwater desktop [canvas|off|PROFILE]  what the machine starts as its desktop [canvas]
 moonwater desktop start|stop           begin the chosen profile now, or end its session
+moonwater latency [reset]              what the input handlers cost a report, and who has the display
 moonwater airplane [on|off]            every radio at once
 moonwater brightness [N%|+N|-N]        the screen backlight
 moonwater power [performance|balanced|powersave]  profile and CPU governor, kept across boots
@@ -255,6 +256,23 @@ profile has to be installed (`bowl profile desktop`), and the choice is kept in
 way it was started, from any terminal or from the serial port. A machine script
 of one's own, in `/root`, starts nothing unless it runs `moonwater desktop boot`
 in its `moonwater_canvas` function, as the builtin one does.
+
+`moonwater latency` says where a report from a mouse or a keyboard spends its
+time on this machine, as far as the machine can see: the two input handlers
+Moonwater attaches to every device, Canvas's and the machine's key watch, are
+counted by the kernel and one report in sixteen is timed, so what each costs a
+report is a number and not a guess. While another program has the display
+Canvas's handler returns at once for everything but the keys of the chord
+above, with no lock taken and nothing woken, and the page says so. `latency
+reset` zeroes the counts: a minute of moving the mouse is a reset, the minute
+and a bare read. What comes after the kernel is the compositor's and the
+screen's, and is read there. On a KDE desktop of a bowl profile,
+`libinput debug-events` in a terminal reads the same devices as KWin and shows
+each report's time; `qdbus6 org.kde.KWin /KWin supportInformation` names the
+renderer, where `llvmpipe` means the CPU is drawing the desktop and not the
+card; and `grep . /sys/module/usbhid/parameters/*poll` names the interval a
+mouse and a keyboard are asked for a report at, which is `0` when it is the
+interval the device gives (8 ms is usual).
 
 Canvas opens no window by itself. The machine script's `moonwater_canvas`
 function opens the kernel log and a terminal when Canvas starts, at boot and

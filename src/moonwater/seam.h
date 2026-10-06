@@ -14,6 +14,8 @@
 #define MOONWATER_SEAM_INCLUDED
 
 #include <linux/fs.h>
+#include <linux/percpu.h>
+#include <linux/timekeeping.h>
 
 /*
         Every request number is the encoding of the struct it carries.
@@ -66,5 +68,84 @@ void moonwater_bind_fire(unsigned int event);
 
 // Whether a key belongs to a binding, which then takes it and not the desktop.
 _Bool moonwater_bind_swallowed(unsigned int code, int value);
+
+/*
+        What an input handler costs, counted where it runs.
+
+        A handler is called for every report of every device it is attached
+        to, so what it does is paid for each of them. This is the counting
+        both of Moonwater's handlers do, the one here and Canvas's, and what
+        `moonwater latency` reads back. A count per processor, so a report is
+        two stores to a line no other processor writes (the handler runs with
+        preemption off, in the input core's own lock, which is what
+        __this_cpu_* asks for); and one report in MOONWATER_COST_EVERY is
+        timed, which spreads the two clock reads over sixteen of them.
+
+        The reading side takes each processor's with READ_ONCE and does not
+        stop anyone: a figure that is a report or two behind is a figure.
+*/
+#define MOONWATER_COST_EVERY 16
+
+struct handler_cost {
+        unsigned long events;   // reports counted
+        unsigned long samples;  // the ones that were timed
+        unsigned long total_ns; // their time, added
+        unsigned long worst_ns; // the longest of them
+};
+
+static __always_inline u64 moonwater_cost_begin(struct handler_cost __percpu *cost)
+{
+        unsigned long events = __this_cpu_read(cost->events) + 1;
+
+        __this_cpu_write(cost->events, events);
+        return events % MOONWATER_COST_EVERY ? 0 : ktime_get_ns();
+}
+
+static __always_inline void moonwater_cost_end(struct handler_cost __percpu *cost,
+                                               u64 started)
+{
+        u64 spent;
+
+        if (likely(!started))
+                return;
+
+        spent = ktime_get_ns() - started;
+        __this_cpu_add(cost->samples, 1);
+        __this_cpu_add(cost->total_ns, spent);
+        if (spent > __this_cpu_read(cost->worst_ns))
+                __this_cpu_write(cost->worst_ns, spent);
+}
+
+static inline void moonwater_cost_read(struct handler_cost __percpu *cost,
+                                       struct handler_cost *out)
+{
+        int cpu;
+
+        for_each_possible_cpu(cpu)
+        {
+                const struct handler_cost *one = per_cpu_ptr(cost, cpu);
+
+                out->events += READ_ONCE(one->events);
+                out->samples += READ_ONCE(one->samples);
+                out->total_ns += READ_ONCE(one->total_ns);
+                if (READ_ONCE(one->worst_ns) > out->worst_ns)
+                        out->worst_ns = READ_ONCE(one->worst_ns);
+        }
+}
+
+static inline void moonwater_cost_reset(struct handler_cost __percpu *cost)
+{
+        int cpu;
+
+        for_each_possible_cpu(cpu)
+        {
+                struct handler_cost *one = per_cpu_ptr(cost, cpu);
+
+                WRITE_ONCE(one->events, 0);
+                WRITE_ONCE(one->samples, 0);
+                WRITE_ONCE(one->total_ns, 0);
+                WRITE_ONCE(one->worst_ns, 0);
+        }
+}
 
 #endif // MOONWATER_SEAM_INCLUDED

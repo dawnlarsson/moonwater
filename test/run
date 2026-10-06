@@ -16356,12 +16356,90 @@ holder = subprocess.run(["cc", "-O2", "-static", "-o", stick + "/drmhold",
                          work + "/drmhold.c"],
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
 
+#       A program that reads the tablet the way a compositor does, and says how
+#       long each report waited between the kernel stamping it and this read
+#       having it: the delivery of a report to whoever reads it, in
+#       microseconds. The stamp is the monotonic clock the evdev handler took
+#       as the report left the device's driver, so the figure is the handlers
+#       and the wakeup, not the device.
+open(work + "/evlat.c", "w").write(r'''
+#include <dirent.h>
+#include <fcntl.h>
+#include <linux/input.h>
+#include <poll.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <time.h>
+#include <unistd.h>
+static int order(const void *a, const void *b)
+{
+        long x = *(const long *)a, y = *(const long *)b;
+        return x < y ? -1 : x > y;
+}
+int main(int argc, char **argv)
+{
+        int seconds = argc > 1 ? atoi(argv[1]) : 4, fd = -1, clock = CLOCK_MONOTONIC;
+        long *waited = malloc(sizeof(long) * 200000);
+        unsigned count = 0;
+        struct timespec now, end;
+        for (int number = 0; number < 32 && fd < 0; number++)
+        {
+                char path[96], name[96] = "";
+                FILE *file;
+                snprintf(path, sizeof(path), "/sys/class/input/event%d/device/name", number);
+                if (!(file = fopen(path, "r")))
+                        continue;
+                if (!fgets(name, sizeof(name), file))
+                        name[0] = 0;
+                fclose(file);
+                if (strstr(name, "Tablet"))
+                {
+                        snprintf(path, sizeof(path), "/dev/input/event%d", number);
+                        fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+                }
+        }
+        if (fd < 0 || !waited || ioctl(fd, EVIOCSCLOCKID, &clock))
+                return printf("evlat-none\n"), 1;
+        clock_gettime(CLOCK_MONOTONIC, &end);
+        end.tv_sec += seconds;
+        for (;;)
+        {
+                struct pollfd wait = {.fd = fd, .events = POLLIN};
+                struct input_event events[64];
+                ssize_t got;
+                clock_gettime(CLOCK_MONOTONIC, &now);
+                if (now.tv_sec > end.tv_sec || (now.tv_sec == end.tv_sec && now.tv_nsec >= end.tv_nsec))
+                        break;
+                if (poll(&wait, 1, 100) <= 0)
+                        continue;
+                clock_gettime(CLOCK_MONOTONIC, &now);
+                got = read(fd, events, sizeof(events));
+                for (ssize_t at = 0; at < got / (ssize_t)sizeof(events[0]); at++)
+                        if (events[at].type == EV_SYN && events[at].code == SYN_REPORT && count < 200000)
+                                waited[count++] = (now.tv_sec - events[at].time.tv_sec) * 1000000L +
+                                                  (now.tv_nsec / 1000 - events[at].time.tv_usec);
+        }
+        if (!count)
+                return printf("evlat-none\n"), 1;
+        qsort(waited, count, sizeof(long), order);
+        printf("evlat-%u-%ld-%ld-%ld\n", count, waited[count / 2], waited[count * 99 / 100],
+               waited[count - 1]);
+        return 0;
+}
+''')
+reader = subprocess.run(["cc", "-O2", "-static", "-o", stick + "/evlat",
+                         work + "/evlat.c"],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+
 #       The same holder, with a count of how often the canvas thread wakes
 #       while it keeps the card: its voluntary switches from 2 s after the
 #       start to 6 s, a second at a time.
 open(stick + "/holdwake", "w").write(r'''p=$(grep -l '^moonwater/canva' /proc/[0-9]*/comm | head -n 1 | cut -d/ -f3)
 count() { sed -n 's/^voluntary_ctxt_switches:[^0-9]*//p' /proc/$p/status; }
 ( sleep 2; a=$(count); sleep 4; b=$(count); echo "wakes-$(( (b - a) / 4 ))-per-second" ) &
+( sleep 2; /mnt/evlat 3 ) &
 exec /mnt/drmhold "$@"
 ''')
 
@@ -16686,15 +16764,59 @@ if switcher and holder:
     serial_wait(b"DRMHOLD done\r\nDRMHOLD", 0)
     time.sleep(8)
 
-    #   How often a suspended Canvas wakes with nothing happening. The look
-    #   it takes at the card is four a second; a frame timer left running
-    #   while the card is taken is one a frame.
+    #   How often a suspended Canvas wakes with a pointer moving over it. The
+    #   look it takes at the card is four a second and a frame timer left
+    #   running while the card is taken is one a frame, but the thing that
+    #   used to wake it was the pointer itself: every report of a tablet or a
+    #   mouse that the program holding the card reads too went through the
+    #   acceleration curve and woke a thread that runs ahead of every ordinary
+    #   task, which looked at the card and threw it away.
+    def pointer_storm(seconds):
+        stop = time.time() + seconds
+        swing = 0
+        while time.time() < stop:
+            swing += 1
+            send([{"type": "abs", "data": {"axis": "x", "value": 1000 + (swing % 40) * 700}},
+                  {"type": "abs", "data": {"axis": "y", "value": 2000 + (swing % 25) * 900}}])
+            time.sleep(0.002)
+
+    #   What a program that reads the pointer is given, and how soon: the
+    #   median wait of a report between the kernel stamping it and the read
+    #   having it, with Canvas moving the cursor on the same reports first,
+    #   and then with it keeping out of the way of a program that has the
+    #   card. Asked of the same tablet in the same guest in the same second
+    #   of a storm, so what differs is who has the display.
+    delivered = [0]
+
+    def delivery(label, rows):
+        delivered[0] += 1
+        for _ in range(60):
+            if open(work + "/leak-serial", "rb").read().count(b"evlat-") >= delivered[0]:
+                break
+            time.sleep(0.2)
+        said = re.findall(rb"evlat-(\d+)-(\d+)-(\d+)-(\d+)", open(work + "/leak-serial", "rb").read())
+        got = said[delivered[0] - 1] if len(said) >= delivered[0] else None
+        rows.append((label, "yes" if got and int(got[0]) > 100 and int(got[1]) < 250
+                     else ("%s reports, median %s us, p99 %s us" % (got[0].decode(), got[1].decode(), got[2].decode())
+                           if got else "no count"), "yes"))
+        return got
+
+    if reader:
+        run_holder("4", "/mnt/evlat")
+        time.sleep(0.5)
+        pointer_storm(2.5)
+        delivery("a report reaches a program reading it within 250 us at the median, Canvas moving the cursor", out)
+
     run_holder("7 0 0", "/shell /mnt/holdwake")
+    time.sleep(2.2)
+    pointer_storm(3.4)
     serial_wait(b"-per-second", 15)
     rate = re.findall(rb"wakes-(\d+)-per-second", open(work + "/leak-serial", "rb").read())
-    out.append(("a suspended Canvas wakes fewer than 20 times a second",
+    out.append(("a suspended Canvas wakes fewer than 20 times a second, a pointer moving over it",
                 "yes" if rate and int(rate[-1]) < 20
                 else ("%s a second" % rate[-1].decode() if rate else "no count"), "yes"))
+    if reader:
+        delivery("and a report reaches a program reading it within 250 us at the median, another program holding the card", out)
     for _ in range(60):
         if open(work + "/leak-serial", "rb").read().count(b"DRMHOLD done") >= 3:
             break
@@ -16710,7 +16832,9 @@ else:
                        ("a program that gives master back and stays is noticed", "yes"),
                        ("and the desktop is back within a second with nothing typed or moved", "yes"),
                        ("and typing reaches Canvas while it still runs", "1"),
-                       ("a suspended Canvas wakes fewer than 20 times a second", "yes")):
+                       ("a suspended Canvas wakes fewer than 20 times a second, a pointer moving over it", "yes"),
+                       ("a report reaches a program reading it within 250 us at the median, Canvas moving the cursor", "yes"),
+                       ("and a report reaches a program reading it within 250 us at the median, another program holding the card", "yes")):
         out.append((name, "not run: no static cc for the helpers", want))
 
 #       Canvas off from its own terminal, then the kernel's console: a shell

@@ -25893,6 +25893,7 @@ static void atomic_long_sub(long n, atomic_long_t *p) { *p -= n; }
     source += section(spark, "static long do_spawn", "static long report_stats")
     source += r'''
 static long report_stats(struct stats *out) { (void)out; return 322; }
+static long report_latency(struct latency_stats *out) { (void)out; return 323; }
 /* memdup_user answers an ERR_PTR, and IS_ERR above is the test it is read
    with. A failed copy frees what it took, so a refused SET leaks nothing. */
 static void *memdup_user(const void *from, unsigned long bytes) {
@@ -26048,6 +26049,8 @@ static void check_spawn_dispatch(void) {
         fail_copy=0;
     }
 
+    check(device_ioctl(&caller,SPARK_IOCTL_LATENCY,0)==323,
+          "the latency request reaches its own report and not the compositor's");
     check(device_ioctl(&caller,0,0)==-ENOTTY,"unknown device ioctl remains rejected");
     allocations=fail_allocation=0; copies=0; fail_copy=0;
 }
@@ -26140,6 +26143,9 @@ static struct {
 #ifndef READ_ONCE
 #define READ_ONCE(x) (x)
 #endif
+#ifndef WRITE_ONCE
+#define WRITE_ONCE(x, val) do { (x) = (val); } while (0)
+#endif
 static unsigned long pointer_counts,pointer_moved;
 static unsigned wakes,wheel_cas,drain_race;
 static int atomic_read(const atomic_t *p) { return *p; }
@@ -26154,6 +26160,17 @@ static _Bool atomic_try_cmpxchg(atomic_t *p,int *old,int value) {
 }
 static int test_bit(unsigned bit,const unsigned long *bits) { return (bits[bit/64]>>(bit%64))&1; }
 static void canvas_thread_wake(void) { wakes++; }
+/* What both input handlers count themselves with is the seam's, per
+   processor; here it is a count, and nothing is timed. */
+struct handler_cost { unsigned long events,samples,total_ns,worst_ns; };
+static unsigned cost_begun,cost_ended;
+static u64 moonwater_cost_begin(struct handler_cost *cost) { cost_begun++;cost->events++;return 0; }
+static void moonwater_cost_end(struct handler_cost *cost,u64 started) { (void)cost;(void)started;cost_ended++; }
+#define DEFINE_PER_CPU(type,name) type name
+#define __this_cpu_inc(x) (++(x))
+static _Bool canvas_yielded;
+static unsigned long canvas_quiet;
+static struct handler_cost canvas_cost;
 static void atomic_fetch_add(int value,atomic_t *at) { *at+=value; }
 static void atomic_fetch_sub(int value,atomic_t *at) { *at-=value; }
 #define smp_wmb() ((void)0)
@@ -26175,6 +26192,7 @@ struct pointer_handle {
     struct pointer_handle *next;
     struct key_link link;
     int reopen,opened;
+    unsigned long events;
     unsigned modifiers;
 };
 static struct pointer_handle *pointer_handles;
@@ -26245,6 +26263,8 @@ static void vt_event(unsigned long event,unsigned console) {
     source += "_Bool moonwater_bind_swallowed(unsigned int code, int value);\n"
     source += section(keys, "#define KEY_TABLE", "// Under desktop.lock")
     source += section(pointer, "static inline struct pointer_handle *pointer_handle_of", "static HOT void pointer_event")
+    source += "static void pointer_event_locked(struct input_handle *handle, unsigned int type, unsigned int code, int value);\n"
+    source += section(pointer, "static HOT void pointer_event_run", "static const char *pointer_device_name")
     source += section(pointer, "static COLD void pointer_disconnect", "static void canvas_input_devices")
     source += section(drag, "#define WHEEL_LINES", "static void wheel_deliver")
     source += section(pointer, "#define ACCEL_ONE", "static void desktop_confine_cursor")
@@ -26414,6 +26434,8 @@ static int kernel_wait(pid_t pid, int *stat) {
     return pid;
 }
 static struct bind_handle bind_dev;
+static unsigned bind_cost_locks;
+static void bind_cost_lock(const void *lock) { (void)lock; bind_cost_locks++; }
 static void bind_send(unsigned type, unsigned code, int value) {
     bind_event(&bind_dev.handle, type, code, value);
 }
@@ -26871,6 +26893,28 @@ static void check_bind(void) {
     queued=bind_queued;
     bind_send(2,0,1);
     check(bind_queued==queued,"motion is not a bound event");
+
+    /* A mouse's every count and every report that ends one passes the key
+       watch for as long as the machine is up: counted, and nothing else. No
+       lock (the hook is let go of by the first unlock, and is still there),
+       no allocation, no queue. */
+    {
+        unsigned begun=cost_begun,ended=cost_ended,taken=allocations;
+        unlock_hook=bind_cost_lock;bind_cost_locks=0;
+        for (unsigned report=0;report<1000;report++) {
+            bind_send(2,0,3);
+            bind_send(2,1,-3);
+            bind_send(0,0,0);
+            bind_send(3,0,640);
+        }
+        check(unlock_hook==bind_cost_lock && !bind_cost_locks,
+              "the key watch takes no lock for a movement, a report or an axis");
+        unlock_hook=0;
+        check(cost_begun-begun==4000 && cost_ended-ended==4000 && bind_cost.events>=4000,
+              "the key watch counts every report it hears");
+        check(allocations==taken && bind_queued==queued,
+              "and allocates and queues nothing for any of them");
+    }
 
     queued=bind_queued;
     bind_fire(SPARK_BIND_CANVAS_ON);
@@ -27483,9 +27527,13 @@ static void check_input_suspension(void) {
     check(desktop.key_tail==desktop.key_head && desktop.key_head==7,
           "every key recorded is dropped by moving the tail, the thread's own index");
     check(!mock_resumes,"nothing resumes while the card is still taken");
+    check(canvas_yielded,
+          "the handler is told another program has the card, so it keeps out of the way");
     suspend_pending();mock_taken=0;
     check(!canvas_suspend_check() && !desktop.suspended && mock_resumes==1,
           "a card given back resumes the desktop once");
+    check(!canvas_yielded,
+          "a card given back is the handler's again");
     check(!desktop.awake,
           "the resume leaves re-arming the frame timer to the first commit after it");
     check(desktop.spawn && desktop.key_tail==3 && desktop.motion_pending,
@@ -27499,6 +27547,8 @@ static void check_input_suspension(void) {
           "keys typed while the machine wakes are kept for the redraw");
     check(!desktop.motion_pending && !desktop.button_changed,
           "the pointer's movement and buttons of that time are dropped");
+    check(!canvas_yielded,
+          "a card that only sleeps does not quiet the handler: the key that wakes it is kept");
     memset(&desktop,0,sizeof(desktop));
     desktop.spawn=1;mock_taken=1;
     check(canvas_suspend_check() && desktop.spawn,
@@ -27555,6 +27605,100 @@ static void check_reclaim_chord(void) {
     check(canvas_suspend_check() && mock_reclaims==1 && !desktop.reclaim,
           "a card that is asleep has no holder to end");
     memset(&desktop,0,sizeof(desktop));mock_taken=0;mock_resumes=0;
+}
+/*
+        A program that has the display is the one the devices are for.
+
+        KDE's compositor reads the same mouse and keyboard Canvas does, and
+        Canvas used to hear every report as well: the acceleration curve, the
+        shake detector, the desktop's input lock and a wakeup of the thread
+        that runs ahead of every ordinary task, for each one, to throw it away
+        a pass later. The handler returns at once for all of it but the keys
+        the chord that ends that program is made of, and its cost is counted
+        either way.
+*/
+static unsigned yield_locks;
+static void yield_lock_seen(const void *lock) { (void)lock;yield_locks++; }
+static void yield_send(struct pointer_handle *p,unsigned type,unsigned code,int value) {
+    unlock_hook=yield_lock_seen;
+    pointer_event(&p->handle,type,code,value);
+}
+static void check_yielded_handler(void) {
+    static struct input_dev tablet={{{0,1000},{0,1000}},{0}};
+    struct pointer_handle *a;
+    unsigned reports,taken;
+
+    /* What it does with the card its own: the baseline the rest is against. */
+    memset(&desktop,0,sizeof(desktop));
+    canvas_yielded=0;wakes=0;
+    desktop.width=3840;desktop.height=2160;
+    a=keyboard_attach(0);a->handle.dev=&tablet;
+    yield_send(a,EV_REL,REL_X,5);yield_send(a,EV_REL,REL_Y,3);yield_send(a,EV_SYN,SYN_REPORT,0);
+    unlock_hook=0;
+    check(desktop.motion_pending==1 && wakes==1,
+          "a movement moves the cursor and wakes the thread while Canvas has the card");
+
+    memset(&desktop,0,sizeof(desktop));
+    desktop.width=3840;desktop.height=2160;
+    canvas_yielded=1;wakes=0;yield_locks=0;cost_begun=cost_ended=0;taken=allocations;
+    canvas_quiet=0;canvas_cost.events=0;a->events=0;reports=0;
+#define YIELD_SEND(type,code,value) do { yield_send(a,(type),(code),(value));reports++; } while (0)
+    for (unsigned round=0;round<200;round++) {
+        YIELD_SEND(EV_REL,REL_X,7);YIELD_SEND(EV_REL,REL_Y,-4);YIELD_SEND(EV_SYN,SYN_REPORT,0);
+        YIELD_SEND(EV_ABS,ABS_X,500);YIELD_SEND(EV_ABS,ABS_Y,500);YIELD_SEND(EV_SYN,SYN_REPORT,0);
+        YIELD_SEND(EV_REL,REL_WHEEL,1);YIELD_SEND(EV_REL,REL_WHEEL_HI_RES,120);
+        YIELD_SEND(EV_KEY,BTN_LEFT,1);YIELD_SEND(EV_KEY,BTN_LEFT,0);
+        YIELD_SEND(EV_KEY,BTN_RIGHT,1);YIELD_SEND(EV_KEY,BTN_MIDDLE,1);YIELD_SEND(EV_KEY,BTN_TOUCH,1);
+        YIELD_SEND(EV_KEY,KEY_A,1);YIELD_SEND(EV_KEY,KEY_A,2);YIELD_SEND(EV_KEY,KEY_A,0);
+        YIELD_SEND(EV_KEY,KEY_TAB,1);YIELD_SEND(EV_KEY,KEY_F9,1);YIELD_SEND(EV_KEY,KEY_T,1);
+    }
+    unlock_hook=0;
+    check(!wakes && !yield_locks && allocations==taken,
+          "while another program has the card a mouse and a keyboard wake nothing, lock nothing and allocate nothing");
+    check(!desktop.motion_pending && !desktop.button_changed && !desktop.client_changed &&
+          !desktop.wheel && !desktop.key_head && !desktop.focus_steps &&
+          !desktop.minimize && !desktop.spawn_key && !desktop.abs_have &&
+          !desktop.raw_x && !desktop.raw_y && !desktop.shake_count,
+          "and leave nothing pending for the thread to drop");
+    check(a->events==reports && canvas_quiet==reports &&
+          cost_begun==reports && cost_ended==reports && canvas_cost.events==reports,
+          "every report is still counted, as the device's, as quiet and in the handler's cost");
+
+    /* The one chord that is Canvas's here: a modifier is tracked, and Backspace
+       with Control and Alt asks the thread to take the card back. */
+    wakes=0;
+    yield_send(a,EV_KEY,KEY_LEFTCTRL,1);yield_send(a,EV_KEY,KEY_LEFTALT,1);
+    check(!wakes && !desktop.reclaim && atomic_read(&desktop.modifiers),
+          "a modifier is kept track of and asks for nothing");
+    yield_send(a,EV_KEY,KEY_BACKSPACE,1);
+    check(desktop.reclaim==1 && wakes==1 && !desktop.key_head,
+          "Control-Alt-Backspace asks for the card, and is queued for no window");
+    desktop.reclaim=0;
+    yield_send(a,EV_KEY,KEY_BACKSPACE,2);yield_send(a,EV_KEY,KEY_BACKSPACE,0);
+    yield_send(a,EV_KEY,KEY_TAB,1);yield_send(a,EV_KEY,KEY_LEFTSHIFT,1);yield_send(a,EV_KEY,KEY_BACKSPACE,1);
+    check(!desktop.reclaim && !desktop.focus_steps,
+          "a repeat, a release, another chord and Alt-Tab ask for nothing");
+    yield_send(a,EV_KEY,KEY_LEFTSHIFT,0);yield_send(a,EV_KEY,KEY_LEFTALT,0);yield_send(a,EV_KEY,KEY_LEFTCTRL,0);
+    unlock_hook=0;
+    check(!atomic_read(&desktop.modifiers) && !desktop.key_head,
+          "and the modifiers let go are let go of");
+    yield_send(a,EV_KEY,KEY_LEFTCTRL,1);yield_send(a,EV_KEY,KEY_LEFTSHIFT,1);yield_send(a,EV_KEY,KEY_T,1);
+    check(!desktop.spawn_key,
+          "Control-Shift-T typed at the program that has the card starts no terminal");
+    yield_send(a,EV_KEY,KEY_LEFTSHIFT,0);yield_send(a,EV_KEY,KEY_LEFTCTRL,0);
+    unlock_hook=0;
+
+    /* And the card given back: the same reports are the desktop's again. */
+    canvas_yielded=0;wakes=0;
+    yield_send(a,EV_REL,REL_X,5);yield_send(a,EV_REL,REL_Y,3);yield_send(a,EV_SYN,SYN_REPORT,0);
+    yield_send(a,EV_KEY,KEY_A,1);
+    unlock_hook=0;
+    check(desktop.motion_pending==1 && desktop.key_head==1 && wakes>=2,
+          "a card given back is moved and typed on again");
+    pointer_disconnect(&a->handle);
+    memset(&desktop,0,sizeof(desktop));
+    canvas_yielded=0;
+#undef YIELD_SEND
 }
 /* GET writes the script into a buffer the kernel is told the size of, and
    refuses rather than writing past one too small. length carries the room in
@@ -28803,6 +28947,7 @@ int main(void) {
     check_settings_sum();
     check_input_suspension();
     check_reclaim_chord();
+    check_yielded_handler();
     check(!copies_under_lock,
           "nothing was copied to or from a caller with snapshot_lock, machine_script_lock or settings_lock held");
     free(output);
@@ -29114,7 +29259,9 @@ line_add_padded() { line_add "$@"; }
                 ("canvas changed", numbers + canvas_numbers.replace("IOCTL_BOTH, 10,",
                                                                     "IOCTL_BOTH, 11,"), 1),
                 ("canvas resized", numbers + canvas_numbers.replace(
-                    "sizeof(struct canvas_control)", "sizeof(struct canvas_control) + 8"), 1)):
+                    "sizeof(struct canvas_control)", "sizeof(struct canvas_control) + 8"), 1),
+                ("latency resized", numbers.replace("sizeof(struct latency_stats)",
+                                                    "sizeof(struct latency_stats) + 8") + canvas_numbers, 1)):
             target = Path(work) / ("ioctl-%s.c" % label.replace(" ", "-"))
             target.write_text(shapes + block)
             checked = subprocess.run(["cc", "-std=gnu11", "-fsyntax-only", "-w",
@@ -29122,8 +29269,8 @@ line_add_padded() { line_add "$@"; }
                                      capture_output=True, text=True)
             assert (checked.returncode != 0) == bool(expected), (label, checked.stderr[-800:])
             assert not expected or "does not encode" in checked.stderr, checked.stderr[-800:]
-        print("  ioctl-numbers 5 of 5", flush=True)
-        write_tally("ioctl-numbers", 5, 5)
+        print("  ioctl-numbers 6 of 6", flush=True)
+        write_tally("ioctl-numbers", 6, 6)
         # The existing kit lane now also checks real pixel stores without a GPU,
         # DRM device, module load, or writable prepared kernel tree.
         if os.uname().sysname == "Linux":
@@ -36835,6 +36982,7 @@ def harness_canvas_seam(argv):
         'SPARK_BIND_CANVAS_ON_NAME', 'SPARK_BIND_CANVAS_OFF_NAME',
         'canvas_is_on', 'canvas_boot', 'canvas_unload',
         'canvas_client_ioctl', 'canvas_client_release', 'CANVAS_FILE_OPERATIONS',
+        'canvas_latency',
         'LIBRARY_CANVAS_ELSEWHERE',
     }
     includes_wanted = {
@@ -44713,7 +44861,8 @@ while True:
             "cpu online 0", "cpu online x", "charge limit", "charge limit 5", "brightness bogus", "brightness 50",
             "power bogus", "power powersave", "brightness", "charge", "power", "ntp sideways", "ntp off",
             "keyboard xx", "timezone Mars/Olympus", "setup install x", "setup bogus", "bios reboot",
-            "airplane on", "sleep", "time sync", "boot", "boot extra", "ask", "machine extra")))
+            "airplane on", "sleep", "time sync", "boot", "boot extra", "ask", "machine extra",
+            "latency", "latency sideways", "latency reset extra")))
         lines, finished = session(script, nobody=True)
         seen = answers(lines)
         wanted = {
@@ -44736,6 +44885,8 @@ while True:
             "setup bogus": (2, ""), "bios reboot": (1, "moonwater bios needs root"), "airplane on": (1, "moonwater airplane needs root"),
             "sleep": (1, ""), "time sync": (1, "moonwater time needs root"), "boot": (1, "moonwater boot needs root"),
             "boot extra": (2, ""), "ask": (1, "moonwater ask needs root"), "machine extra": (2, ""),
+            "latency": (1, "moonwater latency needs root"), "latency sideways": (2, ""),
+            "latency reset extra": (2, ""),
         }
         for command, (status, words) in wanted.items():
             got = seen.get(command, {"out": [], "status": None})

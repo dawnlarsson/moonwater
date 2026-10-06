@@ -19,6 +19,8 @@
 #include <linux/mm_types.h>
 #include <linux/errno.h>
 
+#include "canvas_abi.h"
+
 #ifdef CONFIG_MOONWATER_CANVAS
 
 // The device is registered and the machine is listening: look for a card.
@@ -30,6 +32,9 @@ void canvas_unload(void);
 // Whether the desktop holds a card.
 _Bool canvas_is_on(void);
 
+// What Canvas's input handler costs, for `moonwater latency`; see canvas_abi.h.
+void canvas_latency(struct latency_stats *out, unsigned int request);
+
 // The requests /dev/spark takes that are not the core's; -ENOTTY for the rest.
 long canvas_client_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
 int canvas_client_mmap(struct file *file, struct vm_area_struct *vma);
@@ -40,6 +45,7 @@ void canvas_client_release(struct file *file);
 
 #else
 
+static inline void canvas_latency(struct latency_stats *out, unsigned int request) {}
 static inline void canvas_boot(void) {}
 static inline void canvas_unload(void) {}
 static inline _Bool canvas_is_on(void) { return false; }

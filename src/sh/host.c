@@ -4996,6 +4996,105 @@ static b32 host_canvas(string_address address_to arguments, positive count)
 }
 
 /*
+        moonwater latency [reset]: where a report from a mouse or a keyboard
+        spends its time on this machine, as far as the machine can see it.
+
+        The two input handlers Moonwater attaches to every device are counted
+        by the kernel and one report in sixteen is timed, so what each costs a
+        report is a figure here and not a guess: Canvas's, which moves the
+        cursor and takes the keys while it has the display and says nothing
+        while another program has it (a desktop of a bowl), and the machine's
+        key watch, which fires the bound events. The stages after the kernel
+        (the compositor, the screen) are not the machine's to see; the README
+        says what to run for them. reset zeroes the counts, so a minute of
+        moving a mouse is a reset, the minute and a bare read.
+*/
+static fn latency_cost_say(string_address name, const struct latency_cost address_to cost,
+                           positive elapsed_ms)
+{
+        string_format(log, host_label "  %s: %p reports", name, (positive)cost->events);
+        if (elapsed_ms)
+                string_format(log, " (%p a second)", (positive)(cost->events * 1000 / elapsed_ms));
+        if (cost->samples)
+                string_format(log, ", %p ns each and %p at worst, from %p timed\n",
+                              (positive)(cost->total_ns / cost->samples),
+                              (positive)cost->worst_ns, (positive)cost->samples);
+        else
+                string_format(log, ", none timed yet\n");
+}
+
+static b32 host_latency(string_address address_to arguments, positive count)
+{
+        struct latency_stats stats;
+        struct input_stats pointer;
+        struct input_devices devices;
+        bipolar device;
+        bipolar failed;
+        positive elapsed_ms;
+        bool reset = count == 3 && string_equals(arguments[2], "reset");
+
+        return_if(count > 3 || (count == 3 && !reset), host_usage());
+        host_need_root();
+
+        memory_zero(address_of stats, sizeof(stats));
+        stats.request = reset ? SPARK_LATENCY_RESET : SPARK_LATENCY_READ;
+        failed = host_spark_once(SPARK_IOCTL_LATENCY, address_of stats, FILE_READ);
+        return_if(failed == -EPERM, host_refuse("moonwater latency needs root (CAP_SYS_ADMIN)\n"));
+        return_if(failed < 0, host_fail(SPARK_DEVICE, failed));
+
+        if (reset)
+        {
+                host_say(log, host_label "counts zeroed; moonwater latency reads them\n");
+                return 0;
+        }
+
+        elapsed_ms = (positive)(stats.elapsed_ns / 1000000);
+        string_format(log, host_label "input reports, over %p s since the counts began:\n",
+                      (positive)(elapsed_ms / 1000));
+        latency_cost_say("Canvas's handler", address_of stats.canvas, elapsed_ms);
+        latency_cost_say("the key watch", address_of stats.bind, elapsed_ms);
+
+        if (stats.yielded)
+                string_format(log, host_label "another program has the display: Canvas's handler "
+                                              "returned at once for %p of its reports, with no lock "
+                                              "taken and nothing woken\n", (positive)stats.quiet);
+        else
+                string_format(log, host_label "%p of Canvas's reports were heard while another "
+                                              "program had the display\n", (positive)stats.quiet);
+
+        string_format(log, host_label "canvas thread woke %p times, frame timer fired %p, "
+                                      "low-latency hold: %s, taken %p time%s\n",
+                      (positive)stats.thread_passes, (positive)stats.frame_ticks,
+                      stats.latency_hold ? "held" : "idle", (positive)stats.latency_holds,
+                      stats.latency_holds == 1 ? "" : "s");
+
+        device = system_open_at(AT_FDCWD, SPARK_DEVICE, FILE_READ | O_CLOEXEC);
+        if (device < 0)
+        {
+                log_flush();
+                return 0;
+        }
+
+        if (system_control(device, SPARK_IOCTL_INPUT_STATS, address_of pointer) == 0 && pointer.events)
+                string_format(log, host_label "pointer to screen, as Canvas draws it: %p events, "
+                                              "%p ns each and %p at worst (queued %p, drawing %p, "
+                                              "flush %p)\n",
+                              pointer.events, pointer.mean_ns, pointer.worst_ns,
+                              pointer.queue_ns, pointer.draw_ns, pointer.flush_ns);
+
+        if (system_control(device, SPARK_IOCTL_INPUT_DEVICES, address_of devices) == 0)
+                for (positive at = 0; at < devices.count && at < INPUT_DEVICES_MAX; at++)
+                        string_format(log, host_label "  %s: %p reports%s\n",
+                                      (string_address)devices.device[at].name,
+                                      (positive)devices.device[at].events,
+                                      devices.device[at].opened ? ", would not open" : "");
+
+        system_close(device);
+        log_flush();
+        return 0;
+}
+
+/*
         moonwater bios: restart into the firmware's own setup screen.
 
         UEFI firmware asks for it through one bit. OsIndicationsSupported
@@ -15948,6 +16047,7 @@ static const host_row host_rows[] = {
     {null, "canvas modes [largest|preferred]", "which mode a screen is driven at [largest]", 'b'},
     {null, "desktop [canvas|off|PROFILE]", "what the machine starts as its desktop [canvas]", 'b'},
     {null, "desktop start|stop", "begin the chosen profile now, or end its session", 'b'},
+    {null, "latency [reset]", "what the input handlers cost a report, and who has the display", 'b'},
     {null, "airplane [on|off]", "every radio at once", 'b'},
     {null, "brightness [N%|+N|-N]", "the screen backlight", 'b'},
     {null, "power [performance|balanced|powersave]", "profile and CPU governor, kept across boots", 'b'},
@@ -16517,6 +16617,7 @@ static b32 host_main()
             {"bind", host_bind, false},
             {"canvas", host_canvas, false},
             {"desktop", host_desktop, false},
+            {"latency", host_latency, false},
             {"bios", host_bios, false},
             {"airplane", tune_airplane, false},
             {"brightness", tune_brightness, false},

@@ -632,6 +632,16 @@ static unsigned int canvas_passes, canvas_ticks;
 // And the CPU latency hold, below with the request it is.
 static _Bool hold_on;
 static unsigned int hold_takes;
+/*
+        Whether another program is master of a card Canvas draws on, as the
+        canvas thread last found it, and what the input handler costs.
+
+        canvas_suspend_check is the only writer. The handler reads it with no
+        lock: see pointer_event.
+*/
+static _Bool canvas_yielded;
+static DEFINE_PER_CPU(unsigned long, canvas_quiet);
+static DEFINE_PER_CPU(struct handler_cost, canvas_cost);
 static void canvas_flush_wake(void);
 static _Bool canvas_flush_running(void);
 static void output_free(struct output *output);
@@ -8430,6 +8440,11 @@ static void desktop_resume(void)
 
         desktop.suspended = false;
 
+        // Before anything is drawn: nobody has the card now, and a handler
+        // that went on saying nothing would leave the desktop deaf until a
+        // chord woke the thread, which sleeps with nothing to watch for.
+        WRITE_ONCE(canvas_yielded, false);
+
         cursor_plane_requested_generation++;
         cursor_plane_requested_x = desktop.cursor_x;
         cursor_plane_requested_y = desktop.cursor_y;
@@ -9124,6 +9139,28 @@ static PURE _Bool key_typed(unsigned int code, unsigned int flags)
 }
 
 /*
+        Control-Alt-Backspace ends a program that has the display and will not
+        give it back.
+
+        A compositor with no input, or no picture, or neither, holds the card
+        against Canvas, which drops every key while it does: nothing typed gets
+        the machine out. This one is noticed here and acted on by the thread,
+        which does it only when somebody holds the card; with nobody, the key
+        goes on to the window it was typed at as it always did.
+*/
+static void keyboard_reclaim(unsigned int modifiers, unsigned int code, int value)
+{
+        if ((modifiers & (WINDOW_KEY_ALT | WINDOW_KEY_SHIFT |
+                          WINDOW_KEY_CONTROL)) !=
+                (WINDOW_KEY_ALT | WINDOW_KEY_CONTROL) ||
+            code != KEY_BACKSPACE || value != 1)
+                return;
+
+        atomic_set(&desktop.reclaim, 1);
+        canvas_thread_wake();
+}
+
+/*
         Called by the input core, so no lock and no sleeping. Which window has
         focus is decided under desktop.lock and the window can be freed, so
         this records what happened and the thread hands it over.
@@ -9168,6 +9205,15 @@ static void keyboard_event(struct input_handle *handle, unsigned int code, int v
 
                         return;
                 }
+        }
+
+        // Another program has the display, and what is typed is its: the one
+        // chord that is Canvas's is the way to end it, and nothing else is
+        // queued, woken for or thrown away by the thread a pass later.
+        if (READ_ONCE(canvas_yielded))
+        {
+                keyboard_reclaim(modifiers, code, value);
+                return;
         }
 
         /*
@@ -9236,25 +9282,7 @@ static void keyboard_event(struct input_handle *handle, unsigned int code, int v
                 return;
         }
 
-        /*
-                Control-Alt-Backspace ends a program that has the display and
-                will not give it back.
-
-                A compositor with no input, or no picture, or neither, holds
-                the card against Canvas, which drops every key while it does:
-                nothing typed gets the machine out. This one is noticed here
-                and acted on by the thread, which does it only when somebody
-                holds the card; with nobody, the key goes on to the window
-                it was typed at as it always did.
-        */
-        if ((modifiers & (WINDOW_KEY_ALT | WINDOW_KEY_SHIFT |
-                          WINDOW_KEY_CONTROL)) ==
-                (WINDOW_KEY_ALT | WINDOW_KEY_CONTROL) &&
-            code == KEY_BACKSPACE && value == 1)
-        {
-                atomic_set(&desktop.reclaim, 1);
-                canvas_thread_wake();
-        }
+        keyboard_reclaim(modifiers, code, value);
 
         // Once an Alt-Tab traversal has started, do not leak another
         // Alt-modified key into the selected-but-not-yet-raised client.
@@ -10101,6 +10129,7 @@ static long canvas_turn_off(void)
         if (desktop.focused && !desktop.focused->shared)
                 pane_focus(NULL);
         desktop.suspended = false;
+        WRITE_ONCE(canvas_yielded, false);
         rt_mutex_unlock(&desktop.lock);
 
         put_pid(xchg(&canvas_spawned, NULL));
@@ -10952,8 +10981,28 @@ static unsigned int keyboard_modifiers(void)
                ((held & KEY_HELD_ALTGR) ? WINDOW_KEY_ALTGR : 0);
 }
 
-static HOT void pointer_event(struct input_handle *handle, unsigned int type,
-                              unsigned int code, int value)
+/*
+        What Canvas hears while another program has the display: modifiers,
+        which the chord that ends that program is made of, and Backspace,
+        which completes it. Every other report is the program's, and a
+        compositor that holds the card (KDE's, Weston) reads the same device
+        itself and loses nothing by this handler saying nothing.
+
+        It said a good deal before. Each movement went through the
+        acceleration curve and the shake detector, each report woke a thread
+        that runs ahead of every ordinary task, which took the desktop's lock,
+        asked the card who its master was and threw it all away: a priority-one
+        wakeup per report, on the machine the compositor was trying to move a
+        cursor on. A key that is no part of a chord takes no lock either.
+*/
+static _Bool pointer_yield_hears(unsigned int type, unsigned int code)
+{
+        return type == EV_KEY && code < KEY_TABLE &&
+               (key_mod[code] || code == KEY_BACKSPACE);
+}
+
+static HOT void pointer_event_run(struct input_handle *handle, unsigned int type,
+                                  unsigned int code, int value)
 {
         unsigned long flags;
 
@@ -10964,9 +11013,34 @@ static HOT void pointer_event(struct input_handle *handle, unsigned int type,
         if (!READ_ONCE(desktop.width))
                 return;
 
+        if (unlikely(READ_ONCE(canvas_yielded)))
+        {
+                __this_cpu_inc(canvas_quiet);
+
+                if (!pointer_yield_hears(type, code))
+                {
+                        // A bound key that was swallowed and is let go of while
+                        // yielded must be let go of in the machine's table, or
+                        // it stays held there; no lock unless one is held.
+                        if (type == EV_KEY && !value)
+                                (void)moonwater_bind_swallowed(code, 0);
+                        return;
+                }
+        }
+
         spin_lock_irqsave(&desktop.input_lock, flags);
         pointer_event_locked(handle, type, code, value);
         spin_unlock_irqrestore(&desktop.input_lock, flags);
+}
+
+// Counted and, one in sixteen, timed: what `moonwater latency` shows.
+static HOT void pointer_event(struct input_handle *handle, unsigned int type,
+                              unsigned int code, int value)
+{
+        u64 started = moonwater_cost_begin(&canvas_cost);
+
+        pointer_event_run(handle, type, code, value);
+        moonwater_cost_end(&canvas_cost, started);
 }
 
 static const char *pointer_device_name(struct input_handle *handle)
@@ -11336,6 +11410,7 @@ static void canvas_pm_sleep(_Bool sleeping)
         if (sleeping)
         {
                 WRITE_ONCE(desktop.asleep, true);
+                WRITE_ONCE(canvas_yielded, false);
                 desktop.suspended = true;
                 if (desktop.awake)
                         desktop_set_awake(false);
@@ -11686,6 +11761,11 @@ static _Bool canvas_suspend_check(void)
         rt_mutex_lock(&desktop.lock);
 
         taken = desktop_taken();
+
+        // A card that only sleeps has no program in front of it: its keys are
+        // kept, so the handler keeps hearing them.
+        WRITE_ONCE(canvas_yielded, taken && !READ_ONCE(desktop.asleep));
+
         if (taken)
         {
                 desktop.suspended = true;
@@ -11923,6 +12003,7 @@ static void canvas_thread_start(void)
                               HRTIMER_MODE_REL);
                 frame_ready = true;
         }
+        WRITE_ONCE(canvas_yielded, false);
         thread = kthread_run(canvas_loop, NULL, "moonwater/canvas");
 
         if (IS_ERR(thread))
@@ -11982,6 +12063,38 @@ static void canvas_input_stats(struct input_stats *out)
         out->runs = canvas_runs;
         out->driver_ns = canvas_flush_ns;
         out->text_ns = canvas_text_ns;
+}
+
+/*
+        What the input handler costs and whether it is keeping out of the way,
+        for `moonwater latency`; the core adds the key watch's. A reset zeroes
+        what is counted, and answers with the zeros.
+*/
+void canvas_latency(struct latency_stats *out, unsigned int request)
+{
+        struct handler_cost heard = {};
+        int cpu;
+
+        if (request == SPARK_LATENCY_RESET)
+        {
+                moonwater_cost_reset(&canvas_cost);
+                for_each_possible_cpu(cpu)
+                        WRITE_ONCE(*per_cpu_ptr(&canvas_quiet, cpu), 0);
+        }
+
+        out->yielded = READ_ONCE(canvas_yielded);
+        out->latency_hold = READ_ONCE(hold_on);
+        out->latency_holds = READ_ONCE(hold_takes);
+        out->thread_passes = READ_ONCE(canvas_passes);
+        out->frame_ticks = READ_ONCE(canvas_ticks);
+
+        moonwater_cost_read(&canvas_cost, &heard);
+        out->canvas.events = heard.events;
+        out->canvas.samples = heard.samples;
+        out->canvas.total_ns = heard.total_ns;
+        out->canvas.worst_ns = heard.worst_ns;
+        for_each_possible_cpu(cpu)
+                out->quiet += READ_ONCE(*per_cpu_ptr(&canvas_quiet, cpu));
 }
 
 static void canvas_cursor_stats(struct cursor_stats *out)

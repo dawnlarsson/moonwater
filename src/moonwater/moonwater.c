@@ -1637,6 +1637,9 @@ static _Bool bind_debounce(struct bind_row *row)
         return cmpxchg(&row->last, last, now) == last;
 }
 
+// What the key watch costs a report, per processor: see seam.h.
+static DEFINE_PER_CPU(struct handler_cost, bind_cost);
+
 static struct bind_row *bind_match(unsigned int type, unsigned int code, int value)
 {
         unsigned int event;
@@ -1722,8 +1725,8 @@ static void bind_mods(struct bind_handle *bind, unsigned int code, int value)
         }
 }
 
-static void bind_event(struct input_handle *handle, unsigned int type,
-                       unsigned int code, int value)
+static void bind_event_run(struct input_handle *handle, unsigned int type,
+                           unsigned int code, int value)
 {
         struct bind_handle *bind = container_of(handle, struct bind_handle, handle);
         struct bind_row *row;
@@ -1743,6 +1746,16 @@ static void bind_event(struct input_handle *handle, unsigned int type,
         if (!row || (type == EV_SW && !bind_row_bound(row)) || !bind_debounce(row))
                 return;
         bind_queue(row);
+}
+
+// Counted and, one in sixteen, timed: what `moonwater latency` shows.
+static void bind_event(struct input_handle *handle, unsigned int type,
+                       unsigned int code, int value)
+{
+        u64 started = moonwater_cost_begin(&bind_cost);
+
+        bind_event_run(handle, type, code, value);
+        moonwater_cost_end(&bind_cost, started);
 }
 
 /*
