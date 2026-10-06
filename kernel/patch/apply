@@ -26,7 +26,7 @@
 #                    for the three where a claim is not enough because the
 #                    architecture wrote its own assembly
 #         grafts     adds our Kconfig and our objects to the kernel's own
-#                    lists, and points kernel/moonwater at src/
+#                    lists, and points kernel/moonwater and kernel/canvas at src/
 #         replaces   kernel/replace/, applied separately by its own script
 #
 #       ALL OF IT IS REVERSIBLE BY DELETING linux/ AND UNPACKING AGAIN, which
@@ -906,6 +906,14 @@ line_add_padded "linux/Kconfig" "source \"kernel/moonwater/Kconfig\"" ||
 line_add_padded "linux/kernel/Makefile" "obj-y += moonwater/" ||
         die "grafting kernel/moonwater into linux/kernel/Makefile"
 
+#       Canvas is an object of its own, after the core's: the core calls it
+#       by name and there is nothing to register, so the order is only that
+#       the two directories are both there.
+line_add_padded "linux/Kconfig" "source \"kernel/canvas/Kconfig\"" ||
+        die "grafting kernel/canvas/Kconfig into linux/Kconfig"
+line_add_padded "linux/kernel/Makefile" "obj-y += canvas/" ||
+        die "grafting kernel/canvas into linux/kernel/Makefile"
+
 #
 #       The module source is this tree's src/, and the check
 #       used to be "does the link exist" -- which follows it.
@@ -918,19 +926,24 @@ line_add_padded "linux/kernel/Makefile" "obj-y += moonwater/" ||
 #       a word said about it.
 #
 #       So: where does it actually point, and is that here.
+#       The core and Canvas are two directories, so it is asked twice.
 #
-want_src="$(pwd)/src/moonwater"
-have_src=$(readlink linux/kernel/moonwater 2>/dev/null || true)
+for source_directory in moonwater canvas; do
+        want_src="$(pwd)/src/$source_directory"
+        have_src=$(readlink "linux/kernel/$source_directory" 2>/dev/null || true)
 
-if [ "$have_src" != "$want_src" ]; then
-        if [ -e linux/kernel/moonwater ] && [ ! -L linux/kernel/moonwater ]; then
-                die "linux/kernel/moonwater is not a symlink; preserving it"
-        fi
+        if [ "$have_src" != "$want_src" ]; then
+                if [ -e "linux/kernel/$source_directory" ] &&
+                        [ ! -L "linux/kernel/$source_directory" ]; then
+                        die "linux/kernel/$source_directory is not a symlink; preserving it"
+                fi
 
-        if [ -n "$have_src" ]; then
-                echo "  the kernel module link pointed at $have_src"
-                echo "  it should be $want_src -- repointing it"
+                if [ -n "$have_src" ]; then
+                        echo "  the kernel $source_directory link pointed at $have_src"
+                        echo "  it should be $want_src -- repointing it"
+                fi
+                sudo rm -f "linux/kernel/$source_directory"
+                sudo ln -s "$want_src" "linux/kernel/$source_directory" ||
+                        die "linking kernel $source_directory source"
         fi
-        sudo rm -f linux/kernel/moonwater
-        sudo ln -s "$want_src" linux/kernel/moonwater || die "linking kernel module source"
-fi
+done

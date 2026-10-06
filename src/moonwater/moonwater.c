@@ -758,10 +758,6 @@ static void moonwater_scan(const char *text, unsigned long length,
 #endif /* scan */
 
 #ifdef STANDARD_MODERN_C_KERNEL
-#ifdef CONFIG_MOONWATER_CANVAS
-static _Bool canvas_is_on(void);
-#endif
-
 /*
         One input handler, not grabbing. The callback is IRQ context and only
         debounces and queues; the line runs from system_dfl_long_wq as
@@ -780,7 +776,7 @@ static _Bool canvas_is_on(void);
 #define BIND_MOD_RALT 8u
 #define BIND_BOOT 1u
 #define BIND_DROP 2u
-#define BIND_CANVAS 4u
+#define BIND_STATE 4u
 #define BIND_CAD 8u
 #define BIND_CODES 768u
 #define BIND_MACHINE_QUEUE 32
@@ -817,21 +813,25 @@ static atomic_t bind_ctrl;
 static atomic_t bind_alt;
 static unsigned bind_held_n;
 static _Bool bind_handler_registered;
-static struct work_struct bind_canvas_work;
+static struct work_struct bind_state_work;
 
 /*
-        Whether this Canvas start has been handed to anyone.
+        Whether this start of the desktop has been handed to anyone.
 
-        Canvas starts during the initcalls, before system_state is running,
-        so the canvas on it fires at boot is dropped, and the machine process
-        that opens a desktop's windows attaches seconds later. Each canvas
-        on or off clears it; handing canvas on to the machine process, or
-        queueing its image line, sets it; and an attach that finds Canvas on
-        and this clear fires canvas on again. A machine process that crashes
-        and attaches again after it read the event does not get a second one,
-        so it does not open a second set of windows.
+        A desktop starts during the initcalls, before system_state is
+        running, so the on event it fires at boot is dropped, and the machine
+        process that opens its windows attaches seconds later. Each on or off
+        clears it; handing on to the machine process, or queueing its image
+        line, sets it; and an attach that finds the desktop on and this clear
+        fires on again. A machine process that crashes and attaches again
+        after it read the event does not get a second one, so it does not
+        open a second set of windows.
+
+        The events whose run is the state of the thing when the run starts,
+        and not the edge that queued it, are the ones flagged BIND_STATE: one
+        run answers however many on and off came before it.
 */
-static atomic_t bind_canvas_told;
+static atomic_t bind_state_told;
 static atomic_t bind_alive;
 static atomic_t bind_machine_live;
 
@@ -882,8 +882,8 @@ static const struct {
         { "", 0, 0, { KEY_MUTE, 0 } },
         { "", 0, 0, { KEY_BRIGHTNESSUP, 0 } },
         { "", 0, 0, { KEY_BRIGHTNESSDOWN, 0 } },
-        { "", 0, BIND_DROP | BIND_CANVAS, { 0, 0 } },
-        { "", 0, BIND_DROP | BIND_CANVAS, { 0, 0 } },
+        { "", 0, BIND_DROP | BIND_STATE, { 0, 0 } },
+        { "", 0, BIND_DROP | BIND_STATE, { 0, 0 } },
         { "", 0, 0, { KEY_MICMUTE, 0 } },
         { "", 0, 0, { KEY_RFKILL, KEY_WLAN } },
         { "", 500, BIND_DROP, { 0, 0 } },
@@ -1086,17 +1086,12 @@ static void bind_work(struct work_struct *work)
         bind_run(container_of(work, struct bind_row, work));
 }
 
-static void bind_canvas_run(struct work_struct *work)
+static void bind_state_run(struct work_struct *work)
 {
         struct bind_row *on = bind_row(SPARK_BIND_CANVAS_ON);
         struct bind_row *off = bind_row(SPARK_BIND_CANVAS_OFF);
-        _Bool running = false;
-
         (void)work;
-#ifdef CONFIG_MOONWATER_CANVAS
-        running = canvas_is_on();
-#endif
-        bind_run(running ? on : off);
+        bind_run(canvas_is_on() ? on : off);
         atomic_set(&on->busy, 0);
         atomic_set(&off->busy, 0);
 }
@@ -1206,23 +1201,23 @@ static void bind_queue(struct bind_row *row)
             bind_machine_push(row) && owned)
                 return;
 
-        if (!(row->flags & BIND_CANVAS) && !row->command[0])
+        if (!(row->flags & BIND_STATE) && !row->command[0])
                 return;
 
-        if (row->flags & BIND_CANVAS) {
+        if (row->flags & BIND_STATE) {
                 struct bind_row *on = bind_row(SPARK_BIND_CANVAS_ON);
                 struct bind_row *off = bind_row(SPARK_BIND_CANVAS_OFF);
 
                 if (!on->command[0] && !off->command[0])
                         return;
                 if (atomic_read(&on->busy) || atomic_read(&off->busy) ||
-                    work_pending(&bind_canvas_work))
+                    work_pending(&bind_state_work))
                         return;
                 atomic_set(&on->busy, 1);
                 atomic_set(&off->busy, 1);
                 if (row->event == SPARK_BIND_CANVAS_ON)
-                        atomic_set(&bind_canvas_told, 1);
-                work = &bind_canvas_work;
+                        atomic_set(&bind_state_told, 1);
+                work = &bind_state_work;
         } else {
                 if ((row->flags & BIND_DROP) &&
                     (atomic_read(&row->busy) || work_pending(&row->work)))
@@ -1239,10 +1234,15 @@ static void bind_fire(unsigned int event)
         struct bind_row *row = bind_row(event);
 
         if (event == SPARK_BIND_CANVAS_ON || event == SPARK_BIND_CANVAS_OFF)
-                atomic_set(&bind_canvas_told, 0);
+                atomic_set(&bind_state_told, 0);
 
         if (bind_row_bound(row))
                 bind_queue(row);
+}
+
+void moonwater_bind_fire(unsigned int event)
+{
+        bind_fire(event);
 }
 
 /*
@@ -1365,7 +1365,7 @@ static long bind_machine_wait(struct file *file, struct machine_control *request
                         event = bind_machine.event[0];
                         bind_machine_shift(0);
                         if (event == SPARK_BIND_CANVAS_ON)
-                                atomic_set(&bind_canvas_told, 1);
+                                atomic_set(&bind_state_told, 1);
                         bind_machine_fill(request, event);
                         spin_unlock_irqrestore(&bind_machine_lock, flags);
                         return 0;
@@ -1477,10 +1477,8 @@ static long report_machine(struct file *file, struct machine_control __user *out
                 spin_unlock_irqrestore(&bind_machine_lock, flags);
                 put_pid(before);
                 bind_machine_watch_all();
-#ifdef CONFIG_MOONWATER_CANVAS
-                if (!atomic_read(&bind_canvas_told) && canvas_is_on())
+                if (!atomic_read(&bind_state_told) && canvas_is_on())
                         bind_fire(SPARK_BIND_CANVAS_ON);
-#endif
                 request.flags = MOONWATER_ATTACHED;
                 break;
         }
@@ -1700,6 +1698,11 @@ static _Bool bind_key_swallowed(unsigned int code, int value)
         return swallow;
 }
 
+_Bool moonwater_bind_swallowed(unsigned int code, int value)
+{
+        return bind_key_swallowed(code, value);
+}
+
 static void bind_mods(struct bind_handle *bind, unsigned int code, int value)
 {
         unsigned int bit = code < 256 ? bind_mod_of[code] : 0;
@@ -1859,7 +1862,7 @@ static void bind_start(void)
 {
         unsigned at;
 
-        INIT_WORK(&bind_canvas_work, bind_canvas_run);
+        INIT_WORK(&bind_state_work, bind_state_run);
         init_waitqueue_head(&bind_machine.wait);
         machine_script_reset();
         spin_lock_irq(&bind_machine_lock);
@@ -1921,7 +1924,7 @@ static void bind_stop(void)
         if (bind_handler_registered)
                 input_unregister_handler(&bind_handler);
 
-        cancel_work_sync(&bind_canvas_work);
+        cancel_work_sync(&bind_state_work);
         for (at = 0; at < SPARK_BIND_EVENTS; at++)
                 cancel_work_sync(&bind_table[at].work);
 
@@ -1966,7 +1969,7 @@ static void bind_answer(struct bind_control *request, struct bind_row *row,
         if (atomic_read(&row->busy))
                 request->flags |= SPARK_BIND_RUNNING;
         if (work_pending(&row->work) ||
-            ((row->flags & BIND_CANVAS) && work_pending(&bind_canvas_work)))
+            ((row->flags & BIND_STATE) && work_pending(&bind_state_work)))
                 request->flags |= SPARK_BIND_PENDING;
         if (row->flags & BIND_BOOT)
                 request->flags |= SPARK_BIND_BOOT;

@@ -1,0 +1,71 @@
+menu "Moonwater Canvas"
+    config MOONWATER_CANVAS
+        bool "Moonwater Canvas, the in-kernel compositor"
+        depends on MOONWATER_CORE=y && DRM && DRM_CLIENT
+        select FONT_SUPPORT
+        select FONT_8x16
+        default y
+        help
+          Own the display from kernel space: Canvas draws the desktop,
+          windows and cursor itself through the in-kernel DRM client API
+          rather than handing a device node to a userspace display
+          server. Its source is src/canvas/, an object of its own beside
+          the core, which is why the core has to be built in. Disable this
+          option to omit the compositor C and architecture-specific renderer
+          assembly entirely; Moonwater core, Spark programs and the ordinary
+          kernel consoles remain available.
+
+    config MOONWATER_CANVAS_AUTOSTART
+        bool "Start Canvas automatically during boot"
+        depends on MOONWATER_CANVAS && MOONWATER_SHELL
+        default y
+        help
+          Probe DRM devices and start the Canvas desktop and its terminal as
+          soon as display drivers appear.
+
+          Disable this while keeping MOONWATER_CANVAS enabled to retain the
+          compositor in the image without claiming a display at boot. The
+          ordinary framebuffer, virtual or serial console then owns /dev/console
+          and PID 1 starts the shell directly on it. Ensure the kernel command
+          line does not contain drm_client_lib.active=, which intentionally
+          suppresses the framebuffer console for a Canvas-first desktop.
+
+    config MOONWATER_CANVAS_SCALE
+        int "How many device pixels one drawn pixel is"
+        depends on MOONWATER_CANVAS
+        default 1
+        help
+          A cell is eight by sixteen and a titlebar is twenty. Those are
+          the right numbers on an ordinary screen and a quarter of the
+          right numbers on a dense one, where everything comes out too
+          small to read. This multiplies every metric the compositor
+          draws for itself, so the same window covers the same area of
+          glass whatever the panel is.
+
+          Two for a Retina class display, three past about two hundred
+          and sixty dots to the inch.
+
+          It is a number here and not a measurement because a virtual
+          display's reported size is fiction -- bochs answers 320 by 200
+          millimetres whatever mode it is in, so dots per inch worked out
+          from it swings with the resolution and says nothing.
+
+    config MOONWATER_CANVAS_LARGEST_MODE
+        bool "Drive every screen at the largest mode it lists"
+        depends on MOONWATER_CANVAS
+        default y
+        help
+          A monitor's preferred mode is a recommendation, not its
+          maximum: an Odyssey G9 marks 3840x1080 preferred and will run
+          5120x1440, so taking the preferred one leaves most of the panel
+          dark.
+
+          The largest mode is taken at the highest refresh it lists. A
+          guest is seventy percent of the host screen in the pixels the
+          host already scaled -- cocoa divides by the backing factor and
+          centres the window, so a Retina Mac is seventy percent of the
+          DIP screen. The mode is one the connector already listed, at
+          that size's highest refresh: a made-up CVT line has no pixel
+          clock for virtio-gpu, and the display then waits forever for a
+          vblank that never arrives.
+endmenu # Moonwater Canvas

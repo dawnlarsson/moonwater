@@ -1,13 +1,14 @@
 /*
         The Moonwater kernel module: what it registers, and what it dispatches.
 
-        Three subsystems are expanded into this one translation unit and
-        this file is the only place that knows about all three at once.
-        spark.c is the binary format and the loader, spawn and reports that
-        serve it. moonwater.c is the bindings, the machine script and the
-        scanner. src/canvas/canvas.c is the compositor. Each keeps to itself;
-        the ioctl switch below is where they meet, because /dev/spark is one
-        device and a caller does not care which of them answers.
+        Two subsystems are expanded into this one translation unit. spark.c
+        is the binary format and the loader, spawn and reports that serve it.
+        moonwater.c is the bindings, the machine script and the scanner. Each
+        keeps to itself; the ioctl switch below is where they meet, because
+        /dev/spark is one device and a caller does not care which of them
+        answers. The compositor is a third, and not here: src/canvas builds
+        its own object, and src/canvas/canvas.h and seam.h beside this file
+        are the whole of what passes between them.
 
         What is genuinely this file's: the mounts a Moonwater boot needs
         before anything else can run, the miscdevice and its file
@@ -83,43 +84,19 @@
 #endif
 #endif
 
-// may_use_simd, for Canvas's vector bracket (canvas_simd_begin).
-#include <asm/simd.h>
+// What a kernel object built beside this one may call, and what this asks of
+// it. Plain kernel headers, so before the library's spellings below.
+#include "seam.h"
+#include "../canvas/canvas.h"
 
-// The graphics headers must precede lib.c: it defines "end" as a macro
-// and asm/io.h, reached through drm_client.h, uses that word as a variable.
-#ifdef CONFIG_MOONWATER_CANVAS
-#include <drm/drm_client.h>
-#include <drm/drm_crtc.h>
-#include <drm/drm_device.h>
-#include <drm/drm_drv.h>
-#include <drm/drm_fourcc.h>
-#include <drm/drm_framebuffer.h>
-#include <drm/drm_gem.h>
-#include <drm/drm_mode.h>
-#include <drm/drm_modes.h>
-#include <drm/drm_connector.h>
-#include <drm/drm_modeset_lock.h>
-#include <drm/drm_plane.h>
-#include <drm/drm_print.h>
-#include <drm/drm_probe_helper.h>
-// The console keyboard's mode, which Canvas turns off while it has the keys.
-#ifdef CONFIG_VT
-#include <linux/kd.h>
-#include <linux/vt_kern.h>
-#endif
-#endif
+// Canvas's pixel loops are its own object's, not this one's: the library is
+// declared to it and emitted here, and these six are the other way round.
+#define LIBRARY_CANVAS_ELSEWHERE
 
 #define STANDARD_MODERN_C_KERNEL
 #include "../lib.util.c"
 #include "spark.c"
 #include "moonwater.c"
-
-// Defined below, next to the rest of the spawning, and called only by the
-// compositor when it has a screen to put something on.
-#ifdef CONFIG_MOONWATER_CANVAS
-static int spawn_terminal(void);
-#endif
 
 struct spawn_strings
 {
@@ -130,11 +107,11 @@ struct spawn_strings
         char **vector;
 };
 
-struct pane;
-
 /* One open device is one independent launch/cache and window context. */
 struct device_context
 {
+        // The display client's, and the first member: see moonwater_display.
+        void *display;
         struct mutex spawn_lock;
         struct spawn_strings *environment;
         unsigned long environment_generation;
@@ -152,12 +129,10 @@ struct device_context
                 and the fast path stays a single compare.
         */
         const struct cred *environment_cred;
-        struct pane *pane;
 };
 
-#ifdef CONFIG_MOONWATER_CANVAS
-#include "../canvas/canvas.c"
-#endif
+_Static_assert(offsetof(struct device_context, display) == 0,
+               "moonwater_display reads the first word of the file's context");
 
 // Kernel functions rewritten in assembly (kernel/kernel.c, GPL-2.0), which
 // kernel/patch/functions puts in the place of the C originals. A stock build
@@ -210,48 +185,14 @@ static const struct
     */
 };
 
-/*
-        Every request number is the encoding of the struct it carries.
-
-        A handler copies sizeof(its struct) from the caller, and the caller
-        sized its buffer from the number it sent. The two agree only while
-        nobody edits one without the other, and the day they do not, the
-        kernel reads or writes past what the caller allocated -- a struct
-        that grew by a field, behind a number that still says the old size,
-        is a copy_to_user of stack the caller never asked for. So the number
-        is not typed in and trusted: it is rebuilt here from the direction,
-        the request number and sizeof, and the build stops on a mismatch.
-        The size is what _IOC_SIZE reads and what these are; the type is the
-        letter 's', and no number is used twice.
-*/
-#define IOCTL_IS(command, direction, request, size)                            \
-        _Static_assert((command) == (((unsigned int)(direction) << 30) |        \
-                                     ((unsigned int)(size) << 16) |             \
-                                     ((unsigned int)'s' << 8) |                 \
-                                     (unsigned int)(request)),                  \
-                       #command " does not encode the struct it carries")
-#define IOCTL_NONE 0
-#define IOCTL_WRITE 1
-#define IOCTL_READ 2
-#define IOCTL_BOTH 3
-
 IOCTL_IS(SPARK_IOCTL_SPAWN, IOCTL_WRITE, 1, sizeof(struct spawn));
 IOCTL_IS(SPARK_IOCTL_STATS, IOCTL_READ, 2, sizeof(struct stats));
-IOCTL_IS(SPARK_IOCTL_INPUT_STATS, IOCTL_READ, 3, sizeof(struct input_stats));
-IOCTL_IS(SPARK_IOCTL_CURSOR_STATS, IOCTL_READ, 6, sizeof(struct cursor_stats));
-IOCTL_IS(SPARK_IOCTL_INPUT_DEVICES, IOCTL_READ, 7, sizeof(struct input_devices));
 IOCTL_IS(SPARK_IOCTL_SNAPSHOT, IOCTL_BOTH, 9, sizeof(struct snapshot_request));
-IOCTL_IS(SPARK_IOCTL_CANVAS, IOCTL_BOTH, 10, sizeof(struct canvas_control));
 IOCTL_IS(SPARK_IOCTL_BIND, IOCTL_BOTH, 11, sizeof(struct bind_control));
 IOCTL_IS(SPARK_IOCTL_SETTINGS_GET, IOCTL_READ, 12, sizeof(struct spark_settings_request));
 IOCTL_IS(SPARK_IOCTL_SETTINGS_SET, IOCTL_WRITE, 13, sizeof(struct spark_settings_request));
 IOCTL_IS(MOONWATER_IOCTL_MACHINE, IOCTL_BOTH, 14, sizeof(struct machine_control));
 IOCTL_IS(MOONWATER_IOCTL_SCRIPT, IOCTL_BOTH, 15, sizeof(struct machine_script));
-#ifdef CONFIG_MOONWATER_CANVAS
-IOCTL_IS(WINDOW_IOCTL_CREATE, IOCTL_WRITE, 4, sizeof(struct window_request));
-IOCTL_IS(WINDOW_IOCTL_COMMIT, IOCTL_NONE, 5, 0);
-IOCTL_IS(WINDOW_IOCTL_STRIDE, IOCTL_NONE, 16, 0);
-#endif
 
 static long device_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
@@ -277,25 +218,12 @@ static long device_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
                 return settings_get((struct spark_settings_request __user *)arg);
         case SPARK_IOCTL_SETTINGS_SET:
                 return settings_set((struct spark_settings_request __user *)arg);
-#ifdef CONFIG_MOONWATER_CANVAS
-        case SPARK_IOCTL_INPUT_STATS:
-                return report_input((struct input_stats __user *)arg);
-        case SPARK_IOCTL_CURSOR_STATS:
-                return report_cursor((struct cursor_stats __user *)arg);
-        case SPARK_IOCTL_INPUT_DEVICES:
-                return report_devices((struct input_devices __user *)arg);
-        case SPARK_IOCTL_CANVAS:
-                return report_canvas((struct canvas_control __user *)arg);
-        case WINDOW_IOCTL_CREATE:
-                return window_ioctl_create(file, arg);
-        case WINDOW_IOCTL_COMMIT:
-                return window_ioctl_commit(file);
-        case WINDOW_IOCTL_STRIDE:
-                return window_ioctl_stride(file, arg);
-#endif
         }
 
-        return -ENOTTY;
+        // The compositor's requests, and the windows' ones: a program's
+        // commit is a frame, and the one more compare is not measurable
+        // against it. -ENOTTY from the client is what the switch would say.
+        return canvas_client_ioctl(file, cmd, arg);
 }
 
 /*
@@ -327,9 +255,7 @@ static int device_close(struct inode *inode, struct file *file)
         struct device_context *context = file->private_data;
 
         bind_machine_detach(file, NULL);
-#ifdef CONFIG_MOONWATER_CANVAS
-        window_release(file);
-#endif
+        canvas_client_release(file);
         spark_environment_release(context);
         kfree(context);
         return 0;
@@ -341,10 +267,7 @@ static const struct file_operations device_ops = {
     .unlocked_ioctl = device_ioctl,
     .flush = device_flush,
     .release = device_close,
-#ifdef CONFIG_MOONWATER_CANVAS
-    .mmap = window_mmap,
-    .poll = window_poll,
-#endif
+    CANVAS_FILE_OPERATIONS
     .llseek = noop_llseek,
 };
 
@@ -453,27 +376,16 @@ static b32 __init start()
         // Before the compositor: bindings have to work with no screen.
         bind_start();
 
-#if defined(CONFIG_MOONWATER_CANVAS) && \
-    defined(CONFIG_MOONWATER_CANVAS_AUTOSTART)
-        canvas_start_probing();
-#endif
+        canvas_boot();
 
         return 0;
 }
 
 static void __exit exit_module(void)
 {
-#ifdef CONFIG_MOONWATER_CANVAS
-#ifdef CONFIG_MOONWATER_CANVAS_AUTOSTART
-        // A probe that has not found a card owns no DRM client (and therefore
-        // no module reference) to keep this callback's text resident.
-        cancel_delayed_work_sync(&canvas_probe_work);
-#endif
         // Before anything else: printk must stop being pointed at cells that
         // are about to be freed.
-        console_stop();
-        put_pid(xchg(&canvas_spawned, NULL));
-#endif
+        canvas_unload();
 
         bind_stop();
 

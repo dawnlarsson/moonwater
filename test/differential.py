@@ -25592,7 +25592,7 @@ struct pid; struct cred; struct pane;
 #define refcount_dec_and_test(p) (--*(p) == 0)
 '''
     source += section(core, "struct spawn_strings\n",
-                      "#ifdef CONFIG_MOONWATER_CANVAS\n#include \"../canvas/canvas.c\"")
+                      "_Static_assert(offsetof(struct device_context, display) == 0,")
     # The real request path, not a stub: one opcode now carries every launch,
     # so what used to be decided by the opcode number -- interpretation policy
     # and the descriptors -- is decided by fields the caller controls, and the
@@ -25692,6 +25692,13 @@ static void *memdup_user(const void *from, unsigned long bytes) {
     source += r'''
 static long settings_get(struct spark_settings_request *request) { (void)request; return -61; }
 static long settings_set(struct spark_settings_request *request) { (void)request; return -22; }
+'''
+    # What is not the core's goes to the compositor, which is its own object:
+    # here it answers what it answers with Canvas off.
+    source += r'''
+static long canvas_client_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
+    (void)file; (void)cmd; (void)arg; return -ENOTTY;
+}
 '''
     source += section(core, "static long device_ioctl", "/*\n        misc_open")
     source += r'''
@@ -26008,6 +26015,7 @@ static void vt_event(unsigned long event,unsigned console) {
 }
 '''
     source += "static _Bool bind_key_swallowed(unsigned int code, int value);\n"
+    source += "_Bool moonwater_bind_swallowed(unsigned int code, int value);\n"
     source += section(keys, "#define KEY_TABLE", "// Under desktop.lock")
     source += section(pointer, "static inline struct pointer_handle *pointer_handle_of", "static HOT void pointer_event")
     source += section(pointer, "static COLD void pointer_disconnect", "static void canvas_input_devices")
@@ -26124,6 +26132,10 @@ typedef int wait_queue_head_t;
 static void init_waitqueue_head(wait_queue_head_t *w) { if (w) *w = 0; }
 static void wake_up(wait_queue_head_t *w) { (void)w; wakes++; }
 #define wait_event_interruptible(wq, condition) ((condition) ? 0 : 1)
+/* Whether the desktop holds a card is the compositor's to say, and its object
+   is not in this program. */
+static _Bool canvas_running;
+static _Bool canvas_is_on(void) { return canvas_running; }
 """
     # The script the module bakes in, as the module has it: one object, and an
     # end that is its end. Two empty arrays stood here, and the difference
@@ -26187,7 +26199,7 @@ static void bind_idle(struct bind_row *row) {
     atomic_set(&row->busy,0);
 }
 static void bind_idle_canvas(void) {
-    bind_canvas_work.pending=0;
+    bind_state_work.pending=0;
     atomic_set(&bind_row(SPARK_BIND_CANVAS_ON)->busy,0);
     atomic_set(&bind_row(SPARK_BIND_CANVAS_OFF)->busy,0);
 }
@@ -26238,7 +26250,8 @@ static void canvas_input_devices(struct input_devices *out) { out->count = 1; }
     source += ("REPORT_CANVAS(report_input_real, input_stats, canvas_input_stats)\n"
                "REPORT_CANVAS(report_cursor_real, cursor_stats, canvas_cursor_stats)\n"
                "REPORT_CANVAS(report_devices_real, input_devices, canvas_input_devices)\n")
-    source += canvas[canvas.index("static long report_canvas"):]
+    source += canvas[canvas.index("static long report_canvas"):
+                     canvas.index("/* ---- what the core calls ---- */")]
     # Here rather than beside the geometry it reshapes: resize_move reads the
     # drag state off desktop, and desktop is the mock declared just above.
     source += r'''
@@ -27431,18 +27444,18 @@ static void check_machine_events(void) {
        attach replays on, and the machine process reading the event sets it,
        so a process that attaches again after reading it opens nothing more. */
     bind_machine.count=0;
-    atomic_set(&bind_canvas_told,1);
+    atomic_set(&bind_state_told,1);
     bind_fire(SPARK_BIND_CANVAS_ON);
-    check(!atomic_read(&bind_canvas_told) && bind_machine.count==1 &&
+    check(!atomic_read(&bind_state_told) && bind_machine.count==1 &&
           bind_machine.event[0]==SPARK_BIND_CANVAS_ON,
           "a canvas on is queued for the machine process and not yet told");
     memset(&control,0,sizeof control);
     control.op=MOONWATER_WAIT;
-    check(!report_machine(&machine,&control) && atomic_read(&bind_canvas_told) &&
+    check(!report_machine(&machine,&control) && atomic_read(&bind_state_told) &&
           !bind_machine.count,
           "reading canvas on marks this start told");
     bind_fire(SPARK_BIND_CANVAS_OFF);
-    check(!atomic_read(&bind_canvas_told),
+    check(!atomic_read(&bind_state_told),
           "canvas off clears it for the next start");
 
     bind_idle(power); queued=bind_queued; bind_machine.count=0;
@@ -28671,6 +28684,18 @@ line_add_padded() { line_add "$@"; }
                 assert all(("# moonwater took " + name in makefile) != stock
                            for name in displaced), makefile
                 assert settings_placed(tree), result.stderr
+                #   Both kernel directories are grafted and linked: the core's
+                #   and Canvas's, which is its own object beside it.
+                if kind in ("absent", "symlink"):
+                    kconfig = (tree / "linux/Kconfig").read_text()
+                    kbuild = (tree / "linux/kernel/Makefile").read_text()
+                    assert 'source "kernel/moonwater/Kconfig"' in kconfig and \
+                        'source "kernel/canvas/Kconfig"' in kconfig, kconfig
+                    assert "obj-y += moonwater/" in kbuild and "obj-y += canvas/" in kbuild, kbuild
+                    for directory in ("moonwater", "canvas"):
+                        assert (tree / "linux/kernel" / directory).is_symlink() and \
+                            os.readlink(tree / "linux/kernel" / directory) == \
+                            str(tree / "src" / directory), directory
                 assert functions_placed(tree) != stock, result.stderr
                 if kind in ("directory", "file"):
                     preserved = link / "precious" if kind == "directory" else link
@@ -28744,29 +28769,36 @@ line_add_padded() { line_add "$@"; }
                             ("-std=c11", "-O2", "-Wall", "-Wextra"), sanitize=False)
         subprocess.run([str(binary)], check=True)
         #   Every request number is the encoding of the struct it carries: the
-        #   block core.c builds them from is compiled here over the real
-        #   structs, and then over the same block with one number changed,
-        #   which has to stop it, or the block is not looking.
-        numbers = section(core, "#define IOCTL_IS", "static long device_ioctl")
+        #   blocks core.c and Canvas build them from, over the macro in
+        #   seam.h, are compiled here over the real structs, and then over
+        #   the same blocks with one number changed, which has to stop it, or
+        #   the blocks are not looking.
+        seam = (root / "src/moonwater/seam.h").read_text()
+        macro = section(seam, "#define IOCTL_IS", "#define IOCTL_BOTH 3\n") + "#define IOCTL_BOTH 3\n"
+        numbers = macro + section(core, "IOCTL_IS(SPARK_IOCTL_SPAWN", "static long device_ioctl")
+        canvas_numbers = section(canvas, "IOCTL_IS(SPARK_IOCTL_INPUT_STATS",
+                                 "long canvas_client_ioctl")
         shapes = ("#include <stddef.h>\n"
                   "#define CONFIG_MOONWATER_CANVAS 1\n"
                   "static unsigned int hash_crc32(unsigned int c, void *d, unsigned long n)"
                   " { (void)d; (void)n; return c; }\n"
                   + spark.replace('#include "../platform/spark.inc"',
                                   (root / "src/platform/spark.inc").read_text())
+
                   + moonwater[:moonwater.index("#if defined(STANDARD_MODERN_C_KERNEL)")]
                   + "#endif\n"
                   + section((root / "src/canvas/window.c").read_text(),
                             "// _IOW('s', 4, struct window_request)",
                             "/*\n        A cell, for a window made of text."))
         for label, block, expected in (
-                ("real", numbers, 0),
-                ("changed", numbers.replace("IOCTL_BOTH, 11,", "IOCTL_BOTH, 12,"), 1),
+                ("real", numbers + canvas_numbers, 0),
+                ("changed", numbers.replace("IOCTL_BOTH, 11,", "IOCTL_BOTH, 12,") + canvas_numbers, 1),
                 ("resized", numbers.replace("sizeof(struct bind_control)",
-                                            "sizeof(struct bind_control) + 8"), 1)):
-            (Path(work) / f"ioctl-{label}.c").write_text(shapes + block)
+                                            "sizeof(struct bind_control) + 8") + canvas_numbers, 1)):
+            target = Path(work) / ("ioctl-%s.c" % label.replace(" ", "-"))
+            target.write_text(shapes + block)
             checked = subprocess.run(["cc", "-std=gnu11", "-fsyntax-only", "-w",
-                                      str(Path(work) / f"ioctl-{label}.c")],
+                                      str(target)],
                                      capture_output=True, text=True)
             assert (checked.returncode != 0) == bool(expected), (label, checked.stderr[-800:])
             assert not expected or "does not encode" in checked.stderr, checked.stderr[-800:]
@@ -35916,8 +35948,8 @@ def harness_image_nodes(argv):
     #   waits for -- and the desktop comes up with nothing on it while the
     #   log still says terminal: 0. Three files have to agree and none of
     #   them can see the other two.
-    core = (ROOT / 'src/moonwater/core.c').read_text()
     abi = (ROOT / 'src/canvas/canvas_abi.h').read_text()
+    canvas = (ROOT / 'src/canvas/canvas.c').read_text()
     tools = (ROOT / 'src/sh/tools.inc').read_text()
     system = {name for category, name in re.findall(
         r'SHELL_TOOL\(\s*(\w+)\s*,\s*([^,\s]+)\s*,', tools)
@@ -35933,13 +35965,12 @@ def harness_image_nodes(argv):
         check(name.lstrip('/') in system,
               '%s is a SYSTEM applet, which is why the image links it to the '
               'shell' % terminal)
-    check('work->path = SPARK_TERMINAL_PROGRAM;' in spark,
-          'the compositor asks for the path spark publishes')
+    check('moonwater_spawn_recorded(SPARK_TERMINAL_PROGRAM, &canvas_spawned)' in canvas,
+          'the compositor asks for the path canvas_abi.h publishes')
     #   And spells none of its own, which is the shape that could drift.
-    at = core.index('static int spawn_terminal(void)')
-    body = core[at:core.index('\n}', at)]
-    check('"' not in body.split('*/')[-1],
-          'spawn_terminal spells no path of its own')
+    check(canvas.count('moonwater_spawn_recorded(') == 1 and
+          not re.search(r'moonwater_spawn_recorded\(\s*"', canvas),
+          'the compositor spells no path of its own to the spawn')
 
     #   The build's side of the same agreement: SYSTEM is what makes the
     #   link, and the terminal is one of the programs no switch can take

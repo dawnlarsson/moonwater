@@ -582,9 +582,12 @@ if [ "$do_clean" -eq 1 ]; then
                 artifacts/merge.config artifacts/.config artifacts/info \
                 artifacts/asm.applied artifacts/asm.arch artifacts/asm.requested
         rm -f src/moonwater/*.a src/moonwater/*.o src/moonwater/*.o.d \
-                src/moonwater/*.cmd src/moonwater/*.order
+                src/moonwater/*.cmd src/moonwater/*.order \
+                src/canvas/*.a src/canvas/*.o src/canvas/*.o.d \
+                src/canvas/*.cmd src/canvas/*.order
         # The .S `build asm` generates from each .asm, which kbuild writes here
         # because src/moonwater/ is the kernel tree's kernel/moonwater.
+        # (src/canvas/ is kernel/canvas, and has none.)
         rm -f src/moonwater/*.S src/moonwater/*.asm_tmp
         exit 0
 fi

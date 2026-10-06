@@ -13,16 +13,55 @@
 
         The rest is the sections below, in dependency order: paint, text,
         pane, console, compose, plane, drag, output, keys, client, pointer,
-        and last the ioctls the device hands on. Included by core.c after
-        lib.c, whose "end" macro is why the DRM headers the module needs
-        before lib.c are at the top of core.c rather than here.
+        and last the ioctls the device hands on.
+
+        It is a kernel object of its own, built beside the core and linked
+        into the same image. What it asks of the core is src/moonwater/seam.h
+        and what the core asks of it is canvas.h; the bottom of this file is
+        the calls it answers. The library is declared to it and emitted by the
+        core, bar the pixel loops, which are its own.
 
         There is one desktop across every card, and one cursor on it. Windows
         and the cursor are in desktop coordinates; an output is a rectangle of
         the desktop that some crtc scans out. Nothing has a fixed maximum.
 */
 
+#include <linux/module.h>
+#include <linux/init.h>
+#include <linux/fs.h>
+#include <linux/mm.h>
+#include <linux/vmalloc.h>
+#include <linux/slab.h>
+#include <linux/uaccess.h>
+#include <linux/console.h>
+#include <linux/refcount.h>
+#include <linux/cred.h>
+#include <linux/file.h>
+// Before the library's own spellings below: poll.h names a bool of its own.
+#include <linux/poll.h>
+#include <linux/wait.h>
+#include <linux/timekeeping.h>
+#include <linux/sched/signal.h>
+#include <linux/sched/task.h>
+#include <linux/notifier.h>
 #include <linux/workqueue.h>
+#include <linux/io.h>
+#include <linux/delay.h>
+
+#ifdef CONFIG_X86_64
+#include <asm/cpufeature.h>
+#include <asm/fpu/api.h>
+#elif defined(CONFIG_ARM64)
+#include <asm/cpufeature.h>
+#include <asm/neon.h>
+#elif defined(CONFIG_RISCV)
+#include <asm/cpufeature.h>
+#include <asm/vector.h>
+#endif
+
+// may_use_simd, for the vector bracket (canvas_simd_begin).
+#include <asm/simd.h>
+
 #include <linux/kthread.h>
 #include <linux/rtmutex.h>
 #include <linux/cleanup.h>
@@ -36,8 +75,51 @@
 #include <linux/hrtimer.h>
 #include <linux/font.h>
 #include <linux/cacheflush.h>
+
+// The graphics headers must precede lib.c: it defines "end" as a macro
+// and asm/io.h, reached through drm_client.h, uses that word as a variable.
+#include <drm/drm_client.h>
+#include <drm/drm_crtc.h>
+#include <drm/drm_device.h>
+#include <drm/drm_drv.h>
+#include <drm/drm_fourcc.h>
+#include <drm/drm_framebuffer.h>
+#include <drm/drm_gem.h>
+#include <drm/drm_mode.h>
+#include <drm/drm_modes.h>
+#include <drm/drm_connector.h>
+#include <drm/drm_modeset_lock.h>
+#include <drm/drm_plane.h>
+#include <drm/drm_print.h>
+#include <drm/drm_probe_helper.h>
 #include <drm/drm_file.h>
 #include <drm/drm_rect.h>
+#include <drm/drm_auth.h>
+#ifndef MODULE
+#include <../drivers/gpu/drm/clients/drm_client_internal.h>
+#endif
+// The console keyboard's mode, which Canvas turns off while it has the keys.
+#ifdef CONFIG_VT
+#include <linux/kd.h>
+#include <linux/vt_kern.h>
+#endif
+
+#include "../moonwater/seam.h"
+#include "canvas.h"
+#include "canvas_abi.h"
+
+// The parameters below were the module's when Canvas was in it, and a kernel
+// command line and a sysfs path name them: moonwater.simd, moonwater.pm_dark,
+// moonwater.cursor_plane. The object is canvas.o, which would say canvas.
+#undef MODULE_PARAM_PREFIX
+#define MODULE_PARAM_PREFIX "moonwater."
+
+// The core emits the library; this object takes its declarations, and the
+// pixel loops that the core leaves to it (LIBRARY_CANVAS_ELSEWHERE there).
+#define LIBRARY_BODIES_ELSEWHERE
+#define STANDARD_MODERN_C_KERNEL
+#include "../lib.util.c"
+
 
 #include "window.c"
 
@@ -515,8 +597,8 @@ static struct desktop
 
 /*
         The terminal the compositor last started, as that task recorded itself
-        in spawn_enter, until the first window it opens takes it back in
-        window_ioctl_create. A reference: the pid it names cannot be freed and
+        in spawn_enter (moonwater_spawn_recorded), until the first window it
+        opens takes it back in window_ioctl_create. A reference: the pid it names cannot be freed and
         handed to another task while it is held here.
 */
 static struct pid *canvas_spawned;
@@ -2956,7 +3038,7 @@ static void desktop_refresh_panes(void)
 
 static long window_ioctl_create(struct file *file, unsigned long argument)
 {
-        struct device_context *context = file->private_data;
+        void **slot = moonwater_display(file);
         struct window_request request;
         struct pane *pane;
         unsigned long bytes;
@@ -2969,7 +3051,7 @@ static long window_ioctl_create(struct file *file, unsigned long argument)
         // Tested and stored under the one lock: two threads on one file used
         // to be able to both create, and the window one of them made was then
         // reachable from nothing and freed by nothing.
-        if (context->pane)
+        if (*slot)
                 return -EBUSY;
 
         if (list_empty(&desktop.outputs) || desktop.off)
@@ -2990,10 +3072,10 @@ static long window_ioctl_create(struct file *file, unsigned long argument)
                 pointer can otherwise land ahead of the stores that filled in
                 bytes and mapping. Free on x86, a compiler barrier only.
         */
-        smp_store_release(&context->pane, pane);
+        smp_store_release(slot, pane);
 
         /*
-                Marked, never focused here. Only the task spawn_terminal
+                Marked, never focused here. Only the task moonwater_spawn_recorded
                 started matches, and taking its pid back means only the first
                 window it opens is marked. current holds its own pid alive, so
                 a match cannot be a freed pid reused.
@@ -3023,8 +3105,8 @@ static long window_ioctl_create(struct file *file, unsigned long argument)
 */
 static __poll_t window_poll(struct file *file, poll_table *wait)
 {
-        struct device_context *context = file->private_data;
-        struct pane *pane = smp_load_acquire(&context->pane);
+        void **slot = moonwater_display(file);
+        struct pane *pane = smp_load_acquire(slot);
         struct window *shared;
 
         if (!pane || !pane->shared)
@@ -3151,8 +3233,8 @@ static long pane_restride(struct pane *pane, unsigned int columns)
 
 static long window_ioctl_stride(struct file *file, unsigned long columns)
 {
-        struct device_context *context = file->private_data;
-        struct pane *pane = smp_load_acquire(&context->pane);
+        void **slot = moonwater_display(file);
+        struct pane *pane = smp_load_acquire(slot);
         long answer;
 
         if (!pane || !pane->cells || !pane->shared)
@@ -3174,9 +3256,9 @@ static long window_ioctl_stride(struct file *file, unsigned long columns)
 
 static long window_ioctl_commit(struct file *file)
 {
-        struct device_context *context = file->private_data;
+        void **slot = moonwater_display(file);
 
-        if (!context->pane)
+        if (!*slot)
                 return -EINVAL;
 
         guard(rt_mutex)(&desktop.lock);
@@ -3216,7 +3298,7 @@ static long window_ioctl_commit(struct file *file)
                 take the frame, awake stays false and every commit composes.
         */
         {
-                struct pane *pane = context->pane;
+                struct pane *pane = *slot;
                 u64 now = ktime_get_ns();
 
                 if (desktop.awake && !READ_ONCE(pane->keyed) &&
@@ -3269,8 +3351,8 @@ static const struct vm_operations_struct window_vm_ops = {
 
 static int window_mmap(struct file *file, struct vm_area_struct *vma)
 {
-        struct device_context *context = file->private_data;
-        struct pane *pane = smp_load_acquire(&context->pane);
+        void **slot = moonwater_display(file);
+        struct pane *pane = smp_load_acquire(slot);
 
         if (!pane)
                 return -EINVAL;
@@ -3294,8 +3376,8 @@ static int window_mmap(struct file *file, struct vm_area_struct *vma)
 
 static void window_release(struct file *file)
 {
-        struct device_context *context = file->private_data;
-        struct pane *pane = context->pane;
+        void **slot = moonwater_display(file);
+        struct pane *pane = *slot;
         _Bool refocus;
 
         if (!pane)
@@ -3318,7 +3400,7 @@ static void window_release(struct file *file)
 
         rt_mutex_unlock(&desktop.lock);
 
-        context->pane = NULL;
+        *slot = NULL;
 }
 
 /*
@@ -8787,7 +8869,7 @@ static void keyboard_event(struct input_handle *handle, unsigned int code, int v
         unsigned int head, tail;
         struct window_key key;
 
-        if (bind_key_swallowed(code, value))
+        if (moonwater_bind_swallowed(code, value))
                 return;
 
         modifiers = (unsigned int)atomic_read(&desktop.modifiers);
@@ -9262,9 +9344,6 @@ static struct canvas *canvas_take_over(struct drm_device *dev)
 /*
         What turning Canvas on needs from a card before it is claimed.
 */
-#include <drm/drm_auth.h>
-#include <drm/drm_file.h>
-
 /* Every in-kernel client on a card but Canvas's, as drm_client_dev_unregister takes them. */
 static void canvas_clients_clear(struct drm_device *dev)
 {
@@ -9339,7 +9418,6 @@ static unsigned int canvas_settled_at;
         One bit per minor, which is the whole of DRM's minor space.
 */
 static u64 canvas_claimed;
-static _Bool canvas_is_on(void);
 static void canvas_firmware_yield(void);
 
 static void canvas_claimed_forget(struct drm_device *dev)
@@ -9556,7 +9634,7 @@ static COLD void canvas_probe(struct work_struct *work)
 
         canvas_claim_all(NULL, NULL);
         if (!was_on && canvas_is_on())
-                bind_fire(SPARK_BIND_CANVAS_ON);
+                moonwater_bind_fire(SPARK_BIND_CANVAS_ON);
         canvas_attempts++;
 
         if (!canvas_settled_at && !list_empty(&canvas_list))
@@ -9598,13 +9676,9 @@ static void __maybe_unused canvas_start_probing(void)
         canvas_thread_stop joins a thread that takes desktop.lock, so it is
         called under canvas_list_lock and never under desktop.lock.
 */
-#ifndef MODULE
-#include <../drivers/gpu/drm/clients/drm_client_internal.h>
-#endif
-
 static DEFINE_MUTEX(canvas_control_lock);
 
-static _Bool canvas_is_on(void)
+_Bool canvas_is_on(void)
 {
         _Bool on;
 
@@ -9783,7 +9857,7 @@ static long canvas_turn_off(void)
         pr_info("[moonwater canvas] " "off: %u card(s) given back to the console\n", count);
 
         mutex_unlock(&canvas_control_lock);
-        bind_fire(SPARK_BIND_CANVAS_OFF);
+        moonwater_bind_fire(SPARK_BIND_CANVAS_OFF);
         return 0;
 }
 
@@ -9814,7 +9888,7 @@ static long canvas_turn_on(struct canvas_control *answer)
         if (taken)
         {
                 (void)canvas_layout_name();
-                bind_fire(SPARK_BIND_CANVAS_ON);
+                moonwater_bind_fire(SPARK_BIND_CANVAS_ON);
                 return 0;
         }
 
@@ -11250,7 +11324,7 @@ static int canvas_loop(void *unused)
                 */
                 if (atomic_xchg(&desktop.spawn, 0))
                 {
-                        int ret = spawn_terminal();
+                        int ret = moonwater_spawn_recorded(SPARK_TERMINAL_PROGRAM, &canvas_spawned);
 
                         pr_info("[moonwater canvas] " "terminal: %d\n", ret);
                 }
@@ -11553,4 +11627,76 @@ static long report_canvas(struct canvas_control __user *out)
                 return -EFAULT;
 
         return answer;
+}
+
+/* ---- what the core calls ---- */
+
+/*
+        The requests /dev/spark takes that are not the core's, answered for
+        the core's ioctl switch, which sends every number it does not know
+        here. The numbers are spelled out by the same check the core's are.
+*/
+IOCTL_IS(SPARK_IOCTL_INPUT_STATS, IOCTL_READ, 3, sizeof(struct input_stats));
+IOCTL_IS(SPARK_IOCTL_CURSOR_STATS, IOCTL_READ, 6, sizeof(struct cursor_stats));
+IOCTL_IS(SPARK_IOCTL_INPUT_DEVICES, IOCTL_READ, 7, sizeof(struct input_devices));
+IOCTL_IS(SPARK_IOCTL_CANVAS, IOCTL_BOTH, 10, sizeof(struct canvas_control));
+IOCTL_IS(WINDOW_IOCTL_CREATE, IOCTL_WRITE, 4, sizeof(struct window_request));
+IOCTL_IS(WINDOW_IOCTL_COMMIT, IOCTL_NONE, 5, 0);
+IOCTL_IS(WINDOW_IOCTL_STRIDE, IOCTL_NONE, 16, 0);
+
+long canvas_client_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+{
+        switch (cmd)
+        {
+        case SPARK_IOCTL_INPUT_STATS:
+                return report_input((struct input_stats __user *)arg);
+        case SPARK_IOCTL_CURSOR_STATS:
+                return report_cursor((struct cursor_stats __user *)arg);
+        case SPARK_IOCTL_INPUT_DEVICES:
+                return report_devices((struct input_devices __user *)arg);
+        case SPARK_IOCTL_CANVAS:
+                return report_canvas((struct canvas_control __user *)arg);
+        case WINDOW_IOCTL_CREATE:
+                return window_ioctl_create(file, arg);
+        case WINDOW_IOCTL_COMMIT:
+                return window_ioctl_commit(file);
+        case WINDOW_IOCTL_STRIDE:
+                return window_ioctl_stride(file, arg);
+        }
+
+        return -ENOTTY;
+}
+
+int canvas_client_mmap(struct file *file, struct vm_area_struct *vma)
+{
+        return window_mmap(file, vma);
+}
+
+__poll_t canvas_client_poll(struct file *file, poll_table *wait)
+{
+        return window_poll(file, wait);
+}
+
+void canvas_client_release(struct file *file)
+{
+        window_release(file);
+}
+
+// The device is registered and the bindings work: look for a card.
+void canvas_boot(void)
+{
+#ifdef CONFIG_MOONWATER_CANVAS_AUTOSTART
+        canvas_start_probing();
+#endif
+}
+
+void canvas_unload(void)
+{
+#ifdef CONFIG_MOONWATER_CANVAS_AUTOSTART
+        // A probe that has not found a card owns no DRM client (and therefore
+        // no module reference) to keep this callback's text resident.
+        cancel_delayed_work_sync(&canvas_probe_work);
+#endif
+        console_stop();
+        put_pid(xchg(&canvas_spawned, NULL));
 }

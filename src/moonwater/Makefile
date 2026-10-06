@@ -1,7 +1,4 @@
-# canvas/ is included by core.c rather than compiled separately, so the C
-# side stays one translation unit.
-#
-# It is a composite now rather than obj-y += core.o, because assembly
+# It is a composite rather than obj-y += core.o, because assembly
 # cannot be included into a translation unit -- every .asm becomes its own
 # object and they have to be listed together to end up in one module. The
 # module is named moonwater, because the kernel's namespace is flat and
@@ -67,9 +64,8 @@ obj-$(CONFIG_MOONWATER_FLOODLIGHT) += floodlight.o
 #       other kind of .asm -- the ones that stand in for a file the kernel
 #       already builds -- and those must not be linked into the module as
 #       well, or the symbol they define exists twice and vmlinux does not
-#       link. Canvas's pixel loops are not .asm: they are assembly in
-#       lib.c, which core.c includes, assembled only when
-#       CONFIG_MOONWATER_CANVAS builds Canvas.
+#       link. Canvas's pixel loops are not .asm either: they are assembly in
+#       lib.c, which src/canvas builds into its own object.
 #
 #       Which architecture that is comes from the kernel's own configuration
 #       rather than from the build scripts, so the answer cannot disagree with

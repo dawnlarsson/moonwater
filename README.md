@@ -212,7 +212,10 @@ way. A running machine picks up a changed file on its next start.
 ## Canvas and the terminal
 
 Canvas, the desktop, is part of the kernel: a compositor that draws with the
-CPU through DRM, so it works on any display the kernel can drive.
+CPU through DRM, so it works on any display the kernel can drive. It is an
+object of its own in `src/canvas`, linked beside the Moonwater core, and the
+two meet in two headers: `src/canvas/canvas.h`, what the core asks of it, and
+`src/moonwater/seam.h`, what it asks of the core.
 `moonwater canvas off` closes every window and leaves a shell on the text
 console, from which another display server such as Weston can take the screen.
 

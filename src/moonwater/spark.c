@@ -1370,8 +1370,8 @@ struct spawn_work
         unsigned int argc;
         bool shell_fallback;
         bool path_owned;
-        // spawn_terminal's, whose first window takes the keyboard.
-        bool terminal;
+        // moonwater_spawn_recorded's: where the task says who it is.
+        struct pid **record;
         // SPARK_SPAWN_KEEP_*: the ignores the program keeps.
         unsigned int keep;
         struct file *stdio[3];
@@ -1438,11 +1438,16 @@ static void spawn_free(struct spawn_work *work)
         The ioctl path exists for a program that wants to start another; this
         is for the kernel starting the first one, which is a much smaller
         request and needs none of the copying from userspace.
+
+        The program is borrowed, not copied, so it has to be a literal or
+        otherwise outlive the task. A caller that wants to know which program
+        in the system is its own gives a place to write the thread group's
+        pid: the task records itself there before it becomes the program, so
+        what it opens can be told from what any other program opens.
 */
 static int spawn_enter(void *data);
 
-#ifdef CONFIG_MOONWATER_CANVAS
-static int spawn_terminal(void)
+int moonwater_spawn_recorded(const char *program, struct pid **record)
 {
         struct spawn_work *work = kzalloc(sizeof(*work), GFP_KERNEL);
 
@@ -1451,15 +1456,8 @@ static int spawn_terminal(void)
 
         /* Borrow the literal like do_spawn borrows its fixed /shell path;
            copying it for a worker whose next action is execve adds a slab
-           round trip and no lifetime.
-
-           /term is a link to the shell that the image makes for every applet
-           in the SYSTEM category, so this is the one shell image reached
-           under the name of the applet wanted -- the same multicall
-           convention as every other name at the root, and it stops working
-           the moment term stops being a SYSTEM applet. Nothing said the two
-           had to agree until the image_nodes harness did. */
-        work->path = SPARK_TERMINAL_PROGRAM;
+           round trip and no lifetime. */
+        work->path = (char *)program;
         work->arguments = kvmalloc(sizeof(*work->arguments) +
                                    2 * sizeof(char *), GFP_KERNEL);
 
@@ -1474,7 +1472,7 @@ static int spawn_terminal(void)
         work->arguments->vector[0] = work->path;
         work->arguments->vector[1] = NULL;
         work->argc = 1;
-        work->terminal = true;
+        work->record = record;
 
         if (user_mode_thread(spawn_enter, work, SIGCHLD) <= 0)
         {
@@ -1484,7 +1482,6 @@ static int spawn_terminal(void)
 
         return 0;
 }
-#endif
 
 /*
         A program starts able to be interrupted.
@@ -1534,17 +1531,15 @@ static int spawn_enter(void *data)
 
         spawn_default_signals(work->keep);
 
-#ifdef CONFIG_MOONWATER_CANVAS
         /*
-                The compositor's terminal says who it is before it becomes
-                /term, so the window it opens can be told from any other
-                program's. Recorded by the task itself, which is what puts it
-                ahead of that window; a newer terminal replaces one that never
-                opened a window at all.
+                A launch that asked to be told apart says who it is before it
+                becomes the program, so what it opens can be told from any
+                other program's. Recorded by the task itself, which is what
+                puts it ahead of that program's first window; a newer launch
+                replaces one that never opened one.
         */
-        if (unlikely(work->terminal))
-                put_pid(xchg(&canvas_spawned, get_pid(task_tgid(current))));
-#endif
+        if (unlikely(work->record))
+                put_pid(xchg(work->record, get_pid(task_tgid(current))));
 
         /* Without the close-on-exec flag, so these three outlive the load
            while every other descriptor the caller happened to hold does

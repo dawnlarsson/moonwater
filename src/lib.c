@@ -1468,10 +1468,41 @@ typedef union matrix4
 #define MOONWATER_ASSEMBLY 1
 #endif
 
-#ifdef KERNEL_MODE
+#if defined(KERNEL_MODE) && !defined(LIBRARY_BODIES_ELSEWHERE)
 #define ASM_EXPORT(name) EXPORT_SYMBOL(name)
 #else
 #define ASM_EXPORT(name)
+#endif
+
+/*
+        A second translation unit of one kernel image.
+
+        The kernel build links this library's routines into the image once:
+        every ASM_FUNC below is a global label, and a second copy of any of
+        them is a second definition at the link. Canvas is a kernel object of
+        its own and includes this file for the declarations, the inline bodies
+        and the macros -- what a caller needs -- and none of the routines:
+        LIBRARY_BODIES_ELSEWHERE, set before the include, turns every
+        top-level __asm__ block below into nothing, and the exports with it.
+        The core object carries them. There is nothing else at the top level
+        of this file that makes a symbol, so an object built this way defines
+        none of the library's names (the kernel lane compares the two
+        objects' defined symbols and wants no name in both).
+
+        Two things are the exception. Canvas's own pixel loops, further down,
+        are emitted by Canvas's object and by nothing else when the core
+        says LIBRARY_CANVAS_ELSEWHERE; and a standalone build of this file,
+        which sets neither, is every routine at once, as it always was.
+
+        The macro takes the keyword's own name, which is only safe because
+        nothing in this file spells an inline statement __asm__( with the
+        parenthesis against it -- the inline ones here are `asm volatile`
+        and the keyword is left alone wherever it is not called. The
+        macro is removed at the end of the file, before the code above it
+        that does use the call.
+*/
+#ifdef LIBRARY_BODIES_ELSEWHERE
+#define __asm__(...)
 #endif
 
 // aarch64 spells it with a percent, everything else with an at. Getting this
@@ -46910,12 +46941,13 @@ ASM_EXPORT(memset64);
 #endif
 
 //
-//      Canvas, the compositor in the kernel module, draws every pixel through
-//      the six routines below. Nothing else calls them, so they are assembled
-//      only into a kernel module that builds Canvas: KERNEL_MODE and
-//      CONFIG_MOONWATER_CANVAS. Every x86_64 body is general purpose registers
-//      and rep stosq, because the kernel is built -mno-sse and nothing here
-//      takes kernel_fpu_begin.
+//      Canvas, the compositor in the kernel, draws every pixel through the six
+//      routines below. Nothing else calls them, so they are assembled only into
+//      a kernel build with Canvas: KERNEL_MODE and CONFIG_MOONWATER_CANVAS, and
+//      into Canvas's own object, which is why the core says
+//      LIBRARY_CANVAS_ELSEWHERE and Canvas does not. Every x86_64 body is
+//      general purpose registers and rep stosq, because the kernel is built
+//      -mno-sse and nothing here takes kernel_fpu_begin.
 //
 //
 //       Canvas rectangles and alpha blits.
@@ -46990,7 +47022,11 @@ ASM_EXPORT(memset64);
 //       two byte row, so stride is two and the second call starts a byte along
 //       and eight pixels over.
 //
-#if defined(KERNEL_MODE) && defined(CONFIG_MOONWATER_CANVAS)
+#if defined(KERNEL_MODE) && defined(CONFIG_MOONWATER_CANVAS) && \
+    !defined(LIBRARY_CANVAS_ELSEWHERE)
+#ifdef LIBRARY_BODIES_ELSEWHERE
+#undef __asm__
+#endif
 #if X64
 __asm__(
     ASM_SECTION
@@ -48851,6 +48887,9 @@ __asm__(
     ".option pop\n"
     ASM_SIMD_SECTION_END
 );
+#endif
+#ifdef LIBRARY_BODIES_ELSEWHERE
+#define __asm__(...)
 #endif
 #endif // KERNEL_MODE && CONFIG_MOONWATER_CANVAS
 
@@ -81848,5 +81887,9 @@ __asm__(
 #endif // STANDARD_NO_PLATFORM
 
 #endif // KERNEL_MODE
+
+#ifdef LIBRARY_BODIES_ELSEWHERE
+#undef __asm__
+#endif
 
 #endif // STANDARD_MODERN_C
