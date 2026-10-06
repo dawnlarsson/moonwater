@@ -118,7 +118,10 @@ CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=n
 # Huge pages on request rather than for everything. THP=always is a throughput
 # setting: it hands out huge pages by default and pays for them with direct
 # compaction stalls in whichever process happens to fault next, which is a
-# latency spike landing on an innocent bystander.
+# latency spike landing on an innocent bystander. The tools that fill big
+# arenas ask for them: memory() in lib.c advises every mapping of eight
+# megabytes or more, and sort, xz and zstd are as fast as they were measured
+# at THP=always (sort 1.28x, xz 1.13x slower in a process that did not ask).
 #
 CONFIG_TRANSPARENT_HUGEPAGE_MADVISE=y
 CONFIG_TRANSPARENT_HUGEPAGE_ALWAYS=n

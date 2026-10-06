@@ -16984,13 +16984,17 @@ static bool stdlib_buffers_are_ours(void)
         MADV_NOHUGEPAGE says only that this one region wants ordinary pages.
         Every mmap the process makes afterwards -- the allocator's chunks,
         the movable storage behind memory_reserve, a sort spill -- is a
-        separate region and keeps its huge pages, which is where the tools
-        that genuinely stream megabytes get their win: sort and zstd measure
-        one to three percent faster with this, not slower, because their
-        thirty two megabytes of huge pages were never in the bss to begin
-        with. Turning huge pages off process-wide instead costs sort forty
-        four percent, which is the experiment that says the region and not
-        the process is the right thing to name.
+        separate region and keeps its huge pages where the kernel gives
+        them, which is where the tools that genuinely stream megabytes get
+        their win: sort and zstd measure one to three percent faster with
+        this, not slower, because their thirty two megabytes of huge pages
+        were never in the bss to begin with. Turning huge pages off
+        process-wide instead costs sort forty four percent, which is the
+        experiment that says the region and not the process is the right
+        thing to name. Where the kernel gives them to whoever asks, as the
+        one this tree builds does, memory() asks for every mapping of
+        MEMORY_HUGE_MIN bytes or more, and a store memory_reserve grows to
+        that size, so those are the regions that have them.
 
         On a kernel built the way this tree builds one it changes nothing:
         kernel/profile/latency asks for TRANSPARENT_HUGEPAGE_MADVISE, where

@@ -18845,6 +18845,121 @@ fn check_lazy_file_and_library()
         system_call_3(syscall(unlinkat), AT_FDCWD, (positive)bare, 0);
 }
 
+/*
+        Whether the mapping holding an address has asked for huge pages: "hg"
+        in the VmFlags line smaps gives it. 0 for no, 1 for yes, 2 where the
+        file is not there to read or the kernel (an emulator's host, a
+        machine that is not Linux) does not take the advice at all, which a
+        page of its own says.
+*/
+static positive memory_asked_huge(positive address)
+{
+        static char text[1 << 18];
+        positive probe = (positive)memory(4096);
+
+        if (!probe || system_failed(probe))
+                return 2;
+
+        bipolar taken = (bipolar)system_call_3(syscall(madvise), probe, 4096, MEMORY_ADVISE_HUGE_PAGE);
+
+        memory_free((address_any)probe, 4096);
+        if (taken < 0)
+                return 2;
+
+        bipolar handle = system_open_at(AT_FDCWD, "/proc/self/smaps", FILE_READ);
+        positive used = 0;
+
+        if (handle < 0)
+                return 2;
+        for (;;)
+        {
+                bipolar got = system_read_retry((positive)handle, text + used, sizeof(text) - 1 - used);
+
+                if (got <= 0)
+                        break;
+                used += (positive)got;
+        }
+        system_close((positive)handle);
+        text[used] = 0;
+
+        for (char *line = text; *line;)
+        {
+                char *stop = line;
+                positive low = 0, high = 0, digits = 0;
+
+                while (*stop && *stop != '\n')
+                        stop++;
+                for (char *at = line; at < stop && ((*at >= '0' && *at <= '9') || (*at >= 'a' && *at <= 'f')); at++, digits++)
+                        low = low * 16 + (positive)(*at <= '9' ? *at - '0' : *at - 'a' + 10);
+                if (digits && line[digits] == '-')
+                {
+                        char *at = line + digits + 1;
+
+                        for (; *at != ' ' && at < stop; at++)
+                                high = high * 16 + (positive)(*at <= '9' ? *at - '0' : *at - 'a' + 10);
+                        if (address >= low && address < high)
+                        {
+                                for (line = stop + 1; *line && !(line[0] == 'V' && line[1] == 'm' && line[2] == 'F'); )
+                                {
+                                        while (*line && *line != '\n')
+                                                line++;
+                                        line += *line == '\n';
+                                }
+                                for (char *flag = line; *flag && *flag != '\n'; flag++)
+                                        if (flag[0] == ' ' && flag[1] == 'h' && flag[2] == 'g' && (flag[3] == ' ' || flag[3] == '\n'))
+                                                return 1;
+                                return 0;
+                        }
+                }
+                line = *stop ? stop + 1 : stop;
+        }
+
+        return 2;
+}
+
+/*
+        A mapping of eight megabytes or more is an arena a tool fills, and
+        memory() asks for huge pages for it where the kernel is built to give
+        them to whoever asks; a smaller one does not, and a store that
+        memory_reserve grows to eight megabytes does, whether the mapping it
+        had was one or not. The grown store is the first growth to 16 MiB,
+        which is mremap's.
+*/
+fn check_memory_huge()
+{
+        positive small = (positive)memory(MEMORY_HUGE_MIN - 4096);
+        positive large = (positive)memory(MEMORY_HUGE_MIN);
+        positive big = (positive)memory(3 * MEMORY_HUGE_MIN + 4096);
+
+        if (memory_asked_huge(large) == 2)
+        {
+                memory_free((address_any)small, MEMORY_HUGE_MIN - 4096);
+                memory_free((address_any)large, MEMORY_HUGE_MIN);
+                memory_free((address_any)big, 3 * MEMORY_HUGE_MIN + 4096);
+                string_format(log, "  NOTE memory: the kernel here does not take huge page advice, so none was checked\n");
+                return;
+        }
+
+        same("memory", "under eight megabytes does not ask", memory_asked_huge(small), 0);
+        same("memory", "eight megabytes asks", memory_asked_huge(large), 1);
+        same("memory", "more than eight megabytes asks", memory_asked_huge(big), 1);
+        memory_free((address_any)small, MEMORY_HUGE_MIN - 4096);
+        memory_free((address_any)large, MEMORY_HUGE_MIN);
+        memory_free((address_any)big, 3 * MEMORY_HUGE_MIN + 4096);
+
+        p8 address_to bytes = null;
+        positive room = 0;
+        positive used = 0;
+
+        same("memory_reserve", "a first store of a megabyte", memory_reserve((address_any address_to)address_of bytes, address_of room, 0, 1 << 20, 1, 4096), 1);
+        same("memory_reserve", "under eight megabytes does not ask", memory_asked_huge((positive)bytes), 0);
+        bytes[0] = 1;
+        same("memory_reserve", "grown past eight megabytes", memory_reserve((address_any address_to)address_of bytes, address_of room, 1, 2 * MEMORY_HUGE_MIN, 1, 4096), 1);
+        same("memory_reserve", "keeps what it held", bytes[0], 1);
+        same("memory_reserve", "past eight megabytes asks", memory_asked_huge((positive)bytes), 1);
+        memory_release((address_any address_to)address_of bytes, address_of room, address_of used, 1);
+}
+
 fn check_memory()
 {
         static positive sizes[] = {1, 8, 100, 4095, 4096, 4097, 65536};
@@ -27448,6 +27563,7 @@ b32 main()
         check_file_round_trip();
         check_lazy_file_and_library();
         check_memory();
+        check_memory_huge();
         check_directory();
         check_clock();
         check_format();

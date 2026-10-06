@@ -1265,7 +1265,6 @@ static bool zstd_sequences(p8 address_to src, positive src_len, p8 address_to li
    later. */
 #define ZSTD_MAP_FIXED 0x10
 #define ZSTD_MEMFD_CLOEXEC 1u
-#define ZSTD_MADV_HUGEPAGE 14
 #define ZSTD_RING_ALIGN ((positive)2 << 20)
 /* Below this the plain mapping's doubling is a few megabytes, and a ring
    would round up to whole huge pages. */
@@ -1322,7 +1321,7 @@ static p8 address_to zstd_ring_map(positive size)
                 system_call_2(syscall(munmap), (positive)at, 2 * size);
                 goto done;
         }
-        system_call_3(syscall(madvise), (positive)at, 2 * size, ZSTD_MADV_HUGEPAGE);
+        system_call_3(syscall(madvise), (positive)at, 2 * size, MEMORY_ADVISE_HUGE_PAGE);
         ring = (p8 address_to)at;
 done:
         system_call_1(syscall(close), (positive)handle);

@@ -64332,6 +64332,22 @@ __asm__(
 #endif
 #endif // KERNEL_MODE
 
+//      The size from which a mapping is an arena a tool fills, and the
+//      advice that asks for huge pages for it. kernel/profile/latency builds
+//      THP=madvise, where an anonymous mapping gets ordinary pages unless it
+//      says otherwise: memory says so of every mapping this large, which the
+//      allocator's blocks and every table a tool takes with memory_checked
+//      go through, and memory_reserve of a store that mremap grows to it.
+//      Eight megabytes and not four: a sort of a few lines maps one of four,
+//      touches the first page of it, and with the advice on that is two
+//      megabytes zeroed where it was four kilobytes, ten microseconds on a
+//      start of fifty; the sixteen megabytes a sort of a real file maps, the
+//      tables of xz and the windows of zstd are all above it. Sparse regions
+//      this large say the opposite after they are mapped, as the bss and the
+//      parse arenas do.
+#define MEMORY_HUGE_MIN 8388608
+#define MEMORY_ADVISE_HUGE_PAGE 14
+
 #if X64
 __asm__(
     ASM_SECTION
@@ -64362,6 +64378,12 @@ __asm__(
     "xor %r9d, %r9d\n"
     "        mov     $" MOONWATER_NUMBER(syscall(mmap)) ", %eax\n"
     "syscall\n"
+#if defined(LINUX)
+    "cmp $" MOONWATER_NUMBER(MEMORY_HUGE_MIN) ", %rsi\n   jb 1f\n   cmp $-4095, %rax\n   jae 1f\n"
+    "mov %rax, %r9\n   mov %rax, %rdi\n   mov $" MOONWATER_NUMBER(MEMORY_ADVISE_HUGE_PAGE) ", %edx\n"
+    "mov $" MOONWATER_NUMBER(syscall(madvise)) ", %eax\n   syscall\n   mov %r9, %rax\n"
+    "1:\n"
+#endif
     ASM_RET
     ASM_END(memory)
     //
@@ -64416,7 +64438,10 @@ __asm__(
     "mov %rbp, %rdx\n   mov $1, %r10d  # MREMAP_MAYMOVE\n"
     "mov $" MOONWATER_NUMBER(syscall(mremap)) ", %eax\n   syscall\n"
     "cmp $-4095, %rax\n   jae 4f\n   test %rax, %rax\n   jz 4f\n"
-    "mov %rax, %rbp\n   jmp 3f\n"
+    "mov %rax, %rbp\n"
+    "cmp $" MOONWATER_NUMBER(MEMORY_HUGE_MIN) ", %rdx\n   jb 3f\n"
+    "mov %rbp, %rdi\n   mov %rdx, %rsi\n   mov $" MOONWATER_NUMBER(MEMORY_ADVISE_HUGE_PAGE) ", %edx\n"
+    "mov $" MOONWATER_NUMBER(syscall(madvise)) ", %eax\n   syscall\n   jmp 3f\n"
     "4:\n"
 #endif
     "mov %rbp, %rdi\n   call memory\n   mov %rax, %rbp\n"
@@ -64451,6 +64476,12 @@ __asm__(
     "mov x5, xzr\n"
     "        mov     " SYSCALL_NUMBER_REGISTER ", #" MOONWATER_NUMBER(syscall(mmap)) "\n"
     "        " SYSCALL_INSTRUCTION "\n"
+#if defined(LINUX)
+    "mov x2, #" MOONWATER_NUMBER(MEMORY_HUGE_MIN) "\n   cmp x1, x2\n   b.lo 1f\n   mov x3, #-4095\n   cmp x0, x3\n   b.hs 1f\n"
+    "mov x9, x0\n   mov x2, #" MOONWATER_NUMBER(MEMORY_ADVISE_HUGE_PAGE) "\n"
+    "mov x8, #" MOONWATER_NUMBER(syscall(madvise)) "\n   svc #0\n   mov x0, x9\n"
+    "1:\n"
+#endif
     ASM_RET
     ASM_END(memory)
     ASM_FUNC(memory_free)
@@ -64491,7 +64522,9 @@ __asm__(
     "mov x2, x25\n   mov x3, #1  // MREMAP_MAYMOVE\n"
     "mov x8, #" MOONWATER_NUMBER(syscall(mremap)) "\n   svc #0\n"
     "mov x6, #-4095\n   cmp x0, x6\n   b.hs 4f\n   cbz x0, 4f\n"
-    "mov x24, x0\n   b 3f\n"
+    "mov x24, x0\n   mov x1, #" MOONWATER_NUMBER(MEMORY_HUGE_MIN) "\n   cmp x2, x1\n   b.lo 3f\n"
+    "mov x1, x2\n   mov x2, #" MOONWATER_NUMBER(MEMORY_ADVISE_HUGE_PAGE) "\n"
+    "mov x8, #" MOONWATER_NUMBER(syscall(madvise)) "\n   svc #0\n   b 3f\n"
     "4:\n"
 #endif
     "mov x0, x25\n   bl memory\n   mov x24, x0\n"
@@ -64526,6 +64559,12 @@ __asm__(
     "li a4, -1\n   li a5, 0\n"
     "        li      a7, " MOONWATER_NUMBER(syscall(mmap)) "\n"
     "ecall\n"
+#if defined(LINUX)
+    "li t0, " MOONWATER_NUMBER(MEMORY_HUGE_MIN) "\n   bltu a1, t0, 1f\n   li t0, -4095\n   bgeu a0, t0, 1f\n"
+    "mv t1, a0\n   li a2, " MOONWATER_NUMBER(MEMORY_ADVISE_HUGE_PAGE) "\n"
+    "li a7, " MOONWATER_NUMBER(syscall(madvise)) "\n   ecall\n   mv a0, t1\n"
+    "1:\n"
+#endif
     ASM_RET
     ASM_END(memory)
     ASM_FUNC(memory_free)
@@ -64565,7 +64604,9 @@ __asm__(
     "mv a2, s5\n   li a3, 1  # MREMAP_MAYMOVE\n"
     "li a7, " MOONWATER_NUMBER(syscall(mremap)) "\n   ecall\n"
     "li t0, -4095\n   bgeu a0, t0, 4f\n   beqz a0, 4f\n"
-    "mv s5, a0\n   j 3f\n"
+    "mv s5, a0\n   li t0, " MOONWATER_NUMBER(MEMORY_HUGE_MIN) "\n   bltu a2, t0, 3f\n"
+    "mv a1, a2\n   li a2, " MOONWATER_NUMBER(MEMORY_ADVISE_HUGE_PAGE) "\n"
+    "li a7, " MOONWATER_NUMBER(syscall(madvise)) "\n   ecall\n   j 3f\n"
     "4:\n"
 #endif
     "mv a0, s5\n   call memory\n   mv s5, a0\n"
