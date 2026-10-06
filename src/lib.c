@@ -814,6 +814,10 @@ __attribute__((optimize("inline-max-size=" #max_size)))
 
 #define TERM_ALT_BUFFER ANSI "?1049h"
 #define TERM_MAIN_BUFFER ANSI "?1049l"
+// The same way back with nothing else done: 1049 also restores the cursor,
+// which a terminal that never saw 1049h takes to be the saved position it
+// starts with, the top left corner.
+#define TERM_MAIN_BUFFER_ONLY ANSI "?47l"
 
 // ### Values that never can be negative
 #define positive_range unsigned

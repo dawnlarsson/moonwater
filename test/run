@@ -8407,6 +8407,12 @@ same 'the old screen is still there' '[keep]|[]|[]' \
 same 'the shell leaving one it never entered' '[hi]' \
                                                  20 3 in '\e[?1049lhi' row 0
 same 'the older spelling' '[]|[gone]|[]'         20 3 in 'keep\r\n\e[?47hgone' dump
+#       What the shell writes ahead of every prompt, 47 and not 1049: Konsole,
+#       xterm and VTE restore the cursor on 1049 whether or not it was saved,
+#       which put every prompt at their top left corner.
+same 'the prompt, off the main screen' '[hi]'    20 3 in '\e[?47l\e[0m\e[?25hhi' row 0
+same 'the prompt, off a screen left up' '[keep]|[]|[]' \
+                                                 20 3 in 'keep\r\n\e[?1049hgone\e[?47l\e[0m' dump
 #       None of them moves the cursor, and only 1049 saves it on the way in
 #       and gives it back on the way out.
 same 'entering keeps the cursor' '0,2'           20 3 in 'ab\e[?1049h' cursor

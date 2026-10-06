@@ -19380,6 +19380,228 @@ def shell_argv_zero(farm):
     return shell_reference_walk(farm, cases)
 
 
+class shell_ReferenceScreen:
+    """A screen as Konsole, xterm and VTE keep one, for the bytes a shell writes.
+
+    Only what a prompt, a line editor and the commands under it use: printing
+    with the autowrap that waits for the next character, CR LF BS HT, CUU CUD
+    CUF CUB CUP, EL and ED, DECSC and DECRC, the alternate screen, and every
+    mode and attribute it does not draw ignored. The one place it is exact
+    where an easy model is not is the way back from the alternate screen: 1049
+    restores the cursor on the way out whether or not 1049h ever saved one, and
+    with none saved that is the top left corner, in all three of them. The
+    transcript is what scrolled off the top and then the rows.
+    """
+
+    def __init__(self, columns=80, rows=24):
+        self.columns, self.rows = columns, rows
+        self.history = []
+        self.grid = [[" "] * columns for _ in range(rows)]
+        self.x = self.y = 0
+        self.pending = False
+        self.saved = (0, 0)
+        self.alternate = False
+        self.kept = None
+
+    def put(self, character):
+        if self.pending:
+            self.x, self.pending = 0, False
+            self.down()
+        self.grid[self.y][self.x] = character
+        if self.x == self.columns - 1:
+            self.pending = True
+        else:
+            self.x += 1
+
+    def down(self):
+        if self.y == self.rows - 1:
+            top = self.grid.pop(0)
+            if not self.alternate:
+                self.history.append("".join(top).rstrip())
+            self.grid.append([" "] * self.columns)
+        else:
+            self.y += 1
+
+    def feed(self, data):
+        text = data.decode("utf8", "replace")
+        at = 0
+        while at < len(text):
+            c = text[at]
+            at += 1
+            if c == "\x1b":
+                if at < len(text) and text[at] == "[":
+                    end = at + 1
+                    while end < len(text) and not "@" <= text[end] <= "~":
+                        end += 1
+                    if end >= len(text):
+                        return
+                    self.csi(text[at + 1:end], text[end])
+                    at = end + 1
+                elif at < len(text) and text[at] in "78":
+                    if text[at] == "7":
+                        self.saved = (self.x, self.y)
+                    else:
+                        self.x, self.y = self.saved
+                        self.pending = False
+                    at += 1
+                continue
+            if c == "\r":
+                self.x, self.pending = 0, False
+            elif c == "\n":
+                self.down()
+            elif c == "\b":
+                self.x, self.pending = max(self.x - 1, 0), False
+            elif c == "\t":
+                self.x, self.pending = min((self.x // 8 + 1) * 8, self.columns - 1), False
+            elif c >= " " and c != "\x7f":
+                self.put(c)
+
+    def csi(self, body, final):
+        private = body.startswith("?")
+        numbers = [int(n) if n.isdigit() else 0 for n in body.lstrip("?").split(";")]
+        n = numbers[0] or 1
+        self.pending = self.pending and final in "mhl"
+        if final == "A":
+            self.y = max(self.y - n, 0)
+        elif final == "B":
+            self.y = min(self.y + n, self.rows - 1)
+        elif final == "C":
+            self.x = min(self.x + n, self.columns - 1)
+        elif final == "D":
+            self.x = max(self.x - n, 0)
+        elif final in "Hf":
+            self.y = min(max(n - 1, 0), self.rows - 1)
+            self.x = min(max((numbers[1] if len(numbers) > 1 else 1) - 1, 0), self.columns - 1)
+        elif final == "K":
+            first = {0: self.x, 1: 0, 2: 0}.get(numbers[0], self.x)
+            last = {0: self.columns, 1: self.x + 1, 2: self.columns}.get(numbers[0], self.columns)
+            for column in range(first, last):
+                self.grid[self.y][column] = " "
+        elif final == "J":
+            for row in range(self.rows):
+                if (numbers[0] in (2, 3)) or (numbers[0] == 0 and row > self.y) or (numbers[0] == 1 and row < self.y):
+                    self.grid[row] = [" "] * self.columns
+            if numbers[0] == 0:
+                for column in range(self.x, self.columns):
+                    self.grid[self.y][column] = " "
+            elif numbers[0] == 1:
+                for column in range(self.x + 1):
+                    self.grid[self.y][column] = " "
+        elif private and final in "hl":
+            on = final == "h"
+            for mode in numbers:
+                if mode in (47, 1047, 1049):
+                    if mode == 1049 and on:
+                        self.saved = (self.x, self.y)
+                    if on != self.alternate:
+                        self.grid, self.kept = (self.kept or [[" "] * self.columns for _ in range(self.rows)]), self.grid
+                        self.alternate = on
+                    if mode == 1049 and not on:
+                        self.x, self.y = self.saved
+                    self.pending = False
+
+    def transcript(self):
+        rows = [("".join(row)).rstrip() for row in self.grid]
+        while rows and not rows[-1]:
+            rows.pop()
+        return self.history + rows
+
+
+def shell_terminal_emulators(farm):
+    """What an interactive shell writes, drawn the way a terminal emulator does.
+
+    Konsole's report was every prompt at the top of the window with each line
+    written over the one before it: the shell began every prompt with the way
+    back from the alternate screen, CSI ? 1049 l, which also restores the
+    cursor, and an emulator that never saw the matching h restores the one it
+    starts with. The shell is run on a pty under TERM=xterm-256color and a
+    session is typed at it (a command, two on one line, a line over two rows
+    long, an interrupted sleep, a few characters typed and taken back, a
+    program that takes the alternate screen and never leaves it, and enough
+    output to scroll the window); everything the shell and the line
+    discipline write is drawn by shell_ReferenceScreen, and the transcript
+    has to be the session, row for row, each prompt under the output before it.
+    """
+    import fcntl
+    import pty
+    import select
+    import struct
+    import termios
+    shell = Path(farm).resolve() / "sh"
+    if not shell.exists():
+        return 0, 1, ["terminal emulators need the candidate's sh"]
+
+    def rows(text):
+        return [text[at:at + 80] for at in range(0, max(len(text), 1), 80)]
+
+    #   What is typed, what it shows as, and what it prints, in order. The
+    #   prompt after an interrupt is written after the ^C the line discipline
+    #   echoed, which is on the row below the command.
+    session = [("echo one", "echo one", ["one"]), ("echo two", "echo two", ["two"]),
+               ("echo a; echo b", "echo a; echo b", ["a", "b"]),
+               ("echo " + "x" * 100, "echo " + "x" * 100, ["x" * 100]),
+               ("sleep 5\x03", "sleep 5", []),
+               ("echo xxxxx" + "\x7f" * 5 + "kept", "echo kept", ["kept"]),
+               ("printf '\\033[?1049h'", "printf '\\033[?1049h'", []),
+               ("echo three", "echo three", ["three"])]
+    session += [("echo n%d" % number, "echo n%d" % number, ["n%d" % number]) for number in range(30)]
+    expected, after_interrupt = [], False
+    for typed, shown, printed in session:
+        expected.extend(rows("$ " + shown) if not after_interrupt else rows("^C$ " + shown))
+        after_interrupt = typed.endswith("\x03")
+        for line in printed:
+            expected.extend(rows(line))
+    expected.append("$")
+
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+
+    def leader():
+        os.setsid()
+        fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+
+    env = {"PATH": str(Path(farm).resolve()), "HOME": "/", "TERM": "xterm-256color", "HISTFILE": "",
+           "PS1": "$ ", "LC_ALL": "C.UTF-8"}
+    process = subprocess.Popen([str(shell)], stdin=slave, stdout=slave, stderr=slave, close_fds=True,
+                               preexec_fn=leader, env=env)
+    os.close(slave)
+    screen = shell_ReferenceScreen()
+
+    def quiet(first, longest=5.0):
+        """Draw what arrives until nothing has for a moment."""
+        stop = time.monotonic() + longest
+        last = time.monotonic() + first
+        while time.monotonic() < min(stop, last):
+            if select.select([master], [], [], 0.02)[0]:
+                try:
+                    screen.feed(os.read(master, 65536))
+                except OSError:
+                    return
+                last = time.monotonic() + 0.15
+
+    try:
+        quiet(0.5)
+        for typed, shown, printed in session:
+            body, interrupt, _ = typed.partition("\x03")
+            os.write(master, body.encode() + b"\r")
+            if interrupt:
+                quiet(0.4)
+                os.write(master, b"\x03")
+            quiet(0.3)
+        quiet(0.3)
+    finally:
+        os.kill(process.pid, signal.SIGKILL)
+        process.wait()
+        os.close(master)
+    got = screen.transcript()
+    if got == expected:
+        return 1, 1, []
+    first = next((n for n in range(min(len(got), len(expected))) if got[n] != expected[n]),
+                 min(len(got), len(expected)))
+    return 0, 1, ["transcript differs at row %d: want %r got %r (%d rows against %d)"
+                  % (first, expected[first:first + 2], got[first:first + 2], len(expected), len(got))]
+
+
 def shell_glob_extended_bounded(farm):
     """Extended patterns that a script's own data can make endless.
 
@@ -19708,6 +19930,7 @@ SHELL_CHECKS = (
     shell_signal_dispositions,
     shell_background_pid,
     shell_argv_zero,
+    shell_terminal_emulators,
 )
 
 

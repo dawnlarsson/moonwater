@@ -1175,9 +1175,15 @@ b32 main()
                     !held)
                         shell_prompt_command();
 
+                //      What a program that died on the alternate screen left,
+                //      put right before every prompt. The way back is 47 and
+                //      not 1049: 1049 also restores the cursor, and Konsole,
+                //      xterm and VTE do that whether or not 1049h ever saved
+                //      one, so each prompt went to the top left corner and
+                //      the next line was written over it.
                 if (interactive && terminal_input)
                 {
-                        log_direct(str(TERM_MAIN_BUFFER TERM_RESET
+                        log_direct(str(TERM_MAIN_BUFFER_ONLY TERM_RESET
                                            TERM_SHOW_CURSOR));
                         shell_prompt_write(log_direct, shell_reading_more());
                 }
