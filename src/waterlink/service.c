@@ -484,7 +484,8 @@ static bool link_address_unicast(p8 address_to address)
         HOST, HOST:PORT, [V6] or [V6]:PORT. A name is looked up once, now, over
         IPv4: an address is a cache of where a key last was, and the next
         datagram from the peer corrects it. What it comes to is one machine's
-        address, and not the address of none or of many.
+        address, and not the address of none or of many. A host with no port
+        is on the one `moonwater link port` kept, the default where none is.
 */
 static bool link_parse_place(string_address text, p8 address_to address,
                              p16 address_to port)
@@ -493,7 +494,7 @@ static bool link_parse_place(string_address text, p8 address_to address,
         positive length = string_length(text);
         string_address colon = null;
 
-        address_to port = LINK_PORT;
+        address_to port = link_port();
 
         if (text[0] == '[')
         {

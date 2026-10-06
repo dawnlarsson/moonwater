@@ -2575,6 +2575,42 @@ static b32 bowl_flatten(string_address root, string_address marker)
         return 0;
 }
 
+/*
+        A bowl's /etc/resolv.conf: the machine's own servers, in the order it
+        names them, less the ones on loopback, which a bowl's programs do not
+        reach the way the machine's do. A machine that names none (no file,
+        an empty one, a stub on 127.0.0.53 only) has the public one written
+        for it, alone: the only place the address is written next to a name
+        the machine did not choose, and not ahead of the ones it did.
+*/
+static bool bowl_resolv_compose(byte_store address_to out, p8 address_to host,
+                                bipolar got)
+{
+        static const char fallback[] = "nameserver 1.1.1.1\n";
+        positive at = 0;
+        positive named = 0;
+
+        while (got > 0 && at < (positive)got)
+        {
+                positive start = at;
+                positive stop = start + memory_span_without_byte(
+                                            host + start, '\n', (positive)got - start);
+
+                if (bowl_nameserver_ok(host + start, stop - start))
+                {
+                        if (!byte_store_append_exact(out, host + start,
+                                                     stop - start) ||
+                            !byte_store_append_exact(out, "\n", 1))
+                                return false;
+                        named++;
+                }
+
+                at = stop + (stop < (positive)got);
+        }
+
+        return named || byte_store_append_exact(out, fallback, sizeof(fallback) - 1);
+}
+
 static b32 bowl_write_resolv(string_address root)
 {
         p8 path[BOWL_PATH_LIMIT];
@@ -2583,8 +2619,6 @@ static b32 bowl_write_resolv(string_address root)
         byte_store out = {buffer, sizeof(buffer), 0};
         bipolar got;
         bipolar failed;
-        positive at = 0;
-        string_address fallback = "nameserver 1.1.1.1\n";
 
         if (!bowl_root_path(path, sizeof(path), root, "/etc/resolv.conf"))
                 return bowl_refuse("bowl path is too long\n");
@@ -2598,33 +2632,13 @@ static b32 bowl_write_resolv(string_address root)
                 return_if(failed < 0, bowl_fail(etc, failed));
         }
 
-        if (!byte_store_append_exact(address_of out, fallback,
-                                     string_length(fallback)))
-                return bowl_refuse("resolv.conf is too long\n");
-
         got = file_slurp("/etc/resolv.conf", host, sizeof(host));
         if (got > 0 && (positive)got >= sizeof(host))
                 got = (bipolar)(sizeof(host) - 1);
         if (got > 0)
                 host[got] = end;
-        while (got > 0 && at < (positive)got)
-        {
-                positive start = at;
-                positive stop = start + memory_span_without_byte(
-                                            host + start, '\n', (positive)got - start);
-
-                if (bowl_nameserver_ok(host + start, stop - start) &&
-                    string_compare_max(host + start, fallback,
-                                       string_length(fallback) - 1))
-                {
-                        if (!byte_store_append_exact(address_of out, host + start,
-                                                     stop - start) ||
-                            !byte_store_append_exact(address_of out, "\n", 1))
-                                return bowl_refuse("resolv.conf is too long\n");
-                }
-
-                at = stop + (stop < (positive)got);
-        }
+        if (!bowl_resolv_compose(address_of out, host, got))
+                return bowl_refuse("resolv.conf is too long\n");
 
         return bowl_write_bytes(path, out.bytes, out.used);
 }

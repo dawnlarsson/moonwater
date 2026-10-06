@@ -71,6 +71,7 @@ moonwater ntp sampling [on|off]        keep the lowest-delay sample of five [on]
 
 moonwater keyboard [LAYOUT|list|xkb]   us uk gb de se sv no nb dk fi fr es it [us]
 moonwater name [NEW|random]            what this machine is called, like space-wizard
+moonwater dns [ADDRESS...|auto]        up to three servers names are asked of, or the network's [auto]
 
 moonwater link                         who this machine is linked with, and what each may do
 moonwater link pair [NAME]             a code, and wait for the other machine to use it
@@ -84,7 +85,8 @@ moonwater link remove NAME             stop knowing it
 moonwater link allow|deny NAME GRANT...  shell run log files (any file but the link's own)
 moonwater link group [NAME [SECRET] [allow GRANT...]]  machines on one network that link themselves
 moonwater link group leave NAME [forget]  stop, and forget the group's key
-moonwater link on|off                  the listener, udp 22348 or /root/link.port, kept across boots [off]
+moonwater link on|off                  the listener, kept across boots [off]
+moonwater link port [N|auto]           the udp port it takes, and `link add` assumes [22348]
 ```
 
 `moonwater` alone prints these, and `moonwater help VERB` one command's. A verb
@@ -95,6 +97,12 @@ and not a refusal (exit 1). The keyboard layouts `gb`, `sv` and `nb` are `uk`,
 layout in XKB's name (`gb` for `uk`), which is what a compositor from a bowl
 reads as `XKB_DEFAULT_LAYOUT`. `boot`, `ask` and `machine` are
 init's and the first terminal's, started by them and not typed by hand.
+
+Names are asked of the resolver the network's DHCP lease names, and of nothing
+behind it: `moonwater dns ADDRESS...` keeps up to three of your own instead
+(`/root/dns`, written to `/etc/resolv.conf` now, at every boot and at every
+lease), and `dns auto` goes back. 1.1.1.1 is written only for a network whose
+lease names no resolver, and is asked by a lookup only when the file names none.
 
 Commands given to `moonwater` run as root through the shell, as if typed.
 `bind init` runs in the background and keeps each command's output in
@@ -186,9 +194,9 @@ full frames; with a command it passes stdin through and exits with the far
 command's status (255 if the link failed or its stdin could not be read, 141 if
 whoever reads its output went away, which also hangs up on the command). Both ends run this shell binary, on Moonwater or Linux. A direct
 address is needed; there is no NAT traversal. The listener takes udp 22348
-unless `/root/link.port` holds another port (digits, 1 to 65535), read when it
-starts; `link add NAME KEY HOST:PORT` says where a machine that listens
-elsewhere is.
+unless `moonwater link port N` (1 to 65535, kept in `/root/link.port`) says
+another, read when it starts; `link add NAME KEY HOST` means that port too, and
+`link add NAME KEY HOST:PORT` says where a machine that listens elsewhere is.
 
 For machines nobody stands in front of, join a group instead:
 `moonwater link group office` makes a 160-bit secret and prints the line to run

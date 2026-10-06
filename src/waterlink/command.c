@@ -554,8 +554,8 @@ static b32 link_switch(bool on, bool say)
         if (host_lock_owner(LINK_LOCK_PATH) <= 0)
                 link_serve_start(true);
         if (!link_wait_owner(true))
-                return host_refuse("the listener did not start: is udp 22348 "
-                                   "taken?\n");
+                return host_refuse("the listener did not start: is udp %p "
+                                   "taken?\n", (positive)link_port());
 
         link_key_text(me.public, key);
         crypto_forget(address_of me, sizeof me);
@@ -1206,6 +1206,48 @@ static bool link_known(string_address name)
 }
 
 /*
+        moonwater link port [N|auto]: the udp port the listener takes, and the
+        one `link add NAME KEY HOST` means where HOST has no :PORT -- a fleet
+        on one other port says it once and not at every add. Kept in
+        /root/link.port, read when the listener starts: one that is running
+        keeps the port it has until it is switched off and on. auto goes back
+        to the default.
+*/
+static b32 link_port_verb(string_address word)
+{
+        p8 text[16];
+        bipolar port;
+        bipolar failed;
+        bool running = host_lock_owner(LINK_LOCK_PATH) > 0;
+        positive before = (positive)link_port();
+
+        if (word && !string_equals(word, "auto"))
+        {
+                port = link_decimal(word);
+                if (port <= 0 || port > 65535)
+                        return host_refuse("%s is not a port: 1 to 65535, or auto for %p\n",
+                                           word, (positive)LINK_PORT);
+                text[positive_into(text, (positive)port)] = end;
+                failed = radio_write_word(LINK_PORT_PATH, (string_address)text);
+                return_if(failed < 0, host_fail("link port", failed));
+        }
+        else if (word)
+        {
+                failed = system_remove_at(AT_FDCWD, LINK_PORT_PATH, 0);
+                return_if(failed < 0 && failed != -ENOENT, host_fail("link port", failed));
+        }
+
+        port = (bipolar)link_port();
+        string_format(log, host_label "link port %p%s", (positive)port,
+                      (positive)port == LINK_PORT ? ", the default" : "");
+        if (running && before != (positive)port)
+                string_format(log, "; the listener running keeps udp %p until "
+                                   "link off, then link on", before);
+        host_say(log, "\n");
+        return 0;
+}
+
+/*
         How many words each verb that takes a fixed number is run with, the
         two that name the program and the verb among them. A word of these
         with the wrong number is a usage page for anyone: root's refusal is
@@ -1219,6 +1261,7 @@ static const struct
         positive most;
 } link_shapes[] = {
     {"on", 3, 3},   {"off", 3, 3},   {"key", 3, 3},  {"serve", 3, 3},
+    {"port", 3, 4},
     {"pair", 3, 4}, {"add", 5, 6},   {"remove", 4, 4},
     {"allow", 5, ~(positive)0},      {"deny", 5, ~(positive)0},
     {"shell", 4, 4}, {"run", 5, ~(positive)0},
@@ -1270,6 +1313,8 @@ static b32 link_main(string_address address_to arguments, positive count)
                 return link_switch(string_equals(verb, "on"), true);
         if (string_equals(verb, "key"))
                 return link_key_verb();
+        if (string_equals(verb, "port"))
+                return link_port_verb(count == 4 ? arguments[3] : null);
         if (string_equals(verb, "serve"))
                 return link_serve();
         if (string_equals(verb, "pair"))

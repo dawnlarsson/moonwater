@@ -44147,6 +44147,73 @@ while True:
         check(seen.get("ntp server auto", {}).get("status") == 0 and words[3:4] == ["none"] and
               any(line.startswith("@@back ") and "pool.ntp.org" in line for line in lines),
               "ntp server auto takes the name off and the pool is asked again", repr(words[3:4]))
+        #       The servers names are asked of: kept, written to resolv.conf at once,
+        #       all of what is given or none of it, and forgotten for the lease's,
+        #       which the watcher noted in /run/moonwater/dns.lease for `auto`.
+        def step(label, command):
+            return (f"echo '@@ {label}'; timeout 20 /tmp/moonwater {command} 2>&1; "
+                    f"echo \"@@status $?\"\n"
+                    "echo \"@@file $(tr '\\n' , < /etc/resolv.conf 2>/dev/null)\"\n"
+                    "echo \"@@kept $(cat /root/dns 2>/dev/null | tr '\\n' ,)\"\n")
+
+        dns_bad = ("nope", "0.0.0.0", "224.0.0.1", "255.255.255.255", "9.9.9", "9.9.9.9 9.9.9.9",
+                   "9.9.9.9 nope", "1.1.1.1 8.8.8.8 9.9.9.9 4.4.4.4", "2001:db8::1", '""', "-x", "auto auto")
+        script = ("rm -f /root/dns /etc/resolv.conf /run/moonwater/dns.lease\nmkdir -p /run/moonwater\n" +
+                  step("none", "dns") + step("two", "dns 9.9.9.9 8.8.4.4") + step("read", "dns") +
+                  step("one", "dns 1.0.0.1") +
+                  "".join(step(f"bad {at}", "dns " + bad) for at, bad in enumerate(dns_bad)) +
+                  "echo 10.9.8.7 > /run/moonwater/dns.lease\n" + step("auto", "dns auto") +
+                  "rm -f /run/moonwater/dns.lease\n" + step("auto none", "dns auto") +
+                  "printf 'junk words\\n' > /root/dns\n" + step("junk", "dns") +
+                  "printf '9.9.9.9\\n' > /root/dns\nchmod 000 /root\n")
+        lines, finished = session(script)
+        more, done = session(step("shut", "dns") + step("shut status", "status"), nobody=True)
+        lines += more
+        lines += session("chmod 700 /root\n")[0]
+        seen = answers(lines)
+        text = lambda name: "\n".join(seen.get(name, {}).get("out", []))
+        #       The file and the kept words after each step, in the order of the steps.
+        files = {}
+        kept = {}
+        current = None
+        for line in lines:
+            if line.startswith("@@ "):
+                current = line[3:]
+            elif line.startswith("@@file ") and current:
+                files[current] = line[len("@@file "):]
+            elif line.startswith("@@kept ") and current:
+                kept[current] = line[len("@@kept "):]
+        status = lambda name: seen.get(name, {}).get("status")
+        check(finished and done and status("none") == 0 and "none named" in text("none") and
+              "1.1.1.1" in text("none"),
+              "dns with nothing in resolv.conf says none is named and where lookups go", text("none"))
+        check(status("two") == 0 and files.get("two") == "nameserver 9.9.9.9,nameserver 8.8.4.4," and
+              kept.get("two") == "9.9.9.9 8.8.4.4," and "9.9.9.9 8.8.4.4 (kept)" in text("two") and
+              "(kept)" in text("read"),
+              "dns ADDRESS... keeps the servers and writes resolv.conf at once, in order",
+              repr((files.get("two"), kept.get("two"), text("two"))))
+        check(status("one") == 0 and files.get("one") == "nameserver 1.0.0.1," and kept.get("one") == "1.0.0.1,",
+              "and a new list replaces the old whole", repr((files.get("one"), kept.get("one"))))
+        for at, bad in enumerate(dns_bad):
+            name = f"bad {at}"
+            check(status(name) == 1 and files.get(name) == "nameserver 1.0.0.1," and kept.get(name) == "1.0.0.1,",
+                  f"dns {bad} is refused, and resolv.conf and /root/dns are as they were",
+                  repr((status(name), files.get(name), kept.get(name), text(name)[:120])))
+        check(status("auto") == 0 and files.get("auto") == "nameserver 10.9.8.7," and kept.get("auto") == "" and
+              "(the network's)" in text("auto"),
+              "dns auto forgets them and writes the lease's resolver, which the watcher noted",
+              repr((files.get("auto"), kept.get("auto"), text("auto"))))
+        check(status("auto none") == 0 and files.get("auto none") == "nameserver 1.1.1.1,",
+              "and with no lease the public one, alone", repr(files.get("auto none")))
+        check("(the network's)" in text("junk"),
+              "a /root/dns that is not servers is no choice and is not said to be one", text("junk"))
+        check("(needs root)" in text("shut") and "(kept)" not in text("shut") and
+              "(needs root)" in text("shut status"),
+              "a caller who cannot read /root is not told whose choice the servers are",
+              text("shut")[:200] + text("shut status")[:200])
+        check("dns 1.1.1.1" in text("shut status"),
+              "status has a dns line", text("shut status")[:300])
+
         #       The layouts the command offers are the ones Canvas has: a name the
         #       command takes that the kernel refuses is a layout saved and never
         #       applied, and one only the kernel has is a layout nobody can pick.
@@ -44751,7 +44818,7 @@ while True:
         planted = [("wifi.power", "wifi on"), ("wired.power", "wired off"),
                    ("bluetooth.power", "bluetooth off"), ("internet", "priority internet wifi"),
                    ("ntp", "ntp off"), ("ntp.sampling", "ntp sampling off"), ("keyboard", "keyboard de"),
-                   ("ntp.server", "ntp server time.example.net"),
+                   ("ntp.server", "ntp server time.example.net"), ("dns", "dns 9.9.9.9"),
                    ("timezone", "timezone se"), ("timezone.mode", "timezone se"),
                    ("wifi", "wifi add linkednet passpass1"), ("bluetooth", "bluetooth add linkeddev"),
                    ("tune", "charge limit 80")]
@@ -44786,6 +44853,7 @@ while True:
                   ("ntp.sampling", "ntp sampling off", "ntp"),
                   ("ntp.server", "ntp server time.example.net", "ntp server"),
                   ("keyboard", "keyboard de", "keyboard"),
+                  ("dns", "dns 9.9.9.9", "dns"),
                   ("timezone", "timezone se", "timezone"),
                   ("timezone.mode", "timezone se", "timezone"),
                   ("name", "name random", "name"),
@@ -62840,6 +62908,47 @@ status, out, err = on("c", moon + " link", timeout=20)
 say(status == 0 and b"udp 22348" in out, "a FIFO at /root/link.port is the default, and not waited on")
 os.unlink(top + "/c/root/link.port")
 
+#       link port: the port is a verb, kept where the listener reads it, judged
+#       whole before anything is written, and what `link add` means by a host
+#       with no :PORT.
+status, out, err = on("c", moon + " link port", timeout=20)
+say(status == 0 and b"link port 22348, the default" in out,
+    "link port says the default when none is kept (%r)" % (out[-60:],))
+status, out, err = on("c", moon + " link port 22351", timeout=20)
+say(status == 0 and b"link port 22351" in out and b"the default" not in out and
+    open(top + "/c/root/link.port").read() == "22351\n",
+    "link port N keeps the port and says it (%r)" % (out[-60:],))
+status, out, err = on("c", moon + " link", timeout=20)
+say(status == 0 and b"udp 22351" in out, "and the status page says the same port")
+for bad in ("0", "65536", "99999999999", "abc", "-1", "22 3", "''", "auto auto"):
+    status, out, err = on("c", moon + " link port " + bad, timeout=20)
+    say(status not in (0, None) and open(top + "/c/root/link.port").read() == "22351\n",
+        "link port %s is refused and the port kept is as it was (%r)" % (bad, (status, err[-70:])))
+status, out, err = on("c", moon + " link port 0022352", timeout=20)
+say(status == 0 and open(top + "/c/root/link.port").read() == "22352\n",
+    "a port with leading zeros is kept as its number")
+#       Keys of machines that do not exist: a key already linked under a name is
+#       not added under another, and removing it would take the real record.
+import base64
+fresh = [base64.b64encode(os.urandom(32)).decode() for _ in range(2)]
+on("c", moon + " link add porty %s 10.77.0.9" % fresh[0])
+on("c", moon + " link add porty2 %s 10.77.0.10:22360" % fresh[1])
+status, out, err = on("c", moon + " link", timeout=20)
+say(b"10.77.0.9:22352" in out and b"10.77.0.10:22360" in out,
+    "link add with no :PORT means the kept port, and one with :PORT means its own (%r)" % (out[-300:],))
+on("c", moon + " link remove porty")
+on("c", moon + " link remove porty2")
+status, out, err = on("c", moon + " link port auto", timeout=20)
+say(status == 0 and b"link port 22348, the default" in out and not os.path.exists(top + "/c/root/link.port"),
+    "link port auto goes back to the default and forgets the file (%r)" % (out[-60:],))
+on("c", moon + " link add porty %s 10.77.0.9" % fresh[0])
+status, out, err = on("c", moon + " link", timeout=20)
+say(b"10.77.0.9:22348" in out, "and link add means the default again")
+on("c", moon + " link remove porty")
+os.mkfifo(top + "/c/root/link.port")
+status, out, err = on("c", moon + " link port", timeout=20)
+say(status == 0 and b"link port 22348, the default" in out, "a FIFO at /root/link.port is the default for the verb too")
+os.unlink(top + "/c/root/link.port")
 #       The key, the machines and the groups are root's: for anybody else the
 #       page would say nobody is linked, of a machine that has a dozen.
 if subprocess.run(["unshare", "-U", "--map-user=1000", "true"], capture_output=True).returncode == 0:
@@ -62849,6 +62958,9 @@ if subprocess.run(["unshare", "-U", "--map-user=1000", "true"], capture_output=T
         (status, err[-60:]))
     status, out, err = on("c", "unshare -U --map-user=1000 " + moon + " link remove b", timeout=20)
     say(status != 0 and b"needs root" in err, "and so does a change to them")
+    status, out, err = on("c", "unshare -U --map-user=1000 " + moon + " link port 22349", timeout=20)
+    say(status != 0 and b"needs root" in err and not os.path.exists(top + "/c/root/link.port"),
+        "sec: link port for somebody who is not root says so and keeps nothing (%r)" % (err[-60:],))
 
 #       Descriptor 7 open in the server stands for anything a hand-started
 #       `link serve` inherited; no remote command may see it.

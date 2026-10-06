@@ -79798,6 +79798,39 @@ static fn nix(void)
               bowl_has(root, "/etc/nix/nix.conf") && bowl_has(root, "/etc/passwd") &&
                   bowl_has(root, "/etc/group") && bowl_has(root, "/root/.nix-channels") &&
                   bowl_has(root, "/etc/resolv.conf"));
+        {
+                static const struct
+                {
+                        string_address host;
+                        string_address want;
+                } resolv_case[] = {
+                    {"nameserver 10.0.0.1\nnameserver 10.0.0.2\n",
+                     "nameserver 10.0.0.1\nnameserver 10.0.0.2\n"},
+                    {"", "nameserver 1.1.1.1\n"},
+                    {"nameserver 127.0.0.53\n", "nameserver 1.1.1.1\n"},
+                    {"search lan\n# nameserver 9.9.9.9\nnameserver 10.0.0.1\n",
+                     "nameserver 10.0.0.1\n"},
+                    /* the machine's own choice is the bowl's, public one included
+                       and where it put it, not behind a second 1.1.1.1 */
+                    {"nameserver 9.9.9.9\nnameserver 1.1.1.1\n",
+                     "nameserver 9.9.9.9\nnameserver 1.1.1.1\n"},
+                };
+                bool same = true;
+
+                for (positive at = 0; at < array_count(resolv_case); at++)
+                {
+                        p8 buffer[256];
+                        byte_store out = {buffer, sizeof(buffer), 0};
+                        positive length = string_length(resolv_case[at].host);
+
+                        same &= bowl_resolv_compose(address_of out,
+                                                    (p8 address_to)resolv_case[at].host,
+                                                    (bipolar)length) &&
+                                out.used == string_length(resolv_case[at].want) &&
+                                !memory_compare(out.bytes, resolv_case[at].want, out.used);
+                }
+                check("A bowl's resolv.conf is the machine's servers in order, and the public one only when it names none", same);
+        }
         check("A conf the person changed is left alone",
               unpack_write(root, "/etc/nix/nix.conf", "sandbox = true\n", 0644) &&
                   bowl_configure(root) == 0 &&
@@ -86766,7 +86799,7 @@ static fn storage_test_replace_foreign(void)
                 bipolar first;
                 bipolar second;
                 bipolar got;
-                static p8 wanted[] = "nameserver 10.0.0.2\nnameserver 1.1.1.1\n";
+                static p8 wanted[] = "nameserver 10.0.0.2\n";
 
                 storage_test_namespace(0);
                 used += positive_into(path + used, system_nonce());
@@ -87997,10 +88030,9 @@ static fn storage_test_net_files(void)
               file_look(AT_FDCWD, target, AT_SYMLINK_NOFOLLOW,
                         address_of resolver_facts) &&
                   (resolver_facts.mode & 0777) == 0600);
-        static p8 wanted[] =
-            "nameserver 10.0.0.1\nnameserver 1.1.1.1\n";
+        static p8 wanted[] = "nameserver 10.0.0.1\n";
         got = storage_test_file_read(target, bytes, sizeof bytes);
-        check("resolver writes are complete and ordered (the network's resolver first)",
+        check("resolver writes are complete: the network's resolver, and nothing behind it",
               got == sizeof(wanted) - 1 &&
                   !memory_compare(bytes, wanted, sizeof(wanted) - 1));
         {
@@ -88016,6 +88048,74 @@ static fn storage_test_net_files(void)
                           storage_test_file_read(target, bytes, sizeof bytes) ==
                               sizeof(alone) - 1 &&
                           !memory_compare(bytes, alone, sizeof(alone) - 1));
+                {
+                        static const p32 three[4] = {0x09090909, 0x08080404,
+                                                     0x01000001, 0x0a000001};
+                        static p8 listed[] = "nameserver 9.9.9.9\n"
+                                             "nameserver 8.8.4.4\n"
+                                             "nameserver 1.0.0.1\n";
+
+                        check("kept servers are written in the order they were given, three at most",
+                              net_write_resolv_servers(target, three, 4) == 0 &&
+                                  storage_test_file_read(target, bytes, sizeof bytes) ==
+                                      sizeof(listed) - 1 &&
+                                  !memory_compare(bytes, listed, sizeof(listed) - 1));
+                }
+                {
+                        static const struct
+                        {
+                                string_address text;
+                                positive count;
+                                p32 first;
+                                p32 last;
+                        } kept_case[] = {
+                            {"9.9.9.9\n", 1, 0x09090909, 0x09090909},
+                            {"9.9.9.9 8.8.4.4\n", 2, 0x09090909, 0x08080404},
+                            {"9.9.9.9 8.8.4.4 1.0.0.1\n", 3, 0x09090909, 0x01000001},
+                            {"  9.9.9.9   8.8.4.4  \r\n", 2, 0x09090909, 0x08080404},
+                            {"127.0.0.1\n", 1, 0x7f000001, 0x7f000001},
+                            /* all of it or none of it: a file with one bad word
+                               in it is not the half that reads */
+                            {"9.9.9.9 8.8.4.4 1.0.0.1 1.1.1.1\n", 0, 0, 0},
+                            {"9.9.9.9 nope\n", 0, 0, 0},
+                            {"9.9.9.9 8.8.4\n", 0, 0, 0},
+                            {"9.9.9.9 8.8.4.4.4\n", 0, 0, 0},
+                            {"0.0.0.0\n", 0, 0, 0},
+                            {"0.1.2.3\n", 0, 0, 0},
+                            {"224.0.0.1\n", 0, 0, 0},
+                            {"255.255.255.255\n", 0, 0, 0},
+                            {"-1\n", 0, 0, 0},
+                            {"2001:db8::1\n", 0, 0, 0},
+                            {"1.1.1.1 1.1.1.1 1.1.1.1 1.1.1.1 1.1.1.1 1.1.1.1 1.1.1.1 1.1.1.1 "
+                             "1.1.1.1 1.1.1.1 1.1.1.1 1.1.1.1 1.1.1.1\n", 0, 0, 0},
+                            {"", 0, 0, 0},
+                        };
+                        bool held = true;
+                        p32 chosen[DNS_SERVERS_MAX];
+
+                        for (positive at = 0; at < array_count(kept_case); at++)
+                        {
+                                positive count;
+
+                                file_publish_bytes(target, kept_case[at].text,
+                                                   string_length(kept_case[at].text), 0644, false);
+                                count = net_dns_kept_at(target, chosen);
+                                held &= count == kept_case[at].count &&
+                                        (!count || (chosen[0] == kept_case[at].first &&
+                                                    chosen[count - 1] == kept_case[at].last));
+                        }
+                        check("/root/dns is up to three usable addresses, and a file with anything else is none", held);
+
+                        file_publish_bytes(target, "9.9.9.9\n", 8, 0644, false);
+                        held = net_resolver_choose_at(target, 0x0a000001, chosen) == 1 && chosen[0] == 0x09090909;
+                        file_publish_bytes(target, "nope\n", 5, 0644, false);
+                        held &= net_resolver_choose_at(target, 0x0a000001, chosen) == 1 && chosen[0] == 0x0a000001;
+                        held &= net_resolver_choose_at(target, 0, chosen) == 1 && chosen[0] == DNS_FALLBACK;
+                        system_remove_at(AT_FDCWD, target, 0);
+                        held &= net_dns_kept_at(target, chosen) == 0;
+                        held &= net_resolver_choose_at(target, 0x0a000001, chosen) == 1 && chosen[0] == 0x0a000001;
+                        check("kept servers win over a lease's, a lease's over the public one, and a file that does not read is not a choice", held);
+                }
                 //      The count is kept only while a failure is planned;
                 //      one that is never reached counts.
                 storage_test_net_sync_failure = 99;

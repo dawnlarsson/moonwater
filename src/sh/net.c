@@ -19,6 +19,8 @@
 #define NET_INTERNET_RUN NET_STATE_DIR "/internet"
 #define NET_INTERNET_ROOT "/root/internet"
 #define NET_WIFI_LIST "/root/wifi"
+#define NET_DNS_PATH "/root/dns"
+#define NET_DNS_LEASE NET_STATE_DIR "/dns.lease"
 #define NET_WIFI_POWER "/root/wifi.power"
 #define NET_WIRED_POWER "/root/wired.power"
 #define NET_BLUETOOTH_LIST "/root/bluetooth"
@@ -931,41 +933,44 @@ static b32 net_wget(void)
 }
 
 
+//      host.c's, which is included after this file: a state word is read as a
+//      plain file and never waited for, so a FIFO planted at its name on the
+//      data partition cannot stop the watcher.
+static bipolar host_read_word(string_address path, p8 address_to into, positive room);
+
 /*
-        /etc/resolv.conf: the network's resolver first, a public one behind it.
+        /etc/resolv.conf: what the network handed out, or what was kept.
 
-        The resolver the DHCP server handed out goes first, as dhclient and
-        every other client write it, and Cloudflare's goes second, to be
-        asked only when the first gives no answer at all (a router whose
-        resolver is down, slow or refusing): the resolver believes the first
-        server that answers, "no such name" included (dns_resolve_any). A
-        network with no resolver of its own, or one that names Cloudflare
-        itself, has Cloudflare alone.
+        The file names the resolver the DHCP server gave and nothing behind
+        it, as dhclient writes it, unless `moonwater dns ADDRESS...` kept
+        servers in /root/dns, which are written instead, in the order they
+        were given, whatever a lease says. A network that handed out no
+        resolver has Cloudflare's alone: that is the one case the public
+        address goes into the file, and the only other place it is used is
+        dns_resolve_any, for a machine whose file names no server at all.
 
-        This replaces an order written in the other direction, public resolver
-        first. Its reason was a network whose own resolver was slow or
-        answered with a captive portal's idea of the truth; it cost every
-        machine on every network one name in the clear per lookup, to a
-        third party, before the network's own resolver (which knows the names
-        inside the network and is the only one that should be told them) was
-        asked at all. The two failures it guarded against are the ones the
-        fallback still covers, the first directly (no answer goes on), the
-        second only as far as a portal that lies about a name is one that
-        also lied before.
+        This replaces two orders. Public resolver first cost every machine on
+        every network one name in the clear per lookup, to a third party,
+        before the network's own resolver (which knows the names inside the
+        network and is the only one that should be told them) was asked at
+        all. Public resolver second, which came after it, was better but still
+        sent every name the network's resolver gave no answer to on to
+        Cloudflare, on a private or split-horizon network, which is a third
+        party told what the machine looked for whenever the router was down.
+        A machine that wants a second resolver says so with moonwater dns.
 
         Order is the whole of the policy. Putting it here rather than in the
         resolver means changing which server is preferred is one line in a
         file, not a rebuild.
 */
-static COLD bipolar net_write_resolv_to(string_address path, p32 nameserver)
+static COLD bipolar net_write_resolv_servers(string_address path,
+                                             const p32 address_to servers,
+                                             positive count)
 {
-        const p32 servers[2] = {
-            nameserver ? nameserver : DNS_FALLBACK,
-            nameserver && nameserver != DNS_FALLBACK ? DNS_FALLBACK : 0};
-        p8 line[64];
+        p8 line[32 * DNS_SERVERS_MAX];
         positive used = 0;
 
-        for (positive at = 0; at < 2 && servers[at]; at++)
+        for (positive at = 0; at < count && at < DNS_SERVERS_MAX; at++)
         {
                 memory_copy(line + used, "nameserver ", 11);
                 used += 11 + host_into(line + used + 11, servers[at]);
@@ -976,10 +981,115 @@ static COLD bipolar net_write_resolv_to(string_address path, p32 nameserver)
         return file_publish_bytes(path, line, used, 0644 & ~file_umask(), true);
 }
 
+static COLD bipolar net_write_resolv_to(string_address path, p32 nameserver)
+{
+        const p32 server = nameserver ? nameserver : DNS_FALLBACK;
+
+        return net_write_resolv_servers(path, address_of server, 1);
+}
+
+/*
+        /root/dns: the servers `moonwater dns` kept, one line of up to
+        DNS_SERVERS_MAX dotted addresses. A file that has anything else on
+        it -- a fourth address, a word that is no address, one a lease could
+        not hand out (none, a group's, everybody's) -- is no choice at all,
+        and the lease's resolver is used as if the file were not there: a
+        hand edit that misspells an address must not leave a machine with a
+        half of the servers it meant.
+*/
+static COLD bool net_dns_usable(bipolar host)
+{
+        return host > 0 && (host >> 24) && host < 0xe0000000;
+}
+
+static COLD positive net_dns_kept_at(string_address path, p32 address_to into)
+{
+        p8 text[96];
+        bipolar got = host_read_word(path, text, sizeof(text));
+        positive count = 0;
+        positive at = 0;
+
+        while (got > 0 && at < (positive)got)
+        {
+                p8 word[24];
+                positive length = 0;
+                bipolar host;
+
+                at += string_span_max(text + at, (positive)got - at,
+                                      string_set_blanks);
+                while (at + length < (positive)got && text[at + length] != ' ')
+                        length++;
+                if (!length)
+                        break;
+                if (length >= sizeof(word) || count == DNS_SERVERS_MAX)
+                        return 0;
+
+                memory_copy(word, text + at, length);
+                word[length] = end;
+                host = string_to_host(word);
+                if (!net_dns_usable(host))
+                        return 0;
+                into[count++] = (p32)host;
+                at += length;
+        }
+
+        return count;
+}
+
+//      The servers a lease is written as: the kept ones, else its own, else
+//      the public one.
+static COLD positive net_resolver_choose_at(string_address path, p32 nameserver,
+                                            p32 address_to into)
+{
+        positive count = net_dns_kept_at(path, into);
+
+        if (!count)
+                into[count++] = nameserver ? nameserver : DNS_FALLBACK;
+        return count;
+}
+
+static COLD positive net_dns_kept(p32 address_to into)
+{
+        return net_dns_kept_at(NET_DNS_PATH, into);
+}
+
+static COLD positive net_resolver_choose(p32 nameserver, p32 address_to into)
+{
+        return net_resolver_choose_at(NET_DNS_PATH, nameserver, into);
+}
+
 static COLD bipolar net_write_resolv(p32 nameserver)
 {
-        return net_write_resolv_to((string_address) "/etc/resolv.conf",
-                                   nameserver);
+        p32 chosen[DNS_SERVERS_MAX];
+        positive count = net_resolver_choose(nameserver, chosen);
+
+        return net_write_resolv_servers((string_address) "/etc/resolv.conf",
+                                        chosen, count);
+}
+
+/*
+        The resolver the lease named, kept for `moonwater dns auto`, which is
+        asked from another process and has to write the file the next lease
+        would. Not a setting: it is gone with the power, as the lease is.
+*/
+static COLD fn net_dns_lease_note(p32 nameserver)
+{
+        p8 text[24];
+        positive length = nameserver ? host_into(text, nameserver) : 0;
+
+        if (length)
+                text[length++] = '\n';
+        (void)file_publish_bytes((string_address)NET_DNS_LEASE, text, length,
+                                 0644 & ~file_umask(), false);
+}
+
+static COLD p32 net_dns_lease(void)
+{
+        p8 text[24];
+        bipolar got = host_read_word(NET_DNS_LEASE, text, sizeof(text));
+        bipolar host = got > 0 ? string_to_host(text) : -1;
+
+        return net_dns_usable(host) ? (p32)host : 0;
 }
 
 /*
@@ -1259,13 +1369,16 @@ static COLD bipolar net_holding_release(b32 handle, net_holding address_to held)
         }
 
         /* Once the address is no longer ours, a DHCP-provided resolver is no
-           longer ours either.  Keep the always-available fallback as the
-           complete resolver file, using the same checked atomic publication
-           path as lease installation. A file that cannot be written is said
-           and left: holding the lease for the sake of a name server would
-           leave a machine that has let go of its address with neither. */
+           longer ours either.  Keep the servers moonwater dns kept, or the
+           always-available fallback, as the complete resolver file, using
+           the same checked atomic publication path as lease installation. A
+           file that cannot be written is said and left: holding the lease
+           for the sake of a name server would leave a machine that has let
+           go of its address with neither. */
         {
                 bipolar status = net_write_resolv(0);
+
+                net_dns_lease_note(0);
 
                 if (status < 0)
                         (void)net_refused((string_address) "write resolv.conf",
@@ -1345,6 +1458,8 @@ static COLD b32 net_apply_lease(b32 handle, p32 index, string_address name,
         bool address_changed;
         bool route_changed;
         bool address_applied = false;
+        p32 servers[DNS_SERVERS_MAX];
+        positive named;
         bool route_applied = false;
         string_address doing = null;
         bipolar status = 0;
@@ -1445,7 +1560,10 @@ static COLD b32 net_apply_lease(b32 handle, p32 index, string_address name,
            file names nothing, and a renewal writes it again. Rolling a
            working address and route back over a file left the machine with
            no network at all. */
-        status = net_write_resolv(lease->nameserver);
+        named = net_resolver_choose(lease->nameserver, servers);
+        net_dns_lease_note(lease->nameserver);
+        status = net_write_resolv_servers((string_address) "/etc/resolv.conf",
+                                          servers, named);
         if (status < 0)
                 (void)net_refused((string_address) "write resolv.conf", status);
 
@@ -1458,15 +1576,10 @@ static COLD b32 net_apply_lease(b32 handle, p32 index, string_address name,
                         string_format(net_out, "ip: default via %s\n",
                                       net_host_text(written, lease->router));
 
-                string_format(net_out, "ip: nameserver %s",
-                              net_host_text(written, lease->nameserver
-                                                         ? lease->nameserver
-                                                         : DNS_FALLBACK));
-
-                if (lease->nameserver && lease->nameserver != DNS_FALLBACK)
-                        string_format(net_out, ", then %s",
-                                      net_host_text(written, DNS_FALLBACK));
-
+                string_format(net_out, "ip: nameserver");
+                for (positive at = 0; at < named; at++)
+                        string_format(net_out, "%s %s", at ? "," : "",
+                                      net_host_text(written, servers[at]));
                 string_format(net_out, "\n");
         }
 
@@ -1511,11 +1624,6 @@ failed:
 
         return net_refused(doing, status);
 }
-
-//      host.c's, which is included after this file: a state word is read as a
-//      plain file and never waited for, so a FIFO planted at its name on the
-//      data partition cannot stop the watcher.
-static bipolar host_read_word(string_address path, p8 address_to into, positive room);
 
 /* Whether `moonwater wired off` was said: no wired link is then one a lease
    is asked on, and the walk goes to whatever else has carrier. */

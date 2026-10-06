@@ -2284,17 +2284,16 @@ static COLD bipolar dns_resolve_at(p32 server, p16 port, string_address name,
         servers, which is all glibc and musl read (MAXNS): a file listing more
         would otherwise hold a lookup for its timeout once per line.
 
-        That is a change of rule with the order the file is written in (see
-        net_write_resolv_to: the network's own resolver first, a public one
-        behind it). While a public resolver was written first, its "no such
-        name" for an inside-the-network name could not be final, so the walk
-        went on past it and every name that existed nowhere was also asked in
-        the clear of the next server. With the network's resolver first and
-        believed, a name the network does not know is not sent anywhere else.
+        That is the rule with the order the file is written in (see
+        net_write_resolv_servers: the network's own resolver, or the ones
+        moonwater dns kept, and nothing behind them). A name the network says
+        does not exist is not sent anywhere else, and neither is one it gave
+        no answer to, which a public resolver behind it would have been told.
 
-        With no resolv.conf at all there is still somewhere to ask. A machine
-        that has not been configured yet should be able to resolve a name, if
-        only to fetch the thing that will configure it.
+        With no resolv.conf at all, or one that names no server, there is
+        still somewhere to ask: DNS_FALLBACK, and only then. A machine that
+        has not been configured yet should be able to resolve a name, if only
+        to fetch the thing that will configure it.
 */
 #define DNS_FALLBACK 0x01010101u
 #define DNS_SERVERS_MAX 3

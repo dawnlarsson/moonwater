@@ -2703,6 +2703,7 @@ static b32 host_machine_run(void)
         if (!string_has_prefix((string_address)verdict, "ask "))
                 radio_restore();
         locale_restore();
+        dns_restore();
         tune_restore();
 
         host_machine_hold(slot, true);

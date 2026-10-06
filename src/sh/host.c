@@ -326,6 +326,7 @@ static fn tune_restore(void);
 static fn radio_restore(void);
 static fn radio_recover(void);
 static fn locale_restore(void);
+static fn dns_restore(void);
 //      Set by the machine process alone, in moonwater.c: only it asks the time.
 static bool host_machine_self;
 static fn name_restore(void);
@@ -2136,6 +2137,7 @@ static b32 host_take(host_install address_to install, bool update)
         radio_restore();
         name_restore();
         locale_restore();
+        dns_restore();
         tune_restore();
         return 0;
 }
@@ -15373,6 +15375,124 @@ static b32 host_desktop(string_address address_to arguments, positive count)
 }
 
 /*
+        moonwater dns [ADDRESS...|auto]: the servers names are asked of.
+
+        One to three IPv4 addresses are kept in /root/dns and written to
+        /etc/resolv.conf at once, and every lease after writes them in place
+        of its own resolver: a lease's server is the network's, which is right
+        until it is not (a router that is slow, or that answers for names the
+        machine would rather not send there). auto forgets them, and the file
+        is written the way the lease would write it. Bare says what the file
+        names now and whose choice that is. 1.1.1.1 is neither: it is the
+        server of a network that named none, and where a lookup asks when the
+        file names no server at all.
+*/
+static fn dns_say(bool label)
+{
+        p32 servers[DNS_SERVERS_MAX];
+        p32 kept[DNS_SERVERS_MAX];
+        p8 held[96];
+        p8 text[24];
+        positive count = 0;
+
+        for (positive at = 0; at < DNS_SERVERS_MAX; at++)
+        {
+                bipolar host = dns_server_at((string_address) "/etc/resolv.conf", at);
+
+                if (host < 0)
+                        break;
+                servers[count++] = (p32)host;
+        }
+
+        if (label)
+                string_format(log, host_label "dns");
+        else
+                string_format(log, "  dns");
+        for (positive at = 0; at < count; at++)
+                string_format(log, " %s", net_host_text(text, servers[at]));
+        if (!count)
+                string_format(log, " none named, lookups ask %s",
+                              net_host_text(text, DNS_FALLBACK));
+        else if (!locale_readable(NET_DNS_PATH, held, sizeof(held)))
+                string_format(log, " " LOCALE_NEEDS_ROOT);
+        else
+                string_format(log, "%s", net_dns_kept(kept) ? " (kept)" : " (the network's)");
+        host_say(log, "\n");
+}
+
+static b32 dns_set(string_address address_to words, positive count)
+{
+        p32 servers[DNS_SERVERS_MAX];
+        p8 line[96];
+        bipolar failed;
+
+        if (count > DNS_SERVERS_MAX)
+                return host_refuse("dns takes %p servers at most, which is all a lookup "
+                                   "reads; auto for the network's\n",
+                                   (positive)DNS_SERVERS_MAX);
+        line[0] = end;
+        for (positive at = 0; at < count; at++)
+        {
+                bipolar host = string_to_host(words[at]);
+
+                if (!net_dns_usable(host))
+                        return host_refuse("%s is not a server address: a dotted IPv4 "
+                                           "address a machine can be at, or auto for the "
+                                           "network's\n", words[at]);
+                for (positive before = 0; before < at; before++)
+                        if (servers[before] == (p32)host)
+                                return host_refuse("%s is named twice\n", words[at]);
+                servers[at] = (p32)host;
+                if (at)
+                        string_append_bounded(line, " ", sizeof(line));
+                string_append_bounded(line, words[at], sizeof(line));
+        }
+
+        failed = radio_write_word(NET_DNS_PATH, line);
+        return_if(failed < 0, host_fail("dns", failed));
+        failed = net_write_resolv_servers((string_address) "/etc/resolv.conf",
+                                          servers, count);
+        return_if(failed < 0, host_fail("kept, but /etc/resolv.conf", failed));
+        dns_say(true);
+        return 0;
+}
+
+static b32 dns_auto(void)
+{
+        bipolar failed = system_remove_at(AT_FDCWD, NET_DNS_PATH, 0);
+
+        return_if(failed < 0 && failed != -ENOENT, host_fail("dns", failed));
+        failed = net_write_resolv(net_dns_lease());
+        return_if(failed < 0, host_fail("forgotten, but /etc/resolv.conf", failed));
+        dns_say(true);
+        return 0;
+}
+
+//      What was kept is the file before any lease writes it: a machine that
+//      boots with no network at all still asks the servers it was told to.
+static fn dns_restore(void)
+{
+        p32 servers[DNS_SERVERS_MAX];
+        positive count = net_dns_kept(servers);
+
+        if (count)
+                (void)net_write_resolv_servers((string_address) "/etc/resolv.conf",
+                                               servers, count);
+}
+
+static b32 host_dns(string_address address_to arguments, positive count)
+{
+        if (count == 2)
+        {
+                dns_say(true);
+                return 0;
+        }
+        host_need_root();
+        return count == 3 && string_equals(arguments[2], "auto") ? dns_auto()
+                                                                 : dns_set(arguments + 2, count - 2);
+}
+
+/*
         Bound events, and the init and exit lists, as one verb.
 
         A kernel event is one line. init and exit stay lists, because more
@@ -15801,6 +15921,7 @@ static const host_row host_rows[] = {
     {null, "ntp sampling [on|off]", "keep the lowest-delay sample of five [on]", 'b'},
     {null, "keyboard [LAYOUT|list|xkb]", "us uk gb de se sv no nb dk fi fr es it [us]", 'b'},
     {null, "name [NEW|random]", "what this machine is called, like space-wizard", 'b'},
+    {null, "dns [ADDRESS...|auto]", "up to three servers names are asked of, or the network's [auto]", 'b'},
     {null, "link", "who this machine is linked with, and what each may do", 'f'},
     {null, "link [pair|NAME]", "machines linked by name, with a code", 'm'},
     {null, "link pair [NAME]", "a code, and wait for the other machine to use it", 'f'},
@@ -15814,7 +15935,8 @@ static const host_row host_rows[] = {
     {null, "link allow|deny NAME GRANT...", "shell run log files (any file but the link's own)", 'f'},
     {null, "link group [NAME [SECRET] [allow GRANT...]]", "machines on one network that link themselves", 'f'},
     {null, "link group leave NAME [forget]", "stop, and forget the group's key", 'f'},
-    {null, "link on|off", "the listener, udp 22348 or /root/link.port, kept across boots [off]", 'f'},
+    {null, "link on|off", "the listener, kept across boots [off]", 'f'},
+    {null, "link port [N|auto]", "the udp port it takes, and `link add` assumes [22348]", 'f'},
 };
 
 /* The column the words of a row start in. A command that would not leave two
@@ -16043,6 +16165,8 @@ static b32 host_status(void)
                         string_format(log, "  name %s\n", name);
         }
 
+        dns_say(false);
+
         host_status_wifi();
 
         (void)host_bind_each(false, false);
@@ -16153,6 +16277,7 @@ static string_address host_wipe_keep[] = {
     HOST_WIPE_KEEP(LOCALE_CANVAS_SCALE_PATH),
     HOST_WIPE_KEEP(LOCALE_CANVAS_MODES_PATH),
     HOST_WIPE_KEEP(DESKTOP_PATH),
+    HOST_WIPE_KEEP(NET_DNS_PATH),
     HOST_WIPE_KEEP(NAME_PATH),
     HOST_WIPE_KEEP(LINK_SWITCH_PATH),
     HOST_WIPE_KEEP(LINK_KEY_PATH),
@@ -16356,6 +16481,7 @@ static b32 host_main()
             {"keyboard", host_keyboard, false},
             {"time", host_time, false},
             {"name", host_name, true},
+            {"dns", host_dns, false},
             {"link", link_main, false},
             {"wipe", host_wipe_verb, true},
             {"machine", host_machine_verb, false},
