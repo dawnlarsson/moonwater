@@ -25276,7 +25276,10 @@ def harness_core_state(argv):
     output = canvas_part(canvas, "output")
     pointer = canvas_part(canvas, "pointer")
     keys = canvas_part(canvas, "keys")
-    spark = (root / "src/moonwater/spark.c").read_text()
+    #   Canvas's ABI is a header spark.c includes; a cut of spark.c is cut
+    #   out of the file it is in, so it is given the header's text instead.
+    spark = (root / "src/moonwater/spark.c").read_text().replace(
+        '#include "../canvas/canvas_abi.h"', (root / "src/canvas/canvas_abi.h").read_text())
     # The machine script this build bakes into the module. The scanner that
     # decides which rows the machine process owns is compiled here for real,
     # so the shipped file is scanned here for real as well: an edit to it that
@@ -35914,13 +35917,14 @@ def harness_image_nodes(argv):
     #   log still says terminal: 0. Three files have to agree and none of
     #   them can see the other two.
     core = (ROOT / 'src/moonwater/core.c').read_text()
+    abi = (ROOT / 'src/canvas/canvas_abi.h').read_text()
     tools = (ROOT / 'src/sh/tools.inc').read_text()
     system = {name for category, name in re.findall(
         r'SHELL_TOOL\(\s*(\w+)\s*,\s*([^,\s]+)\s*,', tools)
         if category == 'SYSTEM'}
     check(bool(system), 'tools.inc still has a SYSTEM category')
-    terminal = define(spark, 'SPARK_TERMINAL_PROGRAM')
-    check(terminal is not None, 'spark names what the compositor starts')
+    terminal = define(abi, 'SPARK_TERMINAL_PROGRAM')
+    check(terminal is not None, 'canvas_abi.h names what the compositor starts')
     if terminal:
         name = terminal.strip('"')
         check(name.startswith('/') and '/' not in name[1:],
@@ -60366,7 +60370,10 @@ def harness_machine_scan(argv):
 
     section = lambda source, first, following: src_slice(source, first, following, "machine_scan")
 
-    source = ("#include <stdio.h>\n#include <stdlib.h>\n#define MOONWATER_SCAN\n" +
+    #   Canvas's two events and their names are canvas_abi.h's, which spark.c
+    #   includes and a cut of spark.c does not.
+    abi = (root / "src/canvas/canvas_abi.h").read_text()
+    source = ("#include <stdio.h>\n#include <stdlib.h>\n#define MOONWATER_SCAN\n" + abi +
               section(spark, "#define SPARK_BIND_NAME_MAX", "#define SPARK_BIND_GET") +
               section(spark, "#define SPARK_BIND_POWEROFF", "static const unsigned char spark_bind_stop") +
               section(machine, "#define MOONWATER_HOOK_INIT", "#define MOONWATER_SCRIPT_BYTES") +
@@ -60398,9 +60405,11 @@ int main(int argc, char **argv)
 }
 """)
     checks = Checks()
-    events = [line.strip().strip('",') for line in
+    spelled = dict(re.findall(r'#define (SPARK_BIND_\w+_NAME) "([^"]+)"', abi))
+    events = [spelled.get(line.strip().rstrip(","), line.strip().strip('",')) for line in
               section(spark, "spark_bind_event_name[SPARK_BIND_EVENTS][SPARK_BIND_NAME_MAX] = {",
-                      "};").split("\n")[1:] if line.strip().startswith('"')]
+                      "};").split("\n")[1:]
+              if line.strip().startswith('"') or line.strip().rstrip(",") in spelled]
     rng = random.Random(0x5ca9)
 
     with tempfile.TemporaryDirectory(prefix="machine-scan-") as temporary:
@@ -60757,7 +60766,7 @@ typedef const char *string_address;
 #define memory_zero(at, n) memset(at, 0, n)
 #define string_length strlen
 #define SPARK_EVENTS_UNUSED 0
-""" + section(spark, "#define SPARK_BIND_NAME_MAX", "#define SPARK_BIND_GET") + \
+""" + abi + section(spark, "#define SPARK_BIND_NAME_MAX", "#define SPARK_BIND_GET") + \
         section(spark, "#define SPARK_BIND_POWEROFF", "static const unsigned char spark_bind_stop") + \
         section(spark, "#define SPARK_BIND_COMMAND_MAX 256u", "#define SPARK_BIND_NAME_MAX") + \
         section(spark, "struct bind_control {", "// _IOWR('s', 11, struct bind_control)") + \

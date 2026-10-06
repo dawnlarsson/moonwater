@@ -181,11 +181,9 @@ _Static_assert(sizeof(struct header) == SPARK_HEADER_SIZE,
 // One NAME=value string per variable, for an environment given as a vector.
 #define SPARK_ENVIRONMENT_ENTRY(name, value) name "=" value,
 
-/* What the compositor starts once it has a screen. A root-level link to the
-   shell image, which the build makes for every applet the SYSTEM category
-   holds -- so the name here has to stay one of those, and the image_nodes
-   harness is what says so. src/sh/tools.inc is the list. */
-#define SPARK_TERMINAL_PROGRAM "/term"
+// Canvas's requests, structs and bindings. A program reads them here as it
+// always did; the file they are in is the compositor's.
+#include "../canvas/canvas_abi.h"
 
 // _IOR('s', 2, struct stats). Nanoseconds accumulated inside the kernel,
 // so the split between creating the task and loading the image is measured
@@ -202,66 +200,6 @@ struct stats {
                                  // too, without going through the device
         unsigned long map_ns;    // of the handler, just the region mapping --
                                  // the part that is actually ours to optimise
-};
-
-// _IOR('s', 3, struct input_stats). Nanoseconds from a pointer event
-// reaching the kernel to the cursor being on screen, and what the
-// acceleration curve did with the counts a mouse reported. This, the cursor
-// stats and the input devices need CAP_SYS_ADMIN: they are a live record of
-// somebody's hands.
-#define SPARK_IOCTL_INPUT_STATS 0x80707303u
-
-struct input_stats {
-        unsigned long events;
-        unsigned long mean_ns;
-        unsigned long worst_ns;
-        unsigned long queue_ns;
-        unsigned long draw_ns;
-        unsigned long flush_ns;
-        unsigned long counts;     // reported by the device
-        unsigned long moved;      // pixels the cursor was moved by them
-        unsigned long composes;   // full passes over every output
-        unsigned long compose_ns; // spent in them
-        unsigned long painted;    // pixels written, all drawing
-        unsigned long runs;       // calls into the row primitives
-        unsigned long driver_ns;  // of compose_ns, the driver's share
-        unsigned long text_ns;    // and the share spent laying out glyphs
-};
-
-// _IOR('s', 6, struct cursor_stats). Kept separate from input_stats so the
-// existing diagnostic ABI and its encoded structure size remain stable.
-#define SPARK_IOCTL_CURSOR_STATS 0x80407306u
-
-struct cursor_stats {
-        unsigned long requested_generation; // urgent drag/resize sync request
-        unsigned long armed_generation;     // last all-plane completion
-        unsigned long updates;               // successful visible plane arms
-        unsigned long failures;              // runtime paint/update failures
-        int requested_x, requested_y;
-        int armed_x, armed_y;       // last all-plane completed request
-        unsigned int active;        // outputs retaining a hardware plane
-        unsigned int shown;         // active planes currently showing it
-        unsigned int wanted;        // outputs containing the logical cursor
-        unsigned int recovering;    // a full commit still has to clear a plane
-};
-
-// _IOR('s', 7, struct input_devices). Every input device the compositor is
-// attached to, whether it opened, and how many reports it has delivered.
-// A mouse that is dead until it is plugged in again is either one the
-// kernel never heard from or one whose reports went nowhere, and only a
-// count per device tells the two apart from a stuck cursor.
-#define SPARK_IOCTL_INPUT_DEVICES 0x82487307u
-#define INPUT_DEVICES_MAX 8
-
-struct input_device_stats {
-        char name[56];
-        unsigned long events;  // reports delivered to the compositor
-        long opened;           // 0 once open, else the error the last try gave
-};
-
-struct input_devices {
-        unsigned long count;   // devices attached, listed or not
-        struct input_device_stats device[INPUT_DEVICES_MAX];
 };
 
 /*
@@ -384,63 +322,6 @@ _Static_assert(sizeof(struct snapshot_request) == 32,
 */
 
 /*
-        Canvas, on and off.
-
-        Off gives the display back: every program's window is asked to close,
-        the compositor's input handler and thread stop, its DRM clients are
-        released, every console gets its keyboard back, and the kernel's
-        framebuffer console takes each screen. On takes the cards again and
-        fires canvas on, and opens no window by itself: the machine script
-        asks for the kernel log and a terminal on that event. It refuses
-        while another program is master of a card, and names that program.
-
-        The state below comes back whatever the request answers. Reading it
-        needs nothing; on and off need CAP_SYS_ADMIN. LAYOUT reads the
-        compositor keymap without a capability; setting it needs CAP_SYS_ADMIN.
-        KERNEL_LOG opens the kernel log window, or leaves the one that is
-        open, and TERMINAL starts a terminal as Control-Shift-T does; both
-        start a root shell's worth of view or input, so both need
-        CAP_SYS_ADMIN, and both answer -ENODEV while Canvas is off.
-*/
-#define SPARK_CANVAS_STATUS 0u
-#define SPARK_CANVAS_ON 1u
-#define SPARK_CANVAS_OFF 2u
-#define SPARK_CANVAS_LAYOUT 3u
-#define SPARK_CANVAS_KERNEL_LOG 4u
-#define SPARK_CANVAS_TERMINAL 5u
-#define SPARK_CANVAS_OUTPUTS 4u
-
-struct canvas_output_state {
-        char connector[16];
-        unsigned int width, height, refresh;
-        unsigned int reserved;
-};
-
-struct canvas_control {
-        unsigned int request;      // SPARK_CANVAS_*
-        unsigned int running;      // 1 while Canvas holds a card
-        unsigned int cards;        // cards Canvas holds
-        unsigned int windows;      // programs' windows on the desktop
-        unsigned int detached;     // windows off closed that are still open
-        unsigned int suspended;    // 1 while another program is a card's master
-        int master_pid;            // who held a card on refused, 0 for nobody
-        unsigned int output_count; // outputs below, at most SPARK_CANVAS_OUTPUTS
-        char master_command[16];
-        char driver[16];           // the first card's driver
-        struct canvas_output_state output[SPARK_CANVAS_OUTPUTS];
-        unsigned int latency_hold;  // 1 while the CPU latency hold is taken
-        unsigned int latency_holds; // times it was taken since Canvas started
-        unsigned int thread_passes; // times the canvas thread woke
-        unsigned int frame_ticks;   // times the frame timer fired
-};
-
-_Static_assert(sizeof(struct canvas_output_state) == 32, "spark canvas output ABI");
-_Static_assert(sizeof(struct canvas_control) == 208, "spark canvas control ABI");
-
-// _IOWR('s', 10, struct canvas_control)
-#define SPARK_IOCTL_CANVAS 0xc0d0730au
-
-/*
         Bindings: what the machine's own events run.
 
         Every event has a name and an id, and an id is never given to another
@@ -500,8 +381,7 @@ _Static_assert(sizeof(struct canvas_control) == 208, "spark canvas control ABI")
 #define SPARK_BIND_MUTE 9u
 #define SPARK_BIND_BRIGHTNESS_UP 10u
 #define SPARK_BIND_BRIGHTNESS_DOWN 11u
-#define SPARK_BIND_CANVAS_ON 12u
-#define SPARK_BIND_CANVAS_OFF 13u
+// 12 and 13, canvas on and canvas off: canvas_abi.h
 #define SPARK_BIND_MICMUTE 14u
 #define SPARK_BIND_RFKILL 15u
 #define SPARK_BIND_TABLET_ON 16u
@@ -531,8 +411,8 @@ static const char spark_bind_event_name[SPARK_BIND_EVENTS][SPARK_BIND_NAME_MAX] 
         "mute",
         "brightness_up",
         "brightness_down",
-        "canvas on",
-        "canvas off",
+        SPARK_BIND_CANVAS_ON_NAME,
+        SPARK_BIND_CANVAS_OFF_NAME,
         "micmute",
         "rfkill",
         "tablet on",
@@ -653,7 +533,7 @@ _Static_assert(sizeof(struct spawn) == 64, "spark spawn request ABI");
 #define SPARK_SETTINGS_BIND_TEXT_MOST 255 // a bound command, without its terminator
 
 //      flags: each is the change from the default, so zero is as built.
-#define SPARK_SETTINGS_CANVAS_OFF 0x1u   // Canvas does not start at boot
+//      0x1u is Canvas's, canvas_abi.h
 #define SPARK_SETTINGS_MOUNT_OFF 0x2u    // boot keeps the disks' data unmounted
 #define SPARK_SETTINGS_STARTUP_SET 0x4u  // the startup list is the one written
 
