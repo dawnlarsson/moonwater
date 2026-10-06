@@ -20546,6 +20546,106 @@ fn check_span_max_wide()
 }
 
 /*
+        The five bodies that took a zmm and a ymm form -- the byte sum, the
+        xor, the two case conversions and the 33 hash -- against a page with
+        a dead one on each side. The span is the first bytes of the live page
+        and then its last, at every length to 1100 and a few above, so a load
+        that starts before the span or ends past it is a fault at some length,
+        and what is written is the span and nothing of the rest of the page,
+        which is poisoned and read back whole. Under each body the machine
+        has: the zmm one, the ymm one, the floor, and on x86_64 the zmm one
+        again with the hash told there is no DQ.
+*/
+static fn wide_guard_pass(p8 address_to page)
+{
+        static p8 poison[4096];
+        static p8 want[4096];
+        static const p8 odd[] = {'@', 'A', 'M', 'Z', '[', '`', 'a', 'm', 'z', '{',
+                                 0, 0x7f, 0x80, 0xc1, 0xdb, 0xe1, 0xfa, 0xff, ' ', '~'};
+        positive lengths = 1100 + 4;
+
+        for (positive step = 0; step < lengths; step++)
+        {
+                positive length = step <= 1100 ? step : (positive[]){2048, 4095, 4096, 3000}[step - 1101];
+
+                for (positive edge = 0; edge < 2; edge++)
+                {
+                        p8 address_to span = edge ? page + 4096 - length : page;
+                        positive hash = 5381;
+                        positive sum = 0;
+
+                        for (positive i = 0; i < 4096; i++)
+                                poison[i] = (p8)next();
+                        memory_copy(page, poison, 4096);
+                        for (positive i = 0; i < length; i++)
+                        {
+                                p64 pick = next();
+
+                                span[i] = poison[(span - page) + i] =
+                                    (pick & 1) ? (p8)(pick >> 8) : odd[(pick >> 8) % sizeof(odd)];
+                                hash = hash * 33 + span[i];
+                                sum += span[i];
+                        }
+
+                        same("memory_hash_33", "page edge", memory_hash_33(span, length), hash);
+                        same("memory_sum_bytes", "page edge", memory_sum_bytes(span, length), sum);
+
+                        for (positive which = 0; which < 3; which++)
+                        {
+                                string_address name = which == 0 ? "memory_frob"
+                                                      : which == 1 ? "memory_to_lower_ascii"
+                                                                   : "memory_to_upper_ascii";
+
+                                memory_copy(want, poison, 4096);
+                                memory_copy(page, poison, 4096);
+                                for (positive i = 0; i < length; i++)
+                                {
+                                        p8 address_to at = want + (span - page) + i;
+
+                                        if (which == 0)
+                                                *at ^= 42;
+                                        else if (which == 1 && *at >= 'A' && *at <= 'Z')
+                                                *at += 32;
+                                        else if (which == 2 && *at >= 'a' && *at <= 'z')
+                                                *at -= 32;
+                                }
+                                same(name, "returns its argument",
+                                     (positive)(which == 0   ? memory_frob(span, length)
+                                                : which == 1 ? memory_to_lower_ascii(span, length)
+                                                             : memory_to_upper_ascii(span, length)),
+                                     (positive)(address_any)span);
+                                same_bytes(name, "the span and nothing of the page", page, want, 4096);
+                        }
+                }
+        }
+}
+
+fn check_wide_guards()
+{
+        p8 address_to pages = guard_pages("the wide bodies");
+
+        if (!pages)
+                return;
+#if X64
+        p8 avx2 = cpu_has_avx2, avx512 = cpu_has_avx512, dq = cpu_has_avx512_dq;
+
+        for (positive tier = 0; tier < 4; tier++)
+        {
+                cpu_has_avx2 = tier < 2 || tier == 3 ? avx2 : 0;
+                cpu_has_avx512 = tier == 0 || tier == 3 ? avx512 : 0;
+                cpu_has_avx512_dq = tier == 3 ? 1 : 0;
+                wide_guard_pass(pages + 4096);
+        }
+        cpu_has_avx2 = avx2;
+        cpu_has_avx512 = avx512;
+        cpu_has_avx512_dq = dq;
+#else
+        wide_guard_pass(pages + 4096);
+#endif
+        memory_free(pages, 3 * 4096);
+}
+
+/*
         The digit run.
 
         The buffer is digits from end to end and the run is a window inside it
@@ -27391,6 +27491,7 @@ b32 main()
         check_hostile_neighbours();
         check_span_max();
         check_span_max_wide();
+        check_wide_guards();
         check_digits();
         check_signed_digits_and_width();
         check_digits_base();
@@ -29111,7 +29212,7 @@ static fn model_room(positive allowed)
 static fn unbounded_guard_edge(void)
 {
 #if X64
-        p8 wide = cpu_has_avx2, widest = cpu_has_avx512;
+        p8 wide = cpu_has_avx2, widest = cpu_has_avx512, vector_bytes = cpu_has_avx512_vbmi;
         positive tiers = 3;
 #else
         positive tiers = 1;
@@ -29126,8 +29227,9 @@ static fn unbounded_guard_edge(void)
 #if X64
                 cpu_has_avx2 = tier < 2 ? wide : 0;
                 cpu_has_avx512 = tier < 1 ? widest : 0;
+                cpu_has_avx512_vbmi = tier < 1 ? vector_bytes : 0;
 #endif
-                for (positive suffix = 1; suffix <= 72; suffix++)
+                for (positive suffix = 1; suffix <= 200; suffix++)
                 {
                         string_address source = source_edge - suffix;
                         string_address twin = twin_edge - suffix;
@@ -29169,10 +29271,34 @@ static fn unbounded_guard_edge(void)
                                 memory_give(copy);
                         }
                 }
+
+                //      And from the first byte of a live page, with the dead one
+                //      below it: a block that starts before the subject faults.
+                static const positive stops[] = {0, 1, 2, 3, 4, 5, 7, 8, 9, 31, 32, 33, 59, 60,
+                                                 63, 64, 65, 66, 67, 68, 100, 127, 128, 129, 130,
+                                                 131, 191, 192, 193, 4094, 4095};
+                string_address first = source_edge - 4096;
+
+                for (positive s = 0; s < array_count(stops); s++)
+                {
+                        positive stop = stops[s];
+                        positive bounds[] = {positive_max, 4096, 0 - (positive)first, stop, stop + 1};
+
+                        for (positive i = 0; i < 4096; i++)
+                                ((p8 address_to)first)[i] = (p8)('a' + (i * 7 + stop) % 23);
+                        ((p8 address_to)first)[stop] = 0;
+
+                        for (positive b = 0; b < array_count(bounds); b++)
+                                judge((string_address)"string_span_max from a page start",
+                                      bounds[b], stop,
+                                      (string_span_max)(first, bounds[b], letters),
+                                      stop < bounds[b] ? stop : bounds[b]);
+                }
         }
 #if X64
         cpu_has_avx2 = wide;
         cpu_has_avx512 = widest;
+        cpu_has_avx512_vbmi = vector_bytes;
 #endif
 }
 

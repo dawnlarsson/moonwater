@@ -20507,6 +20507,16 @@ ASM_FUNC(positive_to_string)
     // The bound is tested once per four bytes and not once per byte. The loop
     // runs while four are left and the leftovers go a byte at a time, which is
     // the same shape string_span has with the fence folded into it.
+#ifndef KERNEL_MODE
+    // One block of the span: the 256 byte table in zmm1 to zmm4, the bytes under mask k1, and the
+    // stops, the bytes the table does not hold, in r9; to label 2 when there is one.
+#define STRING_SPAN_MAX_X64_BLOCK \
+    "kmovq %r8, %k1\n   vmovdqu8 (%rdi,%rax), %zmm0{%k1}{z}\n" \
+    "vmovdqa64 %zmm1, %zmm5\n   vpermt2b %zmm2, %zmm0, %zmm5\n" \
+    "vmovdqa64 %zmm3, %zmm6\n   vpermt2b %zmm4, %zmm0, %zmm6\n" \
+    "vpmovb2m %zmm0, %k2\n   vmovdqu8 %zmm6, %zmm5{%k2}\n" \
+    "vptestnmb %zmm5, %zmm5, %k3{%k1}\n   kmovq %k3, %r9\n   test %r9, %r9\n   jnz 2f\n"
+#endif
     ASM_FUNC(string_span_max)
 #ifndef KERNEL_MODE
     // rdi bytes, rsi bound, rdx table of 256 bytes; the run of bytes the table holds, at most bound
@@ -20518,7 +20528,26 @@ ASM_FUNC(positive_to_string)
     "movzbl 3(%rdi), %ecx\n   cmpb $0, (%rdx,%rcx)\n   je 8f\n"
     "vmovdqu64 (%rdx), %zmm1\n   vmovdqu64 64(%rdx), %zmm2\n"
     "vmovdqu64 128(%rdx), %zmm3\n   vmovdqu64 192(%rdx), %zmm4\n"
-    "mov $4, %eax\n   jmp .Lstring_span_max_x64_loop\n"
+    "mov $4, %eax\n"
+    //
+    //       A bound may be more memory than there is: strspn is this with no
+    //       bound at all, and the terminator ends the run before the end of
+    //       the page it is in. A block of 64 bytes read from anywhere can
+    //       reach the next page, so the first one is cut at the page's end
+    //       when it would, and the rest begin on a multiple of 64 -- the
+    //       first one's end rounded down, which only re-reads bytes the first
+    //       has shown are in the set -- and so none of them can cross.
+    //
+    "mov %edi, %r10d\n   and $4095, %r10d\n   cmp $4028, %r10d\n   ja 3f\n"
+    "lea -4(%rsi), %rcx\n"
+    "4:  mov $-1, %r8\n   cmp $64, %rcx\n   jae 1f\n   bzhi %rcx, %r8, %r8\n"
+    "1:  " STRING_SPAN_MAX_X64_BLOCK
+    "lea 68(%rdi), %rax\n   and $-64, %rax\n   sub %rdi, %rax\n"
+    "cmp %rsi, %rax\n   jb .Lstring_span_max_x64_loop\n"
+    "mov %rsi, %rax\n   vzeroupper\n"
+    ASM_RET
+    "3:  lea 4(%rdi), %r10d\n   and $4095, %r10d\n   mov $4096, %ecx\n   sub %r10, %rcx\n"
+    "lea -4(%rsi), %r9\n   cmp %r9, %rcx\n   cmova %r9, %rcx\n   jmp 4b\n"
     "8:  mov $3, %eax\n"
     ASM_RET
     "7:  mov $2, %eax\n"
@@ -20529,11 +20558,7 @@ ASM_FUNC(positive_to_string)
     ASM_RET
     ".balign 16\n.Lstring_span_max_x64_loop:\n"
     "mov %rsi, %rcx\n   sub %rax, %rcx\n   mov $-1, %r8\n   cmp $64, %rcx\n   jae 1f\n   bzhi %rcx, %r8, %r8\n"
-    "1:  kmovq %r8, %k1\n   vmovdqu8 (%rdi,%rax), %zmm0{%k1}{z}\n"
-    "vmovdqa64 %zmm1, %zmm5\n   vpermt2b %zmm2, %zmm0, %zmm5\n"
-    "vmovdqa64 %zmm3, %zmm6\n   vpermt2b %zmm4, %zmm0, %zmm6\n"
-    "vpmovb2m %zmm0, %k2\n   vmovdqu8 %zmm6, %zmm5{%k2}\n"
-    "vptestnmb %zmm5, %zmm5, %k3{%k1}\n   kmovq %k3, %r9\n   test %r9, %r9\n   jnz 2f\n"
+    "1:  " STRING_SPAN_MAX_X64_BLOCK
     "add $64, %rax\n   cmp %rsi, %rax\n   jb .Lstring_span_max_x64_loop\n"
     "mov %rsi, %rax\n   vzeroupper\n"
     ASM_RET
@@ -20566,6 +20591,9 @@ ASM_FUNC(positive_to_string)
     "9:\n"
     ASM_RET
     ASM_END(string_span_max)
+#ifndef KERNEL_MODE
+#undef STRING_SPAN_MAX_X64_BLOCK
+#endif
     //
     //       string_digits -- a run of decimal digits, as a number and as a
     //       count of the bytes it took.
