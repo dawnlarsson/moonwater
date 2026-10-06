@@ -17087,7 +17087,7 @@ counted
 #       absolute number that is not. A Linux host target runs directly.
 #
 
-benchmarks="floor baseline numbers bases hex escape spelled codec fixed table padded input-bases fields human human-nearest hash-33 span-byte utf8-valid net-parsers cells-ascii fill-u32 fill-u64 paths reverse writer-field writer-text text-hot prefix-known translate delete squeeze offsets record-scans ascii-case ascii-case-fold line-break bounded-fold ascii-convert ascii-search grep-search grep-count last-of words clock scan-literal random allocator lock pool ordered tree reserve storage-read compare-max string-copy stream-get stream-write format-bounds startup montgomery limbs shell tools awk find boot-time engines compression compression-floor cksum-crc cksum-digests unicode-width link"
+benchmarks="floor baseline numbers bases hex escape spelled codec fixed table padded input-bases fields human human-nearest hash-33 span-byte utf8-valid net-parsers cells-ascii fill-u32 fill-u64 paths reverse writer-field writer-text text-hot prefix-known translate delete squeeze offsets record-scans ascii-case ascii-case-fold line-break bounded-fold ascii-convert ascii-search grep-search grep-count last-of words clock scan-literal random allocator lock pool ordered tree reserve storage-read compare-max string-copy stream-get stream-write format-bounds startup montgomery limbs shell tools grep-sets awk find boot-time engines compression compression-floor cksum-crc cksum-digests unicode-width link"
 
 #       One benchmark's section and one line about it. A name with no section
 #       is one of the drivers below, which time a whole binary against the
@@ -17220,6 +17220,7 @@ bench_about()
                  bench_line="the generic Montgomery multiply against the C crypto.c ran, and the verifies over it" ;;
         shell)   bench_line="the shell against dash and bash on shell-owned work" ;;
         tools)   bench_line="the text and file utilities against the host's own" ;;
+        grep-sets) bench_line="grep -F -f over lists of two strings to a quarter of a million, against the host's grep and ripgrep" ;;
         awk)     bench_line="awk's owned hot paths against the awk on the machine" ;;
         find)    bench_line="find's walker floor, apart from matching and metadata" ;;
         boot-time) bench_line="how long the stack takes to reach a shell, from the guest clock" ;;
@@ -17781,6 +17782,161 @@ PY
 )
 
 #
+#       grep -F -f against the host's grep and ripgrep, over the lists a
+#       joined alternation could not hold: the number of strings, their
+#       length, how many lines hold one, and the size of the text.
+#
+#           sh test/run bench grep-sets -- [path-to-moonwater-multicall]
+#
+#       BENCH_SIZE is the text in bytes (16 MiB), BENCH_RUNS the runs of each
+#       (3), BENCH_QUICK=1 the four lists that were once refused or fell off a
+#       cliff at 8 bytes. Every answer is checked against the host's before
+#       it is timed, and the lane fails where ours is the slower of the two at
+#       a point: the point of it is that nothing is.
+#
+bench_grep_sets()
+(
+        set -e
+        work=$(mktemp -d)
+        trap 'rm -rf "$work"' EXIT HUP INT TERM
+        subject=${1:-${MOONWATER_TOOLS:-}}
+
+        if [ -z "$subject" ]; then
+                subject=$work/moonwater
+                echo "building $subject" >&2
+                freestanding programs/utilities.c "$subject"
+        fi
+
+        # shellcheck disable=SC1007
+        case $subject in
+        /*) ;;
+        *) subject=$(CDPATH= cd -- "$(dirname -- "$subject")" && pwd)/$(basename -- "$subject") ;;
+        esac
+
+        [ -x "$subject" ] || {
+                echo "bench grep-sets: not executable: $subject" >&2
+                exit 1
+        }
+
+        command -v python3 >/dev/null 2>&1 || {
+                echo "  grep-sets    NOT RUN -- python3 is required" >&2
+                exit 2
+        }
+
+        exec python3 - "$subject" "$work" "${BENCH_RUNS:-3}" \
+                "${BENCH_SIZE:-16777216}" "${BENCH_QUICK:-}" <<'PY'
+import os
+import random
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+subject, work, runs_text, size_text, quick = sys.argv[1:]
+runs = int(runs_text)
+size = int(size_text)
+work_path = Path(work)
+
+if hasattr(os, "sched_getaffinity") and hasattr(os, "sched_setaffinity"):
+    try:
+        os.sched_setaffinity(0, {min(os.sched_getaffinity(0))})
+    except (OSError, ValueError):
+        pass
+
+environment = dict(os.environ, LC_ALL="C")
+ours = work_path / "ours"
+ours.mkdir()
+(ours / "grep").symlink_to(subject)
+engines = [("ours", str(ours / "grep")), ("host", shutil.which("grep"))]
+if not engines[1][1]:
+    raise SystemExit("bench grep-sets: the host's grep is required")
+if shutil.which("rg"):
+    engines.append(("rg", shutil.which("rg")))
+
+counts = (17, 258, 4096, 65536) if quick else (1, 4, 16, 17, 64, 256, 1024, 4096, 16384, 65536, 262144)
+lengths = (8,) if quick else (3, 8, 32)
+hits = (0, 500) if quick else (0, 10, 500)
+letters = bytes(97 + i % 26 for i in range(256))
+text_table = bytes(32 if i % 27 == 26 else 97 + i % 27 for i in range(256))
+output = (work_path / "output").open("wb")
+
+def run(name, path, list_path, text_path, timeout):
+    argv = [path, "-c", "-F", "-f", str(list_path), str(text_path)]
+    if name == "rg":
+        argv[1:1] = ["--no-config", "-j1"]
+    output.seek(0)
+    output.truncate()
+    began = time.perf_counter()
+    try:
+        done = subprocess.run(argv, stdout=output, stderr=subprocess.PIPE, env=environment,
+                              timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None, "timeout"
+    took = (time.perf_counter() - began) * 1000
+    output.flush()
+    answer = (work_path / "output").read_bytes().strip()
+    if done.returncode not in (0, 1):
+        return None, done.stderr.decode("utf-8", "replace").strip()[:60]
+    return took, answer or b"0"
+
+losses = []
+cells = 0
+print(f"{size >> 20} MiB of text, one core, ms (least of {runs}); hit is how many lines in a thousand hold a string")
+print(f"{'strings':>7} {'bytes':>5} {'hit':>4} {'ours':>9} {'host':>9} {'rg':>9} {'lines':>8}  ours against host")
+for count in counts:
+    for length in lengths:
+        rnd = random.Random(count * 131 + length)
+        blob = rnd.randbytes(count * length).translate(letters)
+        words = [blob[at:at + length] for at in range(0, count * length, length)]
+        list_path = work_path / "list"
+        list_path.write_bytes(b"\n".join(words) + b"\n")
+        for hit in hits:
+            body = bytearray(rnd.randbytes(size).translate(text_table))
+            body[63::64] = b"\n" * len(body[63::64])
+            for line in range(size // 64):
+                if rnd.randrange(1000) < hit:
+                    word = words[rnd.randrange(count)]
+                    at = line * 64 + rnd.randrange(64 - length)
+                    body[at:at + length] = word
+            text_path = work_path / "text"
+            text_path.write_bytes(body)
+            row = {}
+            answers = {}
+            for name, path in engines:
+                best = None
+                for _ in range(runs):
+                    took, answer = run(name, path, list_path, text_path, 120)
+                    if took is None:
+                        best = None
+                        answers[name] = answer
+                        break
+                    best = took if best is None else min(best, took)
+                    answers[name] = answer
+                row[name] = best
+            cells += 1
+            if answers["ours"] != answers["host"]:
+                raise SystemExit(f"bench grep-sets: {count} strings of {length} bytes, hit {hit}: "
+                                 f"ours {answers['ours']!r}, host {answers['host']!r}")
+            slower = row["ours"] is None or (row["host"] is not None and row["ours"] >= row["host"])
+            if slower:
+                losses.append((count, length, hit))
+            def cell(name):
+                value = row.get(name)
+                return f"{value:9.1f}" if value is not None else f"{'-':>9}"
+            ratio = "TIMEOUT" if row["ours"] is None else (
+                f"{row['ours'] / row['host'] * 100:.0f}%" if row["host"] else "host timed out")
+            print(f"{count:7d} {length:5d} {hit:4d} {cell('ours')} {cell('host')} {cell('rg')} "
+                  f"{int(answers['ours']):8d}  {ratio}{'  SLOWER' if slower else ''}", flush=True)
+
+print(f"\nours is the slower of the two at {len(losses)} of {cells} points")
+for count, length, hit in losses:
+    print(f"  {count} strings of {length} bytes, hit {hit}")
+raise SystemExit(1 if losses else 0)
+PY
+)
+
+#
 #       Compare AWK's owned hot paths with the host AWK.
 #
 #           sh test/run bench awk -- [path-to-moonwater-multicall]
@@ -18314,6 +18470,7 @@ bench_one()
         case $bench_this in
         shell)     bench_shell "$@" ;;
         tools)     bench_tools "$@" ;;
+        grep-sets) bench_grep_sets "$@" ;;
         awk)       bench_awk "$@" ;;
         find)      bench_find "$@" ;;
         boot-time) bench_boot_time "$@" ;;
