@@ -382,8 +382,17 @@ recorded in the bowl, and remove undoes exactly that: launchers that still
 name the bowl, the profile's packages and the dependencies nothing else needs,
 the script.
 
+A package manager that ends well has its bowl looked at again, and every
+program it added gets a launcher and a link in `/bin` (a program that is
+taken keeps the name it has), so a desktop that execs `/usr/bin/chromium-browser`
+by name finds what `apk add chromium` put there without anybody having typed
+it at a shell. `bowl bus` starts the system message bus of the first bowl that
+has a `dbus-daemon`, as the user, with one policy for a machine of one user, on
+`/run/dbus/system_bus_socket` where every client looks: the daemon as a
+distribution ships it ends at "Unknown username" for the users it drops to.
+
 The `desktop` session starts what the compositor needs of the machine before
-it: `bowl udev`, and the keyboard's layout read when it starts. A compositor
+it: `bowl udev`, `bowl bus`, and the keyboard's layout read when it starts. A compositor
 finds its keyboards and mice through libinput, which asks udev what each of
 `/dev/input` is and skips what udev has not named, so with no udev KWin drew
 the desktop and could not be typed at. `bowl udev` starts the first udev a bowl

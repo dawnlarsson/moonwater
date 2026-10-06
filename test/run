@@ -17556,6 +17556,13 @@ out.append(("a Debian bowl lands on the disk", "yes" if setup == 0 else "no, sta
 _, added = run("(apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y "
                "--no-install-recommends -o Dpkg::Options::=--force-unsafe-io chromium) < /dev/null", 1500)
 out.append(("with Chromium added by apt", "yes" if added == 0 else "no, status %d" % added, "yes"))
+linked, _ = run("ls -l /bin/chromium /bowls/bin/chromium 2>&1 | grep -c chromium", 30)
+out.append(("what apt added has a launcher and a link in /bin, with nobody having typed its name",
+            last(linked) or "no answer", "2"))
+bus, _ = run("bowl bus 2>&1 | tail -1; dbus-send --system --print-reply --dest=org.freedesktop.DBus "
+             "/org/freedesktop/DBus org.freedesktop.DBus.ListNames 2>&1 | tail -5", 120)
+out.append(("the system bus is on /run/dbus/system_bus_socket and answers ListNames",
+            "yes" if '"org.freedesktop.DBus"' in bus else "no: " + bus[-200:], "yes"))
 
 who, _ = run("bowl /bowls/debian /usr/bin/id -u", 60)
 out.append(("a program of the bowl is not root", last(who) or "no answer", "1000"))

@@ -32,7 +32,8 @@ static const p8 bowl_usage_text[] = bowl_label
     bowl_label "       bowl [--fast|--isolated|--root] <root> [program [argument...]]\n"
     bowl_label "       bowl expose <root> <program> [name]\n"
     bowl_label "       bowl profile [<name> [install|remove]]\n"
-    bowl_label "       bowl udev\n";
+    bowl_label "       bowl udev\n"
+    bowl_label "       bowl bus\n";
 
 #define BOWL_NATIVE_SHELL "/shell"
 /* Where bowl roots live, said once. Everything else that needs to know --
@@ -2002,6 +2003,9 @@ static fn bowl_room_after(bipolar handle, string_address root, p64 lowest)
         a policy that refuses them) runs the program as root, as it did.
 */
 static bool bowl_as_root;
+/* Set where setup and a profile run a manager themselves: they expose what
+   they add in their own way, and record it. */
+static bool bowl_own_exposure;
 
 typedef struct { p32 version; b32 process; } bowl_cap_header;
 typedef struct { p32 effective; p32 permitted; p32 inheritable; } bowl_cap_data;
@@ -2031,6 +2035,7 @@ static bool bowl_keep_capabilities(void)
 }
 
 static bool bowl_is_root(void);
+static fn bowl_reconcile(string_address root);
 
 /*  The launch is run as the user. A refusal of the namespace itself is the
     machine's to make and is not an error; a namespace that was made and could
@@ -2096,8 +2101,14 @@ static b32 bowl_launch(string_address root, string_address program,
                 arguments = native_arguments;
         }
 
-        failed = system_call_1(syscall(unshare), CLONE_NEWNS |
-            (isolated ? CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWPID : 0));
+        /*  The isolated guest's own mount namespace is made by the guest's
+            process, after the fork: its pivot_root moves the root of every
+            process in the namespace it is in, and a parent that is in it
+            cannot see /bowls when the guest is done (what a package manager
+            added could not be looked at, and the room could only be asked
+            through a descriptor opened first). */
+        failed = system_call_1(syscall(unshare), isolated
+            ? CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWPID : CLONE_NEWNS);
         if (failed)
                 return bowl_launch_failed(native_shell,
                     isolated ? "cannot make isolated views"
@@ -2121,8 +2132,15 @@ static b32 bowl_launch(string_address root, string_address program,
         }
 
         if (child == 0)
+        {
+                if (system_call_1(syscall(unshare), CLONE_NEWNS) < 0)
+                {
+                        bowl_fail("cannot make a mount view", -ERROR_NOT_PERMITTED);
+                        exit(1);
+                }
                 bowl_inside(root, program, arguments, environment,
                             native_shell, true);
+        }
 
         if (native_shell >= 0)
                 system_close(native_shell);
@@ -2136,6 +2154,9 @@ static b32 bowl_launch(string_address root, string_address program,
 
         if (failed >= 0 && code && room >= 0)
                 bowl_room_after(room, root, lowest);
+        /* What a package manager added is a program of the machine too. */
+        if (isolated && failed >= 0 && !code && !bowl_own_exposure)
+                bowl_reconcile(root);
         if (room >= 0)
                 system_close(room);
         return code;
@@ -5015,6 +5036,7 @@ static b32 bowl_setup_isolated(string_address root, string_address program,
                         if (handle)
                                 system_close(handle);
                 }
+                bowl_own_exposure = true;
                 exit(bowl_launch(root, program, arguments, true));
         }
 
@@ -5702,6 +5724,134 @@ static b32 bowl_udev(positive count)
 }
 
 
+/* ---- The system bus: where a program that asks the machine looks. ---- */
+
+/*
+        Chrome, Qt, GLib and every desktop service open
+        /run/dbus/system_bus_socket and say so when they cannot, and
+        NetworkManager, UPower, udisks and logind's clients stop at it. A
+        distribution starts the daemon from its init, with a configuration
+        that names the users it drops to (messagebus, polkitd, avahi), none of
+        which this machine has, so the daemon of a bowl run as it ships ends at
+        "Unknown username" and "Could not get UID and GID for username
+        messagebus".
+
+        So the bowl that has a dbus-daemon runs it, as the user like the rest
+        of a session (a bus is told who a client is by the id the client says
+        and the id the kernel says, and a client that is the user and a daemon
+        that is not would disagree) with a configuration of this machine's:
+        one user, so a policy that lets every connection own and talk to
+        everything, and the socket where every client looks.
+*/
+#define BOWL_BUS_DIRECTORY "/run/dbus"
+#define BOWL_BUS_SOCKET BOWL_BUS_DIRECTORY "/system_bus_socket"
+#define BOWL_BUS_PIDFILE BOWL_BUS_DIRECTORY "/pid"
+#define BOWL_BUS_CONFIG BOWL_BUS_DIRECTORY "/bowl-system.conf"
+
+static const p8 bowl_bus_config[] =
+    "<!DOCTYPE busconfig PUBLIC \"-//freedesktop//DTD D-Bus Bus Configuration "
+    "1.0//EN\"\n"
+    " \"http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd\">\n"
+    "<busconfig>\n"
+    "  <type>system</type>\n"
+    "  <fork/>\n"
+    "  <pidfile>" BOWL_BUS_PIDFILE "</pidfile>\n"
+    "  <listen>unix:path=" BOWL_BUS_SOCKET "</listen>\n"
+    "  <auth>EXTERNAL</auth>\n"
+    "  <policy context=\"default\">\n"
+    "    <allow user=\"*\"/>\n"
+    "    <allow own=\"*\"/>\n"
+    "    <allow send_type=\"method_call\"/>\n"
+    "    <allow send_type=\"signal\"/>\n"
+    "    <allow send_type=\"method_return\"/>\n"
+    "    <allow send_type=\"error\"/>\n"
+    "    <allow receive_type=\"method_call\"/>\n"
+    "    <allow receive_type=\"signal\"/>\n"
+    "    <allow receive_type=\"method_return\"/>\n"
+    "    <allow receive_type=\"error\"/>\n"
+    "  </policy>\n"
+    "</busconfig>\n";
+
+static string_address bowl_bus_daemons[] = {"/usr/bin/dbus-daemon",
+                                            "/bin/dbus-daemon", null};
+
+static bool bowl_bus_running(void)
+{
+        p8 text[32];
+        p8 path[48];
+        bipolar got = file_read_once_at(AT_FDCWD, BOWL_BUS_PIDFILE, text,
+                                        sizeof(text) - 1);
+        positive taken;
+        positive pid;
+
+        if (got <= 0 || system_access_at(AT_FDCWD, BOWL_BUS_SOCKET, 0) < 0)
+                return false;
+        text[got] = end;
+        pid = string_digits_max(text, (positive)got, address_of taken);
+        if (!taken || sizeof("/proc/") + 20 > sizeof(path))
+                return false;
+
+        memory_copy(path, "/proc/", 6);
+        path[6 + positive_into_string(path + 6, pid)] = end;
+        return system_access_at(AT_FDCWD, path, 0) >= 0;
+}
+
+static b32 bowl_bus(positive count)
+{
+        file_walk walk;
+        p8 root[BOWL_PATH_LIMIT];
+        string_address daemon = null;
+        string_address start[] = {null, "--config-file=" BOWL_BUS_CONFIG, null};
+        bipolar child;
+        b32 failed;
+
+        return_if(count != 2, bowl_usage());
+        return_if(bowl_bus_running(), 0);
+        return_if(!bowl_is_root(), bowl_refuse("the system bus starts as root\n"));
+
+        if (!file_walk_open(address_of walk, AT_FDCWD, BOWL_ROOT_DIRECTORY))
+                return bowl_refuse("there is no bowl to start the bus from\n");
+        while (!daemon && bowl_next_root(address_of walk, root))
+                daemon = bowl_udev_find(root, bowl_bus_daemons);
+        file_walk_close(address_of walk);
+
+        if (!daemon)
+                return bowl_refuse("no bowl has a dbus-daemon: bowl profile "
+                                   "desktop adds one, or add dbus to the "
+                                   "bowl\n");
+
+        /* A socket left by a daemon that is gone is in the way of the next. */
+        system_remove_at(AT_FDCWD, BOWL_BUS_SOCKET, 0);
+        failed = bowl_mkdir(BOWL_BUS_DIRECTORY);
+        if (failed || bowl_write_bytes(BOWL_BUS_CONFIG, bowl_bus_config,
+                                       sizeof(bowl_bus_config) - 1))
+                return bowl_refuse("cannot write the system bus's configuration\n");
+
+        start[0] = daemon;
+        child = system_fork();
+        if (child == 0)
+        {
+                bowl_launch(root, daemon, start, false);
+                exit(127);
+        }
+        failed = bowl_wait_applet(child, "the system bus did not start\n");
+
+        for (positive waited = 0;
+             !failed && system_access_at(AT_FDCWD, BOWL_BUS_SOCKET, 0) < 0;
+             waited += BOWL_UDEV_POLL_NS)
+        {
+                if (waited >= BOWL_UDEV_WAIT_NS)
+                        return bowl_refuse("the system bus is not answering\n");
+                process_nap_ns(BOWL_UDEV_POLL_NS);
+        }
+        return_if(failed, failed);
+
+        string_format(log, bowl_label "the system bus is running, from %s\n",
+                      root);
+        log_flush();
+        return 0;
+}
+
 /* ---- Profiles: what a machine is for, as components from several bowls. ---- */
 
 /*
@@ -5791,6 +5941,7 @@ static string_address bowl_desktop_session[] = {
     "layout=$(moonwater keyboard xkb 2>/dev/null) && "
     "[ -n \"$layout\" ] && export XKB_DEFAULT_LAYOUT=$layout",
     "bowl udev",
+    "bowl bus",
     "exec dbus-run-session -- startplasma-wayland",
     null};
 
@@ -5925,6 +6076,36 @@ bowl_profile_expose_dir(string_address root, string_address dir, bipolar marker)
 }
 
 static string_address bowl_profile_bins[] = {"/usr/bin", "/usr/sbin", null};
+
+/*
+        The programs a bowl holds are the machine's, whoever installed them:
+        a package manager that ends well has its bowl looked at again, and
+        every program in it that has no launcher gets one, and a link in /bin
+        for the desktop that execs /usr/bin/chromium-browser or
+        /usr/bin/google-chrome-stable by that name without asking a shell
+        (an entry of a menu, a link of a page). Until now only a profile did
+        this, and a program added by hand was reachable once somebody had
+        typed its name at a shell. A name that is taken stays with whoever
+        has it, as in a profile, and what is added is not recorded under a
+        profile, so no profile's remove takes it away.
+*/
+static fn bowl_reconcile(string_address root)
+{
+        positive made = 0;
+
+        bowl_quiet = true;
+        for (positive at = 0; bowl_profile_bins[at]; at++)
+                made += bowl_profile_expose_dir(root, bowl_profile_bins[at], -1);
+        bowl_quiet = false;
+
+        if (made)
+        {
+                string_format(log, bowl_label "%p new programs reachable by "
+                                              "name and by /usr/bin path\n",
+                              made);
+                log_flush();
+        }
+}
 
 static b32 bowl_profile_expose(string_address root, string_address name)
 {
@@ -6336,6 +6517,9 @@ static b32 bowl_main()
 
         if (string_equals(arguments[1], "udev"))
                 return bowl_udev(count);
+
+        if (string_equals(arguments[1], "bus"))
+                return bowl_bus(count);
 
         if (string_equals(arguments[1], "--isolated"))
         {
