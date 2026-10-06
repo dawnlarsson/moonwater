@@ -104,6 +104,12 @@ struct input_devices {
         open, and TERMINAL starts a terminal as Control-Shift-T does; both
         start a root shell's worth of view or input, so both need
         CAP_SYS_ADMIN, and both answer -ENODEV while Canvas is off.
+
+        SET_SCALE and SET_MODES change how the desktop is drawn, live, and
+        need CAP_SYS_ADMIN. They are kept when Canvas is off and taken when
+        it starts, so the answer is 0 either way; what is asked is in
+        scale_setting and modes, and the state that comes back says what is
+        in force. A scale outside 1 to SPARK_CANVAS_SCALE_MOST is -EINVAL.
 */
 #define SPARK_CANVAS_STATUS 0u
 #define SPARK_CANVAS_ON 1u
@@ -111,7 +117,22 @@ struct input_devices {
 #define SPARK_CANVAS_LAYOUT 3u
 #define SPARK_CANVAS_KERNEL_LOG 4u
 #define SPARK_CANVAS_TERMINAL 5u
+#define SPARK_CANVAS_SET_SCALE 6u
+#define SPARK_CANVAS_SET_MODES 7u
 #define SPARK_CANVAS_OUTPUTS 4u
+
+// How many device pixels one drawn pixel is: 0 asks the screens, a number is
+// that number. Where the setting in force came from is the origin.
+#define SPARK_CANVAS_SCALE_AUTO 0u
+#define SPARK_CANVAS_SCALE_MOST 4u
+#define SPARK_CANVAS_ORIGIN_DEFAULT 0u
+#define SPARK_CANVAS_ORIGIN_COMMAND_LINE 1u
+#define SPARK_CANVAS_ORIGIN_SET 2u
+
+// Which mode a screen is driven at: the largest it lists, or the one it marks
+// preferred.
+#define SPARK_CANVAS_MODES_LARGEST 0u
+#define SPARK_CANVAS_MODES_PREFERRED 1u
 
 struct canvas_output_state {
         char connector[16];
@@ -135,13 +156,19 @@ struct canvas_control {
         unsigned int latency_holds; // times it was taken since Canvas started
         unsigned int thread_passes; // times the canvas thread woke
         unsigned int frame_ticks;   // times the frame timer fired
+        unsigned int scale;         // device pixels one drawn pixel is, now
+        unsigned int scale_setting; // SPARK_CANVAS_SCALE_AUTO or the number asked
+        unsigned int scale_dpi;     // what auto went by, 0 when no screen could say
+        unsigned int scale_origin;  // SPARK_CANVAS_ORIGIN_*
+        unsigned int modes;         // SPARK_CANVAS_MODES_*
+        unsigned int reserved;
 };
 
 _Static_assert(sizeof(struct canvas_output_state) == 32, "spark canvas output ABI");
-_Static_assert(sizeof(struct canvas_control) == 208, "spark canvas control ABI");
+_Static_assert(sizeof(struct canvas_control) == 232, "spark canvas control ABI");
 
 // _IOWR('s', 10, struct canvas_control)
-#define SPARK_IOCTL_CANVAS 0xc0d0730au
+#define SPARK_IOCTL_CANVAS 0xc0e8730au
 
 // Bindings, which are spark.c's table: the events a desktop fires when it
 // starts and when it stops, in the table's order and under its names.

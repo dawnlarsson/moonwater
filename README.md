@@ -38,6 +38,8 @@ moonwater bind exit remove ID|"command"  stop running one at the stop
 
 moonwater canvas [on|off]              the desktop, and on which screens [on]
 moonwater canvas log|terminal          open the kernel log or a terminal
+moonwater canvas scale [N|auto]        device pixels to a drawn one, 1 to 4 [auto]
+moonwater canvas modes [largest|preferred]  which mode a screen is driven at [largest]
 moonwater airplane [on|off]            every radio at once
 moonwater brightness [N%|+N|-N]        the screen backlight
 moonwater power [performance|balanced|powersave]  profile and CPU governor, kept across boots
@@ -236,6 +238,18 @@ programs draw as they do in xterm or tmux:
 
 Not there yet: pasting (there is no clipboard) and true colour kept as true
 colour.
+
+How Canvas draws is the machine's setting, changed live and kept across boots.
+`moonwater canvas scale 2` draws everything the compositor owns at twice the
+size and lays every window out again; `auto`, the default, asks the screens,
+and trusts only a real panel (eDP, DisplayPort, HDMI, DVI, LVDS or DSI with a
+size in its EDID that fits its mode): two from 150 dots to the inch, three
+from 260, never so many that the desktop is left under 1280 by 640. A virtual
+display reports a size that is made up, so it is one. `moonwater canvas modes
+preferred` drives a real screen at the mode it marks preferred and not the
+largest it lists. Both are kept in `/root` and put back when the machine starts;
+`canvas.scale=2` and `canvas.modes=preferred` on the kernel command line give
+the first frame the same.
 
 If a graphics driver draws a broken hardware cursor, boot with
 `moonwater.cursor_plane=0` and Canvas draws the pointer itself.

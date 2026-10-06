@@ -25558,7 +25558,10 @@ static void pane_reshape(struct pane *p,int x,int y,int w,int h) {
     source += section(compose, "static void target_rectangle", "/*\n        The run of one row")
     source += section(compose, "#define DESKTOP_PIECES", "static HOT void compose_clip")
     source += r'''
-#define IS_ENABLED(x) largest
+#ifndef READ_ONCE
+#define READ_ONCE(x) (x)
+#endif
+#define canvas_modes_largest largest
 #define pr_info(...) ((void)0)
 #define pr_err(...) ((void)0)
 struct canvas { int client; };
@@ -26235,6 +26238,14 @@ static long canvas_turn_on(struct canvas_control *answer) {
 static long canvas_turn_off(void) { canvas_offs++; return canvas_off_answer; }
 static void canvas_state(struct canvas_control *answer) { canvas_states++;answer->running=1;answer->cards=1; }
 static unsigned canvas_logs,canvas_terminals;
+static long canvas_scale_answer,canvas_modes_answer;
+static unsigned canvas_scale_sets,canvas_modes_sets,canvas_scale_asked,canvas_modes_asked;
+static long canvas_scale_set(unsigned int setting) {
+    canvas_scale_sets++;canvas_scale_asked=setting;return canvas_scale_answer;
+}
+static long canvas_modes_set(unsigned int modes) {
+    canvas_modes_sets++;canvas_modes_asked=modes;return canvas_modes_answer;
+}
 static long canvas_log_open(void) { canvas_logs++; return 0; }
 static long canvas_terminal_open(void) { canvas_terminals++; return 0; }
 '''
@@ -27850,13 +27861,41 @@ static void check_canvas_control(void) {
     memset(&control,0,sizeof(control));control.request=SPARK_CANVAS_TERMINAL;
     check(report_canvas(&control)==-EPERM && !canvas_terminals,
           "starting a terminal without CAP_SYS_ADMIN is refused");
+    /* How the desktop is drawn is the machine's: changing it needs the same
+       right, and is refused before anything is asked of the scale or the mode. */
+    memset(&control,0,sizeof(control));control.request=SPARK_CANVAS_SET_SCALE;control.scale_setting=2;
+    check(report_canvas(&control)==-EPERM && !canvas_scale_sets,
+          "changing the scale without CAP_SYS_ADMIN is refused");
+    memset(&control,0,sizeof(control));control.request=SPARK_CANVAS_SET_MODES;control.modes=1;
+    check(report_canvas(&control)==-EPERM && !canvas_modes_sets,
+          "changing the mode without CAP_SYS_ADMIN is refused");
     power_admin=1;
     /* One past the last request there is: the sentinel follows the enum
        rather than naming a number, as 3 became LAYOUT and 5 TERMINAL. */
-    memset(&control,0,sizeof(control));control.request=SPARK_CANVAS_TERMINAL+1;
+    memset(&control,0,sizeof(control));control.request=SPARK_CANVAS_SET_MODES+1;
     check(report_canvas(&control)==-EINVAL && !canvas_ons && !canvas_offs &&
-          !canvas_logs && !canvas_terminals,
+          !canvas_logs && !canvas_terminals && !canvas_scale_sets && !canvas_modes_sets,
           "an unknown Canvas request is refused");
+    memset(&control,0,sizeof(control));control.request=SPARK_CANVAS_SET_SCALE;control.scale_setting=3;
+    check(!report_canvas(&control) && canvas_scale_sets==1 && canvas_scale_asked==3 &&
+          control.request==SPARK_CANVAS_SET_SCALE && control.running==1 && !canvas_modes_sets,
+          "a scale is asked of the scale and nothing else, and the state comes back");
+    canvas_scale_answer=-EINVAL;
+    memset(&control,0,sizeof(control));control.request=SPARK_CANVAS_SET_SCALE;
+    control.scale_setting=SPARK_CANVAS_SCALE_MOST+1;
+    check(report_canvas(&control)==-EINVAL && canvas_scale_sets==2 &&
+          canvas_scale_asked==SPARK_CANVAS_SCALE_MOST+1 && control.running==1,
+          "a scale that is refused is answered so, with the state");
+    canvas_scale_answer=0;
+    memset(&control,0,sizeof(control));control.request=SPARK_CANVAS_SET_MODES;
+    control.modes=SPARK_CANVAS_MODES_PREFERRED;
+    check(!report_canvas(&control) && canvas_modes_sets==1 &&
+          canvas_modes_asked==SPARK_CANVAS_MODES_PREFERRED && canvas_scale_sets==2,
+          "a mode is asked of the mode and nothing else");
+    canvas_modes_answer=-EINVAL;
+    check(report_canvas(&control)==-EINVAL && canvas_modes_sets==2,
+          "a mode that is refused is answered so");
+    canvas_modes_answer=0;
     canvas_on_answer=-EBUSY;
     memset(&control,0,sizeof(control));control.request=SPARK_CANVAS_ON;
     check(report_canvas(&control)==-EBUSY && canvas_ons==1 && control.master_pid==77 &&
@@ -36017,6 +36056,377 @@ def harness_image_nodes(argv):
     return check.verdict('image nodes', 'image_nodes')
 
 
+def harness_canvas_scale(argv):
+    """How Canvas picks and changes the pixel scale and the mode, from its own code.
+
+    The scale is a setting and not a build option: a number or auto, from the
+    kernel command line or a request, and live. Auto is the part that can go
+    wrong quietly, because a wrong answer is a desktop too small to read or
+    too large to use, so the rule is lifted out of canvas.c and given the
+    screens it has to refuse (a virtual display that reports a size that is
+    fiction, a connector no panel is wired to, a size that is not the mode's
+    shape) and the ones it has to take, with the dots to the inch it went by.
+    Around it the command line's parser, the laying out again of every window
+    and the cursor on a change and not on a repeat, a setting kept while no
+    screen is up, and a change of mode asking each card to look again.
+    """
+    import subprocess
+    import tempfile
+    root = HARNESS_ROOT
+    cc = shutil.which(os.environ.get("CC", "cc")) or shutil.which("cc")
+    if not cc:
+        print("canvas scale: NOT RUN -- needs a C compiler")
+        return 2
+    canvas = (root / "src/canvas/canvas.c").read_text()
+    abi = (root / "src/canvas/canvas_abi.h").read_text()
+    cut = lambda first, following: src_slice(canvas, first, following, "canvas_scale")
+    rule = cut("static unsigned int canvas_scale_setting =", "// Read-only: a running desktop")
+    rescale = cut("static void desktop_regrid_panes(void)",
+                  "/*\n        Whether a program other than this one is master")
+    setters = cut("static long canvas_scale_set(",
+                  "/*\n        The kernel log window and a terminal, when userspace asks.")
+    source = r'''
+#include <errno.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#define READ_ONCE(x) (x)
+#define WRITE_ONCE(x, v) ((x) = (v))
+#undef abs
+#define abs(x) ((x) < 0 ? -(x) : (x))
+#define guard(kind) (void)
+#define rt_mutex_lock(l) ((void)(l))
+#define rt_mutex_unlock(l) ((void)(l))
+#define mutex_lock(l) ((void)(l))
+#define mutex_unlock(l) ((void)(l))
+
+struct list_head { struct list_head *next, *prev; };
+#define LIST_HEAD(name) struct list_head name = {&name, &name}
+static void list_init(struct list_head *h) { h->next = h->prev = h; }
+static void list_add_tail(struct list_head *n, struct list_head *h) {
+    n->prev = h->prev; n->next = h; h->prev->next = n; h->prev = n;
+}
+static int list_empty(const struct list_head *h) { return h->next == h; }
+#define list_for_each_entry(pos, head, member) \
+    for (struct list_head *at_ = (head)->next; \
+         at_ != (head) && ((pos = (void *)((char *)at_ - offsetof(__typeof__(*pos), member))), 1); \
+         at_ = at_->next)
+
+/* The pieces of DRM the rule reads. */
+#define DRM_MODE_CONNECTOR_VGA 1
+#define DRM_MODE_CONNECTOR_DVID 3
+#define DRM_MODE_CONNECTOR_LVDS 7
+#define DRM_MODE_CONNECTOR_DisplayPort 10
+#define DRM_MODE_CONNECTOR_HDMIA 11
+#define DRM_MODE_CONNECTOR_HDMIB 12
+#define DRM_MODE_CONNECTOR_eDP 14
+#define DRM_MODE_CONNECTOR_VIRTUAL 15
+#define DRM_MODE_CONNECTOR_DSI 16
+struct drm_device { _Bool virtual_card; };
+struct drm_display_info { unsigned width_mm, height_mm; };
+struct drm_connector { int connector_type; struct drm_display_info display_info; struct drm_device *dev; };
+struct drm_display_mode { int hdisplay, vdisplay; };
+struct drm_mode_set {
+    struct drm_display_mode *mode; unsigned num_connectors;
+    struct drm_connector **connectors; struct drm_mode_set *next;
+};
+struct drm_client_dev { struct drm_mode_set *modesets; };
+#define drm_client_for_each_modeset(set, client) \
+    for (set = (client)->modesets; set; set = set->next)
+static _Bool canvas_is_virtual(struct drm_device *dev) { return dev->virtual_card; }
+
+struct output { struct list_head link; struct drm_mode_set *mode_set; };
+struct pane { struct list_head link; };
+struct canvas { struct list_head link; _Bool retarget; struct drm_client_dev client; };
+static struct { unsigned scale, cursor_scale; int cursor_x, cursor_y;
+                struct list_head outputs, windows; int lock; } desktop;
+static LIST_HEAD(canvas_list);
+static int canvas_list_lock;
+
+static unsigned regrids, gathers, moves, redraws, hotplugs;
+static void pane_regrid(struct pane *pane) { (void)pane; regrids++; }
+static void desktop_gather_panes(void) { gathers++; }
+static void cursor_move(int x, int y) { (void)x; (void)y; moves++; }
+static void desktop_redraw(void) { redraws++; }
+static int client_hotplug(struct drm_client_dev *client) { (void)client; hotplugs++; return 0; }
+
+/* The parts of the kernel's strings and parameters the parser is given. */
+struct kernel_param { void *arg; };
+struct kernel_param_ops { int (*set)(const char *, const struct kernel_param *);
+                          int (*get)(char *, const struct kernel_param *); };
+static int sysfs_streq(const char *s, const char *r) {
+    size_t n = strlen(s);
+    if (n && s[n - 1] == '\n') n--;
+    return strlen(r) == n && !strncmp(s, r, n);
+}
+/* As the kernel's: no space before, one + allowed, one newline after, and a value too large is -ERANGE. */
+static int kstrtouint(const char *s, unsigned base, unsigned *res) {
+    char *end;
+    unsigned long v;
+    if (*s == '+') s++;
+    if (!*s || *s < '0' || *s > '9') return -EINVAL;
+    v = strtoul(s, &end, base);
+    if (*end && !(end[0] == '\n' && !end[1])) return -EINVAL;
+    if (v > 0xffffffffu) return -ERANGE;
+    *res = (unsigned)v;
+    return 0;
+}
+#define sysfs_emit(buf, ...) snprintf(buf, 4096, __VA_ARGS__)
+'''
+    source += abi + rule + rescale + setters + r'''
+static unsigned bad, total;
+static void check(int ok, const char *what) { total++; if (!ok) { bad++; printf("FAIL %s\n", what); } }
+
+static struct drm_device real = {0}, guest = {1};
+static struct drm_display_mode m_4k = {3840, 2160}, m_wqxga = {2560, 1600}, m_fhd = {1920, 1080},
+    m_qhd = {2560, 1440}, m_5k = {5120, 2880}, m_8k = {7680, 4320}, m_phone = {1080, 2400},
+    m_xga = {1280, 800}, m_4x3 = {1024, 768};
+
+/* One screen: a connector of some type and size, on a card, running a mode. */
+static struct drm_mode_set screen(struct drm_connector *connector, int type, unsigned width_mm,
+                                  unsigned height_mm, struct drm_device *dev,
+                                  struct drm_display_mode *mode) {
+    struct drm_mode_set set = {0};
+    connector->connector_type = type;
+    connector->display_info.width_mm = width_mm;
+    connector->display_info.height_mm = height_mm;
+    connector->dev = dev;
+    set.mode = mode;
+    set.num_connectors = 1;
+    return set;
+}
+
+static unsigned of(int type, unsigned wmm, unsigned hmm, struct drm_device *dev,
+                   struct drm_display_mode *mode, unsigned *dpi) {
+    struct drm_connector connector, *list[1] = {&connector};
+    struct drm_mode_set set = screen(&connector, type, wmm, hmm, dev, mode);
+    set.connectors = list;
+    *dpi = 0;
+    return canvas_scale_of(&set, dpi);
+}
+
+int main(void)
+{
+    unsigned dpi, scale;
+    char text[64];
+
+    /* The screens that can say, and what they say. */
+    struct { const char *name; int type; unsigned wmm, hmm; struct drm_display_mode *mode;
+             unsigned scale, dpi; } says[] = {
+        {"a 15.6 inch 4K laptop panel is three", DRM_MODE_CONNECTOR_eDP, 344, 194, &m_4k, 3, 283},
+        {"a 13 inch 2560 by 1600 panel is two", DRM_MODE_CONNECTOR_eDP, 286, 179, &m_wqxga, 2, 227},
+        {"a 13 inch 1080p panel is dense but not so that two leaves a desktop", DRM_MODE_CONNECTOR_eDP, 294, 165, &m_fhd, 1, 165},
+        {"a 27 inch 4K monitor on DisplayPort is two", DRM_MODE_CONNECTOR_DisplayPort, 597, 336, &m_4k, 2, 163},
+        {"a 27 inch 1440p monitor is one", DRM_MODE_CONNECTOR_DisplayPort, 597, 336, &m_qhd, 1, 108},
+        {"a 27 inch 5K is two", DRM_MODE_CONNECTOR_HDMIA, 597, 336, &m_5k, 2, 217},
+        {"a 32 inch 8K is three", DRM_MODE_CONNECTOR_HDMIB, 697, 392, &m_8k, 3, 279},
+        {"a television is one, and says how sparse", DRM_MODE_CONNECTOR_HDMIA, 1210, 680, &m_fhd, 1, 40},
+        {"a phone panel is dense and a desktop of 360 pixels is not one", DRM_MODE_CONNECTOR_DSI, 68, 151, &m_phone, 1, 403},
+        {"an old LVDS panel is one", DRM_MODE_CONNECTOR_LVDS, 331, 207, &m_xga, 1, 98},
+        {"DVI is a panel's connector too", DRM_MODE_CONNECTOR_DVID, 597, 336, &m_4k, 2, 163},
+    };
+    for (unsigned i = 0; i < sizeof(says) / sizeof(says[0]); i++) {
+        scale = of(says[i].type, says[i].wmm, says[i].hmm, &real, says[i].mode, &dpi);
+        check(scale == says[i].scale && dpi == says[i].dpi, says[i].name);
+    }
+
+    /* The screens that cannot, which are not trusted with a size at all. */
+    struct { const char *name; int type; unsigned wmm, hmm; struct drm_device *dev;
+             struct drm_display_mode *mode; } silent[] = {
+        {"bochs says 320 by 200 whatever the mode and is not asked", DRM_MODE_CONNECTOR_VGA, 320, 200, &guest, &m_xga},
+        {"a virtual connector is not asked", DRM_MODE_CONNECTOR_VIRTUAL, 344, 194, &guest, &m_4k},
+        {"a panel connector on a virtual card is not asked either", DRM_MODE_CONNECTOR_eDP, 344, 194, &guest, &m_4k},
+        {"VGA is analogue and its size is whatever the monitor said", DRM_MODE_CONNECTOR_VGA, 344, 194, &real, &m_4k},
+        {"no size is no answer", DRM_MODE_CONNECTOR_eDP, 0, 0, &real, &m_4k},
+        {"a size of one by one is a field filled in", DRM_MODE_CONNECTOR_eDP, 1, 1, &real, &m_4k},
+        {"a size that is not the mode's shape is not the panel's", DRM_MODE_CONNECTOR_eDP, 344, 344, &real, &m_4k},
+        {"a 16 by 9 size claimed of a 4 by 3 mode", DRM_MODE_CONNECTOR_DisplayPort, 531, 299, &real, &m_4x3},
+        {"a size of a hundred metres", DRM_MODE_CONNECTOR_HDMIA, 30000, 20000, &real, &m_4k},
+    };
+    for (unsigned i = 0; i < sizeof(silent) / sizeof(silent[0]); i++) {
+        scale = of(silent[i].type, silent[i].wmm, silent[i].hmm, silent[i].dev, silent[i].mode, &dpi);
+        check(!scale && !dpi, silent[i].name);
+    }
+    {
+        struct drm_mode_set none = {0};
+        none.mode = &m_4k;
+        dpi = 7;
+        check(!canvas_scale_of(&none, &dpi) && !canvas_scale_of(NULL, &dpi),
+              "a mode set with no connector, and none at all, say nothing");
+    }
+
+    /* Auto goes by the first screen of the desktop that can say, then the ones joining it. */
+    {
+        struct drm_connector c0, c1, c2, c3, *l0[1] = {&c0}, *l1[1] = {&c1}, *l2[1] = {&c2}, *l3[1] = {&c3};
+        struct drm_mode_set s0 = screen(&c0, DRM_MODE_CONNECTOR_VIRTUAL, 344, 194, &guest, &m_4k);
+        struct drm_mode_set s1 = screen(&c1, DRM_MODE_CONNECTOR_eDP, 344, 194, &real, &m_4k);
+        struct drm_mode_set s2 = screen(&c2, DRM_MODE_CONNECTOR_DisplayPort, 597, 336, &real, &m_qhd);
+        struct drm_mode_set s3 = screen(&c3, DRM_MODE_CONNECTOR_eDP, 286, 179, &real, &m_wqxga);
+        struct output o0 = {{0}, &s0}, o1 = {{0}, &s1}, o2 = {{0}, &s2};
+        struct drm_client_dev joining = {&s3};
+        s0.connectors = l0; s1.connectors = l1; s2.connectors = l2; s3.connectors = l3;
+
+        list_init(&desktop.outputs); list_init(&desktop.windows);
+        check(canvas_scale_auto(NULL, &dpi) == 1 && !dpi, "no screen is one and no dots to the inch");
+        check(canvas_scale_auto(&joining, &dpi) == 2 && dpi == 227,
+              "the card about to join says when nothing on the desktop can");
+        list_add_tail(&o0.link, &desktop.outputs);
+        check(canvas_scale_auto(NULL, &dpi) == 1 && !dpi, "a virtual screen alone is one, whatever it claims");
+        list_add_tail(&o1.link, &desktop.outputs);
+        list_add_tail(&o2.link, &desktop.outputs);
+        check(canvas_scale_auto(NULL, &dpi) == 3 && dpi == 283,
+              "the first screen that can say is the desktop's, not the last or the densest");
+        check(canvas_scale_auto(&joining, &dpi) == 3, "and a card joining does not change what is already decided");
+
+        canvas_scale_setting = 0;
+        check(canvas_scale_wanted(NULL) == 3, "auto wants what the screens say");
+        canvas_scale_setting = 2;
+        check(canvas_scale_wanted(NULL) == 2, "a number is that number, whatever the screens say");
+        canvas_scale_setting = 0;
+
+        /* Laying out again: every window and the cursor, on a change, and nothing on a repeat. */
+        {
+            struct pane panes[3];
+            desktop.scale = 1; desktop.cursor_scale = 1; desktop.cursor_x = 40; desktop.cursor_y = 50;
+            for (int i = 0; i < 3; i++) list_add_tail(&panes[i].link, &desktop.windows);
+            regrids = gathers = moves = 0;
+            check(!desktop_rescale(1) && !regrids && !gathers && !moves, "the scale it already is touches nothing");
+            desktop_regrid_panes();
+            check(regrids == 3 && gathers == 1 && !moves,
+                  "a start at another scale lays out the windows that outlived the last desktop, and not the cursor");
+            regrids = gathers = 0;
+            check(desktop_rescale(2) && desktop.scale == 2 && desktop.cursor_scale == 2 &&
+                      regrids == 3 && gathers == 1 && moves == 1,
+                  "a change lays out every window once, keeps them on the desktop and redraws the cursor");
+
+            /* A hotplug asks the screens only when it is theirs to be asked. */
+            canvas_scale_setting = 3;
+            regrids = 0;
+            check(!canvas_scale_refresh() && desktop.scale == 2 && !regrids,
+                  "a number is not moved by a screen arriving");
+            canvas_scale_setting = 0;
+            check(canvas_scale_refresh() && desktop.scale == 3 && regrids == 3,
+                  "auto follows the screens when one arrives");
+            check(!canvas_scale_refresh(), "and says nothing when they agree");
+
+            /* The request: what it keeps, what it refuses, what it draws. */
+            redraws = 0; regrids = 0;
+            check(canvas_scale_set(SPARK_CANVAS_SCALE_MOST + 1) == -EINVAL && !canvas_scale_setting &&
+                      canvas_scale_origin == SPARK_CANVAS_ORIGIN_DEFAULT && !redraws,
+                  "a scale past the most is refused and keeps nothing");
+            check(canvas_scale_set(2) == 0 && canvas_scale_setting == 2 && desktop.scale == 2 &&
+                      canvas_scale_origin == SPARK_CANVAS_ORIGIN_SET && redraws == 1 && regrids == 3,
+                  "a number is taken, laid out and drawn once");
+            check(canvas_scale_set(2) == 0 && redraws == 1, "the same number again draws nothing");
+            check(canvas_scale_set(SPARK_CANVAS_SCALE_AUTO) == 0 && !canvas_scale_setting &&
+                      desktop.scale == 3 && redraws == 2,
+                  "auto goes back to what the screens say");
+
+            /* With no screen up the setting is kept for the one that comes. */
+            list_init(&desktop.outputs);
+            desktop.scale = 1; redraws = 0; regrids = 0;
+            check(canvas_scale_set(4) == 0 && canvas_scale_setting == 4 && desktop.scale == 1 &&
+                      !redraws && !regrids && canvas_scale_wanted(NULL) == 4,
+                  "with no screen the setting is kept and nothing is drawn");
+            canvas_scale_setting = 0;
+        }
+    }
+
+    /* The command line's scale and modes. */
+    {
+        struct kernel_param kp = {0};
+        struct { const char *word; int answer; unsigned setting; } words[] = {
+            {"auto", 0, 0}, {"1", 0, 1}, {"2", 0, 2}, {"4", 0, 4}, {"3\n", 0, 3}, {"auto\n", 0, 0},
+            {"0", -EINVAL, 0}, {"5", -EINVAL, 0}, {"", -EINVAL, 0}, {"x", -EINVAL, 0},
+            {"2x", -EINVAL, 0}, {"-1", -EINVAL, 0}, {"+2", 0, 2}, {"Auto", -EINVAL, 0},
+            {"99999999999", -EINVAL, 0}, {" 2", -EINVAL, 0},
+        };
+        for (unsigned i = 0; i < sizeof(words) / sizeof(words[0]); i++) {
+            canvas_scale_setting = 0; canvas_scale_origin = SPARK_CANVAS_ORIGIN_DEFAULT;
+            if (words[i].answer == 0 && words[i].setting)
+                canvas_scale_setting = 0;
+            int answer = canvas_scale_param_set(words[i].word, &kp);
+            snprintf(text, sizeof text, "canvas.scale=%s is %s", words[i].word,
+                     words[i].answer ? "refused and keeps nothing" : "taken");
+            check(answer == words[i].answer && canvas_scale_setting == words[i].setting &&
+                      canvas_scale_origin == (words[i].answer ? SPARK_CANVAS_ORIGIN_DEFAULT
+                                                              : SPARK_CANVAS_ORIGIN_COMMAND_LINE),
+                  text);
+        }
+        canvas_scale_setting = 0;
+        canvas_scale_param_get(text, &kp);
+        check(!strcmp(text, "auto\n"), "auto is read back as auto");
+        canvas_scale_setting = 3;
+        canvas_scale_param_get(text, &kp);
+        check(!strcmp(text, "3\n"), "a number is read back as itself");
+        canvas_scale_setting = 0;
+
+        check(!canvas_modes_param_set("preferred", &kp) && !canvas_modes_largest &&
+                  !canvas_modes_param_set("largest\n", &kp) && canvas_modes_largest,
+              "canvas.modes takes largest and preferred");
+        check(canvas_modes_param_set("biggest", &kp) == -EINVAL && canvas_modes_param_set("", &kp) == -EINVAL &&
+                  canvas_modes_param_set("Largest", &kp) == -EINVAL && canvas_modes_largest,
+              "and nothing else, and a refusal changes nothing");
+        canvas_modes_param_get(text, &kp);
+        check(!strcmp(text, "largest\n"), "the mode is read back");
+    }
+
+    /* A change of mode asks each card to look again, with the right to get smaller; a repeat asks nobody. */
+    {
+        struct canvas cards[2];
+        memset(cards, 0, sizeof(cards));
+        list_add_tail(&cards[0].link, &canvas_list);
+        list_add_tail(&cards[1].link, &canvas_list);
+        canvas_modes_largest = true; hotplugs = 0;
+        check(canvas_modes_set(7) == -EINVAL && canvas_modes_largest && !hotplugs,
+              "a mode that is neither is refused and nobody is asked");
+        check(canvas_modes_set(SPARK_CANVAS_MODES_LARGEST) == 0 && !hotplugs &&
+                  !cards[0].retarget && !cards[1].retarget,
+              "the mode it already takes asks nobody");
+        check(canvas_modes_set(SPARK_CANVAS_MODES_PREFERRED) == 0 && !canvas_modes_largest &&
+                  hotplugs == 2 && cards[0].retarget && cards[1].retarget,
+              "the other mode asks every card to look again and may shrink a screen");
+        check(canvas_modes_set(SPARK_CANVAS_MODES_PREFERRED) == 0 && hotplugs == 2,
+              "and asking again is not asking");
+        canvas_list.next = canvas_list.prev = &canvas_list;
+        check(canvas_modes_set(SPARK_CANVAS_MODES_LARGEST) == 0 && canvas_modes_largest && hotplugs == 2,
+              "with no card up the mode is kept for the one that comes");
+    }
+
+    printf("%u %u\n", total, bad);
+    return bad != 0;
+}
+'''
+    with tempfile.TemporaryDirectory(prefix="canvas-scale-") as temporary:
+        unit = Path(temporary) / "scale.c"
+        unit.write_text(source)
+        built = subprocess.run([cc, "-std=gnu11", "-O1", "-g", "-fsanitize=address,undefined",
+                                "-fno-sanitize-recover=all", "-Wall", "-Wno-unused-function",
+                                "-Wno-unused-variable", "-o", str(unit.with_suffix("")), str(unit)],
+                               capture_output=True, text=True)
+        if built.returncode:
+            print(built.stderr[-4000:])
+            return 1
+        ran = subprocess.run([str(unit.with_suffix(""))], capture_output=True, text=True)
+    lines = ran.stdout.splitlines()
+    for line in lines:
+        if line.startswith("FAIL"):
+            print("  " + line)
+    if not (lines and lines[-1][:1].isdigit()):
+        print("  the scale checks did not run to the end: " + ran.stderr[-1500:])
+    total, failed = (int(n) for n in lines[-1].split()) if lines and lines[-1][:1].isdigit() else (0, 1)
+    check = Checks()
+    for _ in range(total - failed):
+        check(True, "")
+    for _ in range(failed):
+        check(False, "a check of the scale and the mode failed")
+    if ran.returncode and not failed:
+        check(False, "the scale checks did not finish: " + ran.stderr[-600:])
+    return check.verdict("canvas scale", "canvas_scale")
+
+
 def harness_canvas_seam(argv):
     """Canvas is a kernel object of its own, and two headers are all that passes between it and the core.
 
@@ -36156,8 +36566,8 @@ def harness_canvas_seam(argv):
     with tempfile.TemporaryDirectory(prefix='canvas-abi-') as temporary:
         unit = Path(temporary) / 'abi.c'
         unit.write_text('#include "%s"\n'
-                        '_Static_assert(sizeof(struct canvas_control) == 208, "control");\n'
-                        '_Static_assert(SPARK_IOCTL_CANVAS == 0xc0d0730au, "number");\n'
+                        '_Static_assert(sizeof(struct canvas_control) == 232, "control");\n'
+                        '_Static_assert(SPARK_IOCTL_CANVAS == 0xc0e8730au, "number");\n'
                         '_Static_assert(SPARK_BIND_CANVAS_OFF == SPARK_BIND_CANVAS_ON + 1, "pair");\n'
                         'int main(void) { return 0; }\n' % (ROOT / 'src/canvas/canvas_abi.h'))
         built = subprocess.run(shlex.split(os.environ.get('CC', 'cc')) +
@@ -42276,7 +42686,10 @@ def harness_moonwater_cli(argv):
                 "keyboard", "keyboard xx", "keyboard a b", "name", "name random", "name x",
                 "name a b", "name random x", 'name ""', "name -x", "name x-", "name UPPER",
                 "name " + "x" * 64, "name ../x", "canvas", "canvas on", "canvas off",
-                "canvas bogus", "bind", "bind init", "bind exit", "bind bogus", "wifi",
+                "canvas bogus", "canvas scale", "canvas scale 2", "canvas scale auto", "canvas scale 9",
+                "canvas scale 2 3", "canvas modes", "canvas modes preferred", "canvas modes sideways",
+                "canvas modes largest preferred",
+                "bind", "bind init", "bind exit", "bind bogus", "wifi",
                 "wifi off", "wifi on", "wifi add", "wifi remove", "wifi remove nobody",
                 "wifi remove a b", 'wifi remove ""', "wired", "wired on", "wired off",
                 "wired on extra", "wired sideways", "airplane", "airplane extra", "airplane on extra",
@@ -42319,6 +42732,11 @@ def harness_moonwater_cli(argv):
             'ntp sampling on',
             'ntp sampling off',
             'keyboard',
+            'canvas scale',
+            'canvas scale 2',
+            'canvas scale auto',
+            'canvas modes',
+            'canvas modes preferred',
             'name',
             'name random',
             'name x',
@@ -42363,6 +42781,8 @@ def harness_moonwater_cli(argv):
             'canvas',
             'canvas on',
             'canvas off',
+            'canvas scale 9',
+            'canvas modes sideways',
             'bind',
             'bind bogus',
             'wifi remove nobody',
@@ -42409,6 +42829,8 @@ def harness_moonwater_cli(argv):
             'name a b',
             'name random x',
             'canvas bogus',
+            'canvas scale 2 3',
+            'canvas modes largest preferred',
             'wifi add',
             'wifi remove',
             'wifi remove a b',
@@ -42472,7 +42894,7 @@ def harness_moonwater_cli(argv):
                  "exit", "mount", "internet", "wired", "wifi", "+", "-", "+99:99", "-0",
                  "UTC+14", "UTC-14", "<+0530>-5:30", "Europe/", "../../etc/passwd", "x" * 300,
                  "\x1b[31m", "tab\there", "sv", "SE", "\u00e5\u00e4\u00f6", "0", "18446744073709551616",
-                 "power", "canvas on", "--", "-h", "status"]
+                 "power", "canvas on", "--", "-h", "status", "scale", "modes", "largest", "preferred", "1", "4", "5"]
         #       Neither "reboot" nor "bios" carries a reboot into these words: bios
         #       reboot sets a bit in the firmware, and a run as real root would
         #       leave it set on the machine that ran the lane.
@@ -43414,17 +43836,19 @@ while True:
         # the server asked first is a verb, whole or refused.
         locale_say = say
         script = ("rm -f /root/timezone /root/timezone.mode /root/ntp /root/ntp.sampling "
-                  "/root/ntp.server /root/keyboard /root/wired.power\n"
+                  "/root/ntp.server /root/keyboard /root/wired.power /root/canvas.scale /root/canvas.modes\n"
                   "echo '@@ tz'; TZ=JST-9 timeout 20 /tmp/moonwater timezone +1 2>&1; echo \"@@status $?\"\n"
                   "echo '@@ tz time'; TZ=JST-9 timeout 20 /tmp/moonwater time 2>&1; echo \"@@status $?\"\n"
                   "printf 'off\\r\\n' > /root/wired.power\n" + locale_say("wired") +
                   "rm -f /root/wired.power /root/timezone /root/timezone.mode\n")
         #       What a machine nobody has told anything says, then what it says to a
         #       caller with no right to look: /root at mode 000 is closed to nobody.
-        readers = ("ntp", "ntp sampling", "ntp server", "timezone", "time", "keyboard", "status")
+        readers = ("ntp", "ntp sampling", "ntp server", "timezone", "time", "keyboard", "canvas scale",
+                   "canvas modes", "status")
         script += "".join(f"echo '@@ open {verb}'; timeout 20 /tmp/moonwater {verb} 2>&1; "
                           "echo \"@@status $?\"\n" for verb in readers)
         script += ("echo off > /root/ntp; echo off > /root/ntp.sampling; echo de > /root/keyboard\n"
+                   "echo 3 > /root/canvas.scale; echo preferred > /root/canvas.modes\n"
                    "echo Europe/Paris > /root/timezone; echo manual > /root/timezone.mode\n"
                    "chmod 000 /root\n")
         lines, finished = session(script)
@@ -43450,6 +43874,29 @@ while True:
                    "echo \"@@word $(test -e /root/ntp.server && echo kept || echo none)\"\n" +
                    locale_say("ntp server auto") +
                    "echo \"@@back $(timeout 20 /tmp/moonwater ntp server 2>&1)\"\n")
+        #       How Canvas draws is the machine's, kept in /root as the layout is.
+        #       With no Canvas to ask a word is kept and said not asked, a word it
+        #       would not take keeps nothing, and a /dev/spark that is a plain
+        #       file, which takes the open and refuses the ioctl, is a Canvas that
+        #       did not take it: kept, and said not taken.
+        def canvas_kept(name):
+            return "echo \"@@canvas $(cat /root/canvas.%s 2>/dev/null || echo none)\"\n" % name
+        script += ("rm -f /root/canvas.scale /root/canvas.modes\n" + locale_say("canvas scale") +
+                   locale_say("canvas modes") + canvas_kept("scale") + canvas_kept("modes") +
+                   locale_say("canvas scale 2") + canvas_kept("scale") +
+                   locale_say("canvas scale auto") + canvas_kept("scale") +
+                   locale_say("canvas scale 4") + canvas_kept("scale") +
+                   "".join(locale_say("canvas scale " + bad) + canvas_kept("scale")
+                           for bad in ("0", "5", "two", "2x", "-1", "08", '""', "99999999999")) +
+                   locale_say("canvas modes preferred") + canvas_kept("modes") +
+                   locale_say("canvas modes largest") + canvas_kept("modes") +
+                   locale_say("canvas modes preferred") + canvas_kept("modes") +
+                   "".join(locale_say("canvas modes " + bad) + canvas_kept("modes")
+                           for bad in ("huge", "Largest", '""', "largest,preferred")) +
+                   locale_say("canvas scale 2 3") + locale_say("canvas modes largest preferred") +
+                   canvas_kept("scale") + canvas_kept("modes") +
+                   ": > /dev/spark\n" + locale_say("canvas scale 3") + canvas_kept("scale") +
+                   locale_say("canvas modes largest") + canvas_kept("modes") + "rm -f /dev/spark\n")
         #       One query at a time: the clock is moved by what a query measured,
         #       so two that measured before either applied would move it twice. A
         #       hand's `time sync` against a query that holds the lock says so and
@@ -43472,7 +43919,9 @@ while True:
               text("wired"))
         wants = {"ntp": ("ntp off", "sampling off"), "ntp sampling": ("sampling off",),
                  "ntp server": (), "timezone": ("Europe/Paris", "manual"), "time": ("Europe/Paris",),
-                 "keyboard": ("keyboard de",), "status": ("Europe/Paris", "ntp off", "keyboard de")}
+                 "keyboard": ("keyboard de",), "canvas scale": ("scale 3",),
+                 "canvas modes": ("modes preferred",),
+                 "status": ("Europe/Paris", "ntp off", "keyboard de")}
         for verb in readers:
             shut, kept = text(f"shut {verb}"), text(f"kept {verb}")
             check((verb == "status" or seen.get(f"shut {verb}", {}).get("status") == 0) and
@@ -43495,6 +43944,42 @@ while True:
         check(seen.get("keyboard fr", {}).get("status") == 1 and "saved, but Canvas did not" in text("keyboard fr")
               and "@@kept fr" in lines,
               "a layout Canvas did not take is saved and said not taken", text("keyboard fr"))
+        #       The rows above, in the order they ran: none kept, then 2, auto, 4;
+        #       the eight refusals leave 4; then the modes the same way; then the
+        #       usage lines leave both, and the Canvas that took neither keeps 3
+        #       and largest.
+        kept = [line[len("@@canvas "):] for line in lines if line.startswith("@@canvas ")]
+        wanted = (["none", "none", "2", "auto", "4"] + ["4"] * 8 + ["preferred", "largest", "preferred"] +
+                  ["preferred"] * 4 + ["4", "preferred", "3", "largest"])
+        check(kept == wanted,
+              "canvas scale and modes keep the word they were given and nothing a refusal was given",
+              repr(kept))
+        check("scale auto, Canvas is not asking" in text("canvas scale") and
+              "modes largest, Canvas is not asking" in text("canvas modes") and
+              seen.get("canvas scale", {}).get("status") == 0,
+              "with no Canvas to ask the bare words say what is kept, and that nothing was asked",
+              text("canvas scale") + text("canvas modes"))
+        check(seen.get("canvas scale 2", {}).get("status") == 0 and
+              "scale 2, Canvas is not asking" in text("canvas scale 2") and
+              seen.get("canvas modes preferred", {}).get("status") == 0 and
+              "modes preferred, Canvas is not asking" in text("canvas modes preferred"),
+              "a word is kept and said", text("canvas scale 2") + text("canvas modes preferred"))
+        for bad in ("0", "5", "two", "2x", "-1", "08", '""', "99999999999"):
+            check(seen.get("canvas scale " + bad, {}).get("status") == 1 and
+                  "scale is auto or a number from 1 to 4" in text("canvas scale " + bad),
+                  f"canvas scale {bad} is refused in words", text("canvas scale " + bad))
+        for bad in ("huge", "Largest", '""', "largest,preferred"):
+            check(seen.get("canvas modes " + bad, {}).get("status") == 1 and
+                  "modes are largest or preferred" in text("canvas modes " + bad),
+                  f"canvas modes {bad} is refused in words", text("canvas modes " + bad))
+        check(seen.get("canvas scale 2 3", {}).get("status") == 2 and
+              seen.get("canvas modes largest preferred", {}).get("status") == 2,
+              "a third word is a usage line", "")
+        check(seen.get("canvas scale 3", {}).get("status") == 1 and
+              "is kept, but Canvas did not take it" in text("canvas scale 3") and
+              seen.get("canvas modes largest", {}).get("status") == 1,
+              "a Canvas that refused the ioctl is a word kept and said not taken",
+              text("canvas scale 3"))
         words = [line[len("@@word "):] for line in lines if line.startswith("@@word ")]
         check(seen.get("ntp server", {}).get("status") == 0 and "pool.ntp.org" in text("ntp server"),
               "ntp server says the pool when none is named", text("ntp server"))
@@ -75494,6 +75979,7 @@ HARNESS_CHECKS = {
     "floodlight": harness_floodlight,
     "image_nodes": harness_image_nodes,
     "canvas_seam": harness_canvas_seam,
+    "canvas_scale": harness_canvas_scale,
     "bowl_session": harness_bowl_session,
     "bowl_roots": harness_bowl_roots,
     "riscv_builtins": harness_riscv_builtins,

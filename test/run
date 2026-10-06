@@ -11275,6 +11275,7 @@ python3 test/differential.py --harness floodlight || kit_failed=1
 python3 test/differential.py --harness surface_coreutils_gap || kit_failed=1
 python3 test/differential.py --harness image_nodes || kit_failed=1
 python3 test/differential.py --harness canvas_seam || kit_failed=1
+python3 test/differential.py --harness canvas_scale || kit_failed=1
 python3 test/differential.py --harness bowl_session || kit_failed=1
 python3 test/differential.py --harness bowl_roots || kit_failed=1
 python3 test/differential.py --harness riscv_builtins || kit_failed=1
@@ -15399,9 +15400,9 @@ if len(runs) >= 1:
 
     #   The step, from the picture and not from a number written here.
     #
-    #   Everything the compositor draws is multiplied by a scale set in the
-    #   config, so a cascade asserted as twenty pixels would be a check that
-    #   only passes on one setting. It moves the window by the same distance
+    #   Everything the compositor draws is multiplied by the scale, so a
+    #   cascade asserted as twenty pixels would be a check that only passes on
+    #   one setting. It moves the window by the same distance
     #   down as across, and that is what is asserted: the run grew by exactly
     #   as much as the new window's top sits below the old one's.
     sw, sh, spx = load("spawned")
@@ -16404,6 +16405,91 @@ time.sleep(3)
 leak_serial = open(work + "/leak-serial", "rb").read()
 leaks = re.findall(rb"leak-(\d+)", leak_serial)
 out.append(("a typed line runs in one shell", str(len(leaks)), "1"))
+
+if len(runs) >= 1 and before_spawn:
+    #   The pixel scale, changed while the desktop is up.
+    #
+    #   It is a setting of the machine and not an option of the build:
+    #   moonwater canvas scale 2 draws every metric the compositor owns twice
+    #   as large and lays every window out again, which a program sees as a
+    #   window with half the rows and half the columns that is where it was; and
+    #   auto goes back to what the screens say, which a virtual display does not
+    #   get to say -- it reports a size that is fiction -- so one. Asked of the
+    #   terminal that has the keyboard, which answers on the serial line, from
+    #   its own tty and the command's own words, and measured as a count of
+    #   cells and a window's edges, not as a pixel anyone drew by hand. In the
+    #   guest after the first, whose terminal has the keyboard at boot and whose
+    #   windows nothing after this measures against the first guest's.
+    def to_serial(command):
+        type_text(command + " ")
+        chord("shift", "dot")
+        type_text(" /dev/tty")
+        chord("shift", "s")
+        type_text("0\n")
+
+    def size_to_serial(tag):
+        type_text("echo " + tag + "-")
+        chord("shift", "4")
+        chord("shift", "9")
+        type_text("stty size")
+        chord("shift", "0")
+        type_text(" ")
+        chord("shift", "dot")
+        type_text(" /dev/tty")
+        chord("shift", "s")
+        type_text("0\n")
+
+    def terminal_size(tag):
+        found = re.findall(rb"%s-(\d+) (\d+)" % tag.encode(),
+                           open(work + "/leak-serial", "rb").read())
+        return (int(found[-1][0]), int(found[-1][1])) if found else (0, 0)
+
+    size_to_serial("sizeone")
+    time.sleep(1.0)
+    shot("scale-one", 0.5)
+    to_serial("moonwater canvas scale 2")
+    time.sleep(3.0)
+    size_to_serial("sizetwo")
+    to_serial("moonwater canvas scale")
+    time.sleep(1.5)
+    shot("scale-two", 0.5)
+    one, two = terminal_size("sizeone"), terminal_size("sizetwo")
+    out.append(("scale 2 halves the rows and the columns of a terminal",
+                "yes" if one[0] > 8 and one[1] > 16 and abs(two[0] - one[0] // 2) <= 1 and
+                abs(two[1] - one[1] // 2) <= 2 else "%dx%d against %dx%d" % (two[1], two[0], one[1], one[0]),
+                "yes"))
+    before_edges, after_edges = spans("scale-one"), spans("scale-two")
+    out.append(("and leaves the window where it was",
+                "yes" if len(before_edges) == len(after_edges) and before_edges and
+                all(abs(a - b) <= 24 for pair, other in zip(before_edges, after_edges)
+                    for a, b in zip(pair, other)) else "%r against %r" % (before_edges, after_edges),
+                "yes"))
+    said = open(work + "/leak-serial", "rb").read().decode("utf-8", "replace")
+    out.append(("moonwater canvas scale says what it is set to",
+                "yes" if "scale 2, set" in said else "no", "yes"))
+    to_serial("moonwater canvas scale auto")
+    time.sleep(3.0)
+    size_to_serial("sizeauto")
+    to_serial("moonwater canvas scale")
+    time.sleep(1.5)
+    shot("scale-auto", 0.5)
+    #   A window keeps its pixels and takes the whole cells that fit, so the
+    #   round trip is the size it was to within the cell it gave up at two.
+    again = terminal_size("sizeauto")
+    out.append(("auto on a virtual display is one again, whatever size it claims",
+                "yes" if abs(again[0] - one[0]) <= 1 and abs(again[1] - one[1]) <= 2
+                else "%dx%d against %dx%d" % (again[1], again[0], one[1], one[0]),
+                "yes"))
+    said = open(work + "/leak-serial", "rb").read().decode("utf-8", "replace")
+    out.append(("and says it asked no screen it could trust",
+                "yes" if "scale 1, auto: no screen says a size that can be trusted" in said else "no",
+                "yes"))
+    out.append(("the windows are where they were when the scale comes back",
+                "yes" if len(spans("scale-auto")) == len(before_edges) and
+                all(abs(a - b) <= 24 for pair, other in zip(before_edges, spans("scale-auto"))
+                    for a, b in zip(pair, other))
+                else "%r against %r" % (spans("scale-auto"), before_edges),
+                "yes"))
 
 #       The same line once a program has put tty2 in front, with a shell
 #       reading tty2 the way init's reads tty1. Opening tty2 allocates it,

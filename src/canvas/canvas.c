@@ -356,6 +356,10 @@ struct canvas
         // A hotplug that arrived while the machine slept: the card's power was
         // going or half back, so it waits for the wake to run.
         _Bool replug;
+
+        // The next hotplug is a change of which mode to take, and the screen
+        // may get smaller by it as well as larger.
+        _Bool retarget;
 };
 
 static struct desktop
@@ -620,6 +624,7 @@ static void output_free(struct output *output);
 static void desktop_redraw(void);
 static void desktop_recompose(void);
 static void desktop_repaint(void);
+static _Bool canvas_scale_refresh(void);
 static void cursor_plane_recover(void);
 static void desktop_watch(void);
 static u64 canvas_frame_ns(void);
@@ -7201,6 +7206,188 @@ static PURE _Bool canvas_is_firmware(struct drm_device *dev)
         return canvas_driver_among(dev, firmware, array_count(firmware));
 }
 
+/*
+        How many device pixels one drawn pixel is.
+
+        A cell is eight by sixteen and a titlebar is twenty. Those are the
+        right numbers on an ordinary screen and a quarter of the right
+        numbers on a dense one, where everything comes out too small to read.
+        The scale multiplies every metric the compositor draws for itself,
+        so the same window covers the same area of glass whatever the panel
+        is. It is a setting, kept by `moonwater canvas scale`, and not a
+        build option, because it is the machine's and not the image's.
+
+        The setting is a number, or auto. Auto asks the screens, and trusts
+        only the ones that can say: a real panel, whose connector is one a
+        panel is wired to and whose EDID gives a size that fits the shape of
+        its mode. It is not the size a virtual display reports -- bochs
+        answers 320 by 200 millimetres whatever mode it is in, and QEMU
+        synthesises an EDID too, so dots per inch worked out from either
+        swings with the resolution and says nothing. A screen that cannot
+        say is one: what auto changes is only a panel that is dense.
+        Two from 150 dots to the inch, three from 260, and never so many
+        that the desktop is left under 1280 by 640 of the pixels it draws.
+
+        A kernel command line gives the first frame its setting
+        (canvas.scale=2 or canvas.scale=auto); the machine's own, kept in
+        /root, arrives with the machine process seconds after.
+*/
+static unsigned int canvas_scale_setting = SPARK_CANVAS_SCALE_AUTO;
+static unsigned int canvas_scale_origin = SPARK_CANVAS_ORIGIN_DEFAULT;
+
+// Which mode a real screen is driven at; a virtual one is a window and has none.
+static _Bool canvas_modes_largest = true;
+
+static _Bool canvas_connector_is_panel(const struct drm_connector *connector)
+{
+        switch (connector->connector_type)
+        {
+        case DRM_MODE_CONNECTOR_eDP:
+        case DRM_MODE_CONNECTOR_DisplayPort:
+        case DRM_MODE_CONNECTOR_HDMIA:
+        case DRM_MODE_CONNECTOR_HDMIB:
+        case DRM_MODE_CONNECTOR_DVID:
+        case DRM_MODE_CONNECTOR_LVDS:
+        case DRM_MODE_CONNECTOR_DSI:
+                return true;
+        }
+
+        return false;
+}
+
+// What one screen's mode, on its own panel, says the scale should be: 0 when
+// it cannot say, and the dots per inch that decided it.
+static unsigned int canvas_scale_of(const struct drm_mode_set *set,
+                                    unsigned int *dpi)
+{
+        const struct drm_connector *connector;
+        unsigned long width, height, width_mm, height_mm;
+        unsigned int scale;
+
+        if (!set || !set->mode || !set->num_connectors || !set->connectors ||
+            !set->connectors[0])
+                return 0;
+
+        connector = set->connectors[0];
+        if (!canvas_connector_is_panel(connector) ||
+            canvas_is_virtual(connector->dev))
+                return 0;
+
+        width = set->mode->hdisplay;
+        height = set->mode->vdisplay;
+        width_mm = connector->display_info.width_mm;
+        height_mm = connector->display_info.height_mm;
+
+        // A size is a size when it is a panel's and its shape is the mode's,
+        // to within a seventh: EDID counts whole centimetres, and a zero, a
+        // one or a 16:9 claimed of a 4:3 mode is somebody filling a field.
+        if (width_mm < 50 || width_mm > 3000 || height_mm < 30 || height_mm > 2000 ||
+            (unsigned long)abs((long)(width_mm * height) - (long)(height_mm * width)) * 7 >
+                height_mm * width)
+                return 0;
+
+        *dpi = (unsigned int)(width * 254 / (width_mm * 10));
+        scale = *dpi >= 260 ? 3 : *dpi >= 150 ? 2 : 1;
+
+        while (scale > 1 && (width / scale < 1280 || height / scale < 640))
+                scale--;
+
+        return scale;
+}
+
+// The first screen of the desktop that can say, then the ones about to join it.
+static unsigned int canvas_scale_auto(struct drm_client_dev *joining,
+                                      unsigned int *dpi)
+{
+        struct drm_mode_set *set;
+        struct output *output;
+        unsigned int scale;
+
+        *dpi = 0;
+
+        list_for_each_entry(output, &desktop.outputs, link)
+        {
+                scale = canvas_scale_of(output->mode_set, dpi);
+                if (scale)
+                        return scale;
+        }
+
+        if (joining)
+                drm_client_for_each_modeset(set, joining)
+                {
+                        scale = canvas_scale_of(set, dpi);
+                        if (scale)
+                                return scale;
+                }
+
+        return 1;
+}
+
+static unsigned int canvas_scale_wanted(struct drm_client_dev *joining)
+{
+        unsigned int dpi;
+
+        return canvas_scale_setting ? canvas_scale_setting
+                                    : canvas_scale_auto(joining, &dpi);
+}
+
+//      The kernel command line's: canvas.scale=2, canvas.scale=auto.
+static int canvas_scale_param_set(const char *value, const struct kernel_param *kp)
+{
+        unsigned int number;
+
+        if (sysfs_streq(value, "auto"))
+                number = SPARK_CANVAS_SCALE_AUTO;
+        else if (kstrtouint(value, 10, &number) || !number ||
+                 number > SPARK_CANVAS_SCALE_MOST)
+                return -EINVAL;
+
+        canvas_scale_setting = number;
+        canvas_scale_origin = SPARK_CANVAS_ORIGIN_COMMAND_LINE;
+        return 0;
+}
+
+static int canvas_scale_param_get(char *buffer, const struct kernel_param *kp)
+{
+        return canvas_scale_setting ? sysfs_emit(buffer, "%u\n", canvas_scale_setting)
+                                    : sysfs_emit(buffer, "auto\n");
+}
+
+static const struct kernel_param_ops canvas_scale_ops = {
+    .set = canvas_scale_param_set,
+    .get = canvas_scale_param_get,
+};
+
+static int canvas_modes_param_set(const char *value, const struct kernel_param *kp)
+{
+        if (sysfs_streq(value, "largest"))
+                canvas_modes_largest = true;
+        else if (sysfs_streq(value, "preferred"))
+                canvas_modes_largest = false;
+        else
+                return -EINVAL;
+
+        return 0;
+}
+
+static int canvas_modes_param_get(char *buffer, const struct kernel_param *kp)
+{
+        return sysfs_emit(buffer, "%s\n", canvas_modes_largest ? "largest" : "preferred");
+}
+
+static const struct kernel_param_ops canvas_modes_ops = {
+    .set = canvas_modes_param_set,
+    .get = canvas_modes_param_get,
+};
+
+// Read-only: a running desktop is changed by moonwater canvas, which relays it.
+#undef MODULE_PARAM_PREFIX
+#define MODULE_PARAM_PREFIX "canvas."
+module_param_cb(scale, &canvas_scale_ops, NULL, 0444);
+module_param_cb(modes, &canvas_modes_ops, NULL, 0444);
+#undef MODULE_PARAM_PREFIX
+#define MODULE_PARAM_PREFIX "moonwater."
+
 static PURE unsigned int output_mode_count(struct drm_connector *connector)
 {
         struct drm_display_mode *mode;
@@ -7509,10 +7696,13 @@ static COLD int canvas_probe_modes(struct canvas *canvas, _Bool biggest,
                 else
                 {
                         want = biggest ? output_pick_mode(connector, 0, 0, 0, false, 0)
-                                       : output_pick_mode(connector, 0,
-                                                          mode_set->mode->hdisplay,
-                                                          mode_set->mode->vdisplay,
-                                                          true, 0);
+                                       : output_pick_mode(connector, DRM_MODE_TYPE_PREFERRED,
+                                                          0, 0, false, 0);
+                        if (!want && !biggest)
+                                want = output_pick_mode(connector, 0,
+                                                        mode_set->mode->hdisplay,
+                                                        mode_set->mode->vdisplay,
+                                                        true, 0);
                         if (!want || drm_mode_equal(want, mode_set->mode))
                                 continue;
                         taken = output_mode_take(dev, want);
@@ -7604,7 +7794,8 @@ static void output_attach(struct output *output)
         kept until the commit that points the pipe at the new one has
         landed, because freeing it sooner blanks the scanout.
 */
-static _Bool output_grow(struct output *output, struct drm_mode_set *mode_set)
+static _Bool output_grow(struct output *output, struct drm_mode_set *mode_set,
+                         _Bool either)
 {
         unsigned int width, height;
         u32 format;
@@ -7616,8 +7807,11 @@ static _Bool output_grow(struct output *output, struct drm_mode_set *mode_set)
 
         width = mode_set->mode->hdisplay;
         height = mode_set->mode->vdisplay;
-        if ((unsigned long)width * height <=
-            (unsigned long)output->width * output->height)
+        // A hotplug only takes a screen that got larger; a change of which
+        // mode to take takes the one that is not the size it has.
+        if (either ? width == output->width && height == output->height
+                   : (unsigned long)width * height <=
+                         (unsigned long)output->width * output->height)
                 return false;
 
         /* The flusher dirtyfb's output->buffer without desktop.lock.
@@ -7720,13 +7914,12 @@ static int canvas_rebind(struct canvas *canvas)
         struct drm_mode_set *mode_set;
         struct output *output;
         _Bool placed = false;
+        _Bool retarget = xchg(&canvas->retarget, false);
 
         if (canvas_is_virtual(client->dev) && !(canvas_pm_dark & 1))
                 return 0;
 
-        if (canvas_probe_modes(canvas,
-                               IS_ENABLED(CONFIG_MOONWATER_CANVAS_LARGEST_MODE),
-                               false))
+        if (canvas_probe_modes(canvas, READ_ONCE(canvas_modes_largest), false))
         {
                 desktop_redraw();
                 return 0;
@@ -7741,7 +7934,7 @@ static int canvas_rebind(struct canvas *canvas)
                 output = output_for_modeset(canvas, mode_set);
                 if (output)
                 {
-                        if (output_grow(output, mode_set))
+                        if (output_grow(output, mode_set, retarget))
                                 placed = true;
                         else
                                 output_attach(output);
@@ -7753,9 +7946,14 @@ static int canvas_rebind(struct canvas *canvas)
         }
         mutex_unlock(&client->modeset_mutex);
 
+        // A change of which mode to take is a commit whatever sizes came of it:
+        // the largest and the preferred can be the one size at two refresh rates.
+        placed |= retarget;
+
         if (placed)
         {
                 desktop_place_outputs();
+                canvas_scale_refresh();
                 canvas_modes_keep();
                 desktop_redraw();
         }
@@ -8107,6 +8305,55 @@ static void desktop_redraw(void)
 }
 
 /*
+        Draw at another scale, with desktop.lock held, and say whether it was.
+
+        Every metric the compositor draws for itself follows desktop.scale at
+        the place it draws, so the change is only to lay each window out
+        again: its pixels stay where they were and its cells are the whole
+        number of the new size that fit, which is the answer a resize gives,
+        and a program is told as one is, by the grid its page now holds. A
+        window cut for a larger scale keeps the ring it was cut with, which
+        is as many cells as the screen held then, so the desktop that is
+        smaller in cells for it is the only one it can grow into; one opened
+        after takes the room there is. The cursor is the one drawn size, and
+        goes with it.
+
+        The caller draws, because the callers that have more to draw do so
+        once.
+*/
+static void desktop_regrid_panes(void)
+{
+        struct pane *pane;
+
+        list_for_each_entry(pane, &desktop.windows, link)
+                pane_regrid(pane);
+
+        desktop_gather_panes();
+}
+
+static _Bool desktop_rescale(unsigned int scale)
+{
+        if (scale == desktop.scale)
+                return false;
+
+        desktop.scale = scale;
+        desktop.cursor_scale = scale;
+
+        desktop_regrid_panes();
+        cursor_move(desktop.cursor_x, desktop.cursor_y);
+        return true;
+}
+
+// The scale the screens now ask for, when the setting is to ask them.
+static _Bool canvas_scale_refresh(void)
+{
+        unsigned int dpi;
+
+        return !canvas_scale_setting &&
+               desktop_rescale(canvas_scale_auto(NULL, &dpi));
+}
+
+/*
         Whether a program other than this one is master of a card Canvas draws
         on: Weston, a game, anything that opened the card for itself.
 
@@ -8338,18 +8585,15 @@ static int canvas_build(struct canvas *canvas, _Bool biggest)
 {
         struct drm_client_dev *client = &canvas->client;
         struct drm_mode_set *mode_set;
-        unsigned int count = 0;
+        unsigned int count = 0, scale;
 
         if (canvas_probe_modes(canvas, biggest, true))
                 return -ENODEV;
 
-#ifdef CONFIG_MOONWATER_CANVAS_SCALE
-        desktop.scale = CONFIG_MOONWATER_CANVAS_SCALE;
-#endif
-        if (desktop.scale < 1)
-                desktop.scale = 1;
-
         mutex_lock(&client->modeset_mutex);
+        scale = desktop.scale;
+        desktop.scale = canvas_scale_wanted(client);
+
         drm_client_for_each_modeset(mode_set, client)
         {
                 if (!mode_set->mode)
@@ -8364,6 +8608,13 @@ static int canvas_build(struct canvas *canvas, _Bool biggest)
                 return -ENODEV;
 
         desktop_place_outputs();
+
+        // The windows that outlive Canvas being off, the kernel log's, and
+        // those of a desktop another card has already started were laid out
+        // at the scale there was; a start that has another lays them out again.
+        // The cursor is canvas_start's, which sets it from the scale.
+        if (desktop.scale != scale)
+                desktop_regrid_panes();
 
         return 0;
 }
@@ -8415,8 +8666,7 @@ static int canvas_start(struct canvas *canvas)
 
         for (unsigned int attempt = 0; ; attempt++)
         {
-                ret = canvas_build(canvas, !attempt &&
-                    IS_ENABLED(CONFIG_MOONWATER_CANVAS_LARGEST_MODE));
+                ret = canvas_build(canvas, !attempt && READ_ONCE(canvas_modes_largest));
 
                 if (ret)
                 {
@@ -9919,6 +10169,14 @@ static void canvas_state(struct canvas_control *answer)
         answer->thread_passes = READ_ONCE(canvas_passes);
         answer->frame_ticks = READ_ONCE(canvas_ticks);
 
+        answer->scale = desktop.scale;
+        answer->scale_setting = canvas_scale_setting;
+        answer->scale_origin = canvas_scale_origin;
+        (void)canvas_scale_auto(NULL, &answer->scale_dpi);
+        answer->modes = READ_ONCE(canvas_modes_largest)
+                            ? SPARK_CANVAS_MODES_LARGEST
+                            : SPARK_CANVAS_MODES_PREFERRED;
+
         list_for_each_entry(pane, &desktop.windows, link)
                 if (pane->shared)
                         answer->windows++;
@@ -9946,6 +10204,59 @@ static void canvas_state(struct canvas_control *answer)
         }
 
         rt_mutex_unlock(&desktop.lock);
+}
+
+/*
+        The scale and which mode to take, changed while the desktop is up.
+
+        Both are the machine's setting first and the desktop's second: they
+        are kept with Canvas off and taken when it starts, so the answer is
+        the same either way. A scale is laid out again at once, every window
+        and the cursor, and one number or auto is all there is to say. A mode
+        is the hotplug's business, which is where a card is looked at again,
+        so each card is told it has one; a screen that is a window on another
+        one's has no mode of its own and takes none.
+*/
+static long canvas_scale_set(unsigned int setting)
+{
+        unsigned int dpi;
+
+        if (setting > SPARK_CANVAS_SCALE_MOST)
+                return -EINVAL;
+
+        guard(rt_mutex)(&desktop.lock);
+
+        canvas_scale_setting = setting;
+        canvas_scale_origin = SPARK_CANVAS_ORIGIN_SET;
+
+        if (!list_empty(&desktop.outputs) &&
+            desktop_rescale(setting ? setting : canvas_scale_auto(NULL, &dpi)))
+                desktop_redraw();
+
+        return 0;
+}
+
+static long canvas_modes_set(unsigned int modes)
+{
+        struct canvas *canvas;
+
+        if (modes > SPARK_CANVAS_MODES_PREFERRED)
+                return -EINVAL;
+
+        if (READ_ONCE(canvas_modes_largest) == (modes == SPARK_CANVAS_MODES_LARGEST))
+                return 0;
+
+        WRITE_ONCE(canvas_modes_largest, modes == SPARK_CANVAS_MODES_LARGEST);
+
+        mutex_lock(&canvas_list_lock);
+        list_for_each_entry(canvas, &canvas_list, link)
+        {
+                canvas->retarget = true;
+                (void)client_hotplug(&canvas->client);
+        }
+        mutex_unlock(&canvas_list_lock);
+
+        return 0;
 }
 
 /*
@@ -11581,14 +11892,17 @@ static long report_canvas(struct canvas_control __user *out)
         unsigned int request;
         long answer = 0;
         char layout[16];
+        unsigned int asked_scale, asked_modes;
 
         if (copy_from_user(&control, out, sizeof(control)))
                 return -EFAULT;
 
         request = control.request;
+        asked_scale = control.scale_setting;
+        asked_modes = control.modes;
         memcpy(layout, control.master_command, sizeof(layout));
         layout[sizeof(layout) - 1] = 0;
-        if (request > SPARK_CANVAS_TERMINAL)
+        if (request > SPARK_CANVAS_SET_MODES)
                 return -EINVAL;
         if (request == SPARK_CANVAS_LAYOUT)
         {
@@ -11620,6 +11934,10 @@ static long report_canvas(struct canvas_control __user *out)
                 answer = canvas_log_open();
         else if (request == SPARK_CANVAS_TERMINAL)
                 answer = canvas_terminal_open();
+        else if (request == SPARK_CANVAS_SET_SCALE)
+                answer = canvas_scale_set(asked_scale);
+        else if (request == SPARK_CANVAS_SET_MODES)
+                answer = canvas_modes_set(asked_modes);
 
         canvas_state(&control);
 

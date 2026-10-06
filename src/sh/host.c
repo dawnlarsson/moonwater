@@ -4798,6 +4798,12 @@ static fn host_canvas_write(bool label,
         }
 
         host_prefix(label);
+        string_format(log, "drawn at %p times the size, modes %s\n",
+                      (positive)control->scale,
+                      control->modes == SPARK_CANVAS_MODES_PREFERRED
+                          ? "preferred" : "largest");
+
+        host_prefix(label);
         string_format(log, "low-latency hold: %s, taken %p time%s; "
                            "canvas thread woke %p, frame timer fired %p\n",
                       control->latency_hold ? "held" : "idle",
@@ -4879,11 +4885,19 @@ static b32 host_canvas_open(positive request, string_address what)
         return 0;
 }
 
-/* moonwater canvas [on|off|log|terminal] */
+static b32 locale_canvas_setting(string_address address_to arguments, positive count);
+
+/* moonwater canvas [on|off|log|terminal|scale [N|auto]|modes [largest|preferred]] */
 static b32 host_canvas(string_address address_to arguments, positive count)
 {
         struct canvas_control control;
         bipolar failed;
+
+        //      The two settings are the machine's, kept with the others in
+        //      /root: they are asked and set in the locale's section.
+        if (count >= 3 && (string_equals(arguments[2], "scale") ||
+                           string_equals(arguments[2], "modes")))
+                return locale_canvas_setting(arguments, count);
 
         return_if(count > 3, host_usage());
 
@@ -12372,6 +12386,8 @@ static COLD bipolar sntp_query(string_address name, bool filter, bipolar most,
 #define LOCALE_NTP_SERVER_PATH "/root/ntp.server"
 #define LOCALE_NTP_SAMPLING_PATH "/root/ntp.sampling"
 #define LOCALE_KEYBOARD_PATH "/root/keyboard"
+#define LOCALE_CANVAS_SCALE_PATH "/root/canvas.scale"
+#define LOCALE_CANVAS_MODES_PATH "/root/canvas.modes"
 #define LOCALE_NTP_DEFAULT_SERVER "pool.ntp.org"
 #define LOCALE_NTP_SERVER_ROOM 80
 #define LOCALE_NTP_RETRY_LEAST 1
@@ -14332,6 +14348,139 @@ static b32 locale_keyboard_set(string_address name)
 }
 
 /*
+        The two settings of how Canvas draws, which are the machine's and not
+        the image's: the pixel scale, a number or auto, and which mode a real
+        screen is driven at, the largest it lists or the one it marks
+        preferred.
+
+        Asked bare, set with a word. A word is tried on the kernel first,
+        which refuses what it does not take and keeps what it is given with
+        Canvas off, and only then kept in /root, as the keyboard layout is;
+        the machine process puts the kept one back when it starts, and a
+        kernel command line (canvas.scale=2, canvas.modes=preferred) gives
+        the first frame the one before that.
+*/
+static bool locale_canvas_scale_ok(string_address word)
+{
+        return string_equals(word, "auto") ||
+               (word[0] >= '1' && word[0] < '1' + SPARK_CANVAS_SCALE_MOST &&
+                !word[1]);
+}
+
+static bool locale_canvas_modes_ok(string_address word)
+{
+        return string_equals(word, "largest") || string_equals(word, "preferred");
+}
+
+static bipolar locale_canvas_live(bool scale, string_address word)
+{
+        struct canvas_control control;
+
+        memory_zero(address_of control, sizeof(control));
+        control.request = scale ? SPARK_CANVAS_SET_SCALE : SPARK_CANVAS_SET_MODES;
+        if (scale)
+                control.scale_setting = string_equals(word, "auto")
+                    ? SPARK_CANVAS_SCALE_AUTO : (unsigned int)(word[0] - '0');
+        else
+                control.modes = string_equals(word, "preferred")
+                    ? SPARK_CANVAS_MODES_PREFERRED : SPARK_CANVAS_MODES_LARGEST;
+        return host_spark_once(SPARK_IOCTL_CANVAS, address_of control, FILE_READ);
+}
+
+//      What is in force, from the kernel when it can be asked, and else what
+//      is kept: auto and the largest mode when nothing is.
+static b32 locale_canvas_status(bool scale)
+{
+        struct canvas_control control;
+        string_address path = (string_address)(scale ? LOCALE_CANVAS_SCALE_PATH
+                                                     : LOCALE_CANVAS_MODES_PATH);
+        p8 kept[16];
+        bool readable = locale_readable(path, kept, sizeof(kept));
+        string_address and_kept = kept[0] ? ", kept across boots" : "";
+
+        memory_zero(address_of control, sizeof(control));
+        control.request = SPARK_CANVAS_STATUS;
+        if (host_spark_once(SPARK_IOCTL_CANVAS, address_of control, FILE_READ) < 0)
+        {
+                if (!readable)
+                        host_say(log, host_label "%s " LOCALE_NEEDS_ROOT "\n",
+                                 scale ? "scale" : "modes");
+                else
+                        host_say(log, host_label "%s %s, Canvas is not asking\n",
+                                 scale ? "scale" : "modes",
+                                 kept[0] ? (string_address)kept
+                                         : (string_address)(scale ? "auto" : "largest"));
+                return 0;
+        }
+
+        if (!scale)
+                host_say(log, host_label "modes %s%s\n",
+                         control.modes == SPARK_CANVAS_MODES_PREFERRED
+                             ? "preferred" : "largest",
+                         and_kept);
+        //      Not running, the scale in force is the last desktop's: what is
+        //      said is what Canvas will start with.
+        else if (!control.running && control.scale_setting)
+                host_say(log, host_label "scale %p, Canvas takes it when it starts%s\n",
+                         (positive)control.scale_setting, and_kept);
+        else if (!control.running)
+                host_say(log, host_label "scale auto, Canvas asks its screens when it "
+                                         "starts%s\n", and_kept);
+        else if (control.scale_setting)
+                host_say(log, host_label "scale %p, set%s%s\n",
+                         (positive)control.scale,
+                         control.scale_origin == SPARK_CANVAS_ORIGIN_COMMAND_LINE
+                             ? " on the kernel command line" : "",
+                         and_kept);
+        else if (control.scale_dpi)
+                host_say(log, host_label "scale %p, auto: the panel is %p dots to the inch%s\n",
+                         (positive)control.scale, (positive)control.scale_dpi,
+                         and_kept);
+        else
+                host_say(log, host_label "scale %p, auto: no screen says a size that can be "
+                                         "trusted%s\n",
+                         (positive)control.scale, and_kept);
+        return 0;
+}
+
+//      moonwater canvas scale [N|auto] and moonwater canvas modes [largest|preferred]
+static b32 locale_canvas_setting(string_address address_to arguments, positive count)
+{
+        bool scale = string_equals(arguments[2], "scale");
+        string_address word = count > 3 ? arguments[3] : null;
+        bipolar live;
+
+        return_if(count > 4, host_usage());
+        if (!word)
+                return locale_canvas_status(scale);
+
+        if (scale && !locale_canvas_scale_ok(word))
+                return host_refuse("scale is auto or a number from 1 to %p, not %s\n",
+                                   (positive)SPARK_CANVAS_SCALE_MOST, word);
+        if (!scale && !locale_canvas_modes_ok(word))
+                return host_refuse("modes are largest or preferred, not %s\n", word);
+        //      The kernel first, so a refusal keeps nothing; Canvas not being
+        //      there at all keeps the word and takes it when it starts.
+        live = locale_canvas_live(scale, word);
+        if (live == -EPERM)
+                return host_refuse("setting how Canvas draws needs root (CAP_SYS_ADMIN)\n");
+        if (live == -EINVAL)
+                return host_refuse("Canvas does not take %s\n", word);
+        if (host_save(scale ? "canvas scale" : "canvas modes",
+                      scale ? LOCALE_CANVAS_SCALE_PATH : LOCALE_CANVAS_MODES_PATH,
+                      word))
+                return 1;
+        if (live < 0 && live != -ENOENT)
+        {
+                host_say(log_error, host_label "%s %s is kept, but Canvas did not take "
+                                    "it: %s\n",
+                         scale ? "scale" : "modes", word, file_reason(live));
+                return 1;
+        }
+        return locale_canvas_status(scale);
+}
+
+/*
         What the schedule makes of a query that ended, or of a look between
         queries. A success is only a success if the kernel still says the
         clock is synchronised when it is looked at: any change of
@@ -14451,6 +14600,15 @@ static fn locale_restore(void)
         host_read_word(LOCALE_KEYBOARD_PATH, keyboard, sizeof(keyboard));
         if (keyboard[0])
                 locale_keyboard_live(keyboard);
+
+        //      How Canvas draws, as it was left: a word the kernel does not
+        //      take is not one that was ever kept.
+        host_read_word(LOCALE_CANVAS_SCALE_PATH, keyboard, sizeof(keyboard));
+        if (keyboard[0] && locale_canvas_scale_ok(keyboard))
+                locale_canvas_live(true, keyboard);
+        host_read_word(LOCALE_CANVAS_MODES_PATH, keyboard, sizeof(keyboard));
+        if (keyboard[0] && locale_canvas_modes_ok(keyboard))
+                locale_canvas_live(false, keyboard);
 
         locale_ntp_next = 0;
         locale_ntp_retry = LOCALE_NTP_RETRY_LEAST;
@@ -15303,6 +15461,8 @@ static const host_row host_rows[] = {
     {null, "bind exit remove ID|\"command\"", "stop running one at the stop", 'f'},
     {null, "canvas [on|off]", "the desktop, and on which screens [on]", 'b'},
     {null, "canvas log|terminal", "open the kernel log or a terminal", 'b'},
+    {null, "canvas scale [N|auto]", "device pixels to a drawn one, 1 to 4 [auto]", 'b'},
+    {null, "canvas modes [largest|preferred]", "which mode a screen is driven at [largest]", 'b'},
     {null, "airplane [on|off]", "every radio at once", 'b'},
     {null, "brightness [N%|+N|-N]", "the screen backlight", 'b'},
     {null, "power [performance|balanced|powersave]", "profile and CPU governor, kept across boots", 'b'},
@@ -15678,6 +15838,8 @@ static string_address host_wipe_keep[] = {
     HOST_WIPE_KEEP(LOCALE_NTP_SERVER_PATH),
     HOST_WIPE_KEEP(LOCALE_NTP_SAMPLING_PATH),
     HOST_WIPE_KEEP(LOCALE_KEYBOARD_PATH),
+    HOST_WIPE_KEEP(LOCALE_CANVAS_SCALE_PATH),
+    HOST_WIPE_KEEP(LOCALE_CANVAS_MODES_PATH),
     HOST_WIPE_KEEP(NAME_PATH),
     HOST_WIPE_KEEP(LINK_SWITCH_PATH),
     HOST_WIPE_KEEP(LINK_KEY_PATH),
