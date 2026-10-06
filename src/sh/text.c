@@ -4708,7 +4708,9 @@ static b32 text_paste()
 
 /* join ---------------------------------------------------- */
 
-#define JOIN_OUTPUT_MAX 256
+//      GNU's join -o takes as many fields as a command line holds; the table is
+//      that many, in the bss a join that names none never touches.
+#define JOIN_OUTPUT_MAX 32768
 #define JOIN_GROUP_FIRST TEXT_READ_MAX
 
 typedef struct
@@ -4737,7 +4739,8 @@ typedef struct
 static positive join_key[2];
 static positive join_unpaired;
 static positive join_only;
-static join_output join_outputs[JOIN_OUTPUT_MAX];
+static join_output (address_to join_outputs_held)[JOIN_OUTPUT_MAX];
+#define join_outputs UTILITY_HELD(join_outputs)
 static positive join_output_count;
 static bool join_output_auto;
 static positive join_order_mode;
@@ -12060,9 +12063,10 @@ static const argument_option fold_options[] = {
         same list, so option parsing appends positions instead of retaining
         only file_taking's final value.
 */
-#define TEXT_TAB_STOP_MAX 1024
+#define TEXT_TAB_STOP_MAX 32768
 
-static positive text_tab_stops[TEXT_TAB_STOP_MAX];
+static positive (address_to text_tab_stops_held)[TEXT_TAB_STOP_MAX];
+#define text_tab_stops UTILITY_HELD(text_tab_stops)
 static positive text_tab_stop_count;
 static positive text_tab_repeat;
 static bool text_tab_repeat_relative;
@@ -31037,13 +31041,21 @@ static b32 text_grep()
         What is not: l, which is a way of looking at a line rather than a way
         of changing one, and e, which runs a shell.
 */
-#define SED_COMMANDS_MAX 4096
-#define SED_PROGRAMS_MAX 512
-#define SED_TEXT_MAX (1 << 18)
-#define SED_MAPS_MAX 128
-#define SED_SCRIPT_MAX (1 << 19)
-#define SED_FILES_MAX 64
-#define SED_APPENDS_MAX SED_COMMANDS_MAX
+//      GNU's sed has no table to fill: a script of ten thousand commands is a
+//      script. These are the room a script is given, taken from the kernel on
+//      the first command that wants it and so free to a sed that never reads
+//      one, and a script past them is refused by name. The commands and the
+//      programs are a regular expression each, which is a few hundred bytes
+//      beside the page they are written on; the text and the script are the
+//      bytes themselves.
+#define SED_COMMANDS_MAX (1 << 16)
+#define SED_PROGRAMS_MAX (1 << 16)
+#define SED_TEXT_MAX (1 << 24)
+#define SED_MAPS_MAX 1024
+#define SED_SCRIPT_MAX (1 << 24)
+#define SED_FILES_MAX 1024
+#define SED_APPENDS_MAX (1 << 16)
+#define SED_BLOCKS_MAX (1 << 16)
 
 enum
 {
@@ -31085,22 +31097,39 @@ typedef struct
         b32 block_stop;
 } sed_command;
 
-static sed_command sed_commands[SED_COMMANDS_MAX];
+//      What a script is parsed into is sized by the script, once it is whole
+//      (sed_stores_hold): a command, a pattern, a name and a text are each made
+//      of a byte of it at least, so a script of n bytes needs no more than a
+//      few n of each. The stores were the most a script could ever want, taken
+//      whole by every sed, and a sed run under ulimit -v 20000 died of the
+//      16 MiB of the script's before it read a byte.
+static sed_command address_to sed_commands;
+static positive sed_limit_commands, sed_commands_room;
 static b32 sed_command_count;
-static regex_program sed_programs[SED_PROGRAMS_MAX];
+static regex_program address_to sed_programs;
+static positive sed_limit_programs, sed_programs_room, sed_end_only_room;
 static b32 sed_program_count;
-static p8 sed_maps[SED_MAPS_MAX][256];
+//      Which of them is no more than `$`, which matches once, at the end of
+//      the pattern space, and needs no machine to say so: s/$/ </ is the line
+//      with a suffix, and at the machine's speed over every byte of every line
+//      it was twice what GNU's sed took on a file of a megabyte.
+static bool address_to sed_program_end_only;
+static p8 (address_to sed_maps)[256];
+static positive sed_limit_maps, sed_maps_room, sed_map_wide_room, sed_wide_from_room, sed_wide_to_room,
+    sed_wide_from_length_room, sed_wide_to_length_room;
 static b32 sed_map_count;
 // In a UTF-8 locale a y whose strings hold a character of more than one byte
 // maps characters, and keeps the two strings as written.
-static bool sed_map_wide[SED_MAPS_MAX];
-static p8 sed_wide_from[SED_MAPS_MAX][512];
-static p8 sed_wide_to[SED_MAPS_MAX][512];
-static positive sed_wide_from_length[SED_MAPS_MAX];
-static positive sed_wide_to_length[SED_MAPS_MAX];
-static p8 sed_text[SED_TEXT_MAX];
+static bool address_to sed_map_wide;
+static p8 (address_to sed_wide_from)[512];
+static p8 (address_to sed_wide_to)[512];
+static positive address_to sed_wide_from_length;
+static positive address_to sed_wide_to_length;
+static p8 address_to sed_text;
+static positive sed_limit_text, sed_text_room;
 static positive sed_text_used;
-static p8 sed_script[SED_SCRIPT_MAX];
+static p8 address_to sed_script;
+static positive sed_script_room;
 static positive sed_script_length;
 static positive sed_at;
 static bool sed_broken;
@@ -31151,25 +31180,60 @@ static positive sed_number;
 static bool sed_quiet;
 static bool sed_last;
 
-#define sed_script_put(character)                                            \
-        fixed_store_byte(sed_script, sed_script_length, sed_broken, character)
+// One more byte of the script, which grows as it is read, to a limit.
+static fn sed_script_put(p8 character)
+{
+        if (sed_script_length + 2 > sed_script_room &&
+            (sed_script_length + 2 > SED_SCRIPT_MAX ||
+             !array_store_reserve(sed_script, sed_script_room, sed_script_length,
+                                  sed_script_length + 2, 4096)))
+        {
+                sed_broken = true;
+                return;
+        }
+
+        sed_script[sed_script_length++] = character;
+}
 
 static fn sed_script_add(string_address text)
 {
+        //      An empty script (sed '') is a script, and is written down as the
+        //      terminator at the front of a store that exists.
+        if (!sed_script_room &&
+            !array_store_reserve(sed_script, sed_script_room, 0, 4096, 4096))
+        {
+                sed_broken = true;
+                return;
+        }
+
         if (sed_script_length)
                 sed_script_put('\n');
 
         for (positive i = 0; text[i]; i++)
                 sed_script_put(text[i]);
 
-        sed_script[sed_script_length] = '\0';
+        if (!sed_broken)
+                sed_script[sed_script_length] = '\0';
+}
+
+// One more byte of text where the next piece begins, and the script refused
+// when the store is full.
+static fn sed_text_byte(p8 value)
+{
+        if (sed_text_used + 1 >= sed_limit_text)
+        {
+                sed_broken = true;
+                return;
+        }
+
+        sed_text[sed_text_used++] = value;
 }
 
 static b32 sed_text_add(string_address from, positive length)
 {
         b32 at = (b32)sed_text_used;
 
-        if (sed_text_used + length + 1 >= SED_TEXT_MAX)
+        if (sed_text_used + length + 1 >= sed_limit_text)
         {
                 sed_broken = true;
                 return 0;
@@ -31199,7 +31263,7 @@ static bool sed_io_failed;
         The expressions are applied one after the other. They live here, beside
         the one regular-expression compiler, and tar.c asks for them by name.
 */
-#define TAR_TRANSFORMS_MAX 16
+#define TAR_TRANSFORMS_MAX 256
 
 typedef struct
 {
@@ -31210,7 +31274,8 @@ typedef struct
         bool references;
 } tar_transform;
 
-static tar_transform tar_transforms[TAR_TRANSFORMS_MAX];
+static tar_transform (address_to tar_transforms_held)[TAR_TRANSFORMS_MAX];
+#define tar_transforms UTILITY_HELD(tar_transforms)
 static positive tar_transform_count;
 static byte_store tar_transform_a;
 static byte_store tar_transform_b;
@@ -31865,7 +31930,7 @@ static b32 sed_compile_regex(string_address pattern, bool icase)
         if (!pattern[0])
                 return -1;
 
-        if (sed_program_count >= SED_PROGRAMS_MAX)
+        if (sed_program_count >= sed_limit_programs)
         {
                 sed_broken = true;
                 return 0;
@@ -31879,6 +31944,7 @@ static b32 sed_compile_regex(string_address pattern, bool icase)
         }
 
         regex_keep(sed_programs + sed_program_count);
+        sed_program_end_only[sed_program_count] = pattern[0] == '$' && !pattern[1];
         return sed_program_count++;
 }
 
@@ -31892,6 +31958,20 @@ static fn sed_skip_blanks()
         sed_at += string_span_max(sed_script + sed_at,
                                   sed_script_length - sed_at, string_set_blanks);
 }
+
+//      The two pieces an s command or an address is read into on the way to
+//      the compiler. They were a thousand bytes each on the stack, and a
+//      pattern or a replacement of a thousand and one made a script that GNU
+//      runs "unsupported or invalid". Held, they are a megabyte of address
+//      space and the pages a script touches.
+static p8 address_to sed_piece_pattern;
+static p8 address_to sed_piece_replacement;
+static positive sed_limit_piece, sed_piece_pattern_room, sed_piece_replacement_room;
+static b32 address_to sed_open_blocks;
+static positive sed_limit_blocks, sed_open_blocks_room;
+static p8 address_to sed_append_kind;
+static b32 address_to sed_append_which;
+static positive sed_limit_appends, sed_append_kind_room, sed_append_which_room;
 
 // Everything up to the next unescaped delimiter, with an escaped delimiter
 // becoming the character itself -- s,a\,b,x, has a comma in its pattern.
@@ -32069,7 +32149,7 @@ static bool sed_parse_address(p8 address_to type, positive address_to line,
         if (character == '/' || character == '\\')
         {
                 p8 delimiter = '/';
-                p8 pattern[1024];
+                p8 address_to pattern = sed_piece_pattern;
 
                 if (character == '\\')
                 {
@@ -32078,7 +32158,7 @@ static bool sed_parse_address(p8 address_to type, positive address_to line,
                 }
 
                 sed_at++;
-                sed_take_until(delimiter, pattern, sizeof(pattern));
+                sed_take_until(delimiter, pattern, sed_limit_piece);
 
                 bool icase = false;
 
@@ -32096,11 +32176,59 @@ static bool sed_parse_address(p8 address_to type, positive address_to line,
         return false;
 }
 
+// The stores for a script of the length it has, or the end of sed.
+static fn sed_stores_hold()
+{
+        positive n = sed_script_length + 16;
+        positive commands = n < SED_COMMANDS_MAX ? n : SED_COMMANDS_MAX;
+        positive programs = n < SED_PROGRAMS_MAX ? n : SED_PROGRAMS_MAX;
+        positive text = 3 * n < SED_TEXT_MAX ? 3 * n : SED_TEXT_MAX;
+        positive maps = n / 4 + 2 < SED_MAPS_MAX ? n / 4 + 2 : SED_MAPS_MAX;
+        positive blocks = n < SED_BLOCKS_MAX ? n : SED_BLOCKS_MAX;
+        //      Appends queued in one cycle are not bounded by the script, a
+        //      loop queues one a turn, so the least is what they always had.
+        positive appends = n < SED_APPENDS_MAX ? n : SED_APPENDS_MAX;
+
+        if (appends < 4096)
+                appends = 4096;
+
+        sed_limit_commands = commands;
+        sed_limit_programs = programs;
+        sed_limit_text = text;
+        sed_limit_maps = maps;
+        sed_limit_blocks = blocks;
+        sed_limit_appends = appends;
+        sed_limit_piece = n + 1;
+
+#define SED_HOLD(array, want, first) array_store_reserve(array, array##_room, 0, (want), (first))
+        if (!array_store_reserve(sed_script, sed_script_room, sed_script_length, sed_script_length + 2, 4096) ||
+            !SED_HOLD(sed_commands, commands, 16) ||
+            !SED_HOLD(sed_programs, programs, 16) ||
+            !array_store_reserve(sed_program_end_only, sed_end_only_room, 0, programs, 16) ||
+            !SED_HOLD(sed_text, text, 256) ||
+            !SED_HOLD(sed_maps, maps, 4) ||
+            !SED_HOLD(sed_map_wide, maps, 4) ||
+            !SED_HOLD(sed_wide_from, maps, 4) ||
+            !SED_HOLD(sed_wide_to, maps, 4) ||
+            !SED_HOLD(sed_wide_from_length, maps, 4) ||
+            !SED_HOLD(sed_wide_to_length, maps, 4) ||
+            !SED_HOLD(sed_open_blocks, blocks, 16) ||
+            !SED_HOLD(sed_append_kind, appends, 16) ||
+            !SED_HOLD(sed_append_which, appends, 16) ||
+            !SED_HOLD(sed_piece_pattern, n + 2, 256) ||
+            !SED_HOLD(sed_piece_replacement, n + 2, 256))
+#undef SED_HOLD
+        {
+                string_diagnostic(&text_diagnostic, 4, null, "memory exhausted");
+                exit(4);
+        }
+}
+
 static fn sed_parse()
 {
-        b32 open_blocks[SED_COMMANDS_MAX];
         b32 open_count = 0;
 
+        sed_stores_hold();
         sed_at = 0;
 
         while (sed_at < sed_script_length && !sed_broken)
@@ -32126,7 +32254,7 @@ static fn sed_parse()
                         continue;
                 }
 
-                if (sed_command_count >= SED_COMMANDS_MAX)
+                if (sed_command_count >= sed_limit_commands)
                 {
                         sed_broken = true;
                         return;
@@ -32217,12 +32345,12 @@ static fn sed_parse()
                         // command zero for ever; nesting is bounded by the
                         // commands there are, so the record is as long as
                         // their table.
-                        if (open_count == sizeof(open_blocks) / sizeof(open_blocks[0]))
+                        if (open_count == sed_limit_blocks)
                         {
                                 sed_broken = true;
                                 return;
                         }
-                        open_blocks[open_count++] = sed_command_count;
+                        sed_open_blocks[open_count++] = sed_command_count;
 
                         sed_command_count++;
                         continue;
@@ -32237,7 +32365,7 @@ static fn sed_parse()
                                 return;
                         }
 
-                        sed_commands[open_blocks[--open_count]].block_stop =
+                        sed_commands[sed_open_blocks[--open_count]].block_stop =
                             sed_command_count + 1;
 
                         sed_command_count++;
@@ -32247,13 +32375,13 @@ static fn sed_parse()
                 if (kind == 's')
                 {
                         p8 delimiter = sed_peek();
-                        p8 pattern[1024];
-                        p8 replacement[1024];
+                        p8 address_to pattern = sed_piece_pattern;
+                        p8 address_to replacement = sed_piece_replacement;
 
                         sed_at++;
-                        sed_take_until(delimiter, pattern, sizeof(pattern));
+                        sed_take_until(delimiter, pattern, sed_limit_piece);
 
-                        positive have = sed_take_until(delimiter, replacement, sizeof(replacement));
+                        positive have = sed_take_until(delimiter, replacement, sed_limit_piece);
                         bool icase = false;
 
                         command->references = 0;
@@ -32373,15 +32501,15 @@ static fn sed_parse()
                 if (kind == 'y')
                 {
                         p8 delimiter = sed_peek();
-                        p8 from[512];
-                        p8 to[512];
+                        p8 address_to from = sed_piece_pattern;
+                        p8 address_to to = sed_piece_replacement;
 
                         sed_at++;
 
                         positive one = sed_unescape(
-                            from, sed_take_until(delimiter, from, sizeof(from)));
+                            from, sed_take_until(delimiter, from, sed_limit_piece));
                         positive two = sed_unescape(
-                            to, sed_take_until(delimiter, to, sizeof(to)));
+                            to, sed_take_until(delimiter, to, sed_limit_piece));
 
                         // Both halves must be there, and be the same length:
                         // y has no character to turn the odd one into. The
@@ -32392,8 +32520,10 @@ static fn sed_parse()
                         positive length_one = wide ? memory_utf8_span(from, one, positive_max).y : one;
                         positive length_two = wide ? memory_utf8_span(to, two, positive_max).y : two;
 
+                        //      The characters of a multibyte y are kept as written, in
+                        //      rooms of 512 bytes a command; a byte y has its table.
                         if (sed_broken || length_one != length_two ||
-                            sed_map_count >= SED_MAPS_MAX)
+                            sed_map_count >= sed_limit_maps || (wide && (one > 512 || two > 512)))
                         {
                                 sed_broken = true;
                                 return;
@@ -32435,8 +32565,9 @@ static fn sed_parse()
 
                 if (kind == 'a' || kind == 'i' || kind == 'c')
                 {
-                        p8 body[1024];
-                        positive have = 0;
+                        //      The text is written where it is kept, so that a line of it is
+                        //      as long as the store and not as long as a buffer was.
+                        b32 at = (b32)sed_text_used;
                         bool escaped = sed_peek() == '\\';
                         bool empty;
 
@@ -32474,10 +32605,7 @@ static fn sed_parse()
 
                                         if (sed_script[sed_at] == 'n')
                                         {
-                                                if (have < sizeof(body) - 1)
-                                                        body[have++] = '\n';
-                                                else
-                                                        sed_broken = true;
+                                                sed_text_byte('\n');
 
                                                 sed_at++;
                                                 continue;
@@ -32487,16 +32615,13 @@ static fn sed_parse()
                                 // A body longer than its room is not cut
                                 // to fit: a script that lost its tail would
                                 // write the wrong text and say nothing.
-                                if (have < sizeof(body) - 1)
-                                        body[have++] = sed_script[sed_at];
-                                else
-                                        sed_broken = true;
+                                sed_text_byte(sed_script[sed_at]);
 
                                 sed_at++;
                         }
 
-                        body[have] = '\0';
-                        command->text = sed_text_add(body, have);
+                        sed_text_byte('\0');
+                        command->text = at;
                         sed_command_count++;
                         continue;
                 }
@@ -32995,6 +33120,15 @@ static inline INLINE bool sed_find(sed_context address_to ctx, b32 which, p8 mod
                                    string_address text, positive length, positive from,
                                    bool pieces)
 {
+        if (sed_program_end_only[which])
+        {
+                positive address_to slots = pieces ? ctx->match->slots : regex_match.slots;
+
+                slots[0] = length;
+                slots[1] = length;
+                return from <= length;
+        }
+
         if (!pieces)
                 return regex_find(mode, text, length, from);
 
@@ -33634,6 +33768,10 @@ publish:
         return false;
 }
 
+// What a, r and R have queued for the end of a cycle: which kind, and where
+// its text or its reader is.
+
+
 // The next line into the pattern space's own store, grown to hold it.
 static bool sed_line_next()
 {
@@ -33967,8 +34105,6 @@ static b32 text_sed()
 
                         bool dropped = false;
                         b32 pc = 0;
-                        p8 append_kind[SED_APPENDS_MAX];
-                        b32 append_which[SED_APPENDS_MAX];
                         b32 append_count = 0;
 
                         sed_replaced = false;
@@ -34026,10 +34162,10 @@ static b32 text_sed()
                                 case 'R':
                                 case 'r':
                                 case 'a':
-                                        if (append_count < SED_APPENDS_MAX)
+                                        if (append_count < sed_limit_appends)
                                         {
-                                                append_kind[append_count] = kind;
-                                                append_which[append_count++] =
+                                                sed_append_kind[append_count] = kind;
+                                                sed_append_which[append_count++] =
                                                     kind == 'R' ? command->writer
                                                                 : command->text;
                                         }
@@ -34186,22 +34322,22 @@ cycle_done:
 
                         for (b32 c = 0; c < append_count; c++)
                         {
-                                if (append_kind[c] == 'R')
+                                if (sed_append_kind[c] == 'R')
                                 {
-                                        sed_put_reader_line((b32)append_which[c]);
+                                        sed_put_reader_line((b32)sed_append_which[c]);
                                         continue;
                                 }
 
-                                if (append_kind[c] == 'r')
+                                if (sed_append_kind[c] == 'r')
                                 {
-                                        sed_put_file(sed_text + append_which[c]);
+                                        sed_put_file(sed_text + sed_append_which[c]);
                                         continue;
                                 }
 
                                 sed_output_start();
                                 if (unlikely(sed_output_state & (SED_OUTPUT_MODELLING | SED_OUTPUT_PENDING)))
-                                        sed_stdio_line(sed_text + append_which[c]);
-                                text_put_string(sed_text + append_which[c]);
+                                        sed_stdio_line(sed_text + sed_append_which[c]);
+                                text_put_string(sed_text + sed_append_which[c]);
                                 text_put_character('\n');
                         }
 
@@ -34289,7 +34425,7 @@ cycle_done:
         two spaces before b and not at b. That is what -b is for, and what
         makes -k2 and -k2b different keys.
 */
-#define SORT_KEYS_MAX 256
+#define SORT_KEYS_MAX 8192
 
 /*
         Which of the orderings a key is in, and which bytes it never sees.
@@ -34339,7 +34475,8 @@ typedef struct
         bool traditional;
 } sort_key;
 
-static sort_key sort_keys[SORT_KEYS_MAX];
+static sort_key (address_to sort_keys_held)[SORT_KEYS_MAX];
+#define sort_keys UTILITY_HELD(sort_keys)
 static b32 sort_key_count;
 static bool sort_reverse;
 static bool sort_unique;
@@ -41678,6 +41815,22 @@ static b32 text_cmp()
         if (string_equals(left_name, right_name) && skip_left == skip_right &&
             !string_equals(left_name, "-"))
                 return cmp_ends(0);
+
+        //      -s asks for the status and nothing else, and two regular files
+        //      of different sizes differ: as GNU's cmp does, it says so without
+        //      reading either, which for a pair of a hundred megabytes was the
+        //      difference between thirty microseconds and seven milliseconds.
+        if (silent && limit == TEXT_UNSET && !string_equals(left_name, "-") &&
+            !string_equals(right_name, "-"))
+        {
+                positive one;
+                positive two;
+
+                if (text_regular_size(cmp_left.handle, address_of one) &&
+                    text_regular_size(cmp_right.handle, address_of two) &&
+                    (one > skip_left ? one - skip_left : 0) != (two > skip_right ? two - skip_right : 0))
+                        return cmp_ends(1);
+        }
 
         cmp_pass(address_of cmp_left, skip_left);
         cmp_pass(address_of cmp_right, skip_right);

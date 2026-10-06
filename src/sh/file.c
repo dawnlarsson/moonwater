@@ -9191,6 +9191,11 @@ static p8 (address_to ls_arena_held)[LS_ARENA];
         did not need, so trees that used to be refused now list.
 */
 #define LS_BELOW_ARENA (1 << 22)
+//      How deep -R goes before it says a tree is nested too deep: a path is
+//      at most FILE_PATH_MAX bytes and so at most half that many levels, and
+//      this is past it.
+#define LS_DEPTH_MAX (1 << 16)
+static p8 ls_path_shared[FILE_PATH_MAX];
 static p8 (address_to ls_below_names_held)[LS_BELOW_ARENA];
 #define ls_below_names (*ls_below_names_held)
 static positive ls_below_used;
@@ -12310,21 +12315,35 @@ static fn ls_below(string_address path, positive depth)
         //      this and these names are still being read.
         ls_below_used = mark + kept;
 
+        //      The path of the level below is the path of this one and a name,
+        //      so one buffer holds all of them, each level putting its name on
+        //      the end and taking it off again: a tree nested a thousand deep
+        //      is a thousand names and not a thousand copies of the path.
+        bool fits = string_length(path) < FILE_PATH_MAX;
+
+        if (fits && path != ls_path_shared)
+        {
+                string_copy_end(ls_path_shared, path);
+                path = ls_path_shared;
+        }
+
+        positive here = fits ? string_length(path) : 0;
         positive at = 0;
 
         for (positive i = 0; i < found; i++)
         {
-                p8 below[FILE_PATH_MAX];
                 string_address name = ls_below_names + mark + at;
+                positive length = string_length(name);
 
-                at += string_length(name) + 1;
+                at += length + 1;
 
                 // A tree that links into itself stops here, and says so.
                 // It used to be the stack that stopped it -- each level held
                 // its names there -- and the cap is what kept that from
-                // being a crash. The names are in an arena now, so this is
-                // the only thing standing between a symlink loop and a walk
-                // that never ends.
+                // being a crash. The names are in an arena now, and each
+                // level costs a name and a few words of stack, so the cap is
+                // far past any tree there is and is only what stands between
+                // a symlink loop and a walk that never ends.
                 if (depth == 0)
                 {
                         string_format(log_error, "%s: '%w/%w' is nested too deep\n", ls_program,
@@ -12334,7 +12353,9 @@ static fn ls_below(string_address path, positive depth)
                         continue;
                 }
 
-                if (!file_path_join(below, path, name))
+                positive slash = here && path[here - 1] != '/' ? 1 : 0;
+
+                if (!fits || here + slash + length >= FILE_PATH_MAX)
                 {
                         string_format(log_error, "%s: cannot open directory '%w/%w': %s\n",
                                       ls_program, writer_terminal_quoted_name, path,
@@ -12344,21 +12365,27 @@ static fn ls_below(string_address path, positive depth)
                         continue;
                 }
 
-                ls_directory(below, true, depth - 1, false);
+                if (slash)
+                        ls_path_shared[here] = '/';
+
+                memory_copy_apart(ls_path_shared + here + slash, name, length + 1);
+                ls_directory(ls_path_shared, true, depth - 1, false);
+                ls_path_shared[here] = end;
         }
 
         ls_below_used = mark;
 }
 
-// A directory that will not open is answered with 2 when it was named on
-// the command line and 1 when -R met it on the way down, as the reference
-// ls answers; one already listed under -R is named and passed over.
-static fn ls_directory(string_address path, bool heading, positive depth,
-                       bool named)
+//      One directory's listing, out of line so that the buffer its walk holds
+//      (a block of the kernel's records) is the listing's and not every level
+//      of -R's: a tree nested a thousand deep is a thousand of these frames
+//      for the descent, and the descent has the names and nothing else.
+//      Answers whether there is a directory to go below.
+static __attribute__((noinline)) bool ls_list_one(string_address path, bool heading,
+                                                  bool named, positive active)
 {
         file_walk walk;
         file_facts identity;
-        positive active = ls_active_depth;
 
         if (ls_recursive && file_look_at(path, address_of identity) &&
             ls_already_listed(address_of identity))
@@ -12366,7 +12393,7 @@ static fn ls_directory(string_address path, bool heading, positive depth,
                 string_format(log_error, "%s: %w: not listing already-listed directory\n",
                               ls_program, writer_terminal_name, path);
                 ls_status = 2;
-                return;
+                return false;
         }
 
         if (!file_walk_open(address_of walk, AT_FDCWD, path))
@@ -12378,7 +12405,7 @@ static fn ls_directory(string_address path, bool heading, positive depth,
                 else
                         ls_minor();
                 ls_active_depth = active;
-                return;
+                return false;
         }
 
         ls_count = 0;
@@ -12411,7 +12438,7 @@ static fn ls_directory(string_address path, bool heading, positive depth,
         if (ls_broken)
         {
                 ls_active_depth = active;
-                return;
+                return false;
         }
 
         ls_sort();
@@ -12454,6 +12481,19 @@ static fn ls_directory(string_address path, bool heading, positive depth,
         ls_written = true;
 
         ls_print(path);
+        return true;
+}
+
+// A directory that will not open is answered with 2 when it was named on
+// the command line and 1 when -R met it on the way down, as the reference
+// ls answers; one already listed under -R is named and passed over.
+static fn ls_directory(string_address path, bool heading, positive depth,
+                       bool named)
+{
+        positive active = ls_active_depth;
+
+        if (!ls_list_one(path, heading, named, active))
+                return;
 
         if (ls_recursive)
                 ls_below(path, depth);
@@ -13335,7 +13375,7 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
                 }
                 else
                         ls_directory((string_address) ".", ls_recursive,
-                                     FILE_MAX_DEPTH, true);
+                                     LS_DEPTH_MAX, true);
 
                 ls_color_finish();
                 ls_dired_finish();
@@ -13445,7 +13485,7 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
                 string_address name = names + at;
 
                 at += string_length(name) + 1;
-                ls_directory(name, headings, FILE_MAX_DEPTH, true);
+                ls_directory(name, headings, LS_DEPTH_MAX, true);
         }
 
         ls_color_finish();
@@ -13886,8 +13926,13 @@ static b32 file_nice()
         -ok and -printf are not here: -ok asks a question of a terminal, and
         -printf is a second format language. Both would be their own work.
 */
-#define FIND_BATCH_WORDS 256
-#define FIND_BATCH_BYTES 32768
+//      How much one -exec ... + hands a command: GNU's takes what the kernel
+//      allows an argument list, a couple of hundred kilobytes of names, and
+//      fifty thousand files are three runs of the command. A batch of two
+//      hundred and fifty-six names was two hundred of them, each a program
+//      started.
+#define FIND_BATCH_WORDS 8192
+#define FIND_BATCH_BYTES (192 << 10)
 
 typedef struct
 {
@@ -13912,6 +13957,29 @@ typedef struct
         string_address word[FIND_BATCH_WORDS + 1];
         p8 text[FIND_BATCH_BYTES];
 } find_batch;
+
+//      What a batch may hold of names: the kernel gives an argument list a
+//      quarter of the stack limit, and the names and their pointers have to
+//      fit in it with the environment, so an eighth of the limit is the most
+//      taken, and the whole of the room above where that is more.
+static positive find_batch_bytes_held;
+
+static positive find_batch_bytes()
+{
+        if (!find_batch_bytes_held)
+        {
+                positive limits[2] = {0, 0};
+                positive room = FIND_BATCH_BYTES;
+
+                if (!system_call_4(syscall(prlimit64), 0, 3, 0, (positive)limits) &&
+                    limits[0] && limits[0] != ~(positive)0 && limits[0] / 8 < room)
+                        room = limits[0] / 8 > 4096 ? limits[0] / 8 : 4096;
+
+                find_batch_bytes_held = room;
+        }
+
+        return find_batch_bytes_held;
+}
 
 static find_node address_to find_nodes;
 static positive find_node_room;
@@ -14862,8 +14930,10 @@ static b32 find_parse_primary(positive depth)
                                 log_error("find: out of memory while reading -exec\n", 0);
                                 goto bad;
                         }
-                        find_batches[find_batch_have] = (find_batch){
-                            .node = index, .directory = -1};
+                        find_batches[find_batch_have].node = index;
+                        find_batches[find_batch_have].directory = -1;
+                        find_batches[find_batch_have].words = 0;
+                        find_batches[find_batch_have].used = 0;
                         node->unit = (b32)find_batch_have++;
                 }
                 break;
@@ -15311,7 +15381,7 @@ static fn find_batch_add(find_node address_to node, string_address path)
         }
 
         if (batch->words + room + 2 > FIND_BATCH_WORDS ||
-            batch->used + length + 1 > FIND_BATCH_BYTES)
+            batch->used + length + 1 > find_batch_bytes())
                 find_batch_run(node->unit);
 
         if (in_directory && batch->directory < 0)
@@ -32737,8 +32807,19 @@ static bool shuf_seen(p8 letter, string_address value)
                 positive lines;
 
                 if (!file_unsigned_decimal(value, address_of lines))
+                {
+                        //      A count too large for a number is no ceiling at
+                        //      all, as the reference reads it, and a run of
+                        //      digits is all that is let through: what is not
+                        //      a number is still refused.
+                        positive digits = string_span_of_set(value, "0123456789");
+
+                        if (digits && !value[digits])
+                                return true;
+
                         return string_report(log_error, false,
                                              "shuf: invalid line count: '%w'\n", writer_terminal_quoted_name, value);
+                }
 
                 if (!shuf_limited || lines < shuf_wanted)
                         shuf_wanted = lines;

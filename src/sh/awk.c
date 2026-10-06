@@ -859,12 +859,18 @@ enum
         AWK_OFMT
 };
 
-#define AWK_GLOBALS_MAX 1024
-#define AWK_FRAME_MAX 32768
-#define AWK_LOCALS_MAX 128
+//      gawk has no table of variables, functions, rules or parameters to
+//      fill, and a generated program can name ten thousand of each. The
+//      tables are bss a program that does not reach them never touches,
+//      and the frames are a mapping made when the first function is called.
+#define AWK_GLOBALS_MAX 32768
+#define AWK_FRAME_MAX (1 << 22)
+#define AWK_LOCALS_MAX 4096
 
-static awk_cell awk_globals[AWK_GLOBALS_MAX];
-static awk_text address_to awk_global_names[AWK_GLOBALS_MAX];
+static awk_cell (address_to awk_globals_held)[AWK_GLOBALS_MAX];
+#define awk_globals UTILITY_HELD(awk_globals)
+static awk_text address_to (address_to awk_global_names_held)[AWK_GLOBALS_MAX];
+#define awk_global_names UTILITY_HELD(awk_global_names)
 static p8 awk_global_meaning[AWK_GLOBALS_MAX];
 static b32 awk_global_count;
 
@@ -905,12 +911,21 @@ static b32 awk_where_argc;
 
 static fn awk_flush_everything();
 
-static b32 awk_global_find(string_address name, positive length)
-{
-        for (b32 i = 0; i < awk_global_count; i++)
-                if (awk_text_is(awk_global_names[i], name, length))
-                        return i;
+//      A program names a dozen variables, and a walk of those is as quick as
+//      anything. Past that the names are found by their hash in a table twice
+//      the size of the most there can be, one slot a variable holding its
+//      index and one more, so that a program of ten thousand is ten thousand
+//      looks and not fifty million. The table is built when the walk gets
+//      long and the page of it a name lands on is touched only then, so a
+//      small program pays nothing for room it does not use.
+#define AWK_GLOBAL_LINEAR 48
+#define AWK_GLOBAL_SLOTS (AWK_GLOBALS_MAX * 2)
+static b32 (address_to awk_global_slots_held)[AWK_GLOBAL_SLOTS];
+#define awk_global_slots UTILITY_HELD(awk_global_slots)
+static bool awk_global_hashed;
 
+static b32 awk_global_make(string_address name, positive length)
+{
         if (awk_global_count == AWK_GLOBALS_MAX)
                 awk_die(null, "too many variables");
 
@@ -920,6 +935,50 @@ static b32 awk_global_find(string_address name, positive length)
         awk_globals[which].kind = AWK_CELL_UNKNOWN;
         awk_globals[which].value.state = AWK_UNSET;
         return which;
+}
+
+static positive awk_global_slot(string_address name, positive length)
+{
+        positive slot = (positive)memory_hash_33(name, length) & (AWK_GLOBAL_SLOTS - 1);
+
+        while (awk_global_slots[slot] &&
+               !awk_text_is(awk_global_names[awk_global_slots[slot] - 1], name, length))
+                slot = (slot + 1) & (AWK_GLOBAL_SLOTS - 1);
+
+        return slot;
+}
+
+static b32 awk_global_find(string_address name, positive length)
+{
+        if (!awk_global_hashed)
+        {
+                for (b32 i = 0; i < awk_global_count; i++)
+                        if (awk_text_is(awk_global_names[i], name, length))
+                                return i;
+
+                b32 made = awk_global_make(name, length);
+
+                if (awk_global_count > AWK_GLOBAL_LINEAR)
+                {
+                        for (b32 i = 0; i < awk_global_count; i++)
+                                awk_global_slots[awk_global_slot(awk_global_names[i]->text,
+                                                                 awk_global_names[i]->length)] = i + 1;
+
+                        awk_global_hashed = true;
+                }
+
+                return made;
+        }
+
+        positive slot = awk_global_slot(name, length);
+
+        if (awk_global_slots[slot])
+                return awk_global_slots[slot] - 1;
+
+        b32 made = awk_global_make(name, length);
+
+        awk_global_slots[slot] = made + 1;
+        return made;
 }
 
 static awk_cell address_to awk_cell_of(b32 index)
@@ -988,8 +1047,12 @@ static decimal awk_global_number(b32 which)
         which is what keeps a program compiled at parse time valid for the
         whole run.
 */
-#define AWK_REGEX_KEPT 32
-#define AWK_REGEX_CACHED 6
+//      Past the kept ones a pattern is compiled again every time it is asked
+//      for: a program with fifty /re/ rules read every record twice as slowly
+//      as gawk, and every rule past the cache's size cost a compile a record.
+//      The pool holds five hundred programs, and these take up to half of it.
+#define AWK_REGEX_KEPT 384
+#define AWK_REGEX_CACHED 32
 
 static regex_program awk_regex_kept[AWK_REGEX_KEPT];
 static b32 awk_regex_kept_count;
@@ -1025,7 +1088,13 @@ static fn awk_regex_build(regex_program address_to into, string_address pattern)
 
 static regex_program address_to awk_regex_keep(string_address pattern)
 {
-        if (awk_regex_kept_count == AWK_REGEX_KEPT)
+        //      Past half of what the pool holds the rest are left to the cache,
+        //      which gives its room back when it fills, so that a program of a
+        //      few hundred long expressions is slow where it was slow and not
+        //      refused where it was run.
+        if (awk_regex_kept_count == AWK_REGEX_KEPT ||
+            regex_retained.nodes > RX_NODE_MAX / 2 || regex_retained.sets > RX_SET_MAX / 2 ||
+            regex_retained.hints > RX_HINT_MAX / 2)
                 return null;
 
         regex_program address_to into = address_of awk_regex_kept[awk_regex_kept_count++];
@@ -1306,6 +1375,11 @@ static fn awk_field_from_piece(awk_value address_to field,
                                     piece.length);
 }
 
+//      Whether the program names NF anywhere, in its text or on the command
+//      line. With that and the fields it names, parsed, what it can ask a
+//      record for is known before the first one is read.
+static bool awk_nf_named;
+
 static fn awk_split_record()
 {
         // This record is authoritative again. A separator retained from a
@@ -1316,6 +1390,16 @@ static fn awk_split_record()
 
                 awk_record_separator = null;
                 awk_text_drop(prior);
+        }
+
+        //      A program that names no field and not NF has nothing to ask the
+        //      pieces of a record, and finding them -- every separator of every
+        //      line -- was most of what {n++} and {s += length($0)} cost over a
+        //      large file, twice what gawk's, which splits when it is asked.
+        if (!awk_fields_computed && !awk_fields_fixed && !awk_nf_named)
+        {
+                awk_record_stale = false;
+                return;
         }
 
         positive separator_length;
@@ -3471,9 +3555,10 @@ typedef struct
         bool defined;
 } awk_function;
 
-#define AWK_FUNCTIONS_MAX 256
+#define AWK_FUNCTIONS_MAX 8192
 
-static awk_function awk_functions[AWK_FUNCTIONS_MAX];
+static awk_function (address_to awk_functions_held)[AWK_FUNCTIONS_MAX];
+#define awk_functions UTILITY_HELD(awk_functions)
 static b32 awk_function_count;
 
 static awk_text address_to awk_local_names[AWK_LOCALS_MAX];
@@ -3497,9 +3582,10 @@ enum
         RULE_PLAIN
 };
 
-#define AWK_RULES_MAX 512
+#define AWK_RULES_MAX 16384
 
-static awk_rule awk_rules[AWK_RULES_MAX];
+static awk_rule (address_to awk_rules_held)[AWK_RULES_MAX];
+#define awk_rules UTILITY_HELD(awk_rules)
 static b32 awk_rule_count;
 // Where the parser stands: the kind of rule whose action this is, and how
 // many loops deep, for the statements that are only allowed in one place.
@@ -3522,15 +3608,24 @@ static b32 awk_resolve(awk_text address_to name)
                         if (awk_text_is(awk_local_names[i], name->text, name->length))
                                 return -(i + 1);
 
-        return awk_global_find(name->text, name->length);
+        b32 which = awk_global_find(name->text, name->length);
+
+        if (which == awk_where_nf)
+                awk_nf_named = true;
+
+        return which;
 }
 
-static b32 awk_function_named(awk_text address_to name)
-{
-        for (b32 i = 0; i < awk_function_count; i++)
-                if (awk_text_is(awk_functions[i].name, name->text, name->length))
-                        return i;
+//      The same for functions: a walk while there are few, a table of hashes
+//      when there are many.
+#define AWK_FUNCTION_LINEAR 32
+#define AWK_FUNCTION_SLOTS (AWK_FUNCTIONS_MAX * 2)
+static b32 (address_to awk_function_slots_held)[AWK_FUNCTION_SLOTS];
+#define awk_function_slots UTILITY_HELD(awk_function_slots)
+static bool awk_function_hashed;
 
+static b32 awk_function_make(awk_text address_to name)
+{
         if (awk_function_count == AWK_FUNCTIONS_MAX)
                 awk_syntax("too many functions");
 
@@ -3541,6 +3636,50 @@ static b32 awk_function_named(awk_text address_to name)
         awk_functions[which].body = null;
         awk_functions[which].defined = false;
         return which;
+}
+
+static positive awk_function_slot(string_address name, positive length)
+{
+        positive slot = (positive)memory_hash_33(name, length) & (AWK_FUNCTION_SLOTS - 1);
+
+        while (awk_function_slots[slot] &&
+               !awk_text_is(awk_functions[awk_function_slots[slot] - 1].name, name, length))
+                slot = (slot + 1) & (AWK_FUNCTION_SLOTS - 1);
+
+        return slot;
+}
+
+static b32 awk_function_named(awk_text address_to name)
+{
+        if (!awk_function_hashed)
+        {
+                for (b32 i = 0; i < awk_function_count; i++)
+                        if (awk_text_is(awk_functions[i].name, name->text, name->length))
+                                return i;
+
+                b32 made = awk_function_make(name);
+
+                if (awk_function_count > AWK_FUNCTION_LINEAR)
+                {
+                        for (b32 i = 0; i < awk_function_count; i++)
+                                awk_function_slots[awk_function_slot(awk_functions[i].name->text,
+                                                                     awk_functions[i].name->length)] = i + 1;
+
+                        awk_function_hashed = true;
+                }
+
+                return made;
+        }
+
+        positive slot = awk_function_slot(name->text, name->length);
+
+        if (awk_function_slots[slot])
+                return awk_function_slots[slot] - 1;
+
+        b32 made = awk_function_make(name);
+
+        awk_function_slots[slot] = made + 1;
+        return made;
 }
 
 typedef struct
@@ -6316,7 +6455,10 @@ static bool awk_assignment(string_address text, positive length)
         awk_globals[where].kind = AWK_CELL_SCALAR;
 
         if (awk_global_meaning[where] == AWK_NF)
+        {
+                awk_nf_named = true;
                 awk_nf_written(awk_whole(awk_global_number(where)));
+        }
 
         awk_text_drop(name);
         return true;

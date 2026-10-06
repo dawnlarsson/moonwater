@@ -10519,7 +10519,7 @@ release:
 #define DUMP_CANONICAL_WIDTH 16
 #define DUMP_DEFAULT_WIDTH 16
 #define DUMP_LINE_MAX (DUMP_BLOCK * 10 + 64)
-#define DUMP_FORMAT_MAX 16
+#define DUMP_FORMAT_MAX 4096
 #define DUMP_INTEGER 0
 #define DUMP_CHARACTER 1
 #define DUMP_CANONICAL 2
@@ -10547,7 +10547,6 @@ typedef struct
 
 typedef struct
 {
-        dump_format format[DUMP_FORMAT_MAX];
         positive count;
         positive skip;
         positive limit;
@@ -10565,6 +10564,8 @@ typedef struct
 } dump_options;
 
 static dump_options dump_arguments;
+static dump_format (address_to dump_formats_held)[DUMP_FORMAT_MAX];
+#define dump_formats UTILITY_HELD(dump_formats)
 
 static fn dump_add(dump_format format)
 {
@@ -10574,7 +10575,7 @@ static fn dump_add(dump_format format)
                 return;
         }
 
-        dump_arguments.format[dump_arguments.count++] = format;
+        dump_formats[dump_arguments.count++] = format;
 }
 
 static fn dump_add_integer(positive base, positive size, positive width,
@@ -10994,7 +10995,7 @@ static p8 dump_od_types(string_address word)
                            the character kinds are no exception. */
                         if (word[at] == 'z')
                         {
-                                dump_arguments.format[dump_arguments.count - 1]
+                                dump_formats[dump_arguments.count - 1]
                                     .printable = true;
                                 at++;
                         }
@@ -11056,7 +11057,7 @@ static p8 dump_od_types(string_address word)
                                 return DUMP_OD_TYPE_TOO_MANY;
                         if (word[at] == 'z')
                         {
-                                dump_arguments.format[dump_arguments.count - 1]
+                                dump_formats[dump_arguments.count - 1]
                                     .printable = true;
                                 at++;
                         }
@@ -11163,8 +11164,8 @@ static bool dump_od_row_width()
         positive unit = 1;
 
         for (positive at = 0; at < dump_arguments.count; at++)
-                if (dump_arguments.format[at].size > unit)
-                        unit = dump_arguments.format[at].size;
+                if (dump_formats[at].size > unit)
+                        unit = dump_formats[at].size;
 
         if (!dump_arguments.width_given)
         {
@@ -12202,7 +12203,7 @@ static fn dump_row(p8 address_to bytes, positive length, positive address)
 {
         for (positive at = 0; at < dump_arguments.count; at++)
         {
-                dump_format address_to format = dump_arguments.format + at;
+                dump_format address_to format = dump_formats + at;
 
                 if (format->kind == DUMP_CANONICAL)
                         dump_canonical_line(bytes, length, address);
@@ -12346,7 +12347,7 @@ static b32 dump_run(positive first, positive count)
 
         for (positive at = 0; at < dump_arguments.count; at++)
         {
-                dump_format address_to other = dump_arguments.format + at;
+                dump_format address_to other = dump_formats + at;
                 positive span = (other->width + 1) * (width / other->size);
 
                 if (span > widest)
@@ -12354,7 +12355,7 @@ static b32 dump_run(positive first, positive count)
         }
         for (positive at = 0; at < dump_arguments.count; at++)
         {
-                dump_format address_to other = dump_arguments.format + at;
+                dump_format address_to other = dump_formats + at;
                 positive fields = width / other->size;
 
                 other->pad = widest - other->width * fields;
@@ -12852,7 +12853,7 @@ static b32 tools_hexdump(void)
         if (!dump_arguments.count)
                 dump_add_integer(16, 2, 4, 1, false, true, false, true);
 
-        if (dump_arguments.format[0].kind == DUMP_CANONICAL)
+        if (dump_formats[0].kind == DUMP_CANONICAL)
                 dump_arguments.address_width = 8;
 
         return dump_run(taking.first, (positive)text_argument_count);
@@ -14091,6 +14092,25 @@ static b32 diff_pair(string_address left, string_address right)
         memory_fill(a, 0, sizeof(diff_side));
         memory_fill(b, 0, sizeof(diff_side));
 
+        //      Two regular files of different sizes differ, and where nothing
+        //      is ignored that is the whole answer to -q: neither has to be
+        //      read, as GNU does not read them. Ten megabytes of each were read
+        //      to say it.
+        if (diff_brief && !diff_icase && diff_space == DIFF_SPACE_NONE &&
+            !diff_blank_lines && !diff_trailing && !diff_tabs && !diff_strip_cr)
+        {
+                file_facts first;
+                file_facts second;
+
+                if (file_look_at(left, address_of first) && file_look_at(right, address_of second) &&
+                    (first.mode & MODE_FORMAT) == MODE_FILE && (second.mode & MODE_FORMAT) == MODE_FILE &&
+                    first.size != second.size)
+                {
+                        diff_announce("Files ", left, right, " differ\n");
+                        return 1;
+                }
+        }
+
         if (!diff_slurp(a, left, diff_new_file || diff_new_file_left) ||
             !diff_slurp(b, right, diff_new_file))
                 return 2;
@@ -14641,6 +14661,9 @@ static const argument_option diff_options[] = {
     {"text", 'a'},
     {"strip-trailing-cr", 'R', ARGUMENT_LONG_ONLY},
     {"speed-large-files", 'h', ARGUMENT_LONG_ONLY},
+    // The script this finds is the shortest there is, so asking for it is
+    // taking what is already given.
+    {"minimal", 'd'},
     {"label", 'L', ARGUMENT_REQUIRED},
     {"U", 0, ARGUMENT_REQUIRED},
     {"u", 0},
