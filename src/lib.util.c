@@ -151,6 +151,51 @@
                 return _variadic_answer;                                     \
         }
 
+#ifndef KERNEL_MODE
+/*      A statement that runs when the scope it is written in is left: by a
+        return, a break or a continue, or by falling off the end. They run in
+        the reverse of the order they were written, so what a later one needs
+        is still there. It is the cleanup a ladder of early returns writes out
+        before every one of them -- close the socket, give the block back,
+        wipe the key -- said once at the place the resource is taken.
+
+                scope_exit(socket_close(handle));
+                if (cannot(handle))
+                        return -ERROR_INPUT_OUTPUT;
+
+        A resource that is handed on when all goes well is kept from it:
+
+                bool kept = false;
+                scope_exit(if (!kept) socket_close(handle));
+                ...
+                kept = true;
+                return handle;
+
+        What it is, and what it is not for. It is a nested function the
+        compiler calls at every exit, so it names the variables written above
+        it and nothing below. The return value is worked out before it runs:
+        a lock it releases is still held while the return's own report is
+        written, so a function that must not hold one there leaves a braced
+        region and releases at its closing brace. Nothing runs on exit(),
+        _exit(), a signal that kills or a longjmp, and a child that returns
+        from a vfork or a clone runs it in the parent's frame, so none is
+        written in one. A goto that jumps over one skips it without a word
+        from the compiler under -Wall: no function that has a goto or a label
+        has one. Ring 0 has none (it has the kernel's guard()). */
+#define scope_name_(base, id) base##id
+#define scope_name(base, id) scope_name_(base, id)
+#define scope_exit_at(id, ...) \
+        auto void scope_name(scope_run_, id)(char *); \
+        char scope_name(scope_var_, id) \
+            __attribute__((cleanup(scope_name(scope_run_, id)), unused)); \
+        void scope_name(scope_run_, id)(char *scope_unused) \
+        { \
+                (void)scope_unused; \
+                __VA_ARGS__; \
+        }
+#define scope_exit(...) scope_exit_at(__COUNTER__, __VA_ARGS__)
+#endif // KERNEL_MODE
+
 //      One digit for a base that is folded. Anything that is not a digit of
 //      that base answers the base itself, which no digit of it can be.
 static inline INLINE positive digit_known(p8 character, positive base)

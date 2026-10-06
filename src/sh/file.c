@@ -5869,6 +5869,7 @@ static bool locale_read_all(string_address path, byte_store address_to into)
 
         if (handle < 0)
                 return false;
+        scope_exit(system_close((positive)handle));
         into->used = 0;
         for (;;)
         {
@@ -5878,18 +5879,11 @@ static bool locale_read_all(string_address path, byte_store address_to into)
                 bipolar got = system_read_retry((positive)handle, into->bytes + into->used, 4096);
 
                 if (got < 0)
-                {
-                        system_close((positive)handle);
                         return false;
-                }
                 if (!got)
-                {
-                        system_close((positive)handle);
                         return into->used >= 8;
-                }
                 into->used += (positive)got;
         }
-        system_close((positive)handle);
         return false;
 }
 
@@ -7901,6 +7895,7 @@ static COLD bipolar file_staged_name_publish(
                 file_staged_name_abort(stage);
                 return directory;
         }
+        scope_exit(if (directory >= 0) system_close(directory));
 
         /* A device or FIFO written in place has no data of its own to
            sync, and fsync on one answers EINVAL. */
@@ -7911,25 +7906,18 @@ static COLD bipolar file_staged_name_publish(
         if (synced < 0)
         {
                 file_staged_name_abort(stage);
-                if (sync)
-                        system_close(directory);
                 return synced;
         }
 
         bipolar published = file_staged_name_finish(stage, true, 0);
         if (published < 0 || !sync)
-        {
-                if (sync)
-                        system_close(directory);
                 return published < 0 ? published : 0;
-        }
 
         /* The rename above committed the caller-visible result.  Sync and
            close still strengthen crash durability, but neither can turn that
            published name back into a pre-publication failure for callers that
            would otherwise roll back unrelated state. */
         (void)system_call_1(syscall(fsync), (positive)directory);
-        (void)system_close(directory);
         return 0;
 }
 
@@ -8146,22 +8134,16 @@ static bipolar file_replace_decided_at(
             O_PATH | O_NOFOLLOW | O_CLOEXEC);
         if (from_handle < 0)
                 return from_handle;
+        scope_exit(system_close(from_handle));
 
         bipolar replaced_handle = file_open_same(
             to_directory, to, replaced,
             O_PATH | O_NOFOLLOW | O_CLOEXEC);
         if (replaced_handle < 0)
-        {
-                system_close(from_handle);
                 return replaced_handle;
-        }
+        scope_exit(system_close(replaced_handle));
 
-        bipolar result = system_rename_at(
-            from_directory, from, to_directory, to, 0);
-
-        system_close(replaced_handle);
-        system_close(from_handle);
-        return result;
+        return system_rename_at(from_directory, from, to_directory, to, 0);
 }
 
 /* Whether a name is still the object a descriptor was proved to be, when
@@ -8687,15 +8669,15 @@ static bipolar file_parents_ensure_open(string_address dest_dir,
                 return held;
         }
 
+        bool kept = false;
+        scope_exit(if (!kept) system_close(held));
+
         //      All there already: GNU looks no further, and gives nothing
         //      on the way any attribute.
         bipolar whole = system_open_at(held, work[0] == '/' ? work + 1 : work,
                                        flags);
         if (whole >= 0)
-        {
-                system_close(held);
                 return whole;
-        }
 
         positive keeps = file_keeps;
         positive depth = 0;
@@ -8712,10 +8694,7 @@ static bipolar file_parents_ensure_open(string_address dest_dir,
                 if (!named)
                         continue;
                 if (named >= sizeof(component))
-                {
-                        system_close(held);
                         return -ERROR_NAME_TOO_LONG;
-                }
                 memory_copy_apart(component, work + start, named);
                 component[named] = end;
                 depth++;
@@ -8723,10 +8702,7 @@ static bipolar file_parents_ensure_open(string_address dest_dir,
                 if (src_prefix[0])
                 {
                         if (!file_path_join(joined, src_prefix, component))
-                        {
-                                system_close(held);
                                 return -ERROR_NAME_TOO_LONG;
-                        }
                         memory_copy_apart_end(src_prefix, joined,
                                               string_length(joined));
                 }
@@ -8739,10 +8715,7 @@ static bipolar file_parents_ensure_open(string_address dest_dir,
                         memory_copy_apart_end(src_prefix, component, named);
 
                 if (!file_path_join(joined, dest_prefix, component))
-                {
-                        system_close(held);
                         return -ERROR_NAME_TOO_LONG;
-                }
                 memory_copy_apart_end(dest_prefix, joined, string_length(joined));
                 if (failed)
                         memory_copy_apart_end(failed, dest_prefix,
@@ -8764,7 +8737,6 @@ static bipolar file_parents_ensure_open(string_address dest_dir,
                         {
                                 if (next >= 0)
                                         system_close(next);
-                                system_close(held);
                                 file_path_failed("cp", "failed to get attributes of",
                                                  writer_shell_quoted_name, src_prefix, looked, 0);
                                 address_to said = true;
@@ -8797,16 +8769,10 @@ static bipolar file_parents_ensure_open(string_address dest_dir,
                         bipolar made = system_make_directory_at(
                             held, component, wanted);
                         if (made < 0 && made != -ERROR_EXISTS)
-                        {
-                                system_close(held);
                                 return made;
-                        }
                         next = system_open_at(held, component, flags);
                         if (next < 0)
-                        {
-                                system_close(held);
                                 return next;
-                        }
                         if (made >= 0 && cp_loud)
                                 string_format(log, "%s -> %s\n", src_prefix,
                                               dest_prefix);
@@ -8837,7 +8803,6 @@ static bipolar file_parents_ensure_open(string_address dest_dir,
                 else if (next == -ERROR_NOT_DIRECTORY ||
                          next == -ERROR_LOOP)
                 {
-                        system_close(held);
                         string_format(log_error,
                                       "cp: %w exists but is not a directory\n",
                                       writer_shell_quoted_name, dest_prefix);
@@ -8845,15 +8810,13 @@ static bipolar file_parents_ensure_open(string_address dest_dir,
                         return -ERROR_NOT_DIRECTORY;
                 }
                 else if (next < 0)
-                {
-                        system_close(held);
                         return next;
-                }
                 if (record)
                         record->handle = system_open_at(next, (string_address) ".", flags);
                 system_close(held);
                 held = next;
         }
+        kept = true;
         return held;
 }
 
@@ -15281,15 +15244,13 @@ static fn find_batch_run(positive slot)
 {
         find_batch address_to batch = address_of find_batches[slot];
 
+        scope_exit(if (batch->directory >= 0)
+                   {
+                           system_close(batch->directory);
+                           batch->directory = -1;
+                   });
         if (!batch->words)
-        {
-                if (batch->directory >= 0)
-                {
-                        system_close(batch->directory);
-                        batch->directory = -1;
-                }
                 return;
-        }
 
         find_node address_to node = address_of find_nodes[batch->node];
         positive have = 0;
@@ -15301,11 +15262,6 @@ static fn find_batch_run(positive slot)
                 find_status = 1;
                 batch->words = 0;
                 batch->used = 0;
-                if (batch->directory >= 0)
-                {
-                        system_close(batch->directory);
-                        batch->directory = -1;
-                }
                 return;
         }
 
@@ -15320,11 +15276,6 @@ static fn find_batch_run(positive slot)
         if (file_run(find_exec_words, batch->directory) != 0)
                 find_status = 1;
 
-        if (batch->directory >= 0)
-        {
-                system_close(batch->directory);
-                batch->directory = -1;
-        }
         batch->words = 0;
         batch->used = 0;
 }
@@ -15468,6 +15419,7 @@ static bool find_exec_once(find_node address_to node)
         positive words = (positive)(node->extra - node->number);
         bool in_directory = node->mode == 'd' || node->mode == 'O';
         bipolar directory = in_directory ? find_exec_directory_hold() : -1;
+        scope_exit(if (directory >= 0) system_close(directory));
 
         if (in_directory && directory < 0)
         {
@@ -15482,18 +15434,12 @@ static bool find_exec_once(find_node address_to node)
             !find_exec_asked(node, node->mode == 'O'
                                        ? file_last_component(subject)
                                        : subject))
-        {
-                if (directory >= 0)
-                        system_close(directory);
                 return false;
-        }
 
         if (!shell_array_room(find_exec_words, find_exec_word_room, words + 1))
         {
                 log_error("find: out of memory while building -exec arguments\n", 0);
                 find_status = 1;
-                if (directory >= 0)
-                        system_close(directory);
                 return false;
         }
 
@@ -15508,8 +15454,6 @@ static bool find_exec_once(find_node address_to node)
                 {
                         log_error("find: -exec arguments are too large\n", 0);
                         find_status = 1;
-                        if (directory >= 0)
-                                system_close(directory);
                         return false;
                 }
                 needed += length;
@@ -15519,8 +15463,6 @@ static bool find_exec_once(find_node address_to node)
         {
                 log_error("find: out of memory while expanding -exec arguments\n", 0);
                 find_status = 1;
-                if (directory >= 0)
-                        system_close(directory);
                 return false;
         }
 
@@ -15534,10 +15476,7 @@ static bool find_exec_once(find_node address_to node)
 
         find_exec_words[have] = null;
 
-        bool complete = file_run(find_exec_words, directory) == 0;
-        if (directory >= 0)
-                system_close(directory);
-        return complete;
+        return file_run(find_exec_words, directory) == 0;
 }
 
 /*
@@ -20781,6 +20720,7 @@ static b32 file_df()
                               file_reason(reason));
                 tableless = true;
         }
+        scope_exit(df_release(address_of mounts, tableless));
 
         // POSIX spells the unit out in bytes, and GNU does even when -m chose it.
         string_address size_heading =
@@ -20843,10 +20783,7 @@ static b32 file_df()
                                                count - first, 8)) ||
             (filtering && !array_store_reserve(df_order_file, df_order_file_room, 0,
                                                count - first, 8)))
-        {
-                df_release(address_of mounts, tableless);
                 return string_report(log_error, 1, "df: out of memory\n");
-        }
 
         memory_fill(df_samples, 0, mounts.count * sizeof(*df_samples));
 
@@ -21028,7 +20965,6 @@ static b32 file_df()
            on the way that is itself the complaint. */
         if (!showing)
         {
-                df_release(address_of mounts, tableless);
                 log_flush();
                 if (!df_failed)
                         log_error("df: no file systems processed\n", 0);
@@ -21064,7 +21000,6 @@ static b32 file_df()
                 df_row((string_address) "total", (string_address) "-", sum_where, null,
                        address_of sum, true);
 
-        df_release(address_of mounts, tableless);
         log_flush();
 
         return df_failed ? 1 : 0;
@@ -22920,11 +22855,12 @@ static bool ln_unbackup(string_address name)
         return false;
 }
 
-static bool ln_make(string_address target, string_address name)
+static COLD bool ln_make(string_address target, string_address name)
 {
         p8 relative[FILE_PATH_MAX];
         file_facts source;
         bipolar source_handle = -1;
+        scope_exit(if (source_handle >= 0) system_close(source_handle));
 
         if (ln_relative && ln_symbolic)
         {
@@ -23007,21 +22943,13 @@ static bool ln_make(string_address target, string_address name)
                             (there.mode & MODE_FORMAT) != MODE_DIRECTORY)
                                 reached = -ERROR_NOT_DIRECTORY;
                         if (looks && reached == -ERROR_NOT_DIRECTORY)
-                        {
-                                if (source_handle >= 0)
-                                        system_close(source_handle);
                                 return file_path_failed("ln", "failed to access",
                                                         writer_shell_quoted_name, name, reached,
                                                         false);
-                        }
                         if (looks && reached == 0)
-                        {
-                                if (source_handle >= 0)
-                                        system_close(source_handle);
                                 return string_report(log_error, false,
                                                      "ln: %w: cannot overwrite directory\n",
                                                      writer_terminal_name, name);
-                        }
 
                         bipolar looked = file_look_code(AT_FDCWD, bare,
                                                         AT_SYMLINK_NOFOLLOW,
@@ -23037,16 +22965,13 @@ static bool ln_make(string_address target, string_address name)
                         //      before it retries the link, and a look that
                         //      fails for any reason but the name being
                         //      missing is what it reports.
-                        if (source_handle >= 0)
-                                system_close(source_handle);
                         return file_path_failed("ln", "failed to access", writer_shell_quoted_name,
                                                 name, destination_directory, false);
                 }
-                if (source_handle >= 0)
-                        system_close(source_handle);
                 return ln_failed(target, name, destination_directory);
         }
 
+        scope_exit(system_close(destination_directory));
         file_facts destination;
         bipolar destination_look = file_look_code(
             destination_directory, destination_leaf, AT_SYMLINK_NOFOLLOW,
@@ -23058,9 +22983,6 @@ static bool ln_make(string_address target, string_address name)
         if (destination_look < 0 && destination_look != -ERROR_NO_ENTRY &&
             (ln_selected.collision == 'f' || ln_selected.collision == 'i' || file_backup_kind))
         {
-                system_close(destination_directory);
-                if (source_handle >= 0)
-                        system_close(source_handle);
                 return file_path_failed("ln", "failed to access", writer_shell_quoted_name, name,
                                         destination_look, false);
         }
@@ -23075,9 +22997,6 @@ static bool ln_make(string_address target, string_address name)
         {
                 string_format(log_error, "ln: %w: cannot overwrite directory\n",
                               writer_terminal_name, name);
-                system_close(destination_directory);
-                if (source_handle >= 0)
-                        system_close(source_handle);
                 return false;
         }
 
@@ -23107,9 +23026,6 @@ static bool ln_make(string_address target, string_address name)
                               "ln: will not overwrite just-created %w with %w\n",
                               writer_shell_quoted_name, name,
                               writer_shell_quoted_name, target);
-                system_close(destination_directory);
-                if (source_handle >= 0)
-                        system_close(source_handle);
                 return false;
         }
 
@@ -23130,21 +23046,13 @@ static bool ln_make(string_address target, string_address name)
                         string_format(log_error, "ln: %w and %w are the same file\n",
                                       writer_shell_quoted_name, target,
                                       writer_shell_quoted_name, name);
-                        system_close(destination_directory);
-                        if (source_handle >= 0)
-                                system_close(source_handle);
                         return false;
                 }
         }
 
         if (ln_selected.collision == 'i' && destination_exists &&
             !file_ask((string_address)"ln", (string_address)"replace", name))
-        {
-                system_close(destination_directory);
-                if (source_handle >= 0)
-                        system_close(source_handle);
                 return false;
-        }
 
         /* Bind an interactive overwrite decision to the object that was
            shown.  An object that appears after an absent -i check is left in
@@ -23159,12 +23067,7 @@ static bool ln_make(string_address target, string_address name)
                 (string_address)"ln", destination_directory,
                 destination_leaf, name,
                 destination_exists ? address_of destination : null))
-        {
-                system_close(destination_directory);
-                if (source_handle >= 0)
-                        system_close(source_handle);
                 return false;
-        }
         if (make_backup && destination_exists && !file_backup_left)
                 destination_exists = false;
 
@@ -23180,8 +23083,6 @@ static bool ln_make(string_address target, string_address name)
                                                address_of still);
                 if (there < 0)
                 {
-                        system_close(destination_directory);
-                        system_close(source_handle);
                         ln_failed(target, name, there);
                         return ln_unbackup(name);
                 }
@@ -23195,8 +23096,6 @@ static bool ln_make(string_address target, string_address name)
                             O_PATH | O_CLOEXEC | (ln_through ? 0 : O_NOFOLLOW));
                         if (again < 0)
                         {
-                                system_close(destination_directory);
-                                system_close(source_handle);
                                 ln_failed(target, name, again);
                                 return ln_unbackup(name);
                         }
@@ -23225,9 +23124,6 @@ static bool ln_make(string_address target, string_address name)
                 {
                         file_path_failed("ln", "failed to replace", writer_shell_quoted_name, name,
                                          removed, 0);
-                        system_close(destination_directory);
-                        if (source_handle >= 0)
-                                system_close(source_handle);
                         return false;
                 }
         }
@@ -23243,10 +23139,6 @@ static bool ln_make(string_address target, string_address name)
         else
                 done = system_path_link_opened_at(
                     source_handle, destination_directory, destination_leaf);
-
-        system_close(destination_directory);
-        if (source_handle >= 0)
-                system_close(source_handle);
 
         if (done < 0)
         {
@@ -27609,6 +27501,7 @@ static b32 file_split()
                 return string_report(log_error, 1, "split: cannot open %w for reading: %s\n",
                               writer_shell_quoted_name, input_name, file_reason(in));
         }
+        scope_exit(if (in != 0) system_close(in));
 
         split_output output = {
             .prefix = prefix,
@@ -27653,8 +27546,6 @@ static b32 file_split()
                         string_format(log_error,
                                       "split: numerical suffix start value is too large for the suffix length\n");
                         split_try_help(null);
-                        if (in != 0)
-                                system_close(in);
                         return 1;
                 }
 
@@ -27677,8 +27568,6 @@ static b32 file_split()
         {
                 string_format(log_error, "split: %w: %s\n", writer_terminal_name,
                               input_name, file_reason(looked));
-                if (in != 0)
-                        system_close(in);
                 return 1;
         }
 
@@ -27692,8 +27581,6 @@ static b32 file_split()
                                   ? (string_address) "cannot determine file size: "
                                   : (string_address) "",
                               file_reason(-ERROR_IS_DIRECTORY));
-                if (in != 0)
-                        system_close(in);
                 return 1;
         }
 
@@ -27713,11 +27600,7 @@ static b32 file_split()
         */
         if (mode == 'n' && chunk.kind == SPLIT_CHUNK_RR && !chunk.k &&
             chunk.n > SPLIT_COUNT_MAX / 32)
-        {
-                if (in != 0)
-                        system_close(in);
                 return string_report(log_error, 1, "split: memory exhausted\n");
-        }
 
         bool complete = false;
 
@@ -27800,8 +27683,6 @@ static b32 file_split()
 
         if (output.stage.handle >= 0)
                 split_output_abort(address_of output);
-        if (in != 0)
-                system_close(in);
         //      Whatever runs split in this process gets SIGPIPE back as it was.
         if (filter)
                 system_signal_action(13, pipe_before, null, 8);
@@ -35524,6 +35405,7 @@ static bool cp_tree_file(bipolar source, bipolar copy, string_address name)
 
         if (in < 0)
                 return false;
+        scope_exit(system_close(in));
 
         bipolar looked = file_look_code(in, (string_address)"", AT_EMPTY_PATH, address_of facts);
 
@@ -35531,19 +35413,13 @@ static bool cp_tree_file(bipolar source, bipolar copy, string_address name)
         //      serial way, which links its later names to its first copy.
         if (looked < 0 || (facts.mode & MODE_FORMAT) != MODE_FILE ||
             cp_links_tracked(address_of facts, false))
-        {
-                system_close(in);
                 return false;
-        }
 
         bipolar out = file_copy_destination_open(
             copy, name, file_copy_creation_mode(address_of facts), false, address_of facts, true);
 
         if (out < 0)
-        {
-                system_close(in);
                 return false;
-        }
 
         bool copied = file_copy_handles_known(in, out, address_of facts);
         p8 names[FILE_XATTR_JOB_ROOM];
@@ -35564,7 +35440,6 @@ static bool cp_tree_file(bipolar source, bipolar copy, string_address name)
                                              (string_address) "cp", null, names,
                                              sizeof(names), value,
                                              sizeof(value));
-        system_close(in);
         bipolar closed = system_close(out);
 
         if (!copied || tagged < 0 || kept < 0 || closed < 0)
@@ -38747,7 +38622,7 @@ static void install_debug_unknown(void)
                 string_format(log, "copy offload: unknown, reflink: unknown, sparse detection: unknown\n");
 }
 
-static fn install_pair(string_address source, string_address destination)
+static COLD fn install_pair(string_address source, string_address destination)
 {
         static p8 source_leaf[FILE_PATH_MAX];
         file_facts from;
@@ -38793,6 +38668,7 @@ static fn install_pair(string_address source, string_address destination)
                 install_status = 1;
                 return;
         }
+        scope_exit(if (source_handle >= 0) system_close(source_handle));
 
         //      A slash on the end is held to naming a directory, as
         //      cp_slash_allowed says; the leading directories -D makes
@@ -38813,7 +38689,6 @@ static fn install_pair(string_address source, string_address destination)
                                                   destination_leaf);
         if (destination_directory < 0)
         {
-                system_close(source_handle);
                 if (!install_parents && install_loud)
                 {
                         file_backup_told(source, destination, (string_address) "'",
@@ -38829,6 +38704,7 @@ static fn install_pair(string_address source, string_address destination)
                 install_status = 1;
                 return;
         }
+        scope_exit(system_close(destination_directory));
         if (slashed)
         {
                 file_facts through;
@@ -38858,8 +38734,6 @@ static fn install_pair(string_address source, string_address destination)
                                                  writer_shell_quoted_name, destination,
                                                  -ERROR_NOT_DIRECTORY, 0);
                         }
-                        system_close(destination_directory);
-                        system_close(source_handle);
                         install_status = 1;
                         return;
                 }
@@ -38874,8 +38748,6 @@ static fn install_pair(string_address source, string_address destination)
         {
                 file_path_failed("install", "cannot inspect", writer_shell_quoted_name, destination,
                                  to_looked, 0);
-                system_close(destination_directory);
-                system_close(source_handle);
                 install_status = 1;
                 return;
         }
@@ -38897,8 +38769,6 @@ static fn install_pair(string_address source, string_address destination)
                 string_format(log_error, "install: %w and %w are the same file\n",
                               writer_shell_quoted_name, source, writer_shell_quoted_name,
                               destination);
-                system_close(destination_directory);
-                system_close(source_handle);
                 install_status = 1;
                 return;
         }
@@ -38925,8 +38795,6 @@ static fn install_pair(string_address source, string_address destination)
                                          writer_shell_quoted_name, destination, -ERROR_IS_DIRECTORY,
                                          0);
                 }
-                system_close(destination_directory);
-                system_close(source_handle);
                 install_status = 1;
                 return;
         }
@@ -38947,8 +38815,6 @@ static fn install_pair(string_address source, string_address destination)
                                                      destination_leaf, times,
                                                      AT_SYMLINK_NOFOLLOW);
                 }
-                system_close(destination_directory);
-                system_close(source_handle);
                 return;
         }
 
@@ -38965,8 +38831,6 @@ static fn install_pair(string_address source, string_address destination)
                               "install: will not overwrite just-created %w with %w\n",
                               writer_shell_quoted_name, destination,
                               writer_shell_quoted_name, source);
-                system_close(destination_directory);
-                system_close(source_handle);
                 install_status = 1;
                 return;
         }
@@ -38982,8 +38846,6 @@ static fn install_pair(string_address source, string_address destination)
                                  destination,
                                  destination_exists ? address_of to : null))
         {
-                system_close(destination_directory);
-                system_close(source_handle);
                 install_status = 1;
                 return;
         }
@@ -39005,8 +38867,6 @@ static fn install_pair(string_address source, string_address destination)
             destination_leaf, 0600);
         if (destination_handle < 0)
         {
-                system_close(destination_directory);
-                system_close(source_handle);
                 install_debug_unknown();
                 file_path_failed("install", "cannot create regular file", writer_shell_quoted_name,
                                  destination, destination_handle, 0);
@@ -39024,6 +38884,7 @@ static fn install_pair(string_address source, string_address destination)
         if (file_debug)
                 file_copy_debug_said();
         system_close(source_handle);
+        source_handle = -1;
         //      Under -s the copy stays 0600 until strip has run, since
         //      a strip that rewrites its file may not open a read-only one;
         //      the attributes are given after it, as GNU gives them.
@@ -39048,7 +38909,6 @@ static fn install_pair(string_address source, string_address destination)
 
         if (!copied || published < 0)
         {
-                system_close(destination_directory);
                 string_format(log_error, "install: cannot publish %w\n",
                               writer_shell_quoted_name, destination);
                 install_status = 1;
@@ -39056,7 +38916,6 @@ static fn install_pair(string_address source, string_address destination)
         }
         if (!attributed)
         {
-                system_close(destination_directory);
                 install_status = 1;
                 return;
         }
@@ -39102,7 +38961,6 @@ static fn install_pair(string_address source, string_address destination)
                         install_status = 1;
         }
         file_made_now(destination_directory, destination_leaf);
-        system_close(destination_directory);
 }
 
 static fn install_directory_told(string_address path)
@@ -50634,6 +50492,7 @@ static fn xargs_job_finish(positive slot, positive status)
 
         job->child = 0;
         xargs_active--;
+        scope_exit(xargs_job_release(slot));
 
         if (status & 0x7f)
         {
@@ -50642,17 +50501,13 @@ static fn xargs_job_finish(positive slot, positive status)
                               (b32)(status & 0x7f));
                 xargs_answer_raise(125);
                 xargs_done = true;
-                xargs_job_release(slot);
                 return;
         }
 
         b32 code = (b32)wait_status_code(status);
 
         if (!code)
-        {
-                xargs_job_release(slot);
                 return;
-        }
 
         if (code == 255)
         {
@@ -50661,12 +50516,10 @@ static fn xargs_job_finish(positive slot, positive status)
                               writer_terminal_quoted_name, job->command);
                 xargs_answer_raise(124);
                 xargs_done = true;
-                xargs_job_release(slot);
                 return;
         }
 
         xargs_answer_raise(123);
-        xargs_job_release(slot);
 }
 
 /* Ask only for children this invocation started.  wait4(-1) is tempting, but

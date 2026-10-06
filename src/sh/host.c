@@ -5429,13 +5429,12 @@ static COLD bipolar nl80211_open(nl80211 address_to session)
         if (handle < 0)
                 return handle;
 
+        bool kept = false;
+        scope_exit(if (!kept) socket_close((b32)handle));
         sequence = netlink_sequence_take();
         if (!nl80211_begin(address_of request, GENL_ID_CTRL, CTRL_CMD_GETFAMILY,
                            NLM_REQUEST | NLM_ACK, sequence))
-        {
-                socket_close((b32)handle);
                 return -1;
-        }
 
         netlink_attribute_add(address_of request, CTRL_ATTR_FAMILY_NAME, name,
                               sizeof(name));
@@ -5443,16 +5442,14 @@ static COLD bipolar nl80211_open(nl80211 address_to session)
         if (netlink_transact((b32)handle, address_of request, sequence,
                              nl80211_family_seen, address_of info) < 0 ||
             !info.family)
-        {
-                socket_close((b32)handle);
                 return -19;
-        }
 
         if (info.mlme &&
             socket_option_set((b32)handle, SOL_NETLINK, NETLINK_ADD_MEMBERSHIP,
                               address_of info.mlme, sizeof(info.mlme)) >= 0)
                 session->mlme = info.mlme;
 
+        kept = true;
         session->handle = (b32)handle;
         session->family = info.family;
         session->scan = info.scan;
@@ -6155,13 +6152,10 @@ static COLD b32 nl80211_link_news(nl80211 address_to session, p32 index)
         bipolar got = netlink_receive(session->handle, address_of reply,
                                       address_of local_port);
 
+        scope_exit(netlink_forget(address_of reply));
         if (got < 0)
-        {
-                netlink_forget(address_of reply);
                 return got == NETWORK_INTERRUPTED ? 0 : -1;
-        }
         netlink_each(address_of reply, nl80211_link_news_take, address_of turn);
-        netlink_forget(address_of reply);
         return turn.reason;
 }
 
@@ -6461,15 +6455,12 @@ static COLD bool wifi_link_mac(string_address name, p8 address_to mac)
         memory_fill(address_of search, 0, sizeof(search));
         if (handle < 0)
                 return false;
+        scope_exit(socket_close((b32)handle));
         search.wanted = name;
         if (netlink_link_find((b32)handle, address_of search) < 0 ||
             !search.has_hardware)
-        {
-                socket_close((b32)handle);
                 return false;
-        }
         memory_copy(mac, search.hardware, 6);
-        socket_close((b32)handle);
         return true;
 }
 
@@ -6581,6 +6572,7 @@ static COLD bipolar nl80211_wait_associated(nl80211 address_to session, p32 sequ
         if (!network_deadline_begin(address_of deadline, NL80211_CONNECT_SECONDS, 0))
                 return -1;
 
+        scope_exit(netlink_forget(address_of reply));
         for (;;)
         {
                 //      A socket that heard no mlme news is the one the join
@@ -6591,17 +6583,13 @@ static COLD bipolar nl80211_wait_associated(nl80211 address_to session, p32 sequ
                 bipolar got;
 
                 if (asking && nl80211_station(session, index, bssid) > 0)
-                {
-                        netlink_forget(address_of reply);
                         return 0;
-                }
 
                 got = nl80211_join_wait(session, address_of deadline, asking);
                 if (got == NETWORK_TRY_AGAIN)
                         continue;
                 if (got <= 0)
                 {
-                        netlink_forget(address_of reply);
                         if (turn.got_ack && !turn.associated &&
                             nl80211_station(session, index, bssid) > 0)
                                 return 0;
@@ -6614,17 +6602,11 @@ static COLD bipolar nl80211_wait_associated(nl80211 address_to session, p32 sequ
                 if (got == NETWORK_INTERRUPTED)
                         continue;
                 if (got < 0)
-                {
-                        netlink_forget(address_of reply);
                         return got;
-                }
 
                 netlink_each(address_of reply, nl80211_join_take, address_of turn);
                 if (turn.done || (turn.got_ack && turn.associated))
-                {
-                        netlink_forget(address_of reply);
                         return turn.done ? turn.result : 0;
-                }
         }
 }
 
@@ -6641,6 +6623,7 @@ static COLD bipolar nl80211_connect(nl80211 address_to session, p32 index,
         p32 psk = WLAN_AKM_PSK;
         bipolar sent;
 
+        scope_exit(netlink_forget(address_of request));
         if (!nl80211_begin(address_of request, session->family,
                            NL80211_CMD_CONNECT, NLM_REQUEST | NLM_ACK, sequence))
                 return -1;
@@ -6689,13 +6672,9 @@ static COLD bipolar nl80211_connect(nl80211 address_to session, p32 index,
         }
 
         if (request.failed)
-        {
-                netlink_forget(address_of request);
                 return -1;
-        }
 
         sent = socket_send(session->handle, request.bytes, request.used, 0, 0, 0);
-        netlink_forget(address_of request);
         if (sent < 0)
                 return sent;
         return sequence;
@@ -6747,8 +6726,10 @@ static COLD bipolar nl80211_join(p8 address_to ssid, positive ssid_length, p8 ad
         bipolar sequence;
         bool offload = false;
         bool secured = pass_length != 0;
+        bool kept = false;
 
         wifi_link_close(link);
+        scope_exit(if (!kept) wifi_link_close(link));
         memory_fill(chosen, 0, 6);
         //      Whatever keeps the last link's keys goes first: its EAPOL
         //      socket would hear this join's message 1 as a rekey.
@@ -6757,10 +6738,7 @@ static COLD bipolar nl80211_join(p8 address_to ssid, positive ssid_length, p8 ad
         if (!failed)
                 failed = nl80211_interface(address_of link->session, address_of iface);
         if (failed < 0)
-        {
-                wifi_link_close(link);
                 return failed;
-        }
         link->index = iface.index;
 
         route = netlink_open_groups(0);
@@ -6778,18 +6756,12 @@ static COLD bipolar nl80211_join(p8 address_to ssid, positive ssid_length, p8 ad
         picked = radio_bss_choose(address_of link->session, iface.index, ssid, ssid_length,
                                   secured, chosen, address_of frequency, force);
         if (!picked)
-        {
-                wifi_link_close(link);
                 return -113;
-        }
 
         if (secured)
         {
                 if (!wifi_psk(ssid, ssid_length, pass, pass_length, pmk))
-                {
-                        wifi_link_close(link);
                         return -22;
-                }
                 memory_copy(link->pmk, pmk, 32);
                 offload = nl80211_psk_offload(address_of link->session, iface.wiphy);
         }
@@ -6832,8 +6804,8 @@ static COLD bipolar nl80211_join(p8 address_to ssid, positive ssid_length, p8 ad
                 radio_avoid_add(wifi_mac_set(link->bssid) ? link->bssid
                                 : picked > 0          ? chosen
                                                       : null);
-                wifi_link_close(link);
         }
+        kept = !failed;
         crypto_forget(pmk, sizeof(pmk));
         return failed;
 }
@@ -7111,15 +7083,13 @@ static bipolar radio_wifi_save(radio_network address_to networks, positive count
         positive used = 0;
         positive at;
 
+        scope_exit(crypto_forget(text, sizeof(text)));
         for (at = 0; at < count; at++)
         {
                 if (used + networks[at].ssid_length + networks[at].pass_length +
                         2 >=
                     sizeof(text))
-                {
-                        crypto_forget(text, sizeof(text));
                         return -1;
-                }
                 memory_copy(text + used, networks[at].ssid,
                             networks[at].ssid_length);
                 used += networks[at].ssid_length;
@@ -7130,13 +7100,7 @@ static bipolar radio_wifi_save(radio_network address_to networks, positive count
                 text[used++] = '\n';
         }
 
-        {
-                bipolar failed = host_write_file(NET_WIFI_LIST, text, used,
-                                                 0600, true);
-
-                crypto_forget(text, sizeof(text));
-                return failed;
-        }
+        return host_write_file(NET_WIFI_LIST, text, used, 0600, true);
 }
 
 /* ---- wifi: why there is nothing to join with ---- */
@@ -8208,6 +8172,7 @@ static bool radio_air_scan(nl80211 address_to session, p32 index, p8 address_to 
             socket_option_set(session->handle, SOL_NETLINK, NETLINK_ADD_MEMBERSHIP,
                               address_of session->scan, sizeof(session->scan)) < 0)
                 return false;
+        scope_exit(netlink_forget(address_of request); netlink_forget(address_of reply));
         if (!nl80211_begin(address_of request, session->family, NL80211_CMD_TRIGGER_SCAN,
                            NLM_REQUEST | NLM_ACK, sequence))
                 return false;
@@ -8239,11 +8204,7 @@ static bool radio_air_scan(nl80211 address_to session, p32 index, p8 address_to 
         if (request.failed ||
             socket_send(session->handle, request.bytes, request.used, 0, 0, 0) < 0 ||
             !network_deadline_begin(address_of deadline, RADIO_AIR_WAIT_SECONDS, 0))
-        {
-                netlink_forget(address_of request);
                 return false;
-        }
-        netlink_forget(address_of request);
 
         while (network_wait_readable_until(session->handle, address_of deadline) > 0)
         {
@@ -8258,14 +8219,12 @@ static bool radio_air_scan(nl80211 address_to session, p32 index, p8 address_to 
                 netlink_each(address_of reply, radio_scan_take, address_of turn);
                 if (turn.ended)
                 {
-                        netlink_forget(address_of reply);
                         return turn.refused ? tier && turn.status == -22 &&
                                                   radio_air_scan(session, index, ssid,
                                                                  ssid_length, tier - 1)
                                             : turn.whole;
                 }
         }
-        netlink_forget(address_of reply);
         return false;
 }
 
@@ -8292,11 +8251,9 @@ static bool radio_air_take(radio_air address_to air, p8 fresh)
         memory_fill(air, 0, sizeof(*air));
         if (nl80211_open(address_of session) < 0)
                 return false;
+        scope_exit(nl80211_close(address_of session));
         if (nl80211_interface(address_of session, address_of iface) < 0)
-        {
-                nl80211_close(address_of session);
                 return false;
-        }
         radio_air_dump(address_of session, iface.index, radio_air_seen, air);
         if (fresh && bowl_is_root() &&
             (fresh == RADIO_AIR_NOW || !air->any || air->freshest > RADIO_AIR_STALE_MS ||
@@ -8323,7 +8280,6 @@ static bool radio_air_take(radio_air address_to air, p8 fresh)
                         for (positive at = 0; at < air->count; at++)
                                 air->heard[at].joined = false;
         }
-        nl80211_close(address_of session);
 
         for (positive at = 1; at < air->count; at++)
                 for (positive back = at; back > 0 && air->heard[back].mbm >
@@ -9812,9 +9768,9 @@ static b32 host_wifi(string_address address_to arguments, positive count)
         {
                 p8 pass[256];
                 positive length;
-                b32 result;
 
                 host_need_root();
+                scope_exit(crypto_forget(pass, sizeof(pass)));
 
                 /*      No password: asked for at a terminal, open
                         anywhere else, as it always was. "-": one
@@ -9824,10 +9780,7 @@ static b32 host_wifi(string_address address_to arguments, positive count)
                 {
                         if (radio_password_read(pass, sizeof(pass), arguments[3],
                                                 count == 4) < 0)
-                        {
-                                crypto_forget(pass, sizeof(pass));
                                 return host_refuse("nothing saved\n");
-                        }
                 }
                 else
                 {
@@ -9837,9 +9790,7 @@ static b32 host_wifi(string_address address_to arguments, positive count)
                         memory_copy(pass, arguments[4], length + 1);
                         crypto_forget(arguments[4], length);
                 }
-                result = radio_wifi_add(arguments[3], pass);
-                crypto_forget(pass, sizeof(pass));
-                return result;
+                return radio_wifi_add(arguments[3], pass);
         }
         if (string_equals(word, "remove") && count == 4)
         {
@@ -12427,11 +12378,9 @@ static COLD bipolar sntp_query_at(p32 server, bool filter, bipolar most,
         handle = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
         if (handle < 0)
                 return SNTP_NO_SERVER;
+        scope_exit(socket_close((b32)handle));
         if (socket_connect((b32)handle, address_of where, sizeof(where)) < 0)
-        {
-                socket_close((b32)handle);
                 return SNTP_NO_SERVER;
-        }
         (void)socket_option_set((b32)handle, SOL_SOCKET, SNTP_TIMESTAMPNS,
                                 address_of want_stamp, sizeof(want_stamp));
         (void)socket_option_set((b32)handle, SOL_SOCKET, SNTP_TIMESTAMPING,
@@ -12457,7 +12406,6 @@ static COLD bipolar sntp_query_at(p32 server, bool filter, bipolar most,
                     failed == SNTP_RATE_LIMITED || failed == SNTP_DENIED)
                         break;
         }
-        socket_close((b32)handle);
 
         best = sntp_pick(row, want);
         if (best < 0)

@@ -3193,12 +3193,10 @@ static bool base58_level_next(base58_level address_to level, bool inverse)
 
         if (!error)
                 return false;
+        scope_exit(memory_give(error));
         memory_fill(error, 0, room * sizeof(p64));
         if (!big_multiply(error, next->power, dn2, next->inverse, rn2))
-        {
-                memory_give(error);
                 return false;
-        }
 
         p64 one = 1;
 
@@ -3209,17 +3207,13 @@ static bool base58_level_next(base58_level address_to level, bool inverse)
         positive en = big_trim(error, scale);
 
         if (!big_multiply(step, next->inverse, rn2, error, en))
-        {
-                memory_give(error);
                 return false;
-        }
         if (rn2 + en > scale)
         {
                 next->inverse[rn2] = 0;
                 limbs_add(next->inverse, rn2 + 1, step + scale, rn2 + en - scale);
                 next->inverse_used = big_trim(next->inverse, rn2 + 1);
         }
-        memory_give(error);
         return true;
 }
 
@@ -3263,6 +3257,7 @@ static bipolar base58_split(p64 address_to x, positive address_to x_used,
 
         if (!work)
                 return -1;
+        scope_exit(memory_give(work));
 
         if (xn > skip)
         {
@@ -3271,10 +3266,7 @@ static bipolar base58_split(p64 address_to x, positive address_to x_used,
 
                 if (!big_multiply(work, x + skip, xn - skip, level->inverse,
                                   level->inverse_used))
-                {
-                        memory_give(work);
                         return -1;
-                }
                 if (made > shift)
                 {
                         qn = big_trim(work + shift, made - shift);
@@ -3285,14 +3277,10 @@ static bipolar base58_split(p64 address_to x, positive address_to x_used,
         if (qn)
         {
                 if (!big_multiply(work, q, qn, level->power, dn))
-                {
-                        memory_give(work);
                         return -1;
-                }
                 limbs_subtract(x, xn, work, big_trim(work, qn + dn));
                 xn = big_trim(x, xn);
         }
-        memory_give(work);
 
         while (big_compare(x, xn, level->power, dn) >= 0)
         {
@@ -29621,23 +29609,19 @@ static bool grep_pieces_search(grep_pieces address_to task)
 
         if (!text_lines_open(address_of pieces, text_delimiter))
                 return false;
+        scope_exit(parallel_lines_close(address_of pieces));
 
         if (!grep_slots_prepare())
-        {
-                parallel_lines_close(address_of pieces);
                 return false;
-        }
+        scope_exit(grep_slots_release());
 
         run.origin = pieces.start;
         table = pieces.count * 3 * sizeof(positive);
         run.matches = (positive address_to)(address_any)memory_checked(table);
 
         if (!run.matches)
-        {
-                parallel_lines_close(address_of pieces);
-                grep_slots_release();
                 return false;
-        }
+        scope_exit(memory_free(run.matches, table));
 
         run.lines = run.matches + pieces.count;
         run.base = run.lines + pieces.count;
@@ -29648,12 +29632,7 @@ static bool grep_pieces_search(grep_pieces address_to task)
 
                 // Every piece, or the file is left to the serial loop whole.
                 if (pieces.taken != pieces.count)
-                {
-                        memory_free(run.matches, table);
-                        parallel_lines_close(address_of pieces);
-                        grep_slots_release();
                         return false;
-                }
 
                 for (at = 1; at < pieces.count; at++)
                         run.base[at] = run.base[at - 1] + run.lines[at - 1];
@@ -29677,8 +29656,6 @@ static bool grep_pieces_search(grep_pieces address_to task)
         task->stopped = task->first_mode && task->matches;
         task->failed = text_out_failed;
         text_lines_done(address_of pieces);
-        memory_free(run.matches, table);
-        grep_slots_release();
         return true;
 }
 

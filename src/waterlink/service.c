@@ -334,15 +334,12 @@ static bipolar link_secret(p8 address_to secret, bool make)
                 p8 fresh[32];
                 bipolar made;
 
+                scope_exit(crypto_forget(fresh, sizeof fresh));
                 if (system_random_fill(fresh, 32, 0) < 0)
-                {
-                        crypto_forget(fresh, sizeof fresh);
                         return -EIO;
-                }
                 //      A name that is there already is a first use that got
                 //      here first, and is read.
                 made = file_publish_bytes(LINK_KEY_PATH, fresh, 32, 0600, true);
-                crypto_forget(fresh, sizeof fresh);
                 if (made < 0 && made != -ERROR_EXISTS)
                         return made;
 
@@ -3224,6 +3221,7 @@ static b32 link_client_run(string_address name, p8 kind,
         link_nearby.socket = -1;
         if (!link_session_open(s))
                 return host_fail("memory", -ENOMEM);
+        scope_exit(link_session_close(s));
         memory_copy(s->peer, peer->key, 32);
         memory_copy(s->name, peer->name, WATERLINK_NAME_MAX);
         memory_copy(s->address, peer->address, 16);
@@ -3231,10 +3229,7 @@ static b32 link_client_run(string_address name, p8 kind,
         s->kind = kind;
         s->mode = 0644;
         if (system_random_fill(address_of s->conversation, 8, 0) < 0)
-        {
-                link_session_close(s);
                 return host_fail("randomness", -EIO);
-        }
 
         //      Input is read once the machine has said yes to the request.
         //      Neither it nor what comes back is ever waited on.
@@ -3477,7 +3472,6 @@ static b32 link_client_run(string_address name, p8 kind,
                               (positive)s->keyings);
                 log_flush();
         }
-        link_session_close(s);
         return answer;
 }
 

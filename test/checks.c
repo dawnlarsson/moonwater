@@ -36167,11 +36167,80 @@ static fn span_checks(void)
         check("no bytes, no run", got == 0);
 }
 
+/*
+        The controller macros at their edges. scope_exit runs at every way out
+        of its scope -- falling off the end, a return, a break, a continue --
+        in the reverse of the order they were written, and after the value a
+        return hands back has been worked out; a cleanup that is guarded by a
+        flag is skipped by it.
+*/
+static positive control_trail[8];
+static positive control_trails;
+
+static positive control_scoped(positive way)
+{
+        positive value = 5;
+
+        scope_exit(control_trail[control_trails++] = 1);
+        scope_exit(control_trail[control_trails++] = value);
+        if (way == 1)
+                return value;
+        value = 9;
+        if (way == 2)
+                return value;
+        return 0;
+}
+
+static positive control_kept(bool kept)
+{
+        positive undone = 0;
+        positive lost = 0;
+
+        {
+                scope_exit(if (!kept) undone++);
+                lost = undone;
+        }
+        return undone * 10 + lost;
+}
+
+static fn control_checks(void)
+{
+        positive loops = 0;
+
+        control_trails = 0;
+        check("a scope falls off its end: last written, first run",
+              control_scoped(0) == 0 && control_trails == 2 &&
+                  control_trail[0] == 9 && control_trail[1] == 1);
+        control_trails = 0;
+        check("a return computes its value before the cleanup runs",
+              control_scoped(1) == 5 && control_trails == 2 &&
+                  control_trail[0] == 5 && control_trail[1] == 1);
+        control_trails = 0;
+        check("a later return sees what was stored before it, and both cleanups run",
+              control_scoped(2) == 9 && control_trails == 2 &&
+                  control_trail[0] == 9 && control_trail[1] == 1);
+        check("a cleanup behind a flag is skipped by it and taken without it",
+              control_kept(true) == 0 && control_kept(false) == 10);
+
+        control_trails = 0;
+        for (positive turn = 0; turn < 4; turn++)
+        {
+                scope_exit(loops++);
+                if (turn == 1)
+                        continue;
+                if (turn == 2)
+                        break;
+        }
+        check("a continue and a break leave the scope of the turn like any other exit",
+              loops == 3);
+}
+
 b32 main(void)
 {
         p8 source[400], output[640], decoded[400];
         vli_checks();
         span_checks();
+        control_checks();
         for (positive at = 0; at < sizeof(high_alphabet); at++)
                 high_alphabet[at] = (char)(192 + at);
 #if X64

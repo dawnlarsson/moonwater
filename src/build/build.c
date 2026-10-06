@@ -2753,6 +2753,7 @@ static b32 build_spark(string_address source, string_address output,
 
         if (!work)
                 return build_die("spark: cannot make a working directory");
+        scope_exit(build_remove_tree(work));
 
         elf = build_join(work, "/image.elf", null);
         text_binary = build_join(work, "/text.bin", null);
@@ -2774,23 +2775,17 @@ static b32 build_spark(string_address source, string_address output,
                 hook = build_join(work, "/coverage.o", null);
 
                 if (!word_is(arch, "x86_64"))
-                {
-                        build_remove_tree(work);
                         return string_report(log_error, 1,
                                              "spark: coverage records are taken on "
                                              "x86_64, and this is %s\n", arch);
-                }
 
                 if (build_run(compiler, "-O2", "-c", "-march=x86-64",
                               "-fno-stack-protector", "-fno-builtin",
                               "-DCOVERAGE_hook", "-DCOVERAGE_CREATE",
                               "-DCOVERAGE_PATH=\"/coverage.map\"",
                               "test/checks.c", "-o", hook, null))
-                {
-                        build_remove_tree(work);
                         return string_report(log_error, 1,
                                              "spark: the coverage hook did not build\n");
-                }
         }
 
         words[count++] = compiler;
@@ -2854,10 +2849,7 @@ static b32 build_spark(string_address source, string_address output,
         words[count] = null;
 
         if (build_run_words((string_address address_to)words))
-        {
-                build_remove_tree(work);
                 return string_report(log_error, 1, "spark: compilation failed\n");
-        }
 
         count = 0;
         words[count++] = objdump;
@@ -2867,10 +2859,7 @@ static b32 build_spark(string_address source, string_address output,
 
         if (build_capture_words((string_address address_to)words, build_file_one,
                                 BUILD_FILE_ROOM) < 0)
-        {
-                build_remove_tree(work);
                 return 1;
-        }
 
         build_section((string_address)build_file_one, ".text",
                       address_of text_bytes, address_of text_where);
@@ -2913,11 +2902,8 @@ static b32 build_spark(string_address source, string_address output,
         base = text_where - SPARK_HEADER_SIZE;
 
         if (!text_where || !entry)
-        {
-                build_remove_tree(work);
                 return string_report(log_error, 1,
                                      "spark: could not read base/entry from the linked image\n");
-        }
 
         //      A program need not have every section: duck has no .data at
         //      all. Text runs up to whichever region actually follows it, or
@@ -2934,19 +2920,13 @@ static b32 build_spark(string_address source, string_address output,
         bss_size = build_page_up(bss_bytes);
 
         if (!text_size)
-        {
-                build_remove_tree(work);
                 return string_report(log_error, 1,
                                      "spark: computed a non positive text size (%p)\n",
                                      text_size);
-        }
 
         if (build_run(objcopy, "-O", "binary", "--only-section=.text", elf,
                       text_binary, null))
-        {
-                build_remove_tree(work);
                 return 1;
-        }
 
         if (build_run(objcopy, "-O", "binary", "--only-section=.data", elf,
                       data_binary, null))
@@ -2969,11 +2949,8 @@ static b32 build_spark(string_address source, string_address output,
                 bool good;
 
                 if (handle < 0)
-                {
-                        build_remove_tree(work);
                         return string_report(log_error, 1, "spark: cannot write %s\n",
                                              output);
-                }
 
                 //      The header occupies the first SPARK_HEADER_SIZE bytes of
                 //      the text region itself, so the image carries no page
@@ -3008,13 +2985,8 @@ static b32 build_spark(string_address source, string_address output,
                 if (good && hook &&
                     (build_tool("mkdir", "-p", "dist", null) ||
                      build_tool("cp", elf, "dist/shell.coverage.elf", null)))
-                {
-                        build_remove_tree(work);
                         return string_report(log_error, 1,
                                              "spark: cannot keep the coverage ELF\n");
-                }
-
-                build_remove_tree(work);
 
                 if (!good)
                         return string_report(log_error, 1, "spark: writing %s failed\n",
@@ -3455,6 +3427,7 @@ static b32 build_floor(string_address arch)
 
         if (!work)
                 return build_die("floor: cannot make a working directory");
+        scope_exit(build_remove_tree(work));
 
         object = build_join(work, "/floor.o", null);
 
@@ -3497,7 +3470,6 @@ static b32 build_floor(string_address arch)
 
                 if (!compiler)
                 {
-                        build_remove_tree(work);
                         string_format(log,
                                       "%s floor: NOT RUN -- no compiler with a %s back end\n",
                                       arch, arch);
@@ -3514,7 +3486,6 @@ static b32 build_floor(string_address arch)
                         reader = "readelf";
                 else
                 {
-                        build_remove_tree(work);
                         string_format(log,
                                       "%s floor: NOT RUN -- no ELF attribute reader\n",
                                       arch);
@@ -3544,7 +3515,6 @@ static b32 build_floor(string_address arch)
 
         if (build_run_words((string_address address_to)words))
         {
-                build_remove_tree(work);
                 string_format(log, "%s does not compile at the %s floor\n",
                               source, arch);
                 log_flush();
@@ -3560,14 +3530,11 @@ static b32 build_floor(string_address arch)
         if (build_capture_words((string_address address_to)words, build_file_one,
                                 BUILD_FILE_ROOM) < 0)
         {
-                build_remove_tree(work);
                 string_format(log, "the %s ELF attributes could not be read\n",
                               arch);
                 log_flush();
                 return 1;
         }
-
-        build_remove_tree(work);
 
         //      GNU readelf calls this Tag_RISCV_arch and quotes the value;
         //      llvm-readelf prints a TagName line and then a Value. Both put

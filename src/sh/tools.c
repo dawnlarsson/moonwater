@@ -568,22 +568,19 @@ static bipolar logger_connect_kind(logger_control address_to control,
                                     kind | SOCK_CLOEXEC, 0);
         if (handle < 0)
                 return handle;
+
+        bool kept = false;
+        scope_exit(if (!kept) socket_close((b32)handle));
         if (transport == LOGGER_TRANSPORT_STREAM &&
             !network_stream_timeout(handle, LOGGER_STREAM_TIMEOUT_SECONDS, 0))
-        {
-                socket_close((b32)handle);
                 return -ERROR_INPUT_OUTPUT;
-        }
 
         bipolar connected;
         if (control->server)
         {
                 p32 found;
                 if (net_resolve_v4(control->server, address_of found, 3))
-                {
-                        socket_close((b32)handle);
                         return -ERROR_NO_ENTRY;
-                }
                 bipolar host = (bipolar)found;
 
                 positive port = transport == LOGGER_TRANSPORT_STREAM ? 601 : 514;
@@ -595,7 +592,6 @@ static bipolar logger_connect_kind(logger_control address_to control,
                         //      name is a lookup that failed, and the
                         //      reference says so in those words.
                         logger_port_unknown = true;
-                        socket_close((b32)handle);
                         return -ERROR_INVALID;
                 }
 
@@ -615,22 +611,17 @@ static bipolar logger_connect_kind(logger_control address_to control,
                                           : (string_address)"/dev/log";
                 positive length = string_length(path);
                 if (!length || length >= sizeof(where.path))
-                {
-                        socket_close((b32)handle);
                         return -ERROR_INVALID;
-                }
                 memory_copy(where.path, path, length + 1);
                 connected = socket_connect((b32)handle, address_of where,
                                            sizeof(where));
         }
 
         if (connected < 0)
-        {
-                socket_close((b32)handle);
                 return connected;
-        }
 
         control->transport = transport;
+        kept = true;
         return handle;
 }
 
@@ -14410,6 +14401,7 @@ static bool diff_gather(string_address path, diff_names address_to names,
                 return string_diagnostic(&text_diagnostic, 0, path, "No such file or directory");
         }
 
+        scope_exit(file_walk_close(address_of walk));
         struct linux_dirent64 address_to entry;
 
         while ((entry = file_walk_next(address_of walk)))
@@ -14421,21 +14413,13 @@ static bool diff_gather(string_address path, diff_names address_to names,
                 p8 address_to at = (p8 address_to)utility_arena_take(length + 1);
 
                 if (!at)
-                {
-                        file_walk_close(address_of walk);
                         return false;
-                }
 
                 memory_copy_apart(at, entry->d_name, length + 1);
 
                 if (!diff_name_add(names, (string_address)at))
-                {
-                        file_walk_close(address_of walk);
                         return false;
-                }
         }
-
-        file_walk_close(address_of walk);
 
         return diff_names_sort(names);
 }
@@ -21805,6 +21789,7 @@ static bool ul_lsfd_process(struct snapshot_process address_to process, p8 requi
         if (!file_walk_open(address_of walk, AT_FDCWD, directory))
                 return true;
 
+        scope_exit(file_walk_close(address_of walk));
         struct linux_dirent64 address_to dirent;
         while ((dirent = file_walk_next(address_of walk)))
         {
@@ -21819,10 +21804,7 @@ static bool ul_lsfd_process(struct snapshot_process address_to process, p8 requi
                 if (!array_store_reserve(ul_lsfd_entries, ul_lsfd_entry_room,
                                          ul_lsfd_entry_count,
                                          ul_lsfd_entry_count + 1, 64))
-                {
-                        file_walk_close(address_of walk);
                         return false;
-                }
 
                 ul_lsfd_entry address_to descriptor =
                     ul_lsfd_entries + ul_lsfd_entry_count;
@@ -21845,10 +21827,7 @@ static bool ul_lsfd_process(struct snapshot_process address_to process, p8 requi
                 if (named <= 0)
                 {
                         if (!named)
-                        {
-                                file_walk_close(address_of walk);
                                 return false;
-                        }
                         continue;
                 }
 
@@ -21859,15 +21838,11 @@ static bool ul_lsfd_process(struct snapshot_process address_to process, p8 requi
                 if (!user)
                         user = requires & UL_LSFD_NEED_NAMES ? ps_name_of(process->uid) : (string_address)"";
                 if (!user)
-                {
-                        file_walk_close(address_of walk);
                         return false;
-                }
                 descriptor->user = user;
                 ul_lsfd_entry_count++;
         }
 
-        file_walk_close(address_of walk);
         return true;
 }
 
@@ -21954,6 +21929,7 @@ static b32 util_linux_lsfd()
                 requires |= ul_lsfd_columns[columns[at]].requires;
 
         text_begin("lsfd");
+        scope_exit(ul_lsfd_release());
         utility_arena.used = 0;
 
         /* ps_pid_list borrows the text arena; these are not independent mmap
@@ -21962,19 +21938,13 @@ static b32 util_linux_lsfd()
         string_address pid_list = file_option_value(address_of taking, 'p');
         if (pid_list &&
             !ps_pid_list(pid_list, &pids, false))
-        {
-                ul_lsfd_release();
                 return text_done(string_diagnostic(address_of text_diagnostic, 1, pid_list, "invalid PID list"));
-        }
 
         if (!system_snapshot_take_selected(address_of ul_lsfd_snapshot,
                                            SPARK_SNAPSHOT_PROCESS,
                                            (requires & UL_LSFD_NEED_IDS) != 0,
                                            pids.values, pids.count))
-        {
-                ul_lsfd_release();
                 return text_done(string_diagnostic(address_of text_diagnostic, 1, "/proc", "cannot read"));
-        }
 
         bool failed = false;
         for (positive i = 0; i < ul_lsfd_snapshot.header.process_count; i++)
@@ -22013,7 +21983,6 @@ static b32 util_linux_lsfd()
                 log_flush();
         }
 
-        ul_lsfd_release();
         return failed ? text_done(1) : 0;
 }
 

@@ -3097,8 +3097,8 @@ static fn storage_findmnt_release(storage_findmnt_options address_to options,
 }
 
 /* Reentrant core used unchanged by builtin and multicall dispatch. */
-b32 storage_findmnt(positive argc, string_address address_to argv,
-                    writer output, writer diagnostic)
+COLD b32 storage_findmnt(positive argc, string_address address_to argv,
+                         writer output, writer diagnostic)
 {
         static const argument_option arguments[] = {
             {"noheadings", 'n'},
@@ -3241,6 +3241,9 @@ b32 storage_findmnt(positive argc, string_address address_to argv,
         positive operand_room = 0;
         positive target_room = 0;
         positive second_room = 0;
+        scope_exit(storage_findmnt_release(address_of options, operand_room,
+                                           target_room, second_room));
+        scope_exit(storage_mount_table_release(address_of table));
         if (options.operand)
                 options.operand_path = (string_address)storage_word_path(
                     options.operand, address_of operand_room, 0);
@@ -3256,12 +3259,7 @@ b32 storage_findmnt(positive argc, string_address address_to argv,
                 file_facts facts;
 
                 if (!file_look_at(options.target, address_of facts))
-                {
-                        storage_mount_table_release(address_of table);
-                        storage_findmnt_release(address_of options, operand_room,
-                                                target_room, second_room);
                         return 1;
-                }
 
                 query_id = facts.mount_id;
                 have_query_id = true;
@@ -3289,12 +3287,7 @@ b32 storage_findmnt(positive argc, string_address address_to argv,
                                           have_query_id, query_id, submounts,
                                           address_of lines, address_of line_room,
                                           address_of line_count))
-                {
-                        storage_mount_table_release(address_of table);
-                        storage_findmnt_release(address_of options, operand_room,
-                                                target_room, second_room);
                         return 1;
-                }
                 /*  --list and the export shapes keep the subtree
                     --submounts reached and drop the drawing of it. */
                 options.lines = direct || options.list ? null : lines;
@@ -3330,9 +3323,6 @@ b32 storage_findmnt(positive argc, string_address address_to argv,
         }
 
         array_store_release(lines, line_room, line_count);
-        storage_mount_table_release(address_of table);
-        storage_findmnt_release(address_of options, operand_room, target_room,
-                                second_room);
 
         return matched ? 0 : 1;
 }
@@ -4040,12 +4030,10 @@ static b32 storage_mount_fstab_record(storage_fstab address_to record,
         bool tolerated;
 
         memory_fill(address_of options, 0, sizeof(options));
+        scope_exit(storage_options_free(address_of options));
         if (!storage_options_parse(address_of options, record->options) ||
             (extra && !storage_options_merge(address_of options, extra)))
-        {
-                storage_options_free(address_of options);
                 return string_report(diagnostic, 1, "mount: no memory\n");
-        }
         if (extra)
         {
                 options.fake = extra->fake;
@@ -4070,7 +4058,6 @@ static b32 storage_mount_fstab_record(storage_fstab address_to record,
         {
                 if (options.verbose && write)
                         string_format(write, "%s: ignored\n", record->target);
-                storage_options_free(address_of options);
                 address_to ignored = true;
                 return 0;
         }
@@ -4083,7 +4070,6 @@ static b32 storage_mount_fstab_record(storage_fstab address_to record,
         if (answer && !tolerated)
                 storage_mount_failed(diagnostic, record->source, record->target,
                                      answer);
-        storage_options_free(address_of options);
         return answer && !tolerated ? 32 : 0;
 }
 

@@ -468,6 +468,7 @@ static HOT bool system_snapshot_processes(system_snapshot address_to sample,
 
         if (!file_walk_open(address_of walk, AT_FDCWD, "/proc"))
                 return false;
+        scope_exit(file_walk_close(address_of walk));
 
         sample->header.process_offset = (unsigned int)sample->records.used;
         struct linux_dirent64 address_to entry;
@@ -505,10 +506,7 @@ static HOT bool system_snapshot_processes(system_snapshot address_to sample,
                                            sizeof(struct snapshot_process));
 
                 if (!process)
-                {
-                        file_walk_close(address_of walk);
                         return false;
-                }
 
                 if (system_process_parse(block, sample->header.page_size,
                                          process))
@@ -539,8 +537,6 @@ static HOT bool system_snapshot_processes(system_snapshot address_to sample,
                 else
                         sample->records.used -= sizeof(*process);
         }
-
-        file_walk_close(address_of walk);
 
         return !walk.error;
 }

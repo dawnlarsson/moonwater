@@ -1781,6 +1781,7 @@ static bipolar tar_open_pending(string_address path,
         above[slash - path] = end;
 
         bipolar parent = tar_open_beneath(above, O_PATH | O_DIRECTORY);
+        scope_exit(if (parent >= 0) system_close(parent));
         bipolar looked = parent < 0 ? parent :
                          file_look_code(parent, (string_address)"",
                                         AT_EMPTY_PATH, address_of facts);
@@ -1792,16 +1793,10 @@ static bipolar tar_open_pending(string_address path,
              facts.device_minor != kept->parent.device_minor))
                 looked = -ERROR_ACCESS;
         if (looked < 0)
-        {
-                if (parent >= 0)
-                        (void)system_close(parent);
                 return looked;
-        }
 
-        bipolar opened = system_open_at(parent, slash + 1,
-                                        O_PATH | O_NOFOLLOW | O_CLOEXEC);
-        (void)system_close(parent);
-        return opened;
+        return system_open_at(parent, slash + 1,
+                              O_PATH | O_NOFOLLOW | O_CLOEXEC);
 }
 
 /* A symlink member is remembered by kind alone.  A hard link to it names
@@ -3597,6 +3592,7 @@ static bool tar_read_list(string_address path, byte_store address_to into)
                 tar_fatal_exit = true;
                 return false;
         }
+        scope_exit(if (!standard) system_close((positive)handle));
 
         into->used = 0;
         for (;;)
@@ -3613,8 +3609,6 @@ static bool tar_read_list(string_address path, byte_store address_to into)
                 {
                         tar_fail(path, got);
                         tar_fatal_exit = true;
-                        if (!standard)
-                                system_close((positive)handle);
                         return false;
                 }
                 if (!got)
@@ -3622,8 +3616,6 @@ static bool tar_read_list(string_address path, byte_store address_to into)
                 into->used += (positive)got;
         }
         into->bytes[into->used] = end;
-        if (!standard)
-                system_close((positive)handle);
         return true;
 }
 
@@ -4494,6 +4486,7 @@ static fn tar_diff_file(bipolar archive, p8 address_to block, p8 type,
                 tar_skip(archive, tar_padded(size), seekable);
                 return;
         }
+        scope_exit(system_close(file));
 
         bool said = false;
         if (tar_sparse_active)
@@ -4512,20 +4505,13 @@ static fn tar_diff_file(bipolar archive, p8 address_to block, p8 type,
                         if (!tar_diff_bytes(archive, file, tar_sparse[at].offset,
                                             tar_sparse[at].bytes, name,
                                             address_of said))
-                        {
-                                system_close(file);
                                 return;
-                        }
                         cursor = tar_sparse[at].offset + tar_sparse[at].bytes;
                 }
                 tar_diff_holes(file, cursor, real, name, address_of said);
         }
         else if (!tar_diff_bytes(archive, file, 0, size, name, address_of said))
-        {
-                system_close(file);
                 return;
-        }
-        system_close(file);
         tar_skip(archive, tar_padded(size) - size, seekable);
 }
 

@@ -913,17 +913,14 @@ static bipolar floodlight_pinned_reader(bipolar handle)
         if (!floodlight_descriptor_table_open(address_of table))
                 return -ERROR_ACCESS;
 
+        scope_exit(file_walk_close(address_of table));
         if (!file_look(handle, (string_address)"", AT_EMPTY_PATH,
                        address_of expected) ||
             !floodlight_facts_complete(address_of expected, false))
-        {
-                file_walk_close(address_of table);
                 return -ERROR_ACCESS;
-        }
 
         floodlight_descriptor_name(name, handle);
         reader = system_open_at(table.handle, name, FILE_READ | O_CLOEXEC);
-        file_walk_close(address_of table);
 
         if (reader < 0)
                 return reader;
@@ -7056,6 +7053,7 @@ COLD fn shell_exec(writer write, string_address input)
 
         p8 address_to found = null;
         positive found_room = 0;
+        scope_exit(if (found) memory_free(found, found_room));
         string_address address_to environment;
         static string_address empty_environment[1];
         p8 login_name[256];
@@ -7133,9 +7131,6 @@ COLD fn shell_exec(writer write, string_address input)
 
         if (located < 0)
         {
-                if (found)
-                        memory_free(found, found_room);
-
                 shell_answered(2, "%s: no room\n", "exec");
                 shell_stop_when_scripted(2);
 
@@ -7144,9 +7139,6 @@ COLD fn shell_exec(writer write, string_address input)
 
         if (!located)
         {
-                if (found)
-                        memory_free(found, found_room);
-
                 shell_answer(127);
                 shell_exec_refused(shell_argv[1], -ERROR_NO_ENTRY);
                 shell_exec_failed(127);
@@ -7157,7 +7149,6 @@ COLD fn shell_exec(writer write, string_address input)
         environment = clear ? empty_environment : shell_environment();
         if (!environment)
         {
-                memory_free(found, found_room);
                 shell_answer(2);
                 log_error(str("exec: no room for environment\n"));
                 shell_stop_when_scripted(2);
@@ -7206,7 +7197,6 @@ COLD fn shell_exec(writer write, string_address input)
                 floodlight_inplace_descendants_checked = false;
                 floodlight_inplace_terminal = false;
 
-                memory_free(found, found_room);
                 shell_answer(126);
                 shell_exec_refused(shell_argv[1], told);
         }
@@ -24141,7 +24131,6 @@ static bipolar file_exec_path_try_in(
         positive executable_room = 0;
         positive count = 0;
         bipolar located;
-        bipolar answer;
 
         if (!name || !string_get(name) || !words || !words[0])
                 return -ERROR_NO_ENTRY;
@@ -24167,26 +24156,18 @@ static bipolar file_exec_path_try_in(
             ACCESS_EXECUTE, false, path);
         if (located < 0)
                 return -ERROR_NO_MEMORY;
+        scope_exit(if (executable) memory_free(executable, executable_room));
         if (located != 1)
-        {
-                if (executable)
-                        memory_free(executable, executable_room);
                 return located == 2 ? -ERROR_ACCESS : -ERROR_NO_ENTRY;
-        }
 
         while (words[count])
         {
                 if (count == positive_max)
-                {
-                        memory_free(executable, executable_room);
                         return -ERROR_ARGUMENT_LIST;
-                }
                 count++;
         }
 
-        answer = shell_exec_file(executable, words, count, environment);
-        memory_free(executable, executable_room);
-        return answer;
+        return shell_exec_file(executable, words, count, environment);
 }
 
 /* This only returns in the child that a wrapper created for its command. */
@@ -24779,36 +24760,28 @@ fn shell_command_builtin(writer write, string_address input)
                         return shell_answered(2, "%s: no room\n", "command");
                 }
 
+                scope_exit(if (found) memory_free(found, found_room));
                 if (!located)
                 {
-                        if (found)
-                                memory_free(found, found_room);
-
-                        {
-                                //      The line a missing command gets, and
-                                //      command does not put its own name in
-                                //      front of it.
-                                if (!shell_bash_compat)
-                                        shell_diagnostic_where();
-                                return shell_answered(127,
-                                    shell_bash_compat
-                                        ? "%s: command not found\n"
-                                        : "%s: not found\n",
-                                    name);
-                        }
+                        //      The line a missing command gets, and
+                        //      command does not put its own name in
+                        //      front of it.
+                        if (!shell_bash_compat)
+                                shell_diagnostic_where();
+                        return shell_answered(127,
+                            shell_bash_compat
+                                ? "%s: command not found\n"
+                                : "%s: not found\n",
+                            name);
                 }
 
                 if (located == 2)
-                {
-                        memory_free(found, found_room);
                         return shell_answered(126, "command: %s: cannot run\n", name);
-                }
 
                 /* command's external tail bypasses ordinary dispatch, and
                    job control never reaches it: the jobs a monitored shell
                    starts are pipelines, and this is the tail of one. */
                 shell_execute_found(found, name, true, false);
-                memory_free(found, found_room);
         }
 }
 

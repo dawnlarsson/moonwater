@@ -8965,16 +8965,14 @@ static COLD fn exec_frames_publish()
 
         exec_frames_standing = true;
 
+        scope_exit(shell_store_rewind(address_of exec_store, held));
         walked = (string_address address_to)shell_store_take_aligned(
             address_of exec_store, count * sizeof(walked[0]));
         lines = (bipolar address_to)shell_store_take_aligned(
             address_of exec_store, count * sizeof(lines[0]));
 
         if (!walked || !lines)
-        {
-                shell_store_rewind(address_of exec_store, held);
                 return;
-        }
 
         for (positive at = 0; at < exec_frame_count; at++)
         {
@@ -8999,7 +8997,6 @@ static COLD fn exec_frames_publish()
                 walked[exec_frame_count] = shell_script_name;
 
         shell_array_words("BASH_SOURCE", 11, walked, count);
-        shell_store_rewind(address_of exec_store, held);
 }
 
 /*

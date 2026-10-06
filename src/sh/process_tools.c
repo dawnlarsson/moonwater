@@ -251,16 +251,14 @@ static b32 stdbuf_target_kind(string_address path)
 
         if (handle < 0)
                 return 0;
+        scope_exit(system_close(handle));
 
         bipolar got = system_read_retry((positive)handle, file_transfer,
                                         FILE_BLOCK);
 
         if (got < 64 || !stdbuf_elf_native(file_transfer, (positive)got,
                                            false))
-        {
-                system_close(handle);
                 return 0;
-        }
 
         p64 phoff = stdbuf_u64(file_transfer + 32);
         positive entry_size = stdbuf_u16(file_transfer + 54);
@@ -269,10 +267,7 @@ static b32 stdbuf_target_kind(string_address path)
         if (entry_size < 4 || !entries ||
             entries > FILE_BLOCK / entry_size ||
             phoff > positive_max - entry_size * entries)
-        {
-                system_close(handle);
                 return STDBUF_ELF_STATIC;
-        }
 
         positive bytes = entry_size * entries;
         p8 address_to table = file_transfer;
@@ -282,10 +277,7 @@ static b32 stdbuf_target_kind(string_address path)
                 /* ELF headers beyond the first block use the same bounded,
                    EINTR/short-read-safe positional reader as disk metadata. */
                 if (storage_read(handle, file_transfer, bytes, phoff) != bytes)
-                {
-                        system_close(handle);
                         return STDBUF_ELF_STATIC;
-                }
         }
         else
                 table += (positive)phoff;
@@ -299,7 +291,6 @@ static b32 stdbuf_target_kind(string_address path)
                         break;
                 }
 
-        system_close(handle);
         return answer;
 }
 

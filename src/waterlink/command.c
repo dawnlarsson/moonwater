@@ -659,102 +659,97 @@ static b32 link_group_join(string_address address_to words, positive count)
                 secret = (string_address)made;
         }
 
-        lock = link_peers_lock();
-        if (lock < 0)
         {
-                crypto_forget(made, sizeof made);
-                return host_refuse("%s could not be locked\n", LINK_PEERS_LOCK);
-        }
-        if (!link_groups_for_change(address_of groups))
-        {
-                link_peers_unlock(lock);
-                crypto_forget(made, sizeof made);
-                return host_refuse("%s could not be read\n", LINK_GROUPS_PATH);
-        }
-        for (positive look = 0; look < groups.count; look++)
-                if (string_equals(groups.record[look].namespace, namespace) &&
-                    !(groups.record[look].flags & LINK_GROUP_ONCE))
-                        record = groups.record + look;
-
-        if (!secret && !record)
-        {
-                p8 random[20];
-
-                if (system_random_fill(random, sizeof random, 0) < 0)
+                scope_exit(crypto_forget(made, sizeof made);
+                           crypto_forget(address_of groups, sizeof groups));
+                lock = link_peers_lock();
+                if (lock < 0)
+                        return host_refuse("%s could not be locked\n", LINK_PEERS_LOCK);
+                if (!link_groups_for_change(address_of groups))
                 {
                         link_peers_unlock(lock);
-                        crypto_forget(random, sizeof random);
-                        crypto_forget(address_of groups, sizeof groups);
-                        return host_fail("randomness", -EIO);
+                        return host_refuse("%s could not be read\n", LINK_GROUPS_PATH);
                 }
-                //      160 bits as 32 characters of base32.
-                memory_encode_power2(made, random, 4, (string_address)link_base32, 5);
-                made[32] = 0;
-                crypto_forget(random, sizeof random);
-                secret = (string_address)made;
-                generated = true;
-        }
+                for (positive look = 0; look < groups.count; look++)
+                        if (string_equals(groups.record[look].namespace, namespace) &&
+                            !(groups.record[look].flags & LINK_GROUP_ONCE))
+                                record = groups.record + look;
 
-        if (!record)
-        {
-                if (groups.count >= LINK_GROUPS_MAX)
+                if (!secret && !record)
+                {
+                        p8 random[20];
+
+                        scope_exit(crypto_forget(random, sizeof random));
+                        if (system_random_fill(random, sizeof random, 0) < 0)
+                        {
+                                link_peers_unlock(lock);
+                                return host_fail("randomness", -EIO);
+                        }
+                        //      160 bits as 32 characters of base32.
+                        memory_encode_power2(made, random, 4,
+                                             (string_address)link_base32, 5);
+                        made[32] = 0;
+                        secret = (string_address)made;
+                        generated = true;
+                }
+
+                if (!record)
+                {
+                        if (groups.count >= LINK_GROUPS_MAX)
+                        {
+                                link_peers_unlock(lock);
+                                return host_refuse("this machine is in 8 groups "
+                                                   "already\n");
+                        }
+                        record = groups.record + groups.count++;
+                        memory_zero(record, sizeof(address_to record));
+                        string_copy(record->namespace, namespace);
+                        record->may = WATERLINK_MAY_DEFAULT;
+                }
+
+                if (secret)
+                {
+                        //      The slow part, every time. A salted hash of the secret
+                        //      used to sit beside the key so that a script joining at
+                        //      every boot could skip it, and that hash was a guessing
+                        //      oracle at SHA-256 speed for anyone who could read the
+                        //      file, which holds the slow key to check a guess
+                        //      against only if the guess is made slowly. A script
+                        //      that joins at every boot says `link join NAMESPACE`
+                        //      and keeps the group it has.
+                        waterlink_group_derive(namespace, (p8 address_to)secret,
+                                               string_length(secret),
+                                               WATERLINK_GROUP_ROUNDS, record->key);
+                        memory_zero(record->check, sizeof record->check);
+                }
+                if (granted)
+                        record->may = may;
+
+                if (link_groups_save(address_of groups) < 0)
                 {
                         link_peers_unlock(lock);
-                        crypto_forget(made, sizeof made);
-                        crypto_forget(address_of groups, sizeof groups);
-                        return host_refuse("this machine is in 8 groups "
-                                           "already\n");
+                        return host_refuse("%s could not be written\n",
+                                           LINK_GROUPS_PATH);
                 }
-                record = groups.record + groups.count++;
-                memory_zero(record, sizeof(address_to record));
-                string_copy(record->namespace, namespace);
-                record->may = WATERLINK_MAY_DEFAULT;
-        }
-
-        if (secret)
-        {
-                //      The slow part, every time. A salted hash of the secret
-                //      used to sit beside the key so that a script joining at
-                //      every boot could skip it, and that hash was a guessing
-                //      oracle at SHA-256 speed for anyone who could read the
-                //      file, which holds the slow key to check a guess
-                //      against only if the guess is made slowly. A script
-                //      that joins at every boot says `link join NAMESPACE`
-                //      and keeps the group it has.
-                waterlink_group_derive(namespace, (p8 address_to)secret,
-                                       string_length(secret),
-                                       WATERLINK_GROUP_ROUNDS, record->key);
-                memory_zero(record->check, sizeof record->check);
-        }
-        if (granted)
-                record->may = may;
-
-        if (link_groups_save(address_of groups) < 0)
-        {
                 link_peers_unlock(lock);
-                crypto_forget(made, sizeof made);
-                crypto_forget(address_of groups, sizeof groups);
-                return host_refuse("%s could not be written\n", LINK_GROUPS_PATH);
-        }
-        link_peers_unlock(lock);
 
-        link_grants_text(record->may, grants, sizeof grants);
-        string_format(log, host_label "in group %s; its members may %s here\n",
-                      namespace, (string_address)grants);
-        if (generated)
-                string_format(log,
-                              host_label "the secret is %s -- on each other "
-                                         "machine: moonwater link group %s %s\n",
-                              (string_address)made, namespace,
-                              (string_address)made);
-        else if (secret && string_length(secret) < 20)
-                string_format(log, host_label "a secret this short can be "
-                                              "guessed offline by anyone on "
-                                              "the network; leave it out and "
-                                              "one is made\n");
-        log_flush();
-        crypto_forget(made, sizeof made);
-        crypto_forget(address_of groups, sizeof groups);
+                link_grants_text(record->may, grants, sizeof grants);
+                string_format(log, host_label "in group %s; its members may %s here\n",
+                              namespace, (string_address)grants);
+                if (generated)
+                        string_format(log,
+                                      host_label "the secret is %s -- on each other "
+                                                 "machine: moonwater link group "
+                                                 "%s %s\n",
+                                      (string_address)made, namespace,
+                                      (string_address)made);
+                else if (secret && string_length(secret) < 20)
+                        string_format(log, host_label "a secret this short can be "
+                                                      "guessed offline by anyone on "
+                                                      "the network; leave it out and "
+                                                      "one is made\n");
+                log_flush();
+        }
         return link_switch(true, true);
 }
 
@@ -942,19 +937,15 @@ static bipolar link_pair_open(string_address namespace, p8 address_to code,
         //      The slow part, before the lock is taken.
         waterlink_group_derive(namespace, code, LINK_CODE_LENGTH,
                                WATERLINK_GROUP_ROUNDS, key);
+        scope_exit(crypto_forget(key, sizeof key);
+                   crypto_forget(address_of groups, sizeof groups));
 
         lock = link_peers_lock();
         if (lock < 0)
-        {
-                crypto_forget(key, sizeof key);
                 return lock;
-        }
+        scope_exit(link_peers_unlock(lock));
         if (!link_groups_for_change(address_of groups))
-        {
-                link_peers_unlock(lock);
-                crypto_forget(key, sizeof key);
                 return -ENODATA;
-        }
         for (positive at = 0; at < groups.count; at++)
                 if (link_group_spent(groups.record + at, now) ||
                     ((groups.record[at].flags & LINK_GROUP_ONCE) &&
@@ -977,9 +968,6 @@ static bipolar link_pair_open(string_address namespace, p8 address_to code,
                 address_to mark = keys.mark;
                 crypto_forget(address_of keys, sizeof keys);
         }
-        link_peers_unlock(lock);
-        crypto_forget(key, sizeof key);
-        crypto_forget(address_of groups, sizeof groups);
         return answer;
 }
 
