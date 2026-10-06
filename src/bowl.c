@@ -515,7 +515,24 @@ static b32 bowl_fail(string_address what, bipolar failed)
 {
         if (bowl_quiet)
                 return 1;
-        string_format(log, bowl_label "%s: %b\n", what, failed);
+        string_format(log, bowl_label "%s: %s\n", what, file_reason(failed));
+        log_flush();
+        return 1;
+}
+
+/* The step a view was on when it failed, which is the one thing a bare errno
+   leaves out: nothing in a mount namespace says which of thirty mounts it was. */
+static struct { string_address verb; string_address path; } bowl_step;
+#define bowl_doing(what, where) (bowl_step.verb = (what), bowl_step.path = (where))
+
+static b32 bowl_fail_step(string_address root, bipolar failed)
+{
+        if (bowl_quiet)
+                return 1;
+        string_format(log, bowl_label "%s: cannot %s %s: %s\n", root,
+                      bowl_step.verb ? bowl_step.verb : (string_address)"make the view",
+                      bowl_step.path ? bowl_step.path : (string_address)"",
+                      file_reason(failed));
         log_flush();
         return 1;
 }
@@ -533,6 +550,33 @@ static b32 bowl_refuse(string_address message)
         One mount with MS_RDONLY is ignored on bind; the kernel takes the
         readonly bit from a remount of the same target.
 */
+/*
+        What a mount was given that a remount of it must say again. A view a
+        user makes holds every mount it inherits with the machine's nosuid,
+        nodev, noexec and atime choices locked, and a remount that leaves one
+        out (the read-only bind below asks for nothing else) is refused with
+        a bare EPERM: the data partition is mounted nodev, so on an installed
+        disk every launch of a program of a bowl ended there, and on a live
+        image, whose /bowls has no such flag, none did.
+*/
+#define BOWL_ST_RELATIME 0x1000
+
+static positive bowl_mount_kept(string_address target)
+{
+        file_mount_facts facts;
+        positive kept;
+
+        if (system_call_2(syscall(statfs), (positive)target,
+                          (positive)address_of facts) < 0)
+                return 0;
+
+        kept = (positive)facts.flags & (MS_NOSUID | MS_NODEV | MS_NOEXEC |
+                                        MS_NOATIME | MS_NODIRATIME);
+        if (!(facts.flags & (MS_NOATIME | BOWL_ST_RELATIME)))
+                kept |= MS_STRICTATIME;
+        return kept;
+}
+
 static bipolar bowl_bind_ro(string_address source, string_address target)
 {
         /*
@@ -543,13 +587,18 @@ static bipolar bowl_bind_ro(string_address source, string_address target)
                 reliably turn every cloned child mount read-only on older mount
                 APIs.  Do not import child mounts in the first place.
         */
-        bipolar failed = system_mount(source, target, 0, MS_BIND, 0);
+        bipolar failed;
+
+        bowl_doing("bind", source);
+        failed = system_mount(source, target, 0, MS_BIND, 0);
 
         if (failed)
                 return failed;
 
+        bowl_doing("make read-only", target);
         return system_mount(0, target, 0,
-                            MS_BIND | MS_REMOUNT | MS_RDONLY, 0);
+                            MS_BIND | MS_REMOUNT | MS_RDONLY |
+                                bowl_mount_kept(target), 0);
 }
 
 /*
@@ -1006,18 +1055,22 @@ static bipolar bowl_isolated_enter(string_address root)
 {
         bipolar failed;
 
+        bowl_doing("bind", root);
         failed = system_mount(root, root, 0, MS_BIND, 0);
         if (failed)
                 return failed;
 
+        bowl_doing("enter", root);
         failed = system_change_directory(root);
         if (failed)
                 return failed;
 
+        bowl_doing("pivot into", root);
         failed = system_call_2(syscall(pivot_root), (positive)".", (positive)".");
         if (failed)
                 return failed;
 
+        bowl_doing("detach the old root under", root);
         failed = system_call_2(syscall(umount2), (positive)".", MNT_DETACH);
         if (failed)
                 return failed;
@@ -1050,6 +1103,7 @@ static bipolar bowl_fast_layer(string_address root, string_address layer)
         if (system_access_at(AT_FDCWD, source, 0) < 0)
                 return 0;
 
+        bowl_doing("make the directory", layer);
         failed = bowl_mkdir_parents(layer);
         if (failed < 0)
                 return failed;
@@ -1089,6 +1143,7 @@ static bipolar bowl_fast_etc(string_address root)
                           (positive)address_of facts) < 0 ||
             facts.type != BOWL_OVERLAY_MAGIC)
         {
+                bowl_doing("make the directory", BOWL_HOST_ETC);
                 failed = bowl_mkdir(BOWL_HOST_ETC);
                 if (!failed)
                         failed = bowl_bind_ro("/etc", BOWL_HOST_ETC);
@@ -1097,6 +1152,7 @@ static bipolar bowl_fast_etc(string_address root)
         }
 
         memory_copy(options, lower, length);
+        bowl_doing("overlay /etc from", options + length);
         return system_mount("overlay", "/etc", "overlay", MS_RDONLY, options);
 }
 
@@ -1142,6 +1198,7 @@ static DEAD_END fn bowl_inside(string_address root,
         if (!isolated)
                 bowl_session_prepare_from(environment);
 
+        bowl_doing("make private", "/");
         failed = system_mount(0, "/", 0, MS_REC | MS_PRIVATE, 0);
         if (!failed)
                 failed = isolated ? bowl_isolated_enter(root)
@@ -1149,7 +1206,7 @@ static DEAD_END fn bowl_inside(string_address root,
 
         if (failed)
         {
-                bowl_fail(root, failed);
+                bowl_fail_step(root, failed);
                 exit(1);
         }
 
@@ -2138,9 +2195,11 @@ static b32 bowl_launch(string_address root, string_address program,
 
         if (child == 0)
         {
-                if (system_call_1(syscall(unshare), CLONE_NEWNS) < 0)
+                bipolar unshared = system_call_1(syscall(unshare), CLONE_NEWNS);
+
+                if (unshared < 0)
                 {
-                        bowl_fail("cannot make a mount view", -ERROR_NOT_PERMITTED);
+                        bowl_fail("cannot make a mount view", unshared);
                         exit(1);
                 }
                 bowl_inside(root, program, arguments, environment,
@@ -5801,6 +5860,26 @@ static bool bowl_bus_running(void)
         return system_access_at(AT_FDCWD, path, 0) >= 0;
 }
 
+/* The daemon the pidfile names, asked to finish, and the pidfile with it. */
+static fn bowl_bus_stop(void)
+{
+        p8 text[32];
+        bipolar got = file_read_once_at(AT_FDCWD, BOWL_BUS_PIDFILE, text,
+                                        sizeof(text) - 1);
+        positive taken;
+        positive pid;
+
+        if (got > 0)
+        {
+                text[got] = end;
+                pid = string_digits_max(text, (positive)got, address_of taken);
+                if (taken && pid > 1)
+                        system_call_2(syscall(kill), pid, SIGTERM);
+        }
+        system_remove_at(AT_FDCWD, BOWL_BUS_PIDFILE, 0);
+        system_remove_at(AT_FDCWD, BOWL_BUS_SOCKET, 0);
+}
+
 static b32 bowl_bus(positive count)
 {
         file_walk walk;
@@ -5846,7 +5925,12 @@ static b32 bowl_bus(positive count)
              waited += BOWL_UDEV_POLL_NS)
         {
                 if (waited >= BOWL_UDEV_WAIT_NS)
+                {
+                        /* A daemon that never opened its socket is no bus,
+                           and left running it is two when this is run again. */
+                        bowl_bus_stop();
                         return bowl_refuse("the system bus is not answering\n");
+                }
                 process_nap_ns(BOWL_UDEV_POLL_NS);
         }
         return_if(failed, failed);

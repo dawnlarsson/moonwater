@@ -79990,6 +79990,114 @@ static fn isolated_root_children(void)
 }
 
 /*
+        The user's view of a bowl, over a disk the machine mounted nodev. The
+        data partition of an installed machine is, and /bowls is a bind of it,
+        so every mount a launch inherits from the machine has nodev locked in
+        the user namespace the launch makes, and bowl_bind_ro's remount to
+        read-only, which said nothing of nodev, was refused with a bare EPERM:
+        every program of every bowl, on the installed disk and not on the live
+        image, where /bowls is a tmpfs and the lane's bowls disk had no such
+        flag. The check is the same shape with no disk and no network: a
+        tmpfs mounted nodev in a namespace of the check's own, a second user
+        namespace as bowl_launch makes it, and the real bowl_bind_ro on a
+        directory of the tmpfs, which must be read-only and still nodev.
+*/
+static fn fast_view_nodev(void)
+{
+        positive user = (positive)system_call(syscall(getuid));
+        positive group = (positive)system_call(syscall(getgid));
+        p8 root[96] = "/tmp/bowl-nodev-";
+        bipolar child;
+
+        root[16 + positive_into(root + 16, (positive)system_call(syscall(getpid)))] = end;
+        if (system_make_directory_at(AT_FDCWD, root, 0700) < 0)
+                return;
+        child = system_fork();
+        if (child == 0)
+        {
+                p8 source[128];
+                p8 target[128];
+                file_mount_facts facts;
+
+                if (system_call_1(syscall(unshare), CLONE_NEWUSER | CLONE_NEWNS) < 0 ||
+                    !namespace_root(user, group) ||
+                    system_mount(0, "/", 0, MS_REC | MS_PRIVATE, 0) ||
+                    system_mount("tmpfs", root, "tmpfs", MS_NODEV, 0))
+                        exit(77);
+                string_copy_bounded(source, root, sizeof source);
+                string_append_bounded(source, "/source", sizeof source);
+                string_copy_bounded(target, root, sizeof target);
+                string_append_bounded(target, "/target", sizeof target);
+                if (system_make_directory_at(AT_FDCWD, source, 0755) < 0 ||
+                    system_make_directory_at(AT_FDCWD, target, 0755) < 0)
+                        exit(77);
+
+                bowl_become_user();
+                if (system_call(syscall(getuid)) != BOWL_USER_ID ||
+                    system_call_1(syscall(unshare), CLONE_NEWNS) < 0)
+                        exit(77);
+
+                if (bowl_bind_ro(source, target))
+                        exit(3);
+                if (system_call_2(syscall(statfs), (positive)target,
+                                  (positive)address_of facts) < 0)
+                        exit(4);
+                exit((facts.flags & MS_NODEV) && (facts.flags & MS_RDONLY) ? 0 : 5);
+        }
+
+        positive status = 0;
+        b32 code = child >= 0 &&
+                           system_wait4_retry(child, address_of status, 0, null) >= 0
+                       ? wait_status_code(status)
+                       : 77;
+
+        system_remove_at(AT_FDCWD, root, AT_REMOVEDIR);
+        if (code == 77)
+                return;
+        check("A user's view binds a bowl's tree read-only over a disk mounted nodev",
+              code != 3);
+        check("and the bind is read-only and still nodev", code == 0);
+}
+
+/*
+        What a launch that fails says. It said "/bowls/alpine: -1", the number
+        of the error and nothing of the step, to a person at a console whose
+        desktop would not start; it says what the kernel says, and the step.
+*/
+static fn launch_failure_words(void)
+{
+        p8 said[512] = {0};
+        b32 ends[2];
+        bipolar child;
+
+        if (system_pipe(ends, O_CLOEXEC) < 0)
+                return;
+        child = system_fork();
+        if (child == 0)
+        {
+                system_call_3(syscall(dup3), (positive)ends[1], 1, 0);
+                bowl_fail("/bowls/alpine", -ERROR_NOT_PERMITTED);
+                bowl_doing("make read-only", "/bowls/alpine/lib");
+                bowl_fail_step("/bowls/alpine", -ERROR_NOT_PERMITTED);
+                log_flush();
+                exit(0);
+        }
+        system_close(ends[1]);
+        positive used = 0;
+        for (bipolar got; used < sizeof said - 1 &&
+             (got = system_read_once(ends[0], said + used, sizeof said - 1 - used)) > 0;)
+                used += (positive)got;
+        system_close(ends[0]);
+        system_wait4_retry(child, null, 0, null);
+
+        check("A failed launch says the kernel's words and not the number",
+              string_search(said, "Operation not permitted") &&
+                  !string_search(said, ": -1"));
+        check("and the step it was on, with the path",
+              string_search(said, "cannot make read-only /bowls/alpine/lib"));
+}
+
+/*
         The downloads a setup takes, against a mirror that lies. The bytes a
         download leaves are checked here as bowl_setup_download checks them
         (the digest or the key a row pins), on files: right bytes, one byte
@@ -80262,6 +80370,8 @@ b32 main(void)
         isolation();
         kernel_settings();
         isolated_root_children();
+        fast_view_nodev();
+        launch_failure_words();
         room();
         archive_policy();
         landing();

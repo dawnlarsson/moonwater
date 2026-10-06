@@ -17441,7 +17441,11 @@ def run(command, seconds=60):
 time.sleep(25)
 out = []
 
-run("mount /dev/nvme0n1 /bowls", 30)
+#       As an installed machine has it: the partition mounted nodev (the
+#       install's own option) and /bowls a bind of it, so the flag every launch
+#       inherits is the one the user's namespaces lock, which a bowls disk
+#       mounted bare, as this did, never showed.
+run("mkdir -p /mnt/data && mount -o nodev /dev/nvme0n1 /mnt/data && mount --bind /mnt/data /bowls", 30)
 _, setup = run("bowl setup alpine", 600)
 out.append(("an Alpine bowl lands on the disk", "yes" if setup == 0 else "no, status %d" % setup, "yes"))
 _, added = run("apk add eudev libinput-tools", 600)
@@ -17604,7 +17608,11 @@ def last(text):
 time.sleep(25)
 out = []
 
-run("mount /dev/nvme0n1 /bowls", 30)
+#       As an installed machine has it: the partition mounted nodev (the
+#       install's own option) and /bowls a bind of it, so the flag every launch
+#       inherits is the one the user's namespaces lock, which a bowls disk
+#       mounted bare, as this did, never showed.
+run("mkdir -p /mnt/data && mount -o nodev /dev/nvme0n1 /mnt/data && mount --bind /mnt/data /bowls", 30)
 _, setup = run("bowl setup debian", 900)
 out.append(("a Debian bowl lands on the disk", "yes" if setup == 0 else "no, status %d" % setup, "yes"))
 _, added = run("(apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y "
