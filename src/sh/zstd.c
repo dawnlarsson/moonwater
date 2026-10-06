@@ -1706,9 +1706,7 @@ zstd_frame_blocks:
                                 return zstd_fail("zstd raw block too large");
                         /* Consume a whole block before pausing. The window
                            owns the remainder until the pull reader drains it. */
-                        if (!zstd_in_need(size))
-                                return false;
-                        if (!zstd_put(zstd_in_at(), size))
+                        if (!zstd_in_need(size) || !zstd_put(zstd_in_at(), size))
                                 return false;
                         zstd_in_skip(size);
                         if (zstd_paused)
@@ -1723,9 +1721,7 @@ zstd_frame_blocks:
 
                         if (size > zstd_block_limit)
                                 return zstd_fail("zstd RLE block too large");
-                        if (!zstd_in_take(value, 1))
-                                return false;
-                        if (!zstd_put_fill(value[0], size))
+                        if (!zstd_in_take(value, 1) || !zstd_put_fill(value[0], size))
                                 return false;
                         if (zstd_paused)
                         {
@@ -1758,9 +1754,7 @@ zstd_frame_blocks:
                                                     size - lit_used, zstd_lit_buf,
                                                     lit_len);
                                 zstd_hold_emit = false;
-                                if (!ok)
-                                        return false;
-                                if (!zstd_emit(zstd_window + at, zstd_pos - at))
+                                if (!ok || !zstd_emit(zstd_window + at, zstd_pos - at))
                                         return false;
                                 if (zstd_paused)
                                 {

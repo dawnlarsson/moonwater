@@ -1742,11 +1742,7 @@ fn job_notice()
    it agrees to leave. Asked by the exit builtin, compiled before this. */
 static bool job_any_stopped()
 {
-        for (positive at = 0; at < job_count; at++)
-                if (job_table[at].state == JOB_STOPPED)
-                        return true;
-
-        return false;
+        return array_any(at, job_count, job_table[at].state == JOB_STOPPED);
 }
 
 /*
@@ -7932,9 +7928,7 @@ static bool exec_function_text_body(exec_function_text address_to made,
                 return exec_function_text_node(made, body, depth + 1);
 
         exec_function_text_literal(made, "{ ");
-        if (!exec_function_text_node(made, body, depth + 1))
-                return false;
-        if (!exec_function_text_line(made))
+        if (!exec_function_text_node(made, body, depth + 1) || !exec_function_text_line(made))
                 return false;
         exec_function_text_literal(made, "}");
         return !made->failed;
@@ -8449,9 +8443,7 @@ bool exec_function_export_set(string_address name, bool enabled)
         positive2 named = string_hash_33_length(name);
         positive slot = exec_function_locate(name, named);
 
-        if (slot == positive_max)
-                return false;
-        if (enabled && !exec_function_environment_prepare(slot))
+        if (slot == positive_max || (enabled && !exec_function_environment_prepare(slot)))
                 return false;
         if (exec_functions[slot].exported != enabled)
         {
@@ -15240,10 +15232,7 @@ static COLD fn exec_wait_hearing(bipolar child)
 
 static PURE bool exec_background_live()
 {
-        for (positive at = 0; at < shell_wait_count; at++)
-                if (!(shell_wait_table[at].flags & SHELL_WAIT_DONE))
-                        return true;
-        return false;
+        return array_any(at, shell_wait_count, !(shell_wait_table[at].flags & SHELL_WAIT_DONE));
 }
 
 static fn exec_wait_background(bipolar child)

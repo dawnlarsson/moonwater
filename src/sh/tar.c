@@ -805,23 +805,16 @@ static p8 tar_pack_from_name(string_address name)
         if (!name || string_equals(name, "-"))
                 return TAR_PACK_NONE;
         n = string_length(name);
-        if (n >= 3 && !memory_compare(name + n - 3, ".gz", 3))
+        if (memory_has_suffix(name, n, ".gz") || memory_has_suffix(name, n, ".tgz"))
                 return TAR_PACK_GZIP;
-        if (n >= 4 && !memory_compare(name + n - 4, ".tgz", 4))
-                return TAR_PACK_GZIP;
-        if (n >= 3 && !memory_compare(name + n - 3, ".xz", 3))
+        if (memory_has_suffix(name, n, ".xz") || memory_has_suffix(name, n, ".txz"))
                 return TAR_PACK_XZ;
-        if (n >= 4 && !memory_compare(name + n - 4, ".txz", 4))
-                return TAR_PACK_XZ;
-        if (n >= 4 && !memory_compare(name + n - 4, ".zst", 4))
+        if (memory_has_suffix(name, n, ".zst") || memory_has_suffix(name, n, ".tzst"))
                 return TAR_PACK_ZSTD;
-        if (n >= 5 && !memory_compare(name + n - 5, ".tzst", 5))
-                return TAR_PACK_ZSTD;
-        if ((n >= 4 && !memory_compare(name + n - 4, ".bz2", 4)) ||
-            (n >= 5 && !memory_compare(name + n - 5, ".tbz2", 5)) ||
-            (n >= 4 && !memory_compare(name + n - 4, ".tbz", 4)))
+        if (memory_has_suffix(name, n, ".bz2") || memory_has_suffix(name, n, ".tbz2") ||
+            memory_has_suffix(name, n, ".tbz"))
                 return TAR_PACK_BZIP2;
-        if (n >= 2 && !memory_compare(name + n - 2, ".Z", 2))
+        if (memory_has_suffix(name, n, ".Z"))
                 return TAR_PACK_COMPRESS;
         return TAR_PACK_NONE;
 }
@@ -5175,10 +5168,7 @@ static positive tar_x_used;
 
 static bool tar_x_wanted(string_address key)
 {
-        for (positive at = 0; at < tar_pax_deleted_count; at++)
-                if (shell_match(tar_pax_deleted[at], key))
-                        return false;
-        return true;
+        return !array_any(at, tar_pax_deleted_count, shell_match(tar_pax_deleted[at], key));
 }
 
 /* One extended header record, "<length> <key>=<value>\n", the length

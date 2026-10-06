@@ -1128,9 +1128,7 @@ static COLD positive net_lease_due_in(const net_holding address_to held,
 
         if (!held || !held->index || !held->lease.seconds)
                 return 0;
-        if (held->lost)
-                return 1;
-        if (net_lease_expired_at(held, now))
+        if (held->lost || net_lease_expired_at(held, now))
                 return 1;
 
         gone = now - held->taken;

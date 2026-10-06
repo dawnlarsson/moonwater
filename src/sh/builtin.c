@@ -1480,10 +1480,7 @@ static inline INLINE bool env_name_same(string_address held, const_string name,
 {
         if (length == 1)
                 return held[0] == name[0];
-        for (positive at = 0; at < length; at++)
-                if (held[at] != name[at])
-                        return false;
-        return true;
+        return !array_any(at, length, held[at] != name[at]);
 }
 
 /*
@@ -3479,9 +3476,7 @@ static COLD b32 env_write_attributed(positive idx, const_string name,
                 env_reference resolved = env_reference_destination(
                     name, name_len, variable->hash, destination);
 
-                if (!resolved.valid)
-                        return 2;
-                if (env_reference_readonly(resolved))
+                if (!resolved.valid || env_reference_readonly(resolved))
                         return 2;
 
                 if (resolved.element)
@@ -3517,12 +3512,10 @@ KEEP __attribute__((externally_visible)) bool env_write_whole(const_string name,
     env_variable address_to destination, bool protect)
 {
         bool allexport = assignment && (shell_options & SHELL_FLAG('a'));
-        if (!name || !value)
-                return false;
-        if (protect && env_assignment_readonly_found_destination(
-                           name, name_len, hash, idx, destination))
-                return false;
-        if (!destination && env_optlist_name(name, name_len))
+        if (!name || !value ||
+            (protect && env_assignment_readonly_found_destination(
+                            name, name_len, hash, idx, destination)) ||
+            (!destination && env_optlist_name(name, name_len)))
                 return false;
         if (!destination && name_len == 4 && memory_is_4(name, 'P', 'A', 'T', 'H'))
                 hash_forget();
@@ -4048,9 +4041,7 @@ static PURE bool env_assignment_readonly_found_named(
 {
         env_variable address_to variable;
 
-        if (env_restricted_name(name, length))
-                return true;
-        if (env_bash_readonly_name(name, length))
+        if (env_restricted_name(name, length) || env_bash_readonly_name(name, length))
                 return true;
         if (!name)
                 return false;
@@ -4116,9 +4107,7 @@ PURE bool env_readonly_hashed_span(const_string name, positive length,
 {
         positive found;
 
-        if (env_restricted_name(name, length))
-                return true;
-        if (env_bash_readonly_name(name, length))
+        if (env_restricted_name(name, length) || env_bash_readonly_name(name, length))
                 return true;
 
         if (!name || !readonly_count)
@@ -4563,9 +4552,7 @@ static bool shell_array_set_destination(
 
         if (!resolved.valid)
                 return true;
-        if (protect && env_reference_readonly(resolved))
-                return false;
-        if (resolved.element)
+        if ((protect && env_reference_readonly(resolved)) || resolved.element)
                 return false;
 
         destination = resolved.destination;
@@ -4656,9 +4643,7 @@ static COLD bool shell_array_clear_mode(const_string name, positive length,
         env_variable address_to variable;
         array_table address_to table;
 
-        if (!resolved.valid || resolved.element)
-                return false;
-        if (protect && env_reference_readonly(resolved))
+        if (!resolved.valid || resolved.element || (protect && env_reference_readonly(resolved)))
                 return false;
 
         if (resolved.index >= shell_var_count)
@@ -8262,12 +8247,10 @@ static PURE bool env_bash_readonly_name(const_string name, positive length)
                 return true;
         if (!shell_bash_compat || !name)
                 return false;
-        if (memory_is_word((address_any)name, length, "UID"))
-                return true;
-        if (memory_is_word((address_any)name, length, "EUID") ||
-            memory_is_word((address_any)name, length, "PPID"))
-                return true;
-        if (memory_is_word((address_any)name, length, "BASH_VERSINFO"))
+        if (memory_is_word((address_any)name, length, "UID") ||
+            memory_is_word((address_any)name, length, "EUID") ||
+            memory_is_word((address_any)name, length, "PPID") ||
+            memory_is_word((address_any)name, length, "BASH_VERSINFO"))
                 return true;
         return false;
 }
@@ -8867,10 +8850,7 @@ static PURE bool shell_option_letter_known(p8 letter)
                 return string_first_of(SHELL_SET_LETTERS, letter) ||
                        letter == 'r';
 
-        for (positive option = 0; option < SHELL_OPTION_NAMES; option++)
-                if (shell_option_names[option].value == letter)
-                        return true;
-        return false;
+        return array_any(option, SHELL_OPTION_NAMES, shell_option_names[option].value == letter);
 }
 
 COLD fn shell_set(writer write, string_address input)
@@ -10299,9 +10279,7 @@ static bool shell_declare_print_one(writer write, string_address name,
         if ((!variable || !variable->declared) && !readonly)
                 return false;
 
-        if ((filter & DECLARE_EXPORT) && !exported)
-                return false;
-        if ((filter & DECLARE_READONLY) && !readonly)
+        if (((filter & DECLARE_EXPORT) && !exported) || ((filter & DECLARE_READONLY) && !readonly))
                 return false;
 
         //      declare -a, -A, -i, -l, -n and -u list only what carries every
@@ -18232,12 +18210,10 @@ static bool floodlight_policy_take(string_address text,
 
                 if (floodlight_word(&at).length ||
                     (!floodlight_is(state, "allow") &&
-                     !floodlight_is(state, "deny")))
-                        return false;
-                if (subject.length >= FLOODLIGHT_NAME ||
-                    detail.length >= FLOODLIGHT_DETAIL)
-                        return false;
-                if (floodlight_is(subject, "seal") ||
+                     !floodlight_is(state, "deny")) ||
+                    subject.length >= FLOODLIGHT_NAME ||
+                    detail.length >= FLOODLIGHT_DETAIL ||
+                    floodlight_is(subject, "seal") ||
                     !floodlight_plain(subject) ||
                     (i == FLOODLIGHT_FLAG && !floodlight_plain(detail)))
                         return false;
@@ -20908,11 +20884,7 @@ static bool shell_background_reserve(positive count)
 
 static PURE positive shell_wait_find_job(bipolar job)
 {
-        for (positive at = 0; at < shell_wait_count; at++)
-                if (shell_wait_table[at].job == job)
-                        return at;
-
-        return shell_wait_count;
+        return array_where(at, shell_wait_count, shell_wait_table[at].job == job);
 }
 
 static positive shell_wait_find_child(bipolar pid)
@@ -21443,11 +21415,7 @@ static COLD fn comp_forget(comp_spec address_to spec)
 
 static COLD positive comp_find(string_address name)
 {
-        for (positive at = 0; at < comp_count; at++)
-                if (!string_compare(comp_specs[at].name, name))
-                        return at;
-
-        return comp_count;
+        return array_where(at, comp_count, !string_compare(comp_specs[at].name, name));
 }
 
 static COLD fn comp_drop(positive at)
@@ -22334,11 +22302,7 @@ static COLD bipolar bind_keymap_named(string_address name)
 
 static COLD bool bind_function_known(string_address name)
 {
-        for (positive at = 0; at < BIND_FUNCTIONS; at++)
-                if (!string_compare(name, bind_functions[at]))
-                        return true;
-
-        return false;
+        return array_any(at, BIND_FUNCTIONS, !string_compare(name, bind_functions[at]));
 }
 
 /*
@@ -22663,11 +22627,8 @@ static COLD bool bind_add(string_address spelling, string_address text,
 
 static COLD positive bind_variable_index(string_address name)
 {
-        for (positive at = 0; at < BIND_VARIABLES; at++)
-                if (!string_compare(name, bind_variable_defaults[at].name))
-                        return at;
-
-        return BIND_VARIABLES;
+        return array_where(at, BIND_VARIABLES,
+                           !string_compare(name, bind_variable_defaults[at].name));
 }
 
 static COLD string_address bind_variable_now(positive at)

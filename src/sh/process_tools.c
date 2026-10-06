@@ -1938,9 +1938,7 @@ static bool process_script_timing_line(process_script_state address_to state,
                                        p8 stream, positive length)
 {
         process_script_log address_to timing = state->logs + 2;
-        if (timing->handle < 0)
-                return true;
-        if (!state->advanced && stream != 'O')
+        if (timing->handle < 0 || (!state->advanced && stream != 'O'))
                 return true;
 
         positive now = clock_monotonic_nanoseconds();

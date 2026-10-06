@@ -7400,12 +7400,10 @@ static COLD bipolar tls_parse_cert(p8 address_to der, positive length,
                 cert->curve = 3;
                 if (tls_asn1_enter(der, bit_stop, 0x30, address_of at,
                                    address_of rsa_stop) ||
-                    rsa_stop != bit_stop)
-                        return TLS_FAIL;
-                if (tls_asn1_enter(der, rsa_stop, 0x02, address_of at,
-                                   address_of n_stop))
-                        return TLS_FAIL;
-                if (!tls_positive_integer(der, at, n_stop,
+                    rsa_stop != bit_stop ||
+                    tls_asn1_enter(der, rsa_stop, 0x02, address_of at,
+                                   address_of n_stop) ||
+                    !tls_positive_integer(der, at, n_stop,
                                           address_of value_at,
                                           address_of value_length))
                         return TLS_FAIL;

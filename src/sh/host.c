@@ -5578,10 +5578,7 @@ static COLD bool wifi_pass_fits(p8 address_to pass, positive length)
 {
         if (length != 64)
                 return length >= 8 && length <= 63;
-        for (positive at = 0; at < length; at++)
-                if (digit_known(pass[at], 16) >= 16)
-                        return false;
-        return true;
+        return !array_any(at, length, digit_known(pass[at], 16) >= 16);
 }
 
 static COLD bool wifi_psk(p8 address_to ssid, positive ssid_length,
@@ -11229,9 +11226,7 @@ static inline INLINE CONST bool sntp_local_ok(bipolar ns)
 
 static inline INLINE CONST bipolar sntp_timespec_ns(p64 seconds, p64 nanoseconds)
 {
-        if (nanoseconds >= SNTP_NANOSECONDS)
-                return -1;
-        if (seconds > SNTP_TIMESPEC_SECONDS_MOST)
+        if (nanoseconds >= SNTP_NANOSECONDS || seconds > SNTP_TIMESPEC_SECONDS_MOST)
                 return -1;
         return (bipolar)seconds * (bipolar)SNTP_NANOSECONDS +
                (bipolar)nanoseconds;
@@ -11321,11 +11316,8 @@ static CONST COLD bool sntp_sample_sane(bipolar t1, bipolar t2, bipolar t3,
                                    bipolar t4, bipolar offset_ns,
                                    bipolar delay_ns, bipolar most)
 {
-        if (t1 < 0 || t4 < t1 || t3 < t2)
-                return false;
-        if (!sntp_wall_ok(t2) || !sntp_wall_ok(t3))
-                return false;
-        if (delay_ns < 0 || delay_ns > SNTP_DELAY_MOST_NS)
+        if (t1 < 0 || t4 < t1 || t3 < t2 || !sntp_wall_ok(t2) || !sntp_wall_ok(t3) ||
+            delay_ns < 0 || delay_ns > SNTP_DELAY_MOST_NS)
                 return false;
         //      A clock that tells the time already is moved by at most
         //      what was asked; one that does not has nothing to be moved
@@ -14064,10 +14056,7 @@ static bipolar locale_ntp_take(string_address server,
 static bool locale_ntp_heard(const sntp_sample address_to heard, positive count,
                              p32 address)
 {
-        for (positive at = 0; at < count; at++)
-                if (heard[at].address == address)
-                        return true;
-        return false;
+        return array_any(at, count, heard[at].address == address);
 }
 
 static bipolar locale_ntp_walk(bool by_hand)

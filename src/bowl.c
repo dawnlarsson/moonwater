@@ -2380,9 +2380,7 @@ static bool bowl_section_is(string_address line, string_address name)
 {
         positive length = string_length(name);
 
-        if (line[0] != '[')
-                return false;
-        if (string_compare_max(line + 1, name, length))
+        if (line[0] != '[' || string_compare_max(line + 1, name, length))
                 return false;
         return line[1 + length] == ']';
 }

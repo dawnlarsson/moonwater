@@ -152,6 +152,25 @@
         }
 
 #ifndef KERNEL_MODE
+/*      The first index below count at which a test holds, or count when it
+        holds at none: `for (at = 0; at < n; at++) if (test) break;` said
+        once. The caller names the index so the test can read it. */
+#define array_where(at, count, test) \
+        ({ \
+                positive at = 0; \
+                positive array_where_count = (count); \
+                while (at < array_where_count && !(test)) \
+                        at++; \
+                at; \
+        })
+
+/* Whether a test holds at any of the first count indices. */
+#define array_any(at, count, test) \
+        ({ \
+                positive array_any_count = (count); \
+                array_where(at, array_any_count, test) < array_any_count; \
+        })
+
 /*      A statement that runs when the scope it is written in is left: by a
         return, a break or a continue, or by falling off the end. They run in
         the reverse of the order they were written, so what a later one needs

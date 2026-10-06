@@ -36172,7 +36172,9 @@ static fn span_checks(void)
         of its scope -- falling off the end, a return, a break, a continue --
         in the reverse of the order they were written, and after the value a
         return hands back has been worked out; a cleanup that is guarded by a
-        flag is skipped by it.
+        flag is skipped by it. array_where names the index for the test to
+        read, gives the count when nothing holds and reads its count once;
+        array_any is the same asked as a yes or a no.
 */
 static positive control_trail[8];
 static positive control_trails;
@@ -36205,6 +36207,9 @@ static positive control_kept(bool kept)
 
 static fn control_checks(void)
 {
+        static const positive table[] = {4, 7, 7, 1};
+        positive calls = 0;
+        positive found;
         positive loops = 0;
 
         control_trails = 0;
@@ -36233,6 +36238,20 @@ static fn control_checks(void)
         }
         check("a continue and a break leave the scope of the turn like any other exit",
               loops == 3);
+
+        check("nothing to look at is the count, which is nothing",
+              array_where(at, 0, true) == 0 && !array_any(at, 0, true));
+        check("the first index that holds", array_where(at, 4, table[at] == 7) == 1);
+        check("the last index is looked at", array_where(at, 4, table[at] == 1) == 3);
+        check("nothing holds: the count", array_where(at, 4, table[at] == 5) == 4);
+        check("a count shorter than the table keeps the rest unseen",
+              array_where(at, 2, table[at] == 1) == 2 && !array_any(at, 3, table[at] == 1) &&
+                  array_any(at, 4, table[at] == 1));
+        found = array_where(at, (calls++, 4), table[at] == 5);
+        check("the count is read once, not every turn", calls == 1 && found == 4);
+        calls = 0;
+        check("the test reads the index, and nothing past the first hit is looked at",
+              array_any(at, 4, (calls += at, table[at] == 7)) && calls == 1);
 }
 
 b32 main(void)

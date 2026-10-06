@@ -4646,11 +4646,7 @@ static bool awk_special_name(awk_text address_to name)
             "FS", "OFS", "ORS", "RS", "NR", "NF", "FNR", "FILENAME", "SUBSEP",
             "RSTART", "RLENGTH", "CONVFMT", "OFMT", "ENVIRON", "ARGV", "ARGC"};
 
-        for (positive i = 0; i < array_count(specials); i++)
-                if (awk_name_is(name, specials[i]))
-                        return true;
-
-        return false;
+        return array_any(i, array_count(specials), awk_name_is(name, specials[i]));
 }
 
 static fn awk_parse_function()

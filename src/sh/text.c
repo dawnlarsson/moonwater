@@ -363,11 +363,8 @@ static bool text_write_error_worded()
             "pr", "fmt", "ptx",
         };
 
-        for (positive i = 0; i < sizeof(names) / sizeof(names[0]); i++)
-                if (string_equals(text_name, (string_address)names[i]))
-                        return true;
-
-        return false;
+        return array_any(i, sizeof(names) / sizeof(names[0]),
+                         string_equals(text_name, (string_address)names[i]));
 }
 
 static HOT b32 text_done(b32 code)
@@ -10233,11 +10230,7 @@ static bool tail_remote(bipolar handle)
                           (positive)facts) < 0)
                 return true;
 
-        for (positive i = 0; i < sizeof(remote) / sizeof(remote[0]); i++)
-                if ((p32)facts[0] == remote[i])
-                        return true;
-
-        return false;
+        return array_any(i, sizeof(remote) / sizeof(remote[0]), (p32)facts[0] == remote[i]);
 }
 
 /*
@@ -10463,12 +10456,9 @@ static bool tail_any_live()
         if (tail_retry && tail_follow_mode == 'n')
                 return true;
 
-        for (positive i = 0; i < tail_files_count; i++)
-                if (tail_files[i].handle >= 0 ||
-                    (!tail_files[i].ignore && tail_retry))
-                        return true;
-
-        return false;
+        return array_any(i, tail_files_count,
+                         tail_files[i].handle >= 0 ||
+                         (!tail_files[i].ignore && tail_retry));
 }
 
 /*
@@ -27479,13 +27469,10 @@ static bool grep_line_matches(const grep_plan address_to plan,
                 if (plan->boundary == REGEX_BOUNDARY_NONE)
                         return true;
 
-                for (positive i = 0; i < set->count; i++)
-                        if (grep_literal_bounded(plan, line, length,
-                                                 set->bytes + set->at[i],
-                                                 set->size[i], set->anchors[i]))
-                                return true;
-
-                return false;
+                return array_any(i, set->count,
+                                 grep_literal_bounded(plan, line, length,
+                                                      set->bytes + set->at[i],
+                                                      set->size[i], set->anchors[i]));
         }
 
         /*
@@ -27789,12 +27776,9 @@ static bool grep_bytes_hold(const grep_plan address_to plan,
 
         const grep_set address_to set = plan->set;
 
-        for (positive i = 0; i < set->count; i++)
-                if (text_literal_find(bytes, size, 0, set->bytes + set->at[i],
-                                      set->size[i], plan->icase, set->anchors[i]))
-                        return true;
-
-        return false;
+        return array_any(i, set->count,
+                         text_literal_find(bytes, size, 0, set->bytes + set->at[i],
+                                           set->size[i], plan->icase, set->anchors[i]));
 }
 
 /*

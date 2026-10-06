@@ -1773,10 +1773,7 @@ static bool login_message_group_member(string_address user)
             !id_groups_named(user, (positive)primary, address_of have))
                 return false;
 
-        for (positive at = 0; at < have; at++)
-                if (file_id_scratch[at] == login_message_select.wanted_group)
-                        return true;
-        return false;
+        return array_any(at, have, file_id_scratch[at] == login_message_select.wanted_group);
 }
 
 static bool login_message_add(string_address user, string_address line,
@@ -15317,11 +15314,7 @@ static bool ps_value_add(positive address_to address_to values,
 static bool ps_value_has(positive address_to values, positive count,
                          positive value)
 {
-        for (positive i = 0; i < count; i++)
-                if (values[i] == value)
-                        return true;
-
-        return false;
+        return array_any(i, count, values[i] == value);
 }
 
 typedef struct
@@ -18104,9 +18097,7 @@ static bool ul_limit_parse(string_address text, ul_limit_pair current,
 
         p8 left[64];
         positive length = (positive)(colon - text);
-        if (!length && !string_get(colon + 1))
-                return false;
-        if (length >= sizeof(left))
+        if ((!length && !string_get(colon + 1)) || length >= sizeof(left))
                 return false;
         memory_copy_apart_end(left, text, length);
 

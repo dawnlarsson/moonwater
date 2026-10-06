@@ -783,12 +783,10 @@ static bool file_same_dirent(bipolar source_directory, string_address source,
         file_facts left;
         file_facts right;
 
-        if (!string_equals(source, destination))
-                return false;
-        if (file_look_code(source_directory, (string_address)"", AT_EMPTY_PATH,
-                           address_of left) < 0)
-                return false;
-        if (file_look_code(destination_directory, (string_address)"",
+        if (!string_equals(source, destination) ||
+            file_look_code(source_directory, (string_address)"", AT_EMPTY_PATH,
+                           address_of left) < 0 ||
+            file_look_code(destination_directory, (string_address)"",
                            AT_EMPTY_PATH, address_of right) < 0)
                 return false;
         return file_same_identity(address_of left, address_of right);
@@ -11929,11 +11927,7 @@ static bool ls_pattern_hidden(string_address name)
         if (ls_hidden || ls_almost)
                 return false;
 
-        for (positive i = 0; i < ls_hide_count; i++)
-                if (ls_pattern_matches(ls_hide_patterns[i], name))
-                        return true;
-
-        return false;
+        return array_any(i, ls_hide_count, ls_pattern_matches(ls_hide_patterns[i], name));
 }
 
 static fn ls_fill(ls_entry address_to entry, file_facts address_to facts)
@@ -18568,11 +18562,8 @@ static bool du_excluded(string_address path)
 
         path_tail_copy(name, FILE_PATH_MAX, path);
 
-        for (positive i = 0; i < du_exclude_have; i++)
-                if (shell_match(du_excludes[i], path) || shell_match(du_excludes[i], name))
-                        return true;
-
-        return false;
+        return array_any(i, du_exclude_have,
+                         shell_match(du_excludes[i], path) || shell_match(du_excludes[i], name));
 }
 
 static du_moment du_stamp(const file_facts address_to facts)
@@ -19964,10 +19955,7 @@ static positive df_excluded_count;
 static bool df_type_listed(string_address type, string_address address_to list,
                            positive count)
 {
-        for (positive at = 0; at < count; at++)
-                if (string_equals(type, list[at]))
-                        return true;
-        return false;
+        return array_any(at, count, string_equals(type, list[at]));
 }
 
 static bool df_remote(storage_mount address_to mount)
@@ -20053,10 +20041,7 @@ static fn df_field_add(p8 field, string_address heading)
 
 static bool df_field_used(p8 field)
 {
-        for (positive at = 0; at < df_shown_count; at++)
-                if (df_shown[at] == field)
-                        return true;
-        return false;
+        return array_any(at, df_shown_count, df_shown[at] == field);
 }
 
 static bool df_refused(string_address message, string_address word)
@@ -29589,11 +29574,9 @@ static bool hardlink_snapshot_same(file_facts address_to old,
 static bool hardlink_matches(string_address address_to patterns, positive count,
                              string_address text)
 {
-        for (positive at = 0; at < count; at++)
-                if (regex_compile(patterns[at], true, false, false, 5) &&
-                    regex_find(REGEX_FIRST, text, string_length(text), 0))
-                        return true;
-        return false;
+        return array_any(at, count,
+                         regex_compile(patterns[at], true, false, false, 5) &&
+                         regex_find(REGEX_FIRST, text, string_length(text), 0));
 }
 
 #define HARDLINK_SAY(level, ...)                                            \
@@ -29904,11 +29887,9 @@ static bool hardlink_same_node(positive left_at, positive right_at)
 
         if (left->facts.inode != right->facts.inode ||
             file_device_key(left->facts.device_major, left->facts.device_minor) !=
-                file_device_key(right->facts.device_major, right->facts.device_minor))
-                return false;
-        if (hardlink_respect_name && string_compare(hardlink_base(left), hardlink_base(right)))
-                return false;
-        if (hardlink_respect_dir && hardlink_directory_compare(left, right))
+                file_device_key(right->facts.device_major, right->facts.device_minor) ||
+            (hardlink_respect_name && string_compare(hardlink_base(left), hardlink_base(right))) ||
+            (hardlink_respect_dir && hardlink_directory_compare(left, right)))
                 return false;
         return true;
 }
@@ -30467,25 +30448,20 @@ static bool hardlink_may_link(positive master_at, positive other_at)
         if (a->facts.size != b->facts.size ||
             a->facts.device_major != b->facts.device_major ||
             a->facts.device_minor != b->facts.device_minor ||
-            a->facts.inode == b->facts.inode)
-                return false;
-        if (!hardlink_ignore_mode && a->facts.mode != b->facts.mode)
-                return false;
-        if (!hardlink_ignore_owner &&
-            (a->facts.owner != b->facts.owner || a->facts.group != b->facts.group))
-                return false;
-        if (!hardlink_ignore_time && a->facts.modified.seconds != b->facts.modified.seconds)
+            a->facts.inode == b->facts.inode ||
+            (!hardlink_ignore_mode && a->facts.mode != b->facts.mode) ||
+            (!hardlink_ignore_owner &&
+             (a->facts.owner != b->facts.owner || a->facts.group != b->facts.group)) ||
+            (!hardlink_ignore_time && a->facts.modified.seconds != b->facts.modified.seconds))
                 return false;
 
         hardlink_file address_to head_a = hardlink_files + master->head - 1;
         hardlink_file address_to head_b = hardlink_files + other->head - 1;
 
-        if (hardlink_respect_name &&
-            string_compare(hardlink_base(head_a), hardlink_base(head_b)))
-                return false;
-        if (hardlink_respect_dir && hardlink_directory_compare(head_a, head_b))
-                return false;
-        if (hardlink_respect_xattrs && !hardlink_xattrs_equal(head_a, head_b))
+        if ((hardlink_respect_name &&
+             string_compare(hardlink_base(head_a), hardlink_base(head_b))) ||
+            (hardlink_respect_dir && hardlink_directory_compare(head_a, head_b)) ||
+            (hardlink_respect_xattrs && !hardlink_xattrs_equal(head_a, head_b)))
                 return false;
         return true;
 }
@@ -33301,11 +33277,7 @@ static bool dircolors_word_is(string_address text, positive length,
         if (length != string_length(word))
                 return false;
 
-        for (positive i = 0; i < length; i++)
-                if (byte_to_upper(string_get(text + i)) != string_get(word + i))
-                        return false;
-
-        return true;
+        return !array_any(i, length, byte_to_upper(string_get(text + i)) != string_get(word + i));
 }
 
 static string_address dircolors_key(string_address word, positive length)
@@ -35481,20 +35453,15 @@ static bool cp_into_self;
 //      meets it in the walk of dir.
 static bool cp_created_holds(file_facts address_to facts)
 {
-        for (positive at = 0; at < cp_created_count; at++)
-                if (cp_created_inode[at] == facts->inode &&
-                    cp_created_major[at] == facts->device_major &&
-                    cp_created_minor[at] == facts->device_minor)
-                        return true;
-        return false;
+        return array_any(at, cp_created_count,
+                         cp_created_inode[at] == facts->inode &&
+                         cp_created_major[at] == facts->device_major &&
+                         cp_created_minor[at] == facts->device_minor);
 }
 
 static bool cp_created_names(positive inode)
 {
-        for (positive at = 0; at < cp_created_count; at++)
-                if (cp_created_inode[at] == inode)
-                        return true;
-        return false;
+        return array_any(at, cp_created_count, cp_created_inode[at] == inode);
 }
 
 static fn cp_tree_enter(address_any context, address_any node_address,
@@ -35778,13 +35745,10 @@ static positive cp_ancestor_count;
 
 static bool cp_ancestor_holds(file_facts address_to facts)
 {
-        for (positive at = 0; at < cp_ancestor_count; at++)
-                if (cp_ancestor_inode[at] == facts->inode &&
-                    cp_ancestor_major[at] == facts->device_major &&
-                    cp_ancestor_minor[at] == facts->device_minor)
-                        return true;
-
-        return false;
+        return array_any(at, cp_ancestor_count,
+                         cp_ancestor_inode[at] == facts->inode &&
+                         cp_ancestor_major[at] == facts->device_major &&
+                         cp_ancestor_minor[at] == facts->device_minor);
 }
 
 static bool cp_tree_serial_copy(string_address path, positive name_at, positive level)
@@ -36162,15 +36126,13 @@ static bool cp_same_file_ok(bipolar source_directory, string_address source,
                 file_facts source_through = *source_link;
                 file_facts destination_through = *destination_link;
 
-                if (CP_IS_LINK(source_link) &&
-                    !file_look(source_directory, source, 0,
-                               address_of source_through))
-                        return true;
-                if (CP_IS_LINK(destination_link) &&
-                    !file_look(destination_directory, destination, 0,
-                               address_of destination_through))
-                        return true;
-                if (!file_same_identity(address_of source_through,
+                if ((CP_IS_LINK(source_link) &&
+                     !file_look(source_directory, source, 0,
+                                address_of source_through)) ||
+                    (CP_IS_LINK(destination_link) &&
+                     !file_look(destination_directory, destination, 0,
+                                address_of destination_through)) ||
+                    !file_same_identity(address_of source_through,
                                         address_of destination_through))
                         return true;
                 if (cp_hard)
@@ -41752,9 +41714,7 @@ static bool file_duration_read(string_address text, bool units,
                         unit = suffix == 'm' ? 60 : suffix == 'h' ? 3600
                              : suffix == 'd' ? 86400 : 1;
                 }
-                if (string_get(at))
-                        return false;
-                if (value > positive_max / (unit * 1000000000u))
+                if (string_get(at) || value > positive_max / (unit * 1000000000u))
                         return false;
                 address_to nanoseconds = value * unit * 1000000000u;
                 return true;
@@ -42203,11 +42163,9 @@ static bool seq_decimal_number(string_address text, seq_decimal address_to out)
                 positive value;
 
                 if (!string_digits_checked(address_of hex, 16, address_of value) ||
-                    string_get(hex))
-                        return false;
-                if (minus && value > (positive)bipolar_max + 1)
-                        return false;
-                if (!minus && value > (positive)bipolar_max)
+                    string_get(hex) ||
+                    (minus && value > (positive)bipolar_max + 1) ||
+                    (!minus && value > (positive)bipolar_max))
                         return false;
                 out->coefficient = bipolar_from_magnitude(value, minus);
                 out->scale = 0;
@@ -46060,11 +46018,9 @@ static bool file_hostname_valid(string_address name, positive length)
         {
                 p8 byte = name[at];
 
-                if (!byte_is_alnum(byte) && byte != '-' && byte != '.')
-                        return false;
-                if (byte == '-' && (name[at - 1] == '.' || name[at + 1] == '.'))
-                        return false;
-                if (byte == '.' && name[at - 1] == '.')
+                if ((!byte_is_alnum(byte) && byte != '-' && byte != '.') ||
+                    (byte == '-' && (name[at - 1] == '.' || name[at + 1] == '.')) ||
+                    (byte == '.' && name[at - 1] == '.'))
                         return false;
         }
 

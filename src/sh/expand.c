@@ -1339,11 +1339,7 @@ static inline INLINE fn glob_bits_put(glob_bits bits, positive at)
 
 static bool glob_bits_any(glob_reach address_to walk, const glob_bits bits)
 {
-        for (positive at = 0; at < walk->words; at++)
-                if (bits[at])
-                        return true;
-
-        return false;
+        return array_any(at, walk->words, bits[at]);
 }
 
 static fn glob_bits_union(glob_reach address_to walk, glob_bits into,
@@ -5448,11 +5444,7 @@ static fn shell_substitutions_forget()
 //      be asked about.
 bool shell_substitution_child(bipolar pid)
 {
-        for (positive at = 0; at < expand_substitutions_count; at++)
-                if (expand_substitutions[at].child == pid)
-                        return true;
-
-        return false;
+        return array_any(at, expand_substitutions_count, expand_substitutions[at].child == pid);
 }
 
 static bool expand_substitution_remember(b32 descriptor, bipolar child)

@@ -2432,12 +2432,10 @@ static bool link_carried(p8 address_to datagram, positive length,
                 Our sending counter can remain small while a one-way peer
                 exhausts the AEAD message limit, so it cannot enforce the
                 receiving half's nonce budget. */
-        if (waterlink_session_spent(link_age(now, keys->made), head.counter))
-                return false;
-        if (keys == address_of s->before &&
-            link_age(now, s->now.made) > LINK_GRACE)
-                return false;
-        if (!waterlink_replay_new(address_of keys->replay, head.counter))
+        if (waterlink_session_spent(link_age(now, keys->made), head.counter) ||
+            (keys == address_of s->before &&
+             link_age(now, s->now.made) > LINK_GRACE) ||
+            !waterlink_replay_new(address_of keys->replay, head.counter))
                 return false;
 
         if (keys == address_of s->next)

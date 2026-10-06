@@ -1679,9 +1679,7 @@ static bool xz_dec_block(xz_decoder address_to d)
         if (d->paused)
                 return true;
         d->block_packed = d->in_abs - d->block_body_abs;
-        if (!xz_dec_pad4(d, d->block_hdr_size + (positive)d->block_packed))
-                return false;
-        if (!xz_dec_block_data(d))
+        if (!xz_dec_pad4(d, d->block_hdr_size + (positive)d->block_packed) || !xz_dec_block_data(d))
                 return false;
         if (((d->hdr_has & 0x40) && d->hdr_packed != d->block_packed) ||
             ((d->hdr_has & 0x80) && d->hdr_plain != d->block_out))
