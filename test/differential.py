@@ -43998,13 +43998,63 @@ while True:
         #       The layouts the command offers are the ones Canvas has: a name the
         #       command takes that the kernel refuses is a layout saved and never
         #       applied, and one only the kernel has is a layout nobody can pick.
-        table = set(re.findall(r'\{"(\w+)"\}', re.search(
-            r"locale_keyboards\[\] = \{(.*?)\};", (HARNESS_ROOT / "src/sh/host.c").read_text(), re.S).group(1)))
+        pairs = re.findall(r'\{"(\w+)", "(\w+)"\}', re.search(
+            r"locale_keyboards\[\] = \{(.*?)\};", (HARNESS_ROOT / "src/sh/host.c").read_text(), re.S).group(1))
+        table = {name for name, xkb in pairs}
+        #       And each has the name XKB gives it, which a compositor from a
+        #       bowl reads as XKB_DEFAULT_LAYOUT: the country's code where the
+        #       machine's layout name is another (uk is gb, sv is se, nb is no).
+        check(dict(pairs) == {"us": "us", "uk": "gb", "gb": "gb", "de": "de", "se": "se", "sv": "se",
+                              "no": "no", "nb": "no", "dk": "dk", "fi": "fi", "fr": "fr", "es": "es",
+                              "it": "it"},
+              "every layout moonwater keyboard offers has the XKB name a compositor wants", sorted(dict(pairs).items()))
         layout_body = (HARNESS_ROOT / "src/canvas/canvas.c").read_text().split(
             "static long canvas_layout_set", 1)[1].split("\n}\n", 1)[0]
         check(table and table == set(re.findall(r'strcmp\(name, "(\w+)"\)', layout_body)),
               "the layouts moonwater keyboard offers are the ones Canvas takes",
               sorted(table ^ set(re.findall(r'strcmp\(name, "(\w+)"\)', layout_body))))
+        #       moonwater desktop is a setting like the keyboard's: bare it says
+        #       what is chosen, a word is saved when it is canvas, off or a
+        #       profile that is installed, and nothing else is, and a layout is
+        #       said in XKB's name for the session of a bowl to read.
+        script = ("rm -f /root/desktop /bowls/bin/desktop; mkdir -p /bowls/bin\n" +
+                  say("desktop") + say("desktop off") + "echo \"@@kept $(cat /root/desktop)\"\n" +
+                  say("desktop desktop") + say("desktop nosuch") + say("desktop canvas extra") +
+                  say("desktop stop") + "echo \"@@kept $(cat /root/desktop)\"\n" +
+                  "printf '#!/bin/sh\\n# bowl profile desktop\\nexit 0\\n' > /bowls/bin/desktop; "
+                  "chmod 755 /bowls/bin/desktop\n" +
+                  say("desktop desktop") + "echo \"@@kept $(cat /root/desktop)\"\n" +
+                  say("desktop") + say("desktop canvas") + "echo \"@@kept $(cat /root/desktop)\"\n" +
+                  "printf '#!/bin/sh\\nexit 0\\n' > /bowls/bin/desktop\n" + say("desktop desktop") +
+                  "echo \"@@kept $(cat /root/desktop)\"\n" +
+                  "".join(say(f"keyboard {layout}") + say("keyboard xkb") for layout in ("uk", "sv", "nb", "de", "us")) +
+                  "rm -f /root/desktop /bowls/bin/desktop\n")
+        lines, finished = session(script)
+        seen = answers(lines)
+        kept = [line.split(None, 1)[1] if " " in line else "" for line in lines if line.startswith("@@kept")]
+        check(finished and seen.get("desktop", {}).get("status") == 0 and
+              any(line.endswith("desktop canvas") for line in seen["desktop"]["out"]),
+              "moonwater desktop says canvas when nothing was chosen", repr(seen.get("desktop")))
+        check(seen.get("desktop off", {}).get("status") == 0 and kept[:1] == ["off"],
+              "desktop off is saved", repr((seen.get("desktop off"), kept[:1])))
+        check(seen.get("desktop desktop", {}).get("status") == 1 and
+              any("is not installed" in line for line in seen["desktop desktop"]["out"]) and kept[1:2] == ["off"],
+              "a profile that is not installed is refused and the choice stays", repr((kept[1:2],)))
+        check(seen.get("desktop nosuch", {}).get("status") == 1 and
+              any("unknown desktop nosuch" in line for line in seen["desktop nosuch"]["out"]),
+              "a word that is no profile is refused", repr(seen.get("desktop nosuch")))
+        check(seen.get("desktop canvas extra", {}).get("status") == 2,
+              "a word too many is a usage page", repr(seen.get("desktop canvas extra")))
+        check(seen.get("desktop stop", {}).get("status") == 1 and
+              any("no desktop session is running" in line for line in seen["desktop stop"]["out"]),
+              "stop with no session is a refusal", repr(seen.get("desktop stop")))
+        check(kept[2:3] == ["desktop"] and kept[3:4] == ["canvas"],
+              "a profile that is installed is chosen, and canvas puts the default back", repr(kept))
+        check(kept[4:5] == ["canvas"] and seen.get("desktop desktop", {}).get("status") is not None,
+              "a script that is not a profile's is not one", repr(kept))
+        names = [lines[at + 1] for at in range(len(lines) - 1) if lines[at] == "@@ keyboard xkb"]
+        check(names == ["gb", "se", "no", "de", "us"],
+              "keyboard xkb says the layout in XKB's name", repr(names))
         # Wipe against what a machine really has under /home and /root.
         #   A file system mounted there is not userspace to forget: a stick
         #   under /home lost its files and then the wipe failed on the busy

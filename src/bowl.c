@@ -31,7 +31,8 @@ static const p8 bowl_usage_text[] = bowl_label
     "usage: bowl setup <name>\n"
     bowl_label "       bowl [--fast|--isolated] <root> [program [argument...]]\n"
     bowl_label "       bowl expose <root> <program> [name]\n"
-    bowl_label "       bowl profile [<name> [install|remove]]\n";
+    bowl_label "       bowl profile [<name> [install|remove]]\n"
+    bowl_label "       bowl udev\n";
 
 #define BOWL_NATIVE_SHELL "/shell"
 /* Where bowl roots live, said once. Everything else that needs to know --
@@ -705,7 +706,7 @@ static b32 bowl_expose(positive count, string_address address_to arguments)
 }
 
 static string_address bowl_guest_bins[] = {
-    "/usr/bin", "/usr/sbin", "/bin", "/root/.nix-profile/bin", null};
+    "/usr/bin", "/usr/sbin", "/bin", "/sbin", "/root/.nix-profile/bin", null};
 
 static bool bowl_split_guest_path(string_address path, p8 address_to root,
                                   positive root_room, p8 address_to program,
@@ -1049,31 +1050,44 @@ static bipolar bowl_isolated_enter(string_address root)
 }
 
 /* Bind only the loader search paths a guest binary still spells in ELF. */
-static bipolar bowl_fast_enter(string_address root)
+/*
+        What only udev reads: the rules and the hardware database a bowl keeps
+        in its own /etc/udev. Every launch would pay two mounts for it, and
+        nothing but the daemon and its tool ever looks, so `bowl udev` asks for
+        it and no other launch has it.
+*/
+static bool bowl_udev_layer;
+
+static bipolar bowl_fast_layer(string_address root, string_address layer)
 {
         p8 source[BOWL_PATH_LIMIT];
         bipolar failed;
 
+        if (!bowl_root_path(source, sizeof(source), root, layer))
+                return -ENAMETOOLONG;
+
+        if (system_access_at(AT_FDCWD, source, 0) < 0)
+                return 0;
+
+        failed = bowl_mkdir_parents(layer);
+        if (failed < 0)
+                return failed;
+
+        return bowl_bind_ro(source, layer);
+}
+
+static bipolar bowl_fast_enter(string_address root)
+{
+        bipolar failed;
+
         for (positive i = 0; bowl_fast_layers[i]; i++)
         {
-                string_address layer = bowl_fast_layers[i];
-
-                if (!bowl_root_path(source, sizeof(source), root, layer))
-                        return -ENAMETOOLONG;
-
-                if (system_access_at(AT_FDCWD, source, 0) < 0)
-                        continue;
-
-                failed = bowl_mkdir_parents(layer);
-                if (failed < 0)
-                        return failed;
-
-                failed = bowl_bind_ro(source, layer);
+                failed = bowl_fast_layer(root, bowl_fast_layers[i]);
                 if (failed)
                         return failed;
         }
 
-        return 0;
+        return bowl_udev_layer ? bowl_fast_layer(root, "/etc/udev") : 0;
 }
 
 static b32 bowl_launch_failed(bipolar native_shell, string_address what,
@@ -5262,6 +5276,277 @@ static b32 bowl_setup(positive count, string_address address_to arguments)
 }
 
 
+/* ---- udev: the answer to "which of these is a keyboard", for every guest. ---- */
+
+/*
+        libinput, and with it KWin, Weston, sway and Xorg, does not look at
+        /dev/input to learn what a device is. It asks udev, whose database
+        under /run/udev says which event node is a keyboard, a mouse, a
+        touchpad, and a device with none of those tags is skipped as "not
+        tagged as a supported input device". Nothing here runs a udev, so a
+        compositor from any bowl came up on a screen it drew on and found no
+        input at all.
+
+        So the bowl that has one runs it, the way the distribution does: the
+        daemon, then a trigger that has it name every device that is already
+        there, and a wait for it to finish. It runs once and is left running,
+        which is also what makes a keyboard plugged in later reach the
+        compositor, and it is started before the compositor and not after:
+        a compositor that was up first never takes the devices in.
+
+        The daemon is found in whichever bowl holds one, eudev's udevd in
+        Alpine's /sbin or systemd's in the other distributions' library
+        directory, and run in that bowl's own view with its /etc/udev, which
+        is where its rules and hardware database are kept.
+*/
+static string_address bowl_udev_daemons[] = {
+    "/sbin/udevd", "/usr/sbin/udevd", "/usr/lib/systemd/systemd-udevd",
+    "/lib/systemd/systemd-udevd", null};
+static string_address bowl_udev_tools[] = {
+    "/bin/udevadm", "/usr/bin/udevadm", "/sbin/udevadm", null};
+
+/*
+        What a distribution's udev would do that this machine has not asked
+        for: name the network interfaces again. systemd's rules rename wlan0
+        to wlp3s0 the moment a device is named, and what configures a link
+        here finds it by the name the kernel gave. A rule file of the same name
+        in /run/udev/rules.d, a link to /dev/null, is the way udev itself
+        offers to switch one off, and is gone with the next boot.
+*/
+static string_address bowl_udev_masked[] = {
+    "80-net-setup-link.rules", "80-net-name-slot.rules", null};
+
+#define BOWL_UDEV_RULES "/run/udev/rules.d"
+#define BOWL_UDEV_CONTROL "/run/udev/control"
+#define BOWL_UDEV_WAIT_NS ((positive)3000000000)
+#define BOWL_UDEV_POLL_NS ((positive)20000000)
+
+/* Whether a udev daemon is alive: a process named for one, in /proc. */
+static bool bowl_udev_running(void)
+{
+        file_walk walk;
+        struct linux_dirent64 address_to entry;
+        bool found = false;
+
+        if (!file_walk_open(address_of walk, AT_FDCWD, "/proc"))
+                return false;
+
+        while (!found && (entry = file_walk_next(address_of walk)))
+        {
+                p8 path[64];
+                p8 name[32];
+                positive length = string_length(entry->d_name);
+                bipolar got;
+
+                if (!byte_is_digit(entry->d_name[0]) ||
+                    length + sizeof("/proc//comm") > sizeof(path))
+                        continue;
+
+                memory_copy(path, "/proc/", 6);
+                memory_copy(path + 6, entry->d_name, length);
+                memory_copy(path + 6 + length, "/comm", sizeof("/comm"));
+                got = file_read_once_at(AT_FDCWD, path, name, sizeof(name) - 1);
+                if (got <= 0)
+                        continue;
+
+                if (name[got - 1] == '\n')
+                        got--;
+                name[got] = end;
+                found = string_equals(name, "udevd") ||
+                        string_equals(name, "systemd-udevd");
+        }
+
+        file_walk_close(address_of walk);
+        return found;
+}
+
+/* The first of places a bowl can run, as it will be run. */
+static string_address bowl_udev_find(string_address root,
+                                     string_address address_to places)
+{
+        for (; *places; places++)
+                if (bowl_executable_in_root(root, *places) >= 0)
+                        return *places;
+        return null;
+}
+
+/* One program of a bowl in the bowl's own view, to its end. */
+static b32 bowl_udev_run(string_address root, string_address address_to argv,
+                         string_address what)
+{
+        bipolar child = system_fork();
+
+        if (child == 0)
+        {
+                bowl_udev_layer = true;
+                bowl_launch(root, argv[0], argv, false);
+                exit(127);
+        }
+
+        return bowl_wait_applet(child, what);
+}
+
+/*
+        The groups udev's rules hand devices to. Nothing wrote them, and the
+        daemon says it does not know the group of every one of them at start;
+        a device it cannot give to a group stays root's, which is all a
+        program of this machine is, so this is for the log and for a program
+        that looks the group up. Added where they are not, and never changed
+        where they are.
+*/
+static const struct { string_address name; string_address id; } bowl_groups[] = {
+    {"tty", "5"}, {"disk", "6"}, {"lp", "7"}, {"kmem", "9"},
+    {"dialout", "20"}, {"cdrom", "24"}, {"floppy", "25"}, {"tape", "26"},
+    {"audio", "29"}, {"kvm", "36"}, {"video", "44"}, {"input", "104"},
+    {"render", "105"},
+};
+
+/*
+        A group file's text with the groups above added where it has none: the
+        length it comes to. A name is held when a line begins with it and a
+        colon, so video is not held by a group called videos. Whole lines or
+        none: what does not fit in room is left out.
+*/
+static positive bowl_groups_add(p8 address_to text, positive used, positive room)
+{
+        positive before;
+
+        if (used && text[used - 1] != '\n' && used < room)
+                text[used++] = '\n';
+        before = used;
+
+        for (positive at = 0; at < array_count(bowl_groups); at++)
+        {
+                positive name = string_length(bowl_groups[at].name);
+                positive id = string_length(bowl_groups[at].id);
+                bool there = false;
+
+                for (positive line = 0; line < before && !there;)
+                {
+                        there = line + name < before &&
+                                !string_compare_max((string_address)text + line,
+                                                    bowl_groups[at].name, name) &&
+                                text[line + name] == ':';
+                        while (line < before && text[line++] != '\n')
+                                ;
+                }
+                if (there || used + name + id + 5 > room)
+                        continue;
+
+                memory_copy(text + used, bowl_groups[at].name, name);
+                used += name;
+                memory_copy(text + used, ":x:", 3);
+                used += 3;
+                memory_copy(text + used, bowl_groups[at].id, id);
+                used += id;
+                memory_copy(text + used, ":\n", 2);
+                used += 2;
+        }
+
+        return used;
+}
+
+static fn bowl_udev_groups(void)
+{
+        p8 text[4096];
+        bipolar got = file_read_once_at(AT_FDCWD, "/etc/group", text,
+                                        sizeof(text) - 512);
+        positive used = (positive)(got < 0 ? 0 : got);
+        positive grown;
+
+        // A file that fills the room is not all of it, and is not rewritten.
+        if (got >= (bipolar)(sizeof(text) - 512))
+                return;
+
+        grown = bowl_groups_add(text, used, sizeof(text));
+        if (grown == used)
+                return;
+
+        bowl_quiet = true;
+        bowl_write_bytes("/etc/group", (string_address)text, grown);
+        bowl_quiet = false;
+}
+
+static fn bowl_udev_mask(void)
+{
+        p8 path[BOWL_PATH_LIMIT];
+
+        if (bowl_mkdir_parents(BOWL_UDEV_RULES) < 0)
+                return;
+
+        for (positive at = 0; bowl_udev_masked[at]; at++)
+                if (path_join(path, sizeof(path), BOWL_UDEV_RULES,
+                              bowl_udev_masked[at]))
+                        system_symbolic_link_at("/dev/null", AT_FDCWD, path);
+}
+
+static b32 bowl_udev(positive count)
+{
+        file_walk walk;
+        p8 root[BOWL_PATH_LIMIT];
+        string_address daemon = null;
+        string_address tool = null;
+        string_address start[] = {"udevd", "--daemon", null};
+        string_address subsystems[] = {
+            "udevadm", "trigger", "--type=subsystems", "--action=add", null};
+        string_address devices[] = {
+            "udevadm", "trigger", "--type=devices", "--action=add", null};
+        string_address settle[] = {"udevadm", "settle", "--timeout=10", null};
+        const struct { string_address address_to argv; string_address what; } steps[] = {
+            {subsystems, "udev would not name the subsystems\n"},
+            {devices, "udev would not name the devices\n"},
+            {settle, "udev did not finish naming the devices\n"},
+        };
+        b32 failed;
+
+        return_if(count != 2, bowl_usage());
+        return_if(bowl_udev_running(), 0);
+        return_if(!bowl_is_root(), bowl_refuse("udev starts as root\n"));
+
+        if (!file_walk_open(address_of walk, AT_FDCWD, BOWL_ROOT_DIRECTORY))
+                return bowl_refuse("there is no bowl to start udev from\n");
+
+        while (!daemon && bowl_next_root(address_of walk, root))
+        {
+                daemon = bowl_udev_find(root, bowl_udev_daemons);
+                tool = daemon ? bowl_udev_find(root, bowl_udev_tools) : null;
+                if (!tool)
+                        daemon = null;
+        }
+        file_walk_close(address_of walk);
+
+        if (!daemon)
+                return bowl_refuse("no bowl has a udev daemon: bowl profile "
+                                   "desktop adds one, or add eudev to an "
+                                   "Alpine bowl, or systemd to the others\n");
+
+        bowl_session_prepare("/root", null);
+        bowl_udev_groups();
+        bowl_udev_mask();
+
+        start[0] = daemon;
+        subsystems[0] = devices[0] = settle[0] = tool;
+
+        failed = bowl_udev_run(root, start, "the udev daemon did not start\n");
+        for (positive waited = 0;
+             !failed && system_access_at(AT_FDCWD, BOWL_UDEV_CONTROL, 0) < 0;
+             waited += BOWL_UDEV_POLL_NS)
+        {
+                if (waited >= BOWL_UDEV_WAIT_NS)
+                        return bowl_refuse("the udev daemon is not answering\n");
+                process_nap_ns(BOWL_UDEV_POLL_NS);
+        }
+
+        for (positive at = 0; !failed && at < array_count(steps); at++)
+                failed = bowl_udev_run(root, steps[at].argv, steps[at].what);
+        return_if(failed, failed);
+
+        string_format(log, bowl_label "udev is running, from %s\n", root);
+        log_flush();
+        return 0;
+}
+
+
 /* ---- Profiles: what a machine is for, as components from several bowls. ---- */
 
 /*
@@ -5338,9 +5623,18 @@ static const struct bowl_component bowl_desktop_components[] = {
     {null, null, 0},
 };
 
+/*
+        udev first, and the keyboard's layout read when the session starts and
+        not when the profile was installed: KWin has no layout of its own until
+        somebody picks one in its settings, and takes XKB's from the
+        environment, which would otherwise be a US keyboard on every machine.
+*/
 static string_address bowl_desktop_session[] = {
     "export XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=KDE",
     "export KDE_FULL_SESSION=true QT_QPA_PLATFORM=wayland",
+    "layout=$(moonwater keyboard xkb 2>/dev/null) && "
+    "[ -n \"$layout\" ] && export XKB_DEFAULT_LAYOUT=$layout",
+    "bowl udev",
     "exec dbus-run-session -- startplasma-wayland",
     null};
 
@@ -5883,6 +6177,9 @@ static b32 bowl_main()
 
         if (string_equals(arguments[1], "profile"))
                 return bowl_profile_main(count, arguments);
+
+        if (string_equals(arguments[1], "udev"))
+                return bowl_udev(count);
 
         if (string_equals(arguments[1], "--isolated"))
         {

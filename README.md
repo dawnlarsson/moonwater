@@ -40,6 +40,8 @@ moonwater canvas [on|off]              the desktop, and on which screens [on]
 moonwater canvas log|terminal          open the kernel log or a terminal
 moonwater canvas scale [N|auto]        device pixels to a drawn one, 1 to 4 [auto]
 moonwater canvas modes [largest|preferred]  which mode a screen is driven at [largest]
+moonwater desktop [canvas|off|PROFILE]  what the machine starts as its desktop [canvas]
+moonwater desktop start|stop           begin the chosen profile now, or end its session
 moonwater airplane [on|off]            every radio at once
 moonwater brightness [N%|+N|-N]        the screen backlight
 moonwater power [performance|balanced|powersave]  profile and CPU governor, kept across boots
@@ -67,7 +69,7 @@ moonwater ntp [on|off]                 set the clock from the network [on]
 moonwater ntp server [NAME|auto]       who is asked first: a name or address [auto]
 moonwater ntp sampling [on|off]        keep the lowest-delay sample of five [on]
 
-moonwater keyboard [LAYOUT|list]       us uk gb de se sv no nb dk fi fr es it [us]
+moonwater keyboard [LAYOUT|list|xkb]   us uk gb de se sv no nb dk fi fr es it [us]
 moonwater name [NEW|random]            what this machine is called, like space-wizard
 
 moonwater link                         who this machine is linked with, and what each may do
@@ -89,7 +91,9 @@ moonwater link on|off                  the listener, udp 22348 or /root/link.por
 with no word after it says where its switch stands, to anybody; with one it
 changes it and needs root, and a word it does not take is a usage page (exit 2)
 and not a refusal (exit 1). The keyboard layouts `gb`, `sv` and `nb` are `uk`,
-`se` and `no` by their country's other codes. `boot`, `ask` and `machine` are
+`se` and `no` by their country's other codes, and `keyboard xkb` says the
+layout in XKB's name (`gb` for `uk`), which is what a compositor from a bowl
+reads as `XKB_DEFAULT_LAYOUT`. `boot`, `ask` and `machine` are
 init's and the first terminal's, started by them and not typed by hand.
 
 Commands given to `moonwater` run as root through the shell, as if typed.
@@ -109,7 +113,7 @@ writes this build onto the disk first, and `setup live` leaves the disk alone.
 **Settings.** Binds, init and exit live in the boot image: set them on a live
 stick and `setup install` carries them to the disk, while `setup update` keeps
 the disk's own. Wifi, wired, bluetooth, internet preference, power and charge settings,
-timezone, NTP, keyboard, name and link settings live in `/root` on the data
+timezone, NTP, keyboard, desktop, name and link settings live in `/root` on the data
 partition, so `setup update` and `wipe` keep them. A machine gets its name the first
 time it boots, from a live stick too, and `setup install` carries it to the disk.
 
@@ -221,6 +225,17 @@ two meet in two headers: `src/canvas/canvas.h`, what the core asks of it, and
 `moonwater canvas off` closes every window and leaves a shell on the text
 console, from which another display server such as Weston can take the screen.
 
+`moonwater desktop` is what the machine starts as its desktop: Canvas, the
+default; `off`, which turns Canvas off as soon as it has started, for a machine
+that is a text console; or a bowl profile, whose session the machine script's
+canvas line starts once for each boot, after the disks are there, over Canvas's
+own windows, so that a session that ends leaves a terminal where it was. The
+profile has to be installed (`bowl profile desktop`), and the choice is kept in
+`/root` like the keyboard's. `moonwater desktop stop` ends the session whatever
+way it was started, from any terminal or from the serial port. A machine script
+of one's own, in `/root`, starts nothing unless it runs `moonwater desktop boot`
+in its `moonwater_canvas` function, as the builtin one does.
+
 Canvas opens no window by itself. The machine script's `moonwater_canvas`
 function opens the kernel log and a terminal when Canvas starts, at boot and
 after `moonwater canvas on`; change it to start a desktop with something
@@ -302,11 +317,23 @@ recorded in the bowl, and remove undoes exactly that: launchers that still
 name the bowl, the profile's packages and the dependencies nothing else needs,
 the script.
 
-The `desktop` session has been run on a stock Linux kernel with no display:
-KWin `--virtual` and plasmashell on a session bus, and `desktop` itself as far
-as KWin's DRM backend. It has not been booted on Moonwater with a display,
-input devices, a running logind or PipeWire, and only the x86-64 Alpine
-packages have been installed.
+The `desktop` session starts what the compositor needs of the machine before
+it: `bowl udev`, and the keyboard's layout read when it starts. A compositor
+finds its keyboards and mice through libinput, which asks udev what each of
+`/dev/input` is and skips what udev has not named, so with no udev KWin drew
+the desktop and could not be typed at. `bowl udev` starts the first udev a bowl
+has, eudev's `udevd` from Alpine or systemd's from the others, in that bowl's
+own view with its `/etc/udev`, has it name every device that is there, and
+leaves it running for the ones plugged in later; run again it does nothing. A
+profile installed before this keeps its old session script until `bowl profile
+desktop` is run again.
+
+The `desktop` session has been booted on Moonwater under QEMU with a virtio
+display and USB keyboard and tablet, and typed and clicked at. It has not been
+run with a logind or the system bus (Plasma says it cannot load a session
+backend, and its shutdown and lock menus have nothing to ask), on a real GPU,
+or with PipeWire's own devices, and only the x86-64 Alpine packages have been
+installed.
 
 ## gzip
 

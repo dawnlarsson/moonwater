@@ -4587,6 +4587,26 @@ static positive host_event_wait(bipolar child, p64 limit, bool address_to stoppe
         }
 }
 
+/*
+        Until boot has said what this session is: a verdict that is not a
+        question, or the time a boot is given to say one. What runs at boot
+        and does not need to be there before the disks are is held here.
+*/
+static fn host_verdict_settled(void)
+{
+        for (;;)
+        {
+                p8 verdict[HOST_NAME_ROOM + 16];
+
+                if (host_read_word(HOST_VERDICT, verdict, sizeof(verdict)) >= 0
+                        ? !string_has_prefix(verdict, "ask ")
+                        : system_clock_ns(HOST_CLOCK_BOOTTIME) >= HOST_VERDICT_WAIT_NS)
+                        return;
+
+                host_pause(HOST_POLL_NS * 2);
+        }
+}
+
 static fn host_events_boot(host_settings address_to settings)
 {
         host_setting setting;
@@ -4600,18 +4620,7 @@ static fn host_events_boot(host_settings address_to settings)
         system_call(syscall(setsid));
         host_state_ready();
         host_state_directory(HOST_EVENTS_INIT, 0700);
-
-        for (;;)
-        {
-                p8 verdict[HOST_NAME_ROOM + 16];
-
-                if (host_read_word(HOST_VERDICT, verdict, sizeof(verdict)) >= 0
-                        ? !string_has_prefix(verdict, "ask ")
-                        : system_clock_ns(HOST_CLOCK_BOOTTIME) >= HOST_VERDICT_WAIT_NS)
-                        break;
-
-                host_pause(HOST_POLL_NS * 2);
-        }
+        host_verdict_settled();
 
         //      After the verdict, which is when the machine process goes on to
         //      its script: a script that names moonwater_init has the list's
@@ -14226,12 +14235,16 @@ static b32 locale_ntp_server_set(string_address name)
         return 0;
 }
 
+//      A layout by the name this machine takes, and by the one XKB calls it:
+//      uk is gb there, and the country codes sv and nb are se and no.
 static const struct
 {
         char name[8];
+        char xkb[4];
 } locale_keyboards[] = {
-        {"us"}, {"uk"}, {"gb"}, {"de"}, {"se"}, {"sv"}, {"no"}, {"nb"},
-        {"dk"}, {"fi"}, {"fr"}, {"es"}, {"it"},
+        {"us", "us"}, {"uk", "gb"}, {"gb", "gb"}, {"de", "de"}, {"se", "se"},
+        {"sv", "se"}, {"no", "no"}, {"nb", "no"}, {"dk", "dk"}, {"fi", "fi"},
+        {"fr", "fr"}, {"es", "es"}, {"it", "it"},
 };
 
 static bool locale_keyboard_ok(string_address name)
@@ -15048,6 +15061,21 @@ static b32 host_ntp(string_address address_to arguments, positive count)
         return locale_ntp_set(false, word);
 }
 
+//      The layout in XKB's name, alone on a line: what a compositor's
+//      XKB_DEFAULT_LAYOUT is, for a script to read.
+static b32 locale_keyboard_xkb(void)
+{
+        p8 name[16];
+        string_address held = locale_keyboard_say(name, sizeof(name));
+        positive found = array_where(at, array_count(locale_keyboards),
+                                     string_equals(held, (string_address)locale_keyboards[at].name));
+
+        return_if(found == array_count(locale_keyboards),
+                  host_refuse("keyboard %s has no XKB name\n", held));
+        host_say(log, "%s\n", (string_address)locale_keyboards[found].xkb);
+        return 0;
+}
+
 static b32 host_keyboard(string_address address_to arguments, positive count)
 {
         string_address word = count > 2 ? arguments[2] : null;
@@ -15058,8 +15086,289 @@ static b32 host_keyboard(string_address address_to arguments, positive count)
         return_if(count != 3, host_usage());
         if (string_equals(word, "list"))
                 return locale_keyboard_list();
+        if (string_equals(word, "xkb"))
+                return locale_keyboard_xkb();
         host_need_root();
         return locale_keyboard_set(word);
+}
+
+/*
+        moonwater desktop: what is on the screen once the machine has started.
+
+        Canvas is the desktop unless this says otherwise. A bowl profile's
+        session can be the desktop instead (bowl profile desktop installs one):
+        it takes the display from Canvas the way any program that opens the card
+        does, Canvas lets go and drops the keys while it holds it, and has the
+        windows and the keyboard back when it ends. Canvas still starts first,
+        with the kernel log and a terminal, so a session that ends or is ended
+        leaves a shell where it was. off is the text console: Canvas is turned
+        off as soon as it has started.
+
+        The choice is /root/desktop, as the keyboard's is /root/keyboard. The
+        machine script's canvas on line runs `desktop boot`, once for each boot,
+        which waits for the verdict so that /bowls is there and starts the
+        choice in a session of its own, and `desktop start` and `desktop stop`
+        are the same by hand. A session is its leader's number, which is its
+        session's too, and stopping is ending everything in it, again and again
+        until nothing is: KDE's wrapper starts KWin again when only KWin ends.
+*/
+#define DESKTOP_PATH "/root/desktop"
+#define DESKTOP_SESSION HOST_STATE "/desktop"
+#define DESKTOP_BOOTED HOST_STATE "/desktop.booted"
+#define DESKTOP_LOG HOST_STATE "/desktop.log"
+#define DESKTOP_MEMBERS 1024
+#define DESKTOP_GRACE_PASSES 5
+#define DESKTOP_PASSES 25
+#define DESKTOP_PASS_NS ((p64)200000000)
+
+static string_address desktop_choice(p8 address_to name, positive room)
+{
+        if (host_read_word(DESKTOP_PATH, name, room) <= 0 || !name[0])
+                string_copy_bounded(name, "canvas", room);
+        return (string_address)name;
+}
+
+/* Whether the profile's session script is where `bowl profile` puts it. */
+static bool desktop_installed(string_address name)
+{
+        p8 path[HOST_PATH_ROOM];
+        p8 want[HOST_NAME_ROOM + 40];
+        p8 held[HOST_NAME_ROOM + 40];
+        bipolar got;
+
+        return_if(!bowl_find_profile(name) ||
+                      !host_join(path, sizeof(path), BOWL_EXPOSE_DIRECTORY "/", name) ||
+                      !bowl_profile_header(want, sizeof(want), name),
+                  false);
+
+        got = file_read_once_at(AT_FDCWD, path, held, sizeof(held));
+        return got >= (bipolar)string_length(want) &&
+               !string_compare_max(held, want, string_length(want));
+}
+
+static positive desktop_session(void)
+{
+        p8 word[24];
+
+        return_if(host_read_word(DESKTOP_SESSION, word, sizeof(word)) <= 0, 0);
+        return string_to_positive(word);
+}
+
+/*
+        The processes of a session: how many there are, the first room of them
+        in pids, and whether its own leader is one. A session that was logged
+        out of leaves what it started behind it, PipeWire and its manager among
+        them, with no leader and nothing on the screen: that is not a desktop
+        running, though it is something stop still ends.
+*/
+static positive desktop_scan(positive session, p32 address_to pids, positive room,
+                             bool address_to leader)
+{
+        static system_snapshot sample;
+        positive found = 0;
+
+        address_to leader = false;
+        return_if(!session ||
+                      !system_snapshot_take(address_of sample, SPARK_SNAPSHOT_PROCESS, false),
+                  0);
+
+        for (positive at = 0; at < sample.header.process_count; at++)
+        {
+                const struct snapshot_process address_to process = sample.processes + at;
+
+                if (process->session != session || process->state == 'Z')
+                        continue;
+
+                address_to leader |= process->pid == session;
+                if (found < room)
+                        pids[found] = process->pid;
+                found++;
+        }
+
+        return found;
+}
+
+/* The session script of a profile, started where nothing else is. */
+static b32 desktop_launch(string_address name)
+{
+        p8 text[HOST_PATH_ROOM];
+        p8 number[24];
+        bipolar output;
+        bipolar child;
+
+        host_state_ready();
+        return_if(!host_join(text, sizeof(text), "exec " BOWL_EXPOSE_DIRECTORY "/", name),
+                  host_refuse("%s is too long a name\n", name));
+
+        output = host_open_state(AT_FDCWD, DESKTOP_LOG, 0600);
+        child = host_event_start(text, output);
+        if (output >= 0)
+                system_close(output);
+        return_if(child < 0, host_fail("desktop", child));
+
+        positive_into_string(number, (positive)child);
+        host_write_text(DESKTOP_SESSION, number);
+        return 0;
+}
+
+/*
+        Every process of the last session, ended: asked to finish for a second,
+        then killed, until none is left. Done from a process of its own in a
+        session of its own, since the shell that asks is often one of the
+        session's. Whether it did, as a status.
+*/
+static b32 desktop_end(void)
+{
+        positive session = desktop_session();
+        p32 pids[DESKTOP_MEMBERS];
+        bipolar child = system_fork();
+        positive status = 0;
+        bool leader;
+
+        return_if(child < 0, host_fail("desktop", child));
+
+        if (child)
+        {
+                system_wait4_retry(child, address_of status, 0, null);
+                return wait_status_code(status) ? 1 : 0;
+        }
+
+        system_call(syscall(setsid));
+        for (positive pass = 0; pass < DESKTOP_PASSES; pass++)
+        {
+                positive found = desktop_scan(session, pids, DESKTOP_MEMBERS, address_of leader);
+
+                if (!found)
+                        system_call_1(syscall(exit), 0);
+
+                for (positive at = 0; at < found && at < DESKTOP_MEMBERS; at++)
+                        system_call_2(syscall(kill), pids[at],
+                                      pass < DESKTOP_GRACE_PASSES ? SIGTERM : SIGKILL);
+                host_pause(DESKTOP_PASS_NS);
+        }
+
+        system_call_1(syscall(exit), 1);
+        return 1;
+}
+
+/* The choice, put in force: nothing for Canvas, Canvas off for off, else the session. */
+static b32 desktop_start(bool boot)
+{
+        p8 name[HOST_NAME_ROOM];
+        p32 pid;
+        bool leader;
+        positive left;
+
+        desktop_choice(name, sizeof(name));
+        return_if(string_equals(name, "canvas"), 0);
+
+        if (string_equals(name, "off"))
+        {
+                string_address now[] = {"moonwater", "canvas", "off", null};
+
+                return boot ? host_canvas(now, 3) : 0;
+        }
+
+        return_if(!desktop_installed(name),
+                  host_refuse("the profile %s is not installed: bowl profile installs it\n", name));
+        left = desktop_scan(desktop_session(), address_of pid, 1, address_of leader);
+        return_if(leader, host_refuse("the desktop %s is already running\n", name));
+        return_if(left && desktop_end(),
+                  host_refuse("what is left of the last session would not end\n"));
+
+        return desktop_launch(name);
+}
+
+/*
+        From the machine script, when Canvas has started: the choice, once for
+        a boot, in a process of its own that waits for the disks. The script
+        goes on to its next line at once: the events behind it wait on it.
+*/
+static b32 desktop_boot(void)
+{
+        bipolar made;
+
+        host_need_root();
+        host_state_ready();
+        made = system_open_at_mode(AT_FDCWD, DESKTOP_BOOTED,
+                                   FILE_WRITE | FILE_EXCLUSIVE | O_NOFOLLOW | O_CLOEXEC,
+                                   0600);
+        return_if(made < 0, 0);
+        system_close(made);
+        return_if(system_fork(), 0);
+
+        system_call(syscall(setsid));
+        host_verdict_settled();
+        system_call_1(syscall(exit), (positive)desktop_start(true));
+        return 0;
+}
+
+static b32 desktop_stop(void)
+{
+        p32 pid;
+        bool leader;
+
+        host_need_root();
+        return_if(!desktop_scan(desktop_session(), address_of pid, 1, address_of leader),
+                  host_refuse("no desktop session is running\n"));
+        return_if(desktop_end(), host_refuse("the desktop session would not end\n"));
+        host_say(log, host_label "desktop stopped\n");
+        return 0;
+}
+
+static b32 desktop_status(void)
+{
+        p8 name[HOST_NAME_ROOM];
+        p32 pid;
+        bool leader;
+
+        desktop_choice(name, sizeof(name));
+        if (string_equals(name, "canvas") || string_equals(name, "off"))
+                host_say(log, host_label "desktop %s\n", (string_address)name);
+        else if (!desktop_installed(name))
+                host_say(log, host_label "desktop %s, not installed: bowl profile %s "
+                                         "installs it\n", (string_address)name,
+                         (string_address)name);
+        else
+        {
+                desktop_scan(desktop_session(), address_of pid, 1, address_of leader);
+                host_say(log, host_label "desktop %s, %s\n", (string_address)name,
+                         leader ? "running" : "not running");
+        }
+        return 0;
+}
+
+/* moonwater desktop [canvas|off|PROFILE|start|stop] */
+static b32 host_desktop(string_address address_to arguments, positive count)
+{
+        string_address word = count > 2 ? arguments[2] : null;
+
+        return_if(count == 2, desktop_status());
+        return_if(count != 3, host_usage());
+
+        return_if(string_equals(word, "boot"), desktop_boot());
+        if (string_equals(word, "start"))
+        {
+                host_need_root();
+                return desktop_start(false);
+        }
+        return_if(string_equals(word, "stop"), desktop_stop());
+
+        host_need_root();
+        if (!string_equals(word, "canvas") && !string_equals(word, "off"))
+        {
+                return_if(!bowl_find_profile(word),
+                          host_refuse("unknown desktop %s: canvas, off, or a profile of "
+                                      "bowl profile\n", word));
+                return_if(!desktop_installed(word),
+                          host_refuse("the profile %s is not installed: bowl profile "
+                                      "installs it\n", word));
+        }
+
+        return_if(host_save("desktop", DESKTOP_PATH, word), 1);
+        host_say(log, host_label "desktop %s, from the next start; moonwater "
+                                 "desktop start begins it now\n", word);
+        return 0;
 }
 
 /*
@@ -15463,6 +15772,8 @@ static const host_row host_rows[] = {
     {null, "canvas log|terminal", "open the kernel log or a terminal", 'b'},
     {null, "canvas scale [N|auto]", "device pixels to a drawn one, 1 to 4 [auto]", 'b'},
     {null, "canvas modes [largest|preferred]", "which mode a screen is driven at [largest]", 'b'},
+    {null, "desktop [canvas|off|PROFILE]", "what the machine starts as its desktop [canvas]", 'b'},
+    {null, "desktop start|stop", "begin the chosen profile now, or end its session", 'b'},
     {null, "airplane [on|off]", "every radio at once", 'b'},
     {null, "brightness [N%|+N|-N]", "the screen backlight", 'b'},
     {null, "power [performance|balanced|powersave]", "profile and CPU governor, kept across boots", 'b'},
@@ -15487,7 +15798,7 @@ static const host_row host_rows[] = {
     {null, "ntp [on|off]", "set the clock from the network [on]", 'b'},
     {null, "ntp server [NAME|auto]", "who is asked first: a name or address [auto]", 'b'},
     {null, "ntp sampling [on|off]", "keep the lowest-delay sample of five [on]", 'b'},
-    {null, "keyboard [LAYOUT|list]", "us uk gb de se sv no nb dk fi fr es it [us]", 'b'},
+    {null, "keyboard [LAYOUT|list|xkb]", "us uk gb de se sv no nb dk fi fr es it [us]", 'b'},
     {null, "name [NEW|random]", "what this machine is called, like space-wizard", 'b'},
     {null, "link", "who this machine is linked with, and what each may do", 'f'},
     {null, "link [pair|NAME]", "machines linked by name, with a code", 'm'},
@@ -15840,6 +16151,7 @@ static string_address host_wipe_keep[] = {
     HOST_WIPE_KEEP(LOCALE_KEYBOARD_PATH),
     HOST_WIPE_KEEP(LOCALE_CANVAS_SCALE_PATH),
     HOST_WIPE_KEEP(LOCALE_CANVAS_MODES_PATH),
+    HOST_WIPE_KEEP(DESKTOP_PATH),
     HOST_WIPE_KEEP(NAME_PATH),
     HOST_WIPE_KEEP(LINK_SWITCH_PATH),
     HOST_WIPE_KEEP(LINK_KEY_PATH),
@@ -16025,6 +16337,7 @@ static b32 host_main()
             // event. init and exit still need root.
             {"bind", host_bind, false},
             {"canvas", host_canvas, false},
+            {"desktop", host_desktop, false},
             {"bios", host_bios, false},
             {"airplane", tune_airplane, false},
             {"brightness", tune_brightness, false},

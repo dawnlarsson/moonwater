@@ -79300,6 +79300,71 @@ static fn profiles(void)
               bowl_bin_taken("sh") && !bowl_bin_taken("moonwater-no-such-program"));
 
         /*
+                What a desktop needs before its compositor: libinput asks udev
+                which node is a keyboard, so a session that starts none came
+                up with a picture and no input at all, and KWin never takes
+                in a device that was named after it started.
+        */
+        {
+                const struct bowl_profile address_to desktop = bowl_find_profile("desktop");
+                positive udev = 0, compositor = 0, layout = 0, at = 0;
+
+                for (string_address address_to line = desktop ? desktop->session : null;
+                     line && *line; line++, at++)
+                {
+                        if (string_equals(*line, "bowl udev"))
+                                udev = at + 1;
+                        if (string_has_prefix(*line, "exec dbus-run-session"))
+                                compositor = at + 1;
+                        if (string_has_prefix(*line, "layout=$(moonwater keyboard xkb"))
+                                layout = at + 1;
+                }
+                check("The desktop session starts udev before the compositor does",
+                      udev && compositor && udev < compositor);
+                check("The desktop session reads the keyboard's XKB layout when it starts",
+                      layout && layout < compositor);
+        }
+
+        check("A command is looked for in /sbin as well, where Alpine keeps udevd",
+              string_equals(bowl_guest_bins[3], "/sbin"));
+
+        /*
+                The groups udev's rules name, added to a group file that has
+                none of them, once, whole lines, and not to the line of another
+                group that begins the same way.
+        */
+        {
+                p8 groups[1024];
+                positive used;
+
+                string_copy_bounded(groups, "root:x:0:\nvideo:x:7:a\nvideos:x:9:\n", sizeof groups);
+                used = bowl_groups_add(groups, string_length(groups), sizeof groups);
+                groups[used] = end;
+                check("Groups a file lacks are added after the ones it has",
+                      !string_compare_max(groups, "root:x:0:\nvideo:x:7:a\nvideos:x:9:\n", 34) &&
+                          string_has_prefix(groups + 34, "tty:x:5:\n") &&
+                          strstr((const char *)groups, "input:x:104:\n") &&
+                          strstr((const char *)groups, "render:x:105:\n"));
+                check("A group the file has is not added again, nor changed",
+                      !strstr((const char *)groups + 34, "video:x:") &&
+                          strstr((const char *)groups, "video:x:7:a\n"));
+                check("Adding to what is added changes nothing",
+                      bowl_groups_add(groups, used, sizeof groups) == used);
+
+                string_copy_bounded(groups, "root:x:0:", sizeof groups);
+                used = bowl_groups_add(groups, string_length(groups), sizeof groups);
+                check("A last line with no newline is ended before the groups follow",
+                      string_has_prefix(groups, "root:x:0:\ntty:x:5:\n"));
+
+                string_copy_bounded(groups, "root:x:0:\n", sizeof groups);
+                used = bowl_groups_add(groups, string_length(groups), 40);
+                groups[used] = end;
+                check("A room too small for a line leaves that line out whole",
+                      used <= 40 && groups[used - 1] == '\n' &&
+                          string_has_prefix(groups, "root:x:0:\ntty:x:5:\n"));
+        }
+
+        /*
                 Two bowls each hold a program. Marker lines name both, a name
                 that climbs out of the directory, one nothing was exposed
                 under and one too long to be a name. Only the first goes.

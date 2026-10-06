@@ -89,7 +89,7 @@ export TEST_TALLY
 #       fuzz an hour a target, msan a clang with MemorySanitizer, ring0 an
 #       image and a machine that boots it, best one built with
 #       kernel/profile/sec_sanitize.
-asked_lanes="wifi fuzz msan ring0 scale"
+asked_lanes="wifi fuzz msan ring0 scale desktop"
 
 lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex slurp wait writer native probe stack checksum storage_io storage_format machine sensors cli differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep"
 
@@ -168,6 +168,7 @@ describe()
         install)  echo "Moonwater installed to a disk, started from it, asked about and updated from a stick" ;;
         canvas)   echo "what is actually on the screen, read back a pixel at a time" ;;
         sleep)    echo "moonwater sleep from a terminal, woken by a key: the desktop back on a card that lost its pipe, input alive, the log" ;;
+        desktop)  echo "a compositor's input in a booted guest: Alpine's libinput over a bowl's udev, keys and a pointer reaching it (NOT RUN without a network, an image or mke2fs)" ;;
         wifi)     echo "networks in the air of a machine with simulated radios, joined and listed" ;;
         fuzz)     echo "every network libFuzzer target for an hour each, or a release report" ;;
         msan)     echo "the net wire parsers under MemorySanitizer" ;;
@@ -16379,6 +16380,30 @@ t=$(( $(n /tmp/idle2 fired) - $(n /tmp/idle1 fired) ))
 h=$(sed -n 's/.*hold: \([a-z]*\),.*/\1/p' /tmp/idle2)
 echo "idlecheck-$h-$w-$t" > /dev/ttyS0
 ''')
+#       A bowl profile that is only a program holding the display, installed
+#       where bowl profile puts one, chosen as the desktop, started, looked at,
+#       and ended from the same shell that started it. Run in one script
+#       because Canvas drops every key while the session holds the card. Its
+#       output is the serial port's, since a session's own goes to its log.
+open(stick + "/profile", "w").write("#!/bin/sh\n# bowl profile desktop\nexec /mnt/drmhold 120 0 0 > /dev/ttyS0 2>&1\n")
+open(stick + "/desk", "w").write(r'''moonwater desktop > /dev/ttyS0 2>&1
+moonwater desktop desktop > /dev/ttyS0 2>&1
+mkdir -p /bowls/bin
+cp /mnt/profile /bowls/bin/desktop
+chmod 755 /bowls/bin/desktop
+moonwater desktop desktop > /dev/ttyS0 2>&1
+moonwater desktop > /dev/ttyS0 2>&1
+rm -f /run/moonwater/desktop.booted
+moonwater desktop boot
+sleep 6
+moonwater desktop > /dev/ttyS0 2>&1
+moonwater desktop stop > /dev/ttyS0 2>&1
+sleep 3
+moonwater desktop > /dev/ttyS0 2>&1
+moonwater desktop canvas > /dev/ttyS0 2>&1
+moonwater desktop > /dev/ttyS0 2>&1
+echo desk-done > /dev/ttyS0
+''')
 open(stick + "/kcheck", "w").write('''echo "kernel-warnings-$(dmesg | grep -c -E 'WARNING|BUG:|Oops|circular locking|possible recursive')" > /dev/ttyS0
 ''')
 
@@ -16772,6 +16797,47 @@ else:
                        ("and the kernel warned about nothing on the way", "0")):
         out.append((name, "not run: no static cc for the helpers", want))
 
+#       The way out of a display that nothing is working at, and the profiles
+#       that start one. Canvas drops every key while another program holds the
+#       card, so what is typed is of no use until it lets go: a compositor with
+#       no input, or no picture, would have left the machine with a keyboard
+#       and nothing to do with it.
+def wait_count(pattern, count, seconds):
+    stop = time.time() + seconds
+    while time.time() < stop:
+        if serial_count(pattern) >= count:
+            return True
+        time.sleep(0.2)
+    return False
+
+way_names = ("moonwater desktop refuses a profile that is not installed, and takes one that is",
+             "moonwater desktop boot starts the chosen profile, over Canvas",
+             "and moonwater desktop says it is running",
+             "moonwater desktop stop ends its session, and Canvas has the display back",
+             "and moonwater desktop canvas puts the default back")
+if switcher and holder:
+    masters = serial_count(rb"DRMHOLD master")
+    from_here = len(open(work + "/leak-serial", "rb").read())
+    type_text("/shell /mnt/desk\n")
+    finished = wait_count(rb"desk-done", 1, 60)
+    time.sleep(1)
+    typed_to_serial("deskback")
+    time.sleep(3)
+    plain = re.sub(rb"\x1b\[[0-9;?]*[a-zA-Z]", b"",
+                   open(work + "/leak-serial", "rb").read()[from_here:])
+    out.append((way_names[0], "yes" if b"is not installed" in plain and
+                b"desktop desktop, from the next start" in plain else "no: " + repr(plain[:400]), "yes"))
+    out.append((way_names[1], str(serial_count(rb"DRMHOLD master") - masters), "1"))
+    out.append((way_names[2], "yes" if b"desktop desktop, running" in plain else "no", "yes"))
+    out.append((way_names[3], "yes" if finished and b"desktop stopped" in plain and
+                serial_count(rb"deskback-(\d+)") == 1 else "no", "yes"))
+    out.append((way_names[4], "yes" if re.search(
+        rb"desktop stopped.*desktop desktop, not running.*desktop canvas, from the next start"
+        rb".*desktop canvas\r?\n.*desk-done", plain, re.S) else "no: " + repr(plain[-300:]), "yes"))
+else:
+    for name, want in zip(way_names, ("yes", "1", "yes", "yes", "yes")):
+        out.append((name, "not run: no static cc for the helpers", want))
+
 #       And the power button with Canvas up, which has its own input handler
 #       beside the button's: poweroff by default, so the machine goes.
 qcmd({"execute": "system_powerdown"})
@@ -17036,6 +17102,162 @@ else
                 same "$name" "$want" "$got"
         done < "$work/plane-answers"
 fi
+
+counted
+)
+
+#       What a compositor hears, in a booted guest, from the real packages.
+#
+#       The KDE desktop of a bowl profile came up drawn and deaf: libinput does
+#       not read /dev/input to learn which device is a keyboard, it asks udev,
+#       and nothing here ran one, so every node was "not tagged as a supported
+#       input device" and a compositor from any bowl had no keys and no
+#       pointer. libinput's own tool is the smallest thing that asks as a
+#       compositor does, and Alpine is where the desktop profile's packages
+#       come from, so this lands an Alpine bowl on a blank disk (the network
+#       of QEMU's user stack, a few tens of megabytes), adds eudev and
+#       libinput-tools, and looks at what libinput finds before and after
+#       `bowl udev`, and at what it reports of a key and a pointer sent in
+#       through QMP. The guest's own serial shell is the other terminal: it
+#       answers while the display is the compositor's, which is the point of
+#       having one.
+lane_desktop()
+(
+image=${MOONWATER_IMAGE:-dist/bootx64.efi}
+
+counting desktop
+
+for need in qemu-system-x86_64 python3 mke2fs; do
+        if ! command -v "$need" > /dev/null 2>&1; then
+                echo "  desktop      NOT RUN -- no $need"
+                exit 2
+        fi
+done
+
+if [ ! -f "$image" ]; then
+        echo "  desktop      NOT RUN -- no image at $image"
+        exit 2
+fi
+
+if ! python3 -c 'import socket; socket.create_connection(("dl-cdn.alpinelinux.org", 80), 5).close()' 2> /dev/null; then
+        echo "  desktop      NOT RUN -- no network to Alpine's mirror"
+        exit 2
+fi
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/dawning-desktop.XXXXXX") || exit 1
+trap 'rm -rf "$work"' EXIT INT TERM
+
+truncate -s 3G "$work/bowls.img" && mke2fs -q -t ext4 -F "$work/bowls.img" || exit 1
+
+MOONWATER_DESKTOP_WORK=$work
+export MOONWATER_DESKTOP_WORK
+qmp_guest_module "$work"
+
+PYTHONPATH=$work python3 - "$image" > "$work/answers" 2>"$work/why" <<'PY'
+import os, re, socket, sys, time
+from qmp_guest import *
+
+image = sys.argv[1]
+work = os.environ["MOONWATER_DESKTOP_WORK"]
+
+guest = Guest(desktop(image) + [
+    "-drive", "if=none,id=bw,format=raw,file=" + work + "/bowls.img",
+    "-device", "nvme,serial=bowls0,drive=bw",
+    "-netdev", "user,id=n0", "-device", "virtio-net-pci,netdev=n0",
+    "-chardev", "socket,id=s0,path=" + work + "/ser,server=on,wait=off",
+    "-serial", "chardev:s0",
+    "-no-reboot", "-display", "none",
+    "-append", "console=ttyS0 drm_client_lib.active= moonwater.cursor_plane=0"],
+    work + "/qmp", work + "/mon", work, sockets=(work + "/ser",))
+
+shell = socket.socket(socket.AF_UNIX)
+shell.connect(work + "/ser")
+shell.settimeout(1)
+tags = [0]
+
+def run(command, seconds=60):
+    """One line on the guest's serial shell: what it printed, and its status."""
+    tags[0] += 1
+    mark = tags[0]
+    shell.sendall(("\necho BEG\"%d\"; %s\necho END\"%d\":$?\n" % (mark, command, mark)).encode())
+    seen = b""
+    stop = time.time() + seconds
+    done = re.compile(rb"BEG%d\r?\n(.*?)END%d:(\d+)" % (mark, mark), re.S)
+    while time.time() < stop:
+        try:
+            seen += shell.recv(65536)
+        except socket.timeout:
+            pass
+        found = done.search(seen)
+        if found:
+            text = re.sub(rb"\x1b\[[0-9;?]*[a-zA-Z]", b"", found.group(1))
+            text = text.decode("utf8", "replace").replace("\r", "").strip()
+            #       What the shell wrote last is its prompt, for the line after.
+            return re.sub(r"(\s*\$)+$", "", text), int(found.group(2))
+    return seen.decode("utf8", "replace").replace("\r", ""), 124
+
+time.sleep(25)
+out = []
+
+run("mount /dev/nvme0n1 /bowls", 30)
+_, setup = run("bowl setup alpine", 600)
+out.append(("an Alpine bowl lands on the disk", "yes" if setup == 0 else "no, status %d" % setup, "yes"))
+_, added = run("apk add eudev libinput-tools", 600)
+out.append(("with eudev and libinput's tools added", "yes" if added == 0 else "no, status %d" % added, "yes"))
+
+before, _ = run("libinput list-devices 2>&1 | grep -c 'Capabilities:'")
+out.append(("libinput lists no device while no udev has named one", before or "no answer", "0"))
+
+said, started = run("bowl udev 2>&1", 120)
+out.append(("bowl udev starts the bowl's udev", "yes" if started == 0 and "udev is running" in said else "no: " + said[-200:], "yes"))
+again, second = run("bowl udev 2>&1; echo second=$?", 30)
+out.append(("and run again does nothing", "yes" if "second=0" in again and "udev is running" not in again else "no: " + again[-200:], "yes"))
+
+listed, _ = run("libinput list-devices 2>&1")
+out.append(("libinput lists the keyboard and the tablet after it",
+            "yes" if "QEMU QEMU USB Keyboard" in listed and "QEMU QEMU USB Tablet" in listed else "no: " + listed[-300:], "yes"))
+
+run("(libinput debug-events > /tmp/events 2>&1 &) ; sleep 2", 30)
+key("a")
+key("b")
+moveto(300, 300)
+moveto(900, 700)
+send([{"type": "btn", "data": {"down": True, "button": "left"}}])
+time.sleep(0.1)
+send([{"type": "btn", "data": {"down": False, "button": "left"}}])
+time.sleep(2)
+events, _ = run("cat /tmp/events")
+out.append(("a key reaches it", "yes" if "KEYBOARD_KEY" in events else "no: " + events[-300:], "yes"))
+out.append(("a pointer movement reaches it", "yes" if "POINTER_MOTION_ABSOLUTE" in events or "POINTER_MOTION" in events else "no: " + events[-300:], "yes"))
+out.append(("a button reaches it", "yes" if "POINTER_BUTTON" in events else "no: " + events[-300:], "yes"))
+
+links, _ = run("ls /sys/class/net")
+out.append(("the network interface keeps the name the kernel gave it", "yes" if "eth0" in links.split() else "no: " + links[-100:], "yes"))
+
+alive, status = run("echo answers")
+out.append(("and the machine answers on its serial shell", "yes" if status == 0 and "answers" in alive else "no", "yes"))
+
+guest.quit()
+time.sleep(1)
+guest.terminate()
+try:
+    guest.wait(10)
+except Exception:
+    guest.kill()
+
+for name, got, want in out:
+    print("%s|%s|%s" % (name, " ".join(got.split()).replace("|", "/"), want))
+PY
+
+if [ ! -s "$work/answers" ]; then
+        echo "  desktop      the guest answered nothing"
+        sed 's/^/    /' "$work/why" | tail -5
+        exit 1
+fi
+
+while IFS='|' read -r name got want; do
+        same "$name" "$want" "$got"
+done < "$work/answers"
 
 counted
 )
@@ -18809,7 +19031,7 @@ case $jobs in
 '' | *[!0-9]* | 0) echo "run: -j wants a count" >&2; exit 2 ;;
 esac
 
-alone_lanes="text files misc util_linux shell builtins awk term edit differential_oracle boot install canvas wifi ring0 scale"
+alone_lanes="text files misc util_linux shell builtins awk term edit differential_oracle boot install canvas wifi ring0 scale desktop"
 
 if [ "$#" -gt 0 ]; then
         requested=$*

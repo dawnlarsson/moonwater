@@ -81,11 +81,17 @@ function moonwater_ctrl_alt_delete {
 # itself: these are the windows a desktop starts with, at boot and after
 # `moonwater canvas on`. Defining this function owns the canvas rows, so
 # `moonwater bind canvas on|off` is refused while it is here.
+#
+# `moonwater desktop boot` is the desktop `moonwater desktop` says: nothing for
+# Canvas, Canvas off for off, or a bowl profile's session started over the
+# windows above it. It does its work once for a boot, in the background, and
+# comes back at once.
 function moonwater_canvas {
   case $1 in
   on)
     moonwater canvas log
     moonwater canvas terminal
+    moonwater desktop boot
     ;;
   esac
 }
