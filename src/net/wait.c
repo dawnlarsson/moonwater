@@ -82,8 +82,10 @@ static inline INLINE bool network_transaction_secure(address_any into,
         return system_random_fill(into, width, 1) == 0;
 }
 
-static bipolar network_wait_until(
-    bipolar handle, b16 events,
+/* One wait on any of several descriptors, up to the deadline: how many are
+   ready, 0 when it went by with none, -9 when one of them is no descriptor. */
+static bipolar network_wait_set(
+    system_poll_descriptor address_to set, positive count,
     const network_deadline address_to deadline)
 {
         for (;;)
@@ -91,7 +93,6 @@ static bipolar network_wait_until(
                 positive seconds;
                 positive nanoseconds;
                 timespec limit;
-                system_poll_descriptor waited = {(b32)handle, events, 0};
                 bipolar ready;
 
                 if (!network_deadline_left(deadline, address_of seconds,
@@ -99,15 +100,23 @@ static bipolar network_wait_until(
                         return 0;
                 limit.tv_sec = (b64)seconds;
                 limit.tv_nsec = (b64)nanoseconds;
-                ready = system_poll_wait(address_of waited, 1,
-                                         address_of limit, null);
+                ready = system_poll_wait(set, count, address_of limit, null);
                 if (ready == NETWORK_INTERRUPTED)
                         continue;
-                if (ready > 0 &&
-                    (waited.returned & SYSTEM_POLL_INVALID))
-                        return -9;
+                for (positive at = 0; ready > 0 && at < count; at++)
+                        if (set[at].returned & SYSTEM_POLL_INVALID)
+                                return -9;
                 return ready;
         }
+}
+
+static bipolar network_wait_until(
+    bipolar handle, b16 events,
+    const network_deadline address_to deadline)
+{
+        system_poll_descriptor waited = {(b32)handle, events, 0};
+
+        return network_wait_set(address_of waited, 1, deadline);
 }
 
 static bipolar network_wait_readable_until(

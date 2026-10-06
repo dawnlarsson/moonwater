@@ -6161,30 +6161,14 @@ static COLD b32 nl80211_link_news(nl80211 address_to session, p32 index)
 static COLD bipolar wifi_wait(wifi_link address_to link,
                               const network_deadline address_to deadline)
 {
-        for (;;)
-        {
-                system_poll_descriptor waited[2] = {
-                    {link->eapol, SYSTEM_POLL_READ, 0},
-                    {link->session.handle, SYSTEM_POLL_READ, 0}};
-                positive seconds;
-                positive nanoseconds;
-                timespec limit;
-                bipolar ready;
+        system_poll_descriptor waited[2] = {
+            {link->eapol, SYSTEM_POLL_READ, 0},
+            {link->session.handle, SYSTEM_POLL_READ, 0}};
+        bipolar ready = network_wait_set(waited, 2, deadline);
 
-                if (!network_deadline_left(deadline, address_of seconds,
-                                           address_of nanoseconds))
-                        return 0;
-                limit.tv_sec = (b64)seconds;
-                limit.tv_nsec = (b64)nanoseconds;
-                ready = system_poll_wait(waited, 2, address_of limit, null);
-                if (ready == NETWORK_INTERRUPTED)
-                        continue;
-                if (ready <= 0)
-                        return ready;
-                if ((waited[0].returned | waited[1].returned) & SYSTEM_POLL_INVALID)
-                        return -9;
-                return (waited[0].returned ? 1 : 0) | (waited[1].returned ? 2 : 0);
-        }
+        if (ready <= 0)
+                return ready;
+        return (waited[0].returned ? 1 : 0) | (waited[1].returned ? 2 : 0);
 }
 
 /* Whether a frame on the EAPOL socket came from the access point the link
