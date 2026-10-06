@@ -1864,9 +1864,19 @@ bipolar file_link_text(string_address path, p8 address_to into, positive limit)
 #define FILE_RESOLVE_FINAL_MISSING 2
 #define FILE_RESOLVE_MISSING_TAIL 4
 #define FILE_RESOLVE_UNRESOLVED 8
+/* The caller has found that the whole of the name, as it was written, is
+   there, which the kernel could not have said of a name with a component
+   that is not a directory in it: no component is asked about again. A dots
+   pair takes the walk out of that, since it drops a name the kernel did
+   look through, and a walk that says no is to be made again without it. */
+#define FILE_RESOLVE_PROVEN 16
 
 /* Whether the last refusal was a working directory with no name. */
 static bool file_resolve_homeless;
+
+/* Whether the last component of the walk was looked at and found: what is
+   above a name that exists is a directory, and need not be asked. */
+static bool file_resolve_present;
 
 static bool file_resolve_as(string_address path, p8 address_to into,
                             bool follow, p8 policy)
@@ -1879,6 +1889,7 @@ static bool file_resolve_as(string_address path, p8 address_to into,
         bool missing_walk = false;
 
         file_resolve_homeless = false;
+        file_resolve_present = false;
 
         if (string_is(path, end) || string_length(path) >= FILE_PATH_MAX)
                 return false;
@@ -1948,7 +1959,7 @@ static bool file_resolve_as(string_address path, p8 address_to into,
 
                 if (memory_is_word(rest + start, piece, ".."))
                 {
-                        if (missing_walk)
+                        if (missing_walk || (policy & FILE_RESOLVE_PROVEN))
                                 return false;
 
                         p8 address_to slash = memory_last_of(
@@ -1971,8 +1982,11 @@ static bool file_resolve_as(string_address path, p8 address_to into,
                 file_facts facts;
                 bipolar looked = 0;
                 bipolar seen = 0;
-                bool need_directory =
-                    (policy & FILE_RESOLVE_DIRECTORIES) && rest[at];
+
+                file_resolve_present = false;
+
+                bool need_directory = (policy & FILE_RESOLVE_DIRECTORIES) &&
+                                      !(policy & FILE_RESOLVE_PROVEN) && rest[at];
 
                 /* Strict walks need the component's type anyway. Reuse that
                    lookup and read link text only for an actual symlink.
@@ -2021,13 +2035,18 @@ static bool file_resolve_as(string_address path, p8 address_to into,
                                         missing_walk = true;
                                 }
                                 else
+                                {
                                         missing_walk = false;
+                                        file_resolve_present = true;
+                                }
                         }
                         else if (follow && seen < 0 &&
                                  seen != -ERROR_NO_ENTRY &&
                                  seen != -ERROR_INVALID &&
                                  !(policy & FILE_RESOLVE_UNRESOLVED))
                                 return false;
+                        else
+                                file_resolve_present = follow && seen == -ERROR_INVALID;
                         continue;
                 }
 
@@ -11963,6 +11982,38 @@ static fn ls_fill(ls_entry address_to entry, file_facts address_to facts)
         reported, the entry is printed as unknown, and the status says so; a
         failed operand is a failed operand, and answers 2.
 */
+//      struct xattr_args, which the *at calls take for a value.
+typedef struct
+{
+        p64 value;
+        p32 size;
+        p32 flags;
+} file_xattr_args;
+
+/*
+        How long one extended attribute of a name is, asked of the name in the
+        directory it was found in. The name's path from the root is a walk of
+        every component above it for each question, and ls -lR down 1,900
+        levels asked three for each name, paths of up to 3,800 bytes, which
+        was the half of its time that GNU's one (llistxattr) was too.
+*/
+static bipolar file_attribute_size(bipolar directory, string_address path,
+                                   string_address attribute, bool follow)
+{
+        file_xattr_args none = {0, 0, 0};
+
+        return system_call_6(syscall(getxattrat), (positive)directory, (positive)path,
+                             follow ? 0 : AT_SYMLINK_NOFOLLOW, (positive)attribute,
+                             (positive)address_of none, sizeof none);
+}
+
+//      Whether a name has any extended attribute at all, asked once.
+static bool file_has_attributes(bipolar directory, string_address path)
+{
+        return system_call_5(syscall(listxattrat), (positive)directory, (positive)path,
+                             AT_SYMLINK_NOFOLLOW, 0, 0) != 0;
+}
+
 static bool ls_add(bipolar directory, string_address path, string_address shown,
                    p8 type, string_address under, file_facts address_to given)
 {
@@ -12034,16 +12085,12 @@ static bool ls_add(bipolar directory, string_address path, string_address shown,
 
                 // A long listing marks a file with an access control list.
                 if (ls_format == 'l' && (facts.mode & MODE_FORMAT) != MODE_LINK)
-                {
-                        p8 full[FILE_PATH_MAX];
-
-                        entry->acl = ls_full_path(full, under, path) &&
-                                     (system_call_4(syscall(lgetxattr), (positive)full,
-                                                    (positive) "system.posix_acl_access", 0, 0) > 0 ||
+                        entry->acl = file_has_attributes(directory, path) &&
+                                     (file_attribute_size(directory, path,
+                                                          (string_address) "system.posix_acl_access", false) > 0 ||
                                       ((facts.mode & MODE_FORMAT) == MODE_DIRECTORY &&
-                                       system_call_4(syscall(lgetxattr), (positive)full,
-                                                     (positive) "system.posix_acl_default", 0, 0) > 0));
-                }
+                                       file_attribute_size(directory, path,
+                                                           (string_address) "system.posix_acl_default", false) > 0));
 
                 /*
                         A link's target is looked at when something will read
@@ -12058,9 +12105,8 @@ static bool ls_add(bipolar directory, string_address path, string_address shown,
                     (ls_indicator == 'f' || ls_indicator == 'F' || ls_check_link_mode))
                 {
                         file_facts through;
-                        p8 full[FILE_PATH_MAX];
 
-                        if (ls_full_path(full, under, path) && file_look_at(full, address_of through))
+                        if (file_look(directory, path, 0, address_of through))
                         {
                                 entry->link_ok = true;
                                 entry->link_mode = (p32)through.mode;
@@ -12071,14 +12117,9 @@ static bool ls_add(bipolar directory, string_address path, string_address shown,
 
                 //      A capability colours a regular file only when ca= is set.
                 if (ls_coloring && ls_colored(LS_CA) && (facts.mode & MODE_FORMAT) == MODE_FILE)
-                {
-                        p8 full[FILE_PATH_MAX];
-
-                        entry->capability =
-                            ls_full_path(full, under, path) &&
-                            system_call_4(ls_dereference == 'L' ? syscall(getxattr) : syscall(lgetxattr),
-                                          (positive)full, (positive) "security.capability", 0, 0) > 0;
-                }
+                        entry->capability = file_attribute_size(directory, path,
+                                                                (string_address) "security.capability",
+                                                                ls_dereference == 'L') > 0;
         }
         else
         {
@@ -12340,17 +12381,23 @@ static __attribute__((noinline)) bool ls_list_one(string_address path, bool head
 {
         file_walk walk;
         file_facts identity;
+        bool opened = file_walk_open(address_of walk, AT_FDCWD, path);
 
-        if (ls_recursive && file_look_at(path, address_of identity) &&
+        //      Whose directory it is, asked of the descriptor: the path is a
+        //      walk of every level above for each question, and -R asked it
+        //      of each of 1,900.
+        if (opened && ls_recursive &&
+            file_look(walk.handle, (string_address) "", AT_EMPTY_PATH, address_of identity) &&
             ls_already_listed(address_of identity))
         {
+                file_walk_close(address_of walk);
                 string_format(log_error, "%s: %w: not listing already-listed directory\n",
                               ls_program, writer_terminal_name, path);
                 ls_status = 2;
                 return false;
         }
 
-        if (!file_walk_open(address_of walk, AT_FDCWD, path))
+        if (!opened)
         {
                 file_path_failed(ls_program, "cannot open directory", writer_shell_quoted_name,
                                  path, walk.handle, 0);
@@ -24708,36 +24755,41 @@ static bool realpath_named(string_address path, p8 policy, bool logical,
                 source = scratch;
         }
 
-        if (!file_resolve_as(source, answer, !written_name, policy))
+        /*
+                A name that is not resolved through its links is only its dots
+                worked out, and the walk asked the kernel about each of its
+                prefixes to say which of them was not a directory: a path
+                500 levels down was 500 lookups of up to 1,000 bytes, where
+                the one the name has to pass in the end answers for all of
+                them, as GNU's does.
+        */
+        bool checked = written_name && !allow_missing;
+        file_facts facts;
+        bipolar looked = checked ? file_look_code(AT_FDCWD, path, 0, address_of facts) : 0;
+
+        if (!(checked && looked == 0 &&
+              file_resolve_as(source, answer, false, policy | FILE_RESOLVE_PROVEN)) &&
+            !file_resolve_as(source, answer, !written_name, policy))
         {
-                file_facts facts;
-                bipolar looked = file_look_code(AT_FDCWD, path, 0,
-                                                address_of facts);
+                looked = file_look_code(AT_FDCWD, path, 0, address_of facts);
 
                 *why = looked < 0 ? file_reason(looked)
                                   : (string_address) "No such file or directory";
                 return false;
         }
 
-        if (written_name && !allow_missing)
+        if (checked && looked < 0 &&
+            (need_exist || looked != -ERROR_NO_ENTRY))
         {
-                file_facts facts;
-                bipolar looked = file_look_code(AT_FDCWD, path, 0,
-                                                address_of facts);
-
-                if (looked < 0 &&
-                    (need_exist || looked != -ERROR_NO_ENTRY))
-                {
-                        *why = file_reason(looked);
-                        return false;
-                }
+                *why = file_reason(looked);
+                return false;
         }
 
         path_head_copy(scratch, FILE_PATH_MAX, answer);
 
         if (!written_name &&
-            ((!allow_missing && !file_is_directory_through(scratch)) ||
-             (need_exist && !file_exists(AT_FDCWD, answer))))
+            ((!allow_missing && !file_resolve_present && !file_is_directory_through(scratch)) ||
+             (need_exist && !file_resolve_present && !file_exists(AT_FDCWD, answer))))
         {
                 *why = (string_address) "No such file or directory";
                 return false;
@@ -34388,14 +34440,6 @@ static bool file_xattr_is_acl(string_address name)
         return string_equals(name, (string_address) "system.posix_acl_access") ||
                string_equals(name, (string_address) "system.posix_acl_default");
 }
-
-//      struct xattr_args, which the *at calls take for a value.
-typedef struct
-{
-        p64 value;
-        p32 size;
-        p32 flags;
-} file_xattr_args;
 
 /* With room for them passed in, so a pool job can use its own; one whose
    room is too small answers ERANGE and leaves the name to the serial copy,
@@ -44506,6 +44550,25 @@ static string_address address_to env_list;
 static positive env_room;
 static positive env_have;
 
+/*
+        Where each name in the list stands, so that putting one is not a walk
+        of all the others: a hash of the bytes before the =, open-addressed,
+        each slot an index into the list and one over (nought is empty). It
+        is built from the list when the next name is put and the list has
+        changed under it, which a drop does, and again when it fills half.
+*/
+static positive address_to env_slot;
+static positive env_slot_room;
+static positive env_slot_mask;
+static bool env_slot_ready;
+
+static inline INLINE positive env_slot_start(string_address entry, positive length)
+{
+        positive hash = memory_hash_33(entry, length);
+
+        return (hash ^ (hash >> 15)) & env_slot_mask;
+}
+
 static fn env_drop(string_address name)
 {
         positive length = string_length(name);
@@ -44516,21 +44579,54 @@ static fn env_drop(string_address name)
                         env_list[keep++] = env_list[i];
 
         env_have = keep;
+        env_slot_ready = false;
+}
+
+static bool env_slots_build()
+{
+        positive size = 64;
+
+        while (size < 2 * (env_have + 16))
+                size <<= 1;
+        if (!shell_array_room(env_slot, env_slot_room, size))
+                return false;
+        memory_fill(env_slot, 0, size * sizeof(positive));
+        env_slot_mask = size - 1;
+        for (positive i = 0; i < env_have; i++)
+        {
+                string_address mark = string_first_of(env_list[i], '=');
+
+                if (!mark)
+                        continue;
+
+                positive at = env_slot_start(env_list[i], (positive)(mark - env_list[i]));
+
+                while (env_slot[at])
+                        at = (at + 1) & env_slot_mask;
+                env_slot[at] = i + 1;
+        }
+        env_slot_ready = true;
+        return true;
 }
 
 static bool env_put(string_address entry)
 {
         string_address mark = string_first_of(entry, '=');
+        positive at = 0;
 
         if (mark)
         {
                 positive length = (positive)(mark - entry);
 
-                for (positive i = 0; i < env_have; i++)
+                if ((!env_slot_ready || 2 * (env_have + 2) > env_slot_mask + 1) && !env_slots_build())
+                        return string_report(log_error, false, "env: environment is too large\n");
+                for (at = env_slot_start(entry, length); env_slot[at]; at = (at + 1) & env_slot_mask)
                 {
-                        if (environment_key_is(env_list[i], entry, length))
+                        positive found = env_slot[at] - 1;
+
+                        if (environment_key_is(env_list[found], entry, length))
                         {
-                                env_list[i] = entry;
+                                env_list[found] = entry;
                                 return true;
                         }
                 }
@@ -44539,6 +44635,8 @@ static bool env_put(string_address entry)
         if (!shell_array_room(env_list, env_room, env_have + 2))
                 return string_report(log_error, false, "env: environment is too large\n");
 
+        if (mark)
+                env_slot[at] = env_have + 1;
         env_list[env_have++] = entry;
         return true;
 }
@@ -45068,6 +45166,7 @@ env_split_done:
 static b32 file_env()
 {
         env_have = 0;
+        env_slot_ready = false;
         env_drops = 0;
         env_signal_blocked = 0;
         env_signal_unblocked = 0;

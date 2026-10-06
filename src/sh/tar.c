@@ -1076,6 +1076,18 @@ static const tar_codec address_to tar_decoder;
 static const tar_codec address_to tar_encoder;
 static file_facts tar_output_facts;
 static bool tar_output_known;
+/* The archive goes to the null device, as an uncompressed stream: what is
+   written is not kept, so the bytes of a file are not read for it, which is
+   what GNU tar does and what makes a listing of names by tar -cf /dev/null a
+   look at each of them and no more. */
+static bool tar_output_null;
+/* How many regular files in a row had nothing in them. A directory of them
+   is looked at by name and not opened, which is one call for each where the
+   open that looks through the descriptor is three; the first few are opened
+   all the same, so that a directory of files with something in them pays for
+   no look it does not use. */
+#define TAR_EMPTY_RUN 4
+static positive tar_empty_run;
 static file_facts tar_output_target_facts;
 static bool tar_output_target_known;
 static file_facts tar_output_stage_facts;
@@ -2338,6 +2350,8 @@ static fn tar_reset(void)
         tar_decoder = null;
         tar_encoder = null;
         tar_output_known = false;
+        tar_output_null = false;
+        tar_empty_run = 0;
         tar_output_target_known = false;
         tar_output_stage_known = false;
         path_table_clear(address_of tar_directories);
@@ -6316,7 +6330,7 @@ static b32 tar_add_named(bipolar archive, bipolar directory,
                 }
         }
 
-        if (kind == DT_REG)
+        if (kind == DT_REG && !tar_output_null && tar_empty_run < TAR_EMPTY_RUN)
         {
                 handle = system_open_at(
                     directory, name,
@@ -6344,6 +6358,8 @@ static b32 tar_add_named(bipolar archive, bipolar directory,
         }
 
 dereferenced:;
+        if ((facts.mode & MODE_FORMAT) == MODE_FILE)
+                tar_empty_run = facts.size ? 0 : tar_empty_run + 1;
         bool active_output =
             tar_output_known &&
             file_same_identity(address_of facts, address_of tar_output_facts);
@@ -6448,6 +6464,27 @@ dereferenced:;
         {
                 if (tar_put_facts(archive, member, type, 0, null, address_of facts) < 0)
                         tar_create_fatal = true;
+                return tar_status;
+        }
+
+        /*
+                A file with nothing in it has nothing to read, and it needs
+                its descriptor only for the attributes the header may carry;
+                one that goes to the null device is not read at all.
+        */
+        if (!tar_sparse_on &&
+            (tar_output_null ||
+             (handle < 0 && facts.size == 0 && !tar_opt_xattrs && !tar_opt_acls)))
+        {
+                if (handle >= 0)
+                        system_close(handle);
+                bipolar put = tar_put_facts(archive, member, '0', (p64)facts.size, null,
+                                            address_of facts);
+
+                if (put < 0)
+                        tar_create_fatal = true;
+                else if (put > 0)
+                        tar_seen_store(address_of facts, member);
                 return tar_status;
         }
 
@@ -6631,6 +6668,9 @@ static b32 tar_write_archive(struct tar_options address_to options)
                 return tar_status;
         }
         tar_output_known = true;
+        tar_output_null = !in_place && tar_pack == TAR_PACK_NONE &&
+                          (tar_output_facts.mode & MODE_FORMAT) == MODE_CHARACTER &&
+                          tar_output_facts.rdev_major == 1 && tar_output_facts.rdev_minor == 3;
         tar_advise(handle);
         if (!tar_codec_begin_write(handle))
         {

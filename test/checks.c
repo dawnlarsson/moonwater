@@ -50706,6 +50706,7 @@ static fn lock_pool(bool emulated)
 */
 #define TREE_WIDE 3000
 #define TREE_DEEP 1200
+#define TREE_CHAIN 300
 
 typedef struct tree_probe
 {
@@ -51154,6 +51155,22 @@ static fn tree_build(bipolar base)
 
         if (wide >= 0)
                 system_close(wide);
+
+        //      Nothing in it but the next one down.
+        {
+                bipolar chain = tree_make_directory(base, (string_address)"chain");
+
+                for (i = 0; i < TREE_CHAIN && chain >= 0; i++)
+                {
+                        bipolar next = tree_make_directory(chain, (string_address)"c");
+
+                        system_close(chain);
+                        chain = next;
+                }
+
+                if (chain >= 0)
+                        system_close(chain);
+        }
 }
 
 //      And removing it with the pool: files in enter, emptied directories in
@@ -51390,6 +51407,39 @@ static fn lock_tree(void)
         check("every tree node was finished to the sink", tree_probe_live == 0);
         check("a finished tree walk left no descriptor open",
               tree_open_count() == handles_before);
+
+        //      A chain of directories has one node waiting at any time, and
+        //      the walk takes it itself: handing the walk to the pool woke
+        //      every thread for each level, 4,640 futex calls for 500 levels
+        //      and six times the time of one thread walking them.
+        {
+                tree_stream serial = {0xcbf29ce484222325ull, 0, 0, 0, 0};
+                tree_stream chained = {0xcbf29ce484222325ull, 0, 0, 0, 0};
+                bipolar top = system_open_at(base, (string_address)"chain",
+                                             FILE_READ | O_DIRECTORY | O_CLOEXEC);
+                tree_probe address_to root = tree_probe_new(null);
+                bool answered;
+
+                parallel_reset(1);
+                answered = parallel_tree(tree_probe_enter, tree_probe_leave, tree_probe_sink,
+                                         address_of serial, top, root, O_NOFOLLOW);
+                system_close(top);
+
+                top = system_open_at(base, (string_address)"chain",
+                                     FILE_READ | O_DIRECTORY | O_CLOEXEC);
+                root = tree_probe_new(null);
+                parallel_reset(8);
+                answered = answered && parallel_tree(tree_probe_enter, tree_probe_leave,
+                                                     tree_probe_sink, address_of chained, top, root,
+                                                     O_NOFOLLOW);
+                system_close(top);
+
+                check("a walk down a chain of directories gives what one thread's gives",
+                      answered && chained.hash == serial.hash && chained.bytes == serial.bytes &&
+                          chained.nodes == TREE_CHAIN + 1);
+                check("a walk down a chain of directories gives none of it to the pool",
+                      parallel_tree_last.threads == 1);
+        }
 
         //      A stop deep in the chain.
         {

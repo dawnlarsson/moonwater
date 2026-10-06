@@ -7796,7 +7796,20 @@ FILES_UTILITIES = (
                       ("a.txt/",), ("a.txt/.",), ("a.txt//",), ("a.txt/..",), ("badwalk",), ("badwalk/",), ("two words",),
                       ("a.txt", "link", "missing", "dir"), (), ("",), ("dirlink",), ("dirlink/inside",), ("deep/one/two/three/leaf",),
                       ("shut/inside",), ("./././a.txt",), ("dir//sub//",), ("x" * 20000,), ("-",), ("dir/sub/back/sub/back/inside",)),
-            stdin=("empty",), fixture="files", stderr="exact"),
+            stdin=("empty",), fixture="files", stderr="exact",
+            #   A name that is not resolved through its links is its dots worked out,
+            #   and one that is all there is answered by the one lookup of it: a file
+            #   or a missing name in the middle, a trailing slash after a file, dots
+            #   and doubled slashes around the directories that are there, and a link
+            #   to a directory with dots after it, which the kernel and the text read
+            #   differently.
+            extra=tuple(flags + (name,)
+                        for flags in (("-s", "-e"), ("-s",), ("-s", "-m"), ("-s", "-E"), ("-s", "-e", "-q"))
+                        for name in ("a.txt/x", "a.txt/x/y", "a.txt/", "dir/./sub/./", "dir/missing", "dir/missing/..",
+                                     "dir/missing/../sub", "dirlink/./inside", "dirlink/../dir", "dir//sub//back",
+                                     "badwalk/x", "shut/", "a.txt/../a.txt", "dir/sub/back/./inside",
+                                     "deep/one/./two//three/leaf", "./dir/", "dir/sub/..", "dir/sub/../..", "link/.",
+                                     "dangling", "dangling/x", "loop/loop", "./", ".", "dir/.."))),
     Utility("pathchk", options=(Option("-p"), Option("-P"), Option("--portability")),
             operands=(("absent",), ("a.txt",), ("",), ("A-z_09.ok/path",), ("bad+name",), ("okay/-bad",),
                       ("okay/name",), ("okay/" + "x" * 14,), ("okay/" + "x" * 15,), ("missing/" + "x" * 255,),
@@ -8092,7 +8105,13 @@ FILES_UTILITIES = (
                                        ("-v", "-S", "-S echo a", "b"), ("-S", "--split-string=echo x", "y"),
                                        ("-S", "-u X -S 'echo ${HOME}'", "z"), ("-v", "-S", "echo ${NOPE_X}"),
                                        ("-i", "-u", "", "true"), ("-v", "-u", "=", "true"),
-                                       ("-v", "--ignore-signal=33", "true"), ("-C", "a b", "true"))),
+                                       ("-v", "--ignore-signal=33", "true"), ("-C", "a b", "true"))
+            #       A name put again takes the place it first had, among
+            #       hundreds of others, and the ones with no = are not names.
+            + (("-i", *("V%d=%d" % (i % 37, i) for i in range(500)), "sh", "-c", "env | sort"),
+               ("-i", *("K%d=%d" % (i, i) for i in range(300)), "K7=again", "K299=last", "A", "env"),
+               ("-u", "K5", "-i", *("K%d=%d" % (i % 90, i) for i in range(260)), "K5=mine", "env"),
+               ("-0", "-i", *("W%d=x%d" % (i % 20, i) for i in range(120)), "X", "Y=", "=Z"))),
     Utility("printenv", options=(Option("-0"), Option("--null")),
             operands=((), ("PATH",), ("PATH", "HOME"), ("NOPE",), ("PATH", "NOPE"), ("PATH=anything",), ("PATH", "-0"),
                       ("",), ("HOME",), ("TZ", "LC_ALL", "LANG"), ("--bad",), ("COLUMNS", "LINES", "TERM")),
@@ -10161,6 +10180,11 @@ def files_tar_formats(farm):
                         ("-df", str(made), "nothere"), ("-tvvf", str(made), "plain/f", "nothere"),
                         ("-cf", str(top / "w.tar"), "missing"),
                         ("-cf", str(top / "w.tar"), "plain", "missing"),
+                        #   An archive that goes nowhere reads no file: what is
+                        #   said is the names, the missing and the status.
+                        ("-cf", "/dev/null", "plain", "modes", "u", "times", "hardlinks", "plain/hard"),
+                        ("-cvf", "/dev/null", "plain", "missing", "dirs"), ("-cvvf", "/dev/null", "plain", "sl"),
+                        ("-cf", "/dev/null", "--format=posix", "plain", "times"), ("-zcf", "/dev/null", "plain"),
                         ("-cf", str(top / "w.tar"), "-b", "0", "plain"),
                         ("-cf", str(top / "w.tar"), "-H", "bogus", "plain"),
                         ("-cf", str(top / "w.tar"), "--pax-option=delete=atime", "plain"),

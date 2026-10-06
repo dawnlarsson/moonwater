@@ -10980,12 +10980,17 @@ static fn parallel_tree_work(address_any argument)
         atomic_add(address_of run->seats, 1);
 }
 
+//      The pool is for a walk that is wide somewhere. A walk down a chain of
+//      directories has one node pending at a time, which the thread that
+//      entered its parent takes itself, and every other thread woken for it
+//      goes back to sleep: 500 levels were 4,640 futex calls and 13 ms where
+//      the walk by one thread is 2.
 static fn parallel_tree_publish_maybe(parallel_tree_run address_to run,
                                       bool address_to published, bool caller_only)
 {
         if (address_to published || caller_only ||
             atomic_load(address_of run->entered) < PARALLEL_TREE_INLINE_NODES ||
-            !atomic_load(address_of run->pending_count))
+            atomic_load(address_of run->pending_count) < 2)
                 return;
 
         address_to published = true;
