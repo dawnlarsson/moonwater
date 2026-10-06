@@ -328,10 +328,28 @@ pacman -Syu package_name
 Software can come from several distributions on one system, alongside
 Moonwater's own coreutils, util-linux and shell (bash when it is called
 bash, dash when it is called dash or sh, as Debian's `/bin/sh` is). The
-default profile binds only a package's loader and libc; `--isolated`
+default profile binds only a package's loader, libraries and data, and shows
+`/etc` as Moonwater's with the bowl's under it (read-only; a name both have is
+Moonwater's, which is how passwd, resolv.conf and the zone stay the machine's
+and a package's own configuration is where it looks); `--isolated`
 gives package managers a complete namespace with the host's `/proc/sys` and
 `/sys` read-only. `bowl expose` puts chosen programs on the
-global path. A bowl is not a security sandbox: its programs run as root.
+global path. A bowl is not a security sandbox.
+
+A program run in the default view is run as the user, uid and gid 1000, and
+not as root, because software written for a distribution asks who it is:
+Chrome, Chromium and the programs built on them (Electron, Steam's browser)
+stop at "Running as root without --no-sandbox" and the flag that gets past it
+turns their sandbox off. The user is root of this machine seen through a user
+namespace: the files it makes are root's, every file root owns is its own, so
+the home, the runtime directory and the devices a compositor opens need no
+other mode, and what it lacks is what only the machine's root can do (mount, a
+raw socket, the machine's settings). Root is what a package manager runs as
+(they are isolated by their name), what `bowl --root ROOT program` or
+`BOWL_ROOT=1` asks for, and the shell a bare `bowl ROOT` starts, which is the
+way in for administering a bowl. A package manager started from a desktop
+session says so and stops: it needs the machine's root, which a console shell
+has. A machine that will not make the namespace runs the program as root.
 
 `bowl setup` checks for room before downloading. On a live stick bowls live in
 memory; `moonwater setup install` puts them on a data partition.
@@ -358,7 +376,8 @@ a launcher in `/bowls/bin` and a link in `/bin`, so `dbus-run-session` finding
 shell in between. A name `/bin` already has stays Moonwater's. It then writes
 a session script named for the profile (`desktop`, also in `/bin`). Every
 bowl launch also makes what a guest assumes the host has and Moonwater's `/etc`
-does not: root's passwd and group lines, a machine id, `/tmp/.X11-unix`. What was exposed is
+does not: the passwd and group lines of root and the user, a machine id,
+`/tmp/.X11-unix`. What was exposed is
 recorded in the bowl, and remove undoes exactly that: launchers that still
 name the bowl, the profile's packages and the dependencies nothing else needs,
 the script.

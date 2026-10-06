@@ -89,7 +89,7 @@ export TEST_TALLY
 #       fuzz an hour a target, msan a clang with MemorySanitizer, ring0 an
 #       image and a machine that boots it, best one built with
 #       kernel/profile/sec_sanitize.
-asked_lanes="wifi fuzz msan ring0 scale desktop"
+asked_lanes="wifi fuzz msan ring0 scale desktop chrome"
 
 lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex slurp wait writer native probe stack checksum storage_io storage_format machine sensors cli differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep"
 
@@ -169,6 +169,7 @@ describe()
         canvas)   echo "what is actually on the screen, read back a pixel at a time" ;;
         sleep)    echo "moonwater sleep from a terminal, woken by a key: the desktop back on a card that lost its pipe, input alive, the log" ;;
         desktop)  echo "a compositor's input in a booted guest: Alpine's libinput over a bowl's udev, keys and a pointer reaching it (NOT RUN without a network, an image or mke2fs)" ;;
+        chrome)   echo "a browser that will not run as root, from Debian's package in a booted guest: who a bowl's programs are, and Chromium's sandbox on (NOT RUN without a network, an image or mke2fs)" ;;
         wifi)     echo "networks in the air of a machine with simulated radios, joined and listed" ;;
         fuzz)     echo "every network libFuzzer target for an hour each, or a release report" ;;
         msan)     echo "the net wire parsers under MemorySanitizer" ;;
@@ -12589,6 +12590,7 @@ ls /monitor.sh | rev
 n=$(uname -n); r=$(cat /root/name); case $n in moonwater-box|'') k=default;; *-*) k=rolled;; *) k=odd;; esac; printf 'machine-%s-%s\n' "$k" "$([ "$n" = "$r" ] && echo saved || echo apart)"
 printf 'asked-%s\n' "$([ "$(moonwater name)" = "$(uname -n)" ] && echo same || echo different)"
 printf 'owners-%s-end\n' "$(stat -c %u / /etc /root /tmp /var /usr /bin /sbin /lib /lib64 /opt /bowls /bowls/bin | sort -u | tr -d '\n ')"
+printf 'devfd-%s-%s-end\n' "$(readlink /dev/fd)" "$(readlink /dev/stderr)"
 mkdir /tmp/theirs && chown 1000:1000 /tmp/theirs && echo a > /tmp/theirs/a && echo b > /tmp/theirs/b && mv /tmp/theirs/a /tmp/theirs/b; printf 'replaced-%s-%s\n' $? "$(cat /tmp/theirs/b)"
 before=$(stat -c %i /etc/resolv.conf)
 n=0; for p in /proc/[0-9]*; do case $(tr '\0' ' ' < $p/cmdline 2>/dev/null) in *'ip watch'*) kill ${p#/proc/}; n=$((n+1));; esac; done
@@ -13014,6 +13016,7 @@ says transcript 'moonwater name says it'  'asked-same'
 #       /etc/resolv.conf is a replacement).
 #
 says transcript 'the image tree is root-owned'   'owners-0-end'
+says transcript '/dev/fd and /dev/stderr are there before any package manager has run' 'devfd-/proc/self/fd-/proc/self/fd/2-end'
 says transcript 'root replaces a name in another user'"'"'s directory' 'replaced-0-a'
 says transcript 'the watcher came back with an address' 'watch-killed-yes-back-1'
 says transcript 'and a route' 'route-1'
@@ -17434,6 +17437,161 @@ PY
 
 if [ ! -s "$work/answers" ]; then
         echo "  desktop      the guest answered nothing"
+        sed 's/^/    /' "$work/why" | tail -5
+        exit 1
+fi
+
+while IFS='|' read -r name got want; do
+        same "$name" "$want" "$got"
+done < "$work/answers"
+
+counted
+)
+
+#       A browser that refuses to be root, in a booted guest, from the real
+#       package.
+#
+#       Chrome and everything built on it stop at "Running as root without
+#       --no-sandbox is not supported" before a window or a page, and every
+#       program a bowl ran was root. Debian is where a Chromium and the glibc
+#       it was built for come from with no download outside the mirror, so
+#       this lands a Debian bowl on a blank disk, has apt add chromium, and
+#       asks who a program of the bowl is (the user, 1000, and root where
+#       root is asked for or is the way in), what a package manager from the
+#       user is told, and then runs the browser as it is installed -- no flag
+#       taking its sandbox off -- on a page of the guest's own: the page's
+#       text must come out of --dump-dom and the status must be 0, read
+#       before anything is piped. A browser that is root exits 1 with the
+#       sentence above, which is the red of the parent.
+lane_chrome()
+(
+image=${MOONWATER_IMAGE:-dist/bootx64.efi}
+
+counting chrome
+
+for need in qemu-system-x86_64 python3 mke2fs; do
+        if ! command -v "$need" > /dev/null 2>&1; then
+                echo "  chrome       NOT RUN -- no $need"
+                exit 2
+        fi
+done
+
+if [ ! -f "$image" ]; then
+        echo "  chrome       NOT RUN -- no image at $image"
+        exit 2
+fi
+
+if ! python3 -c 'import socket; socket.create_connection(("deb.debian.org", 80), 5).close()' 2> /dev/null; then
+        echo "  chrome       NOT RUN -- no network to Debian's mirror"
+        exit 2
+fi
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/dawning-chrome.XXXXXX") || exit 1
+trap 'rm -rf "$work"' EXIT INT TERM
+
+truncate -s 6G "$work/bowls.img" && mke2fs -q -t ext4 -F "$work/bowls.img" || exit 1
+
+MOONWATER_CHROME_WORK=$work
+export MOONWATER_CHROME_WORK
+qmp_guest_module "$work"
+
+PYTHONPATH=$work python3 - "$image" > "$work/answers" 2>"$work/why" <<'PY'
+import os, re, socket, sys, time
+from qmp_guest import *
+
+image = sys.argv[1]
+work = os.environ["MOONWATER_CHROME_WORK"]
+
+machine = desktop(image)
+machine[machine.index("-m") + 1] = "6G"
+guest = Guest(machine + [
+    "-drive", "if=none,id=bw,format=raw,file=" + work + "/bowls.img",
+    "-device", "nvme,serial=bowls0,drive=bw",
+    "-netdev", "user,id=n0", "-device", "virtio-net-pci,netdev=n0",
+    "-chardev", "socket,id=s0,path=" + work + "/ser,server=on,wait=off",
+    "-serial", "chardev:s0",
+    "-no-reboot", "-display", "none",
+    "-append", "console=ttyS0 drm_client_lib.active= moonwater.cursor_plane=0"],
+    work + "/qmp", work + "/mon", work, sockets=(work + "/ser",))
+
+shell = socket.socket(socket.AF_UNIX)
+shell.connect(work + "/ser")
+shell.settimeout(1)
+tags = [0]
+
+def run(command, seconds=60):
+    """One line on the guest's serial shell: what it printed, and its status."""
+    tags[0] += 1
+    mark = tags[0]
+    shell.sendall(("\necho BEG\"%d\"; %s\necho END\"%d\":$?\n" % (mark, command, mark)).encode())
+    seen = b""
+    stop = time.time() + seconds
+    done = re.compile(rb"BEG%d\r?\n(.*?)END%d:(\d+)" % (mark, mark), re.S)
+    while time.time() < stop:
+        try:
+            seen += shell.recv(65536)
+        except socket.timeout:
+            pass
+        found = done.search(seen)
+        if found:
+            text = re.sub(rb"\x1b\[[0-9;?]*[a-zA-Z]", b"", found.group(1))
+            text = text.decode("utf8", "replace").replace("\r", "").strip()
+            #       What the shell wrote last is its prompt, for the line after.
+            return re.sub(r"(\s*\$)+$", "", text), int(found.group(2))
+    return seen.decode("utf8", "replace").replace("\r", ""), 124
+
+def last(text):
+    """The last line of an answer, which is the one a command printed last."""
+    lines = [line for line in text.split("\n") if line.strip()]
+    return lines[-1].strip() if lines else ""
+
+time.sleep(25)
+out = []
+
+run("mount /dev/nvme0n1 /bowls", 30)
+_, setup = run("bowl setup debian", 900)
+out.append(("a Debian bowl lands on the disk", "yes" if setup == 0 else "no, status %d" % setup, "yes"))
+_, added = run("(apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y "
+               "--no-install-recommends -o Dpkg::Options::=--force-unsafe-io chromium) < /dev/null", 1500)
+out.append(("with Chromium added by apt", "yes" if added == 0 else "no, status %d" % added, "yes"))
+
+who, _ = run("bowl /bowls/debian /usr/bin/id -u", 60)
+out.append(("a program of the bowl is not root", last(who) or "no answer", "1000"))
+name, _ = run("bowl /bowls/debian /usr/bin/id -un", 60)
+out.append(("it is the user by name", last(name) or "no answer", "user"))
+asked, _ = run("bowl --root /bowls/debian /usr/bin/id -u", 60)
+out.append(("--root asks for root", last(asked) or "no answer", "0"))
+shell_id, _ = run("echo 'id -u' | bowl /bowls/debian", 60)
+out.append(("the shell a bare bowl starts is root", last(shell_id) or "no answer", "0"))
+refused, _ = run("bowl /bowls/debian /usr/bin/sh -c 'bowl --isolated /bowls/debian /usr/bin/true' 2>&1", 60)
+out.append(("a package manager from the user says it needs the machine's root",
+            "yes" if "needs the machine's root" in refused else "no: " + refused[-200:], "yes"))
+
+run("printf '<html><body><p id=x>moonwater-chrome-row</p></body></html>' > /tmp/page.html", 30)
+status, _ = run("chromium --headless --disable-gpu --dump-dom file:///tmp/page.html > /tmp/dom 2> /tmp/dom.err; echo rc=$?", 240)
+dom, _ = run("cat /tmp/dom", 30)
+err, _ = run("grep -c 'without --no-sandbox' /tmp/dom.err", 30)
+out.append(("Chromium, its sandbox on, exits 0", "yes" if "rc=0" in status else "no: " + status[-100:], "yes"))
+out.append(("and prints the page it was given", "yes" if "moonwater-chrome-row" in dom else "no: " + dom[-200:], "yes"))
+out.append(("and never says it will not run as root", "yes" if last(err) == "0" else "no", "yes"))
+
+alive, state = run("echo answers")
+out.append(("and the machine answers on its serial shell", "yes" if state == 0 and "answers" in alive else "no", "yes"))
+
+guest.quit()
+time.sleep(1)
+guest.terminate()
+try:
+    guest.wait(10)
+except Exception:
+    guest.kill()
+
+for name, got, want in out:
+    print("%s|%s|%s" % (name, " ".join(got.split()).replace("|", "/"), want))
+PY
+
+if [ ! -s "$work/answers" ]; then
+        echo "  chrome       the guest answered nothing"
         sed 's/^/    /' "$work/why" | tail -5
         exit 1
 fi

@@ -39911,9 +39911,10 @@ static void system_close(bipolar handle) { (void)handle; }
 #define array_count(list) (sizeof(list) / sizeof((list)[0]))
 /*  The identity files are there; every directory is not, so that session prep
     takes the walk that makes it, which is what this window counts. */
+static int etc_missing;
 static bipolar system_access_at(bipolar dir, string_address path, positive mode) {
     (void)dir; (void)mode;
-    return !strncmp(path, "/etc/", 5) ? 0 : -2;
+    return !strncmp(path, "/etc/", 5) && !etc_missing ? 0 : -2;
 }
 static bipolar system_stat_at_stub(void) { return -2; }
 #define system_stat_at(dir, path, flags, mask, into) system_stat_at_stub()
@@ -39922,8 +39923,10 @@ static bipolar system_random_fill(void *into, positive length, positive flags) {
     (void)into; (void)length; (void)flags;
     return 0;
 }
+static char wrote_passwd[512], wrote_group[512];
 static b32 bowl_write_bytes(string_address path, string_address text, positive length) {
-    (void)path; (void)text; (void)length;
+    if (!strcmp(path, "/etc/passwd") && length < sizeof(wrote_passwd)) memcpy(wrote_passwd, text, length);
+    if (!strcmp(path, "/etc/group") && length < sizeof(wrote_group)) memcpy(wrote_group, text, length);
     return 0;
 }
 static bool bowl_quiet;
@@ -40008,11 +40011,40 @@ int main(void) {
     check(env_has(got, "SHELL=/bin/sh"), "empty env gets SHELL");
     check(env_has(got, "TMPDIR=/tmp"), "empty env gets TMPDIR");
 
+    mock_uid = 1001;
+    got = bowl_environment(null);
+    check(env_has(got, "USER=1001"), "a numeric uid is USER");
+    check(env_has(got, "LOGNAME=1001"), "a numeric uid is LOGNAME");
+    check(env_has(got, "XDG_RUNTIME_DIR=/run/user/1001"), "runtime dir follows the uid");
+
+    /*  The user a bowl's programs are run as has a name, and a shell that was
+        root and says so is not believed by a program that is not. */
     mock_uid = 1000;
     got = bowl_environment(null);
-    check(env_has(got, "USER=1000"), "a numeric uid is USER");
-    check(env_has(got, "LOGNAME=1000"), "a numeric uid is LOGNAME");
-    check(env_has(got, "XDG_RUNTIME_DIR=/run/user/1000"), "runtime dir follows the uid");
+    check(env_has(got, "USER=user"), "the user's id is named USER");
+    check(env_has(got, "LOGNAME=user"), "the user's id is named LOGNAME");
+    check(env_has(got, "XDG_RUNTIME_DIR=/run/user/1000"), "the user's runtime dir");
+    {
+        string_address have[] = {"USER=root", "LOGNAME=root", "HOME=/root", null};
+        got = bowl_environment(have);
+        check(!env_has(got, "USER=root") && !env_has(got, "LOGNAME=root"),
+              "a root named by a shell is not the user's name");
+        check(env_has(got, "USER=user") && env_has(got, "LOGNAME=user"),
+              "and the user's name is put where it was");
+    }
+    {
+        string_address have[] = {"USER=a", "LOGNAME=a", null};
+        got = bowl_environment(have);
+        check(env_has(got, "USER=a") && env_has(got, "LOGNAME=a"),
+              "a name that is somebody's is kept");
+    }
+    mock_uid = 0;
+    {
+        string_address have[] = {"USER=root", "LOGNAME=root", null};
+        got = bowl_environment(have);
+        check(env_has(got, "USER=root") && env_has(got, "LOGNAME=root"),
+              "and root's own is kept for root");
+    }
 
     {
         string_address have[] = {
@@ -40174,6 +40206,18 @@ int main(void) {
     check(strcmp(last_open, "/") && strcmp(last_open, "/tmp/..") &&
               !strcmp(last_private, "/run/user/0"),
           "prepare does not chmod / through /tmp/..");
+
+    /*  A machine with no passwd or group is given root and the user, since
+        a program of a bowl is the user and dbus-daemon will not start for an
+        id the machine has no name for. */
+    etc_missing = 1;
+    bowl_session_prepare("/root", null);
+    check(strstr(wrote_passwd, "root:x:0:0:root:/root:/bin/sh\n") &&
+              strstr(wrote_passwd, "user:x:1000:1000:user:/root:/bin/sh\n"),
+          "a missing passwd names root and the user");
+    check(strstr(wrote_group, "root:x:0:\n") && strstr(wrote_group, "user:x:1000:\n"),
+          "a missing group names root and the user");
+    etc_missing = 0;
 
     if (failures) return 1;
     printf("bowl session: %u of %u\n", checks, checks);

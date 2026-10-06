@@ -1586,13 +1586,14 @@ static bool build_config_fragment(string_address from, string_address to)
 
         Every build has them, whatever profile is composed with it, whatever
         --set says and whichever machine it is for: x86_64, arm64 (the Pi
-        too) and riscv64. Each is a line in the profile any, and
-        what keeps it there is here and not in a profile, because a profile
-        is the thing that could drop it: the composition fails when the last
-        word any profile says about one is not =y, and so does the check of
-        the built .config, which is where an option that a dependency took
-        away shows. The second half of each row is the measured win that
-        stands on it, in a line.
+        too) and riscv64. Each is a line in a profile that is always composed
+        (any, or guests), and what keeps it there is here and not in a
+        profile, because a profile is the thing that could drop it: the
+        composition fails when the last word any profile says about one is
+        not =y, and so does the check of the built .config, which is where an
+        option that a dependency took away shows. The second half of each row
+        is what stands on it, in a line, with the measured win where there
+        is one.
 */
 static const struct
 {
@@ -1606,6 +1607,10 @@ static const struct
     {"CONFIG_TMPFS", "the initramfs is a tmpfs, and the huge page policy below is a tmpfs's"},
     {"CONFIG_TRANSPARENT_HUGEPAGE_TMPFS_HUGE_WITHIN_SIZE",
      "the text of every program is one 2 MiB mapping: echo hi 43.3 to 31.5 us, cat 32.7 to 24.2 in a KVM guest"},
+    {"CONFIG_USER_NS",
+     "a program of a bowl is the user, root mapped into a user namespace made at its launch: without it every one runs as root, and Chrome, Chromium and Electron end at \"Running as root without --no-sandbox\""},
+    {"CONFIG_SECCOMP_FILTER",
+     "a browser's sandbox is a seccomp-bpf filter on its renderers and its GPU process: without one it has no sandbox to run in"},
 };
 
 //      What the last of the profiles to name one option says it is: 'y', 'm',

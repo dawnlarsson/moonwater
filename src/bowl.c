@@ -29,7 +29,7 @@
 
 static const p8 bowl_usage_text[] = bowl_label
     "usage: bowl setup <name>\n"
-    bowl_label "       bowl [--fast|--isolated] <root> [program [argument...]]\n"
+    bowl_label "       bowl [--fast|--isolated|--root] <root> [program [argument...]]\n"
     bowl_label "       bowl expose <root> <program> [name]\n"
     bowl_label "       bowl profile [<name> [install|remove]]\n"
     bowl_label "       bowl udev\n";
@@ -87,11 +87,17 @@ static struct bowl_mount_point bowl_isolated_mounts[] = {
         read-only from the bowl. /bin, /usr/bin and /opt stay Moonwater's:
         overlaying them hid every native applet.
 
-        /etc and /var stay Moonwater's, as do /home, /root, /tmp, /run, /dev,
-        /proc and /sys, except the /etc trees desktop and TLS programs read:
-        /etc/xdg for weston.ini, /etc/fonts for fontconfig, /etc/ssl and
-        /etc/pki for the guest's own certificate store. Overlaying all of
-        /etc hid Moonwater's own names.
+        /var stays Moonwater's, as do /home, /root, /tmp, /run, /dev, /proc
+        and /sys. /etc is Moonwater's with the bowl's under it: an overlay of
+        the two, read-only, with Moonwater's on top, so that what Moonwater
+        writes (passwd, group, machine-id, resolv.conf, localtime) is what a
+        guest reads and everything else a package put there is there too.
+        Binding the bowl's /etc over it hid Moonwater's own names, and
+        binding the trees desktop and TLS programs were found to read one by
+        one (xdg for weston.ini, fonts for fontconfig, ssl and pki for the
+        guest's certificate store) left the next program's alone: Debian's
+        chromium wrapper ends at "cannot open /etc/chromium.d/*" and does
+        not start, and so does whatever else reads a directory of its own.
 
         Each launch unshares a mount namespace before these binds, so a
         Debian glibc bowl cannot replace Arch's loader in another process.
@@ -118,10 +124,6 @@ static string_address bowl_fast_layers[] = {
     "/usr/libexec",
     "/usr/local/lib",
     "/usr/local/share",
-    "/etc/xdg",
-    "/etc/fonts",
-    "/etc/ssl",
-    "/etc/pki",
     "/nix",
     null,
 };
@@ -979,26 +981,7 @@ static bipolar bowl_isolated_populate(void)
                 }
         }
 
-        failed = bowl_kernel_settings_seal();
-        if (failed)
-                return failed;
-
-        /*
-                bash process substitution opens /dev/fd/N. devtmpfs does not
-                create those names; pacman-key uses them while filling the
-                keyring.
-        */
-        failed = bowl_dev_link("/proc/self/fd", "/dev/fd");
-        if (!failed)
-                failed = bowl_dev_link("/proc/self/fd/0", "/dev/stdin");
-        if (!failed)
-                failed = bowl_dev_link("/proc/self/fd/1", "/dev/stdout");
-        if (!failed)
-                failed = bowl_dev_link("/proc/self/fd/2", "/dev/stderr");
-        if (failed)
-                bowl_fail("/dev/fd", failed);
-
-        return failed;
+        return bowl_kernel_settings_seal();
 }
 
 /*
@@ -1050,14 +1033,6 @@ static bipolar bowl_isolated_enter(string_address root)
 }
 
 /* Bind only the loader search paths a guest binary still spells in ELF. */
-/*
-        What only udev reads: the rules and the hardware database a bowl keeps
-        in its own /etc/udev. Every launch would pay two mounts for it, and
-        nothing but the daemon and its tool ever looks, so `bowl udev` asks for
-        it and no other launch has it.
-*/
-static bool bowl_udev_layer;
-
 static bipolar bowl_fast_layer(string_address root, string_address layer)
 {
         p8 source[BOWL_PATH_LIMIT];
@@ -1076,6 +1051,49 @@ static bipolar bowl_fast_layer(string_address root, string_address layer)
         return bowl_bind_ro(source, layer);
 }
 
+/*
+        The bowl's /etc under Moonwater's, one mount: Moonwater's directory is
+        the top layer, so a name both have is Moonwater's.
+
+        An overlay may stand on one other overlay and no more (the kernel's
+        stacking depth is two), and a program of a desktop session starts
+        others through launchers of its own, each of which is a view inside
+        the last: so the lower layer is never /etc as the launch finds it,
+        which is the last view's overlay, but a read-only bind of Moonwater's
+        own that the first view made and every view inside it carries.
+*/
+#define BOWL_HOST_ETC "/run/bowl-etc"
+#define BOWL_OVERLAY_MAGIC 0x794c7630
+
+static bipolar bowl_fast_etc(string_address root)
+{
+        static const p8 lower[] = "lowerdir=" BOWL_HOST_ETC ":";
+        p8 options[BOWL_PATH_LIMIT];
+        file_mount_facts facts;
+        positive length = sizeof(lower) - 1;
+        bipolar failed;
+
+        if (!bowl_root_path(options + length, sizeof(options) - length, root,
+                            "/etc"))
+                return -ENAMETOOLONG;
+        if (system_access_at(AT_FDCWD, options + length, 0) < 0)
+                return 0;
+
+        if (system_call_2(syscall(statfs), (positive)"/etc",
+                          (positive)address_of facts) < 0 ||
+            facts.type != BOWL_OVERLAY_MAGIC)
+        {
+                failed = bowl_mkdir(BOWL_HOST_ETC);
+                if (!failed)
+                        failed = bowl_bind_ro("/etc", BOWL_HOST_ETC);
+                if (failed)
+                        return failed;
+        }
+
+        memory_copy(options, lower, length);
+        return system_mount("overlay", "/etc", "overlay", MS_RDONLY, options);
+}
+
 static bipolar bowl_fast_enter(string_address root)
 {
         bipolar failed;
@@ -1087,7 +1105,7 @@ static bipolar bowl_fast_enter(string_address root)
                         return failed;
         }
 
-        return bowl_udev_layer ? bowl_fast_layer(root, "/etc/udev") : 0;
+        return bowl_fast_etc(root);
 }
 
 static b32 bowl_launch_failed(bipolar native_shell, string_address what,
@@ -1113,6 +1131,11 @@ static DEAD_END fn bowl_inside(string_address root,
         bipolar program_handle = -1;
         bipolar failed;
 
+        /* Fast keeps the host's /run and /tmp, and the files this writes are
+           Moonwater's /etc, which the view makes read-only. */
+        if (!isolated)
+                bowl_session_prepare_from(environment);
+
         failed = system_mount(0, "/", 0, MS_REC | MS_PRIVATE, 0);
         if (!failed)
                 failed = isolated ? bowl_isolated_enter(root)
@@ -1124,9 +1147,10 @@ static DEAD_END fn bowl_inside(string_address root,
                 exit(1);
         }
 
-        /* Isolated /run is a fresh tmpfs; fast keeps the host's. Either way
-           the guest now sees the directories the session variables name. */
-        bowl_session_prepare_from(environment);
+        /* Isolated /run is a fresh tmpfs: the guest sees the directories the
+           session variables name once it is there. */
+        if (isolated)
+                bowl_session_prepare_from(environment);
 
         /*
                 Fast mode has not pivoted, so executing ROOT + /program by
@@ -1199,6 +1223,11 @@ static b32 bowl_env_named(string_address entry, string_address name)
 */
 #define BOWL_RUNTIME_DIR "/run/user/"
 #define BOWL_SESSION_HOME "/root"
+/* Who the programs of a bowl are, where root is the machine's own: see
+   bowl_become_user. */
+#define BOWL_USER_ID 1000
+#define BOWL_USER_ID_TEXT "1000"
+#define BOWL_USER_NAME "user"
 #define BOWL_ENV_ROOM 512
 #define BOWL_ENV_DEFAULTS 10
 
@@ -1300,6 +1329,8 @@ static positive bowl_variable_of(string_address entry)
         return BOWL_VARS;
 }
 
+static fn bowl_session_fill_started(void);
+
 static b32 bowl_session_unusable(string_address entry)
 {
         positive which = entry ? bowl_variable_of(entry) : BOWL_VARS;
@@ -1308,6 +1339,15 @@ static b32 bowl_session_unusable(string_address entry)
         if (which == BOWL_VARS)
                 return false;
         value = entry + string_length(bowl_variables[which].name) + 1;
+        /*  A shell that was root names root, and a program that is run as the
+            user is not: the name it asks for is the one it is. */
+        if ((which == BOWL_VAR_USER || which == BOWL_VAR_LOGNAME) &&
+            string_equals(value, "root"))
+        {
+                bowl_session_fill_started();
+                return !string_equals(bowl_user_assignment + sizeof("USER=") - 1,
+                                      "root");
+        }
         return bowl_variables[which].path
                    ? bowl_path_steps(value) || bowl_session_host_path(value)
                    : !value[0];
@@ -1381,6 +1421,8 @@ static fn bowl_session_fill(void)
 
         if (!uid)
                 user = (string_address) "root";
+        else if (uid == BOWL_USER_ID)
+                user = (string_address) BOWL_USER_NAME;
         else
         {
                 digits[positive_into_string(digits, uid)] = end;
@@ -1452,20 +1494,24 @@ static b32 bowl_write_bytes(string_address path, string_address text,
                             positive length);
 
 /*
-        Who root is, and which machine this is. Moonwater's /etc has neither
-        (nothing writes a passwd, a group or a machine id), and the fast view
-        keeps the host's /etc, so dbus-daemon stops at "Could not get password
-        database information for UID of current process" and a desktop never
-        starts. A missing file is made once, atomically, and never replaced,
-        and a root that cannot write /etc is left as it was. The machine id is
-        written last, so one access() says all three are there: a shell start
-        runs this too.
+        Who root and the user are, and which machine this is. Moonwater's /etc
+        has none of it (nothing writes a passwd, a group or a machine id), and
+        the fast view keeps the host's /etc, so dbus-daemon stops at "Could not
+        get password database information for UID of current process" and a
+        desktop never starts. A missing file is made once, atomically, and
+        never replaced, and a root that cannot write /etc is left as it was.
+        The machine id is written last, so one access() says all three are
+        there: a shell start runs this too.
 */
 static fn bowl_session_identity(void)
 {
         static const struct { string_address path; string_address text; } files[] = {
-            {"/etc/passwd", "root:x:0:0:root:/root:/bin/sh\n"},
-            {"/etc/group", "root:x:0:\nnogroup:x:65534:\n"},
+            {"/etc/passwd", "root:x:0:0:root:" BOWL_SESSION_HOME ":/bin/sh\n"
+                            BOWL_USER_NAME ":x:" BOWL_USER_ID_TEXT ":"
+                            BOWL_USER_ID_TEXT ":" BOWL_USER_NAME ":"
+                            BOWL_SESSION_HOME ":/bin/sh\n"},
+            {"/etc/group", "root:x:0:\n" BOWL_USER_NAME ":x:" BOWL_USER_ID_TEXT
+                           ":\nnogroup:x:65534:\n"},
         };
         static const p8 digits[] = "0123456789abcdef";
         p8 raw[16];
@@ -1926,19 +1972,116 @@ static fn bowl_room_after(bipolar handle, string_address root, p64 lowest)
         log_flush();
 }
 
+/*
+        Who a program of a bowl is.
+
+        Moonwater has one user and it is root, and a program a bowl runs is
+        its own: which is not what a distribution's software is written for.
+        Chrome, Chromium and everything built on them (Electron, the Steam
+        client's browser) end at "Running as root without --no-sandbox is not
+        supported" before they draw anything, and the flag that gets past it
+        takes their sandbox off. They are not alone in asking who runs them,
+        only the first a person installs.
+
+        So a program run in the fast view is run as the user, an ordinary one
+        with the name and the id every distribution gives its first: a user
+        namespace with root mapped to uid and gid 1000. What the machine sees
+        of it is still root (the files it makes are root's, a socket says
+        root, a signal from it lands where root's would), and every file root
+        owns is the user's inside, so the home, /etc, the runtime directory and
+        the devices a compositor opens need no change of mode; what it cannot
+        do is what only the machine's own root can, which is capable() in the
+        first namespace: mount, a raw socket, the machine's settings. Its
+        capabilities in the namespace are kept across exec (the ambient set),
+        or a launcher it starts, which makes a mount namespace of its own,
+        would be refused, and so would every program of a desktop session.
+
+        What stays root: a package manager and the isolated view, which mounts
+        /dev and /sys and writes files for ids that are not the user's; the
+        shell a bare `bowl ROOT` starts, which is the way in for administering
+        the bowl; the udev bowl starts; and anything run with --root or with
+        BOWL_ROOT set. A machine that will not make the namespace (none left,
+        a policy that refuses them) runs the program as root, as it did.
+*/
+static bool bowl_as_root;
+
+typedef struct { p32 version; b32 process; } bowl_cap_header;
+typedef struct { p32 effective; p32 permitted; p32 inheritable; } bowl_cap_data;
+
+#define BOWL_CAP_VERSION_3 0x20080522u
+#define BOWL_PR_CAP_AMBIENT 47
+#define BOWL_PR_CAP_AMBIENT_RAISE 2
+
+static bool bowl_keep_capabilities(void)
+{
+        bowl_cap_header header = {BOWL_CAP_VERSION_3, 0};
+        bowl_cap_data data[2] = {{0}};
+
+        if (system_call_2(syscall(capget), (positive)address_of header,
+                          (positive)data) < 0)
+                return false;
+        data[0].inheritable = data[0].permitted;
+        data[1].inheritable = data[1].permitted;
+        if (system_call_2(syscall(capset), (positive)address_of header,
+                          (positive)data) < 0)
+                return false;
+        for (b32 cap = 0; cap <= ul_cap_last(); cap++)
+                if (ul_prctl(BOWL_PR_CAP_AMBIENT, BOWL_PR_CAP_AMBIENT_RAISE,
+                             (positive)cap) < 0)
+                        return false;
+        return true;
+}
+
+static bool bowl_is_root(void);
+
+/*  The launch is run as the user. A refusal of the namespace itself is the
+    machine's to make and is not an error; a namespace that was made and could
+    not be given its ids is no process to go on with. */
+static fn bowl_become_user(void)
+{
+        positive uid = (positive)system_call(syscall(geteuid));
+        positive gid = (positive)system_call(syscall(getegid));
+
+        /*  The maps are written through /proc, and a process that has
+            unshared and cannot be mapped is nobody. */
+        if (system_access_at(AT_FDCWD, "/proc/self/uid_map", 0) < 0 ||
+            system_call_1(syscall(unshare), CLONE_NEWUSER) < 0)
+                return;
+
+        if (ul_namespace_write("/proc/self/setgroups", "deny", 4, "bowl") ||
+            ul_namespace_map("/proc/self/uid_map", BOWL_USER_ID, uid, 1,
+                             "bowl") ||
+            ul_namespace_map("/proc/self/gid_map", BOWL_USER_ID, gid, 1,
+                             "bowl") ||
+            !bowl_keep_capabilities())
+        {
+                bowl_refuse("cannot become the user\n");
+                exit(1);
+        }
+
+        bowl_fill_valid = false;
+}
+
 static b32 bowl_launch(string_address root, string_address program,
                        string_address address_to arguments,
                        bool isolated)
 {
         string_address native_arguments[] = {BOWL_NATIVE_SHELL, null};
-        string_address address_to environment =
-            bowl_environment(file_environment_all());
+        string_address address_to environment;
         bipolar native_shell = -1;
         bipolar failed;
         bipolar child;
         positive status = 0;
 
         return_if(!root || root[0] != '/', bowl_usage());
+        return_if(isolated && !bowl_is_root(),
+                  bowl_refuse("a package manager needs the machine's root: "
+                              "run it from a console shell, not from a "
+                              "desktop session\n"));
+
+        if (!isolated && program && !bowl_as_root && bowl_is_root())
+                bowl_become_user();
+        environment = bowl_environment(file_environment_all());
 
         terminal_terminfo_install();
 
@@ -5392,7 +5535,7 @@ static b32 bowl_udev_run(string_address root, string_address address_to argv,
 
         if (child == 0)
         {
-                bowl_udev_layer = true;
+                bowl_as_root = true;
                 bowl_launch(root, argv[0], argv, false);
                 exit(127);
         }
@@ -6201,13 +6344,23 @@ static b32 bowl_main()
                 isolated_told = true;
                 root_at++;
         }
-        else if (string_equals(arguments[1], "--fast"))
+        else if (string_equals(arguments[1], "--fast") ||
+                 string_equals(arguments[1], "--root"))
         {
+                bowl_as_root = string_equals(arguments[1], "--root");
                 isolated_told = true;
                 root_at++;
         }
         else if (arguments[1][0] == '-' && arguments[1][1] == '-')
                 return bowl_usage();
+
+        if (!bowl_as_root)
+        {
+                string_address asked =
+                    string_get_environment(file_environment_all(), "BOWL_ROOT");
+
+                bowl_as_root = asked && asked[0];
+        }
 
         return_if(root_at >= count, bowl_usage());
 

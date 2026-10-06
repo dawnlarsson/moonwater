@@ -215,10 +215,46 @@ static fn mount_devpts()
         }
 }
 
+/*
+        The names a program opens by habit for the descriptors it holds:
+        /dev/fd and the three that stand for 0, 1 and 2, which devtmpfs does
+        not make and a machine with a udev has made for it. Bash's process
+        substitution opens /dev/fd/N, and so does the kernel when it runs a
+        script it was given as a descriptor (execveat of an O_PATH handle, as
+        every program a bowl launches by its guest path is run), which is
+        how Debian's chromium and Google Chrome, both shell scripts, ended at
+        "sh: /dev/fd/4: cannot open" on a machine that had not run a package
+        manager since it started: bowl made these in the isolated view, whose
+        /dev is this one, and only there.
+*/
+static fn link_dev_fd()
+{
+        static const struct { string_address target; string_address name; } links[] = {
+            {"/proc/self/fd", "/dev/fd"},
+            {"/proc/self/fd/0", "/dev/stdin"},
+            {"/proc/self/fd/1", "/dev/stdout"},
+            {"/proc/self/fd/2", "/dev/stderr"},
+        };
+
+        for (positive at = 0; at < array_count(links); at++)
+        {
+                bipolar made = system_symbolic_link_at(links[at].target, AT_FDCWD,
+                                                       links[at].name);
+
+                if (made < 0 && made != -ERROR_EXISTS)
+                {
+                        string_format(log, init_label "%s could not be made: %b\n",
+                                      links[at].name, made);
+                        log_flush();
+                }
+        }
+}
+
 static DEAD_END b32 system_init()
 {
         system_call(syscall(setsid));
         mount_devpts();
+        link_dev_fd();
 
         bipolar settling = start_service((string_address)settle_program,
                                          settle_argv, 2);
