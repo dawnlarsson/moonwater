@@ -18,6 +18,7 @@
 #> program_flags -fdata-sections
 #> program_flags -Qn -Wl,--build-id=none -Wl,--gc-sections -Wl,--strip-all -Wl,--strip-debug -Wl,-x -Wl,-s
 #> program_flags -O2 -fwhole-program -fipa-pta -Wl,-nmagic -fno-asynchronous-unwind-tables -fomit-frame-pointer -fno-stack-protector
+#> program_flags -Wl,--defsym=SPARK_HOT_LIMIT=0x200000
 
 #
 # Any profile, essential for all
@@ -138,7 +139,11 @@ CONFIG_ACPI_PCI_SLOT=y
 #
 # Memory
 #
+# The three huge page lines are essential to every build: src/build/build.c
+# fails a configuration that drops one, with the win that stands on it.
 CONFIG_TRANSPARENT_HUGEPAGE=y
+CONFIG_TRANSPARENT_HUGEPAGE_MADVISE=y
+CONFIG_TRANSPARENT_HUGEPAGE_TMPFS_HUGE_WITHIN_SIZE=y
 
 CONFIG_SWAP=y
 CONFIG_ZSWAP=y

@@ -1510,6 +1510,131 @@ static bool build_config_fragment(string_address from, string_address to)
         return build_write_file(to, (string_address)build_file_one, used);
 }
 
+/*
+        The options that are not a choice.
+
+        Every build has them, whatever profile is composed with it, whatever
+        --set says and whichever machine it is for: x86_64, arm64 (the Pi
+        too) and riscv64. Each is a line in the profile any, and
+        what keeps it there is here and not in a profile, because a profile
+        is the thing that could drop it: the composition fails when the last
+        word any profile says about one is not =y, and so does the check of
+        the built .config, which is where an option that a dependency took
+        away shows. The second half of each row is the measured win that
+        stands on it, in a line.
+*/
+static const struct
+{
+        string_address name;
+        string_address stands_on_it;
+} build_essentials[] = {
+    {"CONFIG_TRANSPARENT_HUGEPAGE",
+     "memory() asks for huge pages for every arena of 8 MiB or more: sort of 64 MB 74.0 to 60.0 ms, xz -3 of 19 MB 723 to 613 ms"},
+    {"CONFIG_TRANSPARENT_HUGEPAGE_MADVISE",
+     "only a tool that asks pays for a huge page: sort of 1 KB starts in 107 us, in 129 at THP=always"},
+    {"CONFIG_TMPFS", "the initramfs is a tmpfs, and the huge page policy below is a tmpfs's"},
+    {"CONFIG_TRANSPARENT_HUGEPAGE_TMPFS_HUGE_WITHIN_SIZE",
+     "the text of every program is one 2 MiB mapping: echo hi 43.3 to 31.5 us, cat 32.7 to 24.2 in a KVM guest"},
+};
+
+//      What the last of the profiles to name one option says it is: 'y', 'm',
+//      'n' (also "is not set"), or 0 when none of them names it.
+static p8 build_essential_word(string_address name, string_address address_to profiles,
+                               positive count, string_address address_to by)
+{
+        positive length = string_length(name);
+        p8 word = 0;
+
+        *by = null;
+
+        for (positive at = 0; at < count; at++)
+        {
+                string_address path = build_join(build_setting_get("profile_root"),
+                                                 "/", profiles[at], null);
+                build_lines walk;
+
+                if (!build_is_file(path) || file_slurp(path, build_file_two, BUILD_FILE_ROOM) < 0)
+                        continue;
+
+                build_lines_open(address_of walk, (string_address)build_file_two);
+
+                while (build_lines_next(address_of walk))
+                {
+                        build_pair pair;
+
+                        if (!build_config_name(walk.line, walk.length, address_of pair) ||
+                            pair.name_length != length || memory_compare(pair.name, name, length))
+                                continue;
+
+                        word = pair.value && pair.value_length == 1 ? (p8)pair.value[0] : 'n';
+                        *by = profiles[at];
+                }
+        }
+
+        return word;
+}
+
+static b32 build_essentials_composed(string_address address_to profiles, positive count)
+{
+        positive failed = 0;
+
+        for (positive at = 0; at < array_count(build_essentials); at++)
+        {
+                string_address by;
+                p8 word = build_essential_word(build_essentials[at].name, profiles, count, address_of by);
+
+                if (word == 'y')
+                        continue;
+
+                if (by)
+                        string_format(log_error,
+                                      BUILD_RED "config: %s is essential to every build (%s) and profile/%s sets it to %s" BUILD_RESET "\n",
+                                      build_essentials[at].name, build_essentials[at].stands_on_it, by,
+                                      word == 'm' ? "m" : "n");
+                else
+                        string_format(log_error,
+                                      BUILD_RED "config: %s is essential to every build (%s) and no profile sets it" BUILD_RESET "\n",
+                                      build_essentials[at].name, build_essentials[at].stands_on_it);
+                failed++;
+        }
+
+        log_flush();
+
+        return failed != 0;
+}
+
+//      The same of a built .config, which is the file the kernel is built from.
+static b32 build_essentials_built(string_address config)
+{
+        positive failed = 0;
+
+        for (positive at = 0; at < array_count(build_essentials); at++)
+        {
+                build_lines walk;
+                positive length = string_length(build_essentials[at].name);
+                bool present = false;
+
+                build_lines_open(address_of walk, config);
+
+                while (build_lines_next(address_of walk) && !present)
+                        present = walk.length == length + 2 &&
+                                  !memory_compare(walk.line, build_essentials[at].name, length) &&
+                                  walk.line[length] == '=' && walk.line[length + 1] == 'y';
+
+                if (present)
+                        continue;
+
+                string_format(log_error,
+                              BUILD_RED "verify_config: %s is essential to every build (%s) and the kernel's .config does not have it on" BUILD_RESET "\n",
+                              build_essentials[at].name, build_essentials[at].stands_on_it);
+                failed++;
+        }
+
+        log_flush();
+
+        return failed != 0;
+}
+
 static b32 build_config(string_address address_to profiles, positive count)
 {
         string_address artifacts = build_setting_get("artifacts");
@@ -1595,6 +1720,9 @@ static b32 build_config(string_address address_to profiles, positive count)
                 return build_die(build_join("cannot write ", target, null));
 
         build_config_conflicts((string_address)build_file_one, profiles, count);
+
+        if (build_essentials_composed(profiles, count))
+                return 1;
 
         string_format(log, "Configuration generated at %s\n", target);
         log_flush();
@@ -1705,6 +1833,10 @@ static b32 build_verify_config(string_address config,
         if (file_slurp(config, build_file_one, BUILD_FILE_ROOM) < 0)
                 return string_report(log_error, 1, "verify_config: cannot read %s\n",
                                      config);
+
+        //      Not a report: an option no build is without, and a build
+        //      that has lost one stops here.
+        positive essential = build_essentials_built((string_address)build_file_one);
 
         build_lines_open(address_of walk, (string_address)build_file_one);
 
@@ -1847,7 +1979,7 @@ static b32 build_verify_config(string_address config,
                 string_format(log, "All %p requested options took effect.\n",
                               effective);
                 log_flush();
-                return 0;
+                return essential;
         }
 
         string_format(log, "\n");
@@ -1869,8 +2001,9 @@ static b32 build_verify_config(string_address config,
         log_flush();
 
         //      Not fatal: a profile composed for one architecture will
-        //      legitimately carry options another cannot satisfy.
-        return 0;
+        //      legitimately carry options another cannot satisfy. The
+        //      essential ones are, and are the whole of this answer.
+        return essential;
 }
 
 /*
@@ -5208,8 +5341,9 @@ static b32 build_local(string_address address_to profiles, positive count,
                 produced this .config; passing an empty list made the normal
                 build silently report "All 0 requested options took effect."
         */
-        build_verify_config(build_join(tree, "/.config", null),
-                            (string_address address_to)chosen, chosen_count);
+        if (build_verify_config(build_join(tree, "/.config", null),
+                                (string_address address_to)chosen, chosen_count))
+                return build_die("the kernel configuration lost an option every build stands on");
 
         build_label("", "ASSEMBLY");
 

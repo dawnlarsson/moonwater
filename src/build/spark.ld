@@ -639,6 +639,7 @@ SECTIONS
                 *(.text.string_report)
                 *(.text.string_to_host)
                 /* hot_asm end */
+                spark_hot_end = .;
                 *(.text.*)
         }
 
@@ -712,3 +713,13 @@ SECTIONS
                 *(.gnu.hash .hash .dynsym .dynstr)
         }
 }
+
+/* What a start touches ends at spark_hot_end, and the image begins on a 2 MiB
+   boundary (SPARK_BASE is 4 MiB), so while it ends inside the first 2 MiB the
+   page cache can hold the whole of it as one huge page and a start maps it
+   with one entry (kernel/profile/any: TMPFS_HUGE_WITHIN_SIZE). A product link
+   passes SPARK_HOT_LIMIT, the 2 MiB, and a hot set that has grown past it is
+   not linked; a program linked without it is not checked. */
+PROVIDE(SPARK_HOT_LIMIT = 0);
+ASSERT(SPARK_HOT_LIMIT == 0 || spark_hot_end - SPARK_BASE <= SPARK_HOT_LIMIT,
+       "the hot set of the image ends past the first 2 MiB: a start no longer maps it with one huge page")

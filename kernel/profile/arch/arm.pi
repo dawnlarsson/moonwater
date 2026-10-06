@@ -227,8 +227,12 @@ CONFIG_RTC_DRV_PCF8523=y
 CONFIG_RTC_DRV_PCF85063=y
 CONFIG_RTC_DRV_DS1307=y
 
-# Boot command line and parameters
-CONFIG_CMDLINE="console=ttyAMA0,115200 console=tty1 root=/dev/mmcblk0p2 rootfstype=ext4 rootwait"
+# Boot command line and parameters. /init runs from the built-in initramfs and
+# nothing ever mounts the card as root, so root= and rootfstype=ext4 chose only
+# what the initramfs lives on: with a root= and no tmpfs named it is ramfs,
+# which cannot hold the program text in huge pages, and with rootfstype=tmpfs
+# it is the tmpfs that kernel/profile/any gives the policy for.
+CONFIG_CMDLINE="console=ttyAMA0,115200 console=tty1 rootfstype=tmpfs"
 CONFIG_CMDLINE_FROM_BOOTLOADER=y
 
 # Hardware-accelerated crypto

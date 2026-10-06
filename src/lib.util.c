@@ -7310,7 +7310,10 @@ static inline INLINE p32 top_bit_known(positive value)
 /* The index of the lowest set bit of a value that has one, which the codecs'
    match finders ask of a hash-tag mask. The same rule as top_bit_known: the
    ISA's own instruction where there is one, the library's routine on the RV64
-   floor, where the builtin is a libgcc call. */
+   floor, where the builtin is a libgcc call. The codecs are not in the
+   kernel, and the library's routine is not declared there: the riscv64 image
+   did not build for a function nothing in ring 0 calls. */
+#ifndef KERNEL_MODE
 static inline INLINE p32 bottom_bit_known(positive value)
 {
 #if X64 || ARM64
@@ -7319,6 +7322,7 @@ static inline INLINE p32 bottom_bit_known(positive value)
         return (p32)bits_trailing_zeros(value);
 #endif
 }
+#endif
 
 static inline INLINE positive into_base_known(p8 address_to into,
                                               positive value, positive base,

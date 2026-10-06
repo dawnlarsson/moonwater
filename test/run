@@ -12023,7 +12023,7 @@ if command -v python3 > /dev/null 2>&1; then
         if python3 test/differential.py --harness build_tools > "$work/build-tools.out" 2>&1; then
                 won
         else
-                lost 'arguments and watch' "$(tail -12 "$work/build-tools.out" | tr '\n' ' ')"
+                lost 'arguments, watch and essential options' "$(tail -12 "$work/build-tools.out" | tr '\n' ' ')"
         fi
 fi
 

@@ -28694,6 +28694,95 @@ out.write_text("#!/usr/bin/env python3\\n"
                               cwd=self.work, env=self.env, capture_output=True,
                               text=True, timeout=10)
 
+    def essential_options(self):
+        source = (HARNESS_ROOT / "src/build/build.c").read_text()
+        block = source[source.index("build_essentials[] = {"):]
+        return re.findall(r'\{"(CONFIG_\w+)"', block[:block.index("};")])
+
+    def compose(self, profiles, root=None):
+        """build config over the profiles into a fresh artifacts directory:
+        the answer, and the composed file."""
+        directory = self.work / ("artifacts-%d" % len(list(self.work.glob("artifacts-*"))))
+        directory.mkdir()
+        arguments = [build_tool(HARNESS_ROOT), "config", *profiles, "--set", "artifacts=%s" % directory]
+        if root:
+            arguments += ["--set", "profile_root=%s" % root]
+        done = subprocess.run(arguments, cwd=HARNESS_ROOT, capture_output=True, text=True,
+                              timeout=60, env=dict(self.env, TERM="dumb"))
+        return done, directory / ".config"
+
+    def test_every_profile_on_every_machine_keeps_the_essential_options(self):
+        """What the huge-page speedups stand on -- THP, its madvise mode, a tmpfs
+        rootfs and the tmpfs policy that maps text with one PMD -- is =y in the
+        composition of every profile with the always-on ones, on x86_64, arm64
+        (the Pi too) and riscv64, by a reading of the composed file that is not
+        the tool's own: the last word any line says about each."""
+        if platform.system() != "Linux":
+            self.skipTest("the freestanding C build tool requires Linux")
+        names = self.essential_options()
+        self.assertGreaterEqual(len(names), 4)
+        always = re.search(r'\{"profiles_always", "([^"]+)"\}',
+                           (HARNESS_ROOT / "src/build/build.c").read_text()).group(1).split()
+        listed = sorted(path.name for path in (HARNESS_ROOT / "kernel/profile").iterdir()
+                        if path.is_file() and path.name not in always)
+        composed = 0
+        for machine in ("arch/x64", "arch/arm", "arch/arm.pi", "arch/riscv"):
+            for profile in [None] + listed:
+                done, config = self.compose(always + [machine] + ([profile] if profile else []))
+                self.assertEqual(done.returncode, 0, "%s %s: %s" % (machine, profile, done.stderr))
+                last = {}
+                for line in config.read_text().splitlines():
+                    found = re.match(r"(?:# )?(CONFIG_\w+)(?:=(.*)| is not set)$", line)
+                    if found:
+                        last[found.group(1)] = found.group(2) or "n"
+                for name in names:
+                    self.assertEqual(last.get(name), "y", "%s with %s and %s" % (name, machine, profile))
+                composed += 1
+        self.assertGreaterEqual(composed, 4 * (len(listed) + 1))
+
+    def test_a_profile_cannot_take_an_essential_option_away(self):
+        if platform.system() != "Linux":
+            self.skipTest("the freestanding C build tool requires Linux")
+        always = re.search(r'\{"profiles_always", "([^"]+)"\}',
+                           (HARNESS_ROOT / "src/build/build.c").read_text()).group(1).split()
+        for name in self.essential_options():
+            for off in ("%s=n", "# %s is not set", "%s=m"):
+                root = self.work / "profiles"
+                shutil.rmtree(root, ignore_errors=True)
+                shutil.copytree(HARNESS_ROOT / "kernel/profile", root)
+                (root / "off").write_text(off % name + "\n")
+                done, _ = self.compose(always + ["arch/x64", "off"], root)
+                self.assertNotEqual(done.returncode, 0, "%s as %r was composed" % (name, off))
+                self.assertIn(name + " is essential", done.stderr)
+                self.assertIn("profile/off", done.stderr)
+        #       Without the profile that sets them, or with a list that leaves it out,
+        #       which is what --set profiles_always= asks the build for.
+        done, _ = self.compose(["general", "arch/x64"])
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("CONFIG_TRANSPARENT_HUGEPAGE_TMPFS_HUGE_WITHIN_SIZE is essential", done.stderr)
+
+    def test_a_built_config_without_an_essential_option_is_refused(self):
+        if platform.system() != "Linux":
+            self.skipTest("the freestanding C build tool requires Linux")
+        names = self.essential_options()
+        whole = self.work / "whole.config"
+        whole.write_text("".join("%s=y\n" % name for name in names) + "CONFIG_OTHER=y\n")
+
+        def verify(path):
+            return subprocess.run([build_tool(HARNESS_ROOT), "verify-config", str(path), "any"],
+                                  cwd=HARNESS_ROOT, capture_output=True, text=True, timeout=60,
+                                  env=dict(self.env, TERM="dumb"))
+
+        self.assertEqual(verify(whole).returncode, 0)
+        for name in names:
+            for replacement in ("", "%s=m\n", "# %s is not set\n", "%s=n\n"):
+                text = whole.read_text().replace("%s=y\n" % name, replacement % name if replacement else "")
+                broken = self.work / "broken.config"
+                broken.write_text(text)
+                done = verify(broken)
+                self.assertNotEqual(done.returncode, 0, "%s as %r was accepted" % (name, replacement))
+                self.assertIn(name + " is essential", done.stderr)
+
     def test_paths_preserve_spaces_globs_and_option_terminator(self):
         source = self.work / "source [literal] space.c"
         source.touch()
