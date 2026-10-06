@@ -1762,6 +1762,18 @@ typedef struct
         positive count;
         b32 next_free;
         p32 references;
+        // An associative table past ARRAY_ASSOC_ORDERED keys also keeps the
+        // places of its elements by hash, so that finding one is a probe and
+        // not a walk of all of them: p32 slots, the element's place and one,
+        // index_slots of them (a power of two) while they are good and none
+        // once an element has gone or moved.
+        p32 address_to index;
+        positive index_room;
+        positive index_slots;
+        // Walks made since the index went, which pay for making it again once
+        // there have been enough: a loop that removes a key and asks for the
+        // next is a walk a turn and no index would be worth its making.
+        positive index_misses;
 } array_table;
 
 static array_table address_to array_tables;
@@ -1786,6 +1798,8 @@ static COLD b32 array_table_take()
                 array_tables[slot - 1].count = 0;
                 array_tables[slot - 1].next_free = 0;
                 array_tables[slot - 1].references = 1;
+                array_tables[slot - 1].index_slots = 0;
+                array_tables[slot - 1].index_misses = 0;
                 return slot;
         }
 
@@ -1824,6 +1838,8 @@ static COLD fn array_table_release(b32 slot)
                 env_cell_drop(table->element[at].text);
 
         table->count = 0;
+        table->index_slots = 0;
+        table->index_misses = 0;
         table->next_free = array_table_free;
         array_table_free = slot;
 }
@@ -1875,6 +1891,10 @@ failed:
         return false;
 }
 
+//      The size of an associative table past which its elements stay in the
+//      order they were made in (see below) and are found through an index.
+#define ARRAY_ASSOC_ORDERED 8192
+
 /*
         Where a subscript is, or where it would go.
 
@@ -1900,10 +1920,81 @@ static COLD PURE positive array_place(array_table address_to table, positive key
         return low;
 }
 
-static COLD PURE positive array_keyed_place(array_table address_to table,
+//      Which slot of the index a hash starts at: the low bits of a hash of
+//      names that differ in their last bytes are a poor spread alone.
+static CONST positive array_index_start(positive hash, positive slots)
+{
+        return (hash ^ (hash >> 17)) & (slots - 1);
+}
+
+static COLD bool array_index_put(array_table address_to table, positive at)
+{
+        positive slot = array_index_start(table->element[at].key, table->index_slots);
+
+        while (table->index[slot])
+                slot = (slot + 1) & (table->index_slots - 1);
+
+        table->index[slot] = (p32)(at + 1);
+        return true;
+}
+
+//      Made over every element, in a table twice the size that holds them,
+//      when an associative table reaches the size where a walk of it stops
+//      being cheap, and again as it outgrows it. No memory for it leaves the
+//      table without one, which finds elements by the walk it always did.
+static COLD fn array_index_build(array_table address_to table)
+{
+        positive slots = (positive)1 << 14;
+
+        table->index_slots = 0;
+
+        if (table->count >= (positive)0x3ffffff0)
+                return;
+
+        while (slots < table->count * 2)
+                slots <<= 1;
+
+        if (!shell_array_room(table->index, table->index_room, slots))
+                return;
+
+        memory_fill(table->index, 0, slots * sizeof(table->index[0]));
+        table->index_slots = slots;
+
+        for (positive at = 0; at < table->count; at++)
+                array_index_put(table, at);
+}
+
+static COLD positive array_keyed_place(array_table address_to table,
                                        positive hash, const_string key,
                                        positive key_length)
 {
+        if (!table->index_slots && table->count >= ARRAY_ASSOC_ORDERED &&
+            ++table->index_misses >= 16)
+        {
+                table->index_misses = 0;
+                array_index_build(table);
+        }
+
+        if (table->index_slots)
+        {
+                positive slot = array_index_start(hash, table->index_slots);
+
+                while (table->index[slot])
+                {
+                        positive at = table->index[slot] - 1;
+
+                        if (table->element[at].key == hash &&
+                            table->element[at].key_length == key_length &&
+                            !memory_compare(table->element[at].text,
+                                            (address_any)key, key_length))
+                                return at;
+
+                        slot = (slot + 1) & (table->index_slots - 1);
+                }
+
+                return table->count;
+        }
+
         for (positive at = 0; at < table->count; at++)
                 if (table->element[at].key == hash &&
                     table->element[at].key_length == key_length &&
@@ -1925,6 +2016,7 @@ static COLD fn array_element_forget(array_table address_to table, positive at)
 {
         env_cell_drop(table->element[at].text);
         array_remove(table->element, table->count, at);
+        table->index_slots = 0;
 }
 
 /*
@@ -1938,7 +2030,6 @@ static COLD fn array_element_forget(array_table address_to table, positive at)
         its own. A table past a few thousand keys stays in the order made:
         bash rehashes there, and nothing reads that order on purpose.
 */
-#define ARRAY_ASSOC_ORDERED 8192
 
 /* Bash's string hash, FNV-1 over the bytes read as signed chars: the order
    its associative arrays, completion specifications and command hash table
@@ -2036,8 +2127,11 @@ static COLD bool array_element_write(array_table address_to table, positive at,
                 }
 
                 if (left)
+                {
                         memory_copy(table->element + at + 1, table->element + at,
                                     left * sizeof(table->element[0]));
+                        table->index_slots = 0;
+                }
 
                 table->count++;
         }
@@ -2048,6 +2142,17 @@ static COLD bool array_element_write(array_table address_to table, positive at,
         table->element[at].key_length = key_length;
         table->element[at].value_length = value_length;
         table->element[at].text = (string_address)into;
+
+        //      A key made at the end of a table that has its index goes into
+        //      it, or the index is made over again when it is too small for
+        //      one more; one whose place moved the others has none to keep.
+        if (making && key_length && table->index_slots)
+        {
+                if (table->count * 2 > table->index_slots)
+                        array_index_build(table);
+                else
+                        array_index_put(table, at);
+        }
 
         return true;
 }
@@ -4577,7 +4682,10 @@ static COLD bool shell_array_clear_mode(const_string name, positive length,
                 env_cell_drop(table->element[at].text);
 
         if (table)
+        {
                 table->count = 0;
+                table->index_slots = 0;
+        }
 
         variable->attributes |= SHELL_ARRAY_ASSIGNED;
 
@@ -13991,6 +14099,112 @@ static positive read_literal_room;
 static positive read_length;
 // The descriptor read last found unseekable, or -1.
 static bipolar read_pipe_fd = -1;
+// The one read last found to be no pipe, which tee cannot look into, or -1.
+static bipolar read_unpeekable_fd = -1;
+// A scratch pipe for looking ahead in a pipe, made when the first read wants it.
+static bipolar read_peek_in = -1;
+static bipolar read_peek_out = -1;
+#define READ_PEEK_FLOOR 62
+#define READ_DUPFD_CLOEXEC 1030
+
+/*
+        A pipe cannot be read ahead and given back, so a line of it was read a
+        byte at a time: a megabyte of one line was a million system calls, and
+        `cmd | while read line` paid one for every byte of every line. tee
+        looks without taking. It copies what the pipe holds into a scratch
+        pipe, which says where the line ends; the real read then takes exactly
+        up to the delimiter and not a byte past it, so the command after the
+        read finds the rest where Bash and dash leave it. dash does the same.
+
+        Answers the bytes taken (the line and its delimiter, or what the pipe
+        held when it held no delimiter), 0 at the end of the input, and -1 where
+        this is not a pipe or cannot be looked into, for a read a byte at a time.
+*/
+static bool read_peek_open()
+{
+        b32 ends[2];
+        bipolar moved[2];
+
+        if (system_pipe(ends, SHELL_PIPE_CLOSE_ON_EXEC) < 0)
+                return false;
+
+        //      Out of the way of the descriptors a script names and of the ones
+        //      its commands inherit, as a coprocess's are.
+        for (positive end_at = 0; end_at < 2; end_at++)
+        {
+                moved[end_at] = system_call_3(syscall(fcntl), (positive)ends[end_at],
+                                              READ_DUPFD_CLOEXEC, READ_PEEK_FLOOR);
+                if (moved[end_at] < 0)
+                        moved[end_at] = ends[end_at];
+                else
+                        system_close(ends[end_at]);
+        }
+
+        read_peek_in = moved[0];
+        read_peek_out = moved[1];
+        return true;
+}
+
+//      A look that did not finish leaves bytes in the scratch pipe that no
+//      later look may read as its own, so the pair is thrown away and made
+//      again by the next.
+static fn read_peek_reset()
+{
+        system_close(read_peek_in);
+        system_close(read_peek_out);
+        read_peek_in = -1;
+        read_peek_out = -1;
+}
+
+static bipolar read_peeked(b32 descriptor, p8 address_to into, positive room, p8 stop)
+{
+        if (read_peek_in < 0 && !read_peek_open())
+                return -1;
+
+        bipolar copied = system_call_4(syscall(tee), (positive)descriptor,
+                                       (positive)read_peek_out, room, 0);
+
+        if (copied < 0)
+                return -1;
+
+        if (!copied)
+                return 0;
+
+        //      What tee copied is read back into the caller's buffer, which is
+        //      where the delimiter is looked for, and read out of the scratch
+        //      pipe so that it is empty for the next look.
+        positive seen = 0;
+
+        while (seen < (positive)copied)
+        {
+                bipolar got = system_read_once(read_peek_in, into + seen,
+                                               (positive)copied - seen);
+
+                if (got <= 0)
+                {
+                        read_peek_reset();
+                        return -1;
+                }
+
+                seen += (positive)got;
+        }
+
+        p8 address_to found = memory_first_of(into, stop, (positive)copied);
+        positive take = found ? (positive)(found - into) + 1 : (positive)copied;
+        positive have = 0;
+
+        while (have < take)
+        {
+                bipolar got = system_read_once(descriptor, into + have, take - have);
+
+                if (got <= 0)
+                        break;
+
+                have += (positive)got;
+        }
+
+        return have ? (bipolar)have : -1;
+}
 
 // The bytes and their quotedness move together, but no pointer into either is
 // retained while they grow. Keep both mappings for the next call: a shell that
@@ -14459,6 +14673,7 @@ COLD fn shell_read(writer write, string_address input)
         positive block_at = 0;
         positive block_used = 0;
         bool seekable = false;
+        bool peeking = false;
 
         //      A descriptor that answered ESPIPE is asked no more until a
         //      redirection puts something else there (exec_save_fd): a stale
@@ -14472,6 +14687,13 @@ COLD fn shell_read(writer write, string_address input)
                 if (where == -ERROR_ILLEGAL_SEEK)
                         read_pipe_fd = (bipolar)descriptor;
         }
+
+        //      A line of a pipe is taken a chunk at a time, up to its delimiter,
+        //      where nothing counts the bytes or waits on them. A count, a timed
+        //      read and a silent one are the byte-at-a-time reads they were.
+        peeking = !seekable && !timed && !limited && !hidden &&
+                  (bipolar)descriptor == read_pipe_fd &&
+                  (bipolar)descriptor != read_unpeekable_fd;
         while (!(limited && (utf8_n ? read_chars >= limit : read_length >= limit)))
         {
                 p8 value;
@@ -14503,7 +14725,29 @@ COLD fn shell_read(writer write, string_address input)
 
                 bipolar got = 1;
 
-                if (!seekable)
+                if (peeking && block_at == block_used)
+                {
+                        bipolar taken = read_peeked(descriptor, block, sizeof block, stop_at);
+
+                        if (taken < 0)
+                        {
+                                peeking = false;
+                                read_unpeekable_fd = (bipolar)descriptor;
+                        }
+                        else
+                        {
+                                block_at = 0;
+                                block_used = (positive)taken;
+                                got = taken ? 1 : 0;
+                        }
+                }
+
+                if (peeking)
+                {
+                        if (got == 1)
+                                value = block[block_at++];
+                }
+                else if (!seekable)
                         got = system_read_once(descriptor, address_of value, 1);
                 else
                 {
@@ -20701,9 +20945,17 @@ static positive shell_wait_find_child(bipolar pid)
 
 static fn shell_wait_drop(bipolar job)
 {
-        positive into = 0;
+        positive at = 0;
+        positive into;
 
-        for (positive at = 0; at < shell_wait_count; at++)
+        //      Nothing moves before the first row that goes, and for a new job
+        //      there is mostly no such row: the table is read once and not
+        //      written, which a script of a thousand background jobs does a
+        //      thousand times.
+        while (at < shell_wait_count && shell_wait_table[at].job != job)
+                at++;
+
+        for (into = at; at < shell_wait_count; at++)
                 if (shell_wait_table[at].job != job)
                         shell_wait_table[into++] = shell_wait_table[at];
 
@@ -20753,7 +21005,7 @@ fn shell_background_child()
         shell_wait_count = 0;
 }
 
-static fn shell_background_reaped(bipolar pid, positive status)
+static bipolar shell_background_reaped(bipolar pid, positive status)
 {
         positive at = shell_wait_find_child(pid);
 
@@ -20762,7 +21014,10 @@ static fn shell_background_reaped(bipolar pid, positive status)
         {
                 shell_wait_table[at].status = status;
                 shell_wait_table[at].flags |= SHELL_WAIT_DONE;
+                return shell_wait_table[at].job;
         }
+
+        return 0;
 }
 
 static fn job_child_changed(bipolar pid, positive status);

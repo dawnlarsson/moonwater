@@ -15744,6 +15744,38 @@ def shell_lang_nul_bytes(rng):
     return "nul-bytes-" + consumer, modes, shell_program(line + " 2>/dev/null", 'echo "end=$?"')
 
 
+#       read from a pipe takes what it reads from the pipe and no more: a
+#       line, up to its delimiter, with the rest left for the command after
+#       it. A pipe cannot be read ahead and given back, so a shell that reads
+#       it a block at a time has to look first, and what it must not do is
+#       eat the lines after the one it was asked for, or stop at a newline a
+#       backslash had taken, or take a count's worth and a byte more.
+shell_READ_PIPES = ("a\\nb\\nc\\n", "one two three\\nfour\\n", "a\\\\\\nb\\nc\\n", "no newline", "\\n\\nx\\n", "x;y;z\\nlast\\n",
+                    "  lead and trail  \\nnext\\n", "k=v\\nk2=v2\\n", "\\t\\ttab\\nx\\n")
+
+
+def shell_lang_read_pipe(rng):
+    payload = "printf '" + rng.choice(shell_READ_PIPES) + "'"
+    long_line = rng.choice((0, 0, 1))
+    if long_line:
+        payload = "{ head -c " + str(rng.choice((4095, 4096, 4097, 9000, 70000))) + \
+            " /dev/zero | tr '\\0' x; printf '\\nrest1\\nrest2\\n'; }"
+    shape = rng.choice(("rest", "two-then-rest", "loop", "loop-rest", "raw", "fields", "delimiter", "count", "status"))
+    line_by_shape = {
+        "rest": payload + " | { read v; echo \"<${#v}:${v%%${v#??}}>\"; cat; }",
+        "two-then-rest": payload + " | { read a; read b; echo \"<${#a}><${#b}>\"; cat; }",
+        "loop": payload + " | { n=0; while read l; do n=$((n + 1)); done; echo \"lines=$n\"; }",
+        "loop-rest": payload + " | { read first; while read l; do echo \"<${#l}>\"; done; echo \"first=${#first}\"; }",
+        "raw": payload + " | { read -r v; echo \"<${#v}>\"; cat | wc -l; }",
+        "fields": payload + " | { IFS=';' read a b c; echo \"<$a|$b|$c>\"; cat | wc -c; }",
+        "delimiter": payload + " | { read -d 'x' v; echo \"<${#v}>\"; cat | wc -c; }",
+        "count": payload + " | { read -n 3 v; echo \"<$v>\"; cat | wc -c; }",
+        "status": payload + " | { read v; echo \"s=$?\"; read w; echo \"s=$?\"; }",
+    }
+    modes = shell_BASH if shape in ("delimiter", "count") else shell_ALL
+    return "read-pipe-" + shape, modes, shell_program(line_by_shape[shape] + " 2>/dev/null", 'echo "end=$?"')
+
+
 #       Looking a command up: a directory of the command's name earlier in
 #       PATH is passed over, a file there that is not executable is reported
 #       as the kernel refused it, a remembered path that has gone is not
@@ -19800,6 +19832,7 @@ SHELL_FAMILIES = (
     shell_lang_backquote_quoting,
     shell_lang_escaped_pattern_bytes,
     shell_lang_nul_bytes,
+    shell_lang_read_pipe,
     shell_lang_command_lookup,
     shell_lang_lineno_traps,
     shell_lang_trap_numeric_reset,
@@ -75136,7 +75169,7 @@ SCALE_BASELINE = {
     "sh ${s#?} shrink": {10000: 0.55, 100000: 0.56},
     "sh ( ( ( N deep subshells": {10: 0.36, 100: 0.41, 500: 0.57},
     "sh N arguments to a program": {1000: 0.62, 100000: 0.75, 1000000: 0.61},
-    "sh N background jobs": {10: 0.77, 1000: 7.39},
+    "sh N background jobs": {10: 0.77, 1000: 7.39, 10000: 4.6},
     "sh N command substitutions": {100: 1.12, 1000: 1.2, 3000: 1.01},
     "sh N exported variables then exec": {100: 0.73, 1000: 0.93, 30000: 0.21},
     "sh N functions defined": {100: 0.47, 1000: 1.4, 10000: 6.42},
@@ -75226,8 +75259,6 @@ SCALE_KNOWN = {
     "awk N output files open@3000:refusal": "status 2 against 0 (awk: <path> cann)",
     "awk N variables@1030:refusal": "status 2 against 0 (awk: too many variables)",
     "awk N variables@20000:refusal": "status 2 against 0 (awk: too many variables)",
-    "bash assoc lookup N@10000:cliff": "1000 -> 10000: ours 2753.92 ns/unit -> 11754.07 (x4.3), GNU 5246.36 -> 4566.28 (x0.9)",
-    "bash assoc lookup N@10000:slope": "1000 -> 10000: slope 1.63, GNU's 0.94",
     "diff --minimal (1% changed)@10000000:refusal": "status 2 against 1 (diff: invalid option -- 'd')",
     "diff --minimal (1% changed)@1000000:refusal": "status 2 against 1 (diff: invalid option -- 'd')",
     "diff --minimal (1% changed)@10000:refusal": "status 2 against 1 (diff: invalid option -- 'd')",
@@ -75269,7 +75300,6 @@ SCALE_KNOWN = {
     "sed s/PATTERN/x/ (N bytes of pattern)@1030:refusal": "status 1 against 0 (sed: unsupported or invalid script)",
     "sh $(( ( ( N deep ))@10000:refusal": "status 2 against 0 (<path> 1: arithmetic expression: expec)",
     "sh $(echo $(echo ... N deep@100:slope": "30 -> 100: slope 1.72, GNU's 1.44",
-    "sh N background jobs@10000:refusal": "no answer in 20 s (the host's: 0)",
     "sh N levels cd then pwd@3000:refusal": "output differs",
     "sh { { { N deep@5000:refusal": "status 2 against 0 (<path> 1: Syntax error: \"{\" unexpected)",
     "tar -c --transform N times@17:refusal": "status 2 against 0 (tar: Invalid transform expression: s/zq16/x/)",

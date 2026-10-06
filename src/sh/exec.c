@@ -641,7 +641,7 @@ static HOT fn exec_errexit(b32 status)
 }
 
 
-#define REDIRECT_SAVE_MAX 64
+#define REDIRECT_SAVE_MAX 1024
 //      What a command keeps while it is being built. argv and the saved
 //      assignments point in here, so like the expansion store these bytes may
 //      never move once handed out.
@@ -713,6 +713,9 @@ typedef struct
 
 static job_entry address_to job_table;
 static positive job_room;
+// Marks for the numbers the jobs hold, while a new one takes the lowest free.
+static p8 address_to job_numbers;
+static positive job_numbers_room;
 static positive job_count;
 typedef struct
 {
@@ -1114,9 +1117,14 @@ static fn job_drop_at(positive at)
 // not inherit a table whose numbers name processes that are not its children.
 fn job_forget()
 {
-        while (job_count)
-                job_drop_at(job_count - 1);
-
+        //      The rows, and the text each one holds, are the copy fork gave
+        //      this process. Dropping them one at a time settles the marks
+        //      and moves the table once for every row, and freeing the texts
+        //      writes into every page that holds one, for a child that is
+        //      most often about to exec; so the table is let go of whole. A
+        //      script with a thousand background jobs was a million rows of
+        //      this for the thousand and first.
+        job_count = 0;
         exec_disowned_children_count = 0;
         job_current = 0;
         job_previous = 0;
@@ -1343,16 +1351,32 @@ static positive job_started(bipolar address_to children, positive count,
            been reported gives its number back, so the next job after [2]
            is gone is [2] again, as bash and dash both say. */
         entry->number = 0;
-        for (positive candidate = 1; !entry->number; candidate++)
+        if (shell_array_room(job_numbers, job_numbers_room, job_count + 1))
         {
-                positive taken = 0;
+                //      One more number than there are other jobs always has a
+                //      gap, so marks up to job_count hold every number that
+                //      matters and the lowest unmarked one is the answer.
+                memory_fill(job_numbers, 0, job_count + 1);
 
-                while (taken < job_count - 1 &&
-                       job_table[taken].number != candidate)
-                        taken++;
-                if (taken == job_count - 1)
-                        entry->number = candidate;
+                for (positive at = 0; at + 1 < job_count; at++)
+                        if (job_table[at].number <= job_count)
+                                job_numbers[job_table[at].number] = 1;
+
+                for (positive candidate = 1; !entry->number; candidate++)
+                        if (!job_numbers[candidate])
+                                entry->number = candidate;
         }
+        else
+                for (positive candidate = 1; !entry->number; candidate++)
+                {
+                        positive taken = 0;
+
+                        while (taken < job_count - 1 &&
+                               job_table[taken].number != candidate)
+                                taken++;
+                        if (taken == job_count - 1)
+                                entry->number = candidate;
+                }
         entry->last = children[count - 1];
         entry->group = group;
         entry->state = JOB_RUNNING;
@@ -1561,7 +1585,8 @@ static fn job_child_changed(bipolar pid, positive status)
                 return;
         }
 
-        shell_background_reaped(pid, status);
+        bipolar owner = shell_background_reaped(pid, status);
+
         exec_coproc_reaped(pid);
 
         at = job_find(pid, true);
@@ -1569,7 +1594,23 @@ static fn job_child_changed(bipolar pid, positive status)
         if (at < job_count)
                 job_table[at].status = status;
 
-        for (at = 0; at < job_count;)
+        //      This child changed one row, and only the job that holds the row
+        //      can have finished by it. Asking every job whether all of its
+        //      rows are done was the table's size times the jobs' for every
+        //      child that ended -- a script that sent a thousand jobs to the
+        //      background spent most of its time in that question. A child no
+        //      job holds, a here-document's writer or a stage whose job is
+        //      gone, still gets the whole-table answer.
+        positive last_job = job_count;
+
+        at = owner > 0 ? job_find(owner, true) : job_count;
+
+        if (at < job_count)
+                last_job = at + 1;
+        else
+                at = 0;
+
+        while (at < last_job)
         {
                 job_entry address_to entry = job_table + at;
 
@@ -1592,6 +1633,7 @@ static fn job_child_changed(bipolar pid, positive status)
                 {
                         shell_child_death(entry->last, entry->status, false);
                         job_drop_at(at);
+                        last_job--;
                         continue;
                 }
 
@@ -6467,6 +6509,9 @@ static HOT bool exec_save_fd(b32 fd, parse_node address_to node)
         if ((bipolar)fd == read_pipe_fd)
                 read_pipe_fd = -1;
 
+        if ((bipolar)fd == read_unpeekable_fd)
+                read_unpeekable_fd = -1;
+
         if (fd == spawn_device)
                 exec_spawn_device_preserve(node);
 
@@ -7533,6 +7578,127 @@ _Static_assert(sizeof(exec_function) == 80 && __builtin_offsetof(exec_function, 
                __builtin_offsetof(exec_function, body) == 32,
                "exec_function_slot reads a slot at these offsets");
 
+/*
+        Past a hundred and more functions, an index.
+
+        The walk above asks every slot, which is the right thing at the size a
+        script's functions come to and the wrong one at ten thousand, where a
+        definition walked the table twice and every command walked it once:
+        a thousand functions were twenty milliseconds of that and a hundred
+        thousand were six seconds, where bash's hash table takes a tenth of
+        one. The slots of a table of that size are found by their hash in
+        one made over the named slots, a dead one (a name unset, the slot
+        kept) among them since a definition of that name reuses it. A slot
+        that takes another name leaves the old entry behind, and it is only
+        a miss: every probe asks the slot itself. The index is made over when
+        it is half full.
+*/
+#define EXEC_FUNCTION_INDEXED 128
+
+static p32 address_to exec_function_index;
+static positive exec_function_index_room;
+static positive exec_function_index_slots;
+static positive exec_function_index_used;
+// No slot below this has been seen free since a slot last was taken: where the
+// walk for one begins, so that a thousand definitions are not a million looks.
+static positive exec_function_free_hint;
+
+static fn exec_function_index_put(positive slot)
+{
+        positive hash = exec_functions[slot].name_hash;
+        positive at = (hash ^ (hash >> 17)) & (exec_function_index_slots - 1);
+
+        while (exec_function_index[at])
+                at = (at + 1) & (exec_function_index_slots - 1);
+
+        exec_function_index[at] = (p32)(slot + 1);
+        exec_function_index_used++;
+}
+
+static fn exec_function_index_build()
+{
+        positive slots = (positive)1 << 10;
+
+        exec_function_index_slots = 0;
+        exec_function_index_used = 0;
+
+        if (exec_function_count >= (positive)0x3ffffff0)
+                return;
+
+        while (slots < (exec_function_count + 1) * 4)
+                slots <<= 1;
+
+        if (!shell_array_room(exec_function_index, exec_function_index_room, slots))
+                return;
+
+        memory_fill(exec_function_index, 0, slots * sizeof(exec_function_index[0]));
+        exec_function_index_slots = slots;
+
+        for (positive slot = 0; slot < exec_function_count; slot++)
+                if (exec_functions[slot].name)
+                        exec_function_index_put(slot);
+}
+
+// A slot has just been given a name.
+static fn exec_function_index_note(positive slot)
+{
+        if (!exec_function_index_slots)
+                return;
+
+        if ((exec_function_index_used + 1) * 2 > exec_function_index_slots)
+                exec_function_index_build();
+        else
+                exec_function_index_put(slot);
+}
+
+// The slot that holds a name, live or not, or exec_function_count.
+static positive exec_function_named_slot(string_address name, positive2 named)
+{
+        if (exec_function_count >= EXEC_FUNCTION_INDEXED && !exec_function_index_slots)
+                exec_function_index_build();
+
+        if (exec_function_index_slots)
+        {
+                positive hash = named.x;
+                positive at = (hash ^ (hash >> 17)) & (exec_function_index_slots - 1);
+
+                while (exec_function_index[at])
+                {
+                        positive slot = exec_function_index[at] - 1;
+
+                        if (exec_function_matches(slot, name, named.x, named.y))
+                                return slot;
+
+                        at = (at + 1) & (exec_function_index_slots - 1);
+                }
+
+                return exec_function_count;
+        }
+
+        for (positive slot = 0; slot < exec_function_count; slot++)
+                if (exec_function_matches(slot, name, named.x, named.y))
+                        return slot;
+
+        return exec_function_count;
+}
+
+// What the walk answers, by the index: the live slot of a name, or positive_max.
+static positive exec_function_slot_indexed(string_address name, positive2 named)
+{
+        positive slot = exec_function_named_slot(name, named);
+
+        if (slot == exec_function_count || !exec_functions[slot].body)
+                return positive_max;
+
+        exec_function_recent = slot;
+        return slot;
+}
+
+#define exec_function_locate(name, named)                                        \
+        (exec_function_count >= EXEC_FUNCTION_INDEXED                           \
+             ? exec_function_slot_indexed((name), (named))                      \
+             : exec_function_slot((name), (named)))
+
 #if X64
 // The name at %rdi, length %rdx, against the name at held: on to fail
 // unless they agree. Scratch: off and tmp, whose low byte is tmpb.
@@ -7659,7 +7825,7 @@ __asm__(
 
 static b32 exec_function_find(string_address name, positive2 named)
 {
-        positive slot = exec_function_slot(name, named);
+        positive slot = exec_function_locate(name, named);
 
         return slot == positive_max ? 0 : exec_functions[slot].body;
 }
@@ -7672,7 +7838,7 @@ bool exec_function_here_hashed(string_address name, positive2 named)
 bool exec_function_readonly_set(string_address name)
 {
         positive2 named = string_hash_33_length(name);
-        positive slot = exec_function_slot(name, named);
+        positive slot = exec_function_locate(name, named);
 
         if (slot == positive_max)
                 return false;
@@ -7696,7 +7862,7 @@ bool exec_function_readonly_set(string_address name)
 bool exec_function_readonly_clear(string_address name)
 {
         positive2 named = string_hash_33_length(name);
-        positive slot = exec_function_slot(name, named);
+        positive slot = exec_function_locate(name, named);
 
         if (slot == positive_max)
                 return false;
@@ -7707,7 +7873,7 @@ bool exec_function_readonly_clear(string_address name)
 
 b32 exec_function_attributes_hashed(string_address name, positive2 named)
 {
-        positive slot = exec_function_slot(name, named);
+        positive slot = exec_function_locate(name, named);
 
         if (slot == positive_max)
                 return 0;
@@ -8239,7 +8405,7 @@ static bool exec_function_environment_prepare(positive slot)
 bool exec_function_write(writer write, string_address name, b32 filter)
 {
         positive2 named = string_hash_33_length(name);
-        positive slot = exec_function_slot(name, named);
+        positive slot = exec_function_locate(name, named);
         p8 address_to text = null;
         positive room = 0;
         exec_function_text made;
@@ -8281,7 +8447,7 @@ bool exec_function_write(writer write, string_address name, b32 filter)
 bool exec_function_export_set(string_address name, bool enabled)
 {
         positive2 named = string_hash_33_length(name);
-        positive slot = exec_function_slot(name, named);
+        positive slot = exec_function_locate(name, named);
 
         if (slot == positive_max)
                 return false;
@@ -8334,13 +8500,10 @@ HOT bool exec_function_environment_fill(string_address address_to environment,
 b32 exec_function_unset(string_address name)
 {
         positive2 named = string_hash_33_length(name);
-        positive slot;
+        positive slot = exec_function_named_slot(name, named);
 
-        for (slot = 0; slot < exec_function_count; slot++)
+        if (slot < exec_function_count)
         {
-                if (!exec_function_matches(slot, name, named.x, named.y))
-                        continue;
-
                 if (!exec_functions[slot].body)
                         return false;
 
@@ -8356,6 +8519,8 @@ b32 exec_function_unset(string_address name)
                 exec_functions[slot].environment_valid = false;
                 if (exec_function_recent == slot)
                         exec_function_recent = positive_max;
+                if (slot < exec_function_free_hint)
+                        exec_function_free_hint = slot;
                 return true;
         }
 
@@ -8395,11 +8560,7 @@ static b32 exec_define(b32 index)
                 return (shell_status = 2);
         }
 
-        for (slot = 0; slot < exec_function_count; slot++)
-        {
-                if (exec_function_matches(slot, name, named.x, named.y))
-                        break;
-        }
+        slot = exec_function_named_slot(name, named);
 
         if (slot < exec_function_count && exec_functions[slot].body &&
             exec_functions[slot].readonly)
@@ -8414,10 +8575,22 @@ static b32 exec_define(b32 index)
                 // An unset slot has no live tree and can carry a new name --
                 // unless a call of what it held is still on the stack and
                 // will count itself out of the slot on the way back.
-                for (slot = 0; slot < exec_function_count; slot++)
-                        if (!exec_functions[slot].body &&
-                            !exec_functions[slot].active)
-                                break;
+                //      The walk begins at the hint, which stops at the first slot
+                //      passed over for a call still on the stack, so that it is
+                //      looked at again when the call has come back.
+                positive passed = positive_max;
+
+                for (slot = exec_function_free_hint; slot < exec_function_count; slot++)
+                        if (!exec_functions[slot].body)
+                        {
+                                if (!exec_functions[slot].active)
+                                        break;
+
+                                if (passed == positive_max)
+                                        passed = slot;
+                        }
+
+                exec_function_free_hint = passed < slot ? passed : slot + 1;
 
                 if (slot == exec_function_count)
                 {
@@ -8454,6 +8627,7 @@ static b32 exec_define(b32 index)
                 exec_functions[slot].environment_valid = false;
                 exec_functions[slot].special_kind =
                     exec_special_kind(name);
+                exec_function_index_note(slot);
         }
 
         body = parse_keep(parse_nodes[index].right, exec_functions[slot].body);
@@ -9522,7 +9696,7 @@ fn shell_prompt_command()
 
 positive shell_function_slot(string_address name)
 {
-        return exec_function_slot(name, string_hash_33_length(name));
+        return exec_function_locate(name, string_hash_33_length(name));
 }
 
 b32 shell_call_slot(positive slot, string_address name,
@@ -11394,7 +11568,7 @@ static HOT b32 exec_dispatch(b32 command_word)
         else
                 named = string_hash_33_length(name);
 
-        slot = exec_function_slot(name, named);
+        slot = exec_function_locate(name, named);
 
         if (slot != positive_max)
         {
@@ -15184,7 +15358,7 @@ static bool exec_literal_tool(b32 index, string_address address_to name,
 
         *name = parse_words[word];
         *named = string_hash_33_length(*name);
-        if (exec_function_slot(*name, *named) != positive_max ||
+        if (exec_function_locate(*name, *named) != positive_max ||
             exec_control_builtin(*name, false) ||
             shell_command_named_hashed(*name, *named))
                 return false;
@@ -15388,7 +15562,7 @@ static bipolar exec_stage_spawn(b32 index, b32 input, b32 output)
         {
                 named = string_hash_33_length(name);
 
-                if (exec_function_slot(name, named) != positive_max ||
+                if (exec_function_locate(name, named) != positive_max ||
                     exec_control_builtin(name, false))
                         return -1;
 
@@ -15778,7 +15952,7 @@ static PURE bool exec_pipe_lastpipes(b32 index)
                 return false;
 
         named = string_hash_33_length(name);
-        if (exec_function_slot(name, named) != positive_max)
+        if (exec_function_locate(name, named) != positive_max)
                 return true;
 
         return shell_command_named_hashed(name, named) ||
