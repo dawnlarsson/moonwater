@@ -2454,6 +2454,76 @@ verify_one()
 #       is linked against it and run where verify runs. x86_64 twice: with
 #       ALTERNATIVE left as the old instruction, which is early boot, and as
 #       the new one, which is every call after alternative_instructions.
+#       Canvas is a kernel object of its own beside the core, and the library
+#       is one image's: each routine is a global label, so the two objects
+#       may not both carry it. The core takes the library and leaves Canvas
+#       its six pixel loops (LIBRARY_CANVAS_ELSEWHERE); Canvas takes the
+#       declarations and only those (LIBRARY_BODIES_ELSEWHERE). Built the way
+#       each object is built, from the umbrella, the three symbol tables have
+#       to be the whole library cut in two: nothing in both, nothing in
+#       neither, and the only thing that is Canvas's is named canvas_.
+kernel_split_one()
+{
+        kernel_split_name=$1
+        kernel_split_base=$2
+        shift 2
+        kernel_split_nm=${target_compiler%gcc}nm
+        command -v "$kernel_split_nm" > /dev/null 2>&1 || kernel_split_nm=nm
+
+        for kernel_split_side in whole core canvas; do
+                case $kernel_split_side in
+                whole) kernel_split_define=-DCONFIG_MOONWATER_CANVAS ;;
+                core) kernel_split_define=-DLIBRARY_CANVAS_ELSEWHERE ;;
+                canvas) kernel_split_define=-DLIBRARY_BODIES_ELSEWHERE ;;
+                esac
+                kernel_split_object=$kernel_split_base.$kernel_split_side
+                if ! $target_compiler -std=gnu11 -O2 -ffreestanding -fno-builtin \
+                        -nostdlib "$@" -DSTANDARD_MODERN_C_KERNEL \
+                        '-DEXPORT_SYMBOL(name)=' -DCONFIG_MOONWATER_CANVAS \
+                        $kernel_split_define -c src/lib.util.c \
+                        -o "$kernel_split_object.o" 2> "$kernel_split_object.err" ||
+                   ! "$kernel_split_nm" -g --defined-only "$kernel_split_object.o" \
+                        2>> "$kernel_split_object.err" |
+                        awk 'NF == 3 { print $3 }' | sort > "$kernel_split_object.names"
+                then
+                        note "the $kernel_split_name $kernel_split_side library did not build for the split check:"
+                        sed 's/^/    /' "$kernel_split_object.err" | head -10
+                        return 1
+                fi
+        done
+
+        sort "$kernel_split_base.core.names" "$kernel_split_base.canvas.names" \
+                > "$kernel_split_base.both.names"
+        comm -12 "$kernel_split_base.core.names" "$kernel_split_base.canvas.names" \
+                > "$kernel_split_base.shared.names"
+        comm -3 "$kernel_split_base.both.names" "$kernel_split_base.whole.names" \
+                > "$kernel_split_base.lost.names"
+        grep -v '^canvas_' "$kernel_split_base.canvas.names" \
+                > "$kernel_split_base.foreign.names"
+        grep '^canvas_' "$kernel_split_base.core.names" \
+                > "$kernel_split_base.taken.names"
+
+        if [ -s "$kernel_split_base.shared.names" ] ||
+           [ -s "$kernel_split_base.lost.names" ] ||
+           [ -s "$kernel_split_base.foreign.names" ] ||
+           [ -s "$kernel_split_base.taken.names" ] ||
+           [ ! -s "$kernel_split_base.canvas.names" ]
+        then
+                note "the $kernel_split_name library is not cut in two between the core and Canvas:"
+                for kernel_split_kind in shared lost foreign taken; do
+                        [ -s "$kernel_split_base.$kernel_split_kind.names" ] || continue
+                        note "  $kernel_split_kind:"
+                        sed 's/^/    /' "$kernel_split_base.$kernel_split_kind.names" | head -8
+                done
+                return 1
+        fi
+
+        kernel_split_count=$(wc -l < "$kernel_split_base.whole.names" | tr -d ' ')
+        tally "verify-kernel-split-$kernel_split_name" \
+                "$kernel_split_count" "$kernel_split_count"
+        return 0
+}
+
 kernel_narrow_one()
 {
         kernel_narrow_objcopy=${target_compiler%gcc}objcopy
@@ -2511,6 +2581,9 @@ kernel_narrow_one()
                         kernel_narrow_failed=1
                         continue
                 fi
+
+                kernel_split_one "$kernel_narrow_name" "$kernel_narrow_object" "$@" ||
+                        { kernel_narrow_failed=1; continue; }
 
                 target_build freestanding_check verify "$kernel_narrow_object" \
                         "$target" -DVERIFY_NARROW_ONLY -DVERIFY_NARROW_KERNEL \
@@ -11201,6 +11274,7 @@ build_tool switches check || kit_failed=1
 python3 test/differential.py --harness floodlight || kit_failed=1
 python3 test/differential.py --harness surface_coreutils_gap || kit_failed=1
 python3 test/differential.py --harness image_nodes || kit_failed=1
+python3 test/differential.py --harness canvas_seam || kit_failed=1
 python3 test/differential.py --harness bowl_session || kit_failed=1
 python3 test/differential.py --harness bowl_roots || kit_failed=1
 python3 test/differential.py --harness riscv_builtins || kit_failed=1

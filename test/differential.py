@@ -28794,7 +28794,11 @@ line_add_padded() { line_add "$@"; }
                 ("real", numbers + canvas_numbers, 0),
                 ("changed", numbers.replace("IOCTL_BOTH, 11,", "IOCTL_BOTH, 12,") + canvas_numbers, 1),
                 ("resized", numbers.replace("sizeof(struct bind_control)",
-                                            "sizeof(struct bind_control) + 8") + canvas_numbers, 1)):
+                                            "sizeof(struct bind_control) + 8") + canvas_numbers, 1),
+                ("canvas changed", numbers + canvas_numbers.replace("IOCTL_BOTH, 10,",
+                                                                    "IOCTL_BOTH, 11,"), 1),
+                ("canvas resized", numbers + canvas_numbers.replace(
+                    "sizeof(struct canvas_control)", "sizeof(struct canvas_control) + 8"), 1)):
             target = Path(work) / ("ioctl-%s.c" % label.replace(" ", "-"))
             target.write_text(shapes + block)
             checked = subprocess.run(["cc", "-std=gnu11", "-fsyntax-only", "-w",
@@ -28802,8 +28806,8 @@ line_add_padded() { line_add "$@"; }
                                      capture_output=True, text=True)
             assert (checked.returncode != 0) == bool(expected), (label, checked.stderr[-800:])
             assert not expected or "does not encode" in checked.stderr, checked.stderr[-800:]
-        print("  ioctl-numbers 3 of 3", flush=True)
-        write_tally("ioctl-numbers", 3, 3)
+        print("  ioctl-numbers 5 of 5", flush=True)
+        write_tally("ioctl-numbers", 5, 5)
         # The existing kit lane now also checks real pixel stores without a GPU,
         # DRM device, module load, or writable prepared kernel tree.
         if os.uname().sysname == "Linux":
@@ -36011,6 +36015,157 @@ def harness_image_nodes(argv):
           'and so are the image\'s own root and the parent of bowls/bin, which only mkdir -p makes')
 
     return check.verdict('image nodes', 'image_nodes')
+
+
+def harness_canvas_seam(argv):
+    """Canvas is a kernel object of its own, and two headers are all that passes between it and the core.
+
+    The compositor used to be included into the core's one translation unit,
+    where anything could reach anything and the build said nothing. It is
+    src/canvas/canvas.c, its own object linked into the same image, and this
+    holds the line the build cannot: the core names Canvas only where the
+    seam does, Canvas names the core only through seam.h, every name either
+    header declares is defined once on the other side and stubbed when
+    Canvas is off, the configuration and the object are Canvas's own, and
+    the ABI header is something a program can include with nothing else.
+    """
+    ROOT = HARNESS_ROOT
+    check = Checks()
+
+    def code(text, strings=False):
+        text = re.sub(r'/\*.*?\*/', lambda m: '\n' * m.group(0).count('\n'), text, flags=re.S)
+        text = re.sub(r'//[^\n]*', '', text)
+        if not strings:
+            text = re.sub(r'"(?:\\.|[^"\\\n])*"', '""', text)
+        return text
+
+    def read(path):
+        return (ROOT / path).read_text()
+
+    #   1. What the core says about Canvas. The ABI's names are Canvas's and
+    #      the core's tables carry them (the two events, their words, the
+    #      pair a command line spells); the seam is the rest.
+    allowed = {
+        'SPARK_BIND_CANVAS_ON', 'SPARK_BIND_CANVAS_OFF',
+        'SPARK_BIND_CANVAS_ON_NAME', 'SPARK_BIND_CANVAS_OFF_NAME',
+        'canvas_is_on', 'canvas_boot', 'canvas_unload',
+        'canvas_client_ioctl', 'canvas_client_release', 'CANVAS_FILE_OPERATIONS',
+        'LIBRARY_CANVAS_ELSEWHERE',
+    }
+    includes_wanted = {
+        'src/moonwater/core.c': {'../canvas/canvas.h'},
+        'src/moonwater/spark.c': {'../canvas/canvas_abi.h'},
+    }
+    core_files = sorted((ROOT / 'src/moonwater').glob('*.[ch]'))
+    for path in core_files:
+        name = str(path.relative_to(ROOT))
+        text = path.read_text()
+        taken = set(re.findall(r'#\s*include\s+"([^"]*canvas[^"]*)"', text))
+        check(taken == includes_wanted.get(name, set()),
+              '%s includes of Canvas are %s' % (name, sorted(includes_wanted.get(name, set())) or 'none'))
+        body = re.sub(r'#\s*include[^\n]*', '', code(text))
+        found = {w for w in re.findall(r'\w*[Cc][Aa][Nn][Vv][Aa][Ss]\w*', body)}
+        check(found <= allowed,
+              '%s names Canvas only through the seam (%s)' % (name, sorted(found - allowed)))
+        spelled = {m for m in re.findall(r'"([^"\n]*[Cc]anvas[^"\n]*)"',
+                                         re.sub(r'#\s*include[^\n]*', '', code(text, True)))}
+        check(spelled <= {'canvas'},
+              '%s spells Canvas in a string only as the pair a command names (%s)' % (name, sorted(spelled)))
+        check('CONFIG_MOONWATER_CANVAS' not in body and not any(t.endswith('.c') for t in taken),
+              '%s knows no Canvas configuration and includes no Canvas source' % name)
+
+    #   2. What Canvas says about the core: its own headers and one of the
+    #      core's, and of the core's names the ones seam.h gives it.
+    canvas = read('src/canvas/canvas.c')
+    seam = read('src/moonwater/seam.h')
+    header = read('src/canvas/canvas.h')
+    check(re.findall(r'#\s*include\s+"([^"]*moonwater[^"]*)"', canvas) == ['../moonwater/seam.h'],
+          'canvas.c includes seam.h and no other file of the core')
+    for name in ('window.c', 'term.c', 'screen.c', 'terminfo.c', 'canvas.h', 'canvas_abi.h'):
+        check(not re.search(r'#\s*include\s+"[^"]*moonwater[^"]*"', read('src/canvas/' + name)),
+              '%s includes nothing of the core' % name)
+    seam_names = set(re.findall(r'\b(moonwater_\w+)\s*\(', code(seam)))
+    used = set(re.findall(r'\bmoonwater_\w+', code(canvas)))
+    check(used <= seam_names and seam_names <= used | {'moonwater_display'},
+          'Canvas calls exactly what seam.h gives it (%s against %s)' % (sorted(used), sorted(seam_names)))
+    core_defined = set()
+    for path in core_files:
+        for found in re.finditer(r'^(?:static\s+)?[\w\s\*]*?\b((?:spark|bind|spawn|settings|machine|device)_\w+)\s*\(',
+                                 code(path.read_text()), re.M):
+            core_defined.add(found.group(1))
+    reached = {n for n in re.findall(r'\b(?:spark|bind|spawn|settings|machine|device)_\w+', code(canvas))}
+    check(not (reached & core_defined),
+          'Canvas reaches no function of the core by its own name (%s)' % sorted(reached & core_defined))
+    check('struct device_context' not in code(canvas),
+          'Canvas does not know what a /dev/spark file keeps: the core hands it the one slot')
+
+    #   3. The library is declared to Canvas and emitted by the core, and the
+    #      six pixel loops are the other way round.
+    core = read('src/moonwater/core.c')
+    check(canvas.index('#define LIBRARY_BODIES_ELSEWHERE') < canvas.index('#include "../lib.util.c"') and
+          'LIBRARY_CANVAS_ELSEWHERE' not in code(canvas),
+          'Canvas takes the library without its bodies')
+    check(core.index('#define LIBRARY_CANVAS_ELSEWHERE') < core.index('#include "../lib.util.c"') and
+          'LIBRARY_BODIES_ELSEWHERE' not in code(core),
+          'the core takes the library whole and leaves Canvas its six loops')
+
+    #   4. Every name a header declares is defined once on the other side,
+    #      and the stubs are the same names.
+    live, _, stubs = header.partition('#else')
+    declared = set(re.findall(r'\b(canvas_\w+)\s*\(', code(live)))
+    stubbed = set(re.findall(r'\b(canvas_\w+)\s*\(', code(stubs)))
+    defined = set(re.findall(r'^(?:_Bool|void|long|int|__poll_t)\s+(canvas_\w+)\s*\(', code(canvas), re.M))
+    check(declared and declared <= defined,
+          'canvas.h declares only what canvas.c defines (%s)' % sorted(declared - defined))
+    check(stubbed <= declared and declared - stubbed <= {'canvas_client_mmap', 'canvas_client_poll'},
+          'with Canvas off every call the core makes is an empty inline (%s)' % sorted(declared - stubbed))
+    wanted = set(re.findall(r'\b(canvas_\w+)\s*\(', code(read('src/moonwater/core.c') + read('src/moonwater/moonwater.c'))))
+    check(wanted <= declared | {'canvas_client_mmap', 'canvas_client_poll'},
+          'the core calls only what canvas.h declares (%s)' % sorted(wanted - declared))
+    for name in sorted(seam_names - {'moonwater_display'}):
+        defines = [str(p.relative_to(ROOT)) for p in core_files
+                   if re.search(r'^[\w\s\*]*\b%s\s*\([^;{]*\)\s*\n?\{' % name, code(p.read_text()), re.M)]
+        check(len(defines) == 1, '%s is defined once in the core (%s)' % (name, defines))
+
+    #   5. The configuration, the object and the build's grafts.
+    canvas_kconfig = read('src/canvas/Kconfig')
+    core_kconfig = read('src/moonwater/Kconfig')
+    check(re.search(r'config MOONWATER_CANVAS\n', canvas_kconfig) and
+          re.search(r'depends on MOONWATER_CORE=y', canvas_kconfig) and
+          'MOONWATER_CANVAS' not in core_kconfig,
+          'the options are Canvas\'s own, and Canvas needs the core built in')
+    configured = set(re.findall(r'config (MOONWATER_CANVAS\w*)', canvas_kconfig))
+    for profile in sorted((ROOT / 'kernel/profile').rglob('*')):
+        if profile.is_file():
+            for line in profile.read_text(errors='replace').splitlines():
+                named = re.match(r'(?:# )?CONFIG_(MOONWATER_CANVAS\w*)[= ]', line)
+                if named:
+                    check(named.group(1) in configured,
+                          'profile %s sets %s, which Canvas\'s Kconfig defines' % (profile.name, named.group(1)))
+    check('obj-$(CONFIG_MOONWATER_CANVAS) += canvas.o' in read('src/canvas/Makefile') and
+          'canvas' not in code(re.sub(r'#[^\n]*', '', read('src/moonwater/Makefile'))),
+          'canvas.o is Canvas\'s own, and the core\'s composite does not list it')
+    apply = read('kernel/patch/apply')
+    for graft in ('source \\"kernel/canvas/Kconfig\\"', 'obj-y += canvas/', 'for source_directory in moonwater canvas'):
+        check(graft in apply, 'kernel/patch/apply grafts Canvas: %s' % graft)
+
+    #   6. The ABI is a header a program includes alone: nothing but the C
+    #      language under it, and every size it asserts holds.
+    abi = read('src/canvas/canvas_abi.h')
+    check(not re.search(r'#\s*include', abi), 'canvas_abi.h includes nothing')
+    with tempfile.TemporaryDirectory(prefix='canvas-abi-') as temporary:
+        unit = Path(temporary) / 'abi.c'
+        unit.write_text('#include "%s"\n'
+                        '_Static_assert(sizeof(struct canvas_control) == 208, "control");\n'
+                        '_Static_assert(SPARK_IOCTL_CANVAS == 0xc0d0730au, "number");\n'
+                        '_Static_assert(SPARK_BIND_CANVAS_OFF == SPARK_BIND_CANVAS_ON + 1, "pair");\n'
+                        'int main(void) { return 0; }\n' % (ROOT / 'src/canvas/canvas_abi.h'))
+        built = subprocess.run(shlex.split(os.environ.get('CC', 'cc')) +
+                               ['-std=c11', '-pedantic', '-Wall', '-Wextra', '-Werror', '-fsyntax-only', str(unit)],
+                               capture_output=True, text=True)
+        check(built.returncode == 0, 'canvas_abi.h compiles alone as strict C11 (%s)' % built.stderr[-300:])
+
+    return check.verdict('canvas seam', 'canvas_seam')
 
 
 def harness_compression(argv):
@@ -75338,6 +75493,7 @@ HARNESS_CHECKS = {
     "canvas_view": harness_canvas_view,
     "floodlight": harness_floodlight,
     "image_nodes": harness_image_nodes,
+    "canvas_seam": harness_canvas_seam,
     "bowl_session": harness_bowl_session,
     "bowl_roots": harness_bowl_roots,
     "riscv_builtins": harness_riscv_builtins,
