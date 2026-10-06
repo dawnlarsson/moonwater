@@ -18509,7 +18509,8 @@ def shell_lang_job_foreground_mixed_stop(rng):
 def shell_lang_utf8_locale(rng):
     locale = rng.choice(("LC_ALL=C.UTF-8", "LC_ALL=C; LC_CTYPE=C.UTF-8; LANG=C.UTF-8", "LC_ALL=; LC_CTYPE=C.UTF-8; LANG=C",
                          "LC_ALL=; LC_CTYPE=; LANG=C.UTF-8", "LC_ALL=C"))
-    value = rng.choice(("éΩ界🌙é", "01234567éΩ界🌙z", "é", "aé界z", "e\u0301", "👩\u200d💻"))
+    value = rng.choice(("éΩ界🌙é", "01234567éΩ界🌙z", "é", "aé界z", "e\u0301", "👩\u200d💻",
+                        "ÿǆǅǄıÖøåжΣσς", "ᾀᾈᾳῼ"))
     shape = rng.choice(("length", "slice", "pattern", "case", "replace", "glob", "local-restore", "prefix-restore", "printf-width", "read-n"))
     if shape == "length":
         script = "x=" + shell_quote(value) + "; set -- \"$x\"; printf '%s:%s\\n' \"${#x}\" \"${#1}\""
@@ -18777,6 +18778,35 @@ def shell_lang_arithmetic_edges(rng):
         use = "printf '<%s>\\n' $((" + expression + "))"
     return ("arithmetic-edges", modes,
             shell_program("x=1", "y=2", use + " 2>/dev/null", "echo \"status=$?\""))
+
+
+def shell_lang_deep_nesting(rng):
+    """Substitutions and parentheses a hundred or a few thousand deep: the
+    answer, the first syntax error found at the bottom of one, and the
+    operators of every precedence between the parentheses. A shell that
+    parsed each body again in every process below it paid the cube of the
+    depth for these and answered the same."""
+    shape = rng.choice(("chain", "chain", "error", "arith", "arith-operators", "arith-quoted"))
+    if shape == "chain":
+        depth = rng.choice((8, 30, 60, 100))
+        word = rng.choice(("x", "$((1+2))", "'a b'", "\"$1\""))
+        use = "echo " + "$(echo " * depth + word + ")" * depth
+    elif shape == "error":
+        depth = rng.choice((2, 5, 40, 90))
+        use = "echo " + "$(echo " * depth + rng.choice(("$(if)", "$(;)", "$(fi)", "`if`")) + ")" * depth
+    elif shape == "arith":
+        depth = rng.choice((10, 1000, 3000))
+        use = "echo $(( " + "(" * depth + rng.choice(("1", "x", "x+2")) + ")" * depth + " ))"
+    elif shape == "arith-operators":
+        depth = rng.choice((20, 200))
+        operators = ("+", "-", "*", "&", "|", "^", "<<", "==", "<", "&&", "||", ">=", "!=", ">>", "%", "/")
+        use = "echo $(( " + "".join("(%d %s " % (rng.randint(1, 9), rng.choice(operators))
+                                    for _ in range(depth)) + "x" + ")" * depth + " ))"
+    else:
+        depth = rng.choice((5, 50))
+        use = "echo $(( " + "(" * depth + "'1' " + ")" * depth + " ))"
+    return ("deep-nesting", shell_ALL,
+            shell_program("x=3", use + " 2>/dev/null", "echo \"status=$?\""))
 
 
 def shell_lang_read_field_edges(rng):
@@ -20288,6 +20318,7 @@ SHELL_FAMILIES = (
     shell_lang_errexit_functions,
     shell_lang_heredoc_expansion,
     shell_lang_arithmetic_edges,
+    shell_lang_deep_nesting,
     shell_delivered(shell_lang_arithmetic_subscripts),
     shell_lang_read_field_edges,
     shell_lang_nested_parameter,
@@ -31729,6 +31760,9 @@ call-frame lifetime are covered separately by harness shell_functions.
                 for (int low=0;low<=n;low++)
                     for (int count=0;count<=n+1;count++) {
                         memset(parse_node_kept+PARSE_NODES-TOP,1,TOP);
+                        /* The map is written here and not through the reserve, so what
+                           it holds above the ceiling is for this case to say. */
+                        parse_kept_arenas[0].ceiling=PARSE_NODES;
                         for (int j=0;j<n;j++)parse_node_kept[PARSE_NODES-n+j]=(bits>>j)&1;
                         memcpy(expected_top,parse_node_kept+PARSE_NODES-TOP,TOP);
                         int floor=PARSE_NODES-n+low,wanted=count? -1:0;
@@ -31743,6 +31777,7 @@ call-frame lifetime are covered separately by harness shell_functions.
                     }
         CHECK(memory_span_byte(parse_node_kept,1,PARSE_NODES-TOP)==PARSE_NODES-TOP);
         memset(parse_node_kept,0,PARSE_NODES);
+        parse_kept_arenas[0].ceiling=PARSE_NODES;
     }
     int main(void) {
         CHECK(parse_arenas());

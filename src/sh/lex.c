@@ -18,6 +18,40 @@
         take the C word walk.
 */
 
+/*
+        How much of its stack the process has used, against how much it may.
+
+        What a script may nest is what the stack holds, as it is for dash
+        and bash, and not a number chosen for fear of it: a group costs the
+        parser a few hundred bytes, and a parenthesis in an arithmetic
+        expression a few hundred more, so a megabyte of them is four thousand
+        and eight megabytes is more than any script is. The stack's limit is
+        asked of the kernel once, and its top is where the program's own name
+        is, which the kernel put there before it began.
+*/
+static positive shell_stack_limit;
+
+static bool shell_stack_within(positive percent)
+{
+        p8 here;
+        positive top = (positive)program_argument(0);
+        positive used = top > (positive)&here ? top - (positive)&here : 0;
+
+        if (!shell_stack_limit)
+        {
+                positive limits[2] = {0, 0};
+
+                // The soft limit, kept to what the kernel leaves room below the stack
+                // for whatever the limit was when it started the program.
+                if (system_call_4(syscall(prlimit64), 0, 3, 0, (positive)limits) < 0 ||
+                    limits[0] < ((positive)1 << 20))
+                        limits[0] = (positive)8 << 20;
+                shell_stack_limit = limits[0] > ((positive)128 << 20) ? (positive)128 << 20 : limits[0];
+        }
+
+        return used < shell_stack_limit / 100 * percent;
+}
+
 #define LEX_END 0
 #define LEX_WORD 1
 #define LEX_OPERATOR 2
@@ -957,6 +991,34 @@ static string_address lex_nesting_at(string_address at, positive nesting,
                                 step++;
 
                         continue;
+                }
+
+                /* The body of $(( )) has no comments, words or here-documents,
+                   so what is not a delimiter or the start of something that
+                   hides one is only passed: ten thousand parentheses are ten
+                   thousand steps and not ten thousand trips round all of this. */
+                if (!commands && open != close)
+                {
+                        if (c == open)
+                        {
+                                if (!(open == '{' && depth && !funsub))
+                                        depth++;
+                                step++;
+                                continue;
+                        }
+                        if (c == close)
+                        {
+                                step++;
+                                if (!--depth)
+                                        return step;
+                                continue;
+                        }
+                        if (!(c == '$' || c == '\\' || c == '\'' || c == '"' || c == '<' ||
+                              c == '>' || c == '`'))
+                        {
+                                step++;
+                                continue;
+                        }
                 }
 
                 /* A command substitution is parsed as non-interactive input,

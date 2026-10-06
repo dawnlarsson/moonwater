@@ -842,7 +842,10 @@ static bipolar floodlight_child_next(p8 address_to address_to at,
         return (bipolar)value;
 }
 
-static bool floodlight_descendants_present()
+/* Out of line: its buffer is four kilobytes, and a call to this one inlined
+   into exec_simple was four kilobytes more stack under every level of a
+   function that calls itself, a page of the stack to each. */
+static __attribute__((noinline)) bool floodlight_descendants_present()
 {
         p8 text[FLOODLIGHT_CHILDREN_ROOM];
         bipolar got = floodlight_descendants_read(text, sizeof(text));
@@ -5806,6 +5809,32 @@ fn shell_path_tidy(p8 address_to path)
         path[write_at] = end;
 }
 
+/*
+        The directory the name above was last found to be, by device and
+        inode: the name is a walk of every level it has, and a cd that
+        asked the kernel about it before it went anywhere, then went by it,
+        did the walk twice for each of the 2,000 levels of a script that
+        went down them one at a time (dash's own, and one the name is
+        spelled by, is the one). The name is as true as the directory is
+        the same one, which "." says in one step.
+*/
+static p64 shell_directory_device;
+static p64 shell_directory_inode;
+static bool shell_directory_known;
+
+// Whether the name is the spelling cd made of it -- dots taken out, one slash
+// between levels, or what getcwd said -- and so has nothing left to tidy.
+static bool shell_directory_clean;
+
+static fn shell_directory_remember()
+{
+        file_facts here;
+
+        shell_directory_known = test_facts(".", address_of here, true);
+        shell_directory_device = file_device_key(here.device_major, here.device_minor);
+        shell_directory_inode = here.inode;
+}
+
 // PWD is only worth believing while it still names the directory the shell is
 // actually in; a chdir anywhere else leaves it a lie.
 HOT bool shell_directory_holds()
@@ -5816,17 +5845,31 @@ HOT bool shell_directory_holds()
         if (shell_directory[0] != '/')
                 return false;
 
-        if (!test_facts(shell_directory, address_of named, true) ||
-            !test_facts(".", address_of here, true))
+        if (!test_facts(".", address_of here, true))
                 return false;
 
-        return named.inode == here.inode &&
-               file_device_key(named.device_major, named.device_minor) ==
-               file_device_key(here.device_major, here.device_minor);
+        p64 device = file_device_key(here.device_major, here.device_minor);
+
+        if (shell_directory_known && here.inode == shell_directory_inode &&
+            device == shell_directory_device)
+                return true;
+
+        shell_directory_known = test_facts(shell_directory, address_of named, true) &&
+                                named.inode == here.inode &&
+                                file_device_key(named.device_major, named.device_minor) == device;
+
+        if (shell_directory_known)
+        {
+                shell_directory_device = device;
+                shell_directory_inode = here.inode;
+        }
+
+        return shell_directory_known;
 }
 
 bool shell_directory_moved(string_address logical)
 {
+        shell_directory_known = false;
         string_copy_max_end(shell_directory_was, shell_directory,
                             sizeof(shell_directory_was) - 1);
 
@@ -5858,6 +5901,15 @@ static p8 shell_cd_target[4096];
 
 static bipolar shell_cd_reason;
 
+// The name to change directory by where the shell is where it says it is and
+// the way down is a name below it: the same directory as the whole path to it
+// and a step where the path is the length of the depth. Null for any other.
+static string_address shell_cd_below;
+
+// And the name below is one name, no dots and no slash, on a path that is
+// as tidy as cd leaves it: joined on, it is tidy still.
+static bool shell_cd_plain;
+
 bool shell_cd_try(string_address candidate, bool physical,
                   bool address_to physical_named,
                   bool address_to variables_set,
@@ -5867,11 +5919,11 @@ bool shell_cd_try(string_address candidate, bool physical,
 
         string_copy_max_end(wanted, candidate, sizeof(wanted) - 1);
 
-        if (!physical)
+        if (!physical && !shell_cd_plain)
                 shell_path_tidy(wanted);
 
         {
-                bipolar answer = system_change_directory(wanted);
+                bipolar answer = system_change_directory(shell_cd_below ? shell_cd_below : wanted);
 
                 //      Kept for the diagnostic: bash says why it could not
                 //      go there, and the last name tried is the one it
@@ -5900,6 +5952,11 @@ bool shell_cd_try(string_address candidate, bool physical,
                 address_to physical_named = true;
 
         address_to variables_set = shell_directory_moved(wanted);
+
+        if (address_to physical_named)
+                shell_directory_remember();
+
+        shell_directory_clean = address_to physical_named;
 
         return true;
 }
@@ -6008,9 +6065,37 @@ bool shell_cd_walk(bool physical, bool address_to say,
                             ""))
                 return false;
 
-        return shell_cd_try(physical ? shell_cd_target : candidate, physical,
-                            physical_named, variables_set,
-                            physical ? candidate : null);
+        /*
+                Down from here by names alone, with no dots in them to take
+                a link's way up, is the same place by the name it is written
+                with as by the whole path to it, and the kernel finds it in
+                a step. The path is still what PWD is made of, and when it
+                is too long to be walked the answer is the one it always
+                was.
+        */
+        bool below = !physical && shell_cd_target[0] != '/' &&
+                     string_length(candidate) < sizeof(candidate) - 1;
+
+        for (string_address at = shell_cd_target; below && *at;)
+        {
+                string_address stop = string_first_of_or_end(at, '/');
+
+                below = !(stop - at == 2 && at[0] == '.' && at[1] == '.');
+                at = *stop ? stop + 1 : stop;
+        }
+
+        shell_cd_below = below && shell_directory_holds() ? shell_cd_target : null;
+        shell_cd_plain = shell_cd_below && shell_directory_clean &&
+                         !string_first_of(shell_cd_target, '/') &&
+                         !word_is(shell_cd_target, ".");
+
+        bool changed = shell_cd_try(physical ? shell_cd_target : candidate, physical,
+                                    physical_named, variables_set,
+                                    physical ? candidate : null);
+
+        shell_cd_below = null;
+        shell_cd_plain = false;
+        return changed;
 }
 
 COLD fn shell_cd(writer write, string_address input)
@@ -20801,6 +20886,13 @@ typedef struct
 static shell_wait_entry address_to shell_wait_table;
 static positive shell_wait_room;
 static positive shell_wait_count HOT_STATE;
+// Every row before this one is done, and none holds a job or a child that is
+// more than shell_wait_pid_high: children are reaped in about the order they
+// were started, so the one that has just ended is at the front of what is
+// left and not at the far end of a table of ten thousand, and a new job's
+// name cannot be one a row already has when it is above every one they hold.
+static positive shell_wait_front HOT_STATE;
+static bipolar shell_wait_pid_high;
 
 #define SHELL_WAIT_DONE 1
 #define SHELL_WAIT_LAST 2
@@ -20819,14 +20911,36 @@ static bool shell_background_reserve(positive count)
                                 shell_wait_count + count);
 }
 
+static PURE positive shell_wait_find_job_from(bipolar job, positive from)
+{
+        for (positive at = from < shell_wait_count ? from : 0; at < shell_wait_count; at++)
+                if (shell_wait_table[at].job == job)
+                        return at;
+
+        return shell_wait_count;
+}
+
 static PURE positive shell_wait_find_job(bipolar job)
 {
-        return array_where(at, shell_wait_count, shell_wait_table[at].job == job);
+        return shell_wait_find_job_from(job, 0);
 }
+
+// Where the look for the next job's rows begins: wait with no operands has
+// been through the rows before this one and the job it asks about is not
+// among them. Taken once, by the wait that is asked, and not by what a trap
+// run inside it asks.
+static positive shell_wait_scan_from;
 
 static positive shell_wait_find_child(bipolar pid)
 {
         positive at = shell_wait_count;
+
+        //      The few rows at the front of the ones not done first.
+        for (positive near = shell_wait_front, k = 0; near < shell_wait_count && k < 8;
+             near++, k++)
+                if (shell_wait_table[near].pid == pid &&
+                    !(shell_wait_table[near].flags & SHELL_WAIT_DONE))
+                        return near;
 
         /* A reaped, unconsumed stage no longer reserves its numeric PID in
            the kernel. If it is reused, the newest live row owns the new wait
@@ -20847,6 +20961,9 @@ static fn shell_wait_drop(bipolar job)
         positive at = 0;
         positive into;
 
+        if (job > shell_wait_pid_high)
+                return;
+
         //      Nothing moves before the first row that goes, and for a new job
         //      there is mostly no such row: the table is read once and not
         //      written, which a script of a thousand background jobs does a
@@ -20858,6 +20975,8 @@ static fn shell_wait_drop(bipolar job)
                 if (shell_wait_table[at].job != job)
                         shell_wait_table[into++] = shell_wait_table[at];
 
+        if (into != shell_wait_count)
+                shell_wait_front = 0;
         shell_wait_count = into;
 }
 
@@ -20876,8 +20995,18 @@ bool shell_background_started(bipolar address_to children, positive count,
 
         /* A PID can be reused once its old process was reaped. Its new job is
            the identity POSIX makes available, so an unconsumed old result may
-           no longer occupy that name. */
-        shell_wait_drop(job);
+           no longer occupy that name. A pid above every one the table has
+           held cannot be in it, and that is nearly every job of a script that
+           starts them in a loop: it read the table to the end to say so. */
+        bool seen = job <= shell_wait_pid_high;
+
+        if (job > shell_wait_pid_high)
+                shell_wait_pid_high = job;
+        for (positive at = 0; at < count; at++)
+                if (children[at] > shell_wait_pid_high)
+                        shell_wait_pid_high = children[at];
+        if (seen)
+                shell_wait_drop(job);
 
         if (!shell_background_reserve(count))
                 return false;
@@ -20902,17 +21031,32 @@ fn shell_background_child()
         /* $! is part of the inherited shell environment. What a subshell
            cannot inherit is the parent's right to wait for those children. */
         shell_wait_count = 0;
+        shell_wait_front = 0;
 }
+
+// The rows before the first that is not done.
+static fn shell_wait_settle()
+{
+        while (shell_wait_front < shell_wait_count &&
+               (shell_wait_table[shell_wait_front].flags & SHELL_WAIT_DONE))
+                shell_wait_front++;
+}
+
+// The row the last child reaped was kept in, or the end of the table.
+static positive shell_wait_reaped_row;
 
 static bipolar shell_background_reaped(bipolar pid, positive status)
 {
         positive at = shell_wait_find_child(pid);
+
+        shell_wait_reaped_row = at;
 
         // Here-document writers are children too, but never asynchronous jobs.
         if (at < shell_wait_count)
         {
                 shell_wait_table[at].status = status;
                 shell_wait_table[at].flags |= SHELL_WAIT_DONE;
+                shell_wait_settle();
                 return shell_wait_table[at].job;
         }
 
@@ -20976,13 +21120,16 @@ static COLD fn shell_wait_not_child(bipolar job)
 static b32 shell_wait_one(bipolar job, bool address_to interrupted, bool forget,
                           bool foreground)
 {
-        positive first = shell_wait_find_job(job);
+        positive from = shell_wait_scan_from;
+        positive first;
         b32 status = 0;
         b32 rightmost_failure = 0;
         positive job_flags;
         shell_wait_entry address_to last_entry = null;
 
         address_to interrupted = false;
+        shell_wait_scan_from = 0;
+        first = shell_wait_find_job_from(job, from);
 
         if (first >= shell_wait_count)
         {
@@ -21013,8 +21160,15 @@ static b32 shell_wait_one(bipolar job, bool address_to interrupted, bool forget,
                 bipolar got;
                 b32 code;
 
+                //      A job's rows are together, so what follows them is
+                //      not its own: a wait for each of ten thousand jobs
+                //      read the table to the end for every one.
                 if (entry->job != job)
+                {
+                        if (at > first && shell_wait_table[at - 1].job == job)
+                                break;
                         continue;
+                }
 
                 if (!(entry->flags & SHELL_WAIT_DONE))
                 {
@@ -21035,6 +21189,7 @@ static b32 shell_wait_one(bipolar job, bool address_to interrupted, bool forget,
 
                         entry->status = raw;
                         entry->flags |= SHELL_WAIT_DONE;
+                        shell_wait_settle();
                 }
 
                 code = wait_status_code(entry->status);
@@ -21068,15 +21223,39 @@ static b32 shell_wait_one(bipolar job, bool address_to interrupted, bool forget,
    reads the operands and calls this only when it was given none. */
 COLD fn shell_wait(writer write, string_address input)
 {
-        while (shell_wait_count)
+        /*
+                Every job in the order the table has them, and forgotten as a
+                body at the end: forgetting each as it was done moved the rest
+                of the table down over the rows of that one, which for ten
+                thousand jobs was the table's size ten thousand times.
+        */
+        positive done = 0;
+
+        while (done < shell_wait_count)
         {
                 bool interrupted;
-                b32 answer = shell_wait_one(shell_wait_table[0].job,
-                                            address_of interrupted, true, false);
+                bipolar job = shell_wait_table[done].job;
 
-                return_if(interrupted, shell_answer(answer));
+                shell_wait_scan_from = done;
+                b32 answer = shell_wait_one(job, address_of interrupted, false, false);
+
+                while (done < shell_wait_count && shell_wait_table[done].job == job)
+                        done++;
+                if (interrupted)
+                {
+                        // What was waited for is gone, and what was not is kept.
+                        if (done > shell_wait_count)
+                                done = shell_wait_count;
+                        memory_copy(shell_wait_table, shell_wait_table + done,
+                                    (shell_wait_count - done) * sizeof(*shell_wait_table));
+                        shell_wait_count -= done;
+                        shell_wait_front = 0;
+                        return shell_answer(answer);
+                }
         }
 
+        shell_wait_count = 0;
+        shell_wait_front = 0;
         shell_answer(0);
 }
 

@@ -713,10 +713,22 @@ typedef struct
 
 static job_entry address_to job_table;
 static positive job_room;
-// Marks for the numbers the jobs hold, while a new one takes the lowest free.
+// Which numbers the jobs hold, a byte each, and the lowest that may be free:
+// a new job takes it and walks on to the next, where it was a pass over every
+// job in the table to find the gap, which for ten thousand background jobs
+// was a good part of a start. Made again when the table was let go of whole.
 static p8 address_to job_numbers;
 static positive job_numbers_room;
+static positive job_number_low;
+static positive job_numbers_filled;
+static bool job_numbers_valid;
 static positive job_count;
+// Every job before this one has finished, and every one's last child is
+// no more than job_pid_high: jobs end in the order they began more often than
+// not, so the one that has just ended, or the one wait asks for next, is found
+// here and not at the far end of a table of ten thousand.
+static positive job_front;
+static bipolar job_pid_high;
 typedef struct
 {
         bipolar pid;
@@ -1036,11 +1048,31 @@ bool shell_job_command(positive at, string_address address_to text,
 
 static positive job_find(positive value, bool process)
 {
+        if (process)
+        {
+                for (positive at = job_front; at < job_count; at++)
+                        if ((positive)job_table[at].last == value)
+                                return at;
+
+                for (positive at = 0; at < job_front && at < job_count; at++)
+                        if ((positive)job_table[at].last == value)
+                                return at;
+
+                return job_count;
+        }
+
         for (positive at = 0; at < job_count; at++)
-                if ((process ? (positive)job_table[at].last : job_table[at].number) == value)
+                if (job_table[at].number == value)
                         return at;
 
         return job_count;
+}
+
+// The first job that is not finished, which every one before is.
+static fn job_front_settle()
+{
+        while (job_front < job_count && job_table[job_front].state == JOB_FINISHED)
+                job_front++;
 }
 
 /*
@@ -1098,9 +1130,17 @@ static fn job_drop_at(positive at)
                 return;
 
         if (job_table[at].text)
-                memory_free(job_table[at].text, job_table[at].text_room);
+                memory_give(job_table[at].text);
+
+        if (job_numbers_valid && job_table[at].number < job_numbers_room)
+        {
+                job_numbers[job_table[at].number] = 0;
+                if (job_table[at].number < job_number_low)
+                        job_number_low = job_table[at].number;
+        }
 
         array_remove(job_table, job_count, at);
+        job_front = 0;
 
         job_marks_settle();
 
@@ -1125,6 +1165,8 @@ fn job_forget()
         //      script with a thousand background jobs was a million rows of
         //      this for the thousand and first.
         job_count = 0;
+        job_front = 0;
+        job_numbers_valid = false;
         exec_disowned_children_count = 0;
         job_current = 0;
         job_previous = 0;
@@ -1162,15 +1204,20 @@ static positive job_text_add(p8 address_to address_to into,
                              positive address_to room, positive used,
                              string_address text, positive length)
 {
-        byte_store store = {address_to into, address_to room, used};
-
-        if (text && shell_bytes_add(address_of store, text, length))
+        //      From the allocator and not a mapping of its own: a job's text is
+        //      a few bytes, and a page of them for each of ten thousand
+        //      background jobs was 44 MB of a shell that every one of them
+        //      then forked with, its page tables copied by the kernel for
+        //      each, where dash's is 3.
+        if (text && length < positive_max - used - 1 &&
+            memory_resize_reserve(into, room, used + length + 1, 32))
         {
-                address_to into = store.bytes;
-                address_to room = store.room;
+                memory_copy_apart(address_to into + used, text, length);
+                used += length;
+                (address_to into)[used] = end;
         }
 
-        return store.used;
+        return used;
 }
 
 static positive job_text_line(p8 address_to address_to into,
@@ -1337,7 +1384,8 @@ static positive job_started(bipolar address_to children, positive count,
         /* A process identifier is reusable once the kernel has reaped its
            last owner. The new job owns the name; a stale row still carrying
            it does not. */
-        at = job_find(children[count - 1], true);
+        at = children[count - 1] > job_pid_high ? job_count
+                                                : job_find(children[count - 1], true);
 
         if (at < job_count)
                 job_drop_at(at);
@@ -1346,27 +1394,50 @@ static positive job_started(bipolar address_to children, positive count,
                 return 0;
 
         entry = job_table + job_count++;
+        if (children[count - 1] > job_pid_high)
+                job_pid_high = children[count - 1];
 
         /* The lowest number no listed job holds: a finished job that has
            been reported gives its number back, so the next job after [2]
            is gone is [2] again, as bash and dash both say. */
         entry->number = 0;
-        if (shell_array_room(job_numbers, job_numbers_room, job_count + 1))
+        if (shell_array_room(job_numbers, job_numbers_room, job_count + 2))
         {
                 //      One more number than there are other jobs always has a
-                //      gap, so marks up to job_count hold every number that
-                //      matters and the lowest unmarked one is the answer.
-                memory_fill(job_numbers, 0, job_count + 1);
+                //      gap, so the lowest unmarked one is the answer, and the
+                //      marks are kept between jobs, a number put back when
+                //      its job goes.
+                //      What the table grew by is not zero.
+                if (job_numbers_filled > job_numbers_room)
+                        job_numbers_filled = 0;
+                if (job_numbers_valid && job_numbers_filled < job_numbers_room)
+                {
+                        memory_fill(job_numbers + job_numbers_filled, 0,
+                                    job_numbers_room - job_numbers_filled);
+                        job_numbers_filled = job_numbers_room;
+                }
+                if (!job_numbers_valid)
+                {
+                        memory_fill(job_numbers, 0, job_numbers_room);
+                        job_numbers_filled = job_numbers_room;
 
-                for (positive at = 0; at + 1 < job_count; at++)
-                        if (job_table[at].number <= job_count)
-                                job_numbers[job_table[at].number] = 1;
+                        for (positive at = 0; at + 1 < job_count; at++)
+                                if (job_table[at].number < job_numbers_room)
+                                        job_numbers[job_table[at].number] = 1;
 
-                for (positive candidate = 1; !entry->number; candidate++)
-                        if (!job_numbers[candidate])
-                                entry->number = candidate;
+                        job_number_low = 1;
+                        job_numbers_valid = true;
+                }
+
+                while (job_numbers[job_number_low])
+                        job_number_low++;
+
+                entry->number = job_number_low;
+                job_numbers[job_number_low] = 1;
         }
         else
+        {
+                job_numbers_valid = false;
                 for (positive candidate = 1; !entry->number; candidate++)
                 {
                         positive taken = 0;
@@ -1377,6 +1448,7 @@ static positive job_started(bipolar address_to children, positive count,
                         if (taken == job_count - 1)
                                 entry->number = candidate;
                 }
+        }
         entry->last = children[count - 1];
         entry->group = group;
         entry->state = JOB_RUNNING;
@@ -1488,12 +1560,45 @@ static positive job_children(bipolar last, bool running)
 {
         positive rows = 0;
 
-        for (positive at = 0; at < shell_wait_count; at++)
+        //      The rows before shell_wait_front are done, and a done row is
+        //      not one of the ones still running.
+        for (positive at = running ? shell_wait_front : 0; at < shell_wait_count; at++)
                 rows += shell_wait_table[at].job == last &&
                         !(running &&
                           (shell_wait_table[at].flags & SHELL_WAIT_DONE));
 
         return rows;
+}
+
+// Whether the job that owns the row just reaped has a child still running.
+// A job's rows are together, so the ones either side of the row say, and the
+// table is not read to its end to be told that a finished job is finished.
+static bool job_row_running(positive row)
+{
+        bipolar owner = shell_wait_table[row].job;
+        positive at = row;
+
+        while (at && shell_wait_table[at - 1].job == owner)
+                at--;
+        for (; at < shell_wait_count && shell_wait_table[at].job == owner; at++)
+                if (!(shell_wait_table[at].flags & SHELL_WAIT_DONE))
+                        return true;
+        return false;
+}
+
+// Whether the wait table has a row for the job at all, looking where the
+// running ones are first: the count above is every row of every job.
+static bool job_has_rows(bipolar last)
+{
+        for (positive at = shell_wait_front; at < shell_wait_count; at++)
+                if (shell_wait_table[at].job == last)
+                        return true;
+
+        for (positive at = 0; at < shell_wait_front && at < shell_wait_count; at++)
+                if (shell_wait_table[at].job == last)
+                        return true;
+
+        return false;
 }
 
 /*
@@ -1558,11 +1663,23 @@ static fn job_child_changed(bipolar pid, positive status)
         if (exec_foreground_child_changed(pid, status))
                 return;
 
-        for (at = 0; at < job_count; at++)
+        for (at = job_front; at < job_count; at++)
                 if (job_table[at].last == pid ||
                     (job_table[at].group > 0 &&
                      job_group_of(pid) == job_table[at].group))
                         break;
+
+        if (at >= job_count)
+        {
+                for (at = 0; at < job_front && at < job_count; at++)
+                        if (job_table[at].last == pid ||
+                            (job_table[at].group > 0 &&
+                             job_group_of(pid) == job_table[at].group))
+                                break;
+
+                if (at >= job_front || at >= job_count)
+                        at = job_count;
+        }
 
         if (stopped)
         {
@@ -1586,6 +1703,7 @@ static fn job_child_changed(bipolar pid, positive status)
         }
 
         bipolar owner = shell_background_reaped(pid, status);
+        positive reaped_row = shell_wait_reaped_row;
 
         exec_coproc_reaped(pid);
 
@@ -1610,12 +1728,17 @@ static fn job_child_changed(bipolar pid, positive status)
         else
                 at = 0;
 
+        //      The job that owns the row reaped was found through the row, and
+        //      what is asked of it is asked beside the row.
+        bool through_row = owner > 0 && at < job_count && reaped_row < shell_wait_count;
+
         while (at < last_job)
         {
                 job_entry address_to entry = job_table + at;
 
-                if (entry->state == JOB_FINISHED || !job_children(entry->last, false) ||
-                    job_children(entry->last, true))
+                if (entry->state == JOB_FINISHED ||
+                    (through_row ? job_row_running(reaped_row)
+                                 : !job_has_rows(entry->last) || job_children(entry->last, true)))
                 {
                         at++;
                         continue;
@@ -1623,6 +1746,7 @@ static fn job_child_changed(bipolar pid, positive status)
 
                 entry->state = JOB_FINISHED;
                 entry->reported = false;
+                job_front_settle();
 
                 /* Bash with a monitor writes a SIGKILL death on stderr
                    and forgets the row, so `jobs` after `kill -KILL %1`
@@ -3249,21 +3373,100 @@ fn shell_kill(writer write, string_address input)
 // forgets what it waited for.
 static fn job_prune()
 {
-        for (positive at = 0; at < job_count;)
-                if (!job_children(job_table[at].last, false))
-                {
-                        /* Dash wait forgets the wait-table row and still
-                           owes `jobs` a Done line, so an unreported finish
-                           without children is news, not a hole. */
-                        if (!shell_bash_compat &&
-                            job_table[at].state == JOB_FINISHED &&
-                            !job_table[at].reported)
-                                at++;
+        /*
+                Which jobs the wait table still has a row for is asked of a
+                set made in one pass over the rows, and the table is closed up
+                over the jobs that go in one pass over it: a job at a time was
+                the table's size twice for each, and ten thousand of them were
+                a tenth of the time of waiting for ten thousand.
+        */
+        positive slots = 16;
+        bipolar address_to seen = null;
+
+        while (slots < 2 * shell_wait_count)
+                slots <<= 1;
+        if (job_count > 8)
+                seen = (bipolar address_to)memory_take(slots * sizeof(bipolar));
+
+        if (!seen)
+        {
+                for (positive at = 0; at < job_count;)
+                        if (!job_children(job_table[at].last, false))
+                        {
+                                /* Dash wait forgets the wait-table row and still
+                                   owes `jobs` a Done line, so an unreported finish
+                                   without children is news, not a hole. */
+                                if (!shell_bash_compat &&
+                                    job_table[at].state == JOB_FINISHED &&
+                                    !job_table[at].reported)
+                                        at++;
+                                else
+                                        job_drop_at(at);
+                        }
                         else
-                                job_drop_at(at);
+                                at++;
+                return;
+        }
+
+        memory_fill(seen, 0, slots * sizeof(bipolar));
+        for (positive at = 0; at < shell_wait_count; at++)
+        {
+                positive slot = (positive)shell_wait_table[at].job * 0x9e3779b1u & (slots - 1);
+
+                while (seen[slot] && seen[slot] != shell_wait_table[at].job)
+                        slot = (slot + 1) & (slots - 1);
+                seen[slot] = shell_wait_table[at].job;
+        }
+
+        positive into = 0;
+
+        for (positive at = 0; at < job_count; at++)
+        {
+                positive slot = (positive)job_table[at].last * 0x9e3779b1u & (slots - 1);
+                bool held = false;
+
+                while (seen[slot])
+                {
+                        if (seen[slot] == job_table[at].last)
+                        {
+                                held = true;
+                                break;
+                        }
+                        slot = (slot + 1) & (slots - 1);
                 }
-                else
-                        at++;
+
+                if (held ||
+                    (!shell_bash_compat && job_table[at].state == JOB_FINISHED &&
+                     !job_table[at].reported))
+                {
+                        if (into != at)
+                                job_table[into] = job_table[at];
+                        into++;
+                        continue;
+                }
+
+                if (job_table[at].text)
+                        memory_give(job_table[at].text);
+                if (job_numbers_valid && job_table[at].number < job_numbers_room)
+                {
+                        job_numbers[job_table[at].number] = 0;
+                        if (job_table[at].number < job_number_low)
+                                job_number_low = job_table[at].number;
+                }
+        }
+
+        memory_give(seen);
+        if (into != job_count)
+        {
+                job_count = into;
+                job_front = 0;
+                job_marks_settle();
+                if (!job_count)
+                {
+                        job_current = 0;
+                        job_previous = 0;
+                }
+        }
 }
 
 /*
@@ -3346,6 +3549,7 @@ static b32 job_wait_job(positive found, string_address into,
                         job_table[found].state = JOB_FINISHED;
                         job_table[found].reported = false;
                         job_table[found].status = raw;
+                        job_front_settle();
                 }
         }
 
@@ -8578,9 +8782,15 @@ static b32 exec_define(b32 index)
                         exec_function_count++;
                 }
 
+                //      A name is a few bytes, and from the allocator: the pool
+                //      the first room of a table is carved from is a quarter of
+                //      a megabyte, and the names of ten thousand functions
+                //      went past it to a page apiece (36 MB of faults, and a
+                //      third of the time of defining them).
                 if (name_length == positive_max ||
-                    !shell_array_room(exec_functions[slot].name, exec_functions[slot].name_room,
-                                      name_length + 1))
+                    !memory_resize_reserve(address_of exec_functions[slot].name,
+                                           address_of exec_functions[slot].name_room,
+                                           name_length + 1, 32))
                         return (shell_status = string_report(log_error, 1, "No room for function: %s\n", name));
 
                 string_copy(exec_functions[slot].name, name);

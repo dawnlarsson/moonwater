@@ -3788,14 +3788,18 @@ done:
 }
 
 /*
-        How deep a parenthesis or a prefix operator may nest, which is bash's
-        MAX_EXPR_RECURSION_LEVEL. Every level is a descent through the whole
-        precedence ladder, some six hundred bytes of stack, and nothing held
-        it: 15,000 open parentheses in a value -- [[ $x -eq 1 ]] on input a
-        script was handed -- took the shell down with SIGSEGV where bash
-        answers. Past it the expression is refused and the stack is whole.
+        How deep a parenthesis or a prefix operator may nest before the stack
+        is asked about it. Every level is a descent through the ladder of
+        precedences, some two hundred bytes of stack, and nothing held it:
+        15,000 open parentheses in a value -- [[ $x -eq 1 ]] on input a
+        script was handed -- took the shell down with SIGSEGV. Past this many
+        a level asks how much of the stack is used, once in sixty-four, and
+        past three quarters of it the expression is refused with the stack
+        whole; bash's own limit is on the depth of values that name values,
+        which nesting here is not.
 */
 #define ARITH_NESTING 1024
+#define ARITH_NESTING_MAX 1048576
 static positive arith_nesting HOT_STATE;
 static bipolar arith_primary_step();
 
@@ -3803,7 +3807,12 @@ static bipolar arith_primary()
 {
         bipolar value;
 
-        if (arith_nesting >= ARITH_NESTING)
+        //      Neither dash nor the bash this is read against stops at a
+        //      number: this goes as far as the stack does, three quarters
+        //      of it, which is ten thousand parentheses and a good deal more.
+        if (arith_nesting >= ARITH_NESTING &&
+            (arith_nesting >= ARITH_NESTING_MAX ||
+             (!(arith_nesting & 63) && !shell_stack_within(75))))
         {
                 arith_fail("expression recursion level exceeded");
                 return 0;
@@ -3971,80 +3980,135 @@ static bipolar arith_power()
         return value;
 }
 
-/* arith_power returns past trailing whitespace. Every higher production
-   preserves that cursor invariant, including recursive right operands, so
-   precedence levels inspect each operator without rescanning the same span. */
-#define ARITH_LEVEL(name, lower, matches, width, result)                      \
-        static bipolar name()                                               \
-        {                                                                   \
-                bipolar value = lower();                                    \
-                while (true)                                                \
-                {                                                           \
-                        p8 op = string_get(arith_at);                        \
-                        p8 next = op ? string_get(arith_at + 1) : 0;        \
-                        if (!(matches))                                     \
-                                return value;                               \
-                        arith_at += (width);                                \
-                        string_address operand = arith_at;                  \
-                        bipolar right = lower();                            \
-                        arith_operand = operand;                            \
-                        arith_is_lvalue = false;                            \
-                        value = (result);                                   \
-                }                                                           \
+/*
+        The binary operators, one level to a kind, the loosest first: || &&
+        then | ^ & then == != then the four comparisons, the two shifts, + -,
+        and * / % tightest. Where the cursor stands on one, the level it is
+        and the bytes it takes; a level of nought where it does not. An
+        operator followed by = is the assignment's, <<= and >>= too.
+*/
+static positive arith_operator(p8 op, p8 next, positive address_to width)
+{
+        *width = 1;
+
+        switch (op)
+        {
+        case '*': case '/': case '%':
+                return next != '=' ? 10 : 0;
+        case '+': case '-':
+                return next != '=' ? 9 : 0;
+        case '<': case '>':
+                if (next == op)
+                {
+                        *width = 2;
+                        return string_is(arith_at + 2, '=') ? 0 : 8;
+                }
+                *width = next == '=' ? 2 : 1;
+                return 7;
+        case '=': case '!':
+                *width = 2;
+                return next == '=' ? 6 : 0;
+        case '&':
+                if (next == '&')
+                {
+                        *width = 2;
+                        return 2;
+                }
+                return next != '=' ? 5 : 0;
+        case '^':
+                return next != '=' ? 4 : 0;
+        case '|':
+                if (next == '|')
+                {
+                        *width = 2;
+                        return 1;
+                }
+                return next != '=' ? 3 : 0;
         }
 
-ARITH_LEVEL(arith_multiply, arith_power,
-            (op == '*' || op == '/' || op == '%') && next != '=', 1,
-            op == '*' ? arith_product(value, right)
-                      : arith_divide(value, right, op == '%'))
-ARITH_LEVEL(arith_add, arith_multiply,
-            (op == '+' || op == '-') && next != '=', 1,
-            op == '+' ? arith_addition(value, right)
-                      : arith_subtraction(value, right))
-ARITH_LEVEL(arith_shift, arith_add,
-            (op == '<' || op == '>') && next == op &&
-                !string_is(arith_at + 2, '='), 2,
-            op == '<' ? arith_shift_left(value, right)
-                      : arith_shift_right(value, right))
-ARITH_LEVEL(arith_compare, arith_shift,
-            (op == '<' || op == '>') && next != op, next == '=' ? 2 : 1,
-            op == '<' ? (next == '=' ? value <= right : value < right)
-                      : (next == '=' ? value >= right : value > right))
-ARITH_LEVEL(arith_equal, arith_compare,
-            (op == '=' || op == '!') && next == '=', 2,
-            op == '=' ? value == right : value != right)
-ARITH_LEVEL(arith_bit_and, arith_equal,
-            op == '&' && next != '&' && next != '=', 1, value & right)
-ARITH_LEVEL(arith_bit_xor, arith_bit_and,
-            op == '^' && next != '=', 1, value ^ right)
-ARITH_LEVEL(arith_bit_or, arith_bit_xor,
-            op == '|' && next != '|' && next != '=', 1, value | right)
-#undef ARITH_LEVEL
+        return 0;
+}
 
-#define ARITH_LOGICAL_LEVEL(name, lower, byte, wanted, operation)            \
-        static bipolar name()                                               \
-        {                                                                    \
-                bipolar value = lower();                                    \
-                                                                             \
-                while (true)                                                 \
-                {                                                            \
-                        if (!string_is(arith_at, (byte)) ||                  \
-                            string_get(arith_at + 1) != (byte))              \
-                                return value;                                \
-                                                                             \
-                        arith_at += 2;                                        \
-                        bool active = arith_active;                          \
-                        arith_active = active && (wanted);                   \
-                        bipolar right = lower();                             \
-                        arith_active = active;                               \
-                        arith_is_lvalue = false;                             \
-                        value = active ? (value operation right) : 0;        \
-                }                                                            \
+/*
+        Every level from floor up in one function: an operand, then the
+        operators of that level and above, each taking the operand after it
+        from the level above its own, so a run of equal ones leans left. A
+        function to a level made a parenthesis cost one call for each of
+        them, and a parenthesis is all that a deep expression is.
+
+        arith_power returns past trailing whitespace, and so does this: every
+        production keeps that cursor, so each operator is read where it stands
+        without scanning the same span again.
+*/
+static bipolar arith_binary(positive floor)
+{
+        bipolar value = arith_power();
+
+        while (true)
+        {
+                p8 op = string_get(arith_at);
+                p8 next = op ? string_get(arith_at + 1) : 0;
+                positive width;
+                positive level = arith_operator(op, next, address_of width);
+
+                if (level < floor || !level)
+                        return value;
+
+                arith_at += width;
+
+                // The right of && and || is read whether it is wanted or not, for
+                // the cursor's sake, and has no effect where it is not.
+                if (level < 3)
+                {
+                        bool active = arith_active;
+
+                        arith_active = active && (level == 2 ? value != 0 : value == 0);
+                        bipolar far = arith_binary(level + 1);
+                        arith_active = active;
+                        arith_is_lvalue = false;
+                        value = !active ? 0 : level == 2 ? (value && far) : (value || far);
+                        continue;
+                }
+
+                string_address operand = arith_at;
+                bipolar right = arith_binary(level + 1);
+
+                arith_operand = operand;
+                arith_is_lvalue = false;
+
+                switch (level)
+                {
+                case 10:
+                        value = op == '*' ? arith_product(value, right)
+                                          : arith_divide(value, right, op == '%');
+                        break;
+                case 9:
+                        value = op == '+' ? arith_addition(value, right)
+                                          : arith_subtraction(value, right);
+                        break;
+                case 8:
+                        value = op == '<' ? arith_shift_left(value, right)
+                                          : arith_shift_right(value, right);
+                        break;
+                case 7:
+                        value = op == '<' ? (next == '=' ? value <= right : value < right)
+                                          : (next == '=' ? value >= right : value > right);
+                        break;
+                case 6:
+                        value = op == '=' ? value == right : value != right;
+                        break;
+                case 5:
+                        value &= right;
+                        break;
+                case 4:
+                        value ^= right;
+                        break;
+                default:
+                        value |= right;
+                }
         }
+}
 
-ARITH_LOGICAL_LEVEL(arith_and, arith_bit_or, '&', value, &&)
-ARITH_LOGICAL_LEVEL(arith_or, arith_and, '|', !value, ||)
-#undef ARITH_LOGICAL_LEVEL
 
 /*
         The ternary, looser than the two logical levels and tighter than an
@@ -4057,7 +4121,7 @@ ARITH_LOGICAL_LEVEL(arith_or, arith_and, '|', !value, ||)
 */
 static bipolar arith_choose()
 {
-        bipolar value = arith_or();
+        bipolar value = arith_binary(1);
         bipolar taken;
         bipolar left;
         bool active;
@@ -4093,48 +4157,19 @@ static bipolar arith_choose()
         assignment to the comparison. Bash names that; dash leaves the
         operator for the leftover-byte check, which is "expecting EOF".
 */
-static bipolar arith_assign()
+static bipolar arith_assign();
+
+/*
+        What the assignment does, once its operator has been read: out of line,
+        for its copy of the name and of the subscript, 300 bytes of a frame
+        that every parenthesis of an expression has one of, and a thousand of
+        them are what a shell that does not stop at a thousand has to hold.
+*/
+static __attribute__((noinline)) bipolar arith_assign_to(bipolar value, p8 kind, b32 skip)
 {
-        bipolar value = arith_choose();
-        p8 op;
-        p8 next;
-        p8 third;
-        p8 kind = 0;
-        b32 skip = 0;
         expand_reference target;
         p8 name_local[EXPAND_LOCAL_NAME];
         p8 key_local[32];
-
-        arith_space();
-        op = string_get(arith_at);
-        next = op ? string_get(arith_at + 1) : 0;
-        third = next ? string_get(arith_at + 2) : 0;
-
-        if (op == '=' && next != '=')
-        {
-                kind = '=';
-                skip = 1;
-        }
-        else if (op == '<' && next == '<' && third == '=')
-        {
-                kind = 'l';
-                skip = 3;
-        }
-        else if (op == '>' && next == '>' && third == '=')
-        {
-                kind = 'r';
-                skip = 3;
-        }
-        else if (next == '=' &&
-                 (op == '+' || op == '-' || op == '*' || op == '/' ||
-                  op == '%' || op == '&' || op == '|' || op == '^'))
-        {
-                kind = op;
-                skip = 2;
-        }
-
-        if (!kind)
-                return value;
 
         if (!arith_is_lvalue)
         {
@@ -4182,6 +4217,49 @@ static bipolar arith_assign()
                 return arith_store(address_of target,
                                    arith_combine(kind, left, right));
         }
+}
+
+static bipolar arith_assign()
+{
+        bipolar value = arith_choose();
+        p8 op;
+        p8 next;
+        p8 third;
+        p8 kind = 0;
+        b32 skip = 0;
+
+        arith_space();
+        op = string_get(arith_at);
+        next = op ? string_get(arith_at + 1) : 0;
+        third = next ? string_get(arith_at + 2) : 0;
+
+        if (op == '=' && next != '=')
+        {
+                kind = '=';
+                skip = 1;
+        }
+        else if (op == '<' && next == '<' && third == '=')
+        {
+                kind = 'l';
+                skip = 3;
+        }
+        else if (op == '>' && next == '>' && third == '=')
+        {
+                kind = 'r';
+                skip = 3;
+        }
+        else if (next == '=' &&
+                 (op == '+' || op == '-' || op == '*' || op == '/' ||
+                  op == '%' || op == '&' || op == '|' || op == '^'))
+        {
+                kind = op;
+                skip = 2;
+        }
+
+        if (!kind)
+                return value;
+
+        return arith_assign_to(value, kind, skip);
 }
 
 // The comma sequence is the outer arithmetic grammar, including parenthesis
@@ -6756,57 +6834,6 @@ static fn expand_substring(expand_reference reference, string_address expression
         expand_length = expansion_start + count;
 }
 
-// Simple Unicode case, not a database. ASCII is the byte floor; Latin-1 and
-// Greek are the letters C.UTF-8 towupper/towlower actually change for the
-// values the shell walks. ß has no single-character upper form, so it stays.
-// Combining marks and emoji are not letters and are left alone.
-static CONST p32 expand_unicode_case(p32 value, bool upper)
-{
-        if (value < 0x80)
-                return upper ? byte_to_upper(value) : byte_to_lower(value);
-
-        if (upper)
-        {
-                if (value >= 0xe0 && value <= 0xfe && value != 0xf7)
-                        return value - 0x20;
-                if (value >= 0x3b1 && value <= 0x3c1)
-                        return value - 0x20;
-                if (value == 0x3c2)
-                        return 0x3a3;
-                if (value >= 0x3c3 && value <= 0x3cb)
-                        return value - 0x20;
-                if (value == 0x3ac)
-                        return 0x386;
-                if (value >= 0x3ad && value <= 0x3af)
-                        return value - 0x25;
-                if (value == 0x3cc)
-                        return 0x38c;
-                if (value == 0x3cd)
-                        return 0x38e;
-                if (value == 0x3ce)
-                        return 0x38f;
-                return value;
-        }
-
-        if (value >= 0xc0 && value <= 0xde && value != 0xd7)
-                return value + 0x20;
-        if (value >= 0x391 && value <= 0x3a1)
-                return value + 0x20;
-        if (value >= 0x3a3 && value <= 0x3ab)
-                return value + 0x20;
-        if (value == 0x386)
-                return 0x3ac;
-        if (value >= 0x388 && value <= 0x38a)
-                return value + 0x25;
-        if (value == 0x38c)
-                return 0x3cc;
-        if (value == 0x38e)
-                return 0x3cd;
-        if (value == 0x38f)
-                return 0x3ce;
-        return value;
-}
-
 /* ${x~} and ${x~~}: each matched character goes to the other case. */
 static bool expand_case_toggle;
 
@@ -6882,9 +6909,9 @@ static fn expand_case_span(positive start, bool upper, bool every,
                         p32 mapped;
 
                         if (expand_case_toggle)
-                                upper = expand_unicode_case(scalar, true) !=
+                                upper = unicode_case(scalar, UNICODE_CASE_UPPER) !=
                                         scalar;
-                        mapped = expand_unicode_case(scalar, upper);
+                        mapped = unicode_case(scalar, upper ? UNICODE_CASE_UPPER : UNICODE_CASE_LOWER);
 
                         if (mapped != scalar)
                         {
@@ -6967,7 +6994,7 @@ static fn expand_case_buffer(p8 address_to text, positive length, bool upper)
 
                 if (scalar < 0x110000)
                 {
-                        p32 mapped = expand_unicode_case(scalar, upper);
+                        p32 mapped = unicode_case(scalar, upper ? UNICODE_CASE_UPPER : UNICODE_CASE_LOWER);
 
                         if (mapped != scalar)
                         {

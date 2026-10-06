@@ -3003,8 +3003,14 @@ static b32 parse_coproc()
         (its parser stack is 10,000 deep) and answers a syntax error; so
         does this, at four thousand, which no script written by a person
         approaches.
+
+        It stopped at four thousand whatever the stack was, which is a
+        script dash runs and this did not: 5,000 braces. The stack is what
+        is asked now, once the nesting is deep enough to be asking (a
+        thousand, a quarter of a megabyte), and a script may take half of it.
 */
-#define PARSE_NESTING 4096
+#define PARSE_NESTING 1048576
+#define PARSE_NESTING_ASKED 1024
 
 static b32 parse_command_body();
 
@@ -3012,7 +3018,8 @@ static b32 parse_command()
 {
         b32 index;
 
-        if (parse_depth >= PARSE_NESTING)
+        if (parse_depth >= PARSE_NESTING ||
+            (parse_depth >= PARSE_NESTING_ASKED && !shell_stack_within(50)))
         {
                 parse_fail();
                 return 0;
@@ -3679,9 +3686,15 @@ static struct
 {
         b8 address_to occupied;
         b32 room;
+        // Every slot from here up is occupied, so no gap is looked for above
+        // it: a body is put in the highest gap there is, and the walk back
+        // from the top for the first free slot passed everything the bodies
+        // before had taken, which for ten thousand functions was most of the
+        // time of defining them.
+        b32 ceiling;
 } parse_kept_arenas[] = {
-    {null, PARSE_NODES}, {null, PARSE_WORDS},
-    {null, PARSE_REDIRECTS}, {null, PARSE_KEPT_TEXT},
+    {null, PARSE_NODES, PARSE_NODES}, {null, PARSE_WORDS, PARSE_WORDS},
+    {null, PARSE_REDIRECTS, PARSE_REDIRECTS}, {null, PARSE_KEPT_TEXT, PARSE_KEPT_TEXT},
 };
 
 /* Every array above, in one mapping the kernel fills a page at a time: 51
@@ -3743,11 +3756,23 @@ static bool parse_arenas()
         return true;
 }
 
+// A range given back, which may be in the occupied run at the top: that run
+// then begins where the range ends.
+static fn parse_kept_clear(positive arena, b32 start, b32 count)
+{
+        memory_fill(parse_kept_arenas[arena].occupied + start, 0, count);
+        if (start + count > parse_kept_arenas[arena].ceiling)
+                parse_kept_arenas[arena].ceiling = start + count;
+}
+
 static fn parse_kept_mark(parse_kept_body address_to body, p8 occupied)
 {
         for (positive i = 0; i < array_count(parse_kept_arenas); i++)
-                memory_fill(parse_kept_arenas[i].occupied + body->start[i],
-                            occupied, body->count[i]);
+                if (occupied)
+                        memory_fill(parse_kept_arenas[i].occupied + body->start[i],
+                                    occupied, body->count[i]);
+                else
+                        parse_kept_clear(i, body->start[i], body->count[i]);
 }
 
 /* The lowest kept slot of each arena, found from a slot nothing below is
@@ -3832,8 +3857,7 @@ static b32 parse_keep_reserve(positive arena, b32 count, b32 floor)
         if (!count)
                 return 0;
         b8 address_to occupied = parse_kept_arenas[arena].occupied;
-        b32 room = parse_kept_arenas[arena].room;
-        for (b32 at = room; at - floor >= count;)
+        for (b32 at = parse_kept_arenas[arena].ceiling; at > floor && at - floor >= count;)
         {
                 b8 address_to last = memory_last_of(occupied + floor, 0, at - floor);
                 if (!last)
@@ -3846,6 +3870,8 @@ static b32 parse_keep_reserve(positive arena, b32 count, b32 floor)
                 if (!used)
                 {
                         memory_fill(occupied + chosen, 1, count);
+                        if (chosen + count == parse_kept_arenas[arena].ceiling)
+                                parse_kept_arenas[arena].ceiling = chosen;
                         return chosen;
                 }
                 // Every higher candidate includes this occupied byte.
@@ -3944,8 +3970,7 @@ static b32 parse_keep(b32 index, b32 replaced)
         if (arena < array_count(parse_kept_arenas))
         {
                 while (arena--)
-                        memory_fill(parse_kept_arenas[arena].occupied + made.start[arena],
-                                    0, made.count[arena]);
+                        parse_kept_clear(arena, made.start[arena], made.count[arena]);
                 if (reuse)
                         parse_kept_mark(&previous, 1);
                 return 0;

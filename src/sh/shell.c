@@ -2114,8 +2114,43 @@ static fn shell_syntax_fatal(b32 status, bool fatal)
 */
 static bool shell_check_only;
 
+/*
+        The bodies that parsed, as the hash of their bytes and the mode they
+        were read in. A body is checked where it is written and again by the
+        process that runs it, and what it holds is checked again by each one
+        under it: a hundred substitutions inside one another were parsed
+        together and then, a level at a time, in every process below, which
+        is the square of the depth the parent paid and the cube for the run.
+        A body that was found whole is found whole again by the children it
+        was forked into, which hold this table as the parent left it. A
+        slot is one body's, and the next one hashed to it takes it over.
+*/
+#define SHELL_CHECKED_SLOTS 256
+
+static struct { positive hash, length; } shell_checked[SHELL_CHECKED_SLOTS];
+
+static COLD bool shell_substitution_parses_fresh(string_address body,
+                                                 positive length, bool backquoted);
+
 static COLD bool shell_substitution_parses(string_address body,
                                            positive length, bool backquoted)
+{
+        positive mode = (shell_bash_compat ? 1 : 0) | (shell_dash_compat ? 2 : 0) |
+                        (shell_posix_on() ? 4 : 0) | (backquoted ? 8 : 0);
+        positive hash = memory_hash_33(body, length) * 31 + mode;
+        positive slot = (hash ^ (hash >> 17)) % SHELL_CHECKED_SLOTS;
+
+        if (shell_checked[slot].hash == hash && shell_checked[slot].length == length)
+                return true;
+        if (!shell_substitution_parses_fresh(body, length, backquoted))
+                return false;
+        shell_checked[slot].hash = hash;
+        shell_checked[slot].length = length;
+        return true;
+}
+
+static COLD bool shell_substitution_parses_fresh(string_address body,
+                                                 positive length, bool backquoted)
 {
         // Most bodies are a few words: a copy on the stack costs nothing,
         // where a mapping and its release cost more than the parse.
