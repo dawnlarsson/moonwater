@@ -3092,6 +3092,82 @@ static p32 xz_finder_find(xz_finder address_to e)
         return count;
 }
 
+/*
+        A run of one byte, taken a position at a time, costs the same at each
+        of them: a hash insert, and a walk that ends at the position before,
+        whose pair the new one takes in its place (a hash chain links to the
+        position before as well). What is left when the run has been taken is
+        the last of them in the tables with the first's pair, or a chain of
+        the positions before it, and the ones between were only each other's
+        stepping stones, never reached from the tables. A skip over positions
+        whose walk, the length of a compare, stays inside the run does that
+        at once: 10 MB of zeros was 16 ns a byte at -6 where GNU's is 7. The
+        position just taken is the one before the first of them, and its
+        walk was ordinary.
+*/
+#define XZ_RUN_MIN 8
+
+static fn xz_finder_run(xz_finder address_to e, p32 address_to amount)
+{
+        const xz_preset address_to p = address_of e->preset;
+        p32 nice = e->nice;
+        p32 base_at = e->read_pos - 1;
+        p8 address_to base = e->input + base_at;
+        p32 room = e->input_n - base_at;
+
+        if (room <= nice + 1 || base[1] != base[0] || (p->finder == XZ_FINDER_BT4 && !e->depth))
+                return;
+
+        p32 limit = address_to amount + 1 + nice;
+        p32 run = (p32)memory_span_byte(base, base[0], limit < room ? limit : room);
+
+        if (run <= nice)
+                return;
+
+        p32 steps = run - nice;
+
+        if (steps > address_to amount)
+                steps = address_to amount;
+
+        p32 size = e->cyclic_size;
+        p32 first = e->cyclic_pos;
+        p32 pos = base_at + e->offset;
+        p32 address_to hash = e->hash;
+        p32 temp = xz_hash_head(base);
+
+        hash[temp & (XZ_HASH2_SIZE - 1)] = pos + steps;
+        temp ^= (p32)base[2] << 8;
+        if (p->finder == XZ_FINDER_HC3)
+                hash[XZ_HASH2_SIZE + (temp & e->hash_mask)] = pos + steps;
+        else
+        {
+                hash[XZ_HASH2_SIZE + (temp & (XZ_HASH3_SIZE - 1))] = pos + steps;
+                hash[XZ_HASH2_SIZE + XZ_HASH3_SIZE +
+                     ((temp ^ (hash_crc32_tab[base[3]] << 5)) & e->hash_mask)] = pos + steps;
+        }
+        if (p->finder == XZ_FINDER_BT4)
+        {
+                p32 from = first ? first - 1 : size - 1;
+                p32 last = first + steps - 1;
+
+                if (last >= size)
+                        last -= size;
+                e->son[((positive)last << 1)] = e->son[((positive)from << 1)];
+                e->son[((positive)last << 1) + 1] = e->son[((positive)from << 1) + 1];
+        }
+        else
+                for (p32 step = 0, at = first; step < steps; step++)
+                {
+                        e->son[at] = pos + step;
+                        if (++at == size)
+                                at = 0;
+                }
+        first += steps;
+        e->cyclic_pos = first >= size ? first - size : first;
+        e->read_pos += steps;
+        address_to amount -= steps;
+}
+
 static fn xz_finder_skip(xz_finder address_to e, p32 amount)
 {
         const xz_preset address_to p = address_of e->preset;
@@ -3139,6 +3215,8 @@ static fn xz_finder_skip(xz_finder address_to e, p32 amount)
                 else
                         e->son[e->cyclic_pos] = cur_match;
                 xz_move(e);
+                if (amount >= XZ_RUN_MIN)
+                        xz_finder_run(e, &amount);
         }
 }
 
@@ -3197,19 +3275,30 @@ static fn xz_pipe_job(address_any context, positive index)
         positive batch = 0;
 
         (void)index;
-        for (p32 at = 0; at < q->count; at++)
+        for (p32 at = 0; at < q->count;)
         {
                 p32 count = 0;
+                p32 steps = 1;
+                p32 until = (p32)atomic_load(address_of q->skip_to);
 
                 //      A position the parser has said it will skip is inserted
                 //      and no more: the tables come out the same, and the
-                //      answer is a count of none nobody reads.
-                if ((b32)at < atomic_load(address_of q->skip_to))
-                        xz_finder_skip(f, 1);
+                //      answer is a count of none nobody reads, a word of zero
+                //      for each. The ones it said together are taken together,
+                //      for the skip to see the run they may be in.
+                if (at < until)
+                {
+                        steps = until - at;
+                        if (steps > q->count - at)
+                                steps = q->count - at;
+                        if (steps > XZ_PIPE_BATCH)
+                                steps = XZ_PIPE_BATCH;
+                        xz_finder_skip(f, steps);
+                }
                 else
                         count = xz_finder_find(f);
 
-                b32 need = (b32)(1 + 2 * count);
+                b32 need = count ? (b32)(1 + 2 * count) : (b32)steps;
 
                 while ((positive)(head - tail_seen) + (positive)need > XZ_PIPE_WORDS)
                 {
@@ -3237,14 +3326,22 @@ static fn xz_pipe_job(address_any context, positive index)
                                 thread_wait(address_of q->tail, tail_seen);
                         __atomic_store_n(address_of q->producer_asleep, 0, __ATOMIC_SEQ_CST);
                 }
-                q->words[(positive)head & (XZ_PIPE_WORDS - 1)] = count;
-                for (p32 i = 0; i < count; i++)
+                if (count)
                 {
-                        q->words[(positive)(head + 1 + 2 * i) & (XZ_PIPE_WORDS - 1)] = f->matches[i].len;
-                        q->words[(positive)(head + 2 + 2 * i) & (XZ_PIPE_WORDS - 1)] = f->matches[i].dist;
+                        q->words[(positive)head & (XZ_PIPE_WORDS - 1)] = count;
+                        for (p32 i = 0; i < count; i++)
+                        {
+                                q->words[(positive)(head + 1 + 2 * i) & (XZ_PIPE_WORDS - 1)] = f->matches[i].len;
+                                q->words[(positive)(head + 2 + 2 * i) & (XZ_PIPE_WORDS - 1)] = f->matches[i].dist;
+                        }
                 }
+                else
+                        for (p32 i = 0; i < steps; i++)
+                                q->words[(positive)(head + i) & (XZ_PIPE_WORDS - 1)] = 0;
                 head += need;
-                if (++batch == XZ_PIPE_BATCH)
+                at += steps;
+                batch += steps;
+                if (batch >= XZ_PIPE_BATCH)
                 {
                         batch = 0;
                         __atomic_store_n(address_of q->head, head, __ATOMIC_SEQ_CST);
@@ -3314,6 +3411,31 @@ static p32 xz_pipe_pop(xz_encoder address_to e)
         return count;
 }
 
+/*
+        Whether a block is made of runs of one byte, from thirty-two windows
+        of a kilobyte spread over it: where all but a sixteenth of the bytes
+        in them are the byte before. The parser takes a match of the longest
+        length at the start of a run and skips the rest of it by the run,
+        which is a hash insert a run, and a finder beside it that finds at
+        every position of a run, to hand matches nobody takes, does ten
+        million finds for what the parser does in a thousand.
+*/
+static bool xz_runs(const p8 address_to input, positive n)
+{
+        positive changes = 0, seen = 0;
+
+        for (positive window = 0; window < 32; window++)
+        {
+                positive at = (n - 1024) / 31 * window;
+
+                if (at < 1)
+                        at = 1;
+                for (positive i = at; i < at + 1023 && i < n; i++, seen++)
+                        changes += input[i] != input[i - 1];
+        }
+        return changes * 16 < seen;
+}
+
 /* Start the finder beside the caller on the block the encoder holds, or
    leave it to the parser. */
 static fn xz_pipe_start(xz_encoder address_to e)
@@ -3322,7 +3444,8 @@ static fn xz_pipe_start(xz_encoder address_to e)
         //      The fast modes skip most of what a match covers with one hash
         //      insert; finding at every one of those on another thread costs
         //      more than the parser saves.
-        if (!e->pipe_ok || !e->preset.normal || e->input_n < ((p32)1 << 16))
+        if (!e->pipe_ok || !e->preset.normal || e->input_n < ((p32)1 << 16) ||
+            xz_runs(e->input, e->input_n))
                 return;
         if (!e->pipe_area)
         {
@@ -4439,6 +4562,9 @@ static bool xz_block_encode(xz_encoder address_to e, p8 address_to input, p32 n)
 */
 #define XZ_BATCH_BYTES ((positive)1 << 30)
 #define XZ_BATCH_BLOCKS 64
+#define XZ_CUT_LEAST ((positive)1 << 20)
+#define XZ_CUT_ROUND ((positive)1 << 16)
+#define XZ_CUT_PIECES 8
 
 typedef struct
 {
@@ -4456,12 +4582,21 @@ typedef struct
         positive index_n;
         p64 records;
         p8 check;
+        // The block size is the default's, which a whole stream may cut.
+        bool cut;
         byte_store address_to store;
         bipolar fd;
         bool failed;
 } xz_stream_writer;
 
 static xz_stream_writer xz_writer;
+
+//      One slot for each block of a batch, and for each piece a cut stream
+//      may be made of.
+static positive xz_unpadded_room(void)
+{
+        return xz_writer.batch_blocks > XZ_CUT_PIECES ? xz_writer.batch_blocks : XZ_CUT_PIECES;
+}
 
 /* The check every block of the next stream carries: CRC64, as xz writes
    by default, unless the command line's -C names another. */
@@ -4512,7 +4647,7 @@ static fn xz_writer_close(void)
         for (positive i = 0; i < xz_writer.slot_count; i++)
                 xz_encoder_close(xz_writer.slots[i]);
         memory_free(xz_writer.slots, xz_writer.slot_count * sizeof(xz_encoder address_to));
-        memory_free(xz_writer.unpadded, xz_writer.batch_blocks * sizeof(p64));
+        memory_free(xz_writer.unpadded, xz_unpadded_room() * sizeof(p64));
         memory_free(xz_writer.input, xz_writer.input_room);
         memory_free(xz_writer.index, xz_writer.index_room);
         xz_writer.slots = null;
@@ -4590,9 +4725,29 @@ static bool xz_batch_sink(address_any context, positive index, address_any data,
 
 /* Every block of the batch: encoded side by side, written in block order.
    Encoding is heavy per byte, so the pool spreads even a small batch. */
-static bool xz_writer_batch(void)
+static bool xz_writer_batch(bool last)
 {
         xz_stream_writer address_to w = address_of xz_writer;
+
+        //      A stream that is all in this one batch, in a fast mode, is cut
+        //      for the pool to have something to spread: ten megabytes was
+        //      two blocks of eight, a pool of eight threads two, and GNU's
+        //      megabyte blocks eight. The pieces are an eighth of it and at
+        //      least a megabyte, which loses a few tenths of a percent of the
+        //      ratio, as GNU's megabyte blocks lose more, and depend on the
+        //      input alone: the bytes are the same for any pool.
+        if (last && !w->records && w->cut && !w->options.lz.normal &&
+            w->input_n >= 2 * XZ_CUT_LEAST)
+        {
+                positive piece = (w->input_n / XZ_CUT_PIECES + XZ_CUT_ROUND - 1) /
+                                 XZ_CUT_ROUND * XZ_CUT_ROUND;
+
+                if (piece < XZ_CUT_LEAST)
+                        piece = XZ_CUT_LEAST;
+                if (piece < w->block)
+                        w->block = piece;
+        }
+
         positive count = (w->input_n + w->block - 1) / w->block;
 
         if (!count)
@@ -4681,6 +4836,7 @@ static bool xz_encode_setup(p8 level)
         //      A block's positions are 32 bits with the dictionary added.
         if (xz_writer.block > XZ_BLOCK_MAX)
                 xz_writer.block = XZ_BLOCK_MAX;
+        xz_writer.cut = !xz_block_size;
         xz_writer.batch_blocks = xz_batch_room(xz_writer.block) / xz_writer.block;
         if (xz_writer.batch_blocks > XZ_BATCH_BLOCKS)
                 xz_writer.batch_blocks = XZ_BATCH_BLOCKS;
@@ -4698,8 +4854,7 @@ static bool xz_encode_setup(p8 level)
         xz_writer.slot_count = parallel_slots();
         xz_writer.slots = (xz_encoder address_to address_to)memory_checked(
             xz_writer.slot_count * sizeof(xz_encoder address_to));
-        xz_writer.unpadded =
-            (p64 address_to)memory_checked(xz_writer.batch_blocks * sizeof(p64));
+        xz_writer.unpadded = (p64 address_to)memory_checked(xz_unpadded_room() * sizeof(p64));
         xz_writer.input_room = xz_writer.batch_blocks * xz_writer.block + XZ_SLACK;
         xz_writer.input = (p8 address_to)memory_checked(xz_writer.input_room);
         if (!xz_writer.slots || !xz_writer.unpadded || !xz_writer.input)
@@ -4720,7 +4875,7 @@ static bool xz_encode_write(p8 address_to src, positive n)
                 xz_writer.input_n += take;
                 src += take;
                 n -= take;
-                if (xz_writer.input_n == capacity && !xz_writer_batch())
+                if (xz_writer.input_n == capacity && !xz_writer_batch(false))
                         return false;
         }
         return !xz_writer.failed;
@@ -4728,7 +4883,7 @@ static bool xz_encode_write(p8 address_to src, positive n)
 
 static bool xz_encode_end(void)
 {
-        bool ok = xz_writer_batch();
+        bool ok = xz_writer_batch(true);
 
         if (ok)
         {
@@ -4772,7 +4927,7 @@ static bool xz_stream_encode(p8 level)
 
         for (;;)
         {
-                if (xz_writer.input_n == capacity && !xz_writer_batch())
+                if (xz_writer.input_n == capacity && !xz_writer_batch(false))
                         break;
                 bipolar got = system_read_retry((positive)xz_input.fd,
                                                 xz_writer.input + xz_writer.input_n,
@@ -5495,6 +5650,38 @@ range:
         return false;
 }
 
+/*
+        A memory usage limit, as --memlimit-compress and its three brothers
+        and -M take it: a number as any other, or a percentage of what the
+        machine has, from 1 to 100. It is read and checked and nothing more:
+        what this encoder holds is a few dictionaries and a block of input
+        whatever a limit says, and xz's own account of what a preset needs
+        is not a thing a limit here could be held to, so a limit that xz
+        would find too low is met by a stream and not by a refusal.
+*/
+static bool xz_cli_limit(string_address name, string_address text)
+{
+        p64 value;
+        positive length = string_length(text);
+
+        if (length && length < 32 && text[length - 1] == '%')
+        {
+                p8 digits[32];
+                p8 spelled[40];
+                positive at = 0;
+
+                memory_copy_apart(digits, text, length - 1);
+                digits[length - 1] = end;
+                for (positive k = 0; name[k] && at < 38; k++)
+                        spelled[at++] = (p8)name[k];
+                spelled[at++] = '%';
+                spelled[at] = end;
+                return xz_cli_number((string_address)spelled, (string_address)digits, 1, 100,
+                                     address_of value);
+        }
+        return xz_cli_number(name, text, 0, ~(p64)0, address_of value);
+}
+
 /* xz steps over one + before a thread count and before no other number. */
 static bool xz_cli_threads(string_address text)
 {
@@ -5745,6 +5932,10 @@ static bipolar xz_cli_value(file_codec_cli address_to codec, string_address at,
         return 0;
 }
 
+//      The names xz's memory limits go by; --memory is --memlimit's old one.
+static const string_address xz_cli_limits[] = {
+    "memlimit-compress", "memlimit-decompress", "memlimit-mt-decompress", "memlimit", "memory"};
+
 static bipolar xz_cli_option(file_codec_cli address_to codec, string_address at,
                              bool word)
 {
@@ -5771,7 +5962,7 @@ static bipolar xz_cli_option(file_codec_cli address_to codec, string_address at,
                         xz_cli_count = 0;
                         return 1;
                 }
-                if (*at != 'C' && *at != 'T')
+                if (*at != 'C' && *at != 'T' && *at != 'M')
                         return 0;
 
                 string_address value = at[1] ? at + 1 : codec->next_argument;
@@ -5780,7 +5971,9 @@ static bipolar xz_cli_option(file_codec_cli address_to codec, string_address at,
                 if (!value)
                         return xz_cli_missing("option requires an argument -- '", (string_address)letter, "'");
                 codec->took_next = !at[1];
-                if (!(*at == 'C' ? xz_cli_check(value) : xz_cli_threads(value)))
+                if (!(*at == 'C' ? xz_cli_check(value)
+                      : *at == 'M' ? xz_cli_limit("memlimit", value)
+                                   : xz_cli_threads(value)))
                         return -1;
                 return at[1] ? (bipolar)string_length(at) : 1;
         }
@@ -5814,8 +6007,19 @@ static bipolar xz_cli_option(file_codec_cli address_to codec, string_address at,
                         return 1;
                 }
         }
+        if (string_equals(at, "--no-adjust"))
+                return 1;
+
         string_address text = null;
-        bipolar got = xz_cli_value(codec, at, "check", address_of text);
+        bipolar got;
+
+        for (positive i = 0; i < array_count(xz_cli_limits); i++)
+        {
+                got = xz_cli_value(codec, at, xz_cli_limits[i], address_of text);
+                if (got)
+                        return got < 0 ? got : xz_cli_limit(xz_cli_limits[i], text) ? 1 : -1;
+        }
+        got = xz_cli_value(codec, at, "check", address_of text);
 
         if (got)
                 return got < 0 ? got : xz_cli_check(text) ? 1 : -1;

@@ -6678,11 +6678,14 @@ static bool factor_collect(positive number, positive address_to factors,
 
 /*
         Past one machine word. GNU factors any size (GMP past two words);
-        this carries a number in 64-bit limbs, least first, up to
-        FACTOR_LIMBS of them -- 8448 bits, 2543 digits, which is where it
-        says the number is too large rather than truncate it. The arithmetic
-        is what the native path does, widened: trial division by the small
-        odd numbers, Miller-Rabin over the first twenty-five primes in
+        this takes the primes under 2,000 out of a number of any size (below,
+        in limbs on the heap) and carries what is left in 64-bit limbs, least
+        first, up to FACTOR_LIMBS of them -- 8448 bits, 2543 digits, which is
+        where it says the number is too large rather than truncate it: a
+        power of ten or a factorial is nothing but small primes and has no
+        bound, and what has a prime or a composite that large in it is more
+        than a Miller-Rabin of this kind finishes. The arithmetic is what the
+        native path does, widened: Miller-Rabin over the first twenty-five primes in
         Montgomery form (CIOS, a 64x64->128 multiply per limb pair and no
         double-width division anywhere), and Brent's rho with a batched gcd.
         A part that comes down to one word goes back to the native path,
@@ -6755,19 +6758,6 @@ static fn factor_big_double(factor_big address_to value, p64 bit)
         }
         if (carry)
                 value->limb[value->size++] = carry;
-}
-
-static bool factor_big_multiply_add(factor_big address_to value, p64 times, p64 add)
-{
-        p64 carry = limbs_multiply_word(value->limb, value->limb, value->size, times, add);
-
-        if (carry)
-        {
-                if (value->size == FACTOR_LIMBS)
-                        return false;
-                value->limb[value->size++] = carry;
-        }
-        return true;
 }
 
 // value /= divisor, answering the remainder; the divisor is under 2^32.
@@ -7497,27 +7487,240 @@ static b32 factor_found_order(positive left, positive right)
         return 0;
 }
 
-// A number past one word: its factors, sorted, after it.
+/*
+        The small primes of a number of any size, before the rest of it is
+        looked at. A number of a thousand digits that is a power of ten is
+        two primes a thousand times each, and the walk of a trial division
+        by every odd number under two thousand, each a pass over its limbs
+        with a division for each, was 1.4 ms to GNU's 0.3; so the primes
+        under 2,000 are taken in groups, a pass for the remainder by the
+        product of a dozen of them, and only the ones that divide are gone
+        into, by the largest power of the prime a word holds, a pass for
+        each, and the exact power at the end. Nothing here is bounded but by
+        the number, which is held in limbs on the heap, so 10^6000 is
+        factored as 10^1000 is. What is left has no prime factor under 2,000.
+*/
+typedef struct
+{
+        p64 address_to limb;
+        positive size, room;
+} factor_huge;
+
+#define FACTOR_SMALL_LIMIT 2000
+#define FACTOR_SMALL_PRIMES 303
+
+static p16 factor_small_prime[FACTOR_SMALL_PRIMES];
+static p64 factor_small_count[FACTOR_SMALL_PRIMES];
+static positive factor_small_known;
+
+static fn factor_huge_trim(factor_huge address_to value)
+{
+        while (value->size && !value->limb[value->size - 1])
+                value->size--;
+}
+
+// value mod divisor, which is not zero.
+static p64 factor_huge_remainder(const factor_huge address_to value, p64 divisor)
+{
+        p64 rest = 0;
+
+        for (positive at = value->size; at-- > 0;)
+                rest = positive_divide_wide(rest, value->limb[at], divisor).y;
+        return rest;
+}
+
+// value /= divisor, answering the remainder.
+static p64 factor_huge_divide(factor_huge address_to value, p64 divisor)
+{
+        p64 rest = 0;
+
+        for (positive at = value->size; at-- > 0;)
+        {
+                positive2 step = positive_divide_wide(rest, value->limb[at], divisor);
+
+                value->limb[at] = step.x;
+                rest = step.y;
+        }
+        factor_huge_trim(value);
+        return rest;
+}
+
+// value >>= bits.
+static fn factor_huge_shift(factor_huge address_to value, positive bits)
+{
+        positive words = bits / 64;
+        positive rest = bits % 64;
+
+        for (positive at = 0; at + words < value->size; at++)
+        {
+                p64 low = value->limb[at + words];
+                p64 high = at + words + 1 < value->size ? value->limb[at + words + 1] : 0;
+
+                value->limb[at] = rest ? low >> rest | high << (64 - rest) : low;
+        }
+        value->size = value->size > words ? value->size - words : 0;
+        factor_huge_trim(value);
+}
+
+// The decimal digits as limbs, a word's worth at a time.
+static bool factor_huge_read(factor_huge address_to value, const p8 address_to digits,
+                             positive length)
+{
+        value->room = length / 19 + 2;
+        value->size = 0;
+        value->limb = (p64 address_to)memory_take(value->room * sizeof(p64));
+
+        if (!value->limb)
+                return false;
+
+        for (positive at = 0; at < length;)
+        {
+                positive take = at ? 19 : (length % 19 ? length % 19 : 19);
+                p64 chunk = 0, scale = 1;
+
+                for (positive digit = 0; digit < take; digit++)
+                {
+                        chunk = chunk * 10 + (p64)(digits[at + digit] - '0');
+                        scale *= 10;
+                }
+                p64 carry = limbs_multiply_word(value->limb, value->limb, value->size, scale, chunk);
+
+                if (carry)
+                        value->limb[value->size++] = carry;
+                at += take;
+        }
+        factor_huge_trim(value);
+        return true;
+}
+
+// The multiplicity of one prime, and the number without it.
+static p64 factor_huge_strip(factor_huge address_to value, p64 prime)
+{
+        p64 power = prime, steps = 1, times = 0;
+
+        while (power <= ~(p64)0 / prime)
+        {
+                power *= prime;
+                steps++;
+        }
+        for (;;)
+        {
+                p64 rest = factor_huge_remainder(value, power);
+
+                if (!rest)
+                {
+                        factor_huge_divide(value, power);
+                        times += steps;
+                        continue;
+                }
+                p64 exact = 0;
+
+                while (!(rest % prime))
+                {
+                        rest /= prime;
+                        exact++;
+                }
+                if (exact)
+                {
+                        p64 gone = 1;
+
+                        for (p64 k = 0; k < exact; k++)
+                                gone *= prime;
+                        factor_huge_divide(value, gone);
+                        times += exact;
+                }
+                return times;
+        }
+}
+
+static fn factor_small_make()
+{
+        p8 composite[FACTOR_SMALL_LIMIT];
+
+        if (factor_small_known)
+                return;
+        memory_fill(composite, 0, sizeof(composite));
+        for (positive n = 2; n < FACTOR_SMALL_LIMIT; n++)
+        {
+                if (composite[n])
+                        continue;
+                factor_small_prime[factor_small_known++] = (p16)n;
+                for (positive m = n * n; m < FACTOR_SMALL_LIMIT; m += n)
+                        composite[m] = 1;
+        }
+}
+
+static fn factor_strip(factor_huge address_to value)
+{
+        positive zeros = 0;
+
+        factor_small_make();
+        memory_fill(factor_small_count, 0, sizeof(factor_small_count));
+
+        while (zeros < value->size && !value->limb[zeros])
+                zeros++;
+        if (zeros < value->size)
+        {
+                positive bits = zeros * 64 + (positive)bits_trailing_zeros(value->limb[zeros]);
+
+                if (bits)
+                {
+                        factor_small_count[0] = bits;
+                        factor_huge_shift(value, bits);
+                }
+        }
+
+        for (positive at = 1; at < factor_small_known;)
+        {
+                p64 product = 1;
+                positive stop = at;
+
+                while (stop < factor_small_known &&
+                       product <= ~(p64)0 / factor_small_prime[stop])
+                        product *= factor_small_prime[stop++];
+
+                if (value->size > 1 || value->limb[0] > 1)
+                {
+                        p64 rest = factor_huge_remainder(value, product);
+
+                        for (positive prime = at; prime < stop; prime++)
+                                if (!(rest % factor_small_prime[prime]))
+                                        factor_small_count[prime] =
+                                            factor_huge_strip(value, factor_small_prime[prime]);
+                }
+                at = stop;
+        }
+}
+
+// The small primes found, as they are written: each as often as it divides,
+// or once with its exponent.
+static fn factor_small_put(bool exponents)
+{
+        for (positive at = 0; at < factor_small_known; at++)
+        {
+                p64 times = factor_small_count[at];
+
+                for (p64 k = 0; k < (exponents ? (times ? 1 : 0) : times); k++)
+                {
+                        text_put_character(' ');
+                        positive_to_string(text_put, factor_small_prime[at]);
+                        if (exponents && times > 1)
+                        {
+                                text_put_character('^');
+                                positive_to_string(text_put, times);
+                        }
+                }
+        }
+}
+
+// A number past one word, its small primes taken out: its factors, sorted,
+// after them.
 static bool factor_big_number(factor_big address_to number, bool exponents)
 {
         factor_pool_used = 0;
         factor_found_count = 0;
 
-        while (!(number->limb[0] & 1))
-        {
-                p64 two = 2;
-
-                if (!factor_found_add(address_of two, 1))
-                        return false;
-                factor_big_half(number);
-        }
-        for (p64 trial = 3; trial < 2000 && number->size > 1; trial += 2)
-                while (number->size > 1 && !factor_big_remainder_word(number, trial))
-                {
-                        if (!factor_found_add(address_of trial, 1))
-                                return false;
-                        factor_big_divide_word(number, trial);
-                }
+        factor_small_put(exponents);
 
         if (!factor_big_collect(number))
                 return false;
@@ -7606,7 +7809,7 @@ static fn factor_line_end()
 static bool factor_number(p8 address_to bytes, positive length,
                           bool exponents)
 {
-        static p8 decimal[FACTOR_DIGITS + 1];
+        p8 decimal[24];
         /*      The reference walks off leading blanks -- spaces alone, not
                 tabs or newlines -- and then one plus sign, and nothing after
                 the sign. So ' 12' is twelve and '+ 12' is not a number. */
@@ -7621,48 +7824,61 @@ static bool factor_number(p8 address_to bytes, positive length,
         if (start < length)
                 start += memory_span_byte(bytes + start, '0', length - start - 1);
 
-        if (start == length || length - start >= sizeof(decimal))
+        if (start == length)
                 goto invalid;
-
-        memory_copy(decimal, bytes + start, length - start);
-        decimal[length - start] = end;
 
         /* The checked digit floor is shared with shred's native sizes.  Keep
            its cursor so an overflow, sign, point or trailing byte cannot be
            mistaken for a numeric prefix (string_digits_exact intentionally
-           has wrapping arithmetic for older callers). */
+           has wrapping arithmetic for older callers). A number of more than
+           twenty digits is past a word without asking. */
         string_address after = decimal;
-        if (!string_digits_checked(address_of after, 10, address_of value) ||
-            string_get(after))
+        bool word = false;
+
+        if (length - start < sizeof(decimal))
         {
-                //      All digits and past one word: the multi-limb road.
-                if (string_span_max(decimal, length - start, string_set_digits) !=
+                memory_copy(decimal, bytes + start, length - start);
+                decimal[length - start] = end;
+                word = string_digits_checked(address_of after, 10, address_of value) &&
+                       !string_get(after);
+        }
+
+        if (!word)
+        {
+                //      All digits and past one word: the multi-limb road,
+                //      whatever the number's size.
+                if (string_span_max(bytes + start, length - start, string_set_digits) !=
                     length - start)
                         goto invalid;
 
-                static factor_big wide;
+                factor_huge wide = {0};
+                static factor_big cofactor;
 
-                wide.size = 0;
-                for (positive at = 0; at < length - start;)
+                if (!factor_huge_read(address_of wide, bytes + start, length - start))
                 {
-                        positive take = min((positive)9, length - start - at);
-                        p64 chunk = 0, scale = 1;
-
-                        for (positive digit = 0; digit < take; digit++)
-                        {
-                                chunk = chunk * 10 + (p64)(decimal[at + digit] - '0');
-                                scale *= 10;
-                        }
-                        if (!factor_big_multiply_add(address_of wide, scale, chunk))
-                                goto invalid;
-                        at += take;
+                        string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
+                        return false;
                 }
 
-                factor_big_put(address_of wide);
-                text_put_character(':');
-                if (!factor_big_number(address_of wide, exponents))
+                factor_strip(address_of wide);
+
+                //      What is left has no prime under 2,000, and goes on in the
+                //      arithmetic below, which holds so many limbs.
+                if (wide.size > FACTOR_LIMBS)
                 {
-                        string_diagnostic(&text_diagnostic, 0, decimal, "factorization did not converge");
+                        memory_give(wide.limb);
+                        goto invalid;
+                }
+
+                cofactor.size = wide.size;
+                memory_copy(cofactor.limb, wide.limb, wide.size * sizeof(p64));
+                memory_give(wide.limb);
+
+                text_put(bytes + start, length - start);
+                text_put_character(':');
+                if (!factor_big_number(address_of cofactor, exponents))
+                {
+                        string_diagnostic(&text_diagnostic, 0, (string_address)"", "factorization did not converge");
                         text_put_character('\n');
                         factor_line_end();
                         return false;
@@ -7671,6 +7887,8 @@ static bool factor_number(p8 address_to bytes, positive length,
                 factor_line_end();
                 return true;
         }
+
+        //      A word: its digits were copied and ended.
 
         positive_to_string(text_put, value);
         text_put_character(':');
@@ -7778,7 +7996,8 @@ invalid:
                 writer_terminal_quoted_name_span(writer_stderr, (string_address)bytes,
                                                  memory_span_without_byte(bytes, 0, length));
                 if (ceiling)
-                        string_format(writer_stderr, ": too large; at most %p digits are factored\n",
+                        string_format(writer_stderr,
+                                      ": too large; at most %p digits are factored once its primes under 2,000 are out\n",
                                       (positive)FACTOR_DIGITS);
                 else
                         writer_stderr("' is not a valid positive integer\n", 0);
