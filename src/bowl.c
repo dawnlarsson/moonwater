@@ -587,8 +587,7 @@ static b32 bowl_expose_program(string_address root, string_address program,
                 name = inferred;
         }
 
-        if (!bowl_name(name, true))
-                return bowl_refuse("invalid command name\n");
+        return_if(!bowl_name(name, true), bowl_refuse("invalid command name\n"));
 
         root_length = string_length(root);
         program_length = string_length(program);
@@ -601,14 +600,12 @@ static b32 bowl_expose_program(string_address root, string_address program,
                 return bowl_refuse("exposed path is too long\n");
 
         failed = bowl_executable_in_root(root, program);
-        if (failed < 0)
-                return bowl_fail(installed, failed);
+        return_if(failed < 0, bowl_fail(installed, failed));
 
         failed = bowl_mkdir(BOWL_ROOT_DIRECTORY);
         if (!failed)
                 failed = bowl_mkdir(BOWL_EXPOSE_DIRECTORY);
-        if (failed < 0)
-                return bowl_fail(BOWL_EXPOSE_DIRECTORY, failed);
+        return_if(failed < 0, bowl_fail(BOWL_EXPOSE_DIRECTORY, failed));
 
         path_join(launcher, sizeof(launcher), BOWL_EXPOSE_DIRECTORY, name);
 
@@ -671,8 +668,7 @@ static b32 bowl_expose_program(string_address root, string_address program,
             AT_FDCWD, launcher,
             FILE_WRITE | FILE_EXCLUSIVE | O_CLOEXEC, 0755);
 
-        if (handle < 0)
-                return bowl_fail(launcher, handle);
+        return_if(handle < 0, bowl_fail(launcher, handle));
 
         if (system_write_all((positive)handle, line, line_length) !=
             line_length)
@@ -702,8 +698,7 @@ static b32 bowl_expose_program(string_address root, string_address program,
 
 static b32 bowl_expose(positive count, string_address address_to arguments)
 {
-        if (count < 4 || count > 5)
-                return bowl_usage();
+        return_if(count < 4 || count > 5, bowl_usage());
 
         return bowl_expose_program(arguments[2], arguments[3],
                                    count == 5 ? arguments[4] : null, true);
@@ -1929,8 +1924,7 @@ static b32 bowl_launch(string_address root, string_address program,
         bipolar child;
         positive status = 0;
 
-        if (!root || root[0] != '/')
-                return bowl_usage();
+        return_if(!root || root[0] != '/', bowl_usage());
 
         terminal_terminfo_install();
 
@@ -2266,8 +2260,7 @@ static b32 bowl_reset_root(string_address root)
 {
         bipolar failed = bowl_reset_walk(root, 0, null);
 
-        if (failed < 0)
-                return bowl_fail(root, failed);
+        return_if(failed < 0, bowl_fail(root, failed));
         return 0;
 }
 
@@ -2290,8 +2283,7 @@ static b32 bowl_forget_path(string_address path)
                 failed = system_remove_at(parent, leaf, 0);
         system_close(parent);
 
-        if (failed < 0 && failed != -ERROR_NO_ENTRY)
-                return bowl_fail(path, failed);
+        return_if(failed < 0 && failed != -ERROR_NO_ENTRY, bowl_fail(path, failed));
         return 0;
 }
 
@@ -2313,8 +2305,7 @@ static b32 bowl_recover_from(string_address root, string_address marker)
                 bipolar failed = system_rename_at(AT_FDCWD, from, AT_FDCWD,
                                                   root, 0);
 
-                if (failed < 0)
-                        return bowl_fail(from, failed);
+                return_if(failed < 0, bowl_fail(from, failed));
         }
         return 0;
 }
@@ -2329,8 +2320,7 @@ static b32 bowl_write_bytes(string_address path, string_address text,
         bipolar handle;
         bipolar failed = 0;
 
-        if (parent < 0)
-                return bowl_fail(path, parent);
+        return_if(parent < 0, bowl_fail(path, parent));
 
         handle = file_temporary_open_at(parent, leaf, temp, sizeof(temp),
             ".bowl-", 6, (positive)system_call_1(syscall(getpid), 0), 128, 0644);
@@ -2450,15 +2440,12 @@ static b32 bowl_wait_applet(bipolar child, string_address what)
         positive status = 0;
         bipolar failed;
 
-        if (child < 0)
-                return bowl_fail(what, child);
+        return_if(child < 0, bowl_fail(what, child));
 
         failed = system_wait4_retry(child, address_of status, 0, null);
-        if (failed < 0)
-                return bowl_fail(what, failed);
+        return_if(failed < 0, bowl_fail(what, failed));
 
-        if (wait_status_code(status))
-                return bowl_refuse(what);
+        return_if(wait_status_code(status), bowl_refuse(what));
 
         return 0;
 }
@@ -2545,8 +2532,7 @@ static b32 bowl_flatten(string_address root, string_address marker)
                 return 0;
 
         failed = bowl_prefix_find(root, marker, rel);
-        if (failed < 0)
-                return bowl_fail(root, failed);
+        return_if(failed < 0, bowl_fail(root, failed));
         if (failed != 1)
                 return bowl_refuse(failed ? "archive has more than one root\n"
                                           : "archive is not a bowl bootstrap\n");
@@ -2562,15 +2548,13 @@ static b32 bowl_flatten(string_address root, string_address marker)
         }
 
         failed = system_rename_at(AT_FDCWD, root, AT_FDCWD, sibling, 0);
-        if (failed < 0)
-                return bowl_fail(sibling, failed);
+        return_if(failed < 0, bowl_fail(sibling, failed));
 
         if (!bowl_root_path(from, sizeof(from), sibling, rel))
                 return bowl_refuse("bowl path is too long\n");
 
         failed = system_rename_at(AT_FDCWD, from, AT_FDCWD, root, 0);
-        if (failed < 0)
-                return bowl_fail(from, failed);
+        return_if(failed < 0, bowl_fail(from, failed));
 
         if (system_remove_at(AT_FDCWD, sibling, AT_REMOVEDIR) < 0)
                 bowl_forget_path(sibling);
@@ -2597,8 +2581,7 @@ static b32 bowl_write_resolv(string_address root)
                 if (!bowl_root_path(etc, sizeof(etc), root, "/etc"))
                         return bowl_refuse("bowl path is too long\n");
                 failed = bowl_mkdir(etc);
-                if (failed < 0)
-                        return bowl_fail(etc, failed);
+                return_if(failed < 0, bowl_fail(etc, failed));
         }
 
         if (!byte_store_append_exact(address_of out, fallback,
@@ -2656,8 +2639,7 @@ static b32 bowl_write_localtime_at(string_address path)
                 return 0;
 
         length = clock_zone_tzif(zone, file, sizeof(file));
-        if (!length)
-                return bowl_refuse("the machine's timezone does not parse\n");
+        return_if(!length, bowl_refuse("the machine's timezone does not parse\n"));
 
         //      Every boot re-applies the zone, and a write here is an fsync
         //      per bowl on the way to a prompt. A file that already says the
@@ -2705,8 +2687,7 @@ static b32 bowl_write_localtime_host(void)
 {
         bipolar made = bowl_mkdir("/etc");
 
-        if (made < 0)
-                return bowl_fail("/etc", made);
+        return_if(made < 0, bowl_fail("/etc", made));
         return bowl_write_localtime_at("/etc/localtime");
 }
 
@@ -2748,11 +2729,9 @@ static b32 bowl_write_mirror(string_address root)
                 return bowl_refuse("bowl path is too long\n");
 
         got = file_slurp(path, text, sizeof(text));
-        if (got <= 0)
-                return bowl_fail(path, got < 0 ? got : -ERROR_NO_ENTRY);
+        return_if(got <= 0, bowl_fail(path, got < 0 ? got : -ERROR_NO_ENTRY));
 
-        if ((positive)got >= sizeof(text) - 1)
-                return bowl_refuse("mirrorlist is too long\n");
+        return_if((positive)got >= sizeof(text) - 1, bowl_refuse("mirrorlist is too long\n"));
         text[got] = end;
 
         while (at < (positive)got)
@@ -2894,8 +2873,7 @@ static b32 bowl_write_apt(string_address root)
                 return bowl_refuse("bowl path is too long\n");
 
         failed = bowl_mkdir(dir);
-        if (failed < 0)
-                return bowl_fail(dir, failed);
+        return_if(failed < 0, bowl_fail(dir, failed));
 
         return bowl_write_bytes(path, text, string_length(text));
 }
@@ -2915,11 +2893,9 @@ static b32 bowl_write_pacman(string_address root)
                 return bowl_refuse("bowl path is too long\n");
 
         got = file_slurp(path, text, sizeof(text));
-        if (got <= 0)
-                return bowl_fail(path, got < 0 ? got : -ERROR_NO_ENTRY);
+        return_if(got <= 0, bowl_fail(path, got < 0 ? got : -ERROR_NO_ENTRY));
 
-        if ((positive)got >= sizeof(text) - 1)
-                return bowl_refuse("pacman.conf is too long\n");
+        return_if((positive)got >= sizeof(text) - 1, bowl_refuse("pacman.conf is too long\n"));
         text[got] = end;
 
         /*
@@ -3784,26 +3760,22 @@ static b32 bowl_oci_blob(string_address layout, string_address descriptor,
                                    "than its sha256 and size\n");
 
         path_join(rel, sizeof(rel), "blobs/sha256", digest + 7);
-        if (!path_join(path, room, layout, rel))
-                return bowl_refuse("bowl path is too long\n");
+        return_if(!path_join(path, room, layout, rel), bowl_refuse("bowl path is too long\n"));
 
         directory = system_open_at(AT_FDCWD, layout,
                                    FILE_READ | O_DIRECTORY | O_NOFOLLOW |
                                        O_CLOEXEC);
-        if (directory < 0)
-                return bowl_fail(layout, directory);
+        return_if(directory < 0, bowl_fail(layout, directory));
         handle = system_open_resolved(directory, rel, FILE_READ | O_CLOEXEC,
                                       SYSTEM_RESOLVE_BENEATH |
                                           SYSTEM_RESOLVE_NO_SYMLINKS);
         system_close(directory);
-        if (handle < 0)
-                return bowl_fail(path, handle);
+        return_if(handle < 0, bowl_fail(path, handle));
 
         same = bowl_sha256_of(handle, hex, address_of size) &&
                string_equals(hex, digest + 7) && size == want;
         system_close(handle);
-        if (!same)
-                return bowl_refuse("an OCI blob does not match its digest\n");
+        return_if(!same, bowl_refuse("an OCI blob does not match its digest\n"));
 
         return 0;
 }
@@ -4036,8 +4008,7 @@ static b32 bowl_oci_layer(string_address blob, string_address layout,
         if (!failed)
         {
                 failed = bowl_mkdir(upper);
-                if (failed < 0)
-                        return bowl_fail(upper, failed);
+                return_if(failed < 0, bowl_fail(upper, failed));
         }
         if (!failed)
                 failed = bowl_extract(blob, upper);
@@ -4053,8 +4024,7 @@ static b32 bowl_oci_layer(string_address blob, string_address layout,
                 system_close(from);
         if (onto >= 0)
                 system_close(onto);
-        if (failed)
-                return bowl_fail(root, failed);
+        return_if(failed, bowl_fail(root, failed));
 
         return bowl_forget_path(upper);
 }
@@ -4081,8 +4051,7 @@ static b32 bowl_extract_oci(string_address archive, string_address root)
         {
                 bipolar made = bowl_mkdir(layout);
 
-                if (made < 0)
-                        return bowl_fail(layout, made);
+                return_if(made < 0, bowl_fail(layout, made));
         }
         if (!failed)
                 failed = bowl_extract(archive, layout);
@@ -4298,8 +4267,7 @@ static b32 bowl_extract_nix(string_address archive, string_address root)
         //      the release lists neither its top directory, which is the
         //      root now, nor store/.
         failed = system_change_mode_at(AT_FDCWD, root, 0755);
-        if (failed)
-                return bowl_fail(root, failed);
+        return_if(failed, bowl_fail(root, failed));
 
         if (!bowl_root_path(from, sizeof(from), root, "/install"))
                 return bowl_refuse("bowl path is too long\n");
@@ -4320,8 +4288,7 @@ static b32 bowl_extract_nix(string_address archive, string_address root)
         if (!bowl_root_path(to, sizeof(to), root, "/nix"))
                 return bowl_refuse("bowl path is too long\n");
         failed = bowl_mkdir(to);
-        if (failed < 0)
-                return bowl_fail(to, failed);
+        return_if(failed < 0, bowl_fail(to, failed));
 
         if (!bowl_root_path(from, sizeof(from), root, "/store") ||
             !bowl_root_path(to, sizeof(to), root, "/nix/store"))
@@ -4329,8 +4296,7 @@ static b32 bowl_extract_nix(string_address archive, string_address root)
         failed = system_rename_at(AT_FDCWD, from, AT_FDCWD, to, 0);
         if (!failed)
                 failed = system_change_mode_at(AT_FDCWD, to, 0755);
-        if (failed)
-                return bowl_fail(to, failed);
+        return_if(failed, bowl_fail(to, failed));
 
         if (!bowl_root_path(to, sizeof(to), root, BOWL_NIX_SEED))
                 return bowl_refuse("bowl path is too long\n");
@@ -4343,14 +4309,12 @@ static b32 bowl_extract_nix(string_address archive, string_address root)
             !bowl_root_path(to, sizeof(to), root, "/nix/.reginfo"))
                 return bowl_refuse("bowl path is too long\n");
         failed = system_rename_at(AT_FDCWD, from, AT_FDCWD, to, 0);
-        if (failed)
-                return bowl_fail(to, failed);
+        return_if(failed, bowl_fail(to, failed));
 
         // The installer scripts: this is what they would have done.
         parent = system_open_parent_nofollow(AT_FDCWD, root, false, 0, leaf,
                                              sizeof(leaf));
-        if (parent < 0)
-                return bowl_fail(root, parent);
+        return_if(parent < 0, bowl_fail(root, parent));
         failed = bowl_reset_walk_at(parent, leaf, 0, keep);
         system_close(parent);
         return failed ? bowl_fail(root, failed) : 0;
@@ -4398,8 +4362,7 @@ static b32 bowl_write_nix(string_address root)
                 if (!bowl_root_path(path, sizeof(path), root, directories[at]))
                         return bowl_refuse("bowl path is too long\n");
                 failed = bowl_mkdir(path);
-                if (failed < 0)
-                        return bowl_fail(path, failed);
+                return_if(failed < 0, bowl_fail(path, failed));
         }
 
         for (positive at = 0; at < array_count(files); at++)
@@ -4432,14 +4395,12 @@ static b32 bowl_land(string_address archive, string_address root,
                 return bowl_refuse("setup needs an archive path and /bowls/NAME\n");
 
         failed = system_access_at(AT_FDCWD, archive, 0);
-        if (failed < 0)
-                return bowl_fail(archive, failed);
+        return_if(failed < 0, bowl_fail(archive, failed));
 
         failed = bowl_mkdir(BOWL_ROOT_DIRECTORY);
         if (!failed)
                 failed = bowl_mkdir(root);
-        if (failed < 0)
-                return bowl_fail(root, failed);
+        return_if(failed < 0, bowl_fail(root, failed));
 
         failed = bowl_recover_from(root, marker);
         if (failed)
@@ -4895,8 +4856,7 @@ static b32 bowl_setup_self(p8 address_to into, positive room)
 {
         bipolar got = file_link_text("/proc/self/exe", into, room);
 
-        if (got < 0)
-                return bowl_fail("/proc/self/exe", got);
+        return_if(got < 0, bowl_fail("/proc/self/exe", got));
 
         return 0;
 }
@@ -4907,8 +4867,7 @@ static b32 bowl_setup_bind_via_sudo(string_address self)
         string_address ln = bowl_find_executable(bowl_ln_places);
         string_address argv[8];
 
-        if (!sudo || !ln)
-                return bowl_refuse("setup needs to write /bowls\n");
+        return_if(!sudo || !ln, bowl_refuse("setup needs to write /bowls\n"));
 
         argv[0] = sudo;
         argv[1] = "-n";
@@ -5013,8 +4972,7 @@ static b32 bowl_publish_bin(string_address name)
                 return 0;
 
         failed = system_symbolic_link_at(from, AT_FDCWD, to);
-        if (failed < 0 && failed != -EEXIST)
-                return bowl_fail(to, failed);
+        return_if(failed < 0 && failed != -EEXIST, bowl_fail(to, failed));
 
         return 0;
 }
@@ -5203,8 +5161,7 @@ static b32 bowl_setup_distro(const struct bowl_distro address_to distro)
         string_address address_to program;
 
         failed = bowl_mkdir(BOWL_ROOT_DIRECTORY);
-        if (failed < 0)
-                return bowl_fail(BOWL_ROOT_DIRECTORY, failed);
+        return_if(failed < 0, bowl_fail(BOWL_ROOT_DIRECTORY, failed));
 
         if (!bowl_has(distro->root, distro->marker))
         {
@@ -5293,12 +5250,10 @@ static b32 bowl_setup(positive count, string_address address_to arguments)
 {
         const struct bowl_distro address_to distro;
 
-        if (count != 3)
-                return bowl_usage();
+        return_if(count != 3, bowl_usage());
 
         distro = bowl_find_distro(arguments[2]);
-        if (!distro)
-                return bowl_refuse("known setups: arch alpine debian fedora nix\n");
+        return_if(!distro, bowl_refuse("known setups: arch alpine debian fedora nix\n"));
 
         if (bowl_setup_become_root("setup", distro->name, null))
                 return 1;
@@ -5534,12 +5489,10 @@ static b32 bowl_profile_expose(string_address root, string_address name)
                 return bowl_refuse("bowl path is too long\n");
 
         failed = bowl_mkdir_parents(state);
-        if (failed < 0)
-                return bowl_fail(state, failed);
+        return_if(failed < 0, bowl_fail(state, failed));
 
         marker = bowl_profile_marker_open(marker_path);
-        if (marker < 0)
-                return bowl_fail(marker_path, marker);
+        return_if(marker < 0, bowl_fail(marker_path, marker));
 
         bowl_quiet = true;
         for (positive at = 0; bowl_profile_bins[at]; at++)
@@ -5607,8 +5560,7 @@ static b32 bowl_profile_script(const struct bowl_profile address_to profile)
         handle = system_open_at_mode(AT_FDCWD, path,
                                      FILE_WRITE | FILE_EXCLUSIVE | O_CLOEXEC,
                                      0755);
-        if (handle < 0)
-                return bowl_fail(path, handle);
+        return_if(handle < 0, bowl_fail(path, handle));
         if (system_write_all((positive)handle, text, used) != used)
         {
                 system_close(handle);
@@ -5898,10 +5850,8 @@ bowl_profile_main(positive count, string_address address_to arguments)
 
         words = bowl_profile_words(count, arguments, address_of profile,
                                    address_of remove);
-        if (words == BOWL_PROFILE_WORDS_USAGE)
-                return bowl_usage();
-        if (words == BOWL_PROFILE_WORDS_UNKNOWN)
-                return bowl_refuse("known profiles: desktop\n");
+        return_if(words == BOWL_PROFILE_WORDS_USAGE, bowl_usage());
+        return_if(words == BOWL_PROFILE_WORDS_UNKNOWN, bowl_refuse("known profiles: desktop\n"));
 
         if (bowl_setup_become_root("profile", profile->name,
                                    remove ? "remove" : "install"))
@@ -5923,8 +5873,7 @@ static b32 bowl_main()
         bool isolated_told = false;
         p8 launcher_root[BOWL_PATH_LIMIT];
 
-        if (!arguments || count < 2)
-                return bowl_usage();
+        return_if(!arguments || count < 2, bowl_usage());
 
         if (string_equals(arguments[1], "setup"))
                 return bowl_setup(count, arguments);
@@ -5949,8 +5898,7 @@ static b32 bowl_main()
         else if (arguments[1][0] == '-' && arguments[1][1] == '-')
                 return bowl_usage();
 
-        if (root_at >= count)
-                return bowl_usage();
+        return_if(root_at >= count, bowl_usage());
 
         root = arguments[root_at];
 

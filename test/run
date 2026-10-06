@@ -11896,7 +11896,7 @@ same 'a named machine failure never clears the retirement count' '1:1' \
 
 hook_return=$(grep -c 'return build_run("sh", "-c", value, null);' \
         src/build/build.c)
-hook_gates=$(grep -E -c 'if \(build_shell_key\("(pre|post)"\)\)' \
+hook_gates=$(grep -E -c '(if \(|return_if\()build_shell_key\("(pre|post)"\)' \
         src/build/build.c)
 same 'build hooks gate success' '1:2' "$hook_return:$hook_gates"
 

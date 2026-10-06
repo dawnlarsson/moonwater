@@ -32,11 +32,7 @@ static bipolar net_resolve_v4(string_address name, p32 address_to found,
         the diagnostic with status 1, and the text stream closed the way
         every return of these tools closes it. */
 #define text_refuse(condition, message) \
-        do \
-        { \
-                if (condition) \
-                        return text_done(string_diagnostic(&text_diagnostic, 1, null, message)); \
-        } while (0)
+        return_if(condition, text_done(string_diagnostic(&text_diagnostic, 1, null, message)))
 
 /* coreutils' complaint about a surplus word, with the usage hint. */
 static b32 tools_extra_operand(string_address program, string_address word)
@@ -96,8 +92,7 @@ static b32 tools_hostid()
 {
         tools_taking("hostid", tools_no_options);
 
-        if (!file_take(address_of taking))
-                return text_done(1);
+        return_if(!file_take(address_of taking), text_done(1));
 
         if (taking.first < (positive)program_argument_count())
                 return tools_extra_operand("hostid",
@@ -1202,8 +1197,7 @@ static b32 tools_logger()
         logger_seen_rfc_time = true;
         logger_seen_rfc_quality = true;
         logger_seen_rfc_host = true;
-        if (!file_take(address_of taking) || file_operand_failed)
-                return text_done(1);
+        return_if(!file_take(address_of taking) || file_operand_failed, text_done(1));
 
         logger_control control = {
             .handle = -1,
@@ -1320,12 +1314,10 @@ static b32 tools_logger()
         utility_arena.used = 0;
         control.workspace = (p8 address_to)utility_arena_take(
             LOGGER_HEADER_ROOM + control.maximum + 2);
-        if (!control.workspace)
-                return text_done(1);
+        return_if(!control.workspace, text_done(1));
         control.body = control.workspace + LOGGER_HEADER_ROOM;
 
-        if (!logger_connect(address_of control))
-                return text_done(1);
+        return_if(!logger_connect(address_of control), text_done(1));
 
         bool answer;
         if (file_operand_count)
@@ -2111,8 +2103,7 @@ static b32 tools_write()
 {
         tools_taking("write", login_write_options);
 
-        if (!file_take(address_of taking))
-                return text_done(1);
+        return_if(!file_take(address_of taking), text_done(1));
         b32 meta;
         if (login_message_meta(address_of taking, "user [ttyname]",
                                address_of meta))
@@ -2308,8 +2299,7 @@ static fn login_wall_banner(login_message_sink address_to sink)
 static b32 tools_wall()
 {
         tools_taking("wall", login_wall_options);
-        if (!file_take(address_of taking))
-                return text_done(1);
+        return_if(!file_take(address_of taking), text_done(1));
         b32 meta;
         if (login_message_meta(address_of taking,
                                "[options] [file | message]",
@@ -2642,8 +2632,7 @@ static b32 tools_utmpdump()
                         system_close(login_utmpdump_output);
                 return text_done(1);
         }
-        if (file_meta(address_of taking, "[options] [filename]", text_put))
-                return text_done(0);
+        return_if(file_meta(address_of taking, "[options] [filename]", text_put), text_done(0));
         text_refuse(taking.flags & FILE_FLAG('r'), "reverse import is not supported; binary login state is never mutated");
         text_refuse(taking.flags & FILE_FLAG('f'), "follow mode is not supported");
 
@@ -3214,8 +3203,7 @@ static b32 tools_last()
         // last -3 is the line limit said without its letter.
         tools_taking("last", login_last_arguments, .operand = file_operand,
                      .digits = 'n', .seen = login_last_seen);
-        if (!file_take(address_of taking) || file_operand_failed)
-                return text_done(1);
+        return_if(!file_take(address_of taking) || file_operand_failed, text_done(1));
         if (file_meta(address_of taking, "[options] [username|tty ...]", text_put))
                 return text_done(0);
         text_refuse(taking.flags & FILE_FLAG('d'), "DNS lookup is not supported");
@@ -3463,8 +3451,7 @@ static b32 tools_last()
         /*      With no time asked for there is no line to say when the
                 database begins, and the blank line that would have stood
                 above it goes with it. */
-        if (login_last.time_format == LOGIN_LAST_TIME_NONE)
-                return text_done(0);
+        return_if(login_last.time_format == LOGIN_LAST_TIME_NONE, text_done(0));
         text_put_character('\n');
         p8 beginning_text[64];
         positive beginning_length =
@@ -3718,11 +3705,9 @@ static b32 tools_who()
         tools_taking("who", login_who_arguments, .operand = file_operand);
         memory_fill(address_of login_who, 0, sizeof(login_who));
 
-        if (!file_take(address_of taking) || file_operand_failed)
-                return text_done(1);
+        return_if(!file_take(address_of taking) || file_operand_failed, text_done(1));
 
-        if (file_operand_count > 2)
-                return tools_extra_operand("who", file_operand_at(2));
+        return_if(file_operand_count > 2, tools_extra_operand("who", file_operand_at(2)));
 
         positive flags = taking.flags;
         bool all = (flags & FILE_FLAG('a')) != 0;
@@ -3767,9 +3752,7 @@ static b32 tools_who()
                                   : (string_address)LOGIN_UTMP_PATH;
         bool default_path = file_operand_count != 1;
 
-        if (!login_records(path, default_path, true,
-                           login_who_visit))
-                return text_done(1);
+        return_if(!login_records(path, default_path, true, login_who_visit), text_done(1));
 
         if (login_who.count)
         {
@@ -3825,19 +3808,15 @@ static b32 tools_users()
         utility_arena.used = 0;
         login_users_head = null;
 
-        if (!file_take(address_of taking) || file_operand_failed)
-                return text_done(1);
-        if (file_operand_count > 1)
-                return tools_extra_operand("users", file_operand_at(1));
+        return_if(!file_take(address_of taking) || file_operand_failed, text_done(1));
+        return_if(file_operand_count > 1, tools_extra_operand("users", file_operand_at(1)));
 
         string_address path = file_operand_count
                                   ? file_operand_at(0)
                                   : (string_address)LOGIN_UTMP_PATH;
         bool default_path = !file_operand_count;
 
-        if (!login_records(path, default_path, true,
-                           login_users_visit))
-                return text_done(1);
+        return_if(!login_records(path, default_path, true, login_users_visit), text_done(1));
 
         for (login_name address_to node = login_users_head; node;
              node = node->next)
@@ -4127,8 +4106,7 @@ static b32 tools_pinky()
             .idle = true,
         };
 
-        if (!file_take(address_of taking) || file_operand_failed)
-                return text_done(1);
+        return_if(!file_take(address_of taking) || file_operand_failed, text_done(1));
 
         positive flags = taking.flags;
 
@@ -4238,8 +4216,7 @@ static b32 tools_logname()
                 }
         }
 
-        if (!found)
-                return string_report(log_error, 1, "logname: no login name\n");
+        refuse_if(!found, 1, "logname: no login name\n");
 
         file_line(name);
         log_flush();
@@ -4402,8 +4379,7 @@ static b32 tools_tsort()
         tools_taking("tsort", tsort_options);
         utility_arena.used = 0;
 
-        if (!file_take(address_of taking))
-                return text_done(1);
+        return_if(!file_take(address_of taking), text_done(1));
 
         positive arguments = (positive)program_argument_count() - taking.first;
 
@@ -4453,8 +4429,7 @@ static b32 tools_tsort()
         if (close_input)
                 system_close(input);
 
-        if (!bytes)
-                return text_done(1);
+        return_if(!bytes, text_done(1));
 
         positive tokens = 0;
         bool inside = false;
@@ -4481,8 +4456,7 @@ static b32 tools_tsort()
 
         if (tokens & 1)
                 return text_done(string_diagnostic(&text_diagnostic, 1, path, "input contains an odd number of tokens"));
-        if (!tokens)
-                return text_done(0);
+        return_if(!tokens, text_done(0));
 
         /* Every relation can introduce two nodes.  These checks make every
            subsequent product and signed graph index representable before an
@@ -4515,8 +4489,7 @@ static b32 tools_tsort()
         p8 address_to graph = (p8 address_to)utility_arena_take(
             node_bytes + edge_bytes + bucket_bytes);
 
-        if (!graph)
-                return text_done(1);
+        return_if(!graph, text_done(1));
 
         tsort_nodes = (tsort_node address_to)graph;
         tsort_edges = (tsort_edge address_to)(graph + node_bytes);
@@ -4578,8 +4551,7 @@ static b32 tools_tsort()
                                    ? order + tsort_node_count
                                    : null;
 
-        if (!order)
-                return text_done(1);
+        return_if(!order, text_done(1));
 
         for (positive i = 0; i < tsort_node_count; i++)
                 order[i] = (b32)i;
@@ -6198,8 +6170,7 @@ static b32 tools_text_done(b32 code)
 {
         text_flush();
 
-        if (!text_out_failed)
-                return text_done(code);
+        return_if(!text_out_failed, text_done(code));
 
         bipolar reason = text_out_error ? text_out_error : -ERROR_INPUT_OUTPUT;
 
@@ -6233,8 +6204,7 @@ static b32 tools_numfmt()
             .to_unit = 1,
         };
 
-        if (!file_take(address_of taking) || file_operand_failed)
-                return text_done(1);
+        return_if(!file_take(address_of taking) || file_operand_failed, text_done(1));
 
         numfmt_locale();
 
@@ -7824,8 +7794,7 @@ static b32 tools_factor()
         file_operands_begin();
         tools_taking("factor", factor_options, .operand = file_operand);
 
-        if (!file_take(address_of taking) || file_operand_failed)
-                return text_done(1);
+        return_if(!file_take(address_of taking) || file_operand_failed, text_done(1));
 
         bool exponents = (taking.flags & FILE_FLAG('h')) != 0;
         bool failed = false;
@@ -7845,8 +7814,7 @@ static b32 tools_factor()
         {
                 text_reader input;
 
-                if (!text_reader_open(address_of input, null))
-                        return text_done(1);
+                return_if(!text_reader_open(address_of input, null), text_done(1));
 
                 //      A token is kept whole whatever its length, as GNU
                 //      keeps it, so a long word that is no number is named
@@ -8080,8 +8048,7 @@ static b32 tools_uuidgen()
                      .operand = file_operand);
         utility_arena.used = 0;
 
-        if (!file_take(address_of taking) || file_operand_failed)
-                return text_done(1);
+        return_if(!file_take(address_of taking) || file_operand_failed, text_done(1));
 
         positive flags = taking.flags;
         string_address namespace = file_option_value(address_of taking, 'n');
@@ -8132,8 +8099,7 @@ static b32 tools_uuidgen()
                 return text_done(0);
         }
 
-        if (!count)
-                return text_done(0);
+        return_if(!count, text_done(0));
 
         file_random_state random;
         text_refuse(!file_random_seed(address_of random), "kernel random source failed");
@@ -8357,8 +8323,7 @@ static b32 tools_mcookie()
 {
         tools_taking("mcookie", tools_mcookie_options,
                      .seen = tools_mcookie_seen);
-        if (!file_take(address_of taking))
-                return text_done(1);
+        return_if(!file_take(address_of taking), text_done(1));
 
         positive maximum = 4096;
         string_address maximum_text = file_option_value(address_of taking, 'm');
@@ -12324,8 +12289,7 @@ static b32 dump_run(positive first, positive count)
         p8 stack_previous[DUMP_BLOCK];
         positive width = dump_arguments.width;
 
-        if (!dump_wide_ready(width))
-                return text_done(1);
+        return_if(!dump_wide_ready(width), text_done(1));
 
         p8 address_to block = width > DUMP_BLOCK ? dump_wide.bytes : stack_block;
 
@@ -12709,8 +12673,7 @@ static b32 tools_od(void)
         dump_od_type_failed = false;
         dump_od_warn_unit = 0;
 
-        if (!file_take(address_of taking) || dump_od_type_failed)
-                return text_done(1);
+        return_if(!file_take(address_of taking) || dump_od_type_failed, text_done(1));
 
         if (taking.flags & FILE_FLAG('w'))
         {
@@ -12773,8 +12736,7 @@ static b32 tools_od(void)
                         operands--;
                 }
 
-                if (failed)
-                        return text_done(1);
+                return_if(failed, text_done(1));
         }
 
         if (traditional && operands > 1)
@@ -12813,8 +12775,7 @@ static b32 tools_hexdump(void)
         dump_arguments.address_base = 16;
         dump_arguments.address_width = 7;
 
-        if (!file_take(address_of taking))
-                return text_done(1);
+        return_if(!file_take(address_of taking), text_done(1));
 
         /* --color only interprets the specifiers of a custom -e format, and
            the stock displays carry none, so the mode is checked and inert. */
@@ -14732,8 +14693,7 @@ static b32 tools_diff(void)
         diff_titled = false;
         utility_arena.used = 0;
 
-        if (!file_take(address_of taking))
-                return text_done(2);
+        return_if(!file_take(address_of taking), text_done(2));
 
         positive flags = taking.flags;
         b32 first = (b32)taking.first;
@@ -14745,8 +14705,7 @@ static b32 tools_diff(void)
 
         diff_switches = (p8 address_to)utility_arena_take(switches_room);
 
-        if (!diff_switches)
-                return text_done(2);
+        return_if(!diff_switches, text_done(2));
 
         diff_icase = (flags & FILE_FLAG('i')) != 0;
         diff_blank_lines = (flags & FILE_FLAG('B')) != 0;
@@ -14850,8 +14809,7 @@ static b32 tools_diff(void)
         {
                 joined = diff_path(left, file_last_component(right));
 
-                if (!joined)
-                        return text_done(2);
+                return_if(!joined, text_done(2));
 
                 left = joined;
         }
@@ -14859,8 +14817,7 @@ static b32 tools_diff(void)
         {
                 joined = diff_path(right, file_last_component(left));
 
-                if (!joined)
-                        return text_done(2);
+                return_if(!joined, text_done(2));
 
                 right = joined;
         }
@@ -16538,8 +16495,7 @@ static b32 tools_dmesg_read_file(tools_dmesg_state address_to state,
         p8 address_to bytes = utility_arena_read_all(
             (positive)handle, 16384, address_of length, address_of failed);
         system_close(handle);
-        if (!bytes)
-                return text_done(1);
+        return_if(!bytes, text_done(1));
 
         // util-linux maps the file, and an empty one cannot be mapped.
         if (!length)
@@ -16619,8 +16575,7 @@ static b32 tools_dmesg_main()
 {
         tools_taking("dmesg", tools_dmesg_options);
         utility_arena.used = 0;
-        if (!file_take(address_of taking))
-                return text_done(1);
+        return_if(!file_take(address_of taking), text_done(1));
         if (taking.first != (positive)program_argument_count())
                 return text_done(string_diagnostic(&text_diagnostic, 1, program_argument((b32)taking.first), "extra operand"));
         if (file_meta(address_of taking, "[options]\n"
@@ -16785,8 +16740,7 @@ static b32 tools_dmesg_main()
                 capacity = size > 0 ? (positive)size : 16384;
         }
         p8 address_to buffer = (p8 address_to)utility_arena_take(capacity + 1);
-        if (!buffer)
-                return text_done(1);
+        return_if(!buffer, text_done(1));
         b32 action = (flags & FILE_FLAG('c')) ? DMESG_READ_CLEAR
                                               : DMESG_READ_ALL;
         bipolar got = system_call_3(syscall(syslog), action,
@@ -17307,8 +17261,7 @@ static b32 util_linux_bits()
         };
 
         text_begin("bits");
-        if (!file_take(address_of taking) || file_operand_failed)
-                return text_done(1);
+        return_if(!file_take(address_of taking) || file_operand_failed, text_done(1));
         if (file_meta(address_of taking, "[-m|-g|-b|-l] [-w BITS] [MASK_OR_LIST ...]", text_put))
                 return text_done(0);
 
@@ -17345,8 +17298,7 @@ static b32 util_linux_bits()
         utility_arena.used = 0;
         positive address_to result = (positive address_to)utility_arena_take(
             words * 2 * sizeof(positive));
-        if (!result)
-                return text_done(1);
+        return_if(!result, text_done(1));
         positive address_to scratch = result + words;
         memory_fill(result, 0, words * sizeof(*result));
 
@@ -17360,8 +17312,7 @@ static b32 util_linux_bits()
         else
         {
                 text_delimiter = '\n';
-                if (!text_open(null))
-                        return text_done(1);
+                return_if(!text_open(null), text_done(1));
                 while (text_line_next(text_line, 0))
                 {
                         while (text_line_length &&
@@ -17376,8 +17327,7 @@ static b32 util_linux_bits()
                         }
                 }
                 text_close();
-                if (text_status)
-                        return text_done(text_status);
+                return_if(text_status, text_done(text_status));
         }
 
         positive bytes = width / 8 + (width % 8 != 0);
@@ -17542,8 +17492,7 @@ static b32 ul_exec(positive first, string_address program)
 {
         positive count = (positive)program_argument_count();
 
-        if (first >= count)
-                return string_report(log_error, 1, "%s: %s\n", program, "no command specified");
+        refuse_if(first >= count, 1, "%s: %s\n", program, "no command specified");
 
         return ul_exec_words(program_argument_list() + first, program);
 }
@@ -17608,11 +17557,7 @@ static bool ul_options_done(file_taking address_to taking, string_address syntax
 /*      "name: reason" on standard error and the status 1, when the condition
         holds: what most of a program's refusals of its own options say. */
 #define tools_refuse(condition, program, message) \
-        do \
-        { \
-                if (condition) \
-                        return string_report(log_error, 1, "%s: %s\n", program, message); \
-        } while (0)
+        refuse_if(condition, 1, "%s: %s\n", program, message)
 
 /*      Nearly every one of them opens the same way: its name, the table of
         options it answers and the syntax line its --help prints, then the
@@ -17778,9 +17723,7 @@ static b32 ul_renice_one(string_address operand, b32 which,
             !ul_unsigned(operand, b32_max, address_of id))
         {
                 bipolar named = file_user_id(operand);
-                if (named < 0)
-                        return string_report(log_error, 1, "renice: unknown user %s\n",
-                                      operand);
+                refuse_if(named < 0, 1, "renice: unknown user %s\n", operand);
                 id = (positive)named;
         }
         else if (!ul_unsigned(operand, b32_max, address_of id))
@@ -18946,8 +18889,7 @@ static b32 util_linux_flock()
         }
 
         positive count = (positive)program_argument_count();
-        if (taking.first >= count)
-                return ul_flock_usage();
+        return_if(taking.first >= count, ul_flock_usage());
 
         /* ul_flock_seen refused every malformed -E, -w, -S and -N already;
            what survives here parses. */
@@ -18995,8 +18937,7 @@ static b32 util_linux_flock()
             (string_equals(program_argument((b32)taking.first + 1), "-c") ||
              string_equals(program_argument((b32)taking.first + 1), "--command")))
         {
-                if (taking.first + 3 != count)
-                        return ul_flock_usage();
+                return_if(taking.first + 3 != count, ul_flock_usage());
                 command_text = program_argument((b32)taking.first + 2);
                 command_option = true;
         }
@@ -19379,7 +19320,7 @@ static b32 util_linux_setarch()
                 string_address shown = file_option_value(address_of taking, 's');
                 return ul_setarch_show(shown, shown ? 0 : pid);
         }
-        if (pid) return string_report(log_error, 1, "%s: %s\n", "setarch", "use -p/--pid option with --show option");
+        refuse_if(pid, 1, "%s: %s\n", "setarch", "use -p/--pid option with --show option");
 
         p32 personality = taking.flags & FILE_FLAG('u') ? UL_UNAME26 : 0, bit;
         string_address name;
@@ -19393,7 +19334,7 @@ static b32 util_linux_setarch()
                 positive i;
                 for (i = 0; ul_arches[i].name; i++)
                         if (string_equals(arch, ul_arches[i].name)) { personality |= ul_arches[i].personality; break; }
-                if (!ul_arches[i].name) { return string_report(log_error, 1, "setarch: %s: Unrecognized architecture\n", arch); }
+                refuse_if(!ul_arches[i].name, 1, "setarch: %s: Unrecognized architecture\n", arch);
         }
 
         bipolar changed = system_call_1(syscall(personality), personality);
@@ -19837,7 +19778,7 @@ static COLD __attribute__((noinline)) b32 ul_setpriv_dump(positive dumps)
         bipolar nnp = ul_prctl(UL_PR_GET_NO_NEW_PRIVS, 0, 0);
         string_format(log, "no_new_privs: %b\n", nnp);
         p64 caps[5];
-        if (!ul_cap_status(caps)) return string_report(log_error, 1, "%s: %s\n", "setpriv", "cannot read capability state");
+        refuse_if(!ul_cap_status(caps), 1, "%s: %s\n", "setpriv", "cannot read capability state");
         if (dumps >= 2)
         {
                 log("Effective capabilities: ", 24); ul_caps_say(caps[0]);
@@ -20409,8 +20350,7 @@ static b32 tools_uuidparse()
         file_operands_begin();
         tools_taking("uuidparse", tools_uuidparse_options,
                      .operand = file_operand);
-        if (!file_take(address_of taking) || file_operand_failed)
-                return text_done(1);
+        return_if(!file_take(address_of taking) || file_operand_failed, text_done(1));
 
         bool json = (taking.flags & FILE_FLAG('J')) != 0;
         bool noheadings = (taking.flags & FILE_FLAG('n')) != 0;
@@ -20424,8 +20364,7 @@ static b32 tools_uuidparse()
         positive column_count = 4;
         string_address output = file_option_value(address_of taking, 'o');
         // util-linux fails an empty list without a word.
-        if (output && !string_get(output))
-                return text_done(1);
+        return_if(output && !string_get(output), text_done(1));
         column_count = output ? 0 : 4;
         if (output && !name_list_select(output, tools_uuid_definitions, sizeof(tools_uuid_definitions[0]),
                                         array_count(tools_uuid_definitions), columns, address_of column_count,
@@ -20863,8 +20802,8 @@ static b32 util_linux_lsclocks()
         };
         b32 answer;
         text_begin("lsclocks");
-        if (!file_take(address_of taking)) return text_done(1);
-        if (ul_meta(address_of taking, "[options]", address_of answer)) return text_done(answer);
+        return_if(!file_take(address_of taking), text_done(1));
+        return_if(ul_meta(address_of taking, "[options]", address_of answer), text_done(answer));
         if (taking.first < (positive)program_argument_count())
                 return text_done(string_diagnostic(address_of text_diagnostic, 1, program_argument((b32)taking.first), "unexpected operand"));
 
@@ -20924,7 +20863,7 @@ static b32 util_linux_lsclocks()
         utility_arena.used = 0;
         ul_lsclock_row address_to rows = utility_arena_take(
             UL_LSCLOCK_ROWS * sizeof(*rows));
-        if (!rows) return text_done(1);
+        return_if(!rows, text_done(1));
         positive count = 0;
         for (positive at = 0; at < array_count(ul_lsclock_system); at++)
                 if (!ul_lsclock_add_posix(rows, address_of count,
@@ -21040,8 +20979,7 @@ static b32 util_linux_lsns()
             (ul_lsns_entry address_to)utility_arena_take(
                 capacity * sizeof(ul_lsns_entry));
 
-        if (!entries)
-                return text_done(1);
+        return_if(!entries, text_done(1));
 
         positive used = 0;
         p64 task_inodes[UL_NS_COUNT] = {0};
@@ -21080,8 +21018,7 @@ static b32 util_linux_lsns()
                     (ul_lsns_entry address_to)utility_arena_take(
                         used * sizeof(ul_lsns_entry));
 
-                if (!spare)
-                        return text_done(1);
+                return_if(!spare, text_done(1));
                 entries = array_merge_sort(entries, spare, used,
                                            ul_lsns_order);
         }
@@ -21459,16 +21396,14 @@ static b32 util_linux_lslocks()
         p8 address_to input = utility_arena_read_all(
             (positive)handle, 4096, address_of length, address_of read_failed);
         system_close(handle);
-        if (!input)
-                return text_done(1);
+        return_if(!input, text_done(1));
 
         positive lines = memory_count(input, length, '\n') +
                          (length && input[length - 1] != '\n');
         ul_lslocks_entry address_to locks =
             (ul_lslocks_entry address_to)utility_arena_take(
                 lines * sizeof(ul_lslocks_entry));
-        if (!locks && lines)
-                return text_done(1);
+        return_if(!locks && lines, text_done(1));
 
         positive count = 0;
         p8 address_to cursor = input;
@@ -22994,9 +22929,7 @@ static b32 util_linux_setsid()
 
                 log_flush();
                 child = system_fork();
-                if (child < 0)
-                        return string_report(log_error, 1, "setsid: fork: %s\n",
-                                      file_reason(child));
+                refuse_if(child < 0, 1, "setsid: fork: %s\n", file_reason(child));
                 if (child > 0)
                 {
                         if (!waiting)
@@ -23009,9 +22942,7 @@ static b32 util_linux_setsid()
         }
 
         answer = (b32)system_call(syscall(setsid));
-        if (answer < 0)
-                return string_report(log_error, 1, "setsid: setsid failed: %s\n",
-                              file_reason(answer));
+        refuse_if(answer < 0, 1, "setsid: setsid failed: %s\n", file_reason(answer));
 
         if ((taking.flags & FILE_FLAG('c')) &&
             system_control(0, UL_TIOCSCTTY, 1) < 0)
@@ -23032,9 +22963,7 @@ static b32 util_linux_setpgid()
         tools_refuse(taking.first >= (positive)program_argument_count(), "setpgid", "no command specified");
 
         changed = system_call_2(syscall(setpgid), 0, 0);
-        if (changed < 0)
-                return string_report(log_error, 1, "setpgid: setpgid failed: %s\n",
-                              file_reason(changed));
+        refuse_if(changed < 0, 1, "setpgid: setpgid failed: %s\n", file_reason(changed));
 
         if (taking.flags & FILE_FLAG('f'))
         {
@@ -23227,19 +23156,14 @@ static b32 util_linux_fallocate()
             AT_FDCWD, path,
             FILE_READ_WRITE | (create ? FILE_CREATE : 0), 0666);
 
-        if (handle < 0)
-                return string_report(log_error, 1, "fallocate: cannot open %s: %s\n",
-                              path, file_reason(handle));
+        refuse_if(handle < 0, 1, "fallocate: cannot open %s: %s\n", path, file_reason(handle));
 
         bipolar done = system_call_4(syscall(fallocate), (positive)handle,
                                      mode, offset, length);
         bipolar closed = system_close(handle);
 
-        if (done < 0)
-                return string_report(log_error, 1, "fallocate: fallocate failed: %s\n",
-                              file_reason(done));
-        if (closed < 0)
-                return string_report(log_error, 1, "fallocate: write failed: %s\n", path);
+        refuse_if(done < 0, 1, "fallocate: fallocate failed: %s\n", file_reason(done));
+        refuse_if(closed < 0, 1, "fallocate: write failed: %s\n", path);
 
         if (flags & FILE_FLAG('v'))
         {
@@ -23381,10 +23305,7 @@ static b32 util_linux_copyfilerange()
         file_facts facts;
         bipolar in = system_open_at(AT_FDCWD, source, FILE_READ);
 
-        if (in < 0)
-                return string_report(log_error, 1,
-                              "copyfilerange: cannot open source %s: %s\n",
-                              source, file_reason(in));
+        refuse_if(in < 0, 1, "copyfilerange: cannot open source %s: %s\n", source, file_reason(in));
         if (!file_look(in, (string_address)"", AT_EMPTY_PATH,
                        address_of facts))
         {
@@ -23538,9 +23459,7 @@ static b32 util_linux_fadvise()
         if (close_handle)
                 system_close(handle);
 
-        if (answer < 0)
-                return string_report(log_error, 1, "fadvise: failed to advise: %s\n",
-                              file_reason(answer));
+        refuse_if(answer < 0, 1, "fadvise: failed to advise: %s\n", file_reason(answer));
 
         return 0;
 }
@@ -23585,9 +23504,7 @@ static b32 ul_ionice_get(b32 which, b32 id)
         b32 class;
         b32 data;
 
-        if (raw < 0)
-                return string_report(log_error, 1, "ionice: ioprio_get failed: %s\n",
-                              file_reason(raw));
+        refuse_if(raw < 0, 1, "ionice: ioprio_get failed: %s\n", file_reason(raw));
 
         class = (b32)((positive)raw >> UL_IOPRIO_SHIFT);
         data = (b32)((positive)raw & UL_IOPRIO_DATA_MASK);
@@ -24642,8 +24559,7 @@ static b32 ul_partition_program(string_address program, b32 operation)
         positive count = (positive)program_argument_count();
         positive wanted = operation == UL_BLKPG_ADD ? 4
                           : operation == UL_BLKPG_DELETE ? 2 : 3;
-        if (count - taking.first != wanted)
-                return ul_usage_error(program, "not enough arguments");
+        return_if(count - taking.first != wanted, ul_usage_error(program, "not enough arguments"));
 
         string_address device = program_argument((b32)taking.first);
         positive partition;
@@ -24667,9 +24583,7 @@ static b32 ul_partition_program(string_address program, b32 operation)
 
         bipolar handle = system_open_at(AT_FDCWD, device,
                                         FILE_READ | O_CLOEXEC);
-        if (handle < 0)
-                return string_report(log_error, 1, "%s: cannot open %s: %s\n",
-                              program, device, file_reason(handle));
+        refuse_if(handle < 0, 1, "%s: cannot open %s: %s\n", program, device, file_reason(handle));
         if (operation == UL_BLKPG_RESIZE &&
             !ul_block_start(handle, partition, address_of start))
         {
@@ -24908,9 +24822,7 @@ static b32 ul_blockdev_one(string_address path, ul_blockdev_run address_to run)
 {
         bipolar handle = system_open_at(AT_FDCWD, path,
                                         FILE_READ | O_CLOEXEC);
-        if (handle < 0)
-                return string_report(log_error, 1, "blockdev: cannot open %s: %s\n",
-                              path, file_reason(handle));
+        refuse_if(handle < 0, 1, "blockdev: cannot open %s: %s\n", path, file_reason(handle));
 
         for (positive at = 0; at < run->count; at++)
         {
@@ -25058,8 +24970,7 @@ static b32 util_linux_blockdev()
         positive count = (positive)program_argument_count();
         /* Nothing at all is not enough arguments; anything else that names
            no device is a device that was not named. */
-        if (count < 2)
-                return ul_usage_error("blockdev", "not enough arguments");
+        return_if(count < 2, ul_usage_error("blockdev", "not enough arguments"));
         if (!report && taking.first == count)
                 return ul_usage_error("blockdev", "no device specified");
         tools_refuse(report && run.count, "blockdev", "--report cannot be combined with commands");
@@ -25576,9 +25487,7 @@ static b32 util_linux_mkswap()
         string_address path = program_argument((b32)taking.first);
         bipolar handle = system_open_at(AT_FDCWD, path,
                                         FILE_READ_WRITE | O_CLOEXEC);
-        if (handle < 0)
-                return string_report(log_error, 1, "mkswap: cannot open %s: %s\n",
-                              path, file_reason(handle));
+        refuse_if(handle < 0, 1, "mkswap: cannot open %s: %s\n", path, file_reason(handle));
 
         file_facts facts;
         if (!file_look(handle, "", AT_EMPTY_PATH, address_of facts) ||
@@ -25712,9 +25621,7 @@ static b32 util_linux_swaplabel()
         bipolar handle = system_open_at(
             AT_FDCWD, path,
             (changing ? FILE_READ_WRITE : FILE_READ) | O_CLOEXEC);
-        if (handle < 0)
-                return string_report(log_error, 1, "swaplabel: cannot open %s: %s\n",
-                              path, file_reason(handle));
+        refuse_if(handle < 0, 1, "swaplabel: cannot open %s: %s\n", path, file_reason(handle));
 
         file_facts facts;
         p8 bytes[STORAGE_PROBE_ROOM];
@@ -29175,9 +29082,7 @@ static b32 util_linux_ipcrm()
                         log_flush();
                         return 1;
                 }
-                if (count < 3)
-                        return string_report(log_error, 1, "%s: %s\n", "ipcrm",
-                                             "not enough arguments");
+                refuse_if(count < 3, 1, "%s: %s\n", "ipcrm", "not enough arguments");
                 taking.first++;
                 while (taking.first < count)
                         failed |= ul_ipcrm_remove(
@@ -29499,9 +29404,7 @@ static b32 util_linux_mesg()
 
                 if (first >= 'A' && first <= 'Z')
                         first = (p8)(first + ('a' - 'A'));
-                if (first != 'y' && first != 'n')
-                        return string_report(log_error, 1,
-                                      "mesg: invalid argument: %s\n", wanted);
+                refuse_if(first != 'y' && first != 'n', 1, "mesg: invalid argument: %s\n", wanted);
                 allowed = first == 'y';
         }
 
@@ -29891,9 +29794,7 @@ static b32 ul_rfkill_change(ul_rfkill_row address_to rows, positive count,
             (string_address)"/dev/rfkill");
         bipolar handle = system_open_at(AT_FDCWD, device,
                                         01 | O_CLOEXEC | O_NONBLOCK);
-        if (handle < 0)
-                return string_report(log_error, 1, "rfkill: cannot open %s: %s\n",
-                              device, file_reason(handle));
+        refuse_if(handle < 0, 1, "rfkill: cannot open %s: %s\n", device, file_reason(handle));
 
         bool toggle = string_equals(action, "toggle");
         bool block = string_equals(action, "block");
@@ -30343,8 +30244,7 @@ static b32 tools_fincore_main()
         tools_fincore_row address_to rows =
             (tools_fincore_row address_to)utility_arena_take(
                 file_operand_count * sizeof(*rows));
-        if (!rows)
-                return text_done(1);
+        return_if(!rows, text_done(1));
 
         positive count = 0;
         bool failed = false;

@@ -3411,8 +3411,7 @@ b32 storage_mountpoint(positive argc, string_address address_to argv,
                         show = true;
                 else if (option == ARGUMENT_OPERAND)
                 {
-                        if (path)
-                                return storage_mountpoint_usage(diagnostic);
+                        return_if(path, storage_mountpoint_usage(diagnostic));
                         path = value;
                 }
                 else
@@ -3423,8 +3422,7 @@ b32 storage_mountpoint(positive argc, string_address address_to argv,
                 }
         }
 
-        if (!path)
-                return storage_mountpoint_usage(diagnostic);
+        return_if(!path, storage_mountpoint_usage(diagnostic));
 
         if (devno && nofollow)
         {

@@ -2454,8 +2454,7 @@ fn shell_jobs(writer write, string_address input)
 
                                 at = walk.index;
 
-                                if (at >= shell_argc)
-                                        return shell_answer(0);
+                                return_if(at >= shell_argc, shell_answer(0));
 
                                 //      The command word names a job or it
                                 //      names a command; a spec among the
@@ -2601,8 +2600,7 @@ fn shell_fg(writer write, string_address input)
         string_address word = shell_argc > 1 ? shell_argv[1] : null;
         told = job_specified(word, address_of found);
 
-        if (told != JOB_SPEC_FOUND)
-                return shell_answer(job_spec_refused("fg", word, told, false));
+        return_if(told != JOB_SPEC_FOUND, shell_answer(job_spec_refused("fg", word, told, false)));
 
         entry = job_table + found;
         entry->background = false;
@@ -2630,8 +2628,7 @@ fn shell_bg(writer write, string_address input)
 
         (void)input;
 
-        if (!job_monitor())
-                return shell_answered(1, "%s: no job control\n", "bg");
+        return_if(!job_monitor(), shell_answered(1, "%s: no job control\n", "bg"));
 
         job_reap();
 
@@ -3012,8 +3009,7 @@ fn job_execute_tool(positive which, bool confined)
 {
         bipolar child;
 
-        if (!job_reserve(1, false))
-                return shell_answered(2, "No room to retain foreground job\n");
+        return_if(!job_reserve(1, false), shell_answered(2, "No room to retain foreground job\n"));
 
         log_flush();
         child = confined ? shell_clone() : shell_clone_raw();
@@ -3125,14 +3121,12 @@ fn shell_kill(writer write, string_address input)
                 else
                         number = kill_number(word + 1);
 
-                if (number < 0)
-                        return shell_answered(2, "kill: invalid signal\n");
+                return_if(number < 0, shell_answered(2, "kill: invalid signal\n"));
 
                 at++;
         }
 
-        if (at >= shell_argc)
-                return shell_answered(2, "kill: no process named\n");
+        return_if(at >= shell_argc, shell_answered(2, "kill: no process named\n"));
 
         job_reap();
 
@@ -3533,8 +3527,7 @@ fn job_wait(writer write, string_address input)
                             "wait: %s: invalid identifier\n", into);
         }
 
-        if (next)
-                return shell_answer(job_wait_next(force, into, first));
+        return_if(next, shell_answer(job_wait_next(force, into, first)));
 
         if (first >= shell_argc)
         {
@@ -3561,8 +3554,7 @@ fn job_wait(writer write, string_address input)
                                               address_of interrupted, true,
                                               shell_bash_compat);
 
-                        if (interrupted)
-                                return shell_answer(answer);
+                        return_if(interrupted, shell_answer(answer));
                 }
 
                 if (!waited_running)
@@ -3586,8 +3578,7 @@ fn job_wait(writer write, string_address input)
                                                       address_of interrupted,
                                                       true, true);
 
-                                if (interrupted)
-                                        return shell_answer(answer);
+                                return_if(interrupted, shell_answer(answer));
                         }
                 }
                 else if (shell_bash_compat)
@@ -5500,8 +5491,7 @@ fn shell_history(writer write, string_address input)
                         positive kept_first = history_first;
                         positive count;
 
-                        if (!named)
-                                return shell_answered(2, "history: -d wants an offset\n");
+                        return_if(!named, shell_answered(2, "history: -d wants an offset\n"));
 
                         //      start-end takes a range, either end counted
                         //      from the back when it is negative.
@@ -5572,8 +5562,7 @@ fn shell_history(writer write, string_address input)
                 {
                         string_address where = named ? named : path;
 
-                        if (!where)
-                                return shell_answered(1, "history: no history file\n");
+                        return_if(!where, shell_answered(1, "history: no history file\n"));
 
                         /* Restricted Bash permits its inherited HISTFILE but
                            does not let a command select another directory by
@@ -5593,9 +5582,7 @@ fn shell_history(writer write, string_address input)
                                 return shell_answer(
                                     history_write(where, 0, false) ? 0 : 1);
 
-                        if (letter == 'r')
-                                return shell_answer(history_read(where, 0) < 0
-                                                        ? 1 : 0);
+                        return_if(letter == 'r', shell_answer(history_read(where, 0) < 0 ? 1 : 0));
 
                         return shell_answer(
                             history_read(where, history_file_seen) < 0 ? 1 : 0);
@@ -5634,8 +5621,7 @@ fn shell_history(writer write, string_address input)
                 {
                         static byte_store joined;
 
-                        if (!shell_argv_joined(at + 1, address_of joined))
-                                return shell_answer(1);
+                        return_if(!shell_argv_joined(at + 1, address_of joined), shell_answer(1));
                         if (joined.used)
                                 history_hold((string_address)joined.bytes,
                                              joined.used);
@@ -5665,8 +5651,7 @@ fn shell_history(writer write, string_address input)
                             shell_argv[at]);
                 }
 
-                if (at + 1 < shell_argc)
-                        return shell_refuse(2, "history: too many arguments\n");
+                return_if(at + 1 < shell_argc, shell_refuse(2, "history: too many arguments\n"));
 
                 if (wanted < show)
                         show = wanted;
@@ -5912,10 +5897,7 @@ static b32 history_edit(writer write, string_address editor, positive first,
         b32 editor_status;
         bool wrote = true;
 
-        if (!history_edit_directory(path))
-                return string_report(log_error, 1,
-                                     "fc: cannot make private edit directory\n",
-                                     0);
+        refuse_if(!history_edit_directory(path), 1, "fc: cannot make private edit directory\n", 0);
 
         directory = system_open_at(
             AT_FDCWD, path,
@@ -6144,14 +6126,12 @@ fn shell_fc(writer write, string_address input)
                 // Nothing to work on is not a failure when nothing was asked
                 // for either: a shell with no history lists none and says so
                 // by saying nothing.
-                if (listing && at >= shell_argc)
-                        return shell_answer(0);
+                return_if(listing && at >= shell_argc, shell_answer(0));
 
                 //      Bash keeps quiet about an empty history whatever was
                 //      asked of it: there is no line to name, so there is
                 //      nothing it could say was not found.
-                if (shell_bash_compat)
-                        return shell_answer(0);
+                return_if(shell_bash_compat, shell_answer(0));
 
                 return shell_answered(1, "fc: no command found\n");
         }
@@ -6531,8 +6511,7 @@ static HOT bool exec_save_fd(b32 fd, parse_node address_to node)
         if (exec_child_root && node == parse_nodes + exec_child_root)
                 return true;
 
-        if (exec_save_count >= REDIRECT_SAVE_MAX)
-                return string_report(log_error, false, "Too many redirections\n");
+        refuse_if(exec_save_count >= REDIRECT_SAVE_MAX, false, "Too many redirections\n");
 
         /* A descriptor holding an outer save is about to be replaced --
            exec 10>&1 inside { ...; } > f -- so the save moves first, or the
@@ -6544,10 +6523,7 @@ static HOT bool exec_save_fd(b32 fd, parse_node address_to node)
 
                 bipolar moved = exec_save_duplicate(fd, node, 10);
 
-                if (moved < 0)
-                        return string_report(log_error, false,
-                                             "Cannot preserve descriptor %p\n",
-                                             (positive)fd);
+                refuse_if(moved < 0, false, "Cannot preserve descriptor %p\n", (positive)fd);
                 exec_saves[at].saved = (b32)moved;
         }
 
@@ -6566,9 +6542,7 @@ static HOT bool exec_save_fd(b32 fd, parse_node address_to node)
         // EBADF says there was nothing to restore. EINVAL/EMFILE say the
         // original is live but cannot be saved, and must never be treated as
         // a closed descriptor -- doing that closes it during restoration.
-        if (!closed && saved < 0)
-                return string_report(log_error, false, "Cannot preserve descriptor %p\n",
-                              (positive)fd);
+        refuse_if(!closed && saved < 0, false, "Cannot preserve descriptor %p\n", (positive)fd);
 
         if (!closed && shell_parser_source_active &&
             shell_parser_source_handle == fd)
@@ -6936,9 +6910,7 @@ static COLD b32 exec_redirect_refused(p8 op, string_address target,
 
         shell_diagnostic_where();
 
-        if (shell_bash_compat)
-                return string_report(log_error, false, "%w: %s\n",
-                                     writer_terminal_name, target, why);
+        refuse_if(shell_bash_compat, false, "%w: %s\n", writer_terminal_name, target, why);
 
         if (code == ERROR_NO_ENTRY)
                 why = reading ? (string_address) "No such file"
@@ -15805,12 +15777,9 @@ static b32 exec_coproc(b32 index)
         bipolar child;
         bool monitor = job_monitor();
 
-        if (name_length > EXEC_COPROC_NAME)
-                return string_report(log_error, 1, "coproc: %s: name too long\n", name);
+        refuse_if(name_length > EXEC_COPROC_NAME, 1, "coproc: %s: name too long\n", name);
 
-        if (!job_reserve(1, false))
-                return string_report(log_error, 2,
-                                     "No room to retain coprocess\n");
+        refuse_if(!job_reserve(1, false), 2, "No room to retain coprocess\n");
 
         /*      A second coprocess is not a warning. Bash warned while it
                 held one at a time; 5.3 holds as many as it is given and says
@@ -15972,9 +15941,7 @@ static b32 exec_pipe(b32 first, positive count, bool background,
 
         if (lastpipe)
         {
-                if (count > positive_max / 2)
-                        return string_report(log_error, 2,
-                                             "No room for pipeline\n");
+                refuse_if(count > positive_max / 2, 2, "No room for pipeline\n");
                 wanted += count;
         }
 

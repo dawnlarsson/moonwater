@@ -577,8 +577,7 @@ static bool gzip_inflate_align(gzip_inflater address_to z)
 {
         positive rewind = z->count >> 3;
 
-        if (rewind > z->input.at)
-                return gzip_inflate_fail(z, GZIP_WHY_FORMAT);
+        return_if(rewind > z->input.at, gzip_inflate_fail(z, GZIP_WHY_FORMAT));
         z->input.at -= rewind;
         z->bits = 0;
         z->count = 0;
@@ -591,8 +590,7 @@ static bool gzip_inflate_table(gzip_inflater address_to z, p32 address_to table,
 {
         bipolar built = gzip_huffman_cells(table, length, n, root, kind, look);
 
-        if (built < 0)
-                return gzip_inflate_fail(z, GZIP_WHY_FORMAT);
+        return_if(built < 0, gzip_inflate_fail(z, GZIP_WHY_FORMAT));
         return true;
 }
 
@@ -661,8 +659,7 @@ static bool gzip_inflate_dynamic(gzip_inflater address_to z)
                                 count = z->count;
                         }
                 }
-                if (count < look_pre)
-                        return gzip_inflate_fail(z, GZIP_WHY_EOF);
+                return_if(count < look_pre, gzip_inflate_fail(z, GZIP_WHY_EOF));
                 cell = z->precode[bits & 127];
                 take = cell & 255;
                 if ((cell & GZIP_CELL_EXCEPTIONAL) || take > count)
@@ -678,15 +675,13 @@ static bool gzip_inflate_dynamic(gzip_inflater address_to z)
                         continue;
                 }
                 width = symbol == 16 ? 2 : symbol == 17 ? 3 : 7;
-                if (count < width)
-                        return gzip_inflate_fail(z, GZIP_WHY_EOF);
+                return_if(count < width, gzip_inflate_fail(z, GZIP_WHY_EOF));
                 repeat = (positive)(bits & (((p64)1 << width) - 1));
                 bits >>= width;
                 count -= width;
                 if (symbol == 16)
                 {
-                        if (!at)
-                                return gzip_inflate_fail(z, GZIP_WHY_FORMAT);
+                        return_if(!at, gzip_inflate_fail(z, GZIP_WHY_FORMAT));
                         repeat += 3;
                         fill = last;
                 }
@@ -695,8 +690,7 @@ static bool gzip_inflate_dynamic(gzip_inflater address_to z)
                         repeat += symbol == 17 ? 3 : 11;
                         fill = 0;
                 }
-                if (at + repeat > nlit + ndist)
-                        return gzip_inflate_fail(z, GZIP_WHY_FORMAT);
+                return_if(at + repeat > nlit + ndist, gzip_inflate_fail(z, GZIP_WHY_FORMAT));
                 memory_fill(lengths + at, fill, repeat);
                 at += repeat;
                 last = fill;
@@ -704,8 +698,7 @@ static bool gzip_inflate_dynamic(gzip_inflater address_to z)
         z->bits = bits & (((p64)1 << count) - 1);
         z->count = count;
 
-        if (!lengths[256])
-                return gzip_inflate_fail(z, GZIP_WHY_FORMAT);
+        return_if(!lengths[256], gzip_inflate_fail(z, GZIP_WHY_FORMAT));
         return gzip_inflate_table(z, z->litlen, lengths, nlit, GZIP_LITLEN_ROOT, 1,
                                   address_of z->look_lit) &&
                gzip_inflate_table(z, z->offset, lengths + nlit, ndist, GZIP_OFFSET_ROOT, 2,
@@ -978,8 +971,7 @@ static bool gzip_inflate_skip_string(gzip_inflater address_to z, p32 address_to 
         do
         {
                 byte = gzip_head_byte(z, sum);
-                if (byte < 0)
-                        return gzip_inflate_fail(z, GZIP_WHY_EOF);
+                return_if(byte < 0, gzip_inflate_fail(z, GZIP_WHY_EOF));
         } while (byte);
         return true;
 }
@@ -1378,8 +1370,7 @@ static bool gzip_stream_decode(bipolar in, bipolar out)
         gzip_note = null;
         gzip_note_more = null;
         gzip_garbage = false;
-        if (!z)
-                return gzip_fail("gzip cannot map the decoder");
+        return_if(!z, gzip_fail("gzip cannot map the decoder"));
         for (;;)
         {
                 positive hold;
@@ -3650,8 +3641,7 @@ static bool gzip_batch_sink(address_any context, positive index, address_any dat
         gzip_stream_writer address_to w = (gzip_stream_writer address_to)context;
         positive n = gzip_batch_bytes(w, index);
 
-        if (!w->done[index])
-                return gzip_fail("gzip cannot map the encoder");
+        return_if(!w->done[index], gzip_fail("gzip cannot map the encoder"));
         w->crc = hash_crc32(w->crc, w->input + GZIP_WINDOW + index * GZIP_BLOCK, n);
         w->isize += (p32)n;
         return gzip_writer_emit((p8 address_to)data, length);

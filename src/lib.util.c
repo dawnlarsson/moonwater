@@ -152,6 +152,21 @@
         }
 
 #ifndef KERNEL_MODE
+/*      Leave with a value when a condition holds: the early exit that
+        `if (c) return v;` writes in two lines, said in one. A void
+        function leaves with return_if(c). */
+#define return_if(condition, ...) \
+        do \
+        { \
+                if (condition) \
+                        return __VA_ARGS__; \
+        } while (0)
+
+/*      A tool's refusal when the condition holds: "name: reason" on
+        standard error, then the status the tool answers with. */
+#define refuse_if(condition, status, ...) \
+        return_if(condition, string_report(log_error, status, __VA_ARGS__))
+
 /*      The first index below count at which a test holds, or count when it
         holds at none: `for (at = 0; at < n; at++) if (test) break;` said
         once. The caller names the index so the test can read it. */

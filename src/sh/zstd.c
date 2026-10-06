@@ -180,13 +180,11 @@ static bool zstd_fail(string_address why)
 
 static bool zstd_in_need(positive n)
 {
-        if (n > ZSTD_IN)
-                return zstd_fail("zstd block larger than the input window");
+        return_if(n > ZSTD_IN, zstd_fail("zstd block larger than the input window"));
         if (zstd_src.fd < 0 && !zstd_src.mem)
                 zstd_src.eof = true;
         bipolar got = byte_input_need(address_of zstd_src, n);
-        if (got < 0)
-                return zstd_fail("zstd: read failed");
+        return_if(got < 0, zstd_fail("zstd: read failed"));
         return (positive)got >= n ? true : zstd_fail("zstd truncated input");
 }
 
@@ -292,10 +290,8 @@ static bool zstd_fse_build(zstd_fse address_to table, const bipolar address_to n
         positive s;
         positive u;
 
-        if (!log)
-                return zstd_fail("zstd FSE table log is zero");
-        if (log > 9 || size > ZSTD_FSE_MAX)
-                return zstd_fail("zstd FSE table too large");
+        return_if(!log, zstd_fail("zstd FSE table log is zero"));
+        return_if(log > 9 || size > ZSTD_FSE_MAX, zstd_fail("zstd FSE table too large"));
 
         memory_fill(symbol, 0xff, size);
         memory_fill(next, 0, sizeof(next));
@@ -310,8 +306,7 @@ static bool zstd_fse_build(zstd_fse address_to table, const bipolar address_to n
                 p16 n = next[sym]++;
                 p8 bits;
 
-                if (!n)
-                        return zstd_fail("zstd FSE empty cell");
+                return_if(!n, zstd_fail("zstd FSE empty cell"));
                 bits = (p8)(log - zstd_highbit32(n));
                 table->cell[u].extra = 0;
                 table->cell[u].bits = bits;
@@ -381,8 +376,7 @@ static bool zstd_seq_build(zstd_fse address_to table, const bipolar address_to n
         positive total = 0;
         bool below_one = false;
 
-        if (log < 5 || log > 9 || max_sym > 52)
-                return zstd_fail("zstd FSE table log");
+        return_if(log < 5 || log > 9 || max_sym > 52, zstd_fail("zstd FSE table log"));
         memory_fill(next, 0, sizeof(next));
         memory_fill(template, 0, sizeof(template));
         memory_fill(symbol, 0xff, size);
@@ -392,8 +386,7 @@ static bool zstd_seq_build(zstd_fse address_to table, const bipolar address_to n
                 below_one |= norm[s] < 0;
                 total += next[s];
         }
-        if (total != size)
-                return zstd_fail("zstd FSE counts do not sum");
+        return_if(total != size, zstd_fail("zstd FSE counts do not sum"));
         if (!below_one)
         {
                 p64 value = 0;
@@ -465,8 +458,7 @@ static bool zstd_seq_fuse(zstd_fse address_to table, p8 kind)
         {
                 p8 sym = table->log ? (p8)table->cell[i].base : table->rle;
 
-                if (sym > max)
-                        return zstd_fail("zstd sequence symbol too large");
+                return_if(sym > max, zstd_fail("zstd sequence symbol too large"));
                 if (kind == 1)
                 {
                         table->cell[i].extra = sym;
@@ -511,8 +503,7 @@ static bool zstd_fse_read(p8 address_to src, positive src_len,
         positive charnum = 0;
         bool previous0 = false;
 
-        if (!src_len)
-                return zstd_fail("zstd truncated FSE header");
+        return_if(!src_len, zstd_fail("zstd truncated FSE header"));
         if (src_len > 512)
                 src_len = 512;
 
@@ -526,8 +517,7 @@ static bool zstd_fse_read(p8 address_to src, positive src_len,
         bit_count = 0;
 
         table_log = (p8)((bit_stream & 15) + 5);
-        if (table_log > max_log)
-                return zstd_fail("zstd FSE accuracy log too large");
+        return_if(table_log > max_log, zstd_fail("zstd FSE accuracy log too large"));
         bit_stream >>= 4;
         bit_count = 4;
         remaining = ((positive)1 << table_log) + 1;
@@ -541,8 +531,7 @@ static bool zstd_fse_read(p8 address_to src, positive src_len,
                         while ((bit_stream & 0xffffu) == 0xffffu)
                         {
                                 charnum += 24;
-                                if (charnum > max_sym + 1)
-                                        return zstd_fail("zstd FSE zero run");
+                                return_if(charnum > max_sym + 1, zstd_fail("zstd FSE zero run"));
                                 bit_stream >>= 16;
                                 bit_count += 16;
                                 if (ip + 4 <= iend)
@@ -555,16 +544,14 @@ static bool zstd_fse_read(p8 address_to src, positive src_len,
                         while ((bit_stream & 3) == 3)
                         {
                                 charnum += 3;
-                                if (charnum > max_sym + 1)
-                                        return zstd_fail("zstd FSE zero run");
+                                return_if(charnum > max_sym + 1, zstd_fail("zstd FSE zero run"));
                                 bit_stream >>= 2;
                                 bit_count += 2;
                         }
                         charnum += bit_stream & 3;
                         bit_count += 2;
                         bit_stream >>= 2;
-                        if (charnum > max_sym + 1)
-                                return zstd_fail("zstd FSE zero run");
+                        return_if(charnum > max_sym + 1, zstd_fail("zstd FSE zero run"));
                         previous0 = false;
                         if (ip + 4 <= iend)
                         {
@@ -621,13 +608,11 @@ static bool zstd_fse_read(p8 address_to src, positive src_len,
                 }
         }
 
-        if (remaining != 1)
-                return zstd_fail("zstd FSE counts do not sum");
+        return_if(remaining != 1, zstd_fail("zstd FSE counts do not sum"));
 
         ip += (bit_count + 7) >> 3;
         address_to used = (positive)(ip - pad);
-        if (address_to used > src_len)
-                return zstd_fail("zstd FSE header over-read");
+        return_if(address_to used > src_len, zstd_fail("zstd FSE header over-read"));
         address_to log = table_log;
         return true;
 }
@@ -654,19 +639,16 @@ static bool zstd_fse_unpack(zstd_fse address_to table, p8 address_to into,
         p16 state2;
         positive n = 0;
 
-        if (!size)
-                return zstd_fail("zstd empty bitstream");
+        return_if(!size, zstd_fail("zstd empty bitstream"));
         if (zstd_bits_open(address_of bits, src, size))
                 return zstd_fail("zstd bitstream missing the end mark");
         state1 = (p16)zstd_bits_get(address_of bits, table->log);
         state2 = (p16)zstd_bits_get(address_of bits, table->log);
-        if (zstd_bits_reload(address_of bits))
-                return zstd_fail("zstd Huffman FSE overflow");
+        return_if(zstd_bits_reload(address_of bits), zstd_fail("zstd Huffman FSE overflow"));
 
         for (;;)
         {
-                if (n + 2 > max_out)
-                        return zstd_fail("zstd Huffman too many weights");
+                return_if(n + 2 > max_out, zstd_fail("zstd Huffman too many weights"));
                 into[n++] = zstd_fse_symbol(table, address_of state1,
                                             address_of bits);
                 if (zstd_bits_reload(address_of bits))
@@ -706,8 +688,7 @@ static bool zstd_huff_from_weights(zstd_huff address_to huff, p8 address_to weig
 
         for (s = 0; s < provided; s++)
         {
-                if (weight[s] > 11)
-                        return zstd_fail("zstd Huffman weight too large");
+                return_if(weight[s] > 11, zstd_fail("zstd Huffman weight too large"));
                 if (weight[s])
                 {
                         sum += (positive)1 << (weight[s] - 1);
@@ -715,22 +696,18 @@ static bool zstd_huff_from_weights(zstd_huff address_to huff, p8 address_to weig
                 }
         }
 
-        if (!sum)
-                return zstd_fail("zstd Huffman weights are empty");
+        return_if(!sum, zstd_fail("zstd Huffman weights are empty"));
 
         max_bits = (p8)(zstd_highbit32(sum) + 1);
         rest = ((p32)1 << max_bits) - (p32)sum;
         if (!rest || (rest & (rest - 1)))
                 return zstd_fail("zstd Huffman weights are not a power of two");
         last_weight = (p8)(zstd_highbit32(rest) + 1);
-        if (last_weight > 11 || provided >= 256)
-                return zstd_fail("zstd Huffman last weight");
+        return_if(last_weight > 11 || provided >= 256, zstd_fail("zstd Huffman last weight"));
         weight[provided] = last_weight;
         rank[last_weight]++;
-        if (max_bits > 11)
-                return zstd_fail("zstd Huffman deeper than 11");
-        if (rank[1] < 2 || (rank[1] & 1))
-                return zstd_fail("zstd Huffman rank-1 weights");
+        return_if(max_bits > 11, zstd_fail("zstd Huffman deeper than 11"));
+        return_if(rank[1] < 2 || (rank[1] & 1), zstd_fail("zstd Huffman rank-1 weights"));
 
         /* Built at eleven bits whatever the depth: a depth-L cell repeats
            1 << (11 - L) times, so every table takes the four-stream
@@ -748,8 +725,7 @@ static bool zstd_huff_from_weights(zstd_huff address_to huff, p8 address_to weig
                 if (w <= max_bits)
                         start += (positive)rank[w] << (w - 1 + 11 - max_bits);
         }
-        if (start != ((positive)1 << 11))
-                return zstd_fail("zstd Huffman table did not fill");
+        return_if(start != ((positive)1 << 11), zstd_fail("zstd Huffman table did not fill"));
         //      A weight never passes max_bits: 2^(w-1) is within the sum, and
         //      the last weight's power of two is below 2^max_bits.
         zstd_huffman_cells(huff->cell, weight, provided + 1, max_bits, first_cell);
@@ -764,8 +740,7 @@ static bool zstd_huff_read(p8 address_to src, positive src_len,
         p8 weight[256];
         positive provided;
 
-        if (!src_len)
-                return zstd_fail("zstd truncated Huffman header");
+        return_if(!src_len, zstd_fail("zstd truncated Huffman header"));
 
         header = src[0];
         memory_fill(weight, 0, sizeof(weight));
@@ -776,8 +751,7 @@ static bool zstd_huff_read(p8 address_to src, positive src_len,
                 positive bytes = (symbols + 1) / 2;
                 positive i;
 
-                if (1 + bytes > src_len)
-                        return zstd_fail("zstd truncated Huffman weights");
+                return_if(1 + bytes > src_len, zstd_fail("zstd truncated Huffman weights"));
                 for (i = 0; i < symbols; i += 2)
                 {
                         weight[i] = src[1 + i / 2] >> 4;
@@ -795,17 +769,14 @@ static bool zstd_huff_read(p8 address_to src, positive src_len,
                 p8 log;
                 positive unpacked;
 
-                if (!header)
-                        return zstd_fail("zstd empty Huffman FSE header");
-                if (1 + header > src_len)
-                        return zstd_fail("zstd truncated Huffman FSE header");
+                return_if(!header, zstd_fail("zstd empty Huffman FSE header"));
+                return_if(1 + header > src_len, zstd_fail("zstd truncated Huffman FSE header"));
                 if (!zstd_fse_read(src + 1, header, address_of ncount, norm, 255,
                                    address_of log, 6))
                         return false;
                 if (!zstd_fse_build(address_of table, norm, 255, log))
                         return false;
-                if (ncount >= header)
-                        return zstd_fail("zstd Huffman FSE stream empty");
+                return_if(ncount >= header, zstd_fail("zstd Huffman FSE stream empty"));
                 if (!zstd_fse_unpack(address_of table, weight, 255,
                                      address_of unpacked, src + 1 + ncount,
                                      header - ncount))
@@ -814,8 +785,7 @@ static bool zstd_huff_read(p8 address_to src, positive src_len,
                 address_to used = 1 + header;
         }
 
-        if (!provided)
-                return zstd_fail("zstd Huffman no weights");
+        return_if(!provided, zstd_fail("zstd Huffman no weights"));
         return zstd_huff_from_weights(huff, weight, provided);
 }
 
@@ -1008,8 +978,7 @@ static bool zstd_seq_table(zstd_fse address_to address_to out, p8 mode, p8 addre
         address_to out = table;
         if (mode == 1)
         {
-                if (!src_len)
-                        return zstd_fail("zstd truncated RLE table");
+                return_if(!src_len, zstd_fail("zstd truncated RLE table"));
                 zstd_fse_rle(table, src[0]);
                 address_to used = 1;
                 return zstd_seq_fuse(table, kind);
@@ -1030,8 +999,7 @@ static bool zstd_seq_table(zstd_fse address_to address_to out, p8 mode, p8 addre
         }
         if (mode == 3)
         {
-                if (!prev)
-                        return zstd_fail("zstd repeat FSE with no previous table");
+                return_if(!prev, zstd_fail("zstd repeat FSE with no previous table"));
                 address_to out = prev;
                 return true;
         }
@@ -1050,8 +1018,7 @@ static bool zstd_literals(p8 address_to src, positive src_len,
         positive header = 0;
         p8 address_to body;
 
-        if (!src_len)
-                return zstd_fail("zstd truncated literals");
+        return_if(!src_len, zstd_fail("zstd truncated literals"));
 
         type = src[0] & 3;
         format = (src[0] >> 2) & 3;
@@ -1065,20 +1032,17 @@ static bool zstd_literals(p8 address_to src, positive src_len,
                 }
                 else if (format == 1)
                 {
-                        if (src_len < 2)
-                                return zstd_fail("zstd truncated literals size");
+                        return_if(src_len < 2, zstd_fail("zstd truncated literals size"));
                         header = 2;
                         regen = memory_load_unaligned(p16, src) >> 4;
                 }
                 else
                 {
-                        if (src_len < 3)
-                                return zstd_fail("zstd truncated literals size");
+                        return_if(src_len < 3, zstd_fail("zstd truncated literals size"));
                         header = 3;
                         regen = zstd_get24(src) >> 4;
                 }
-                if (regen > zstd_block_limit)
-                        return zstd_fail("zstd literals larger than a block");
+                return_if(regen > zstd_block_limit, zstd_fail("zstd literals larger than a block"));
                 body = src + header;
                 if (type == 0)
                 {
@@ -1089,8 +1053,7 @@ static bool zstd_literals(p8 address_to src, positive src_len,
                 }
                 else
                 {
-                        if (header + 1 > src_len)
-                                return zstd_fail("zstd truncated RLE literals");
+                        return_if(header + 1 > src_len, zstd_fail("zstd truncated RLE literals"));
                         memory_fill(lit, body[0], regen);
                         address_to used = header + 1;
                 }
@@ -1103,8 +1066,7 @@ static bool zstd_literals(p8 address_to src, positive src_len,
 
                 if (format <= 1)
                 {
-                        if (src_len < 3)
-                                return zstd_fail("zstd truncated literals header");
+                        return_if(src_len < 3, zstd_fail("zstd truncated literals header"));
                         pack = zstd_get24(src);
                         header = 3;
                         regen = (pack >> 4) & 0x3ff;
@@ -1112,8 +1074,7 @@ static bool zstd_literals(p8 address_to src, positive src_len,
                 }
                 else if (format == 2)
                 {
-                        if (src_len < 4)
-                                return zstd_fail("zstd truncated literals header");
+                        return_if(src_len < 4, zstd_fail("zstd truncated literals header"));
                         pack = memory_load_unaligned(p32, src);
                         header = 4;
                         regen = (pack >> 4) & 0x3fff;
@@ -1121,8 +1082,7 @@ static bool zstd_literals(p8 address_to src, positive src_len,
                 }
                 else
                 {
-                        if (src_len < 5)
-                                return zstd_fail("zstd truncated literals header");
+                        return_if(src_len < 5, zstd_fail("zstd truncated literals header"));
                         pack = memory_load_unaligned(p32, src);
                         header = 5;
                         regen = (pack >> 4) & 0x3ffff;
@@ -1141,8 +1101,7 @@ static bool zstd_literals(p8 address_to src, positive src_len,
                 if (!zstd_huff_read(body, compressed, address_of tree,
                                     address_of zstd_lit_huff))
                         return false;
-                if (tree > compressed)
-                        return zstd_fail("zstd Huffman tree larger than literals");
+                return_if(tree > compressed, zstd_fail("zstd Huffman tree larger than literals"));
                 body += tree;
                 compressed -= tree;
         }
@@ -1157,8 +1116,7 @@ static bool zstd_literals(p8 address_to src, positive src_len,
         }
         else
         {
-                if (regen < 6)
-                        return zstd_fail("zstd 4-stream literals too small");
+                return_if(regen < 6, zstd_fail("zstd 4-stream literals too small"));
                 if (!zstd_huff_four(address_of zstd_lit_huff, lit, regen, body,
                                     compressed))
                         return false;
@@ -1180,8 +1138,7 @@ static bool zstd_sequences(p8 address_to src, positive src_len, p8 address_to li
         positive used;
         zstd_seq_job job;
 
-        if (p >= stop)
-                return zstd_fail("zstd truncated sequences");
+        return_if(p >= stop, zstd_fail("zstd truncated sequences"));
 
         if (p[0] < 128)
         {
@@ -1190,34 +1147,28 @@ static bool zstd_sequences(p8 address_to src, positive src_len, p8 address_to li
         }
         else if (p[0] < 255)
         {
-                if (p + 2 > stop)
-                        return zstd_fail("zstd truncated sequence count");
+                return_if(p + 2 > stop, zstd_fail("zstd truncated sequence count"));
                 nseq = ((positive)(p[0] - 128) << 8) + p[1];
                 p += 2;
         }
         else
         {
-                if (p + 3 > stop)
-                        return zstd_fail("zstd truncated sequence count");
+                return_if(p + 3 > stop, zstd_fail("zstd truncated sequence count"));
                 nseq = 0x7f00u + memory_load_unaligned(p16, p + 1);
                 p += 3;
         }
 
         if (!nseq)
         {
-                if (p != stop)
-                        return zstd_fail("zstd extra bytes after no sequences");
-                if (lit_len > zstd_block_limit)
-                        return zstd_fail("zstd block output is too large");
+                return_if(p != stop, zstd_fail("zstd extra bytes after no sequences"));
+                return_if(lit_len > zstd_block_limit, zstd_fail("zstd block output is too large"));
                 return zstd_put(lit, lit_len);
         }
 
-        if (p >= stop)
-                return zstd_fail("zstd truncated sequence tables");
+        return_if(p >= stop, zstd_fail("zstd truncated sequence tables"));
         modes = p[0];
         p += 1;
-        if (modes & 3)
-                return zstd_fail("zstd reserved sequence bits");
+        return_if(modes & 3, zstd_fail("zstd reserved sequence bits"));
 
         if (!zstd_seq_table(address_of job.ll, (p8)(modes >> 6), p, (positive)(stop - p),
                             address_of used, 0, 35, 9))
@@ -1236,8 +1187,7 @@ static bool zstd_sequences(p8 address_to src, positive src_len, p8 address_to li
         zstd_seq_prev[1] = job.of;
         zstd_seq_prev[2] = job.ml;
 
-        if (p >= stop)
-                return zstd_fail("zstd truncated sequence bitstream");
+        return_if(p >= stop, zstd_fail("zstd truncated sequence bitstream"));
 
         job.window = zstd_window;
         job.pos = zstd_pos;
@@ -1420,10 +1370,7 @@ static bool zstd_window_open(positive window)
         }
 
         zstd_window = (p8 address_to)memory_checked(cap);
-        if (!zstd_window)
-        {
-                return zstd_fail("zstd cannot map the window");
-        }
+        return_if(!zstd_window, zstd_fail("zstd cannot map the window"));
         zstd_window_cap = cap;
         return true;
 }
@@ -1466,8 +1413,7 @@ static bool zstd_dictionary_load(p8 address_to bytes, positive length)
         zstd_dict_rep[0] = 1;
         zstd_dict_rep[1] = 4;
         zstd_dict_rep[2] = 8;
-        if (length > ZSTD_WINDOW_MAX)
-                return zstd_fail("zstd dictionary larger than 128 MiB");
+        return_if(length > ZSTD_WINDOW_MAX, zstd_fail("zstd dictionary larger than 128 MiB"));
         if (length < 8 || memory_load_unaligned(p32, bytes) != ZSTD_DICT_MAGIC)
         {
                 zstd_dict_content = bytes;
@@ -1499,14 +1445,12 @@ static bool zstd_dictionary_load(p8 address_to bytes, positive length)
                         at += used;
                 }
         }
-        if (at + 12 > length)
-                return zstd_fail("zstd dictionary is corrupt");
+        return_if(at + 12 > length, zstd_fail("zstd dictionary is corrupt"));
         for (positive k = 0; k < 3; k++)
         {
                 p32 const rep = memory_load_unaligned(p32, bytes + at + 4 * k);
 
-                if (!rep || rep > length - at - 12)
-                        return zstd_fail("zstd dictionary is corrupt");
+                return_if(!rep || rep > length - at - 12, zstd_fail("zstd dictionary is corrupt"));
                 zstd_dict_rep[k] = rep;
         }
         at += 12;
@@ -1536,8 +1480,7 @@ static bool zstd_frame(void)
 
         if (!zstd_in_take(scratch, 4))
                 return false;
-        if (memory_load_unaligned(p32, scratch) != ZSTD_MAGIC)
-                return zstd_fail("zstd bad magic");
+        return_if(memory_load_unaligned(p32, scratch) != ZSTD_MAGIC, zstd_fail("zstd bad magic"));
         if (!zstd_in_take(desc, 1))
                 return false;
 
@@ -1545,8 +1488,7 @@ static bool zstd_frame(void)
         single = (desc[0] & 0x20) != 0;
         checksum = (desc[0] & 0x04) != 0;
         dict_flag = desc[0] & 3;
-        if (desc[0] & 0x08)
-                return zstd_fail("zstd reserved frame bit");
+        return_if(desc[0] & 0x08, zstd_fail("zstd reserved frame bit"));
 
         if (!single)
         {
@@ -1559,8 +1501,7 @@ static bool zstd_frame(void)
                         return false;
                 exponent = (p8)(win[0] >> 3);
                 mantissa = win[0] & 7;
-                if (exponent > 17)
-                        return zstd_fail("zstd window larger than 128 MiB");
+                return_if(exponent > 17, zstd_fail("zstd window larger than 128 MiB"));
                 base = (positive)1 << (10 + exponent);
                 window = base + (base >> 3) * mantissa;
         }
@@ -1622,15 +1563,12 @@ static bool zstd_frame(void)
 
         if (single)
         {
-                if (!zstd_have_fcs)
-                        return zstd_fail("zstd single-segment frame has no size");
-                if (zstd_fcs > ZSTD_WINDOW_MAX)
-                        return zstd_fail("zstd frame larger than 128 MiB");
+                return_if(!zstd_have_fcs, zstd_fail("zstd single-segment frame has no size"));
+                return_if(zstd_fcs > ZSTD_WINDOW_MAX, zstd_fail("zstd frame larger than 128 MiB"));
                 window = (positive)zstd_fcs;
         }
 
-        if (window > ZSTD_WINDOW_MAX)
-                return zstd_fail("zstd window larger than 128 MiB");
+        return_if(window > ZSTD_WINDOW_MAX, zstd_fail("zstd window larger than 128 MiB"));
 
         // A single segment of no bytes has a window of none, and no block
         // may carry anything: this read it as the full 128 KiB and wrote the
@@ -1698,12 +1636,10 @@ zstd_frame_blocks:
                 last = (pack & 1) != 0;
                 type = (p8)((pack >> 1) & 3);
                 size = pack >> 3;
-                if (type == 3)
-                        return zstd_fail("zstd reserved block type");
+                return_if(type == 3, zstd_fail("zstd reserved block type"));
                 if (type == 0)
                 {
-                        if (size > zstd_block_limit)
-                                return zstd_fail("zstd raw block too large");
+                        return_if(size > zstd_block_limit, zstd_fail("zstd raw block too large"));
                         /* Consume a whole block before pausing. The window
                            owns the remainder until the pull reader drains it. */
                         if (!zstd_in_need(size) || !zstd_put(zstd_in_at(), size))
@@ -1719,8 +1655,7 @@ zstd_frame_blocks:
                 {
                         p8 value[1];
 
-                        if (size > zstd_block_limit)
-                                return zstd_fail("zstd RLE block too large");
+                        return_if(size > zstd_block_limit, zstd_fail("zstd RLE block too large"));
                         if (!zstd_in_take(value, 1) || !zstd_put_fill(value[0], size))
                                 return false;
                         if (zstd_paused)
@@ -1741,8 +1676,7 @@ zstd_frame_blocks:
                         if (!zstd_literals(zstd_comp, size, address_of lit_used,
                                            zstd_lit_buf, address_of lit_len))
                                 return false;
-                        if (lit_used > size)
-                                return zstd_fail("zstd literals overran the block");
+                        return_if(lit_used > size, zstd_fail("zstd literals overran the block"));
                         if (!zstd_window_room(zstd_block_limit))
                                 return false;
                         {
@@ -1783,8 +1717,7 @@ zstd_frame_trailer:
                         return false;
                 want = memory_load_unaligned(p32, scratch);
                 got = (p32)hash_xxh64_finish(address_of zstd_hash);
-                if (got != want)
-                        return zstd_fail("zstd content checksum mismatch");
+                return_if(got != want, zstd_fail("zstd content checksum mismatch"));
         }
 
         zstd_hashing = false;
@@ -1889,8 +1822,7 @@ static bool zstd_stream(void)
                                 return false;
                         continue;
                 }
-                if (!any)
-                        return zstd_fail("zstd bad magic");
+                return_if(!any, zstd_fail("zstd bad magic"));
                 return zstd_fail("zstd trailing garbage");
         }
 
@@ -1940,8 +1872,7 @@ static bool zstd_decode_begin(bipolar in)
 static bool zstd_decode_begin_prefix(bipolar in, p8 address_to prefix, positive n)
 {
         zstd_decode_begin(in);
-        if (n > ZSTD_IN)
-                return zstd_fail("zstd prefix");
+        return_if(n > ZSTD_IN, zstd_fail("zstd prefix"));
         memory_copy(zstd_src.buf, prefix, n);
         zstd_src.have = n;
         zstd_src.at = 0;
@@ -5924,8 +5855,7 @@ static bool zstd_job_sink(address_any context, positive index,
                           address_any data, positive length)
 {
         (void)context;
-        if (zstd_jobs.failed[index])
-                return zstd_fail("zstd cannot map a job's tables");
+        return_if(zstd_jobs.failed[index], zstd_fail("zstd cannot map a job's tables"));
         return zstd_enc_out(data, length);
 }
 
@@ -6298,12 +6228,10 @@ static bool zstd_encode_start(const zstd_params address_to p, bool checksum)
 
         zstd_why = null;
         zstd_ct_init();
-        if (!zstd_ct_ready)
-                return zstd_fail("zstd cannot build its predefined tables");
+        return_if(!zstd_ct_ready, zstd_fail("zstd cannot build its predefined tables"));
         zstd_enc_checksum = checksum;
         jobs = zstd_jobs_open(p);
-        if (jobs < 0)
-                return zstd_fail("zstd cannot map its jobs");
+        return_if(jobs < 0, zstd_fail("zstd cannot map its jobs"));
         if (!jobs && !zstd_encoder_open(address_of zstd_enc, p, checksum))
                 return false;
         hash_xxh64_begin(address_of zstd_enc_hash, 0);

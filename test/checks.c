@@ -36172,9 +36172,10 @@ static fn span_checks(void)
         of its scope -- falling off the end, a return, a break, a continue --
         in the reverse of the order they were written, and after the value a
         return hands back has been worked out; a cleanup that is guarded by a
-        flag is skipped by it. array_where names the index for the test to
-        read, gives the count when nothing holds and reads its count once;
-        array_any is the same asked as a yes or a no.
+        flag is skipped by it. return_if leaves with its value when its
+        condition holds and asks the condition once. array_where names the
+        index for the test to read, gives the count when nothing holds and
+        reads its count once; array_any is the same asked as a yes or a no.
 */
 static positive control_trail[8];
 static positive control_trails;
@@ -36203,6 +36204,27 @@ static positive control_kept(bool kept)
                 lost = undone;
         }
         return undone * 10 + lost;
+}
+
+static positive control_left(positive way)
+{
+        return_if(way == 1, 11);
+        return_if(way == 2, 22);
+        return 33;
+}
+
+static positive control_asked;
+
+static positive control_once(void)
+{
+        return_if(control_asked++ == 1, 7);
+        return 8;
+}
+
+static fn control_left_void(positive address_to reached, positive way)
+{
+        return_if(way);
+        address_to reached = 1;
 }
 
 static fn control_checks(void)
@@ -36238,6 +36260,19 @@ static fn control_checks(void)
         }
         check("a continue and a break leave the scope of the turn like any other exit",
               loops == 3);
+
+        {
+                positive reached = 0;
+
+                control_left_void(address_of reached, 1);
+                check("a void function leaves where it says so", reached == 0);
+                control_left_void(address_of reached, 0);
+                check("and goes on where it does not", reached == 1);
+        }
+        check("an early exit gives its value, the first that holds, or goes on",
+              control_left(1) == 11 && control_left(2) == 22 && control_left(0) == 33);
+        check("the condition is asked once, not once for the test and once for the return",
+              control_once() == 8 && control_once() == 7 && control_asked == 2);
 
         check("nothing to look at is the count, which is nothing",
               array_where(at, 0, true) == 0 && !array_any(at, 0, true));

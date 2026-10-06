@@ -814,8 +814,7 @@ static bool xz_dec_more(xz_decoder address_to d)
 {
         bipolar got = byte_input_need(address_of d->input, 1);
 
-        if (got < 0)
-                return xz_dec_fail(d, "xz read failed");
+        return_if(got < 0, xz_dec_fail(d, "xz read failed"));
         return got != 0;
 }
 
@@ -864,8 +863,7 @@ static bool xz_dec_filter(xz_decoder address_to d, bool final)
 
         if (!n && !final)
                 return true;
-        if (n > XZ_FBUF_DATA || d->wn || !d->fbuf)
-                return xz_dec_fail(d, "xz filter window");
+        return_if(n > XZ_FBUF_DATA || d->wn || !d->fbuf, xz_dec_fail(d, "xz filter window"));
 
         p8 address_to at = d->fbuf + XZ_FILTER_HEAD;
 
@@ -977,8 +975,7 @@ static fn xz_dec_dict_reset(xz_decoder address_to d)
 
 static bool xz_dec_dict_open(xz_decoder address_to d, positive size)
 {
-        if (!size || size > XZ_DICT_MAX)
-                return xz_dec_fail(d, "xz dictionary");
+        return_if(!size || size > XZ_DICT_MAX, xz_dec_fail(d, "xz dictionary"));
 
         positive limit = (size + 15) & ~(positive)15;
         positive cap = limit + XZ_DICT_START + XZ_DICT_SLACK;
@@ -1062,15 +1059,13 @@ static fn xz_dec_models_reset(xz_decoder address_to d)
 
 static bool xz_dec_props(xz_decoder address_to d, p8 packed)
 {
-        if (packed > (4 * 5 + 4) * 9 + 8)
-                return xz_dec_fail(d, "xz LZMA properties");
+        return_if(packed > (4 * 5 + 4) * 9 + 8, xz_dec_fail(d, "xz LZMA properties"));
 
         p32 lc = packed % 9;
         p32 lp = (packed / 9) % 5;
         p32 pb = packed / 45;
 
-        if (lc + lp > 4)
-                return xz_dec_fail(d, "xz lc+lp");
+        return_if(lc + lp > 4, xz_dec_fail(d, "xz lc+lp"));
         d->job.lc = lc;
         d->job.lp = lp;
         d->job.pb = pb;
@@ -1081,18 +1076,15 @@ static bool xz_dec_rc_init(xz_decoder address_to d)
 {
         bipolar first = xz_dec_byte(d);
 
-        if (first < 0)
-                return xz_dec_fail(d, "xz truncated LZMA");
-        if (first)
-                return xz_dec_fail(d, "xz LZMA range init");
+        return_if(first < 0, xz_dec_fail(d, "xz truncated LZMA"));
+        return_if(first, xz_dec_fail(d, "xz LZMA range init"));
         d->job.range = 0xffffffffu;
         d->job.code = 0;
         for (positive at = 0; at < 4; at++)
         {
                 bipolar byte = xz_dec_byte(d);
 
-                if (byte < 0)
-                        return xz_dec_fail(d, "xz truncated LZMA");
+                return_if(byte < 0, xz_dec_fail(d, "xz truncated LZMA"));
                 d->job.code = (d->job.code << 8) | (p8)byte;
         }
         return true;
@@ -1306,13 +1298,11 @@ static bool xz_dec_lzma_finish(xz_decoder address_to d)
         {
                 bipolar byte = xz_dec_byte(d);
 
-                if (byte < 0)
-                        return xz_dec_fail(d, "xz truncated LZMA2");
+                return_if(byte < 0, xz_dec_fail(d, "xz truncated LZMA2"));
                 d->job.range <<= 8;
                 d->job.code = (d->job.code << 8) | (p8)byte;
         }
-        if (d->job.code)
-                return xz_dec_fail(d, "xz LZMA2 chunk end");
+        return_if(d->job.code, xz_dec_fail(d, "xz LZMA2 chunk end"));
         if (d->in_abs - d->pack_from != d->pack_want)
                 return xz_dec_fail(d, "xz LZMA2 compressed size");
         return true;
@@ -1360,8 +1350,7 @@ static bool xz_dec_lzma2(xz_decoder address_to d)
                         d->lz2_kind = 0;
                         return true;
                 }
-                if (control > 2 && control < 0x80)
-                        return xz_dec_fail(d, "xz LZMA2 control");
+                return_if(control > 2 && control < 0x80, xz_dec_fail(d, "xz LZMA2 control"));
                 if (reset)
                 {
                         xz_dec_hash(d);
@@ -1375,8 +1364,7 @@ static bool xz_dec_lzma2(xz_decoder address_to d)
                 bipolar hi = xz_dec_byte(d);
                 bipolar lo = xz_dec_byte(d);
 
-                if (hi < 0 || lo < 0)
-                        return xz_dec_fail(d, "xz truncated LZMA2 sizes");
+                return_if(hi < 0 || lo < 0, xz_dec_fail(d, "xz truncated LZMA2 sizes"));
                 if (control < 0x80)
                 {
                         d->raw_left = ((positive)hi << 8) + (positive)lo + 1;
@@ -1393,15 +1381,13 @@ static bool xz_dec_lzma2(xz_decoder address_to d)
 
                 hi = xz_dec_byte(d);
                 lo = xz_dec_byte(d);
-                if (hi < 0 || lo < 0)
-                        return xz_dec_fail(d, "xz truncated LZMA2 sizes");
+                return_if(hi < 0 || lo < 0, xz_dec_fail(d, "xz truncated LZMA2 sizes"));
                 d->pack_want = ((p64)hi << 8) + (p64)lo + 1;
                 if (control >= 0xc0)
                 {
                         bipolar prop = xz_dec_byte(d);
 
-                        if (prop < 0)
-                                return xz_dec_fail(d, "xz truncated properties");
+                        return_if(prop < 0, xz_dec_fail(d, "xz truncated properties"));
                         if (!xz_dec_props(d, (p8)prop))
                                 return false;
                         d->need_props = false;
@@ -1430,10 +1416,8 @@ static bool xz_dec_pad4(xz_decoder address_to d, positive n)
         {
                 bipolar byte = xz_dec_byte(d);
 
-                if (byte < 0)
-                        return xz_dec_fail(d, "xz truncated padding");
-                if (byte)
-                        return xz_dec_fail(d, "xz padding");
+                return_if(byte < 0, xz_dec_fail(d, "xz truncated padding"));
+                return_if(byte, xz_dec_fail(d, "xz padding"));
                 n++;
         }
         return true;
@@ -1449,8 +1433,7 @@ static bool xz_dec_check(xz_decoder address_to d)
         bipolar width = xz_check_size(d->check);
         positive size;
 
-        if (width < 0)
-                return xz_dec_fail(d, "xz check type");
+        return_if(width < 0, xz_dec_fail(d, "xz check type"));
         size = (positive)width;
 
         memory_fill(d->check_bytes, 0, sizeof(d->check_bytes));
@@ -1458,8 +1441,7 @@ static bool xz_dec_check(xz_decoder address_to d)
         {
                 bipolar byte = xz_dec_byte(d);
 
-                if (byte < 0)
-                        return xz_dec_fail(d, "xz truncated check");
+                return_if(byte < 0, xz_dec_fail(d, "xz truncated check"));
                 d->check_bytes[at] = (p8)byte;
         }
         if (d->check == XZ_CHECK_CRC32)
@@ -1541,8 +1523,7 @@ static bool xz_dec_block(xz_decoder address_to d)
 
                 bipolar hdr0 = xz_dec_byte(d);
 
-                if (hdr0 < 0)
-                        return xz_dec_fail(d, "xz truncated block");
+                return_if(hdr0 < 0, xz_dec_fail(d, "xz truncated block"));
 
                 positive header_size = ((positive)hdr0 + 1) * 4;
 
@@ -1551,8 +1532,7 @@ static bool xz_dec_block(xz_decoder address_to d)
                 {
                         bipolar byte = xz_dec_byte(d);
 
-                        if (byte < 0)
-                                return xz_dec_fail(d, "xz truncated block header");
+                        return_if(byte < 0, xz_dec_fail(d, "xz truncated block header"));
                         header[at] = (p8)byte;
                 }
 
@@ -1566,24 +1546,21 @@ static bool xz_dec_block(xz_decoder address_to d)
                         got |= (p32)header[limit + i] << (8 * i);
                 if (got != ~hash_crc32(0xffffffffu, header, limit))
                         return xz_dec_fail(d, "xz block header CRC");
-                if (flags & 0x3c)
-                        return xz_dec_fail(d, "xz reserved block flags");
+                return_if(flags & 0x3c, xz_dec_fail(d, "xz reserved block flags"));
                 d->hdr_packed = d->hdr_plain = 0;
                 d->hdr_has = flags & 0xc0;
                 if (flags & 0x40)
                 {
                         positive k = memory_vli_get(header + at, limit - at, 9, address_of d->hdr_packed);
 
-                        if (!k || !d->hdr_packed)
-                                return xz_dec_fail(d, "xz block header");
+                        return_if(!k || !d->hdr_packed, xz_dec_fail(d, "xz block header"));
                         at += k;
                 }
                 if (flags & 0x80)
                 {
                         positive k = memory_vli_get(header + at, limit - at, 9, address_of d->hdr_plain);
 
-                        if (!k)
-                                return xz_dec_fail(d, "xz block header");
+                        return_if(!k, xz_dec_fail(d, "xz block header"));
                         at += k;
                 }
 
@@ -1596,12 +1573,10 @@ static bool xz_dec_block(xz_decoder address_to d)
                         p64 psize;
                         positive k = memory_vli_get(header + at, limit - at, 9, address_of id);
 
-                        if (!k)
-                                return xz_dec_fail(d, "xz filter flags");
+                        return_if(!k, xz_dec_fail(d, "xz filter flags"));
                         at += k;
                         k = memory_vli_get(header + at, limit - at, 9, address_of psize);
-                        if (!k || psize > limit - at - k)
-                                return xz_dec_fail(d, "xz filter flags");
+                        return_if(!k || psize > limit - at - k, xz_dec_fail(d, "xz filter flags"));
                         at += k;
 
                         const p8 address_to props = header + at;
@@ -1623,8 +1598,7 @@ static bool xz_dec_block(xz_decoder address_to d)
                         f->id = (p8)id;
                         if (id == XZ_FILTER_DELTA)
                         {
-                                if (psize != 1)
-                                        return xz_dec_fail(d, "xz filter properties");
+                                return_if(psize != 1, xz_dec_fail(d, "xz filter properties"));
                                 f->dist = props[0];
                         }
                         else if (xz_filter_alignment(id))
@@ -1642,21 +1616,18 @@ static bool xz_dec_block(xz_decoder address_to d)
                         d->nfilt++;
                 }
                 for (; at < limit; at++)
-                        if (header[at])
-                                return xz_dec_fail(d, "xz block header");
+                        return_if(header[at], xz_dec_fail(d, "xz block header"));
                 //      A block that says how much it holds never reaches back
                 //      further than that, so a dictionary claimed larger maps
                 //      no more than the block.
                 if ((flags & 0x80) && d->hdr_plain < dict)
                         dict = d->hdr_plain ? (positive)d->hdr_plain : 1;
-                if (!dict || !xz_dec_dict_open(d, dict))
-                        return xz_dec_fail(d, "xz dictionary");
+                return_if(!dict || !xz_dec_dict_open(d, dict), xz_dec_fail(d, "xz dictionary"));
                 if (d->nfilt && !d->linear && !d->fbuf)
                 {
                         d->fbuf = (p8 address_to)memory_checked(XZ_FILTER_HEAD + XZ_FBUF_DATA +
                                                                 XZ_FILTER_HEAD);
-                        if (!d->fbuf)
-                                return xz_dec_fail(d, "xz cannot map the filter window");
+                        return_if(!d->fbuf, xz_dec_fail(d, "xz cannot map the filter window"));
                 }
                 d->wn = 0;
                 d->block_filtered = false;
@@ -1728,14 +1699,12 @@ static bool xz_dec_index_and_footer(xz_decoder address_to d)
         p64 got;
         p64 back;
 
-        if (xz_dec_byte(d) != 0)
-                return xz_dec_fail(d, "xz index indicator");
+        return_if(xz_dec_byte(d) != 0, xz_dec_fail(d, "xz index indicator"));
 
         p32 crc = hash_crc32(0xffffffffu, address_of zero, 1);
         bipolar records = xz_dec_vli(d, address_of crc, address_of hashed);
 
-        if (records < 0)
-                return xz_dec_fail(d, "xz truncated index");
+        return_if(records < 0, xz_dec_fail(d, "xz truncated index"));
         if ((p64)records != d->index_blocks)
                 return xz_dec_fail(d, "xz index does not match the blocks");
         while (records--)
@@ -1744,36 +1713,29 @@ static bool xz_dec_index_and_footer(xz_decoder address_to d)
                 bipolar uncompressed = unpadded < 0 ? -1
                     : xz_dec_vli(d, address_of crc, address_of hashed);
 
-                if (uncompressed < 0)
-                        return xz_dec_fail(d, "xz truncated index");
+                return_if(uncompressed < 0, xz_dec_fail(d, "xz truncated index"));
                 xz_dec_index_digest(address_of digest, (p64)unpadded,
                                     (p64)uncompressed);
         }
-        if (digest != d->index_digest)
-                return xz_dec_fail(d, "xz index does not match the blocks");
+        return_if(digest != d->index_digest, xz_dec_fail(d, "xz index does not match the blocks"));
         while (hashed & 3)
         {
                 bipolar byte = xz_dec_byte(d);
 
-                if (byte < 0)
-                        return xz_dec_fail(d, "xz truncated index padding");
-                if (byte)
-                        return xz_dec_fail(d, "xz index padding");
+                return_if(byte < 0, xz_dec_fail(d, "xz truncated index padding"));
+                return_if(byte, xz_dec_fail(d, "xz index padding"));
                 crc = hash_crc32(crc, address_of zero, 1);
                 hashed++;
         }
-        if (!xz_dec_le(d, address_of got, 4))
-                return xz_dec_fail(d, "xz truncated index CRC");
-        if (got != (p32)~crc)
-                return xz_dec_fail(d, "xz index CRC");
+        return_if(!xz_dec_le(d, address_of got, 4), xz_dec_fail(d, "xz truncated index CRC"));
+        return_if(got != (p32)~crc, xz_dec_fail(d, "xz index CRC"));
         if (!xz_dec_le(d, address_of got, 4) || !xz_dec_le(d, address_of back, 4))
                 return xz_dec_fail(d, "xz truncated footer");
 
         bipolar fb0 = xz_dec_byte(d);
         bipolar fb1 = xz_dec_byte(d);
 
-        if (fb0 < 0 || fb1 < 0)
-                return xz_dec_fail(d, "xz truncated footer");
+        return_if(fb0 < 0 || fb1 < 0, xz_dec_fail(d, "xz truncated footer"));
         if (fb0 || (fb1 & 0xf0) || (fb1 & 0xf) != d->check)
                 return xz_dec_fail(d, "xz footer flags");
         if (xz_dec_byte(d) != 'Y' || xz_dec_byte(d) != 'Z')
@@ -1781,11 +1743,9 @@ static bool xz_dec_index_and_footer(xz_decoder address_to d)
         memory_store_unaligned(p32, body, (p32)back);
         body[4] = (p8)fb0;
         body[5] = (p8)fb1;
-        if (got != (p32)~hash_crc32(0xffffffffu, body, 6))
-                return xz_dec_fail(d, "xz footer CRC");
+        return_if(got != (p32)~hash_crc32(0xffffffffu, body, 6), xz_dec_fail(d, "xz footer CRC"));
         // The backward size measures the index, its CRC included, in fours.
-        if (back != (hashed + 4) / 4 - 1)
-                return xz_dec_fail(d, "xz footer");
+        return_if(back != (hashed + 4) / 4 - 1, xz_dec_fail(d, "xz footer"));
         d->index_blocks = 0;
         d->index_digest = 0;
         return true;
@@ -1807,8 +1767,7 @@ static bool xz_dec_stream(xz_decoder address_to d)
                 }
                 if (d->why)
                         return false;
-                if ((d->in_abs - from) & 3)
-                        return xz_dec_fail(d, "xz stream padding");
+                return_if((d->in_abs - from) & 3, xz_dec_fail(d, "xz stream padding"));
                 if (d->input.at >= d->input.have)
                         return true;
         }
@@ -1820,15 +1779,13 @@ static bool xz_dec_stream(xz_decoder address_to d)
 
                 if (!xz_dec_le(d, address_of magic, 6))
                         return xz_dec_fail(d, "xz truncated header");
-                if (magic != 0x005a587a37fdull)
-                        return xz_dec_fail(d, "xz bad magic");
+                return_if(magic != 0x005a587a37fdull, xz_dec_fail(d, "xz bad magic"));
                 flags[0] = (p8)xz_dec_byte(d);
                 flags[1] = (p8)xz_dec_byte(d);
                 if (flags[0] || (flags[1] & 0xf0))
                         return xz_dec_fail(d, "xz reserved stream flags");
                 d->check = flags[1] & 0xf;
-                if (xz_check_size(d->check) < 0)
-                        return xz_dec_fail(d, "xz check type");
+                return_if(xz_check_size(d->check) < 0, xz_dec_fail(d, "xz check type"));
                 if (!xz_dec_le(d, address_of got, 4))
                         return xz_dec_fail(d, "xz truncated header CRC");
                 if (got != (p32)~hash_crc32(0xffffffffu, flags, 2))
@@ -1839,8 +1796,7 @@ static bool xz_dec_stream(xz_decoder address_to d)
         {
                 if (!d->block_live)
                 {
-                        if (!xz_dec_more(d))
-                                return xz_dec_fail(d, "xz truncated stream");
+                        return_if(!xz_dec_more(d), xz_dec_fail(d, "xz truncated stream"));
                         if (!d->in_buf[d->input.at])
                                 break;
                 }
@@ -1940,8 +1896,7 @@ static bool xz_dec_run(xz_decoder address_to d)
         }
         if (d->why)
                 return xz_dec_salvage(d);
-        if (!any)
-                return xz_dec_fail(d, "xz empty input");
+        return_if(!any, xz_dec_fail(d, "xz empty input"));
         return xz_dec_drain(d);
 }
 
@@ -1995,8 +1950,7 @@ static bool xz_block_decode(address_any state, p8 address_to block,
         xz_dec_open(d);
         if (d->dict)
                 xz_dec_dict_close(d);
-        if (xz_check_size(check_type) < 0)
-                return xz_dec_fail(d, "xz check type");
+        return_if(xz_check_size(check_type) < 0, xz_dec_fail(d, "xz check type"));
         byte_input_open_memory(address_of d->input, block, block_len, d->in_buf,
                                XZ_DEC_IN);
         d->linear = true;
@@ -4577,8 +4531,7 @@ static bool xz_writer_record(p64 unpadded, p64 uncompressed)
                 positive room = xz_writer.index_room ? 2 * xz_writer.index_room : 4096;
                 p8 address_to grown = (p8 address_to)memory_checked(room);
 
-                if (!grown)
-                        return xz_fail("xz cannot map the index");
+                return_if(!grown, xz_fail("xz cannot map the index"));
                 if (xz_writer.index)
                 {
                         memory_copy_apart(grown, xz_writer.index, xz_writer.index_n);
@@ -4630,8 +4583,7 @@ static bool xz_batch_sink(address_any context, positive index, address_any data,
 {
         xz_stream_writer address_to w = (xz_stream_writer address_to)context;
 
-        if (!w->unpadded[index])
-                return xz_fail("xz cannot encode a block");
+        return_if(!w->unpadded[index], xz_fail("xz cannot encode a block"));
         return xz_writer_emit((p8 address_to)data, length) &&
                xz_writer_record(w->unpadded[index], xz_batch_bytes(w, index));
 }
@@ -4655,8 +4607,7 @@ static bool xz_writer_batch(void)
                 if (!e)
                 {
                         e = xz_encoder_open_with(address_of w->options);
-                        if (!e)
-                                return xz_fail("xz cannot map an encoder");
+                        return_if(!e, xz_fail("xz cannot map an encoder"));
                         w->slots[0] = e;
                 }
                 e->check = w->check;
@@ -4665,8 +4616,7 @@ static bool xz_writer_batch(void)
                 bool ok = xz_block_encode(e, w->input, (p32)xz_batch_bytes(w, 0));
 
                 e->pipe_ok = false;
-                if (!ok)
-                        return xz_fail("xz cannot encode a block");
+                return_if(!ok, xz_fail("xz cannot encode a block"));
                 w->unpadded[0] = e->unpadded;
                 if (!xz_writer_emit(e->out + e->out_at, e->out_n) ||
                     !xz_writer_record(w->unpadded[0], xz_batch_bytes(w, 0)))
@@ -5167,18 +5117,15 @@ static bool xz_par_index(xz_par address_to r)
                 return xz_par_fail(r, "xz truncated index");
         if (memory_compare(r->bytes, r->records, want))
                 return xz_par_fail(r, "xz index does not match the blocks");
-        if (xz_par_read(r, tail, pad + 4 + 12) != 1)
-                return xz_par_fail(r, "xz truncated index");
+        return_if(xz_par_read(r, tail, pad + 4 + 12) != 1, xz_par_fail(r, "xz truncated index"));
         for (positive i = 0; i < pad; i++)
-                if (tail[i])
-                        return xz_par_fail(r, "xz index padding");
+                return_if(tail[i], xz_par_fail(r, "xz index padding"));
 
         p32 crc = hash_crc32(0xffffffffu, head, n);
 
         crc = hash_crc32(crc, r->bytes, want);
         crc = hash_crc32(crc, tail, pad);
-        if (memory_load_unaligned(p32, tail + pad) != ~crc)
-                return xz_par_fail(r, "xz index CRC");
+        return_if(memory_load_unaligned(p32, tail + pad) != ~crc, xz_par_fail(r, "xz index CRC"));
 
         p8 address_to footer = tail + pad + 4;
 
@@ -5368,8 +5315,7 @@ static bool xz_par_decode(bipolar in, bipolar out)
 {
         xz_par address_to r = (xz_par address_to)memory_checked(sizeof(xz_par));
 
-        if (!r)
-                return xz_fail("xz cannot map the decoder");
+        return_if(!r, xz_fail("xz cannot map the decoder"));
         r->in = in;
         r->out = out;
         r->slot_count = parallel_slots();
@@ -5719,8 +5665,7 @@ static const xz_cli_option_map xz_cli_lzma_map[] = {
 /* Add a filter: id, and the text after '=' when there was one. */
 static bool xz_cli_add(p8 kind, p8 id, string_address text)
 {
-        if (xz_cli_count == 4)
-                return xz_cli_say("Maximum number of filters is four", "", "");
+        return_if(xz_cli_count == 4, xz_cli_say("Maximum number of filters is four", "", ""));
 
         xz_cli_entry address_to e = xz_cli_chain + xz_cli_count;
 
@@ -5921,8 +5866,7 @@ static bool xz_cli_setup(void)
                                  ? "Unsupported options in filter chain 0"
                                  : "Unsupported filter chain or filter options";
 
-        if (xz_cli_chain[last].kind != XZ_CLI_LZMA2 || bad_start)
-                return xz_cli_say(why, "", "");
+        return_if(xz_cli_chain[last].kind != XZ_CLI_LZMA2 || bad_start, xz_cli_say(why, "", ""));
         memory_fill(address_of xz_encode_options, 0, sizeof(xz_encode_options));
         for (positive i = 0; i < last; i++)
         {

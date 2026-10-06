@@ -764,10 +764,7 @@ static COLD b32 net_wget_failed(bipolar status, b32 code, p8 address_to where,
                                      writer_terminal_quoted_name, output,
                                      file_reason(http_write_failure));
         case HTTP_STATUS:
-                if (code == 401)
-                        return string_report(
-                            log_error, WGET_AUTH,
-                            "Username/Password Authentication Failed.\n");
+                refuse_if(code == 401, WGET_AUTH, "Username/Password Authentication Failed.\n");
                 return string_report(log_error, WGET_SERVER,
                                      "wget: %w returned %p\n",
                                      writer_terminal_quoted_name, host,
@@ -843,8 +840,7 @@ static b32 net_wget(void)
 
         status = http_split_into(url, name, sizeof name, address_of port,
                                  address_of path, address_of tls);
-        if (status)
-                return net_wget_failed(status, 0, url, null);
+        return_if(status, net_wget_failed(status, 0, url, null));
 
         if (output && string_equals(output, (string_address) "-"))
                 dest = 1;
@@ -2017,8 +2013,7 @@ static COLD b32 net_auto(b32 handle, net_holding address_to held)
                 {
                         status = netlink_link_up(handle, search.index);
 
-                        if (status < 0)
-                                return net_refused((string_address) "link up", status);
+                        return_if(status < 0, net_refused((string_address) "link up", status));
                 }
 
                 string_format(net_out, "ip: asking for a lease\n");
@@ -2114,9 +2109,7 @@ static COLD b32 net_reconfigure(b32 handle, net_holding address_to held)
         {
                 bipolar status = net_holding_release(handle, held);
 
-                if (status < 0)
-                        return net_refused((string_address) "lease release",
-                                           status);
+                return_if(status < 0, net_refused((string_address) "lease release", status));
         }
 
         return net_auto(handle, held);
@@ -2864,8 +2857,7 @@ static COLD b32 net_ip(void)
 
         handle = netlink_open_groups(0);
 
-        if (handle < 0)
-                return net_ip_refused("cannot open a netlink socket");
+        return_if(handle < 0, net_ip_refused("cannot open a netlink socket"));
 
         //      auto ------------------------------------------------------
         if (net_word_is(object, "auto", 2))

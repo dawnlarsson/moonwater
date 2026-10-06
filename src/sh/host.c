@@ -346,11 +346,7 @@ static string_address host_verb;
 
 // The root check the commands that change the machine open with.
 #define host_need_root() \
-        do \
-        { \
-                if (!bowl_is_root()) \
-                        return host_refuse("moonwater %s needs root\n", host_verb); \
-        } while (0)
+        return_if(!bowl_is_root(), host_refuse("moonwater %s needs root\n", host_verb))
 
 // A refusal, in the voice of the rest: the label, the words and what they name.
 #define host_refuse(...) \
@@ -1589,8 +1585,7 @@ static b32 host_copy_file(string_address from, string_address to)
         bool copied;
         bipolar synced = 0;
 
-        if (source < 0)
-                return host_fail(from, source);
+        return_if(source < 0, host_fail(from, source));
 
         target = system_open_at_mode(AT_FDCWD, to, FILE_WRITE | O_CLOEXEC, 0644);
         if (target < 0)
@@ -1780,8 +1775,7 @@ static b32 host_place_written(string_address system, string_address running,
                         return host_refuse("%s could not be kept whole\n", image);
 
                 failed = system_rename_at(AT_FDCWD, next, AT_FDCWD, kept, 0);
-                if (failed < 0)
-                        return host_fail(kept, failed);
+                return_if(failed < 0, host_fail(kept, failed));
         }
 
         if (!host_join(next, sizeof(next), system, HOST_IMAGE_NEXT) ||
@@ -1791,8 +1785,7 @@ static b32 host_place_written(string_address system, string_address running,
         //      Both slots of the new image say what the disk is to keep, before
         //      the rename makes it the one that starts.
         failed = carry ? host_settings_stamp(next, carry) : 0;
-        if (failed < 0)
-                return host_fail(next, failed);
+        return_if(failed < 0, host_fail(next, failed));
 
         *carried = carry && !failed;
         if (carry && failed)
@@ -1804,8 +1797,7 @@ static b32 host_place_written(string_address system, string_address running,
                 return host_refuse("%s is not the image it was copied from\n", next);
 
         failed = system_rename_at(AT_FDCWD, next, AT_FDCWD, image, 0);
-        if (failed < 0)
-                return host_fail(image, failed);
+        return_if(failed < 0, host_fail(image, failed));
 
         if (!host_image_build(image, build, sizeof(build)) ||
             !string_equals(build, running))
@@ -1885,8 +1877,7 @@ static b32 host_attach(host_install address_to install)
 
         failed = host_mount(install->data, HOST_DATA, "ext4", HOST_DATA_MOUNT);
 
-        if (failed < 0)
-                return host_fail(install->data, failed);
+        return_if(failed < 0, host_fail(install->data, failed));
 
         for (at = 0; at < array_count(host_kept); at++)
         {
@@ -2090,8 +2081,7 @@ static b32 host_run(string_address address_to argv)
         bipolar child = system_fork();
         bipolar reaped;
 
-        if (child < 0)
-                return host_fail(argv[0], child);
+        return_if(child < 0, host_fail(argv[0], child));
 
         if (child == 0)
         {
@@ -2103,8 +2093,7 @@ static b32 host_run(string_address address_to argv)
 
         reaped = system_wait4_retry(child, address_of status, 0, null);
 
-        if (reaped < 0)
-                return host_fail(argv[0], reaped);
+        return_if(reaped < 0, host_fail(argv[0], reaped));
 
         if (wait_status_code(status))
                 return host_refuse("%s did not finish\n", argv[0]);
@@ -4259,8 +4248,7 @@ static b32 host_settings_apply(host_settings address_to settings,
                 {
                         failed = host_settings_add(settings, list, SPARK_SETTINGS_COMMAND,
                                                    text, length, address_of id);
-                        if (failed)
-                                return host_settings_refused(verb, failed, settings);
+                        return_if(failed, host_settings_refused(verb, failed, settings));
 
                         string_format(log, host_label "%s %p added: %s; ", verb,
                                       (positive)id, text);
@@ -4347,8 +4335,7 @@ static b32 host_settings_locked(string_address address_to arguments, positive co
         host_settings_session(address_of settings);
 
         outcome = host_settings_apply(address_of settings, arguments, count);
-        if (outcome == HOST_SETTINGS_USAGE)
-                return host_usage();
+        return_if(outcome == HOST_SETTINGS_USAGE, host_usage());
         if (outcome != HOST_SETTINGS_CHANGED)
                 return outcome == HOST_SETTINGS_SHOWN ? 0 : 1;
 
@@ -4369,8 +4356,7 @@ static b32 host_settings_command(string_address address_to arguments, positive c
 
         host_need_root();
 
-        if (!host_settings_shaped(arguments, count))
-                return host_usage();
+        return_if(!host_settings_shaped(arguments, count), host_usage());
 
         //      Showing a list or a switch changes nothing and waits for nobody.
         if (count < 4)
@@ -4889,8 +4875,7 @@ static b32 host_canvas_open(positive request, string_address what)
                 return host_refuse("opening %s needs root (CAP_SYS_ADMIN)\n", what);
         if (failed == -ENODEV)
                 return host_refuse("Canvas is off, so there is nowhere to open %s\n", what);
-        if (failed < 0)
-                return host_fail(what, failed);
+        return_if(failed < 0, host_fail(what, failed));
         return 0;
 }
 
@@ -4900,14 +4885,12 @@ static b32 host_canvas(string_address address_to arguments, positive count)
         struct canvas_control control;
         bipolar failed;
 
-        if (count > 3)
-                return host_usage();
+        return_if(count > 3, host_usage());
 
         if (count < 3)
         {
                 failed = host_canvas_request(SPARK_CANVAS_STATUS, address_of control);
-                if (failed < 0)
-                        return host_fail(SPARK_DEVICE, failed);
+                return_if(failed < 0, host_fail(SPARK_DEVICE, failed));
 
                 host_canvas_say(address_of control);
                 return 0;
@@ -4921,8 +4904,7 @@ static b32 host_canvas(string_address address_to arguments, positive count)
                 if (!bowl_is_root())
                         return host_refuse("turning Canvas off needs root (CAP_SYS_ADMIN)\n");
                 failed = host_canvas_request(SPARK_CANVAS_STATUS, address_of control);
-                if (failed < 0)
-                        return host_fail(SPARK_DEVICE, failed);
+                return_if(failed < 0, host_fail(SPARK_DEVICE, failed));
                 if (!control.running)
                         return host_refuse("Canvas is already off\n");
 
@@ -4937,8 +4919,7 @@ static b32 host_canvas(string_address address_to arguments, positive count)
                         return host_refuse("turning Canvas off needs root (CAP_SYS_ADMIN)\n");
                 if (failed == -EALREADY)
                         return host_refuse("Canvas is already off\n");
-                if (failed < 0)
-                        return host_fail("canvas off", failed);
+                return_if(failed < 0, host_fail("canvas off", failed));
 
                 if (!host_console_is_screen())
                         host_tty1_shell();
@@ -4979,8 +4960,7 @@ static b32 host_canvas(string_address address_to arguments, positive count)
                 }
                 if (failed == -ENODEV)
                         return host_refuse("there is no display for Canvas to start on\n");
-                if (failed < 0)
-                        return host_fail("canvas on", failed);
+                return_if(failed < 0, host_fail("canvas on", failed));
 
                 host_canvas_say(address_of control);
                 return 0;
@@ -5087,8 +5067,7 @@ static b32 host_bios_set(void)
 
         handle = system_open_at_mode(AT_FDCWD, HOST_EFI_INDICATIONS,
                                      O_WRONLY | FILE_CREATE | O_CLOEXEC | O_NOFOLLOW, 0644);
-        if (handle < 0)
-                return host_fail("firmware setup", handle);
+        return_if(handle < 0, host_fail("firmware setup", handle));
         if (system_write_all((positive)handle, image, sizeof(image)) != sizeof(image))
         {
                 system_close((positive)handle);
@@ -5131,8 +5110,7 @@ static b32 host_bios(string_address address_to arguments, positive count)
         if (offered == -ENODEV)
                 return host_refuse("this machine did not start from UEFI firmware, so "
                                    "there is no setup to restart into\n");
-        if (offered < 0)
-                return host_fail("firmware setup", offered);
+        return_if(offered < 0, host_fail("firmware setup", offered));
         if (!offered)
                 return host_refuse("this firmware offers no setup screen at the next boot\n");
 
@@ -9022,8 +9000,7 @@ static b32 radio_wifi_enter(string_address ssid, string_address pass)
                 return host_refuse("too many saved networks\n");
         if (stored == -EFBIG)
                 return host_refuse("%s is too long to change here\n", NET_WIFI_LIST);
-        if (stored < 0)
-                return host_fail(NET_WIFI_LIST, stored);
+        return_if(stored < 0, host_fail(NET_WIFI_LIST, stored));
 
         switched = radio_switch(NET_WIFI_POWER, RADIO_RFKILL_WLAN, true, true);
 
@@ -9068,8 +9045,7 @@ static b32 radio_wifi_enter(string_address ssid, string_address pass)
                 return host_refuse("saved, but the network %s\n",
                                    radio_join_words(failed));
         }
-        if (failed < 0)
-                return host_fail("wifi", failed);
+        return_if(failed < 0, host_fail("wifi", failed));
         if (pass && pass[0])
                 crypto_forget((address_any)pass, string_length(pass));
 
@@ -9099,8 +9075,7 @@ static b32 radio_wifi_add(string_address ssid, string_address pass)
                 joined it first while this scanned, and this then left that
                 join to make its own. */
         lock = radio_lock(true);
-        if (lock < 0)
-                return host_fail("wifi", lock);
+        return_if(lock < 0, host_fail("wifi", lock));
         result = radio_wifi_enter(ssid, pass);
         //      The password is forgotten before the keeper is forked, which
         //      would carry it in its memory for as long as it lives, and the
@@ -9159,8 +9134,7 @@ static b32 radio_wifi_forget(string_address ssid)
 
         failed = radio_wifi_save(networks, count);
         crypto_forget(networks, sizeof(networks));
-        if (failed < 0)
-                return host_fail(NET_WIFI_LIST, failed);
+        return_if(failed < 0, host_fail(NET_WIFI_LIST, failed));
 
         {
                 radio_last last;
@@ -9195,8 +9169,7 @@ static b32 radio_wifi_remove(string_address ssid)
                 return host_refuse("that network name is empty or too long\n");
 
         lock = radio_lock(true);
-        if (lock < 0)
-                return host_fail("wifi", lock);
+        return_if(lock < 0, host_fail("wifi", lock));
         result = radio_wifi_forget(ssid);
         radio_unlock(lock);
         return result;
@@ -9224,8 +9197,7 @@ static b32 radio_wired_set(bool on)
                 return 1;
 
         handle = netlink_open_groups(0);
-        if (handle < 0)
-                return host_fail("wired", handle);
+        return_if(handle < 0, host_fail("wired", handle));
 
         failed = netlink_wired_list((b32)handle, address_of wired);
         if (failed >= 0)
@@ -9235,8 +9207,7 @@ static b32 radio_wired_set(bool on)
         socket_close((b32)handle);
         radio_net_wake();
 
-        if (failed < 0)
-                return host_fail("wired", failed);
+        return_if(failed < 0, host_fail("wired", failed));
         host_say(log, host_label "wired %s%s\n", on ? "on" : "off",
                  wired.count ? "" : " (this machine has no wired link)");
         return 0;
@@ -9408,8 +9379,7 @@ static b32 radio_bluetooth_edit(string_address identity, bool add)
                 return host_refuse("that bluetooth name cannot be stored\n");
 
         lock = radio_lock(true);
-        if (lock < 0)
-                return host_fail("bluetooth", lock);
+        return_if(lock < 0, host_fail("bluetooth", lock));
         got = host_read_state(NET_BLUETOOTH_LIST, text, sizeof(text));
         if (got < 0)
                 got = 0;
@@ -9455,8 +9425,7 @@ static b32 radio_bluetooth_edit(string_address identity, bool add)
                 return host_refuse("too many saved bluetooth devices\n");
         if (failed == 4)
                 return host_refuse("%s is too long to change here\n", NET_BLUETOOTH_LIST);
-        if (failed)
-                return host_fail(NET_BLUETOOTH_LIST, failed);
+        return_if(failed, host_fail(NET_BLUETOOTH_LIST, failed));
         //      A name remembered is for a radio that is on to find it.
         failed = add ? radio_bluetooth_power(true, true) : 0;
         host_say(log, host_label "bluetooth %s %s\n", add ? "remembered" : "forgot", identity);
@@ -9516,8 +9485,7 @@ static b32 radio_internet_set(string_address which)
         if (host_save(NET_INTERNET_ROOT, NET_INTERNET_ROOT, which))
                 return 1;
         failed = radio_internet_run(which);
-        if (failed < 0)
-                return host_fail(NET_INTERNET_RUN, failed);
+        return_if(failed < 0, host_fail(NET_INTERNET_RUN, failed));
         radio_net_wake();
 
         host_say(log, host_label "internet prefers %s\n", which);
@@ -9709,8 +9677,7 @@ static b32 host_priority(string_address address_to arguments, positive count)
 
         if (count == 2)
                 return radio_internet_status();
-        if (!string_equals(word, "internet"))
-                return host_usage();
+        return_if(!string_equals(word, "internet"), host_usage());
         if (count == 3)
                 return radio_internet_status();
         if (count != 4 || (!string_equals(arguments[3], "wired") &&
@@ -9726,8 +9693,7 @@ static b32 host_wired(string_address address_to arguments, positive count)
 
         if (count < 3)
                 return radio_wired_status();
-        if (power < 0)
-                return host_usage();
+        return_if(power < 0, host_usage());
         host_need_root();
         return radio_wired_set(power);
 }
@@ -10102,8 +10068,7 @@ static b32 tune_airplane(string_address address_to arguments, positive count)
                          wifi_off && bluetooth_off ? "on" : "off");
                 return 0;
         }
-        if (count != 3 || host_onoff(arguments[2]) < 0)
-                return host_usage();
+        return_if(count != 3 || host_onoff(arguments[2]) < 0, host_usage());
         host_need_root();
         on = host_onoff(arguments[2]) > 0;
         kept = tune_kept("airplane", was, sizeof(was));
@@ -10210,8 +10175,7 @@ static b32 tune_brightness(string_address address_to arguments, positive count)
                 if (target && !value)
                         value = 1;
                 failed = tune_write_number(current_path, value);
-                if (failed < 0)
-                        return host_fail("brightness", failed);
+                return_if(failed < 0, host_fail("brightness", failed));
                 host_say(log, host_label "brightness %p%%\n", target);
         }
         return 0;
@@ -10518,8 +10482,7 @@ static b32 tune_cpu(string_address address_to arguments, positive count)
                 if (failed == -ENOENT)
                         return host_refuse(boost ? "this machine has no boost switch\n"
                                                  : "this machine has no SMT switch\n");
-                if (failed < 0)
-                        return host_fail(boost ? "cpu boost" : "cpu smt", failed);
+                return_if(failed < 0, host_fail(boost ? "cpu boost" : "cpu smt", failed));
                 //      Both default to on: nothing to bring back then.
                 if (tune_remember(boost ? "cpu.boost" : "cpu.smt", on ? "" : "off"))
                         return 1;
@@ -10549,8 +10512,7 @@ static b32 tune_cpu(string_address address_to arguments, positive count)
                              : -ENOENT;
                 if (failed == -ENOENT)
                         return host_refuse("that cpu cannot be switched\n");
-                if (failed < 0)
-                        return host_fail("cpu", failed);
+                return_if(failed < 0, host_fail("cpu", failed));
                 host_say(log, host_label "cpu %s %p\n", arguments[2], number);
                 return 0;
         }
@@ -13049,8 +13011,7 @@ static b32 locale_zone_store(string_address zone, string_address mode)
         locale_zone_moment(before, sizeof(before));
 
         failed = locale_zone_write(zone, mode, true);
-        if (failed < 0)
-                return host_fail("timezone", failed);
+        return_if(failed < 0, host_fail("timezone", failed));
 
         locale_zone_moment(after, sizeof(after));
         locale_zone_title(zone, title, sizeof(title));
@@ -13446,8 +13407,7 @@ static b32 locale_zone_auto(void)
         {
                 bipolar kept = locale_zone_write(null, "auto", true);
 
-                if (kept < 0)
-                        return host_fail("timezone", kept);
+                return_if(kept < 0, host_fail("timezone", kept));
         }
         locale_network(network, sizeof(network));
         status = locale_auto_ask(address_of answer);
@@ -14240,8 +14200,7 @@ static b32 locale_ntp_server_set(string_address name)
         }
         else
                 kept = radio_write_word(LOCALE_NTP_SERVER_PATH, name);
-        if (kept < 0)
-                return host_fail("ntp server", kept);
+        return_if(kept < 0, host_fail("ntp server", kept));
         //      Asked of the new server at once, as `ntp on` does.
         if (locale_ntp_wanted() && locale_ntp_apply(true) < 0)
                 host_say(log, host_label "ntp server %s, waiting for a "
@@ -14811,8 +14770,7 @@ static b32 host_name(string_address address_to arguments, positive count)
         p8 name[NAME_ROOM];
         bool rolled;
 
-        if (count > 3)
-                return host_usage();
+        return_if(count > 3, host_usage());
 
         if (count == 2)
         {
@@ -14883,8 +14841,7 @@ static b32 host_time(string_address address_to arguments, positive count)
         locale_zone_own();
         if (count == 2)
                 return locale_time_status();
-        if (count != 3 || !string_equals(arguments[2], "sync"))
-                return host_usage();
+        return_if(count != 3 || !string_equals(arguments[2], "sync"), host_usage());
         host_need_root();
         return locale_time_sync();
 }
@@ -14896,8 +14853,7 @@ static b32 host_timezone(string_address address_to arguments, positive count)
         locale_zone_own();
         if (count == 2)
                 return locale_zone_status();
-        if (count != 3)
-                return host_usage();
+        return_if(count != 3, host_usage());
         if (string_equals(word, "list"))
                 return locale_zone_list();
         host_need_root();
@@ -14917,8 +14873,7 @@ static b32 host_ntp(string_address address_to arguments, positive count)
         {
                 if (count == 3)
                         return locale_ntp_server_status();
-                if (count != 4)
-                        return host_usage();
+                return_if(count != 4, host_usage());
                 host_need_root();
                 return locale_ntp_server_set(arguments[3]);
         }
@@ -14926,13 +14881,11 @@ static b32 host_ntp(string_address address_to arguments, positive count)
         {
                 if (count == 3)
                         return locale_ntp_sampling_status();
-                if (count != 4 || host_onoff(arguments[3]) < 0)
-                        return host_usage();
+                return_if(count != 4 || host_onoff(arguments[3]) < 0, host_usage());
                 host_need_root();
                 return locale_ntp_set(true, arguments[3]);
         }
-        if (count != 3 || host_onoff(word) < 0)
-                return host_usage();
+        return_if(count != 3 || host_onoff(word) < 0, host_usage());
         host_need_root();
         return locale_ntp_set(false, word);
 }
@@ -14944,8 +14897,7 @@ static b32 host_keyboard(string_address address_to arguments, positive count)
         locale_zone_own();
         if (count == 2)
                 return locale_keyboard_status();
-        if (count != 3)
-                return host_usage();
+        return_if(count != 3, host_usage());
         if (string_equals(word, "list"))
                 return locale_keyboard_list();
         host_need_root();
@@ -15064,8 +15016,7 @@ static b32 host_bind_keep(unsigned int event, struct bind_control address_to con
                                            (string_address)control->command,
                                            string_length((string_address)control->command),
                                            address_of id);
-                if (failed)
-                        return host_settings_refused("bind", failed, address_of settings);
+                return_if(failed, host_settings_refused("bind", failed, address_of settings));
         }
         return host_settings_save(address_of settings) ? 0 : 1;
 }
@@ -15129,8 +15080,7 @@ static b32 host_bind_events(void)
 {
         bipolar failed = host_bind_each(false, true);
 
-        if (failed < 0)
-                return host_fail(SPARK_DEVICE, failed);
+        return_if(failed < 0, host_fail(SPARK_DEVICE, failed));
 
         host_say(log, "  reset is the keyboard's reset/restart key; "
                       "a case reset button cannot be bound\n");
@@ -15205,8 +15155,7 @@ static b32 host_bind_told(unsigned int event, string_address command)
                                                    : (string_address)"that event");
         if (failed == -ENAMETOOLONG)
                 return host_refuse("that command is longer than the 255 bytes a bound event holds\n");
-        if (failed < 0)
-                return host_fail(SPARK_DEVICE, failed);
+        return_if(failed < 0, host_fail(SPARK_DEVICE, failed));
 
         if (host_bind_keep(event, address_of control))
                 return 1;
@@ -15221,8 +15170,7 @@ static b32 host_bind_tell(unsigned int event, string_address command)
 {
         b32 outcome;
 
-        if (!bowl_is_root())
-                return host_bind_told(event, command);
+        return_if(!bowl_is_root(), host_bind_told(event, command));
 
         if (!host_acquire())
                 return 1;
@@ -15289,8 +15237,7 @@ static b32 host_bind(string_address address_to arguments, positive count)
                 bipolar failed = host_bind_request(SPARK_BIND_GET, event, null,
                                                    address_of control);
 
-                if (failed < 0)
-                        return host_fail(SPARK_DEVICE, failed);
+                return_if(failed < 0, host_fail(SPARK_DEVICE, failed));
                 host_bind_say(true, address_of control);
                 log_flush();
                 return 0;
@@ -15806,8 +15753,7 @@ static b32 host_setup(string_address address_to arguments, positive count)
         {
                 bool removable = count == 5 && string_equals(arguments[4], "removable");
 
-                if (count < 4 || count > 5 || (count == 5 && !removable))
-                        return host_usage();
+                return_if(count < 4 || count > 5 || (count == 5 && !removable), host_usage());
                 host_need_root();
                 host_state_ready();
                 return host_install_disk(arguments[3], removable);
@@ -15836,8 +15782,7 @@ static b32 host_setup(string_address address_to arguments, positive count)
 /* moonwater help [VERB]: the main page, or one verb's. */
 static b32 host_help(string_address address_to arguments, positive count)
 {
-        if (count > 3)
-                return host_usage();
+        return_if(count > 3, host_usage());
 
         if (count == 3)
         {
@@ -15868,8 +15813,7 @@ static b32 host_machine_verb(string_address address_to arguments, positive count
 /* boot and ask are init's and the terminal's, and take no words. */
 static b32 host_boot_verb(string_address address_to arguments, positive count)
 {
-        if (count > 2)
-                return host_usage();
+        return_if(count > 2, host_usage());
         host_need_root();
         host_state_ready();
         return host_boot();
@@ -15879,8 +15823,7 @@ static b32 host_ask_verb(string_address address_to arguments, positive count)
 {
         p8 verdict[HOST_NAME_ROOM + 16];
 
-        if (count > 2)
-                return host_usage();
+        return_if(count > 2, host_usage());
         host_need_root();
         host_state_ready();
 
@@ -15962,8 +15905,7 @@ static b32 host_main()
 
         which = string_table_find(host_verb, host_verbs, sizeof(host_verbs[0]),
                                   array_count(host_verbs));
-        if (which == array_count(host_verbs))
-                return host_usage();
+        return_if(which == array_count(host_verbs), host_usage());
 
         host_state_once = host_verbs[which].run != host_machine_verb;
         if (host_verbs[which].quiet)

@@ -683,17 +683,14 @@ static b32 build_start(build_command address_to what)
         command = trusted ? build_resolve_privileged(words[0])
                           : build_resolve(words[0]);
 
-        if (!command)
-                return string_report(log_error, -1, "build: %s not found\n", words[0]);
+        refuse_if(!command, -1, "build: %s not found\n", words[0]);
 
         if (what->privileged && !root)
         {
                 string_address sudo = build_resolve_privileged("sudo");
                 positive count = 0;
 
-                if (!sudo)
-                        return string_report(log_error, -1,
-                                             "build: sudo not found in trusted system paths\n");
+                refuse_if(!sudo, -1, "build: sudo not found in trusted system paths\n");
 
                 raised[count++] = sudo;
                 raised[count++] = command;
@@ -1826,9 +1823,7 @@ static b32 build_verify_config(string_address config,
 
         build_name_storage.used = 0;
 
-        if (!build_is_file(config))
-                return string_report(log_error, 1, "verify_config: no such config: %s\n",
-                                     config);
+        refuse_if(!build_is_file(config), 1, "verify_config: no such config: %s\n", config);
 
         if (file_slurp(config, build_file_one, BUILD_FILE_ROOM) < 0)
                 return string_report(log_error, 1, "verify_config: cannot read %s\n",
@@ -2341,13 +2336,11 @@ static b32 build_asm(string_address arch, string_address input,
                                      "asm: nothing in the kernel config names an architecture this knows\n");
         }
 
-        if (!build_is_file(input))
-                return string_report(log_error, 1, "asm: no such file: %s\n", input);
+        refuse_if(!build_is_file(input), 1, "asm: no such file: %s\n", input);
 
         target = build_asm_normalize(arch);
 
-        if (!target)
-                return string_report(log_error, 1, "asm: unknown architecture: %s\n", arch);
+        refuse_if(!target, 1, "asm: unknown architecture: %s\n", arch);
 
         if (file_slurp(input, build_file_one, BUILD_FILE_ROOM) < 0)
                 return string_report(log_error, 1, "asm: cannot read %s\n", input);
@@ -2741,9 +2734,7 @@ static b32 build_spark(string_address source, string_address output,
         if (!objdump || !readelf || !objcopy)
                 return 1;
 
-        if (!build_is_file(script))
-                return string_report(log_error, 1, "spark: missing linker script at %s\n",
-                                     script);
+        refuse_if(!build_is_file(script), 1, "spark: missing linker script at %s\n", script);
 
         build_label(BUILD_YELLOW, "EXPERIMENTAL! C compiled to spark format");
         string_format(log, BUILD_BOLD "Compiling %s" BUILD_RESET "\n", output);
@@ -2751,8 +2742,7 @@ static b32 build_spark(string_address source, string_address output,
 
         work = build_temporary_directory("spark");
 
-        if (!work)
-                return build_die("spark: cannot make a working directory");
+        return_if(!work, build_die("spark: cannot make a working directory"));
         scope_exit(build_remove_tree(work));
 
         elf = build_join(work, "/image.elf", null);
@@ -2919,10 +2909,7 @@ static b32 build_spark(string_address source, string_address output,
         data_size = build_page_up(data_bytes);
         bss_size = build_page_up(bss_bytes);
 
-        if (!text_size)
-                return string_report(log_error, 1,
-                                     "spark: computed a non positive text size (%p)\n",
-                                     text_size);
+        refuse_if(!text_size, 1, "spark: computed a non positive text size (%p)\n", text_size);
 
         if (build_run(objcopy, "-O", "binary", "--only-section=.text", elf,
                       text_binary, null))
@@ -2948,9 +2935,7 @@ static b32 build_spark(string_address source, string_address output,
                 bipolar got;
                 bool good;
 
-                if (handle < 0)
-                        return string_report(log_error, 1, "spark: cannot write %s\n",
-                                             output);
+                refuse_if(handle < 0, 1, "spark: cannot write %s\n", output);
 
                 //      The header occupies the first SPARK_HEADER_SIZE bytes of
                 //      the text region itself, so the image carries no page
@@ -2988,9 +2973,7 @@ static b32 build_spark(string_address source, string_address output,
                         return string_report(log_error, 1,
                                              "spark: cannot keep the coverage ELF\n");
 
-                if (!good)
-                        return string_report(log_error, 1, "spark: writing %s failed\n",
-                                             output);
+                refuse_if(!good, 1, "spark: writing %s failed\n", output);
         }
 
         string_format(log, "spark: base=%s entry=%s text=%p data=%p bss=%p\n",
@@ -3226,9 +3209,7 @@ static b32 build_freestanding(string_address address_to arguments, positive coun
                                    (output[1] == '.' && output[2] == '/'))))
                 output = build_join("./", output, null);
 
-        if (!build_is_file(source))
-                return string_report(log_error, 1, "build: no such source file: %s\n",
-                                     source);
+        refuse_if(!build_is_file(source), 1, "build: no such source file: %s\n", source);
 
         if (!watch)
         {
@@ -3425,8 +3406,7 @@ static b32 build_floor(string_address arch)
 
         work = build_temporary_directory("floor");
 
-        if (!work)
-                return build_die("floor: cannot make a working directory");
+        return_if(!work, build_die("floor: cannot make a working directory"));
         scope_exit(build_remove_tree(work));
 
         object = build_join(work, "/floor.o", null);
@@ -4329,9 +4309,7 @@ static b32 build_config_header_write(string_address config, string_address outpu
         string_address record;
         string_address text;
 
-        if (!build_is_file(config))
-                return string_report(log_error, 1, "config-header: no such file: %s\n",
-                                     config);
+        refuse_if(!build_is_file(config), 1, "config-header: no such file: %s\n", config);
 
         if (kind && !word_is(kind, "utility"))
                 return string_report(log_error, 1,
@@ -4570,9 +4548,7 @@ static b32 build_switches(string_address mode)
         string_address text;
         bipolar got;
 
-        if (mode && !word_is(mode, "check"))
-                return string_report(log_error, 1, "switches: '%s' is not check\n",
-                                     mode);
+        refuse_if(mode && !word_is(mode, "check"), 1, "switches: '%s' is not check\n", mode);
 
         if (!build_tools_read() || !build_builtins_read())
                 return build_die("cannot read the tool or builtin registry");
@@ -4602,18 +4578,13 @@ static b32 build_switches(string_address mode)
 //      configuration links, one path a line, relative to the image root.
 static b32 build_surface(string_address config, string_address kind)
 {
-        if (!build_is_file(config))
-                return string_report(log_error, 1, "surface: no such file: %s\n",
-                                     config);
+        refuse_if(!build_is_file(config), 1, "surface: no such file: %s\n", config);
 
-        if (kind && !word_is(kind, "utility"))
-                return string_report(log_error, 1,
-                                     "surface: '%s' is not utility\n", kind);
+        refuse_if(kind && !word_is(kind, "utility"), 1, "surface: '%s' is not utility\n", kind);
 
         build_components(config);
 
-        if (!build_tools_read())
-                return build_die("cannot read the tool registry");
+        return_if(!build_tools_read(), build_die("cannot read the tool registry"));
 
         //      What build_userspace would build: the utility-only program
         //      when asked, or when the shell is off.
@@ -5113,8 +5084,7 @@ static b32 build_local(string_address address_to profiles, positive count,
 
                 //      path, type, major, minor: a short last entry would
                 //      hand mknod a pointer the splitter never wrote.
-                if (many % 4)
-                        return build_die("image_nodes wants path type major minor per node");
+                return_if(many % 4, build_die("image_nodes wants path type major minor per node"));
 
                 for (positive at = 0; at + 3 < many; at += 4)
                 {
@@ -5242,8 +5212,7 @@ static b32 build_local(string_address address_to profiles, positive count,
                 words[at] = null;
                 what.words = (string_address address_to)words;
 
-                if (build_execute(address_of what))
-                        return build_die("kernel configuration");
+                return_if(build_execute(address_of what), build_die("kernel configuration"));
 
                 /*
                         Quiet: merge_config compares the combined fragment
@@ -5274,8 +5243,7 @@ static b32 build_local(string_address address_to profiles, positive count,
                 what.environment = build_environment_with(
                         (string_address address_to)extra, many);
 
-                if (build_execute(address_of what))
-                        return build_die("kernel configuration");
+                return_if(build_execute(address_of what), build_die("kernel configuration"));
 
                 at = 0;
                 words[at++] = "make";
@@ -5289,8 +5257,7 @@ static b32 build_local(string_address address_to profiles, positive count,
                 what.privileged = true;
                 what.environment = null;
 
-                if (build_execute(address_of what))
-                        return build_die("kernel configuration");
+                return_if(build_execute(address_of what), build_die("kernel configuration"));
         }
         else
         {
@@ -5327,13 +5294,11 @@ static b32 build_local(string_address address_to profiles, positive count,
                 words[2] = null;
                 what.words = (string_address address_to)words;
 
-                if (build_execute(address_of what))
-                        return build_die("assembly");
+                return_if(build_execute(address_of what), build_die("assembly"));
         }
 
         build_label("", "PRE BUILD");
-        if (build_shell_key("pre"))
-                return build_die("pre-build hook");
+        return_if(build_shell_key("pre"), build_die("pre-build hook"));
 
         build_label("", "USER SPACE BUILD");
 
@@ -5381,8 +5346,7 @@ static b32 build_local(string_address address_to profiles, positive count,
                         here too, from keys no profile has ever set -- four
                         empty variables handed to make on every build.
                 */
-                if (build_execute(address_of what))
-                        return build_die("kernel build");
+                return_if(build_execute(address_of what), build_die("kernel build"));
         }
 
         if (!build_is_file(kernel_image))
@@ -5414,8 +5378,7 @@ static b32 build_local(string_address address_to profiles, positive count,
         }
 
         build_label("", "POST BUILD");
-        if (build_shell_key("post"))
-                return build_die("post-build hook");
+        return_if(build_shell_key("post"), build_die("post-build hook"));
         string_format(log, "%sDone Building Kernel%s\n", BUILD_BOLD, BUILD_GREEN);
         log_flush();
         build_size(build_key("kernel_export"));
@@ -5787,8 +5750,7 @@ static b32 build_remote_fetch(string_address host, string_address remote,
         string_address request[3] = {"cat", "--", image};
         string_address words[5];
 
-        if (parent < 0)
-                return build_die("could not prepare the local image path");
+        return_if(parent < 0, build_die("could not prepare the local image path"));
 
         stage = build_remote_fetch_stage(parent, stage_name,
                                          sizeof(stage_name));
@@ -5880,8 +5842,7 @@ static b32 build_remote(string_address host, string_address remote,
 
         /* Five fixed build words, --arch and its name, plus the five-word
            staging front must fit. */
-        if (count + 12 >= BUILD_ARGUMENT_ROOM)
-                return build_die("too many remote build arguments");
+        return_if(count + 12 >= BUILD_ARGUMENT_ROOM, build_die("too many remote build arguments"));
 
         build_say(build_join("Checking ", host, null));
 
@@ -5898,9 +5859,7 @@ static b32 build_remote(string_address host, string_address remote,
                                                   BUILD_FILE_ROOM);
                 positive length;
 
-                if (got < 0)
-                        return build_die(build_join("cannot reach ", host,
-                                                    " over ssh", null));
+                return_if(got < 0, build_die(build_join("cannot reach ", host, " over ssh", null)));
                 length = string_length((string_address)build_file_two);
                 length -= memory_trailing(build_file_two, length, byte_is_line_end);
                 build_file_two[length] = end;
@@ -6007,8 +5966,7 @@ static b32 build_remote(string_address host, string_address remote,
                         words[at++] = names[which];
                 }
 
-                if (at + 2 >= BUILD_ARGUMENT_ROOM)
-                        return build_die("too many remote exclusions");
+                return_if(at + 2 >= BUILD_ARGUMENT_ROOM, build_die("too many remote exclusions"));
                 words[at++] = "./";
                 words[at++] = build_join(host, ":./", null);
                 words[at] = null;
@@ -6542,8 +6500,7 @@ b32 main()
                         pair = build_join(pair, null);
                         cut = (p8 address_to)string_first_of(pair, '=');
 
-                        if (!cut)
-                                return build_die("--set wants name=value");
+                        return_if(!cut, build_die("--set wants name=value"));
 
                         address_to cut = end;
                         build_setting_set(pair, (string_address)(cut + 1));

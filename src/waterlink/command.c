@@ -324,8 +324,7 @@ static b32 link_key_verb(void)
                 return host_refuse("%s is not a private key: it must be a "
                                    "32-byte file only root can read\n",
                                    LINK_KEY_PATH);
-        if (got < 0)
-                return host_fail(LINK_KEY_PATH, got);
+        return_if(got < 0, host_fail(LINK_KEY_PATH, got));
 
         link_key_text(me.public, key);
         crypto_forget(address_of me, sizeof me);
@@ -625,8 +624,7 @@ static b32 link_group_join(string_address address_to words, positive count)
                 secret = words[at++];
         if (at < count)
         {
-                if (!string_equals(words[at], "allow") || at + 1 == count)
-                        return host_usage();
+                return_if(!string_equals(words[at], "allow") || at + 1 == count, host_usage());
                 may = link_grants_of(words + at + 1, count - at - 1,
                                      address_of good);
                 if (!good)
@@ -1149,8 +1147,7 @@ static b32 link_pair_here(string_address expect)
                 return host_refuse("%s is not a name to link by: moonwater name "
                                    "NEW gives one that is\n",
                                    (string_address)name);
-        if (!link_code_make(code))
-                return host_fail("randomness", -EIO);
+        return_if(!link_code_make(code), host_fail("randomness", -EIO));
 
         refused = link_pair_start((string_address)name, code, expect,
                                   address_of mark, address_of before);

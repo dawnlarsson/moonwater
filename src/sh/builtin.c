@@ -6019,10 +6019,7 @@ COLD fn shell_cd(writer write, string_address input)
         //      rbash: the working directory is the first thing a restricted
         //      shell keeps, because everything reached by a relative name
         //      follows from it.
-        if (shell_restricted)
-        {
-                return shell_refuse(1, "cd: restricted\n");
-        }
+        return_if(shell_restricted, shell_refuse(1, "cd: restricted\n"));
 
         shell_option_walk walk = {1};
         p8 letter;
@@ -6081,10 +6078,7 @@ COLD fn shell_cd(writer write, string_address input)
                 //      is the current directory, the same stay as `cd ''`.
                 if (!name)
                 {
-                        if (shell_bash_compat)
-                        {
-                                return shell_refuse(1, "cd: HOME not set\n");
-                        }
+                        return_if(shell_bash_compat, shell_refuse(1, "cd: HOME not set\n"));
 
                         name = ".";
                 }
@@ -6099,10 +6093,7 @@ COLD fn shell_cd(writer write, string_address input)
 
                 if (!name)
                 {
-                        if (shell_bash_compat)
-                        {
-                                return shell_refuse(1, "cd: OLDPWD not set\n");
-                        }
+                        return_if(shell_bash_compat, shell_refuse(1, "cd: OLDPWD not set\n"));
 
                         name = shell_directory;
                 }
@@ -6150,8 +6141,7 @@ COLD fn shell_cd(writer write, string_address input)
                 }
         }
 
-        if (!variables_set)
-                return shell_answer(shell_bash_compat ? 1 : 2);
+        return_if(!variables_set, shell_answer(shell_bash_compat ? 1 : 2));
 
         if (say)
                 string_format(write, "%s\n", shell_cd_target);
@@ -6431,9 +6421,7 @@ COLD fn shell_dirs(writer write, string_address input)
                         //      index into, and that is what bash says; past
                         //      that it names the number, without the sign it
                         //      was given.
-                        if (count < 2)
-                                return shell_answered(1,
-                                    "dirs: directory stack empty\n");
+                        return_if(count < 2, shell_answered(1, "dirs: directory stack empty\n"));
 
                         return shell_answered(1,
                             "dirs: %s: directory stack index out of range\n",
@@ -6529,10 +6517,7 @@ COLD fn shell_pushd(writer write, string_address input)
                 //      The count comes first: "pushd - -Z" is two words
                 //      to bash before either of them is a number it could
                 //      not read.
-                if (named)
-                {
-                        return shell_refuse(1, "pushd: too many arguments\n");
-                }
+                return_if(named, shell_refuse(1, "pushd: too many arguments\n"));
 
                 if (!shell_dirstack_spec(word) && !word_is(word, "-") &&
                     (string_is(word, '+') || string_is(word, '-')))
@@ -6570,8 +6555,7 @@ COLD fn shell_pushd(writer write, string_address input)
 
                 //      rbash: a directory change is what cd refuses, and pushd
                 //      makes one as surely; -n above only edits the stack.
-                if (shell_restricted)
-                        return shell_refuse(1, "pushd: restricted\n");
+                return_if(shell_restricted, shell_refuse(1, "pushd: restricted\n"));
 
                 string_copy_max_end(previous, shell_directory,
                                     sizeof(previous) - 1);
@@ -6601,8 +6585,7 @@ COLD fn shell_pushd(writer write, string_address input)
         // under the top to exchange with.
         if (!named)
         {
-                if (count < 2)
-                        return shell_answered(1, "pushd: no other directory\n");
+                return_if(count < 2, shell_answered(1, "pushd: no other directory\n"));
 
                 if (stack_only)
                 {
@@ -6637,9 +6620,7 @@ COLD fn shell_pushd(writer write, string_address input)
         {
                 //      With nothing pushed there is no stack to index into,
                 //      and bash says that rather than naming the number.
-                if (count < 2)
-                        return shell_answered(1,
-                            "pushd: directory stack empty\n");
+                return_if(count < 2, shell_answered(1, "pushd: directory stack empty\n"));
 
                 return shell_answered(1,
                     "pushd: %s: directory stack index out of range\n",
@@ -6648,8 +6629,7 @@ COLD fn shell_pushd(writer write, string_address input)
 
         //      A rotation that moves the shell is the same refusal, made
         //      before the stack is touched.
-        if (!stack_only && shell_restricted)
-                return shell_refuse(1, "pushd: restricted\n");
+        return_if(!stack_only && shell_restricted, shell_refuse(1, "pushd: restricted\n"));
 
         string_copy_max_end(wanted, rotated[0], sizeof(wanted) - 1);
 
@@ -6723,16 +6703,12 @@ COLD fn shell_popd(writer write, string_address input)
                         return shell_answer(shell_dirstack_number_refused(
                             "popd", word, "popd [-n] [+N | -N]"));
 
-                if (named)
-                        return shell_answered(1, "popd: too many arguments\n");
+                return_if(named, shell_answered(1, "popd: too many arguments\n"));
 
                 named = word;
         }
 
-        if (count < 2)
-        {
-                return shell_refuse(1, "popd: directory stack empty\n");
-        }
+        return_if(count < 2, shell_refuse(1, "popd: directory stack empty\n"));
 
         if (named && !shell_dirstack_index(named, count, address_of index))
                 return shell_answered(1, "popd: %s: directory stack index out of range\n",
@@ -6750,8 +6726,7 @@ COLD fn shell_popd(writer write, string_address input)
         // entry out from under it leaves it where it is.
         if (!index)
         {
-                if (shell_restricted)
-                        return shell_refuse(1, "popd: restricted\n");
+                return_if(shell_restricted, shell_refuse(1, "popd: restricted\n"));
 
                 string_copy_max_end(wanted, kept[0], sizeof(wanted) - 1);
 
@@ -7031,10 +7006,7 @@ COLD fn shell_exec(writer write, string_address input)
 
         //      rbash: replacing the shell would replace the restriction
         //      with whatever was named.
-        if (shell_restricted)
-        {
-                return shell_refuse(1, "exec: restricted\n");
-        }
+        return_if(shell_restricted, shell_refuse(1, "exec: restricted\n"));
 
         p8 address_to found = null;
         positive found_room = 0;
@@ -7089,8 +7061,7 @@ COLD fn shell_exec(writer write, string_address input)
 
         // With nothing to run, exec is only there for the redirections that
         // were already applied to get here.
-        if (shell_argc < 2)
-                return shell_answer(0);
+        return_if(shell_argc < 2, shell_answer(0));
 
         /*
                 An empty operand is still a name. Dash treats it as a path
@@ -7257,8 +7228,7 @@ COLD fn shell_pwd(writer write, string_address input)
 
                 log_error("pwd: cannot determine current directory\n", 0);
 
-                if (shell_bash_compat)
-                        return shell_answer(1);
+                return_if(shell_bash_compat, shell_answer(1));
 
                 /* dash diagnoses a failed physical lookup but retains its
                    historical success status and empty output. */
@@ -7337,8 +7307,7 @@ COLD fn shell_exit(writer write, string_address input)
                         //      Outside posix mode bash's exit answers 2 for
                         //      a word that is no number and stays; under
                         //      posix it is a special builtin's error.
-                        if (shell_bash_compat && !shell_posix_on())
-                                return shell_answer(2);
+                        return_if(shell_bash_compat && !shell_posix_on(), shell_answer(2));
                         exec_special_error_note();
                         if (shell_bash_compat)
                         {
@@ -8433,8 +8402,7 @@ COLD fn shell_shopt(writer write, string_address input)
 
                 // -q with nothing to ask about is a question with no
                 // subject, and Bash answers yes to it.
-                if (quiet)
-                        return shell_answer(0);
+                return_if(quiet, shell_answer(0));
 
                 // shopt -o with nothing named is the view set -o writes, in
                 // the same order and the same field; only -s or -u filtering
@@ -8577,8 +8545,7 @@ COLD fn shell_shopt(writer write, string_address input)
                         shell_shopt_said(write, which, as_commands);
         }
 
-        if (bad)
-                return shell_answer(1);
+        return_if(bad, shell_answer(1));
 
         shell_answer(set || unset ? 0 : (all_on ? 0 : 1));
 }
@@ -8826,9 +8793,7 @@ static COLD b32 shell_set_refused_letter(p8 sign, p8 letter)
 static COLD b32 shell_set_refused_name(bool on, string_address name)
 {
         shell_diagnostic_where();
-        if (!shell_bash_compat)
-                return string_report(log_error, 2,
-                    "set: Illegal option -o %s\n", name);
+        refuse_if(!shell_bash_compat, 2, "set: Illegal option -o %s\n", name);
         return string_report(log_error, 2, "set: %s: invalid option name\n",
                              name);
 }
@@ -11222,8 +11187,7 @@ COLD fn shell_local(writer write, string_address input)
                 (void)write;
                 (void)input;
                 state.index = 1;
-                if (state.index >= shell_argc)
-                        return shell_answer(0);
+                return_if(state.index >= shell_argc, shell_answer(0));
                 shell_declare_apply(address_of state, true);
                 return;
         }
@@ -11287,8 +11251,7 @@ COLD fn shell_local(writer write, string_address input)
                 state.index++;
         }
 
-        if (state.index >= shell_argc)
-                return shell_answer(0);
+        return_if(state.index >= shell_argc, shell_answer(0));
 
         shell_declare_apply(address_of state, true);
 }
@@ -11367,8 +11330,7 @@ static fn shell_declare(writer write, string_address input)
                 }
 
                 listed = shell_declare_functions(write, state.index, bodies);
-                if (listed < 0)
-                        return shell_answered(2, "%s: no room\n", "declare");
+                return_if(listed < 0, shell_answered(2, "%s: no room\n", "declare"));
                 return shell_answer(listed ? 0 : 1);
         }
 
@@ -11704,15 +11666,13 @@ static COLD fn shell_marked(writer write, p8 mark)
 
                         //      Under posix the next word is not tried, so
                         //      bash never complains about that one too.
-                        if (shell_posix_on())
-                                return shell_answer(1);
+                        return_if(shell_posix_on(), shell_answer(1));
 
                         //      Bash names the word it will not have and goes
                         //      on to the next one -- "export - v=1" leaves v
                         //      set to 1 and answers 1. dash stops there, and
                         //      being a special builtin the script stops too.
-                        if (!shell_bash_compat)
-                                return shell_answer(2);
+                        return_if(!shell_bash_compat, shell_answer(2));
 
                         refused = true;
                         continue;
@@ -11770,8 +11730,7 @@ static COLD fn shell_marked(writer write, p8 mark)
                 if (value)
                         address_to cut = append ? '+' : '=';
 
-                if (!kept)
-                        return shell_answered(2, "%s: no room\n", command);
+                return_if(!kept, shell_answered(2, "%s: no room\n", command));
         }
 
         shell_answer(refused ? 1 : 0);
@@ -12795,8 +12754,7 @@ HOT fn shell_test(writer write, string_address input)
         //      from every shell it is compared against.
         if (bracket)
         {
-                if (argc < 2)
-                        return shell_answered(2, "%s: missing `]'\n", name);
+                return_if(argc < 2, shell_answered(2, "%s: missing `]'\n", name));
 
                 last = shell_argv[argc - 1];
                 if (!last || string_not(last, ']') || string_get(last + 1))
@@ -12805,14 +12763,11 @@ HOT fn shell_test(writer write, string_address input)
                 test_stop = argc - 1;
         }
 
-        if (test_at >= test_stop)
-                return shell_answer(1);
+        return_if(test_at >= test_stop, shell_answer(1));
 
         count = test_stop - test_at;
 
-        if (count == 1)
-                return shell_answer(string_get(shell_argv[test_at]) != end ? 0
-                                                                          : 1);
+        return_if(count == 1, shell_answer(string_get(shell_argv[test_at]) != end ? 0 : 1));
 
         if (count <= 4)
         {
@@ -12820,11 +12775,9 @@ HOT fn shell_test(writer write, string_address input)
 
                 if (handled)
                 {
-                        if (!test_bad)
-                                return shell_answer(value ? 0 : 1);
+                        return_if(!test_bad, shell_answer(value ? 0 : 1));
 
-                        if (test_said)
-                                return shell_answer(2);
+                        return_if(test_said, shell_answer(2));
 
                         return shell_refuse(2, "%s: %s: unexpected operator\n",
                             shell_argv[0], shell_argv[test_at]);
@@ -12835,8 +12788,7 @@ HOT fn shell_test(writer write, string_address input)
 
         if (test_bad || test_at != test_stop)
         {
-                if (test_said)
-                        return shell_answer(2);
+                return_if(test_said, shell_answer(2));
 
                 return shell_refuse(
                     2, test_bad ? "%s: %s: unexpected operator\n"
@@ -13966,9 +13918,7 @@ fn shell_printf(writer write, string_address input)
                         return shell_letter_refuse("printf", letter, "printf [-v var] format [arguments]");
 
                 into = shell_option_argument(address_of walk);
-                if (!into)
-                        return shell_answered(2, "printf: -v: option requires an "
-                                   "argument\n");
+                return_if(!into, shell_answered(2, "printf: -v: option requires an " "argument\n"));
 
                 //      Bash refuses a name it could not assign as soon as it
                 //      reads it, before any later letter.
@@ -13981,8 +13931,7 @@ fn shell_printf(writer write, string_address input)
 
         positive first = walk.index;
 
-        if (shell_argc <= first)
-                return shell_answer(2);
+        return_if(shell_argc <= first, shell_answer(2));
 
         format = shell_argv[first];
         printf_argument = first + 1;
@@ -14466,10 +14415,7 @@ COLD fn shell_read(writer write, string_address input)
 
         read_length = 0;
 
-        if (!read_reserve(1))
-        {
-                return shell_answered(2, "%s: no room\n", "read");
-        }
+        return_if(!read_reserve(1), shell_answered(2, "%s: no room\n", "read"));
 
         shell_option_walk options = {.index = 1};
         p8 which;
@@ -14488,8 +14434,7 @@ COLD fn shell_read(writer write, string_address input)
                             "[-n nchars] [-N nchars] [-p prompt] "
                             "[-t timeout] [-u fd] [name ...]");
                 string_address value = shell_option_argument(address_of options);
-                if (!value)
-                        return shell_answered(2, "read: option -%s wants a value\n", said);
+                return_if(!value, shell_answered(2, "read: option -%s wants a value\n", said));
                 if (which == 'a')
                 {
                         if (!shell_valid_name(value,
@@ -14806,8 +14751,7 @@ COLD fn shell_read(writer write, string_address input)
 
         /* Bash leaves destinations alone on a descriptor/syscall failure.
            EOF and timeout are different: both still publish what was read. */
-        if (failed && shell_bash_compat)
-                return shell_answer(1);
+        return_if(failed && shell_bash_compat, shell_answer(1));
 
         if (!array_name && names >= shell_argc)
         {
@@ -15089,8 +15033,7 @@ COLD fn shell_mapfile(writer write, string_address input)
         }
         if (seekable && used > at)
                 system_seek(from, (positive)(-(bipolar)(used - at)), FILE_SEEK_CUR);
-        if (failed)
-                return shell_answered(2, "%s: no room\n", "mapfile");
+        return_if(failed, shell_answered(2, "%s: no room\n", "mapfile"));
         shell_answer(0);
 }
 
@@ -15198,9 +15141,7 @@ fn shell_getopts_answer(string_address name, string_address said,
 */
 static COLD b32 shell_getopts_usage()
 {
-        if (shell_bash_compat)
-                return string_report(log_error, 2,
-                    "getopts: usage: getopts optstring name [arg ...]\n");
+        refuse_if(shell_bash_compat, 2, "getopts: usage: getopts optstring name [arg ...]\n");
 
         return shell_reported(2,
             "getopts: Usage: getopts optstring var [arg...]\n");
@@ -15238,8 +15179,7 @@ COLD fn shell_getopts(writer write, string_address input)
                             "getopts optstring name [arg ...]");
         }
 
-        if (shell_argc - first < 2)
-                return shell_answer(shell_getopts_usage());
+        return_if(shell_argc - first < 2, shell_answer(shell_getopts_usage()));
 
         options = shell_argv[first];
         name = shell_argv[first + 1];
@@ -16725,8 +16665,7 @@ COLD fn shell_alias(writer write, string_address input)
                         alias_written(write, at++);
                 }
 
-                if (index == shell_argc)
-                        return shell_answer(0);
+                return_if(index == shell_argc, shell_answer(0));
         }
 
         while (index < shell_argc)
@@ -16902,8 +16841,7 @@ COLD fn shell_eval(writer write, string_address input)
         positive index = 1;
         positive syntax = shell_syntax_generation;
 
-        if (shell_argc < 2)
-                return shell_answer(0);
+        return_if(shell_argc < 2, shell_answer(0));
 
         //      Bash reads eval's words for options first, so "eval --"
         //      runs nothing and "eval -x" is a usage error fatal to a
@@ -16922,8 +16860,7 @@ COLD fn shell_eval(writer write, string_address input)
 
                 index = walk.index;
 
-                if (index >= shell_argc)
-                        return shell_answer(0);
+                return_if(index >= shell_argc, shell_answer(0));
         }
 
         if (!shell_argv_joined(index, address_of joined))
@@ -21137,8 +21074,7 @@ COLD fn shell_wait(writer write, string_address input)
                 b32 answer = shell_wait_one(shell_wait_table[0].job,
                                             address_of interrupted, true, false);
 
-                if (interrupted)
-                        return shell_answer(answer);
+                return_if(interrupted, shell_answer(answer));
         }
 
         shell_answer(0);
@@ -21191,8 +21127,7 @@ COLD fn shell_let(writer write, string_address input)
         (void)write;
         (void)input;
 
-        if (shell_argc < 2)
-                return shell_answer(1);
+        return_if(shell_argc < 2, shell_answer(1));
 
         at = 1;
 
@@ -21202,8 +21137,7 @@ COLD fn shell_let(writer write, string_address input)
         if (word_is(shell_argv[at], "--"))
                 at++;
 
-        if (at >= shell_argc)
-                return shell_answer(1);
+        return_if(at >= shell_argc, shell_answer(1));
 
         for (; at < shell_argc; at++)
                 if (!exec_let_value(shell_argv[at], address_of value))
@@ -21711,8 +21645,7 @@ static COLD fn shell_complete(writer write, string_address input)
                                     shell_argv[at + 1]);
                 }
 
-        if (!comp_read("complete", address_of want, false))
-                return shell_answer(2);
+        return_if(!comp_read("complete", address_of want, false), shell_answer(2));
 
         names_given = want.first < shell_argc;
 
@@ -21902,8 +21835,7 @@ static COLD fn shell_compopt(writer write, string_address input)
                                     shell_argv[at + 1]);
                 }
 
-        if (!comp_read("compopt", address_of want, true))
-                return shell_answer(2);
+        return_if(!comp_read("compopt", address_of want, true), shell_answer(2));
 
         //      No completion is being executed and no name has a
         //      specification, which is the pair of things Bash says here.
@@ -22912,8 +22844,7 @@ static COLD fn shell_bind(writer write, string_address input)
                 if (string_first_of("mfqurx", which))
                 {
                         value = shell_option_argument(address_of walk);
-                        if (!value)
-                                return shell_answer(2);
+                        return_if(!value, shell_answer(2));
                 }
 
                 switch (which)
@@ -23648,8 +23579,7 @@ fn shell_hash(writer write, string_address input)
         p8 address_to found = null;
         positive found_room = 0;
 
-        if (!shell_hashall_on())
-                return shell_answered(1, "hash: hashing disabled\n");
+        return_if(!shell_hashall_on(), shell_answered(1, "hash: hashing disabled\n"));
 
         while (shell_option_letter(address_of walk, address_of which))
         {
@@ -24536,8 +24466,7 @@ COLD fn shell_type(writer write, string_address input)
 
         index = walk.index;
 
-        if (index >= shell_argc)
-                return shell_answer(0);
+        return_if(index >= shell_argc, shell_answer(0));
 
         shell_answer(shell_query(
             write, index, (every ? SHELL_QUERY_ALL : 0) |
@@ -24618,10 +24547,7 @@ fn shell_command_builtin(writer write, string_address input)
                 {
                         //      rbash: -p is the standard PATH, which is a way
                         //      back to the directories the restriction took.
-                        if (shell_restricted)
-                        {
-                                return shell_refuse(1, "command: -p: restricted\n");
-                        }
+                        return_if(shell_restricted, shell_refuse(1, "command: -p: restricted\n"));
 
                         standard_path = true;
                 }
@@ -24632,8 +24558,7 @@ fn shell_command_builtin(writer write, string_address input)
 
         index = walk.index;
 
-        if (index >= shell_argc)
-                return shell_answer(0);
+        return_if(index >= shell_argc, shell_answer(0));
 
         if (only_say)
         {
@@ -24672,8 +24597,7 @@ fn shell_command_builtin(writer write, string_address input)
            it a temporary variable stack that is discarded when it ends.
            local only writes into that stack, so command local is a
            successful no-op, including outside a function. */
-        if (!shell_bash_compat && word_is(shell_argv[0], "local"))
-                return shell_answer(0);
+        return_if(!shell_bash_compat && word_is(shell_argv[0], "local"), shell_answer(0));
 
         {
                 bool tail = shell_tail_command;
@@ -24701,8 +24625,7 @@ fn shell_command_builtin(writer write, string_address input)
                 shell_tail_command = tail;
         }
 
-        if (!shell_command_path_allowed(shell_argv[0], true))
-                return shell_answer(1);
+        return_if(!shell_command_path_allowed(shell_argv[0], true), shell_answer(1));
 
         {
                 string_address name = shell_argv[0];
@@ -24716,10 +24639,7 @@ fn shell_command_builtin(writer write, string_address input)
                                           name, address_of found,
                                           address_of found_room);
 
-                if (located < 0)
-                {
-                        return shell_answered(2, "%s: no room\n", "command");
-                }
+                return_if(located < 0, shell_answered(2, "%s: no room\n", "command"));
 
                 scope_exit(if (found) memory_free(found, found_room));
                 if (!located)
@@ -24736,8 +24656,7 @@ fn shell_command_builtin(writer write, string_address input)
                             name);
                 }
 
-                if (located == 2)
-                        return shell_answered(126, "command: %s: cannot run\n", name);
+                return_if(located == 2, shell_answered(126, "command: %s: cannot run\n", name));
 
                 /* command's external tail bypasses ordinary dispatch, and
                    job control never reaches it: the jobs a monitored shell
@@ -25260,8 +25179,7 @@ fn shell_builtin_run(writer write, string_address input)
         (void)write;
         (void)input;
 
-        if (shell_argc < 2)
-                return shell_answer(0);
+        return_if(shell_argc < 2, shell_answer(0));
 
         //      builtin takes no options of its own, so the only word the
         //      walk can hand back is one it should refuse; "--" ends them
@@ -25273,8 +25191,7 @@ fn shell_builtin_run(writer write, string_address input)
 
         index = walk.index;
 
-        if (index >= shell_argc)
-                return shell_answer(0);
+        return_if(index >= shell_argc, shell_answer(0));
 
         memory_copy(shell_argv, shell_argv + index,
                     (positive)(shell_argc - index + 1) * sizeof(shell_argv[0]));
@@ -25378,8 +25295,7 @@ fn shell_enable(writer write, string_address input)
         /* Removing a builtin is permitted in restricted mode; restoring one
            would let a script replace the fixed command surface after entry.
            No-name invocations above remain pure listings. */
-        if (shell_restricted && !off)
-                return shell_answered(1, "enable: restricted\n");
+        return_if(shell_restricted && !off, shell_answered(1, "enable: restricted\n"));
 
         while (index < shell_argc)
         {
@@ -26124,8 +26040,7 @@ COLD fn shell_compgen(writer write, string_address input)
                             shell_argv[at + 1]);
         }
 
-        if (!comp_read("compgen", address_of want, false))
-                return shell_answer(2);
+        return_if(!comp_read("compgen", address_of want, false), shell_answer(2));
 
         //      -D, -E and -I belong to complete.
         if (want.special)
@@ -26252,8 +26167,7 @@ COLD fn shell_compgen(writer write, string_address input)
         if (ok && !compgen_shown && (want.options_on & COMP_OPTION_DIRNAMES))
                 compgen_entries(word ? word : (string_address) "", true, false);
 
-        if (!ok)
-                return shell_answer(1);
+        return_if(!ok, shell_answer(1));
 
         if (want.variable)
         {

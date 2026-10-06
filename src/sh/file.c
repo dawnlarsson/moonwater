@@ -101,9 +101,7 @@ static bool utility_hold(address_any address_to held, positive bytes,
         if (address_to held)
                 return true;
         address_any got = memory_checked(bytes);
-        if (!got)
-                return string_report(log_error, false, "%s: memory exhausted\n",
-                                     program);
+        refuse_if(!got, false, "%s: memory exhausted\n", program);
         /* Small pages: with transparent huge pages always on, the first
            touch of a large mapping zeroes two megabytes, and ls, which
            touches a few kilobytes of each table, started 80 us slower than
@@ -8939,8 +8937,7 @@ static bool file_source_destination(string_address program, positive first,
 
         // GNU's order: what is missing first, then the two options that
         // cannot be together.
-        if (first >= count)
-                return file_need_file(program, false);
+        return_if(first >= count, file_need_file(program, false));
 
         if (!into && first + 1 >= count)
                 return file_need_destination(program, file_operand_at(first), false);
@@ -12918,8 +12915,7 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
         //      address space before the first name, which a ulimit -v that
         //      GNU's ls runs under refused outright. The operand order is
         //      sized once here, for every operand there is.
-        if (!ls_order_reserve(count + 1))
-                return string_report(log_error, 2, "%s: memory exhausted\n", program);
+        refuse_if(!ls_order_reserve(count + 1), 2, "%s: memory exhausted\n", program);
 
         ls_program = program;
         ls_selected = (ls_selection){};
@@ -13808,13 +13804,11 @@ static b32 file_nice()
 
         if (first >= count)
         {
-                if (given)
-                        return string_report(log_error, 125, "nice: a command must be given with an adjustment\n");
+                refuse_if(given, 125, "nice: a command must be given with an adjustment\n");
 
                 bipolar current;
 
-                if (!nice_current(address_of current))
-                        return string_report(log_error, 125, "nice: cannot get niceness\n");
+                refuse_if(!nice_current(address_of current), 125, "nice: cannot get niceness\n");
 
                 bipolar_to_string(log, current);
                 log("\n", 1);
@@ -13824,8 +13818,7 @@ static b32 file_nice()
 
         bipolar current;
 
-        if (!nice_current(address_of current))
-                return string_report(log_error, 125, "nice: cannot get niceness\n");
+        refuse_if(!nice_current(address_of current), 125, "nice: cannot get niceness\n");
 
         bipolar wanted = current + adjustment;
 
@@ -18329,8 +18322,7 @@ static b32 file_stat()
                      : chosen == 'a' ? STAT_DONT_SYNC : 0;
         }
 
-        if (index >= count)
-                return file_need_operand((string_address) "stat");
+        return_if(index >= count, file_need_operand((string_address) "stat"));
 
         /*
                 A format of the user's that names a file with %N quotes it as
@@ -19372,18 +19364,13 @@ static bool du_threshold_read(string_address value)
 
         if (!digits)
         {
-                if (!known)
-                        return string_report(log_error, false, "du: invalid %s argument '%s'\n",
-                                             option, value);
+                refuse_if(!known, false, "du: invalid %s argument '%s'\n", option, value);
                 magnitude = 1;
         }
 
         if (letter)
         {
-                if (!known)
-                        return string_report(log_error, false,
-                                             "du: invalid suffix in %s argument '%s'\n", option,
-                                             value);
+                refuse_if(!known, false, "du: invalid suffix in %s argument '%s'\n", option, value);
 
                 p64 scale = 1024;
                 positive skip = 1;
@@ -19411,8 +19398,7 @@ static bool du_threshold_read(string_address value)
         if (overflow || magnitude > (p64)bipolar_max + negative)
                 return string_report(log_error, false, "du: %s argument '%s' too large\n", option,
                                      value);
-        if (!magnitude && negative)
-                return string_report(log_error, false, "du: invalid --threshold argument '-0'\n");
+        refuse_if(!magnitude && negative, false, "du: invalid --threshold argument '-0'\n");
 
         du_threshold = negative ? (b64)((p64)0 - magnitude) : (b64)magnitude;
         return true;
@@ -19725,8 +19711,7 @@ static b32 file_du()
                       (du_follow || files_from ||
                        (taking.first < count && count - taking.first > 1));
 
-        if (du_option_failed)
-                return file_try_help((string_address) "du", 1);
+        return_if(du_option_failed, file_try_help((string_address) "du", 1));
 
         positive block_unit = 0;
         bool block_human = false;
@@ -19813,9 +19798,7 @@ static b32 file_du()
         }
         du_si = du_unit_option == 'j' || (du_unit_option == 'B' && block_si);
 
-        if (du_summary && du_all)
-                return string_report(log_error, 1,
-                                     "du: cannot both summarize and show all entries\n");
+        refuse_if(du_summary && du_all, 1, "du: cannot both summarize and show all entries\n");
 
         // -s with a depth of nought says the same thing twice, which is a
         // warning; with any other depth it says two things, which is not --
@@ -20698,8 +20681,7 @@ static b32 file_df()
                                              file_reason(reason));
                 //      The operands are looked at first, so a bad one is
                 //      named before the warning, as GNU names it.
-                if (!df_tableless(address_of mounts, first, count))
-                        return string_report(log_error, 1, "df: out of memory\n");
+                refuse_if(!df_tableless(address_of mounts, first, count), 1, "df: out of memory\n");
                 df_failed = df_tableless_failed;
                 string_format(log_error, "df: Warning: cannot read table of mounted file systems: %s\n",
                               file_reason(reason));
@@ -21556,9 +21538,7 @@ static b32 file_chmod()
                 break;
         }
 
-        if (minus_mode && like)
-                return string_report(log_error, 1,
-                                     "chmod: cannot combine mode and --reference options\n");
+        refuse_if(minus_mode && like, 1, "chmod: cannot combine mode and --reference options\n");
 
         chmod_surprising = minus_mode != null;
 
@@ -22563,8 +22543,7 @@ static b32 file_chown_common(string_address program, bool groups_only)
         //      file names the spec it stopped after.
         if (first >= count || (!like && first + 1 >= count))
         {
-                if (first >= count)
-                        return file_need_operand(program);
+                return_if(first >= count, file_need_operand(program));
 
                 return file_need_operand_after(program, file_operand_at(count - 1));
         }
@@ -23212,13 +23191,9 @@ static b32 file_ln()
         // than to the link, which is the one thing -L and -P are about.
         ln_through = ln_selected.dereference == 'L';
 
-        if (first >= count)
-                return file_need_file((string_address) "ln", 1);
+        return_if(first >= count, file_need_file((string_address) "ln", 1));
 
-        if (ln_relative && !ln_symbolic)
-        {
-                return string_report(log_error, 1, "ln: cannot do --relative without --symbolic\n");
-        }
+        refuse_if(ln_relative && !ln_symbolic, 1, "ln: cannot do --relative without --symbolic\n");
 
         string_address into = file_option_value(address_of taking, 't');
         bool alone = (flags & FILE_FLAG('T')) != 0;
@@ -23767,8 +23742,7 @@ static b32 file_namei()
                 log_flush();
                 return 0;
         }
-        if (!file_operand_count)
-                return string_report(log_error, 1, "namei: pathname argument is missing\n");
+        refuse_if(!file_operand_count, 1, "namei: pathname argument is missing\n");
 
         namei_row_count = 0;
         namei_text_used = 0;
@@ -24210,8 +24184,7 @@ static b32 file_whereis()
                         }
                         else if (option == 'B' || option == 'M' || option == 'S')
                         {
-                                if (word[at + 1])
-                                        return whereis_bad_usage();
+                                return_if(word[at + 1], whereis_bad_usage());
 
                                 positive kind = option == 'B' ? WHEREIS_BINARY
                                                 : option == 'M' ? WHEREIS_MANUAL
@@ -24296,8 +24269,7 @@ static b32 file_whereis()
         log_flush();
 
         //      Said once, at the end, after every name has been answered.
-        if (missing_f)
-                return string_report(log_error, 1, "whereis: option -f is missing\n");
+        refuse_if(missing_f, 1, "whereis: option -f is missing\n");
 
         return 0;
 }
@@ -24345,8 +24317,7 @@ static b32 file_readlink()
         positive count = file_operand_count;
         positive flags = taking.flags;
 
-        if (first >= count)
-                return file_need_operand((string_address) "readlink");
+        return_if(first >= count, file_need_operand((string_address) "readlink"));
 
         bool resolve = readlink_selected.canonical != 0;
         bool no_newline = (flags & FILE_FLAG('n')) != 0;
@@ -24498,8 +24469,7 @@ static b32 file_basename()
         // without it the second word is the suffix and there is exactly one.
         bool many = (taking.flags & (FILE_FLAG('a') | FILE_FLAG('s'))) != 0;
 
-        if (index >= count)
-                return file_need_operand((string_address) "basename");
+        return_if(index >= count, file_need_operand((string_address) "basename"));
 
         if (!many && index + 1 < count)
                 suffix = program_argument((b32)(index + 1));
@@ -24559,8 +24529,7 @@ static b32 file_dirname()
         positive first = taking.first;
         positive count = (positive)program_argument_count();
 
-        if (first >= count)
-                return file_need_operand((string_address) "dirname");
+        return_if(first >= count, file_need_operand((string_address) "dirname"));
 
         while (first < count)
                 dirname_one(program_argument((b32)first++),
@@ -24794,8 +24763,7 @@ static b32 file_realpath()
         positive first = taking.first;
         positive count = (positive)program_argument_count();
 
-        if (first >= count)
-                return file_need_operand((string_address) "realpath");
+        return_if(first >= count, file_need_operand((string_address) "realpath"));
 
         bool allow_missing = realpath_selected.missing == 'm';
         bool written_name = realpath_selected.walk == 's';
@@ -24972,10 +24940,7 @@ static bool pathchk_one(string_address path, bool basic, bool extra)
 {
         positive length = string_length(path);
 
-        if ((basic || extra) && !length)
-        {
-                return string_report(log_error, false, "pathchk: empty file name\n");
-        }
+        refuse_if((basic || extra) && !length, false, "pathchk: empty file name\n");
 
         positive at = 0;
         positive longest = 0;
@@ -25037,8 +25002,7 @@ static bool pathchk_one(string_address path, bool basic, bool extra)
         if (!looked)
                 return true;
 
-        if (looked != -ERROR_NO_ENTRY || !length)
-                return pathchk_bad(path, file_reason(looked));
+        return_if(looked != -ERROR_NO_ENTRY || !length, pathchk_bad(path, file_reason(looked)));
 
         if (length >= FILE_PATH_MAX)
                 return pathchk_bad(path, (string_address) "path limit exceeded");
@@ -25057,8 +25021,7 @@ static bool pathchk_one(string_address path, bool basic, bool extra)
         bipolar mounted = system_call_2(syscall(statfs), (positive)base,
                                         (positive)address_of mount);
 
-        if (mounted < 0)
-                return pathchk_bad(path, file_reason(mounted));
+        return_if(mounted < 0, pathchk_bad(path, file_reason(mounted)));
 
         if (mount.name_length > 0)
                 name_max = (positive)mount.name_length;
@@ -25116,8 +25079,7 @@ static b32 file_pathchk()
         positive count = (positive)program_argument_count();
         positive first = taking.first;
 
-        if (first >= count)
-                return file_need_operand((string_address) "pathchk");
+        return_if(first >= count, file_need_operand((string_address) "pathchk"));
 
         bool basic = (taking.flags &
                       (FILE_FLAG('p') | FILE_FLAG('Q'))) != 0;
@@ -25205,8 +25167,7 @@ static b32 file_mkdir()
         //      An operand is asked for before -m is read, the way the
         //      reference asks: mkdir -m nonsense with nothing to make is a
         //      missing operand and not an invalid mode.
-        if (index >= count)
-                return file_need_operand((string_address) "mkdir");
+        return_if(index >= count, file_need_operand((string_address) "mkdir"));
 
         //      -m is read against a=rwx the way the reference mkdir reads
         //      it: the base is all nine bits and not the umask-filtered set,
@@ -25391,8 +25352,7 @@ static b32 file_mkfifo()
                                address_of mode, address_of given_mode))
                 return 1;
 
-        if (!file_operand_count)
-                return file_need_operand((string_address) "mkfifo");
+        return_if(!file_operand_count, file_need_operand((string_address) "mkfifo"));
 
         if (!file_node_mode_taken((string_address) "mkfifo", address_of taking,
                                   address_of mode, given_mode))
@@ -25470,8 +25430,7 @@ static b32 file_mknod()
                 one when there are too many -- and a type that wants numbers
                 says so in a line of its own.
         */
-        if (!file_operand_count)
-                return file_need_operand((string_address) "mknod");
+        return_if(!file_operand_count, file_need_operand((string_address) "mknod"));
 
         if (file_operand_count == 1)
                 return file_need_operand_after((string_address) "mknod", file_operand_at(0));
@@ -25637,11 +25596,9 @@ static b32 file_sync()
         bool data = (taking.flags & FILE_FLAG('d')) != 0;
         bool filesystem = (taking.flags & FILE_FLAG('f')) != 0;
 
-        if (data && filesystem)
-                return string_report(log_error, 1, "sync: cannot specify both --data and --file-system\n");
+        refuse_if(data && filesystem, 1, "sync: cannot specify both --data and --file-system\n");
 
-        if (data && !file_operand_count)
-                return string_report(log_error, 1, "sync: --data needs at least one argument\n");
+        refuse_if(data && !file_operand_count, 1, "sync: --data needs at least one argument\n");
 
         if (!file_operand_count)
                 system_call(syscall(sync));
@@ -26060,8 +26017,7 @@ static bool split_output_advance(split_output address_to output)
 
 static bool split_output_name(split_output address_to output)
 {
-        if (!split_output_advance(output))
-                return string_report(log_error, false, "split: output file suffixes exhausted\n");
+        refuse_if(!split_output_advance(output), false, "split: output file suffixes exhausted\n");
 
         string_address suffix = output->suffix;
         positive suffix_length = output->suffix_length;
@@ -26114,9 +26070,7 @@ static bool split_filter_spawn(split_output address_to output)
         b32 ends[2];
         bipolar made = system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC);
 
-        if (made < 0)
-                return string_report(log_error, false, "split: failed to create pipe: %s\n",
-                                     file_reason(made));
+        refuse_if(made < 0, false, "split: failed to create pipe: %s\n", file_reason(made));
 
         string_address shell = file_environment((string_address) "SHELL");
 
@@ -26580,9 +26534,7 @@ static bool split_materialized(bipolar in, file_facts address_to facts,
                 bipolar mapped = system_call_6(
                     syscall(mmap), 0, (positive)facts->size,
                     FILE_PROTECT_READ, FILE_MAP_PRIVATE, (positive)in, 0);
-                if (mapped < 0)
-                        return string_report(log_error, false, "split: cannot map input: %s\n",
-                                      file_reason(mapped));
+                refuse_if(mapped < 0, false, "split: cannot map input: %s\n", file_reason(mapped));
 
                 bool answer = split_line_bytes_memory(
                     (p8 address_to)(positive)mapped, (positive)facts->size,
@@ -27195,8 +27147,7 @@ static bool split_chunk_buffer(p8 address_to input, positive length,
 
 static bool split_separator(string_address text, p8 address_to separator)
 {
-        if (!text || !string_get(text))
-                return string_report(log_error, false, "split: empty record separator\n");
+        refuse_if(!text || !string_get(text), false, "split: empty record separator\n");
 
         if (!string_get(text + 1))
         {
@@ -27825,9 +27776,7 @@ static bool csplit_suffix_valid(string_address format)
                 p8 kind = *at;
                 bool decimal = kind == 'd' || kind == 'i' || kind == 'u';
 
-                if (!kind)
-                        return string_report(log_error, false,
-                                             "csplit: missing conversion specifier in suffix\n");
+                refuse_if(!kind, false, "csplit: missing conversion specifier in suffix\n");
                 if (!decimal && kind != 'o' && kind != 'x' && kind != 'X')
                 {
                         p8 shown[8];
@@ -27925,8 +27874,7 @@ static bool csplit_name(csplit_state address_to state, positive number)
                                                      state->name + state->prefix_length,
                                                      room);
 
-                if (made == positive_max)
-                        return string_report(log_error, false, "csplit: output file name is too long\n");
+                refuse_if(made == positive_max, false, "csplit: output file name is too long\n");
                 memory_copy_apart(state->name, state->prefix, state->prefix_length);
                 state->name[state->prefix_length + made] = 0;
                 return true;
@@ -28520,8 +28468,7 @@ static b32 file_csplit()
 
         if (!file_operands_take(address_of taking))
                 return 1;
-        if (!file_operand_count)
-                return file_need_operand((string_address) "csplit");
+        return_if(!file_operand_count, file_need_operand((string_address) "csplit"));
         if (file_operand_count < 2)
                 return file_need_operand_after((string_address) "csplit", file_operand_at(0));
 
@@ -29266,8 +29213,7 @@ static b32 file_truncate()
                 return file_try_help((string_address) "truncate", 1);
         }
 
-        if (!file_operand_count)
-                return file_need_file((string_address) "truncate", 1);
+        return_if(!file_operand_count, file_need_file((string_address) "truncate", 1));
 
         b64 reference = -1;
 
@@ -30738,8 +30684,7 @@ static b32 file_hardlink()
                       "  -c content only  -n dry-run  -l list  -q quiet\n"
                       "  -s MIN  -S MAX  -f respect name", log))
                 return 0;
-        if (!file_operand_count)
-                return string_report(log_error, 1, "hardlink: no directory or file specified\n");
+        refuse_if(!file_operand_count, 1, "hardlink: no directory or file specified\n");
 
         bool content = (taking.flags & FILE_FLAG('c')) != 0;
         hardlink_ignore_mode = content || (taking.flags & FILE_FLAG('p'));
@@ -31932,8 +31877,7 @@ static b32 file_shred()
 
         if (!file_operands_take(address_of taking))
                 return 1;
-        if (!file_operand_count)
-                return file_need_file((string_address) "shred", 1);
+        return_if(!file_operand_count, file_need_file((string_address) "shred", 1));
 
         shred_random.handle = -1;
         shred_random.name = shred_source_name;
@@ -32692,9 +32636,7 @@ static bool shuf_seen(p8 letter, string_address value)
                 //      A second -i is refused before the word it carries is
                 //      read, the way the reference refuses it: two ranges is
                 //      the complaint whether or not the second one parses.
-                if (shuf_ranged)
-                        return string_report(log_error, false,
-                                             "shuf: multiple -i options specified\n");
+                refuse_if(shuf_ranged, false, "shuf: multiple -i options specified\n");
 
                 if (!shuf_range(value, address_of low, address_of high) ||
                     high - low == positive_max)
@@ -33458,8 +33400,7 @@ static bool dircolors_parse(string_address input, positive length, string_addres
                         positive size = value_end - value;
                         p8 address_to pattern = size < sizeof(small) ? small : memory_take(size + 1);
 
-                        if (!pattern)
-                                return string_report(log_error, false, "dircolors: memory exhausted\n");
+                        refuse_if(!pattern, false, "dircolors: memory exhausted\n");
                         memory_copy_apart(pattern, input + value, size);
                         pattern[size] = end;
                         state = shell_match(pattern, term_gate ? term : colorterm) ? DC_SURE : DC_NO;
@@ -33729,8 +33670,7 @@ static b32 file_rmdir()
         positive flags = taking.flags;
         positive first = taking.first;
 
-        if (first >= count)
-                return file_need_operand((string_address) "rmdir");
+        return_if(first >= count, file_need_operand((string_address) "rmdir"));
 
         b32 status = 0;
 
@@ -37908,8 +37848,7 @@ static bool file_into_option_seen(string_address program, p8 letter,
 {
         if (letter != 't')
                 return true;
-        if (file_into_seen)
-                return file_targets_told(program, true);
+        return_if(file_into_seen, file_targets_told(program, true));
         file_into_seen = value;
         return true;
 }
@@ -38034,8 +37973,7 @@ static bool ln_option_seen(p8 letter, string_address value)
            refused there, before any later word is read. */
         if (letter != 't')
                 return true;
-        if (ln_target_directory)
-                return file_targets_told((string_address) "ln", true);
+        return_if(ln_target_directory, file_targets_told((string_address) "ln", true));
 
         file_facts facts;
         bipolar looked = file_look_code(AT_FDCWD, value, 0, address_of facts);
@@ -38567,9 +38505,7 @@ static bool install_strip_run(string_address name)
                               file_reason(child < 0 ? child : refused));
                 return false;
         }
-        if (waited < 0)
-                return string_report(log_error, false, "install: waiting for strip: %s\n",
-                                     file_reason(waited));
+        refuse_if(waited < 0, false, "install: waiting for strip: %s\n", file_reason(waited));
         if ((status & 0x7f) || wait_status_code(status))
                 return string_report(log_error, false,
                                      "install: strip process terminated abnormally\n");
@@ -39038,8 +38974,7 @@ static b32 file_install()
                         return string_report(
                             log_error, 1,
                             "install: target directory not allowed when installing a directory\n");
-                if (taking.first >= count)
-                        return file_need_file((string_address) "install", 1);
+                return_if(taking.first >= count, file_need_file((string_address) "install", 1));
                 if ((flags & FILE_FLAG('T')) && count - taking.first > 2)
                         return file_extra_operand((string_address) "install",
                                                   file_operand_at(taking.first + 2), 1);
@@ -39130,8 +39065,7 @@ static b32 file_install()
                 return install_status;
         }
 
-        if (taking.first >= count)
-                return file_need_file((string_address) "install", 1);
+        return_if(taking.first >= count, file_need_file((string_address) "install", 1));
         if (!into && taking.first + 1 >= count)
                 return file_need_destination((string_address) "install",
                                              file_operand_at(taking.first), 1);
@@ -41148,9 +41082,7 @@ static b32 file_rm()
         if (rm_preserve_root)
         {
                 bipolar looked = file_look_code(AT_FDCWD, "/", 0, address_of rm_root);
-                if (looked < 0)
-                        return string_report(log_error, 1, "rm: cannot preserve '/': %s\n",
-                                      file_reason(looked));
+                refuse_if(looked < 0, 1, "rm: cannot preserve '/': %s\n", file_reason(looked));
         }
 
         while (first < count)
@@ -41549,8 +41481,7 @@ static b32 file_touch()
                 times[1] = times[3] = 0;
         }
 
-        if (first >= count)
-                return file_need_file((string_address) "touch", 1);
+        return_if(first >= count, file_need_file((string_address) "touch", 1));
 
         b64 obsolete;
 
@@ -41939,8 +41870,7 @@ static b32 file_sleep()
 {
         positive count = (positive)program_argument_count();
 
-        if (count < 2)
-                return file_need_operand((string_address) "sleep");
+        return_if(count < 2, file_need_operand((string_address) "sleep"));
 
         bool intervals_only = false;
         bool refused = false;
@@ -42002,8 +41932,7 @@ static b32 file_sleep()
                 total = span > positive_max - total ? positive_max : total + span;
         }
 
-        if (refused)
-                return file_try_help((string_address) "sleep", 1);
+        return_if(refused, file_try_help((string_address) "sleep", 1));
 
         // A signal that arrives partway through leaves the remainder in the
         // second timespec, and the sleep goes on from there.
@@ -42013,8 +41942,7 @@ static b32 file_sleep()
         do
                 slept = system_call_2(syscall(nanosleep), (positive)left, (positive)left);
         while (slept == -4);
-        if (slept < 0)
-                return string_report(log_error, 1, "sleep: %s\n", file_reason(slept));
+        refuse_if(slept < 0, 1, "sleep: %s\n", file_reason(slept));
 
         return 0;
 }
@@ -42039,9 +41967,7 @@ static b32 file_stty()
         bipolar answer = system_control(0, TIOCGWINSZ,
                                        address_of size);
 
-        if (answer < 0)
-                return string_report(log_error, 1, "stty: standard input: %s\n",
-                              file_reason(answer));
+        refuse_if(answer < 0, 1, "stty: standard input: %s\n", file_reason(answer));
 
         positive_to_string(log, size.rows);
         log(" ", 1);
@@ -42081,9 +42007,7 @@ static b32 file_tty()
                 return log_failed() ? 3 : 1;
         }
 
-        if (length < 0)
-                return string_report(log_error, 4, "tty: ttyname error: %s\n",
-                              file_reason(length));
+        refuse_if(length < 0, 4, "tty: ttyname error: %s\n", file_reason(length));
 
         file_line(path);
         log_flush();
@@ -42619,8 +42543,7 @@ static b32 seq_count_digits(string_address first, string_address last,
                 log(seq_count_room + start, stop - start);
                 written = true;
 
-                if (log_failed())
-                        return seq_write_failed();
+                return_if(log_failed(), seq_write_failed());
 
                 positive carry = step;
                 positive at = stop;
@@ -43933,8 +43856,7 @@ static b32 seq_wide_numbers(seq_format address_to format, seq_wide first,
                         return string_report(log_error, 1,
                                              "seq: write error: Value too large for"
                                              " defined data type\n");
-                if (log_failed())
-                        return seq_write_failed();
+                return_if(log_failed(), seq_write_failed());
                 if (beyond)
                         break;
 
@@ -44118,8 +44040,7 @@ static b32 seq_decimal_numbers(seq_format address_to format, seq_decimal first,
                 //      A refused write ends the sequence, as GNU's does: seq
                 //      inf, or a last number past what anyone could read,
                 //      would otherwise count on for ever into nothing.
-                if (log_failed())
-                        return seq_write_failed();
+                return_if(log_failed(), seq_write_failed());
 
                 value = (bipolar)((positive)value +
                                  (positive)step.coefficient * (records - 1));
@@ -44489,8 +44410,7 @@ static b32 file_yes()
 
         positive mapped = (positive)memory_checked(length);
 
-        if (!mapped)
-                return string_report(log_error, 1, "yes: out of memory\n");
+        refuse_if(!mapped, 1, "yes: out of memory\n");
 
         p8 address_to line = (p8 address_to)mapped;
         positive used = 0;
@@ -44997,9 +44917,7 @@ static bool env_split(string_address text, positive address_to have, bool loud)
                         if (sq && text[1] != '\\' && text[1] != '\'')
                                 break;
                         next = string_get(text + 1);
-                        if (!next)
-                                return string_report(log_error, false,
-                                              "env: invalid backslash at end of string in -S\n");
+                        refuse_if(!next, false, "env: invalid backslash at end of string in -S\n");
                         text++;
                         switch (next)
                         {
@@ -45135,8 +45053,7 @@ static bool env_split(string_address text, positive address_to have, bool loud)
         }
 
 env_split_done:
-        if (dq || sq)
-                return string_report(log_error, false, "env: no terminating quote in -S string\n");
+        refuse_if(dq || sq, false, "env: no terminating quote in -S string\n");
 
         if (!sep)
         {
@@ -45214,8 +45131,7 @@ static b32 file_env()
                         string_address kept = shell_store_copy(address_of env_keep, env_words[word],
                                                                string_length(env_words[word]));
 
-                        if (!kept)
-                                return string_report(log_error, 125, "env: split string is too large\n");
+                        refuse_if(!kept, 125, "env: split string is too large\n");
                         env_words[word] = kept;
                 }
 
@@ -45726,15 +45642,12 @@ static b32 file_id()
                           ((flags & FILE_FLAG('g')) != 0) +
                           ((flags & FILE_FLAG('G')) != 0);
 
-        if (chosen > 1)
-                return string_report(log_error, 1,
-                                     "id: cannot print \"only\" of more than one choice\n");
+        refuse_if(chosen > 1, 1, "id: cannot print \"only\" of more than one choice\n");
 
         if ((names || real) && !one)
                 return string_report(log_error, 1, "id: printing only names or real IDs requires -u, -g, or -G\n");
 
-        if (zero && !one)
-                return string_report(log_error, 1, "id: option --zero not permitted in default format\n");
+        refuse_if(zero && !one, 1, "id: option --zero not permitted in default format\n");
 
         positive first = taking.first;
         positive count = (positive)program_argument_count();
@@ -46058,9 +45971,7 @@ static b32 file_hostname()
                 p8 address_to at = line;
                 p8 address_to stop;
 
-                if (got < 0)
-                        return string_report(log_error, 1, "hostname: %s\n",
-                                             file_reason(got));
+                refuse_if(got < 0, 1, "hostname: %s\n", file_reason(got));
                 line[got] = end;
                 stop = line + got;
 
@@ -46086,15 +45997,13 @@ static b32 file_hostname()
 
         if (file_operand_count)
         {
-                if (name || file_operand_count > 1)
-                        return file_hostname_usage();
+                return_if(name || file_operand_count > 1, file_hostname_usage());
                 name = file_operand_at(0);
         }
 
         if (name)
         {
-                if (taking.flags & FILE_FLAG('s'))
-                        return file_hostname_usage();
+                return_if(taking.flags & FILE_FLAG('s'), file_hostname_usage());
 
                 name += string_span(name, string_set_space);
                 length = string_length(name);
@@ -46105,16 +46014,12 @@ static b32 file_hostname()
                                              "hostname: the specified hostname is invalid\n");
 
                 failed = system_call_2(syscall(sethostname), (positive)name, length);
-                if (failed == -1)
-                        return string_report(log_error, 1,
-                                             "hostname: you must be root to change the host name\n");
-                if (failed == -22)
-                        return string_report(log_error, 1, "hostname: name too long\n");
+                refuse_if(failed == -1, 1, "hostname: you must be root to change the host name\n");
+                refuse_if(failed == -22, 1, "hostname: name too long\n");
                 return 0;
         }
 
-        if (!file_machine_read(address_of facts))
-                return string_report(log_error, 1, "hostname: cannot read system name\n");
+        refuse_if(!file_machine_read(address_of facts), 1, "hostname: cannot read system name\n");
 
         if (taking.flags & FILE_FLAG('s'))
         {
@@ -46173,8 +46078,7 @@ static b32 file_uname()
 
         positive flags = taking.flags;
 
-        if (!file_machine_read(address_of facts))
-                return string_report(log_error, 1, "uname: cannot read system name\n");
+        refuse_if(!file_machine_read(address_of facts), 1, "uname: cannot read system name\n");
 
         /*
                 Every field uname answers with, in the order -a writes them.
@@ -46851,8 +46755,7 @@ static b32 file_mktemp()
 
                 length = string_length(base);
 
-                if (length > FILE_PATH_MAX - 2)
-                        return string_report(log_error, 1, "mktemp: template too long\n");
+                refuse_if(length > FILE_PATH_MAX - 2, 1, "mktemp: template too long\n");
 
                 memory_copy_apart(path, base, length);
 
@@ -46863,8 +46766,7 @@ static b32 file_mktemp()
 
         positive whole_length = template_length + suffix_length;
 
-        if (length + whole_length >= FILE_PATH_MAX)
-                return string_report(log_error, 1, "mktemp: template too long\n");
+        refuse_if(length + whole_length >= FILE_PATH_MAX, 1, "mktemp: template too long\n");
 
         memory_copy_apart(path + length, whole, whole_length);
         path[length + whole_length] = end;
@@ -46923,8 +46825,7 @@ static b32 file_mktemp()
                                 system_close(answer);
                 }
 
-                if (answer >= 0)
-                        return mktemp_told(path, directory, true, quiet);
+                return_if(answer >= 0, mktemp_told(path, directory, true, quiet));
 
                 if (answer != -ERROR_EXISTS)
                 {
@@ -46935,8 +46836,7 @@ static b32 file_mktemp()
                 }
         }
 
-        if (dry)
-                return mktemp_told(path, directory, false, quiet);
+        return_if(dry, mktemp_told(path, directory, false, quiet));
 
         if (!quiet)
                 mktemp_failed(directory, shown, -ERROR_EXISTS);
@@ -47359,10 +47259,7 @@ static b32 kill_listed(string_address word)
         //      Dash's kill -l only reads a number (an exit status). A
         //      name is an illegal number, status two. Bash looks the
         //      name up and writes it back.
-        if (kill_shell_spelling && !shell_bash_compat)
-        {
-                return string_report(log_error, 2, "kill: Illegal number: %s\n", word);
-        }
+        refuse_if(kill_shell_spelling && !shell_bash_compat, 2, "kill: Illegal number: %s\n", word);
 
         bipolar found = kill_signal_of(word);
 
@@ -47522,10 +47419,7 @@ static b32 kill_process_state(string_address pid)
         bipolar got = kill_process_status(pid, kill_status_text,
                                           sizeof(kill_status_text));
 
-        if (got < 0)
-                return string_report(log_error, 1,
-                                     "kill: failed to initialize procfs handler: %s\n",
-                                     file_reason(got));
+        refuse_if(got < 0, 1, "kill: failed to initialize procfs handler: %s\n", file_reason(got));
 
         static const struct
         {
@@ -47642,12 +47536,8 @@ static b32 file_kill()
                 {
                         positive left = count - index;
 
-                        if (left < 2)
-                                return string_report(log_error, 1,
-                                                     "kill: too few arguments\n");
-                        if (left > 2)
-                                return string_report(log_error, 1,
-                                                     "kill: too many arguments\n");
+                        refuse_if(left < 2, 1, "kill: too few arguments\n");
+                        refuse_if(left > 2, 1, "kill: too many arguments\n");
                         return kill_process_state(program_argument((b32)(index + 1)));
                 }
 
@@ -47666,9 +47556,7 @@ static b32 file_kill()
                 if (!string_compare(argument, "-p") ||
                     !string_compare(argument, "--pid"))
                 {
-                        if (do_kill)
-                                return string_report(log_error, 1,
-                                                     "kill: --pid and --signal are mutually exclusive\n");
+                        refuse_if(do_kill, 1, "kill: --pid and --signal are mutually exclusive\n");
                         print_only = true;
                         index++;
                         continue;
@@ -47784,13 +47672,8 @@ static b32 file_kill()
                         return string_report(log_error, 1,
                                              "kill: %s: invalid signal specification\n",
                                              argument + 1);
-                if (number < 0)
-                        return string_report(log_error, 1,
-                                             "kill: invalid signal name or number: %s\n",
-                                             argument + 1);
-                if (print_only)
-                        return string_report(log_error, 1,
-                                             "kill: --pid and --signal are mutually exclusive\n");
+                refuse_if(number < 0, 1, "kill: invalid signal name or number: %s\n", argument + 1);
+                refuse_if(print_only, 1, "kill: --pid and --signal are mutually exclusive\n");
                 do_kill = true;
                 index++;
         }
@@ -48104,8 +47987,7 @@ static b32 file_rename()
                       "  -n no-act  -v verbose  -a all  -l last\n"
                       "  -o no-overwrite  -i interactive", log))
                 return 0;
-        if (file_operand_count < 3)
-                return string_report(log_error, 1, "rename: not enough arguments\n");
+        refuse_if(file_operand_count < 3, 1, "rename: not enough arguments\n");
         bool symlinks = (taking.flags & FILE_FLAG('s')) != 0;
 
         string_address before = file_operand_at(0);
@@ -48722,10 +48604,8 @@ static bool cal_number(string_address text, string_address what, b64 address_to 
         if (negative)
                 value = -value;
         range = digits && !*at && (value > 2147483647LL || value < -2147483648LL);
-        if (!digits || *at)
-                return string_report(log_error, false, "cal: %s: '%s'\n", what, text);
-        if (range)
-                return string_report(log_error, false, "cal: %s: '%s': Numerical result out of range\n", what, text);
+        refuse_if(!digits || *at, false, "cal: %s: '%s'\n", what, text);
+        refuse_if(range, false, "cal: %s: '%s': Numerical result out of range\n", what, text);
         address_to out = value;
         return true;
 }
@@ -48777,8 +48657,7 @@ static b32 file_cal()
                     string_equals(color, (string_address)"always") ||
                     string_equals(color, (string_address)"tty");
 
-                if (!allowed)
-                        return string_report(log_error, 1, "cal: unsupported color mode: %s\n", color);
+                refuse_if(!allowed, 1, "cal: unsupported color mode: %s\n", color);
         }
 
         bool proleptic = false;
@@ -48873,8 +48752,7 @@ static b32 file_cal()
                 {
                         if (!cal_number(file_operand_at(0), (string_address) "illegal day value", address_of value))
                                 return 1;
-                        if (value < 1 || value > 31)
-                                return string_report(log_error, 1, "cal: illegal day value: use 1-31\n");
+                        refuse_if(value < 1 || value > 31, 1, "cal: illegal day value: use 1-31\n");
                         day = (positive)value;
                 }
                 if (operands >= 2)
@@ -48890,8 +48768,7 @@ static b32 file_cal()
                         {
                                 bipolar named = cal_month_number(said);
 
-                                if (named < 1)
-                                        return string_report(log_error, 1, "cal: unknown month name: %s\n", said);
+                                refuse_if(named < 1, 1, "cal: unknown month name: %s\n", said);
                                 value = named;
                         }
                         if (value < 1 || value > 12)
@@ -48900,8 +48777,7 @@ static b32 file_cal()
                 }
                 if (!cal_number(file_operand_at(operands - 1), (string_address) "illegal year value", address_of value))
                         return 1;
-                if (value < 1)
-                        return string_report(log_error, 1, "cal: illegal year value: use positive integer\n");
+                refuse_if(value < 1, 1, "cal: illegal year value: use positive integer\n");
                 year = value;
                 if (day && day > cal_days_in_month(year, month, proleptic))
                 {
@@ -50032,10 +49908,7 @@ static b32 file_date()
                                              writer_terminal_quoted_name,
                                              program_argument((b32)date_operand_list[1]));
 
-                if (format)
-                        return string_report(
-                            log_error, 1,
-                            "date: multiple output formats specified\n");
+                refuse_if(format, 1, "date: multiple output formats specified\n");
 
                 format = argument + 1;
         }

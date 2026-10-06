@@ -430,8 +430,7 @@ static b32 process_stdbuf()
                          (FILE_FLAG('i') | FILE_FLAG('o') | FILE_FLAG('e'));
         positive count = (positive)program_argument_count();
 
-        if (taking.first >= count)
-                return string_report(log_error, 125, "stdbuf: missing operand\n" TOOLS_TRY("stdbuf"));
+        refuse_if(taking.first >= count, 125, "stdbuf: missing operand\n" TOOLS_TRY("stdbuf"));
         if (!modes)
                 return string_report(log_error, 125,
                                      "stdbuf: you must specify a buffering mode option\n"
@@ -539,21 +538,18 @@ static b32 process_chroot_credentials(string_address userspec, string_address gr
                 positive user_length = split ? (positive)(split - userspec) : string_length(userspec);
                 string_address group = split ? split + 1 : null;
 
-                if (user_length >= sizeof(text))
-                        return string_report(log_error, 125, "chroot: invalid user\n");
+                refuse_if(user_length >= sizeof(text), 125, "chroot: invalid user\n");
                 memory_copy(text, userspec, user_length);
                 text[user_length] = end;
                 if (user_length)
                 {
                         uid = file_identity_of((string_address)text, false);
-                        if (uid < 0)
-                                return string_report(log_error, 125, "chroot: invalid user\n");
+                        refuse_if(uid < 0, 125, "chroot: invalid user\n");
                 }
                 if (group && group[0])
                 {
                         gid = file_identity_of(group, true);
-                        if (gid < 0)
-                                return string_report(log_error, 125, "chroot: invalid group\n");
+                        refuse_if(gid < 0, 125, "chroot: invalid group\n");
                 }
         }
         if (groups && groups[0])
@@ -602,8 +598,7 @@ static b32 process_chroot()
 
         if (!file_take(address_of taking))
                 return 125;
-        if (taking.first >= count)
-                return string_report(log_error, 125, "chroot: missing operand\n" TOOLS_TRY("chroot"));
+        refuse_if(taking.first >= count, 125, "chroot: missing operand\n" TOOLS_TRY("chroot"));
 
         string_address root = program_argument((b32)taking.first++);
 
@@ -670,9 +665,7 @@ static bool process_nohup_duplicate(bipolar from, b32 to,
 {
         bipolar answer = system_descriptor_install((b32)from, to);
 
-        if (answer < 0)
-                return string_report(log_error, false, "nohup: cannot redirect %s: %s\n",
-                              what, file_reason(answer));
+        refuse_if(answer < 0, false, "nohup: cannot redirect %s: %s\n", what, file_reason(answer));
 
         return true;
 }
@@ -747,8 +740,7 @@ static b32 process_nohup()
 
         if (!file_take(address_of taking))
                 return failure;
-        if (taking.first >= count)
-                return string_report(log_error, failure, "nohup: missing operand\n" TOOLS_TRY("nohup"));
+        refuse_if(taking.first >= count, failure, "nohup: missing operand\n" TOOLS_TRY("nohup"));
 
         bool input_terminal = stream_is_terminal(0);
         bool output_terminal = stream_is_terminal(1);
@@ -1120,8 +1112,7 @@ static b32 process_coresched()
 
         string_address words[256];
         positive word_count = file_operand_count - first_word;
-        if (word_count >= array_count(words))
-                return string_report(log_error, 1, "coresched: too many arguments\n");
+        refuse_if(word_count >= array_count(words), 1, "coresched: too many arguments\n");
         for (positive at = 0; at < word_count; at++)
                 words[at] = file_operand_at(first_word + at);
         words[word_count] = null;
@@ -1156,8 +1147,7 @@ static b32 process_coresched()
         {
                 // A destination type is accepted and ignored here, as in
                 // util-linux.
-                if (command || destination)
-                        return string_report(log_error, 1, "coresched: bad usage of the get function\n");
+                refuse_if(command || destination, 1, "coresched: bad usage of the get function\n");
 
                 p64 cookie = 0;
                 bipolar answer = process_coresched_call(
@@ -1197,9 +1187,7 @@ static b32 process_coresched()
                             null);
         }
 
-        if (changed < 0)
-                return string_report(log_error, 1, "coresched: cannot change cookie: %s\n",
-                              file_reason(changed));
+        refuse_if(changed < 0, 1, "coresched: cannot change cookie: %s\n", file_reason(changed));
 
         if (taking.flags & FILE_FLAG('v'))
         {
@@ -1578,8 +1566,7 @@ static b32 process_timeout()
                 return 125;
         /* coreutils answers a missing duration or command with the usage
            hint alone, and names the offending value in the other three. */
-        if (taking.first >= count)
-                return string_report(log_error, 125, "Try 'timeout --help' for more information.\n");
+        refuse_if(taking.first >= count, 125, "Try 'timeout --help' for more information.\n");
 
         positive duration;
         string_address interval = program_argument((b32)taking.first++);
@@ -1588,8 +1575,7 @@ static b32 process_timeout()
                 return string_report(log_error, 125, "timeout: invalid time interval '%w'\n"
                                                      "Try 'timeout --help' for more information.\n",
                                      writer_terminal_quoted_name, interval);
-        if (taking.first >= count)
-                return string_report(log_error, 125, "Try 'timeout --help' for more information.\n");
+        refuse_if(taking.first >= count, 125, "Try 'timeout --help' for more information.\n");
 
         b32 signal = SIGTERM;
         string_address signal_text = file_option_value(address_of taking, 's');
@@ -2099,9 +2085,7 @@ static b32 process_script_record(process_script_state address_to state,
         b32 master = -1, slave = -1;
         bipolar opened = process_pty_open(address_of master, address_of slave,
                                           true);
-        if (opened < 0)
-                return string_report(log_error, 1, "script: cannot open pseudo-terminal: %s\n",
-                              file_reason(opened));
+        refuse_if(opened < 0, 1, "script: cannot open pseudo-terminal: %s\n", file_reason(opened));
 
         winsize size;
         if (system_control(0, TIOCGWINSZ, address_of size) >= 0)
@@ -3181,9 +3165,7 @@ static b32 process_scriptreplay()
 
         process_replay_reader timing, output, input;
         bipolar opened = process_replay_open(address_of timing, timing_path);
-        if (opened < 0)
-                return string_report(log_error, 1, "scriptreplay: %s: %s\n",
-                              timing_path, file_reason(opened));
+        refuse_if(opened < 0, 1, "scriptreplay: %s: %s\n", timing_path, file_reason(opened));
         output.from.fd = input.from.fd = -1;
         if (out_path)
         {
@@ -3274,8 +3256,7 @@ static b32 process_scriptreplay()
                 system_close((positive)output.from.fd);
         if (input.from.fd >= 0 && input.from.fd != output.from.fd)
                 system_close((positive)input.from.fd);
-        if (failed)
-                return string_report(log_error, 1, "scriptreplay: malformed or truncated timing/log file\n");
+        refuse_if(failed, 1, "scriptreplay: malformed or truncated timing/log file\n");
         system_write_all(1, "\n", 1);
         return 0;
 
@@ -3372,11 +3353,7 @@ static b32 process_ctrlaltdel()
 
                 if (handle >= 0)
                         system_close(handle);
-                if (got < 0)
-                {
-                        return string_report(log_error, 1, "ctrlaltdel: cannot read %s: %s\n",
-                                      knob, file_reason(got));
-                }
+                refuse_if(got < 0, 1, "ctrlaltdel: cannot read %s: %s\n", knob, file_reason(got));
                 log(got > 0 && setting[0] == '1' ? "hard\n" : "soft\n", 5);
                 log_flush();
                 return 0;

@@ -1632,8 +1632,7 @@ static b32 checksum_main()
             .selection = (p8 address_to)&checksum_selected,
         };
 
-        if (!file_take(address_of taking))
-                return text_done(1);
+        return_if(!file_take(address_of taking), text_done(1));
 
         if (taking.flags & FILE_FLAG('l'))
         {
@@ -1654,8 +1653,7 @@ static b32 checksum_main()
         if (tagged && checksum_selected.mode == 't')
                 return checksum_usage_error(command, "--tag does not support --text mode");
 
-        if (checking)
-                return checksum_done(checksum_verify(algorithm, address_of taking), false);
+        return_if(checking, checksum_done(checksum_verify(algorithm, address_of taking), false));
 
         return checksum_done(checksum_generate(algorithm, taking.first, tagged, false), false);
 }

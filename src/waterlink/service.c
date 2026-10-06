@@ -2908,8 +2908,7 @@ static b32 link_serve(void)
         }
 
         link_self.socket = link_socket_open(port, true);
-        if (link_self.socket < 0)
-                return host_fail("the link's port", link_self.socket);
+        return_if(link_self.socket < 0, host_fail("the link's port", link_self.socket));
         link_nearby.socket = -1;
         link_self.server = true;
         //      Segment runs unless told otherwise, which is how the cost of
@@ -3166,8 +3165,7 @@ static b32 link_client_run(string_address name, p8 kind,
 
                         input = system_open_at(AT_FDCWD, words[0],
                                                FILE_READ | O_CLOEXEC);
-                        if (input < 0)
-                                return host_fail(words[0], input);
+                        return_if(input < 0, host_fail(words[0], input));
                         mode = file_look(input, (string_address) "",
                                          AT_EMPTY_PATH, address_of facts)
                                        ? facts.mode & 0777
@@ -3210,15 +3208,13 @@ static b32 link_client_run(string_address name, p8 kind,
                 }
 
         link_self.socket = link_socket_open(0, false);
-        if (link_self.socket < 0)
-                return host_fail("a socket", link_self.socket);
+        return_if(link_self.socket < 0, host_fail("a socket", link_self.socket));
         link_self.gso = !file_environment((string_address) "WATERLINK_NO_SEGMENTS");
         //      The client greets nobody. Left at zero, the wait watched
         //      descriptor 0, standard input, as the greeting socket, and an
         //      input at its end or on a file woke it at once, every turn.
         link_nearby.socket = -1;
-        if (!link_session_open(s))
-                return host_fail("memory", -ENOMEM);
+        return_if(!link_session_open(s), host_fail("memory", -ENOMEM));
         scope_exit(link_session_close(s));
         memory_copy(s->peer, peer->key, 32);
         memory_copy(s->name, peer->name, WATERLINK_NAME_MAX);
