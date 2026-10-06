@@ -40111,7 +40111,7 @@ int main(void) {
               "the default runtime dir is created 0700");
         check(config, "HOME/.config is created");
         check(tmp && sticky, "/tmp is created 1777");
-        check(shm, "/dev/shm is created");
+        check(!shm, "/dev/shm is the init's, and a launch does not make it");
         check(lock && var_run, "/run/lock and /var/run are created");
     }
 

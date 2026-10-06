@@ -12590,6 +12590,7 @@ ls /monitor.sh | rev
 n=$(uname -n); r=$(cat /root/name); case $n in moonwater-box|'') k=default;; *-*) k=rolled;; *) k=odd;; esac; printf 'machine-%s-%s\n' "$k" "$([ "$n" = "$r" ] && echo saved || echo apart)"
 printf 'asked-%s\n' "$([ "$(moonwater name)" = "$(uname -n)" ] && echo same || echo different)"
 printf 'owners-%s-end\n' "$(stat -c %u / /etc /root /tmp /var /usr /bin /sbin /lib /lib64 /opt /bowls /bowls/bin | sort -u | tr -d '\n ')"
+printf 'shm-%s-%s-end\n' "$(stat -c %a /dev/shm)" "$(grep -c ' /dev/shm tmpfs ' /proc/self/mounts)"
 printf 'devfd-%s-%s-end\n' "$(readlink /dev/fd)" "$(readlink /dev/stderr)"
 mkdir /tmp/theirs && chown 1000:1000 /tmp/theirs && echo a > /tmp/theirs/a && echo b > /tmp/theirs/b && mv /tmp/theirs/a /tmp/theirs/b; printf 'replaced-%s-%s\n' $? "$(cat /tmp/theirs/b)"
 before=$(stat -c %i /etc/resolv.conf)
@@ -13016,6 +13017,7 @@ says transcript 'moonwater name says it'  'asked-same'
 #       /etc/resolv.conf is a replacement).
 #
 says transcript 'the image tree is root-owned'   'owners-0-end'
+says transcript '/dev/shm is a tmpfs anybody may write'   'shm-1777-1-end'
 says transcript '/dev/fd and /dev/stderr are there before any package manager has run' 'devfd-/proc/self/fd-/proc/self/fd/2-end'
 says transcript 'root replaces a name in another user'"'"'s directory' 'replaced-0-a'
 says transcript 'the watcher came back with an address' 'watch-killed-yes-back-1'

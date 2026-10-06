@@ -216,6 +216,35 @@ static fn mount_devpts()
 }
 
 /*
+        POSIX shared memory lives in /dev/shm, a tmpfs anybody may make files
+        in (1777, as every distribution mounts it): Chrome's renderers, Qt
+        and Wayland clients' buffers and sem_open all go through it. Without
+        the mount it was a directory of devtmpfs, which is root's alone and
+        not the filesystem a program that checks what /dev/shm is expects, and
+        every bowl launch made it, which is the init's to do once.
+*/
+static fn mount_shm()
+{
+        bipolar made = system_make_directory_at(AT_FDCWD, "/dev/shm", 0755);
+
+        if (made < 0 && made != -ERROR_EXISTS)
+        {
+                string_format(log, init_label "/dev/shm could not be created: %b\n", made);
+                log_flush();
+                return;
+        }
+
+        bipolar mounted = system_mount("tmpfs", "/dev/shm", "tmpfs",
+                                       MS_NOSUID | MS_NODEV, "mode=1777");
+
+        if (mounted < 0)
+        {
+                string_format(log, init_label "/dev/shm mount failed: %b\n", mounted);
+                log_flush();
+        }
+}
+
+/*
         The names a program opens by habit for the descriptors it holds:
         /dev/fd and the three that stand for 0, 1 and 2, which devtmpfs does
         not make and a machine with a udev has made for it. Bash's process
@@ -254,6 +283,7 @@ static DEAD_END b32 system_init()
 {
         system_call(syscall(setsid));
         mount_devpts();
+        mount_shm();
         link_dev_fd();
 
         bipolar settling = start_service((string_address)settle_program,

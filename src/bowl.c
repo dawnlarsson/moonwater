@@ -1621,8 +1621,8 @@ static fn bowl_session_prepare_at(string_address home, string_address runtime,
                 if (sockets)
                         bowl_chmod_directory("/tmp/.X11-unix", 01777);
         }
-        /*  The rest is the machine's and not a session's: /dev/shm, /run/lock
-            and /var, the two links and the three identity files are there or
+        /*  The rest is the machine's and not a session's: /run/lock and
+            /var, the two links and the three identity files are there or
             not for every shell after the first, until the machine is
             started again. The first to finish them says so, in a file in the
             runtime directory this file names for itself (/run/user/<uid>,
@@ -1650,8 +1650,6 @@ static fn bowl_session_prepare_at(string_address home, string_address runtime,
                 }
                 if (!marked)
                 {
-                        if (system_access_at(AT_FDCWD, "/dev/shm", 0) < 0)
-                                bowl_mkdir("/dev/shm");
                         if (system_access_at(AT_FDCWD, "/run/lock", 0) < 0)
                                 bowl_mkdir("/run/lock");
                         if (system_access_at(AT_FDCWD, "/var", 0) < 0)
@@ -5785,10 +5783,11 @@ static const struct bowl_component bowl_desktop_components[] = {
         not when the profile was installed: KWin has no layout of its own until
         somebody picks one in its settings, and takes XKB's from the
         environment, which would otherwise be a US keyboard on every machine.
+        The session names no desktop or platform of its own: startplasma sets
+        the session type, KDE_FULL_SESSION and XDG_CURRENT_DESKTOP, and Qt
+        takes Wayland from the compositor's socket.
 */
 static string_address bowl_desktop_session[] = {
-    "export XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=KDE",
-    "export KDE_FULL_SESSION=true QT_QPA_PLATFORM=wayland",
     "layout=$(moonwater keyboard xkb 2>/dev/null) && "
     "[ -n \"$layout\" ] && export XKB_DEFAULT_LAYOUT=$layout",
     "bowl udev",
