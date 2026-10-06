@@ -15649,6 +15649,130 @@ static positive file_terminal_spell(p8 address_to bytes, positive length,
         return kept;
 }
 
+/*
+        What the moonwater and bowl commands say is for a person at a terminal,
+        which is why a label is bold and a note dim. Into a pipe or a file those
+        are bytes in the data (`moonwater status | grep` read
+        ESC[1m[Moonwater]ESC[0m), so the two streams a command writes to are
+        asked once what they are, and one that is not a terminal has its colour
+        sequences -- ESC [ parameters m -- taken out as they pass. A sequence
+        may come in two writes, so the bytes of one in progress are kept until
+        it ends.
+
+        What a message names, a %s, is another matter: string_format hands it
+        over with a length of nought, the writer's word for "to the
+        terminator", where everything the command writes itself has its own
+        length. Those are anybody's words -- a name typed after the verb, a
+        disk's, a network's -- and are shown and not obeyed: a byte a terminal
+        would act on, ESC and the C1 controls among them, is spelled \xNN, to
+        a terminal or a file alike, and a line or a tab is the text's own.
+        host.c and bowl.c say log and log_error as plain_out and plain_err.
+*/
+typedef struct
+{
+        p8 held[24];
+        positive used;
+        bool known;
+        bool plain;
+} plain_stream;
+
+static plain_stream plain_streams[2];
+
+/* A word as it is seen and not as a terminal would take it. */
+static fn plain_show(writer through, string_address text)
+{
+        const p8 address_to bytes = (const p8 address_to)text;
+        positive length = string_length(text);
+        positive start = 0;
+        positive at = 0;
+
+        while (at < length)
+        {
+                bool printable;
+                positive step = file_terminal_step(bytes + at, length - at, true,
+                                                   address_of printable);
+                p8 spelled[4] = {'\\', 'x'};
+
+                if (printable || bytes[at] == '\n' || bytes[at] == '\t')
+                {
+                        at += step;
+                        continue;
+                }
+                if (at > start)
+                        through((address_any)(bytes + start), at - start);
+                memory_into_hex(spelled + 2, (address_any)(bytes + at), 1);
+                through(spelled, sizeof(spelled));
+                start = ++at;
+        }
+        if (at > start)
+                through((address_any)(bytes + start), at - start);
+}
+
+static fn plain_stream_write(positive which, writer through, address_any data,
+                            positive length)
+{
+        plain_stream address_to stream = plain_streams + which;
+        const p8 address_to bytes = data;
+        positive start = 0;
+
+        if (!length)
+        {
+                plain_show(through, data);
+                return;
+        }
+        if (!stream->known)
+        {
+                stream->known = true;
+                stream->plain = !stream_is_terminal((b32)which + 1);
+        }
+        if (!stream->plain)
+        {
+                through(data, length);
+                return;
+        }
+
+        for (positive at = 0; at < length; at++)
+        {
+                p8 byte = bytes[at];
+
+                if (!stream->used)
+                {
+                        if (byte != 0x1b)
+                                continue;
+                        if (at > start)
+                                through((address_any)(bytes + start), at - start);
+                        stream->held[stream->used++] = byte;
+                        continue;
+                }
+
+                stream->held[stream->used++] = byte;
+                if ((stream->used == 2 && byte == '[') ||
+                    (stream->used > 2 && byte >= 0x20 && byte <= 0x3f &&
+                     stream->used < sizeof(stream->held)))
+                        continue;
+
+                //      The end of it, or no escape sequence after all: a colour
+                //      is dropped and anything else goes on as it was.
+                if (!(stream->used > 2 && byte == 'm'))
+                        through(stream->held, stream->used);
+                stream->used = 0;
+                start = at + 1;
+        }
+
+        if (!stream->used && start < length)
+                through((address_any)(bytes + start), length - start);
+}
+
+static fn plain_out(address_any data, positive length)
+{
+        plain_stream_write(0, log, data, length);
+}
+
+static fn plain_err(address_any data, positive length)
+{
+        plain_stream_write(1, log_error, data, length);
+}
+
 static bool find_names_hidden(bipolar handle)
 {
         if (handle >= 0)

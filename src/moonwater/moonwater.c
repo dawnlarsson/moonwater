@@ -2679,6 +2679,7 @@ static b32 host_machine_run(void)
                 return host_refuse("moonwater machine needs root\n");
 
         host_state_ready();
+        host_input_none();
         system_call_1(syscall(chdir), (positive)(string_address) "/root");
         bowl_session_prepare("/root", null);
         SPARK_COMMAND_ENVIRONMENT(HOST_MACHINE_ASSIGN)

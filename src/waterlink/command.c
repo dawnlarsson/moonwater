@@ -713,7 +713,7 @@ static b32 link_group_join(string_address address_to words, positive count)
                         //      oracle at SHA-256 speed for anyone who could read the
                         //      file, which holds the slow key to check a guess
                         //      against only if the guess is made slowly. A script
-                        //      that joins at every boot says `link join NAMESPACE`
+                        //      that joins at every boot says `link group NAMESPACE`
                         //      and keeps the group it has.
                         waterlink_group_derive(namespace, (p8 address_to)secret,
                                                string_length(secret),
@@ -1192,7 +1192,8 @@ static b32 link_pair_there(string_address typed_name, string_address typed)
         if (refused)
                 return refused;
 
-        string_format(log, host_label "looking for %s on this network\n",
+        string_format(log, host_label "looking for %s on this network, for five "
+                                      "minutes at most\n",
                       (string_address)name);
         log_flush();
         return link_pair_wait(mark, (string_address)name, address_of before);

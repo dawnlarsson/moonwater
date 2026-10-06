@@ -17,12 +17,14 @@ what the machine's events do.
 moonwater status                       this session as one page
 moonwater help [VERB]                  these commands, or one command's
 moonwater setup                        where this session runs, and the installs found
-moonwater setup install DISK [removable]  erase DISK and put Moonwater on it
-                                       removable takes a disk that says it is
+moonwater setup install DISK [removable] [yes]  erase DISK and put Moonwater on it
+                                       removable takes a disk that says it is; yes
+                                       is for a script, which cannot be asked
 moonwater setup update [DISK]          write this build over an install, keeping its data
 moonwater setup use [DISK]             run this build with an install's data
 moonwater setup live                   leave the disks alone this session
-moonwater wipe                         forget /home and /root, keep the machine
+moonwater wipe [yes]                   forget /home and /root, keep the machine; yes
+                                       is for a script, which cannot be asked
 
 moonwater bind                         the machine's events, and what each runs
 moonwater bind EVENT [COMMAND]         one event; empty puts the default back
@@ -160,7 +162,7 @@ zoneinfo directory: each of tzdata's 420 zones maps to the POSIX rule in its
 TZif footer (`src/build/zones.py` regenerates them), which is right from the
 zone's last change on.
 
-**Kiosks.** `moonwater wipe` empties `/home` and `/root` except the settings
+**Kiosks.** `moonwater wipe yes` empties `/home` and `/root` except the settings
 above and the machine script overlay; `/bowls` survives. A kiosk is a machine
 script whose `moonwater_init` wipes and then starts Chromium, Weston or any
 bowl program -- the builtin script has this commented out. Start it in the
@@ -223,6 +225,117 @@ belongs to the script, and `moonwater bind mute` points there
 (`mute: /root/main.moonwater.sh:8`) and refuses to change it. Defining
 `moonwater_init` or `moonwater_end` takes over the init or exit list the same
 way. A running machine picks up a changed file on its next start.
+
+### Scripting the machine
+
+Every `moonwater` verb and `bowl` work from the machine script, from `bind init`
+and `bind exit` lines, and from anything else that has no one at it. The script
+runs as root, once a boot, after the boot has said what the session is and
+`/root` is the disk's: with no terminal, standard input `/dev/null`,
+`TERM=dumb`, `HOME=/root` and `LANG=C.UTF-8`, and nothing it runs reads or waits
+for a person. Output into a pipe or a file has no colour in it.
+
+An answer is 0 when the verb did what it was asked or showed it, 1 when it
+refused or failed (a line of words says why), and 2 when it was not a command
+(the usage page). A script is its own judge of a 1: `|| true` goes after a verb
+that may not have its hardware or its network yet.
+
+**What cannot be taken back is said yes to.** `moonwater setup install DISK
+[removable] yes` erases DISK, and `moonwater wipe yes` forgets `/home` and
+`/root`. Without the word, at a terminal, they ask as they always did (the
+disk's name typed for an install, `yes` for a wipe); anywhere else, they
+refuse at once with a 1 and say the line that would have been right, and
+read nothing, so a pipe that happens to carry a disk's name is not an
+answer. `setup update` and `setup use` keep the disk's data and ask nothing;
+`ask` is the first terminal's question and is refused to anything else. An
+install is idempotent where it counts: a stick of this build whose disk holds
+an install of it attaches that disk at boot, and `setup install` of the disk
+a session already keeps is refused.
+
+**The same line twice is the same machine.** A settings verb that finds the
+state as asked says so and writes nothing: `bind init add` of a line already in
+the list (it is not added a second time), `bind EVENT COMMAND` of the command
+the event runs, `bind init mount`, `wifi add` of a saved network with its
+password (and, while it is joined and kept, no leaving and joining again),
+`bluetooth add`, `dns`, `timezone`, `keyboard`, `ntp`, `priority`, `wired`,
+`name NAME`, `link add`, `link allow`, `link group`, `link on`. What is a
+refusal the second time, because it was said to be: `remove` of what is not
+there, `canvas on` and `off` and `desktop stop` of what is as asked ("already"),
+and `link pair`. What does its work again: `wifi on` joins again, `time sync`
+and `timezone auto` ask the network, `name random` rolls another name and
+`setup update` writes this build over the disk's again, keeping its settings.
+
+**What waits, and how long.** A verb that changes a setting waits up to 30
+seconds for another `moonwater` command that is changing one. `wifi on` and
+`wifi add` take up to 8 seconds for a card to appear and 20 for the
+association and 8 for the handshake, and come back at once when there is no
+wireless hardware; `link on` and `link off` up to 3; `link group` with a secret a
+second or so of key stretching and the 3; `link add` with a host name the
+resolver's seconds; `setup install` and `update` look up
+to 10 seconds of uptime for the stick the session started from; `bowl udev`
+3. `time sync` asks up to seven servers two seconds a sample, and `timezone
+auto` one HTTPS request, which is over a minute on a network that does not
+answer: the machine does both by itself (`ntp` and `timezone auto` are on
+unless turned off), so a script has no need of them. `bowl setup` and `bowl
+profile` take what their downloads take, minutes. A slow line in
+`moonwater_init` holds every event behind it (the power button, the lid, the
+Canvas windows) until it returns: put what takes time in the background with
+`&`, or in `bind init`, which does that for you.
+
+Never from a script: `sleep`, `hibernate` and `bios reboot` (they leave),
+`canvas off` (it closes the windows), `link pair` and `link NAME CODE` (they
+wait five minutes for a person on the other machine and say so), `link NAME`
+and `link log NAME` (a terminal on another machine, and a log that does not
+end), and `ask`.
+
+**Secrets stay out of the script.** The machine script is readable through
+`/dev/spark`, and a command line is in `ps`. `moonwater wifi add SSID - <
+/root/office.pass` reads the password from a file through standard input, and
+`moonwater link group NAME` with no secret joins the group this machine
+already has: give it the secret once, as root, before the install. A `link
+group` that finds no group by the name makes a new one with a secret of its
+own and prints it. `wifi add SSID` with no password and no terminal saves an
+open network, as it always did (and is refused, with the network saved, if the
+air says it asks for one); `-` is how a script gives a password.
+
+```sh
+# /root/main.moonwater.sh
+function moonwater_init {
+  case $1 in
+  live)                              # a stick that provisions the disk it is put in:
+    [ -b /dev/nvme0n1 ] && moonwater setup install nvme0n1 yes   # erases it
+    ;;
+  disk*) ;;
+  *) return ;;                       # a question is waiting for a person
+  esac
+  moonwater name kiosk-7
+  moonwater timezone Europe/Stockholm
+  moonwater keyboard se
+  moonwater dns 9.9.9.9 1.1.1.1
+  moonwater priority internet wired
+  moonwater wifi add office - < /root/office.pass || true
+  moonwater bluetooth add headset
+  moonwater link group fleet allow shell run || true
+  moonwater link add depot "$(cat /root/depot.key)" depot.lan
+  moonwater canvas scale 2
+  moonwater bind lid_close "moonwater sleep"
+  moonwater brightness 60% || true   # a desktop has no backlight
+  moonwater power balanced || true
+  bowl setup alpine > /run/bowl.log 2>&1 &
+  moonwater desktop boot
+}
+
+function moonwater_canvas {
+  case $1 in on) moonwater canvas terminal ;; esac
+}
+```
+
+The lines that cannot go in `moonwater_init` because it owns the list are
+`bind init add` and `bind exit add`; a machine that wants those and a script
+leaves `moonwater_init` undefined, and the list runs at boot with the same
+rules and the same standard input. A kiosk that says `moonwater wipe yes` first
+keeps what it reads (a password file, a key) outside `/root`, which a wipe
+empties: in `/bowls`, which it does not.
 
 ## Canvas and the terminal
 

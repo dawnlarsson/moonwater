@@ -25,6 +25,11 @@
         complete, the program is an ordinary native process on this kernel.
 */
 
+//      Said through plain_out and plain_err (file.c) to the end of this file:
+//      the label is bold at a terminal and plain in a pipe or a file.
+#define log plain_out
+#define log_error plain_err
+
 #define bowl_label TERM_BOLD "[Bowl]" TERM_RESET " "
 
 static const p8 bowl_usage_text[] = bowl_label
@@ -6584,3 +6589,6 @@ static b32 bowl_main()
 
         return bowl_launch(root, program, command_arguments, isolated);
 }
+
+#undef log
+#undef log_error

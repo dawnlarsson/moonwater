@@ -91,7 +91,7 @@ export TEST_TALLY
 #       kernel/profile/sec_sanitize.
 asked_lanes="wifi fuzz msan ring0 scale desktop chrome"
 
-lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex slurp wait writer native probe stack checksum storage_io storage_format machine sensors cli differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep"
+lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex slurp wait writer native probe stack checksum storage_io storage_format machine sensors cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep"
 
 describe()
 {
@@ -160,6 +160,7 @@ describe()
         machine) echo "the machine script: hooks, functions, case arms, overlay lines and file policy" ;;
         sensors) echo "monitor's clocks, temperatures, fans, power and battery against generated sysfs trees" ;;
         cli)      echo "the moonwater command in a namespace: every verb, every zone it names, what it writes" ;;
+        script)   echo "every verb as the machine script runs it, with no terminal and nothing on its input: bounded, asking nothing, and the same twice" ;;
         term)     echo "the emulator driven a byte and a read at a time, and the line being edited" ;;
         edit)     echo "the full-screen editor, its key protocol, buffer, undo and redraws" ;;
         kit)      echo "build, source-inventory, remote-host and firmware tooling" ;;
@@ -2981,6 +2982,17 @@ lane_cli()
         *) cli_outcome=1 ;;
         esac
         return "$cli_outcome"
+}
+
+#
+#       The machine script's side of the same command: every verb with
+#       nothing to ask and no one to answer, run twice. differential.py
+#       --harness moonwater_script says what it holds it to.
+#
+lane_script()
+{
+        need_shell || return 1
+        python3 test/differential.py --harness moonwater_script --shell "$shell_binary"
 }
 lane_leaving()   { freestanding_checks_lane leaving leaving; }
 #       strtod and strtof against glibc, over generated text.
@@ -13444,11 +13456,42 @@ asked("a machine process killed with a background job alive is replaced by one t
       "kill -9 $(mp); for i in $(seq 60); do [ \"$(cat /root/inits 2>/dev/null)\" = 2 ] && break; sleep 0.5; done; "
       "printf 'reattach-%s\\n' \"$(cat /root/inits)\" | rev; kill $(cat /root/bgpids) 2>/dev/null",
       b"2-hcattaer", 90)
+#       The machine script has no one at its input. The machine process is
+#       started with init's descriptors, whose input is the console: a verb
+#       that asked, or a `read`, in moonwater_init held every event behind it
+#       until a key was struck. Here the script says what its input is, says
+#       a verb of each kind that has something to refuse or to keep, reads a
+#       line, and writes a file when it is done: all inside a minute. (mp is
+#       the function of the row above.)
+asked("a machine script with a verb of every kind has no input and comes back",
+      "rm -f /tmp/mscript.done /tmp/m[0-9]*; "
+      "printf '%s\\n' 'function moonwater_init {' '  readlink /proc/$$/fd/0 > /tmp/m0' "
+      "'  moonwater setup install nvme9n1 > /tmp/m1 2>&1' '  moonwater setup install nvme9n1 yes > /tmp/m2 2>&1' "
+      "'  moonwater wipe > /tmp/m3 2>&1' '  moonwater wifi add scripted passpass1 > /tmp/m4 2>&1' "
+      "'  moonwater wifi remove scripted > /dev/null 2>&1' '  moonwater link group lab > /tmp/m5 2>&1' "
+      "'  moonwater link group leave lab > /dev/null 2>&1' '  moonwater link off > /dev/null 2>&1' "
+      "'  moonwater dns 9.9.9.9 > /tmp/m6 2>&1' '  moonwater dns auto > /dev/null 2>&1' "
+      "'  moonwater keyboard us > /tmp/m7 2>&1' '  moonwater desktop start > /tmp/m8 2>&1' "
+      "'  moonwater bind init add true > /tmp/m9 2>&1' '  read line; echo \"[$line]\" > /tmp/m10' "
+      "'  date +%s > /tmp/mscript.done' '}' > /root/main.moonwater.sh; chmod 600 /root/main.moonwater.sh; "
+      "start=$(date +%s); kill -9 $(mp); for i in $(seq 120); do [ -e /tmp/mscript.done ] && break; sleep 0.5; done; "
+      "printf 'script-%s-%s-%s-%s-%s-%s\\n' \"$(cat /tmp/m0)\" \"$(grep -c 'nothing here can be asked' /tmp/m1)\" "
+      "\"$(grep -c 'there is no disk called nvme9n1' /tmp/m2)\" \"$(grep -c 'nothing here can be asked' /tmp/m3)\" "
+      "\"$(cat /tmp/m10)\" \"$(( $(cat /tmp/mscript.done) - start < 60 ))\" | rev; rm -f /root/main.moonwater.sh",
+      b"1-][-1-1-1-llun/ved/-tpircs", 90)
 #       The boot leaves the settings' init list to a script's moonwater_init only
 #       once the machine process says it has the script: its word is a file.
 asked("a machine process that took its script up says so, for the boot that waits to hear it",
       "[ -e /run/moonwater/machine.sourced ] && echo sourced-yes | rev",
       b"sey-decruos")
+#       A script says its bind at every boot: the line an event already
+#       runs is not set again, and the image it would be kept in is not
+#       written over with what it holds. The first says where it kept it.
+asked("a bound command said again is not kept again",
+      "rm -f /root/main.moonwater.sh; moonwater bind brightness_up 'true' > /tmp/bu1 2>&1; moonwater bind brightness_up 'true' > /tmp/bu2 2>&1; "
+      "moonwater bind brightness_up '' > /dev/null 2>&1; "
+      "printf 'again-%s-%s\\n' \"$(grep -c 'this session only' /tmp/bu1)\" \"$(grep -c 'this session only' /tmp/bu2)\" | rev",
+      b"0-1-niaga")
 #       A key held down is a flood of presses of a row with no debounce: each
 #       is queued or folded into the one waiting, and the machine goes on.
 if button:
@@ -14139,7 +14182,7 @@ if [ "$install_loader" = BOOTX64.EFI ] && [ -r /dev/kvm ] && [ -w /dev/kvm ] &&
         #       installed, then its loader made one byte another's.
         cat > "$work/cutbase.commands" <<'COMMANDS'
 this line is eaten by the console
-printf 'nvme0n1\n' | moonwater setup install nvme0n1 > /tmp/install 2>&1
+moonwater setup install nvme0n1 yes > /tmp/install 2>&1
 printf 'based-%s\n' $(( $? + 40 ))
 mkdir -p /mnt
 mount -t vfat /dev/nvme0n1p1 /mnt
@@ -14252,7 +14295,7 @@ this line is eaten by the console
 moonwater setup update nvme0n1 > /tmp/update 2>&1
 printf 'update-refused-%s\n' $(( $? + 40 ))
 cat /tmp/update
-printf 'nvme1n1\n' | moonwater setup install nvme1n1 > /tmp/install 2>&1
+moonwater setup install nvme1n1 yes > /tmp/install 2>&1
 printf 'install-refused-%s\n' $(( $? + 40 ))
 cat /tmp/install
 printf 'blank-%s\n' $(( $(ls /sys/class/block | grep -c '^nvme1n1p') + 30 ))
@@ -14283,14 +14326,14 @@ COMMANDS
         cat > "$work/cutinstall.commands" <<'COMMANDS'
 this line is eaten by the console
 dd if=/dev/urandom of=/root/big bs=1M count=300 2> /dev/null
-printf 'nvme0n1\n' | moonwater setup install nvme0n1
+moonwater setup install nvme0n1 yes
 poweroff
 COMMANDS
         cat > "$work/cutredo.commands" <<'COMMANDS'
 this line is eaten by the console
 printf 'verdict-%s\n' "$(cut -c1-4 /run/moonwater/verdict | rev)"
 if [ "$(cut -c1-4 /run/moonwater/verdict)" != disk ]; then
-        printf 'nvme0n1\n' | moonwater setup install nvme0n1 > /tmp/install 2>&1
+        moonwater setup install nvme0n1 yes > /tmp/install 2>&1
         printf 'redone-%s\n' $(( $? + 40 ))
 fi
 poweroff
@@ -14368,7 +14411,7 @@ COMMANDS
         #       claim to carry the session's.
         cat > "$work/plain.commands" <<'COMMANDS'
 this line is eaten by the console
-printf 'nvme0n1\n' | moonwater setup install nvme0n1 > /tmp/install 2>&1
+moonwater setup install nvme0n1 yes > /tmp/install 2>&1
 printf 'installed-%s\n' $(( $? + 40 ))
 cat /tmp/install
 printf 'claim-%s\n' $(( $(grep -c "this session's settings" /tmp/install) + 30 ))
@@ -14427,11 +14470,16 @@ printf 'link-joined-%s\n' $(( $(grep -c 'in group lab; its members may run' /tmp
 printf 'link-key-%s\n' "$(cat /tmp/linkkey)"
 moonwater name > /root/livename
 printf 'name-live-%s\n' $(( $(grep -c -E '^[a-z]+-[a-z]+$' /root/livename) * 7 ))
-printf 'no\n' | moonwater setup install nvme0n1 > /tmp/refused 2>&1
+moonwater setup install nvme0n1 > /tmp/refused 2>&1
+no
 printf 'unconfirmed-%s\n' $(( $? + 40 ))
-printf 'sda\n' | moonwater setup install sda > /tmp/removable 2>&1
+printf 'typed-%s\n' $(( $(grep -c 'Type nvme0n1 to go on' /tmp/refused) * 7 ))
+moonwater setup install nvme0n1 < /dev/null > /tmp/unasked 2>&1
+printf 'unasked-%s\n' $(( $? + 40 ))
+printf 'asked-%s\n' $(( $(grep -c 'nothing here can be asked' /tmp/unasked) * 7 ))
+moonwater setup install sda yes > /tmp/removable 2>&1
 printf 'removable-%s\n' $(( $? + 40 ))
-printf 'nvme0n1\n' | moonwater setup install nvme0n1 > /tmp/install 2>&1
+moonwater setup install nvme0n1 yes > /tmp/install 2>&1
 printf 'installed-%s\n' $(( $? + 40 ))
 cat /tmp/install
 printf 'verdict-%s\n' "$(rev < /run/moonwater/verdict)"
@@ -14454,7 +14502,10 @@ says live 'a first boot is live'        'verdict-evil'
 says live 'status says live'            'status-live-7'
 says live 'status finds no install'     'status-none-7'
 says live 'status finds the stick'      'status-stick-7'
-says live 'a wrong answer writes nothing' 'unconfirmed-41'
+says live 'a wrong answer typed at the terminal writes nothing' 'unconfirmed-41'
+says live 'the terminal was asked for the disk'"'"'s name' 'typed-7'
+says live 'a script with nothing to ask is refused' 'unasked-41'
+says live 'and told the word that goes with it' 'asked-7'
 says live 'removable media is refused'  'removable-41'
 says live 'the install succeeds'        'installed-40'
 says live 'the session keeps the disk'  'verdict-1n0emvn ksid'
@@ -14678,23 +14729,24 @@ printf 'lock-%s\n' $(( $(moonwater bind init | grep -c 'echo lock') * 7 ))
 moonwater bind init add "/bin/cp /root/a /root/b" > /tmp/note 2>&1
 printf 'note-%s\n' $(( $(grep -c 'is read when the entry runs' /tmp/note) + 30 ))
 for d in /sys/class/block/nvme*n*; do [ "$(cat $d/queue/zoned 2> /dev/null)" = host-managed ] && z=${d##*/}; done
-printf "$z\n" | moonwater setup install $z > /tmp/zoned 2>&1
+moonwater setup install $z yes > /tmp/zoned 2>&1
 printf 'zoned-refused-%s\n' $(( $? + 40 ))
 printf 'zoned-said-%s\n' $(( $(grep -c 'cannot hold partitions' /tmp/zoned) * 7 ))
 printf 'zoned-clean-%s\n' $(( $(dd if=/dev/$z bs=1024 count=1 2> /dev/null | tr -d '\000' | wc -c) + 30 ))
 dd if=/dev/zero of=/root/big bs=1M count=1700 2> /dev/null
 printf 'big-%s\n' $(( $(wc -c < /root/big) / 1048576 ))
-printf 'nvme1n1\n' | moonwater setup install nvme1n1 > /tmp/small 2>&1
+moonwater setup install nvme1n1 yes > /tmp/small 2>&1
 printf 'small-refused-%s\n' $(( $? + 40 ))
 printf 'small-said-%s\n' $(( $(grep -c 'nvme1n1 would hold' /tmp/small) * 7 ))
 printf 'small-parts-%s\n' $(( $(ls /sys/class/block | grep -c '^nvme1n1p') + 30 ))
 rm -f /root/big
-printf 'nvme0n1%58sjunk\n' '' | moonwater setup install nvme0n1 > /tmp/long 2>&1
+moonwater setup install nvme0n1 > /tmp/long 2>&1
+nvme0n1                                                          junk
 printf 'long-refused-%s\n' $(( $? + 40 ))
 printf 'long-parts-%s\n' $(( $(ls /sys/class/block | grep -c '^nvme0n1p') + 30 ))
-printf 'nvme0n1\n' | moonwater setup install nvme0n1 > /tmp/first 2>&1
+moonwater setup install nvme0n1 yes > /tmp/first 2>&1
 printf 'first-%s\n' $(( $? + 40 ))
-printf 'nvme1n1\n' | moonwater setup install nvme1n1 > /tmp/second 2>&1
+moonwater setup install nvme1n1 yes > /tmp/second 2>&1
 printf 'keeps-refused-%s\n' $(( $? + 40 ))
 printf 'keeps-said-%s\n' $(( $(grep -c 'already keeps nvme0n1' /tmp/second) * 7 ))
 printf 'keeps-parts-%s\n' $(( $(ls /sys/class/block | grep -c '^nvme1n1p') + 30 ))
@@ -14734,7 +14786,7 @@ rm -f /mnt/fill
 umount /mnt
 rm -f /bin/cp
 moonwater setup live > /dev/null 2>&1
-printf 'nvme1n1\n' | moonwater setup install nvme1n1 > /tmp/gone 2>&1
+moonwater setup install nvme1n1 yes > /tmp/gone 2>&1
 printf 'gone-refused-%s\n' $(( $? + 40 ))
 printf 'gone-said-%s\n' $(( $(grep -c 'is left without a partition table' /tmp/gone) * 7 ))
 printf 'gone-parts-%s\n' $(( $(ls /sys/class/block | grep -c '^nvme1n1p') + 30 ))
@@ -14781,7 +14833,8 @@ cat > "$work/update.commands" <<'COMMANDS'
 this line is eaten by the console
 printf 'verdict-%s\n' "$(rev < /run/moonwater/verdict)"
 [ -e /root/second ] || printf 'unmounted-%s\n' "$(printf live | rev)"
-printf '2\n' | moonwater ask > /tmp/ask 2>&1
+moonwater ask > /tmp/ask 2>&1
+2
 printf 'answered-%s\n' $(( $? + 50 ))
 cat /tmp/ask
 printf 'verdict-%s\n' "$(rev < /run/moonwater/verdict)"
@@ -14892,7 +14945,8 @@ fi
 
 cat > "$work/use.commands" <<'COMMANDS'
 this line is eaten by the console
-printf '3\n' | moonwater ask > /tmp/ask 2>&1
+moonwater ask > /tmp/ask 2>&1
+3
 printf 'left-%s\n' "$(rev < /run/moonwater/verdict)"
 moonwater ask > /dev/null 2>&1
 printf 'asked-once-%s\n' $(( $? + 60 ))

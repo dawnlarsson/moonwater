@@ -40,21 +40,36 @@
 # desktop, a kiosk browser, a player. One that holds the process here
 # is a machine whose power button, lid and keys are queued and never
 # read.
+#
+# Everything here runs as root, once a boot, with no terminal and standard
+# input /dev/null: no moonwater verb asks or waits for a person. A verb that
+# cannot be taken back takes the word yes (moonwater wipe yes), a verb that
+# is said twice leaves the machine as it was after the first, and a 1 from
+# one that may not have its hardware or its network yet is `|| true`'s to
+# ignore. The README's machine script section says what each may wait for.
 # function moonwater_init {
 #   case $1 in
 #   live|disk*)
-#     # moonwater wipe
+#     # On a stick that is to provision the machine it is put in (live, not
+#     # disk): erases that disk, which is why it says yes.
+#     # moonwater setup install nvme0n1 yes
+#     # moonwater wipe yes
 #     # After wipe, start whatever this machine is. A kiosk is one line
 #     # of already-installed software, backgrounded, for example:
 #     # chromium --kiosk --user-data-dir=/tmp/kiosk "$URL" &
 #     # weston &
 #     # /bowls/bin/exhibit &
-#     # moonwater wifi add "ssid" "password"
+#     # A saved network stays through a wipe. A password stays out of this
+#     # file, which any user can read through /dev/spark, and out of ps: it
+#     # is read from a file outside /root, which wipe empties, through
+#     # standard input.
+#     # moonwater wifi add "ssid" - < /bowls/ssid.pass || true
 #     # moonwater wifi on
 #     # moonwater bluetooth on
 #     # moonwater priority internet wired
 #     # moonwater timezone Europe/Stockholm
 #     # moonwater keyboard se
+#     # moonwater dns 9.9.9.9 1.1.1.1
 #     # Pair by itself with every machine on the local network in the
 #     # group: run `moonwater link group office SECRET allow shell run` once,
 #     # as root, before install -- the secret then lives only in /root, and

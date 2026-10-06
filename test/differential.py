@@ -43309,6 +43309,80 @@ int main(int count, char **argument) {
     write_tally("terminfo-install", passed, total)
     return 1 if passed != total else 0
 
+def moonwater_sandbox(shell, top):
+    """A user, mount and network namespace with a chroot of scratch
+    directories standing for the machine, the moonwater command copied to
+    /tmp/moonwater: what the cli and script harnesses run it in. Returns the
+    chroot's path, the commands that make its /dev, and session(script,
+    nobody=False, raw=False) -> (lines, finished), say(command) and
+    answers(lines) as the harnesses fence and read one invocation."""
+    sandbox = top / "root"
+    for name in ("usr", "dev", "proc", "root", "run", "etc", "home", "tmp",
+                 "bowls/one/etc", "bowls/two/etc"):
+        (sandbox / name).mkdir(parents=True, exist_ok=True)
+    for name, target in (("bin", "usr/bin"), ("lib", "usr/lib"), ("lib64", "usr/lib"),
+                         ("sbin", "usr/bin")):
+        (sandbox / name).symlink_to(target)
+    for name in ("passwd", "group", "hosts"):
+        if Path("/etc", name).exists():
+            shutil.copy(Path("/etc", name), sandbox / "etc" / name)
+    (sandbox / "bowls/one/etc/localtime").symlink_to("/usr/share/zoneinfo/UTC")
+    shutil.copy(shell, sandbox / "tmp/moonwater")
+
+    #       A /dev of its own: the machine's null, zero, full, random, urandom and
+    #       tty, and an rfkill that is a plain file. Binding the whole of /dev
+    #       let airplane, wifi and bluetooth write the real /dev/rfkill, which a
+    #       seated user may; here the last event a verb wrote is a file to read.
+    nodes = [name for name in ("null", "zero", "full", "random", "urandom", "tty")
+             if Path("/dev", name).exists()]
+    private_dev = (f"mount -t tmpfs -o mode=755 tmpfs {sandbox}/dev && " +
+                   "".join(f": > {sandbox}/dev/{name} && mount --bind /dev/{name} {sandbox}/dev/{name} && "
+                           for name in nodes) +
+                   f": > {sandbox}/dev/rfkill && ln -s /proc/self/fd {sandbox}/dev/fd && ")
+
+    def session(script, nobody=False, raw=False):
+        """Run a script in the sandbox; its lines, and whether it finished.
+        With nobody the script runs as nobody: a user namespace of its own,
+        made before the chroot (which one cannot be made from) with its caps kept
+        for the chroot to use, and nothing mapped, so the effective user is not
+        root and holds an owner's rights over what the namespace's root owns
+        and no more."""
+        wrapper = (f"mount --rbind /usr {sandbox}/usr && {private_dev}"
+                   f"mount --rbind /proc {sandbox}/proc && "
+                   f"exec {'unshare -U --keep-caps ' if nobody else ''}chroot {sandbox} "
+                   "/usr/bin/sh -c 'cd / && . /tmp/script'")
+        (sandbox / "tmp/script").write_text(script)
+        try:
+            ran = subprocess.run(["unshare", "-Urmnu", "--fork", "sh", "-c", wrapper],
+                                 stdin=subprocess.DEVNULL, capture_output=True,
+                                 timeout=600, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
+        except subprocess.TimeoutExpired:
+            return [], False
+        text = ran.stdout.decode(errors="replace")
+        if not raw:
+            text = re.sub(r"\x1b\[[0-9;]*m", "", text)
+        return text.splitlines(), ran.returncode == 0
+
+    def say(command):
+        # One invocation, fenced so its answer can be found again.
+        return (f"echo '@@ {command}'; timeout 20 /tmp/moonwater {command} 2>&1; "
+                f"echo \"@@status $?\"\n")
+
+    def answers(lines):
+        found, current = {}, None
+        for line in lines:
+            if line.startswith("@@status "):
+                found[current]["status"] = int(line.split()[1])
+            elif line.startswith("@@ "):
+                current = line[3:]
+                found.setdefault(current, {"out": [], "status": None})
+            elif current is not None:
+                found[current]["out"].append(line)
+        return found
+
+    return sandbox, private_dev, session, say, answers
+
+
 def harness_moonwater_cli(argv):
     """The moonwater command, which no lane but boot reached, in a sandbox.
 
@@ -43355,69 +43429,7 @@ def harness_moonwater_cli(argv):
     shown = "+%F %T %Z %z"
 
     with tempfile.TemporaryDirectory(prefix="moonwater-cli-") as temporary:
-        top = Path(temporary)
-        sandbox = top / "root"
-        for name in ("usr", "dev", "proc", "root", "run", "etc", "home", "tmp",
-                     "bowls/one/etc", "bowls/two/etc"):
-            (sandbox / name).mkdir(parents=True, exist_ok=True)
-        for name, target in (("bin", "usr/bin"), ("lib", "usr/lib"), ("lib64", "usr/lib"),
-                             ("sbin", "usr/bin")):
-            (sandbox / name).symlink_to(target)
-        for name in ("passwd", "group", "hosts"):
-            if Path("/etc", name).exists():
-                shutil.copy(Path("/etc", name), sandbox / "etc" / name)
-        (sandbox / "bowls/one/etc/localtime").symlink_to("/usr/share/zoneinfo/UTC")
-        shutil.copy(args.shell, sandbox / "tmp/moonwater")
-
-        #       A /dev of its own: the machine's null, zero, full, random, urandom and
-        #       tty, and an rfkill that is a plain file. Binding the whole of /dev
-        #       let airplane, wifi and bluetooth write the real /dev/rfkill, which a
-        #       seated user may; here the last event a verb wrote is a file to read.
-        nodes = [name for name in ("null", "zero", "full", "random", "urandom", "tty")
-                 if Path("/dev", name).exists()]
-        private_dev = (f"mount -t tmpfs -o mode=755 tmpfs {sandbox}/dev && " +
-                       "".join(f": > {sandbox}/dev/{name} && mount --bind /dev/{name} {sandbox}/dev/{name} && "
-                               for name in nodes) +
-                       f": > {sandbox}/dev/rfkill && ln -s /proc/self/fd {sandbox}/dev/fd && ")
-
-        def session(script, nobody=False):
-            """Run a script in the sandbox; its lines, and whether it finished.
-            With nobody the script runs as nobody: a user namespace of its own,
-            made before the chroot (which one cannot be made from) with its caps kept
-            for the chroot to use, and nothing mapped, so the effective user is not
-            root and holds an owner's rights over what the namespace's root owns
-            and no more."""
-            wrapper = (f"mount --rbind /usr {sandbox}/usr && {private_dev}"
-                       f"mount --rbind /proc {sandbox}/proc && "
-                       f"exec {'unshare -U --keep-caps ' if nobody else ''}chroot {sandbox} "
-                       "/usr/bin/sh -c 'cd / && . /tmp/script'")
-            (sandbox / "tmp/script").write_text(script)
-            try:
-                ran = subprocess.run(["unshare", "-Urmnu", "--fork", "sh", "-c", wrapper],
-                                     stdin=subprocess.DEVNULL, capture_output=True,
-                                     timeout=600, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
-            except subprocess.TimeoutExpired:
-                return [], False
-            text = re.sub(r"\x1b\[[0-9;]*m", "", ran.stdout.decode(errors="replace"))
-            return text.splitlines(), ran.returncode == 0
-
-        def say(command):
-            # One invocation, fenced so its answer can be found again.
-            return (f"echo '@@ {command}'; timeout 20 /tmp/moonwater {command} 2>&1; "
-                    f"echo \"@@status $?\"\n")
-
-        def answers(lines):
-            found, current = {}, None
-            for line in lines:
-                if line.startswith("@@status "):
-                    found[current]["status"] = int(line.split()[1])
-                elif line.startswith("@@ "):
-                    current = line[3:]
-                    found.setdefault(current, {"out": [], "status": None})
-                elif current is not None:
-                    found[current]["out"].append(line)
-            return found
-
+        sandbox, private_dev, session, say, answers = moonwater_sandbox(args.shell, Path(temporary))
         # What the command offers, asked of the command.
         lines, finished = session(say("timezone list") + say("keyboard list"))
         offered = answers(lines)
@@ -43455,9 +43467,10 @@ def harness_moonwater_cli(argv):
                 "hibernate extra", "bluetooth remove", "bluetooth remove nobody", "bios", "bios extra", "bios bogus",
                 "bios reboot extra", "bluetooth", "bluetooth off",
                 "bluetooth on", "priority internet", "priority internet wired",
-                "priority internet wifi", "priority internet cable", "wipe extra",
+                "priority internet wifi", "priority internet cable", "wipe extra", "wipe", "wipe yes extra",
                 "install", "use", "update", "live", "setup", "setup install", "setup install a b c",
-                "setup install a removable x", "setup install ../x removable", "setup use a b c",
+                "setup install a removable x", "setup install ../x removable", "setup install a yes removable",
+                "setup install ../x removable yes", "ask", "setup use a b c",
                 "setup update a b c", "setup live extra", "setup bogus", "setup removable",
                 "setup use nobody", "setup update nobody", "boot extra", "ask extra",
                 "machine extra",
@@ -43546,6 +43559,9 @@ def harness_moonwater_cli(argv):
             'wifi remove ""',
             'bluetooth remove nobody',
             'setup install ../x removable',
+            'setup install ../x removable yes',
+            'wipe',
+            'ask',
             'setup use nobody',
             'setup update nobody',
             'link bogus',
@@ -43616,6 +43632,8 @@ def harness_moonwater_cli(argv):
             'setup install',
             'setup install a b c',
             'setup install a removable x',
+            'setup install a yes removable',
+            'wipe yes extra',
             'setup use a b c',
             'setup update a b c',
             'setup live extra',
@@ -44557,7 +44575,7 @@ while True:
         script += say("link key") + say("link off") + "printf g > /root/link.groups\n"
         script += "echo off > /root/wired.power; printf 'power powersave\\n' > /root/tune\n"
         script += ("mkdir -p /home/u/deep && echo x > /home/u/deep/f && echo y > /root/junk && "
-                   "mkdir -p /root/dir && echo z > /bowls/one/kept\n" + say("wipe") +
+                   "mkdir -p /root/dir && echo z > /bowls/one/kept\n" + say("wipe yes") +
                    "echo \"@@after $(ls -A /home | wc -l) $(ls /root | tr '\\n' ,) "
                    "$(cat /bowls/one/kept)\"\n")
         lines, finished = session(script)
@@ -44906,51 +44924,51 @@ while True:
                   "echo a > /home/stick/file; echo b > /home/u/inner/file; echo c > /root/data/file\n"
                   "echo d > /home/u/gone/f; echo e > /home/loose; echo f > /root/junk/f\n" +
                   "".join(f"echo {name} > /root/{name}\n" for name in kept_names) +
-                  say("wipe") +
+                  say("wipe yes") +
                   "echo \"@@mounts $(cat /home/stick/file /home/u/inner/file /root/data/file | tr '\\n' ,) "
                   "$(ls /home | tr '\\n' ,) $(ls /home/u | tr '\\n' ,) $(ls /root | tr '\\n' ,)\"\n")
         lines, finished = session(script)
         seen = answers(lines)
         listed = ",".join(sorted(kept_names + ["data"]))
         mounts = [line.split(maxsplit=1)[1] for line in lines if line.startswith("@@mounts ")]
-        check(finished and seen.get("wipe", {}).get("status") == 0 and mounts and
+        check(finished and seen.get("wipe yes", {}).get("status") == 0 and mounts and
               mounts[0].split() == ["a,b,c,", "stick,u,", "inner,", listed + ","],
               "wipe leaves a file system mounted under /home or /root and every directory "
               "holding one, takes the rest, and keeps what each setting's macro names",
-              repr((seen.get("wipe"), mounts)))
+              repr((seen.get("wipe yes"), mounts)))
         session("rm -rf /home/* /root/* /root/.[!.]*\n")
 
         script = ("rm -rf /home/* /root/* /root/.[!.]*\n"
                   "mkdir -p /home/deep /root/deepr && echo kept > /root/name\n"
                   "for top in /home/deep /root/deepr; do (cd $top; i=0; "
                   "while [ $i -lt 130 ]; do mkdir d && cd d && echo x > f$i; i=$((i+1)); done); done\n" +
-                  say("wipe") +
+                  say("wipe yes") +
                   "echo \"@@deep $(ls -A /home | wc -l) $(ls -A /root | tr '\\n' ,) $(cat /root/name)\"\n")
         lines, finished = session(script)
         seen = answers(lines)
         deep = [line.split(maxsplit=1)[1] for line in lines if line.startswith("@@deep ")]
-        check(finished and seen.get("wipe", {}).get("status") == 0 and deep and
+        check(finished and seen.get("wipe yes", {}).get("status") == 0 and deep and
               deep[0].split() == ["0", "name,", "kept"],
               "wipe empties a tree 130 directories deep, past the walk's cap, in /home and /root",
-              repr((seen.get("wipe"), deep)))
+              repr((seen.get("wipe yes"), deep)))
 
         script = ("rm -rf /home/* /root/* /root/.[!.]*\n"
                   "mkdir -p /tmp/elsewhere && echo precious > /tmp/elsewhere/f\n"
-                  "rmdir /home && ln -s /tmp/elsewhere /home\n" + say("wipe") +
+                  "rmdir /home && ln -s /tmp/elsewhere /home\n" + say("wipe yes") +
                   "echo \"@@link $(cat /tmp/elsewhere/f)\"\n"
-                  "rm /home && mkdir /home && rmdir /root && ln -s /tmp/elsewhere /root\n" + say("wipe") +
+                  "rm /home && mkdir /home && rmdir /root && ln -s /tmp/elsewhere /root\n" + say("wipe yes") +
                   "echo \"@@link $(cat /tmp/elsewhere/f)\"\n"
                   "rm /root && mkdir -m 700 /root\n")
         lines, finished = session(script)
         seen = answers(lines)
         kept = [line[len("@@link "):] for line in lines if line.startswith("@@link ")]
         check(finished and kept == ["precious", "precious"] and
-              all(got["status"] == 1 for key, got in seen.items() if key == "wipe"),
+              all(got["status"] == 1 for key, got in seen.items() if key == "wipe yes"),
               "wipe goes through no link at /home or at /root",
-              repr((seen.get("wipe"), kept)))
+              repr((seen.get("wipe yes"), kept)))
 
         script = ("rm -rf /home/* /root/* /root/.[!.]*\n"
-                  "rmdir /home\numask 077\n" + say("wipe") + "umask 022\n"
+                  "rmdir /home\numask 077\n" + say("wipe yes") + "umask 022\n"
                   "echo \"@@mode $(stat -c %a /home /root | tr '\\n' ' ')\"\n")
         lines, finished = session(script)
         modes = [line.split(maxsplit=1)[1] for line in lines if line.startswith("@@mode ")]
@@ -44959,7 +44977,7 @@ while True:
 
         script = ("mkdir -p /run/moonwater /home/q && echo q > /home/q/f\n"
                   "(flock -x /run/moonwater/radio.lock sleep 4) &\nsleep 1\n"
-                  "s=$(date +%s)\n" + say("wipe") +
+                  "s=$(date +%s)\n" + say("wipe yes") +
                   "echo \"@@waited $(( $(date +%s) - s ))\"\nwait\n")
         lines, finished = session(script)
         waited = [int(line.split()[1]) for line in lines if line.startswith("@@waited ")]
@@ -45228,11 +45246,11 @@ while True:
         script = ("mv /root /root.gone\n" + "".join(say(command) for command in (
             "status", "keyboard", "ntp", "timezone", "name", "wifi", "bluetooth", "wired", "priority",
             "time", "bind", "link", "wifi add a passpass1", "ntp off", "keyboard de", "name keeper")) +
-                  say("wipe") + "echo \"@@mode $(stat -c %a /root)\"\nrm -rf /root; mv /root.gone /root\n")
+                  say("wipe yes") + "echo \"@@mode $(stat -c %a /root)\"\nrm -rf /root; mv /root.gone /root\n")
         lines, finished = session(script)
         seen = answers(lines)
         check(finished and all(got["status"] in (0, 1) for got in seen.values()) and
-              seen["wipe"]["status"] == 0 and seen["status"]["status"] == 0 and
+              seen["wipe yes"]["status"] == 0 and seen["status"]["status"] == 0 and
               any(line.startswith("@@mode 700") for line in lines),
               "with no /root the verbs answer, and wipe makes it again",
               repr({key: got["status"] for key, got in seen.items()}))
@@ -45406,10 +45424,10 @@ while True:
         # room said refused after it had been set, and the command and the
         # kernel disagreed about what the machine runs. Here there is no
         # kernel to ask, so the room is the whole of the answer.
-        fill = "x" * 4000
+        fill = "x" * 3999
         lines, finished = session(
             "rm -rf /run/moonwater\n" +
-            "for n in 1 2 3 4; do timeout 20 /tmp/moonwater bind init add \"" + fill + "\" > /dev/null 2>&1; done\n"
+            "for n in 1 2 3 4; do timeout 20 /tmp/moonwater bind init add \"${n}" + fill + "\" > /dev/null 2>&1; done\n"
             "timeout 20 /tmp/moonwater bind init add \"" + "y" * 250 + "\" > /dev/null 2>&1\n" +
             say("bind mute " + "z" * 100) + say("bind mute z") +
             "echo '@@ left'; timeout 20 /tmp/moonwater bind init | wc -l; echo '@@end'\n")
@@ -45539,6 +45557,231 @@ while True:
               "canvas off without a Canvas does not announce closing windows", lines[:6])
 
     return checks.verdict("moonwater cli", "moonwater-cli")
+
+
+def harness_moonwater_script(argv):
+    """Every verb as the machine script runs it: root, no terminal, standard
+    input /dev/null (or closed, or a pipe nobody writes to), in the cli
+    harness's sandbox.
+
+    Each verb of a script that uses one of every kind is run under a timeout
+    and a clock, and must come back inside its bound with an answer that is
+    0, 1 or 2 as the table says, with no prompt in what it said and no escape
+    in it (it is a file, not a terminal): bowl's bold label was one. The
+    whole script is then run twice and what it keeps (/root, /etc, the
+    machine's state, /home and the bowls) is compared: the same line said
+    again is the same machine, where `bind init add` of one line twice was
+    two entries that both ran at every boot. What cannot be taken back is
+    said yes to: with no terminal to ask on, an install and a wipe refuse at
+    once, over /dev/null, a closed input and a pipe that is never written,
+    and leave what they would have erased; `ask` leaves its question for the
+    terminal that can answer it.
+    """
+    import base64
+    import platform
+    import tempfile
+    parser = argparse.ArgumentParser(prog="differential.py --harness moonwater_script")
+    parser.add_argument("--shell", required=True)
+    args = parser.parse_args(argv)
+    if platform.system() != "Linux":
+        print("moonwater script: NOT RUN -- Linux namespaces")
+        return 2
+    probe = subprocess.run(["unshare", "-Urmnu", "--fork", "true"], capture_output=True)
+    if probe.returncode:
+        print("moonwater script: NOT RUN -- no unprivileged user namespaces here")
+        return 2
+
+    checks = Checks()
+
+    def check(ok, what, detail=""):
+        checks(ok, what + ("" if ok else " -- " + str(detail)[:600]))
+
+    key = base64.b64encode(bytes([9]) + bytes(31)).decode()
+    prompt = re.compile(r"Type |to go on|password for|\[y/N\]|\(empty for")
+
+    #       A verb of each kind, in the order a kiosk would say them, and what
+    #       each answers in a sandbox that has no hardware, no network and no
+    #       disk: 0, 1 or 2 (a usage page).
+    walk = [
+        ("wipe yes", 0), ("name keeper", 0), ("timezone Europe/Stockholm", 0), ("keyboard se", 0),
+        ("dns 1.1.1.1 9.9.9.9", 0), ("ntp on", 0), ("ntp server time.example.net", 0), ("ntp sampling on", 0),
+        ("priority internet wired", 0), ("wired on", 0), ("wifi add scn-a passpass1", 1), ("wifi add scn-open", 1),
+        ("wifi", 0), ("wifi on", 1), ("wifi off", 0), ("bluetooth add dev1", 0), ("bluetooth on", 0),
+        ("bluetooth", 0), ("airplane on", 0), ("airplane off", 0), ("brightness 50%", 1), ("power balanced", 1),
+        ("cpu smt on", 1), ("cpu online 1", 1), ("charge limit 80", 1), ("sleep", 1), ("hibernate", 1),
+        ("bios", 0), ("bios reboot", 1), ("time", 0), ("time sync", 1), ("timezone auto", 1),
+        ("bind init add echo hi", 0), ("bind init add echo hi", 0), ("bind init mount off", 0),
+        ("bind init mount off", 0), ("bind init", 0), ("bind exit add echo bye", 0), ("bind exit add echo bye", 0),
+        ("bind exit", 0), ("bind poweroff", 1), ("canvas", 1), ("canvas on", 1), ("canvas off", 1),
+        ("canvas log", 1), ("canvas terminal", 1), ("canvas scale 2", 0), ("canvas modes preferred", 0),
+        ("desktop off", 0), ("desktop start", 0), ("desktop stop", 1), ("desktop boot", 0), ("desktop", 0),
+        ("latency", 1), ("link on", 0), ("link on", 0), ("link key", 0), ("link port 22348", 0),
+        ("link add peer1 " + key, 0), ("link add peer1 " + key, 0), ("link allow peer1 run", 0),
+        ("link allow peer1 run", 0), ("link group lab SECRETsecret1 allow run", 0),
+        ("link group lab SECRETsecret1 allow run", 0), ("link group lab", 0), ("link", 0),
+        ("link group leave lab", 0), ("link remove peer1", 0), ("link off", 0), ("link push nobody a b", 1),
+        ("link pull nobody a b", 1), ("link log nobody", 1), ("link nobody whoami", 1),
+        ("setup", 0), ("setup use", 1), ("setup update", 1), ("setup live", 0),
+        ("setup install sda yes", 1), ("setup install sda removable yes", 1), ("status", 0), ("help", 0),
+        ("bowl", 2), ("bowl setup alpine", 1), ("bowl profile", 0), ("bowl profile desktop", 1),
+        ("bowl udev", 0), ("bowl expose", 2), ("bowl setup nonesuch", 1),
+    ]
+    #       The two that wait five minutes for a person on another machine,
+    #       and say so: killed at three seconds, they must have said it.
+    waits = [("link pair", "five minutes"), ("link nobody abc-def", "five minutes")]
+
+    def line_of(command, limit, runner="v", redirect=""):
+        words = shlex.split(command)
+        program = "/tmp/bowl" if words[0] == "bowl" else "/tmp/moonwater"
+        rest = words[1:] if words[0] == "bowl" else words
+        return "%s %s%d %s %s %s\n" % (runner, redirect, limit, shlex.quote(command), program,
+                                       " ".join(shlex.quote(word) for word in rest))
+
+    #       v runs one verb with nothing on its input, and says its answer, its
+    #       seconds and the escapes in what it said. w does it over each kind
+    #       of input and says what is left of the files it might have erased.
+    functions = (
+        "v() {\n"
+        "  limit=$1; label=$2; shift 2\n"
+        "  start=$(date +%s)\n"
+        "  timeout \"$limit\" \"$@\" < /dev/null > /tmp/v.out 2>&1\n"
+        "  code=$?\n"
+        "  echo \"@@ $label\"; cat /tmp/v.out; echo\n"
+        "  echo \"@@status $code $(( $(date +%s) - start )) $(tr -cd '\\033' < /tmp/v.out | wc -c)\"\n"
+        "}\n"
+        "w() {\n"
+        "  how=$1; limit=$2; label=$3; shift 3\n"
+        "  mkdir -p /home/u; echo x > /home/u/f; echo y > /root/lost\n"
+        "  start=$(date +%s)\n"
+        "  case $how in\n"
+        "  null) timeout \"$limit\" \"$@\" < /dev/null > /tmp/v.out 2>&1 ;;\n"
+        "  closed) timeout \"$limit\" \"$@\" <&- > /tmp/v.out 2>&1 ;;\n"
+        "  pipe) timeout \"$limit\" \"$@\" < /tmp/never > /tmp/v.out 2>&1 ;;\n"
+        "  esac\n"
+        "  code=$?\n"
+        "  echo \"@@ $how $label\"; cat /tmp/v.out; echo\n"
+        "  echo \"@@status $code $(( $(date +%s) - start )) $(ls /home/u | wc -l) $(ls /root | grep -c '^lost$')\"\n"
+        "}\n"
+        "snap() {\n"
+        "  cd /\n"
+        "  find root etc run/moonwater home bowls -type f ! -name '*.lock' 2> /dev/null | sort |\n"
+        "    while read -r f; do printf '%s %s\\n' \"$f\" \"$(cksum < \"$f\")\"; done\n"
+        "}\n"
+        "walk() {\n" + "".join("  " + line_of(command, 20) for command, _ in walk) +
+        "".join("  " + line_of(command, 3) for command, _ in waits) + "}\n")
+
+    def blocks(lines):
+        found, current = [], None
+        for line in lines:
+            if line.startswith("@@status "):
+                current["numbers"] = [int(word) for word in line.split()[1:]]
+                found.append(current)
+                current = None
+            elif line.startswith("@@ "):
+                current = {"command": line[3:], "out": []}
+            elif current is not None and line:
+                current["out"].append(line)
+        return found
+
+    def said(block):
+        return " ".join(block["out"])
+
+    with tempfile.TemporaryDirectory(prefix="moonwater-script-") as temporary:
+        sandbox, private_dev, session, say, answers = moonwater_sandbox(args.shell, Path(temporary))
+        shutil.copy(args.shell, sandbox / "tmp/bowl")
+
+        # The whole script, twice.
+        lines, finished = session(
+            functions + "walk > /tmp/walk1 2>&1\nsnap > /tmp/snap1\nwalk > /tmp/walk2 2>&1\nsnap > /tmp/snap2\n"
+            "echo '@@@ first'; cat /tmp/walk1\necho '@@@ second'; cat /tmp/walk2\n"
+            "echo '@@@ kept'; cat /tmp/snap1\necho '@@@ moved'; diff /tmp/snap1 /tmp/snap2\n"
+            "echo '@@@ end'\n", raw=True)
+        check(finished, "the script of every kind of verb finished", "")
+        parts = {}
+        for item in re.split(r"^@@@ ", "\n".join(lines), flags=re.M)[1:]:
+            name, _, chunk = item.partition("\n")
+            parts[name] = chunk.split("\n")
+        first, second = blocks(parts.get("first", [])), blocks(parts.get("second", []))
+        expected = [command for command, _ in walk] + [command for command, _ in waits]
+        check([b["command"] for b in first] == expected and [b["command"] for b in second] == expected,
+              "every verb was run, twice", [b["command"] for b in first][-3:])
+        for run in (first, second):
+            for block, (command, want) in zip(run, walk):
+                code, seconds, escapes = block["numbers"]
+                check(code == want and seconds <= 5,
+                      f"moonwater {command} answers {want} inside five seconds, with no terminal",
+                      f"{code} in {seconds} s: {said(block)[:200]}")
+                check(not prompt.search(said(block)), f"moonwater {command} asks nothing", said(block)[:200])
+                check(escapes == 0, f"moonwater {command} puts no escape in a file", f"{escapes}: {said(block)[:200]}")
+            for block, (command, words) in zip(run[len(walk):], waits):
+                check(block["numbers"][0] == 124 and words in said(block),
+                      f"moonwater {command} waits, and says for how long", repr(block))
+        check([b["numbers"][0] for b in first] == [b["numbers"][0] for b in second],
+              "the second run answers what the first did",
+              [(a["command"], a["numbers"][0], b["numbers"][0]) for a, b in zip(first, second)
+               if a["numbers"][0] != b["numbers"][0]])
+        moved = [line for line in parts.get("moved", []) if line.strip()]
+        check(not moved, "run twice, the script leaves what it kept as the first run did", moved[:6])
+        kept = parts.get("kept", [])
+        check(any(line.startswith("root/wifi ") for line in kept) and any(line.startswith("root/dns ") for line in kept),
+              "and what it kept is there to compare", kept[:8])
+
+        # What cannot be taken back: nothing is asked, nothing is read, nothing is lost.
+        words = ("setup install sda", "setup install sda removable", "wipe", "ask")
+        lines, finished = session(
+            functions + "mkfifo /tmp/never; (sleep 30 > /tmp/never &)\n" +
+            "".join(line_of(command, 10, "w", how + " ") for how in ("null", "closed", "pipe") for command in words))
+        check(finished, "the refusals finished", "")
+        refused = blocks(lines)
+        check(len(refused) == 12, "twelve refusals were asked for", [b["command"] for b in refused])
+        for block in refused:
+            code, seconds, home, lost = block["numbers"]
+            how, command = block["command"].split(" ", 1)
+            check(code == 1 and seconds <= 2 and not prompt.search(said(block)),
+                  f"{command} without the word and without a terminal ({how}) is refused at once, asking nothing",
+                  f"{code} in {seconds} s: {said(block)[:200]}")
+            if command.startswith("setup install"):
+                check("nothing here can be asked" in said(block) and said(block).rstrip().endswith(command + " yes"),
+                      f"{command} says the line that would have been right", said(block)[:300])
+            if command == "wipe":
+                check("nothing here can be asked" in said(block) and "moonwater wipe yes" in said(block) and
+                      home == 1 and lost == 1,
+                      f"wipe ({how}) leaves /home and /root as they were", f"{home} {lost} {said(block)[:200]}")
+            if command == "ask":
+                check("question for a terminal" in said(block), f"ask ({how}) says it is for a terminal", said(block)[:300])
+
+        # A question left for the first terminal is left there, not taken and put back.
+        lines, _ = session(functions + "mkdir -p /run/moonwater; echo 'ask sda' > /run/moonwater/verdict; "
+                           ": > /run/moonwater/question\n" + line_of("ask", 5) +
+                           "echo \"@@@ left $(ls /run/moonwater | tr '\\n' ' ')\"\n", raw=True)
+        left = [line for line in lines if line.startswith("@@@ left")]
+        check(left and " question " in left[0] and "question.taken" not in left[0],
+              "ask from a script leaves the question where the first terminal finds it", left)
+
+        # With the word, nothing is asked either: a disk that is not there is said so.
+        for command, want in (("setup install sda yes", 1), ("setup install sda removable yes", 1), ("wipe yes", 0)):
+            lines, _ = session(functions + line_of(command, 10))
+            got = blocks(lines)
+            check(got and got[0]["numbers"][0] == want and not prompt.search(said(got[0])) and
+                  (want == 0 or "there is no disk called sda" in said(got[0])),
+                  f"moonwater {command} goes on without asking", got)
+
+        # The same line again, counted: one entry, not two.
+        lines, _ = session(functions + "rm -rf /run/moonwater\n" + line_of("bind init add echo hi", 5) * 3 +
+                           line_of("bind init add echo hi there", 5) +
+                           line_of("bind exit add echo bye", 5) * 2 + line_of("bind init", 5) +
+                           line_of("bind exit", 5) + line_of("bind init mount off", 5) * 2)
+        got = blocks(lines)
+        entries = [line.split(None, 1)[1] for line in got[6]["out"] if line.split(None, 1)[1:]]
+        check(entries == ["echo hi", "echo hi there"],
+              "bind init add of a line already there is not another entry", got[6]["out"])
+        check(len(got[7]["out"]) == 1, "nor is bind exit add", got[7]["out"])
+        check(got[1]["numbers"][0] == 0 and any("is already" in line for line in got[1]["out"]),
+              "it says it is already there, and answers 0", got[1])
+        check(any("; " in line for line in got[8]["out"]) and not any("; " in line for line in got[9]["out"]),
+              "a switch already as asked is not written again", (got[8], got[9]))
+
+    return checks.verdict("moonwater script", "moonwater-script")
 
 
 def harness_machine_reap(argv):
@@ -64551,6 +64794,15 @@ def harness_guest_scenarios(argv):
                 word = rng.choice(("a b", "it's", 'say "hi"', "x=1;y=2", "$HOME", "semi;colon", "#hash"))
                 text = ("true " if name == "exit" else "echo ") + word
                 args = q(text)
+            #   The same line again is the entry it already is, and is not
+            #   another: a line the list holds is made another by a word on
+            #   its end, said in the quotes the arguments end in, so that the
+            #   model still has an entry for each add and the draws that follow
+            #   are the ones they were.
+            if text and len(text) <= TEXT_MOST and any(held == text for _, held, _ in lists[name]):
+                mark = " u%d" % step
+                args, text = args[:-1] + mark + args[-1], text + mark
+                spell = spell + mark if spell else spell
             if not text:
                 want = 2
             elif len(text) > TEXT_MOST:
@@ -76913,6 +77165,7 @@ HARNESS_CHECKS = {
     "host_writes": harness_host_writes,
     "net_sysctl": harness_net_sysctl,
     "moonwater_cli": harness_moonwater_cli,
+    "moonwater_script": harness_moonwater_script,
     "machine_reap": harness_machine_reap,
     "tls_chains": harness_tls_chains,
     "tls_peer": harness_tls_peer,

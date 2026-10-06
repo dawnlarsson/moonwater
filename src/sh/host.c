@@ -58,131 +58,10 @@
 
 #include "../moonwater/moonwater.c"
 
-/*
-        What the command says is for a person at a terminal, which is why its
-        label is bold and its notes dim. Into a pipe or a file those are bytes
-        in the data (`moonwater status | grep` read ESC[1m[Moonwater]ESC[0m), so
-        the two streams it writes to are asked once what they are, and one
-        that is not a terminal has its colour sequences -- ESC [ parameters m
-        -- taken out as they pass. A sequence may come in two writes, so the
-        bytes of one in progress are kept until it ends.
-
-        What a message names, a %s, is another matter: string_format hands it
-        over with a length of nought, the writer's word for "to the
-        terminator", where everything the command writes itself has its own
-        length. Those are anybody's words -- a name typed after the verb, a
-        disk's, a network's -- and are shown and not obeyed: a byte a terminal
-        would act on, ESC and the C1 controls among them, is spelled \xNN, to
-        a terminal or a file alike, and a line or a tab is the text's own.
-        Everything below that says log or log_error says these.
-*/
-typedef struct
-{
-        p8 held[24];
-        positive used;
-        bool known;
-        bool plain;
-} host_stream;
-
-static host_stream host_streams[2];
-
-/* A word as it is seen and not as a terminal would take it. */
-static fn host_show(writer through, string_address text)
-{
-        const p8 address_to bytes = (const p8 address_to)text;
-        positive length = string_length(text);
-        positive start = 0;
-        positive at = 0;
-
-        while (at < length)
-        {
-                bool printable;
-                positive step = file_terminal_step(bytes + at, length - at, true,
-                                                   address_of printable);
-                p8 spelled[4] = {'\\', 'x'};
-
-                if (printable || bytes[at] == '\n' || bytes[at] == '\t')
-                {
-                        at += step;
-                        continue;
-                }
-                if (at > start)
-                        through((address_any)(bytes + start), at - start);
-                memory_into_hex(spelled + 2, (address_any)(bytes + at), 1);
-                through(spelled, sizeof(spelled));
-                start = ++at;
-        }
-        if (at > start)
-                through((address_any)(bytes + start), at - start);
-}
-
-static fn host_stream_write(positive which, writer through, address_any data,
-                            positive length)
-{
-        host_stream address_to stream = host_streams + which;
-        const p8 address_to bytes = data;
-        positive start = 0;
-
-        if (!length)
-        {
-                host_show(through, data);
-                return;
-        }
-        if (!stream->known)
-        {
-                stream->known = true;
-                stream->plain = !stream_is_terminal((b32)which + 1);
-        }
-        if (!stream->plain)
-        {
-                through(data, length);
-                return;
-        }
-
-        for (positive at = 0; at < length; at++)
-        {
-                p8 byte = bytes[at];
-
-                if (!stream->used)
-                {
-                        if (byte != 0x1b)
-                                continue;
-                        if (at > start)
-                                through((address_any)(bytes + start), at - start);
-                        stream->held[stream->used++] = byte;
-                        continue;
-                }
-
-                stream->held[stream->used++] = byte;
-                if ((stream->used == 2 && byte == '[') ||
-                    (stream->used > 2 && byte >= 0x20 && byte <= 0x3f &&
-                     stream->used < sizeof(stream->held)))
-                        continue;
-
-                //      The end of it, or no escape sequence after all: a colour
-                //      is dropped and anything else goes on as it was.
-                if (!(stream->used > 2 && byte == 'm'))
-                        through(stream->held, stream->used);
-                stream->used = 0;
-                start = at + 1;
-        }
-
-        if (!stream->used && start < length)
-                through((address_any)(bytes + start), length - start);
-}
-
-static fn host_out(address_any data, positive length)
-{
-        host_stream_write(0, log, data, length);
-}
-
-static fn host_err(address_any data, positive length)
-{
-        host_stream_write(1, log_error, data, length);
-}
-
-#define log host_out
-#define log_error host_err
+//      What this file says as log and log_error is said through plain_out and
+//      plain_err (file.c): colour only to a terminal, names shown and not obeyed.
+#define log plain_out
+#define log_error plain_err
 
 // The start of a line: the label, or the two blanks a page indents by.
 static fn host_prefix(bool label)
@@ -332,7 +211,6 @@ static bool host_machine_self;
 static fn name_restore(void);
 static fn locale_recover(void);
 static unsigned int locale_wake_ms(unsigned int most);
-static b32 host_wipe(void);
 
 // A line to the writer, then the buffer out: the two calls every report ends on.
 #define host_say(...) \
@@ -344,6 +222,17 @@ static b32 host_wipe(void);
 
 // The word the command was given, which its refusals and its usage name.
 static string_address host_verb;
+
+/*
+        What a command that cannot be taken back is said yes to. At a terminal
+        a person is asked; anywhere else nobody can be, and a script that means
+        it says yes as the last word. One that has neither is refused where it
+        stands, with the line that would have been right, and never reads: an
+        input that is /dev/null, a pipe nobody writes to or the console a
+        machine script was started on is no answer.
+*/
+#define HOST_YES "yes"
+#define host_asks() stream_is_terminal(0)
 
 // The root check the commands that change the machine open with.
 #define host_need_root() \
@@ -792,6 +681,24 @@ static bool host_detach(p32 keep, p32 keep_too)
                         system_call_3(syscall(dup3), (positive)quiet, at, 0);
         (void)descriptors_close_except(3, keep, keep_too);
         return true;
+}
+
+/*
+        Standard input is /dev/null. The machine process is started with init's
+        descriptors, whose input is the console, and the script it runs has
+        nobody at that: a `read` or a verb that asks would hold every event
+        behind it until a key was struck, and a keystroke meant for the login
+        prompt would be taken by whichever got it first.
+*/
+static fn host_input_none(void)
+{
+        bipolar quiet = system_open_at(AT_FDCWD, "/dev/null", FILE_READ | O_CLOEXEC);
+
+        if (quiet > 0)
+        {
+                system_call_3(syscall(dup3), (positive)quiet, 0, 0);
+                system_close(quiet);
+        }
 }
 
 /*
@@ -2741,7 +2648,7 @@ static bool host_install_place(p64 bytes, b32 sector, storage_format_partition a
         itself: the exclusive open fails. Removable media is refused unless
         asked for, because the stick being installed from is removable too.
 */
-static b32 host_install_locked(string_address asked, bool removable)
+static b32 host_install_locked(string_address asked, bool removable, bool said_yes)
 {
         string_address name = string_has_prefix(asked, "/dev/") ? asked + 5 : asked;
         p8 sysfs[HOST_PATH_ROOM];
@@ -2881,17 +2788,24 @@ static b32 host_install_locked(string_address asked, bool removable)
                 string_copy(text, "a disk");
         host_plain_line(text);
 
-        host_say(log, host_label "Installing erases everything on %s: %s, %p GiB.\n"
-                      host_label "Type %s to go on: ",
-                 name, text, bytes >> 30, name);
+        host_say(log, host_label "Installing erases everything on %s: %s, %p GiB.\n",
+                 name, text, bytes >> 30);
 
-        if (host_read_line(answer, sizeof(answer)) < 0 ||
-            !string_equals(answer, name))
+        //      Said yes to, in the words of the command: nothing is asked.
+        //      Otherwise the name is typed, which is how a person at a
+        //      terminal is sure of which disk this is.
+        if (!said_yes)
         {
-                system_close(handle);
-                host_unmount(HOST_MEDIUM);
-                host_say(log, host_label "nothing written\n");
-                return 1;
+                host_say(log, host_label "Type %s to go on: ", name);
+
+                if (host_read_line(answer, sizeof(answer)) < 0 ||
+                    !string_equals(answer, name))
+                {
+                        system_close(handle);
+                        host_unmount(HOST_MEDIUM);
+                        host_say(log, host_label "nothing written\n");
+                        return 1;
+                }
         }
 
         failed = system_random_fill(random, sizeof(random), 0);
@@ -3100,14 +3014,14 @@ fn host_quiesce(void)
         storage_mount_table_release(address_of table);
 }
 
-static b32 host_install_disk(string_address asked, bool removable)
+static b32 host_install_disk(string_address asked, bool removable, bool said_yes)
 {
         b32 failed;
 
         if (!host_acquire())
                 return 1;
 
-        failed = host_install_locked(asked, removable);
+        failed = host_install_locked(asked, removable, said_yes);
         host_release();
         return failed;
 }
@@ -3386,11 +3300,25 @@ static fn host_settings_drop(host_settings address_to settings,
         memory_zero(settings->payload + settings->length, size);
 }
 
+/* An entry of a list by its exact words. */
+static bool host_settings_find_words(host_settings address_to settings, p8 list,
+                                     string_address wanted, host_setting address_to into)
+{
+        p8 text[SPARK_SETTINGS_TEXT_MOST + 1];
+        positive at = 0;
+
+        while (host_settings_next(settings, address_of at, into))
+                if (into->entry.list == list &&
+                    (host_settings_text(text, into), string_equals(text, wanted)))
+                        return true;
+
+        return false;
+}
+
 /* An entry named by its id, all digits, or by its exact words. */
 static bool host_settings_find(host_settings address_to settings, p8 list,
                                string_address wanted, host_setting address_to into)
 {
-        p8 text[SPARK_SETTINGS_TEXT_MOST + 1];
         positive id = 0;
         positive at = 0;
         string_address stop = wanted;
@@ -3402,15 +3330,12 @@ static bool host_settings_find(host_settings address_to settings, p8 list,
                                                        address_of range);
         by_id = by_id && !*stop && !range && id <= 0xffff;
 
-        while (host_settings_next(settings, address_of at, into))
-        {
-                if (into->entry.list != list)
-                        continue;
+        if (!by_id)
+                return host_settings_find_words(settings, list, wanted, into);
 
-                if (by_id ? into->entry.id == id
-                          : (host_settings_text(text, into), string_equals(text, wanted)))
+        while (host_settings_next(settings, address_of at, into))
+                if (into->entry.list == list && into->entry.id == id)
                         return true;
-        }
 
         return false;
 }
@@ -4225,6 +4150,14 @@ static b32 host_settings_apply(host_settings address_to settings,
                         return HOST_SETTINGS_SHOWN;
                 }
 
+                //      A switch already as asked is not written again.
+                if (!!(settings->flags & flag) == !host_onoff(arguments[3]))
+                {
+                        host_say(log, host_label "%s %s %s\n", verb,
+                                 host_switches[at].word, arguments[3]);
+                        return HOST_SETTINGS_SHOWN;
+                }
+
                 if (!host_onoff(arguments[3]))
                         settings->flags |= flag;
                 else
@@ -4248,6 +4181,15 @@ static b32 host_settings_apply(host_settings address_to settings,
 
                 if (adding)
                 {
+                        //      The same line again, as a script says it at every
+                        //      boot, is the entry it already has and not another
+                        //      that runs beside it.
+                        if (host_settings_find_words(settings, list, text, address_of setting))
+                        {
+                                host_say(log, host_label "%s %p is already: %s\n", verb,
+                                         (positive)setting.entry.id, text);
+                                return HOST_SETTINGS_SHOWN;
+                        }
                         failed = host_settings_add(settings, list, SPARK_SETTINGS_COMMAND,
                                                    text, length, address_of id);
                         return_if(failed, host_settings_refused(verb, failed, settings));
@@ -4449,7 +4391,7 @@ static bool host_settings_install(host_install address_to install,
         log -- the kernel log window -- says when each starts and ends, by
         its number and never its text, and neither the prompt nor the
         desktop waits for any of it. The text is root's alone, because a
-        command can carry a secret (`link join NS SECRET`), and anybody can
+        command can carry a secret (`link group NS SECRET`), and anybody can
         read the kernel log on this image: its first eighty characters went
         there with every boot.
 
@@ -9073,7 +9015,8 @@ static b32 radio_wifi_off(bool report)
 /* The network put on the saved list, or put there again with the password it
    was last given. -E2BIG when the list is full, -EFBIG when it is more than
    this reads and would be written back short. */
-static bipolar radio_wifi_store(string_address ssid, string_address pass)
+static bipolar radio_wifi_store(string_address ssid, string_address pass,
+                                bool address_to same)
 {
         radio_network networks[RADIO_WIFI_MOST];
         bool cut;
@@ -9087,8 +9030,16 @@ static bipolar radio_wifi_store(string_address ssid, string_address pass)
                 if (string_equals((string_address)networks[at].ssid, ssid))
                         break;
 
+        //      The same network with the same password is already what the
+        //      list says: nothing is written for it, and the caller is told.
+        address_to same = at < count && networks[at].pass_length == pass_length &&
+                          string_equals((string_address)networks[at].pass,
+                                        pass ? pass : (string_address) "");
+
         if (cut)
                 failed = -EFBIG;
+        else if (address_to same)
+                failed = 0;
         else if (at == count && count++ == RADIO_WIFI_MOST)
                 failed = -E2BIG;
         else
@@ -9115,7 +9066,8 @@ static b32 radio_wifi_enter(string_address ssid, string_address pass)
         radio_air air;
         radio_heard address_to heard = null;
         positive pass_length = pass ? string_length(pass) : 0;
-        bipolar stored = radio_wifi_store(ssid, pass);
+        bool same;
+        bipolar stored = radio_wifi_store(ssid, pass, address_of same);
         bipolar failed;
         p8 why[RADIO_WHY_ROOM];
 
@@ -9138,6 +9090,14 @@ static b32 radio_wifi_enter(string_address ssid, string_address pass)
              (radio_air_take(address_of air, RADIO_AIR_NOW | RADIO_AIR_JOINABLE) &&
               (heard = radio_air_find(address_of air, ssid)))))
         {
+                //      Said again by a script at every boot, with a link that
+                //      holds: nothing is left and joined over.
+                if (same && heard->joined && host_lock_owner(RADIO_KEEPER_PATH) > 0 &&
+                    nl80211_associated())
+                {
+                        host_say(log, host_label "wifi already joined %s\n", ssid);
+                        return switched;
+                }
                 if (!heard->joinable)
                         return host_refuse("saved, but it asks for %s, which "
                                            "moonwater cannot join yet\n",
@@ -15877,6 +15837,18 @@ static b32 host_bind_told(unsigned int event, string_address command)
                 return 1;
         }
 
+        //      The line the event already runs, said again as a script says
+        //      it at every boot: nothing is set, and the boot image is not
+        //      written over with what it holds.
+        if (*command && host_bind_request(SPARK_BIND_GET, event, null, address_of control) >= 0 &&
+            !(control.flags & SPARK_BIND_DEFAULT) &&
+            string_equals((string_address)control.command, command))
+        {
+                host_bind_say(true, address_of control);
+                log_flush();
+                return 0;
+        }
+
         full = host_bind_fits(address_of settings, event, command);
         if (full)
         {
@@ -16022,12 +15994,14 @@ static const host_row host_rows[] = {
     {null, "help [VERB]", "these commands, or one command's", 'b'},
     {null, "setup", "where it runs: install, update, use, live", 'm'},
     {null, "setup", "where this session runs, and the installs found", 'f'},
-    {null, "setup install DISK [removable]", "erase DISK and put Moonwater on it", 'f'},
-    {null, "", "removable takes a disk that says it is", 'f'},
+    {null, "setup install DISK [removable] [yes]", "erase DISK and put Moonwater on it", 'f'},
+    {null, "", "removable takes a disk that says it is; yes", 'f'},
+    {null, "", "is for a script, which cannot be asked", 'f'},
     {null, "setup update [DISK]", "write this build over an install, keeping its data", 'f'},
     {null, "setup use [DISK]", "run this build with an install's data", 'f'},
     {null, "setup live", "leave the disks alone this session", 'f'},
-    {null, "wipe", "forget /home and /root, keep the machine", 'b'},
+    {null, "wipe [yes]", "forget /home and /root, keep the machine; yes", 'b'},
+    {null, "", "is for a script, which cannot be asked", 'b'},
     {null, "bind", "the machine's events, and what each runs", 'b'},
     {null, "bind EVENT [COMMAND]", "one event; empty puts the default back", 'b'},
     {null, "bind init [add|remove ...]", "what runs at boot", 'm'},
@@ -16403,7 +16377,8 @@ static b32 host_answer(bool update, string_address disk)
         /home is emptied. /root is emptied except the overlay and the files
         an image update already leaves on the data partition. /bowls
         stays: that is the pre-installed software a kiosk starts after wipe.
-        The builtin machine script calls this at every settled boot.
+        A kiosk's machine script says it at every boot, and a script says the
+        word that goes with it: `wipe yes`. At a terminal it asks instead.
 
         What /root keeps is each setting's own path, taken from the macro the
         command that writes it names it by, so a setting added without a line
@@ -16460,12 +16435,30 @@ static b32 host_wipe_path(string_address path, positive mode,
         rename took the half-written file and left `wifi add` with an error
         for a network it had just joined.
 */
-static b32 host_wipe(void)
+static b32 host_wipe(bool said_yes)
 {
         bipolar lock;
         b32 failed;
 
         host_need_root();
+
+        if (!said_yes)
+        {
+                p8 answer[8];
+
+                return_if(!host_asks(),
+                          host_refuse("wiping forgets everything in /home and /root but the "
+                                      "settings, and nothing here can be asked: "
+                                      "moonwater wipe " HOST_YES "\n"));
+                host_say(log, host_label "Wiping forgets everything in /home and /root but "
+                                         "the settings. Type " HOST_YES " to go on: ");
+                if (host_read_line(answer, sizeof(answer)) < 0 ||
+                    !string_equals(answer, HOST_YES))
+                {
+                        host_say(log, host_label "nothing forgotten\n");
+                        return 1;
+                }
+        }
 
         if (!host_acquire())
                 return 1;
@@ -16504,12 +16497,27 @@ static b32 host_setup(string_address address_to arguments, positive count)
 
         if (string_equals(verb, "install"))
         {
-                bool removable = count == 5 && string_equals(arguments[4], "removable");
+                positive words = 4;
+                bool removable = count > words && string_equals(arguments[words], "removable");
+                bool said_yes;
 
-                return_if(count < 4 || count > 5 || (count == 5 && !removable), host_usage());
+                words += removable;
+                said_yes = count > words && string_equals(arguments[words], HOST_YES);
+                words += said_yes;
+                return_if(count < 4 || count != words, host_usage());
                 host_need_root();
+                if (!said_yes && !host_asks())
+                {
+                        host_say(log_error, host_label "installing erases %s and nothing here "
+                                                       "can be asked: moonwater setup install "
+                                                       "%s%s " HOST_YES "\n",
+                                 arguments[3], arguments[3],
+                                 removable ? (string_address) " removable"
+                                           : (string_address) "");
+                        return 1;
+                }
                 host_state_ready();
-                return host_install_disk(arguments[3], removable);
+                return host_install_disk(arguments[3], removable, said_yes);
         }
 
         if (string_equals(verb, "live") && count == 3)
@@ -16555,7 +16563,10 @@ static b32 host_status_verb(string_address address_to arguments, positive count)
 
 static b32 host_wipe_verb(string_address address_to arguments, positive count)
 {
-        return count == 2 ? host_wipe() : host_usage();
+        bool said_yes = count == 3 && string_equals(arguments[2], HOST_YES);
+
+        return_if(count > 3 || (count == 3 && !said_yes), host_usage());
+        return host_wipe(said_yes);
 }
 
 static b32 host_machine_verb(string_address address_to arguments, positive count)
@@ -16578,6 +16589,7 @@ static b32 host_ask_verb(string_address address_to arguments, positive count)
 
         return_if(count > 2, host_usage());
         host_need_root();
+        return_if(!host_asks(), host_refuse("moonwater ask is a question for a terminal\n"));
         host_state_ready();
 
         host_read_word(HOST_VERDICT, verdict, sizeof(verdict));
@@ -16651,7 +16663,7 @@ static b32 host_main()
         b32 answer;
 
         host_verb = count > 1 ? arguments[1] : null;
-        memory_zero(host_streams, sizeof(host_streams));
+        memory_zero(plain_streams, sizeof(plain_streams));
         if (!host_verb)
         {
                 host_title(log);
