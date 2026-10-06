@@ -20772,7 +20772,242 @@ def text_grep_engine(farm):
     return passed, len(cases), notes
 
 
-TEXT_CHECKS = (text_grep_encoding, text_grep_engine, text_file_failures, text_collation)
+#       A list of plain strings is a dictionary, and grep answers it with an
+#       automaton once it is longer than the set and the machine can take --
+#       by count or by bytes, each of which the expression it would otherwise
+#       be joined into refuses somewhere ("invalid regular expression" past a
+#       few hundred words, "pattern too long" past a few thousand), where GNU
+#       takes any list. The lists here straddle the count where the automaton
+#       takes over (read from the source), reach ten times past it and sit on
+#       the sizes that were refused, and every output mode is asked of each,
+#       with the dialects that also say plain strings, a record in the other
+#       delimiter, a case that folds, the shapes that are not bytes alone
+#       (which keep to the expression) and the empty string, which is every
+#       record.
+def text_many_cutoff():
+    source = (Path(__file__).resolve().parents[1] / "src" / "sh" / "text.c").read_text()
+    found = re.search(r"#define GREP_MANY_FROM (\d+)", source)
+    return int(found.group(1)) if found else 16
+
+
+def text_many_data(rnd):
+    alphabet = "abcdefghij"
+    vocabulary = []
+    for _ in range(9000):
+        vocabulary.append("".join(rnd.choice(alphabet) for _ in range(rnd.randint(2, 11))))
+    vocabulary = sorted(set(vocabulary))
+    rnd.shuffle(vocabulary)
+    lines = []
+    for number in range(2400):
+        kind = number % 11
+        if kind == 3:
+            line = "".join(rnd.choice("xyzqw  ") for _ in range(rnd.randint(1, 60)))
+        elif kind == 7:
+            line = ""
+        else:
+            tokens = []
+            for _ in range(rnd.randint(1, 12)):
+                word = rnd.choice(vocabulary)
+                tokens.append(rnd.choice((word, word, word.capitalize(), word.upper(), word + "s", "x" + word)))
+                tokens.append(rnd.choice((" ", " ", "  ", ",", "-", "_", ".", "\t")))
+            line = "".join(tokens)
+        if number % 29 == 5:
+            line += "\r"
+        if number % 61 == 9:
+            line += " caf\xc3\xa9 "
+        lines.append(line)
+    lines[1200] = "".join(rnd.choice(vocabulary) + " " for _ in range(500))
+    return vocabulary, lines
+
+
+def text_grep_many(farm):
+    import shutil
+    import subprocess
+    import tempfile
+    from concurrent.futures import ThreadPoolExecutor
+
+    reference = shutil.which("grep", path=os.defpath)
+    candidate = Path(farm) / "grep"
+    if not reference or not candidate.exists():
+        return 0, 1, ["the dictionary cells need both a reference and a candidate grep"]
+    environment = dict(os.environ, LC_ALL="C")
+    rnd = random.Random(0x4d414e59)
+    vocabulary, lines = text_many_data(rnd)
+    cutoff = text_many_cutoff()
+    with tempfile.TemporaryDirectory(prefix="grep-many-") as temporary:
+        base = Path(temporary)
+        hay = ("\n".join(lines) + "\n").encode("latin1")
+        (base / "hay").write_bytes(hay)
+        (base / "hay2").write_bytes(hay[len(hay) // 3:])
+        (base / "nonl").write_bytes(hay.rstrip(b"\n"))
+        (base / "hayz").write_bytes(hay.replace(b"\n", b"\0"))
+        (base / "bin").write_bytes(hay[:30000] + b"\0" + hay[30000:60000])
+        pool = list(vocabulary)
+        cuts = [word[1:] for word in vocabulary[:1500]] + [word[:-1] for word in vocabulary[:1500]]
+        wholes = [line for line in lines[:1500] if line and "\r" not in line][:400]
+        misses = ["".join(rnd.choice("klmnop") for _ in range(rnd.randint(3, 12))) for _ in range(3000)]
+        everything = pool + cuts + misses
+        rnd.shuffle(everything)
+
+        def listing(name, strings):
+            (base / name).write_text("\n".join(strings) + "\n", encoding="latin1")
+            return name
+
+        sizes = sorted({cutoff - 1, cutoff, cutoff + 1, cutoff + 2, 4 * cutoff, 10 * cutoff,
+                        258, 500, 900, 2000, 6000})
+        lists = {}
+        for size in sizes:
+            sample = everything[:size] if size > 0 else []
+            lists[size] = listing(f"list{size}", sample)
+        # A list past anything an expression holds and a pile of one long string.
+        huge_list = listing("list40000", vocabulary + [word[1:] for word in vocabulary[:4000]]
+                            + ["".join(rnd.choice("klmnopqrstuv") for _ in range(rnd.randint(3, 14)))
+                               for _ in range(30000)])
+        listing("alike", ["a" * 3000] * 4 + ["a" * 3000 + "b"] * 3 + ["a" * 2999 + "c"] * 3 + ["ab"] * 17)
+        listing("bytes", [bytes([byte, byte ^ 1, 7]).decode("latin1") for byte in range(2, 256)
+                          if byte not in (10, 11, 12, 13)] + ["\xe9\xe9"] * 3)
+        # What the lines themselves are, for -x, and what they hold, for -w.
+        listing("whole", wholes + everything[:cutoff + 3])
+        listing("wholes", wholes[:cutoff + 3])
+        listing("dups", (everything[:200] + everything[:200] + everything[100:300]) * 2)
+        listing("overlap", ["a", "ab", "abc", "abcd", "bcd", "cd", "d", "abcde", "bcde", "cde", "de", "e"] * 3
+                + ["aa", "aaa", "aaaa", "aaaaa", "ba", "baa", "cc", "ccc", "bb", "bbb", "ee", "eee",
+                   "ff", "fg", "fgh", "ghi", "hij", "ij", "ijab", "jabc"] * 2)
+        listing("empty", ["", *everything[:cutoff + 10]])
+        listing("empty_only", [""] * (cutoff + 3))
+        listing("one_empty", ["", "abc"])
+        listing("upper", [word.upper() for word in vocabulary[:cutoff + 40]] + ["Zz"] * 3)
+        listing("long", ["".join(rnd.choice("abcdefghij") for _ in range(1000)) for _ in range(20)]
+                + [lines[1200][:700], lines[1200][5:900]])
+        listing("huge", ["".join(rnd.choice("abcdefghij") for _ in range(6000)) for _ in range(3)] + [lines[1200]])
+        listing("high", [word + "\xc3\xa9" for word in vocabulary[:cutoff + 5]] + ["caf\xc3\xa9"])
+        listing("crlf", [word + "\r" for word in vocabulary[:cutoff + 8]])
+        listing("single", [word[:1] for word in vocabulary[:40]] + vocabulary[:cutoff + 4])
+        # A list that stays an expression: one pattern in it is not bytes alone.
+        listing("regexed", everything[:cutoff + 30] + ["a.c", "x*y"])
+        listing("escaped", everything[:cutoff + 30] + ["a\\.b", "c\\|d"])
+        modes = (("-c",), ("-n",), ("-v", "-c"), (), ("-o",), ("-w", "-c"), ("-x", "-c"), ("-i", "-c"),
+                 ("-ow",), ("-vn",), ("-bo",), ("-c", "-w", "-i"), ("--color=always",), ("-m", "3"),
+                 ("-A1", "-n"), ("-l",), ("-L",), ("-q",), ("-xn",), ("-wn",), ("-on", "-i"), ("-vc", "-x"),
+                 ("-cz",), ("-H", "-c"))
+        cases = []
+        for size in sizes:
+            for mode in modes:
+                name = "hayz" if mode == ("-cz",) else "hay"
+                cases.append((("-F", *mode, "-f", lists[size], name), None))
+        for name in ("whole", "dups", "overlap", "empty", "empty_only", "one_empty", "upper", "long", "huge",
+                     "high", "crlf", "single", "regexed", "escaped"):
+            for mode in (("-c",), ("-n",), ("-o",), ("-w", "-c"), ("-x", "-c"), ("-i", "-c"), ("-v", "-c"),
+                         ("-ow",), ("-xv", "-c"), ("--color=always", "-n"), ("-wvn",), ("-m", "2", "-n")):
+                # Lines are not bytes alone in a dialect, so the dialects only
+                # say what is.
+                dialects = (("-E",), ("-F",)) if name in ("regexed", "escaped") \
+                    else (("-F",),) if name == "whole" else (("-F",), ("-E",), ())
+                for dialect in dialects:
+                    cases.append(((*dialect, *mode, "-f", name, "hay"), None))
+        for mode in (("-c",), ("-n",), ("-o",), ("-x", "-c"), ("-i", "-c"), ("-v", "-c"), ("-wc",)):
+            cases.append((("-F", *mode, "-f", huge_list, "hay"), None))
+        for mode in (("-c",), ("-o",), ("-w", "-c"), ("-x", "-c"), ("-i", "-c")):
+            cases.append((("-F", *mode, "-f", "alike", "alike_hay"), None))
+            cases.append((("-F", *mode, "-f", "bytes", "bytes_hay"), None))
+        (base / "alike_hay").write_text("a" * 2500 + "\n" + "a" * 3000 + "\n" + "a" * 3000 + "b\n"
+                                        + "a" * 2999 + "c\nab\n" + "a" * 100000 + "\n", encoding="latin1")
+        (base / "bytes_hay").write_bytes(b"".join(bytes([byte, byte ^ 1, 7]) + b" " + bytes([byte]) + b"\n"
+                                                    for byte in range(2, 256) if byte not in (10, 11, 12, 13))
+                                         + b"\xe9\xe9\n")
+        # A walk, whose files are read on the pool: the same lines in files
+        # of every size, a binary one and an empty one.
+        for name, data in (("tree/a", hay), ("tree/sub/b", hay[:20000]), ("tree/sub/c", hay[5:300]),
+                           ("tree/sub/deep/d", hay[-40000:]), ("tree/bin", b"x\0" + hay[:3000]),
+                           ("tree/empty", b"")):
+            (base / name).parent.mkdir(parents=True, exist_ok=True)
+            (base / name).write_bytes(data)
+        for mode in (("-c",), ("-l",), ("-L",), ("-o",), ("-n",), ("-w", "-c"), ("-x", "-c"), ("-i", "-c")):
+            cases.append((("-r", "-F", *mode, "-f", lists[10 * cutoff], "tree"), None))
+        # Other inputs: a pipe, two files, no last newline, a binary file, -f from
+        # standard input, -e given a thousand times, and the other places a
+        # pattern is said.
+        for source in (("hay", None), ("nonl", None), ("bin", None), ("hay2", None)):
+            for mode in (("-c",), ("-n",), ("-o",), ("-a", "-c"), ("-l",), ("-w", "-c"), ("-x", "-c"), ("-v", "-c")):
+                cases.append((("-F", *mode, "-f", lists[10 * cutoff], source[0]), None))
+        cases.append((("-F", "-c", "-f", lists[10 * cutoff]), "hay"))
+        cases.append((("-F", "-n", "-f", lists[10 * cutoff], "-"), "hay"))
+        cases.append((("-F", "-c", "-f", lists[4 * cutoff], "hay", "hay2"), None))
+        cases.append((("-F", "-H", "-n", "-f", lists[4 * cutoff], "hay", "hay2"), None))
+        cases.append((("-F", "-L", "-f", lists[4 * cutoff], "hay", "hay2", "nonl"), None))
+        cases.append((("-F", "-c", "-f", "-", "hay"), "stdin-list"))
+        (base / "stdin-list").write_text("\n".join(everything[:3 * cutoff]) + "\n", encoding="latin1")
+        for count in (cutoff - 1, cutoff + 1, 3 * cutoff):
+            arguments = []
+            for string in everything[:count]:
+                arguments += ["-e", string]
+            cases.append((("-F", "-c", *arguments, "hay"), None))
+            cases.append((("-F", "-c", "-f", lists[cutoff + 1], *arguments, "hay"), None))
+        cases.append((("-F", "-c", "-e", "\n".join(everything[:cutoff + 6]), "hay"), None))
+        cases.append((("-F", "-c", "\n".join(everything[:cutoff + 6]), "hay"), None))
+        cases.append((("-E", "-c", "-e", "\n".join(everything[:cutoff + 6]), "hay"), None))
+        cases.append((("-c", "\n".join(everything[:3 * cutoff]), "hay"), None))
+        cases.append((("-F", "-c", "-f", "empty_only", "hay"), None))
+        cases.append((("-F", "-c", "-f", "/dev/null", "hay"), None))
+        cases.append((("-F", "-vc", "-f", "empty_only", "hay"), None))
+        cases.append((("-F", "-c", "-f", lists[10 * cutoff], "-e", "x*y.z", "hay"), None))
+        cases.append((("-E", "-c", "-f", lists[10 * cutoff], "-e", "x*y.z", "hay"), None))
+        cases.append((("-G", "-c", "-f", lists[10 * cutoff], "-e", "[a-c]b\\+", "hay"), None))
+        # The bytes that are an operator in one dialect and a letter in another.
+        listing("operators", ["a+b", "c?d", "e|f", "(g)", "h{2}", "i}", "j^", "$k", "l*", "m[", "n]", "o\\"] * 2
+                + everything[:cutoff + 6])
+        listing("plus", ["a+b", "c?d", "e|f", "(g)", "h{2}", "i}", "{j", "k)", "l(", "m]"] * 2
+                + everything[:cutoff + 6])
+        for mode in (("-c",), ("-o",), ("-w", "-c")):
+            cases.append((("-F", *mode, "-f", "operators", "hay"), None))
+            # In basic syntax these are bytes.
+            cases.append((("-G", *mode, "-f", "plus", "hay"), None))
+        # A line without the string, the empty string, and a file that is not
+        # there, in the order GNU reports them.
+        cases.append((("-F", "-f", lists[10 * cutoff], "missing", "hay"), None))
+        cases.append((("-F", "-f", "missing-list", "hay"), None))
+        cases.append((("-F", "-s", "-f", lists[10 * cutoff], "missing", "hay"), None))
+        cases.append((("-F", "-c", "-f", lists[cutoff + 1], "hay", "hay", "hay"), None))
+        # The same in a UTF-8 locale, where the bytes of a letter are one
+        # character, and the name of a word is not only ASCII's.
+        env_utf8 = dict(os.environ, LC_ALL="C.UTF-8")
+        for mode in (("-c",), ("-o",), ("-n",), ("-w", "-c"), ("-x", "-c"), ("-v", "-c")):
+            for name in ("high", lists[10 * cutoff]):
+                cases.append((("-F", *mode, "-f", name, "hay"), "utf8"))
+
+        def run(case):
+            argv, source = case
+            answers = []
+            locale = env_utf8 if source == "utf8" else environment
+            source = None if source == "utf8" else source
+            for binary in (reference, candidate):
+                stdin = open(base / source, "rb") if source else subprocess.DEVNULL
+                try:
+                    result = subprocess.run(["grep", *argv], executable=str(binary), cwd=temporary,
+                                            env=locale, stdin=stdin, stdout=subprocess.PIPE,
+                                            stderr=subprocess.PIPE, timeout=20)
+                except subprocess.TimeoutExpired:
+                    answers.append((-1, b"timeout", b""))
+                    continue
+                finally:
+                    if source:
+                        stdin.close()
+                answers.append((result.returncode, result.stdout, _stderr_exact(result.stderr)))
+            return argv, answers
+
+        passed, notes = 0, []
+        with ThreadPoolExecutor(max_workers=8) as pool_:
+            for argv, answers in pool_.map(run, cases):
+                if answers[0] == answers[1]:
+                    passed += 1
+                elif len(notes) < 40:
+                    notes.append(f"grep {shlex.join(argv)}: reference={answers[0][:2]!r}"
+                                 f" ({len(answers[0][1])} bytes), candidate={answers[1][:2]!r}"
+                                 f" ({len(answers[1][1])} bytes), stderr {answers[0][2]!r} against {answers[1][2]!r}")
+    return passed, len(cases), notes
+
+
+TEXT_CHECKS = (text_grep_encoding, text_grep_engine, text_grep_many, text_file_failures, text_collation)
 
 _TEXT_GREP_OPERANDS = (
     (), ("a.txt",), ("a.txt", "b.txt"), ("-",), ("missing",), ("dir",), ("tree",),
@@ -76000,7 +76235,6 @@ PINNED = r"""
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","order":"records","status":0,"stdout":"fb5e0891bddbb39937aeca06f80c79adbf552880374eca58532d875a98bb794b"},"case":{"argv":["--line-buffered","-Z","-m100","-e","[^abc]","--dereference-recursive","--no-filename","loop"],"fixture":"text","stdin":"edge_65537"},"domain":"text","kind":"bug","list":"ledger","reason_id":"r253","utility":"grep"},
 {"candidate":[0,"9adbdb3e","b92847f3"],"case":{"argv":["-n","--context=1","-E","--directories=skip","--byte-offset","-e","(a|)ba+","-","a.txt"],"fixture":"text","stdin":"text_words"},"domain":"text","kind":"bug","list":"ledger","reason_id":"r253","utility":"grep"},
 {"candidate":[1,"e3b0c442","b92847f3"],"case":{"argv":["-e","^[a-c]a\\'"],"fixture":"text","stdin":"text_regex"},"domain":"text","kind":"bug","list":"ledger","reason_id":"r253","utility":"grep"},
-{"candidate":[2,"e3b0c442","b92847f3"],"case":{"argv":["-c","-x","-e","a\nb\nc","--no-group-separator","-f","-","--file=pats","binary"],"fixture":"text","stdin":"edge_65537","tier":"pinned"},"domain":"text","kind":"bug","list":"ledger","reason_id":"h30352","reference":[1,"9a271f2a","b92847f3"],"utility":"grep"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","order":"records","status":2,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-E","-e","a\\{4000\\}","--regexp=alpha","-f","-","-i","-z","--null-data","-s","--no-messages","--invert-match","-m100","--max-count=1","--byte-offset","--line-buffered","-H","--with-filename","-h","--no-filename","--label=X","-o","--only-matching","-q","--quiet","--silent","--binary-files=binary","-a","-d","read","-D","skip","--devices=skip","-R","--dereference-recursive","--include=a-b.txt","--exclude=three*","--exclude-from=excludes","--exclude-dir=tree","-L","--files-without-match","-l","-c","--count","-Z","-B0","-A","0","-C","2","--context=1","-1","--group-separator=##","--no-group-separator","--color=sometimes","-U","dangling"],"fixture":"text","stdin":"blanks","tier":"pinned"},"domain":"text","kind":"bug","list":"ledger","reason_id":"h82a8b","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","order":"records","status":0,"stdout":"005634d881f6768f466456f0c8bc96adae89080621a4b9832d10029e8dd21cae"},"utility":"grep"},
 {"candidate":[0,"a34d819e","b92847f3"],"case":{"argv":["--word-regexp","--after-context=1","--binary","-e","[^0-9a-z]","-o","--line-number"],"fixture":"text","stdin":"text_words"},"domain":"text","kind":"bug","list":"ledger","reason_id":"r253","utility":"grep"},
 {"candidate":[2,"e3b0c442","b92847f3"],"case":{"argv":["-L","--line-number","--files-without-match","-v","--color=sometimes","--line-buffered"],"fixture":"text","stdin":"blanks"},"domain":"text","kind":"deliberate","list":"ledger","reason_id":"r254","utility":"grep"},

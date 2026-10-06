@@ -24612,6 +24612,9 @@ static bool grep_pattern_any;
 static bool grep_pattern_dangling, grep_pattern_dangling_bad;
 static positive grep_pattern_count;
 static bool grep_pattern_empty;
+// Some pattern has bytes in it; none has when the only pattern is empty,
+// said once or many times, as GNU keeps one of every pattern said twice.
+static bool grep_pattern_filled;
 // How many groups the patterns joined so far have opened, which is what a
 // backreference in the next one has to be counted past.
 static positive grep_pattern_groups;
@@ -24711,6 +24714,8 @@ static fn grep_shift_references(p8 address_to text, positive length,
         }
 }
 static bool grep_pattern_broken;
+static fn grep_many_add(string_address text, positive length, bool fixed,
+                        bool extended);
 
 #define grep_pattern_put(character)                                          \
         fixed_store_byte(grep_pattern, grep_pattern_length,                  \
@@ -24727,11 +24732,14 @@ static fn grep_pattern_add(string_address text, positive length, bool fixed, boo
 
                 if (at == from)
                         grep_pattern_empty = true;
+                else
+                        grep_pattern_filled = true;
 
                 if (grep_pattern_dangling)
                         grep_pattern_dangling_bad = true;
                 grep_pattern_count++;
                 grep_pattern_dangling = false;
+                grep_many_add(text + from, at - from, fixed, extended);
 
                 if (!fixed)
                 {
@@ -24824,6 +24832,7 @@ static string_address grep_colors;
 
 static fn grep_color_line(string_address line, positive length, bool context,
                           bool highlight);
+static bool grep_search(p8 mode, string_address line, positive length, positive from);
 
 static fn grep_hold_release()
 {
@@ -25260,7 +25269,7 @@ static fn grep_color_line(string_address line, positive length, bool context,
                 grep_color_start(line_color);
 
         while (highlight && search <= length &&
-               regex_find(REGEX_LONGEST, line, length, search))
+               grep_search(REGEX_LONGEST, line, length, search))
         {
                 positive begin = regex_slots[0];
                 positive stop = regex_slots[1];
@@ -25917,6 +25926,1144 @@ static bool grep_set_gather(const regex_program address_to program, p16 node,
 }
 
 /*
+        Strings past what the set holds.
+
+        A list of a few hundred words, or a few kilobytes of them, is not a
+        program for the machine above: joined into one alternation it has
+        more branches than the machine has states, so the graph tries every
+        branch at every byte, and more bytes than an expression holds, and
+        GNU takes either without noticing. A list of plain strings is a
+        dictionary, and a dictionary is searched by an automaton over its
+        trie (Aho and Corasick's): one step a byte whatever the number of
+        strings, and a build that is one pass over the bytes.
+
+        The trie is numbered breadth first, which makes the children of a
+        node a run of consecutive numbers (a node is a first child and a
+        count, and a child is found by its class in that run) and puts the
+        shallow nodes, the only ones a text of ordinary words visits much,
+        at the front, where the rows are. A row is a node's step on every
+        class of byte with the failure links already followed, so the loop
+        is one load a byte. A step to a node the rows do not reach, or to
+        one a string ends at (a string ends at it, or at a suffix of it,
+        which is a string ending here as well), is a negative cell, and the
+        loops stop for it: the first is walked on the failure links until a
+        row takes it back, the second is the answer.
+
+        The classes are the bytes the strings use, one each, and every other
+        byte, the delimiter among them, in class 0, whose step is the root's
+        from every node: a record's end begins the next without being asked.
+        Case is a class as well, so -i is not a second pass. Nothing changes
+        after the build, so every pool slot reads the one automaton.
+
+        What the automaton answers is whether a record holds a string. Where
+        a match has to be found, or told from one with a word or a line
+        around it, the trie is walked forward from each start of the record
+        it chose, which is leftmost and then longest by what it is.
+*/
+/*
+        Where the automaton takes over from the set: the set's own limits, 16
+        strings and 4096 bytes between them, are the cutoff, and a list past
+        either of them is the automaton's. Measured on a 16 MiB file, one
+        core, a line in a thousand holding a string, the set costs 1.5 ms for
+        two strings and 3.9 for eight and reaches the automaton's 6.6 ms,
+        which is the same for any number of them, at 12 to 16; the machine
+        that had the next hundred strings was 7 to 30% behind it all the way
+        and was gone, to a backtracker taking seconds, when they came to
+        4096 bytes (64 of 64, 128 of 32) or to three or four hundred of any
+        length. With every other line holding one the automaton is ahead
+        from eight strings, except where each is 64 bytes long, which the
+        set hunts by two anchors at a time.
+*/
+#ifndef GREP_MANY_FROM
+#define GREP_MANY_FROM 16
+#endif
+#ifndef GREP_MANY_BYTES
+#define GREP_MANY_BYTES 4096
+#endif
+// What the rows may take; the nodes past them are walked.
+#define GREP_MANY_ROWS (8u << 20)
+// Ranges at most this long are sorted by insertion.
+#define GREP_MANY_SMALL 16
+
+enum { GREP_MANY_END = 1, GREP_MANY_OUT = 2 };
+
+typedef struct
+{
+        // A byte's class, 0 for any no string uses.
+        p8 classes[256];
+        positive class_count, shift;
+        positive nodes, dense, longest;
+        p32 address_to first;
+        p32 address_to fail;
+        p8 address_to kids;
+        p8 address_to edge;
+        p8 address_to flags;
+        b32 address_to rows;
+        p8 boundary, delimiter;
+        // The empty string is one of them: every record holds it.
+        bool empty;
+} grep_many;
+
+typedef struct
+{
+        positive low, high, depth;
+} grep_many_range;
+
+// The strings as they are given, each with its newline after it.
+static p8 address_to grep_many_pool;
+static positive grep_many_used, grep_many_room, grep_many_total;
+// Every string so far is plain, and whether one holds a byte of 0x80 or more.
+static bool grep_many_plain, grep_many_high;
+static grep_many grep_many_set;
+static bool grep_many_on;
+
+static fn grep_many_release()
+{
+        grep_many address_to many = address_of grep_many_set;
+
+        memory_give(grep_many_pool);
+        memory_give(many->first);
+        memory_give(many->fail);
+        memory_give(many->kids);
+        memory_give(many->edge);
+        memory_give(many->flags);
+        memory_give(many->rows);
+        memory_fill(many, 0, sizeof(*many));
+        grep_many_pool = null;
+        grep_many_used = grep_many_room = grep_many_total = 0;
+        grep_many_plain = true;
+        grep_many_high = false;
+        grep_many_on = false;
+}
+
+/*
+        One more pattern, if it is bytes and nothing else in the language it
+        is given in. A fixed string always is. In basic syntax the backslash,
+        the bracket, the dot, the star and the two anchors are operators, and
+        in extended syntax the plus, the question mark, the brace, the bar
+        and the parentheses are too; every other byte is itself. A NUL is
+        never plain: no string of the set holds one, since a binary file's
+        NULs end its lines.
+*/
+static fn grep_many_add(string_address text, positive length, bool fixed,
+                        bool extended)
+{
+        bool high = false;
+
+        if (!grep_many_plain)
+                return;
+
+        for (positive at = 0; at < length; at++)
+        {
+                p8 byte = text[at];
+                bool operator_byte = !byte;
+
+                if (!fixed)
+                        operator_byte = operator_byte || byte == '\\' || byte == '[' ||
+                                        byte == '.' || byte == '*' || byte == '^' ||
+                                        byte == '$' ||
+                                        (extended && (byte == '+' || byte == '?' ||
+                                                      byte == '{' || byte == '|' ||
+                                                      byte == '(' || byte == ')'));
+
+                if (operator_byte)
+                {
+                        memory_give(grep_many_pool);
+                        grep_many_pool = null;
+                        grep_many_plain = false;
+                        return;
+                }
+
+                high = high || byte >= 0x80;
+        }
+
+        if (grep_many_used + length + 1 > grep_many_room)
+        {
+                positive room = grep_many_room * 2;
+                p8 address_to grown;
+
+                if (room < grep_many_used + length + 1)
+                        room = grep_many_used + length + 1;
+
+                if (room < 4096)
+                        room = 4096;
+
+                grown = (p8 address_to)memory_take(room);
+
+                if (!grown)
+                {
+                        memory_give(grep_many_pool);
+                        grep_many_pool = null;
+                        grep_many_plain = false;
+                        return;
+                }
+
+                if (grep_many_used)
+                        memory_copy_apart(grown, grep_many_pool, grep_many_used);
+
+                memory_give(grep_many_pool);
+                grep_many_pool = grown;
+                grep_many_room = room;
+        }
+
+        memory_copy_apart(grep_many_pool + grep_many_used, text, length);
+        grep_many_pool[grep_many_used + length] = '\n';
+        grep_many_used += length + 1;
+        grep_many_total++;
+        grep_many_high = grep_many_high || high;
+}
+
+// Whether the strings are better served by the automaton than by the set
+// and the machine: more of them than the set holds, or more bytes.
+static bool grep_many_wanted(bool icase)
+{
+        return grep_many_plain && grep_many_total &&
+               grep_many_total == grep_pattern_count &&
+               !(grep_utf8 && icase && grep_many_high) &&
+               (grep_many_total > GREP_MANY_FROM ||
+                grep_many_used - grep_many_total > GREP_MANY_BYTES);
+}
+
+// The strings in order, which makes the nodes of a depth come in order too.
+static b32 grep_many_order(const p8 address_to norm, const positive address_to start,
+                           const p32 address_to size, p32 left, p32 right,
+                           positive depth)
+{
+        positive a = size[left], b = size[right];
+        positive least = a < b ? a : b;
+        const p8 address_to x = norm + start[left];
+        const p8 address_to y = norm + start[right];
+
+        for (; depth < least; depth++)
+                if (x[depth] != y[depth])
+                        return x[depth] < y[depth] ? -1 : 1;
+
+        return a == b ? 0 : a < b ? -1 : 1;
+}
+
+// A short range put in order by insertion.
+static fn grep_many_insertion(const p8 address_to norm, const positive address_to start,
+                              const p32 address_to size, p32 address_to order,
+                              positive low, positive high, positive depth)
+{
+        for (positive i = low + 1; i < high; i++)
+        {
+                p32 held = order[i];
+                positive j = i;
+
+                while (j > low &&
+                       grep_many_order(norm, start, size, order[j - 1], held, depth) > 0)
+                {
+                        order[j] = order[j - 1];
+                        j--;
+                }
+
+                order[j] = held;
+        }
+}
+
+/*
+        Most significant byte first, a byte at a time: a range is counted by
+        the byte at its depth, moved by it, and the ranges that came of it
+        sorted the same way a byte deeper. A string that has ended sorts
+        before every other, and those that have are equal. A range that is
+        short is sorted by insertion where it is found, so the ranges waiting
+        are disjoint and longer than that, and a stack of a sixteenth of the
+        strings holds them.
+*/
+static fn grep_many_sort(const p8 address_to norm, const positive address_to start,
+                         const p32 address_to size, p32 address_to order,
+                         p32 address_to scratch, grep_many_range address_to stack,
+                         positive total)
+{
+        positive top = 0;
+
+        if (total <= GREP_MANY_SMALL)
+        {
+                grep_many_insertion(norm, start, size, order, 0, total, 0);
+                return;
+        }
+
+        stack[top++] = (grep_many_range){0, total, 0};
+
+        while (top)
+        {
+                grep_many_range range = stack[--top];
+                positive buckets[258];
+
+                memory_fill(buckets, 0, sizeof(buckets));
+
+                for (positive i = range.low; i < range.high; i++)
+                {
+                        p32 id = order[i];
+                        positive key = range.depth < size[id]
+                                           ? (positive)norm[start[id] + range.depth] + 1
+                                           : 0;
+
+                        buckets[key + 1]++;
+                }
+
+                for (positive k = 0; k < 257; k++)
+                        buckets[k + 1] += buckets[k];
+
+                for (positive i = range.low; i < range.high; i++)
+                {
+                        p32 id = order[i];
+                        positive key = range.depth < size[id]
+                                           ? (positive)norm[start[id] + range.depth] + 1
+                                           : 0;
+
+                        scratch[range.low + buckets[key]++] = id;
+                }
+
+                memory_copy_apart(order + range.low, scratch + range.low,
+                                  (range.high - range.low) * sizeof(p32));
+
+                // After the scatter buckets[k] is where key k's run ends.
+                for (positive k = 1; k < 257; k++)
+                {
+                        positive low = range.low + buckets[k - 1];
+                        positive high = range.low + buckets[k];
+
+                        if (high - low > GREP_MANY_SMALL)
+                                stack[top++] = (grep_many_range){low, high, range.depth + 1};
+                        else if (high - low > 1)
+                                grep_many_insertion(norm, start, size, order, low, high,
+                                                    range.depth + 1);
+                }
+        }
+}
+
+// The child of a node by its class, or 0: the children are consecutive and
+// their classes ascend.
+static positive grep_many_child(const grep_many address_to many, positive node, p8 class)
+{
+        positive count = many->kids[node];
+        const p8 address_to edges = many->edge + many->first[node];
+        positive low = 0;
+
+        if (count <= 8)
+        {
+                for (; low < count && edges[low] < class; low++)
+                        ;
+
+                return low < count && edges[low] == class ? many->first[node] + low : 0;
+        }
+
+        while (count > 1)
+        {
+                positive half = count / 2;
+
+                if (edges[low + half] <= class)
+                        low += half;
+
+                count -= half;
+        }
+
+        return edges[low] == class ? many->first[node] + low : 0;
+}
+
+// Where a node goes on a class of byte: its row's cell when it has a row,
+// else a child or the failure link's own answer.
+static positive grep_many_go(const grep_many address_to many, positive node, p8 class)
+{
+        for (;;)
+        {
+                positive child;
+
+                if (node < many->dense)
+                {
+                        b32 cell = many->rows[(node << many->shift) + class];
+
+                        return cell >= 0 ? (positive)cell >> many->shift : (positive)~cell;
+                }
+
+                child = grep_many_child(many, node, class);
+
+                if (child)
+                        return child;
+
+                node = many->fail[node];
+        }
+}
+
+// A step into `node`, as a row holds it.
+static inline INLINE b32 grep_many_cell(const grep_many address_to many, positive node)
+{
+        return node < many->dense && !(many->flags[node] & GREP_MANY_OUT)
+                   ? (b32)(node << many->shift)
+                   : ~(b32)node;
+}
+
+/*
+        The automaton for the strings collected, with the delimiter and the
+        boundary the run has. False when memory ran out.
+*/
+static bool grep_many_build(bool icase, p8 boundary, p8 delimiter)
+{
+        grep_many address_to many = address_of grep_many_set;
+        positive total = grep_many_total;
+        positive bytes = grep_many_used - total;
+        positive longest = 0;
+        positive nodes = 1;
+        positive classes = 1;
+        positive dense;
+        positive width;
+        p8 seen[256];
+        p8 address_to norm = null;
+        positive address_to start = null;
+        positive address_to count = null;
+        positive address_to place = null;
+        p32 address_to size = null;
+        p32 address_to order = null;
+        p32 address_to scratch = null;
+        p32 address_to lcp = null;
+        p32 address_to path = null;
+        grep_many_range address_to stack = null;
+        const p8 address_to line = grep_many_pool;
+        bool good = false;
+
+        memory_fill(seen, 0, sizeof(seen));
+
+        for (positive at = 0; at < grep_many_used; at++)
+        {
+                p8 byte = line[at];
+
+                if (byte != '\n')
+                        seen[icase && byte >= 'A' && byte <= 'Z' ? byte + 32 : byte] = 1;
+        }
+
+        memory_fill(many->classes, 0, sizeof(many->classes));
+
+        for (positive byte = 0; byte < 256; byte++)
+                if (seen[byte])
+                        many->classes[byte] = (p8)classes++;
+
+        if (icase)
+                for (positive byte = 'A'; byte <= 'Z'; byte++)
+                        many->classes[byte] = many->classes[byte + 32];
+
+        many->class_count = classes;
+        many->shift = 0;
+
+        while (((positive)1 << many->shift) < classes)
+                many->shift++;
+
+        norm = (p8 address_to)memory_take(bytes ? bytes : 1);
+        start = (positive address_to)memory_take(total * sizeof(positive));
+        size = (p32 address_to)memory_take(total * sizeof(p32));
+        order = (p32 address_to)memory_take(total * sizeof(p32));
+        scratch = (p32 address_to)memory_take(total * sizeof(p32));
+        lcp = (p32 address_to)memory_take(total * sizeof(p32));
+        stack = (grep_many_range address_to)memory_take(
+            (total / GREP_MANY_SMALL + 16) * sizeof(grep_many_range));
+
+        if (!norm || !start || !size || !order || !scratch || !lcp || !stack)
+                goto done;
+
+        // Every string as the classes of its bytes, one after another.
+        for (positive i = 0, at = 0, put = 0; i < total; i++)
+        {
+                const p8 address_to newline = memory_first_of(line + at, '\n',
+                                                              grep_many_used - at);
+                positive length = (positive)(newline - (line + at));
+
+                start[i] = put;
+                size[i] = (p32)length;
+                order[i] = (p32)i;
+
+                for (positive k = 0; k < length; k++)
+                        norm[put + k] = many->classes[line[at + k]];
+
+                put += length;
+                at += length + 1;
+
+                if (length > longest)
+                        longest = length;
+        }
+
+        grep_many_sort(norm, start, size, order, scratch, stack, total);
+
+        count = (positive address_to)memory_take_zeroed(longest + 2, sizeof(positive));
+        place = (positive address_to)memory_take((longest + 2) * sizeof(positive));
+        path = (p32 address_to)memory_take((longest + 2) * sizeof(p32));
+
+        if (!count || !place || !path)
+                goto done;
+
+        // The nodes of each depth: what a string adds past the bytes it
+        // shares with the one before it.
+        for (positive i = 0; i < total; i++)
+        {
+                positive length = size[order[i]];
+                positive same = 0;
+
+                if (i)
+                {
+                        positive before = size[order[i - 1]];
+                        positive least = length < before ? length : before;
+                        const p8 address_to x = norm + start[order[i]];
+                        const p8 address_to y = norm + start[order[i - 1]];
+
+                        while (same < least && x[same] == y[same])
+                                same++;
+                }
+
+                lcp[i] = (p32)same;
+
+                for (positive d = same + 1; d <= length; d++)
+                        count[d]++;
+        }
+
+        for (positive d = 1; d <= longest; d++)
+        {
+                place[d] = nodes;
+                nodes += count[d];
+        }
+
+        // Node numbers are 32 bits, and a cell has to hold one beside its sign.
+        if (nodes >= 0x7fffffffu)
+                goto done;
+
+        many->nodes = nodes;
+        many->first = (p32 address_to)memory_take_zeroed(nodes, sizeof(p32));
+        many->fail = (p32 address_to)memory_take_zeroed(nodes, sizeof(p32));
+        many->kids = (p8 address_to)memory_take_zeroed(nodes, 1);
+        many->edge = (p8 address_to)memory_take_zeroed(nodes, 1);
+        many->flags = (p8 address_to)memory_take_zeroed(nodes, 1);
+
+        if (!many->first || !many->fail || !many->kids || !many->edge || !many->flags)
+                goto done;
+
+        path[0] = 0;
+
+        for (positive i = 0; i < total; i++)
+        {
+                p32 id = order[i];
+                positive length = size[id];
+                const p8 address_to x = norm + start[id];
+
+                for (positive d = lcp[i] + 1; d <= length; d++)
+                {
+                        positive node = place[d]++;
+                        positive parent = path[d - 1];
+
+                        path[d] = (p32)node;
+                        many->edge[node] = x[d - 1];
+
+                        if (!many->kids[parent])
+                                many->first[parent] = (p32)node;
+
+                        many->kids[parent]++;
+                }
+
+                many->flags[path[length]] |= GREP_MANY_END;
+        }
+
+        many->flags[0] |= (many->flags[0] & GREP_MANY_END) ? GREP_MANY_OUT : 0;
+        many->longest = longest;
+        many->empty = (many->flags[0] & GREP_MANY_END) != 0;
+        many->boundary = boundary;
+        many->delimiter = delimiter;
+
+        // Rows for as many nodes from the front as the budget holds.
+        width = (positive)1 << many->shift;
+        dense = GREP_MANY_ROWS / (width * sizeof(b32));
+        dense = dense < nodes ? dense : nodes;
+        many->dense = dense;
+        many->rows = (b32 address_to)memory_take(dense * width * sizeof(b32));
+
+        if (!many->rows)
+                goto done;
+
+        // The failure links, a depth at a time: a node's is where its parent's
+        // goes on the same byte, and every node it needs is a smaller number.
+        for (positive node = 0; node < nodes; node++)
+        {
+                positive kids = many->kids[node];
+                positive fail = many->fail[node];
+                b32 address_to row = node < dense ? many->rows + (node << many->shift) : null;
+
+                if (row)
+                {
+                        if (node)
+                                memory_copy_apart(row, many->rows + (fail << many->shift),
+                                                  width * sizeof(b32));
+                        else
+                                memory_fill(row, 0, width * sizeof(b32));
+                }
+
+                for (positive k = 0; k < kids; k++)
+                {
+                        positive child = many->first[node] + k;
+                        p8 class = many->edge[child];
+                        positive back = node ? grep_many_go(many, fail, class) : 0;
+
+                        many->fail[child] = (p32)back;
+
+                        if ((many->flags[child] & GREP_MANY_END) ||
+                            (many->flags[back] & GREP_MANY_OUT))
+                                many->flags[child] |= GREP_MANY_OUT;
+
+                        if (row)
+                                row[class] = grep_many_cell(many, child);
+                }
+        }
+
+        good = true;
+
+done:
+        memory_give(norm);
+        memory_give(start);
+        memory_give(size);
+        memory_give(order);
+        memory_give(scratch);
+        memory_give(lcp);
+        memory_give(stack);
+        memory_give(count);
+        memory_give(place);
+        memory_give(path);
+
+        // The strings themselves are not asked for again.
+        memory_give(grep_many_pool);
+        grep_many_pool = null;
+        return good;
+}
+
+// A string that ends at `at` is no hit under a word if a name byte follows it.
+static inline INLINE bool grep_many_right(const grep_many address_to many,
+                                          string_address at, string_address past)
+{
+        return many->boundary != REGEX_BOUNDARY_WORD || at + 1 == past ||
+               !string_set_name[at[1]];
+}
+
+/*
+        From a node the rows do not reach, with `at` on the byte after the one
+        that came to it: the byte that ends a string, or null with the node
+        the walk was left at. A node under the rows is one they take up from
+        `*at`; the span's end is a node past them with `*at` at it.
+*/
+static string_address grep_many_through(const grep_many address_to many,
+                                        positive address_to node,
+                                        string_address address_to at,
+                                        string_address past)
+{
+        const p8 address_to classes = many->classes;
+
+        for (;;)
+        {
+                positive next;
+
+                if (*at == past)
+                        return null;
+
+                next = grep_many_go(many, *node, classes[**at]);
+
+                if ((many->flags[next] & GREP_MANY_OUT) && grep_many_right(many, *at, past))
+                        return *at;
+
+                (*at)++;
+                *node = next;
+
+                if (next < many->dense)
+                        return null;
+        }
+}
+
+/*
+        The byte that ends the first string in [at, past), the walk started
+        at `*state` and left at it again for the bytes that come after.
+*/
+static string_address grep_many_run(const grep_many address_to many,
+                                    positive address_to state, string_address at,
+                                    string_address past)
+{
+        const p8 address_to classes = many->classes;
+        const b32 address_to rows = many->rows;
+        positive node = *state;
+
+        if (many->empty)
+                return at < past ? at : null;
+
+        for (;;)
+        {
+                if (node < many->dense)
+                {
+                        b32 row = (b32)(node << many->shift);
+                        b32 next = 0;
+
+                        while (at < past && (next = rows[row + classes[*at]]) >= 0)
+                        {
+                                row = next;
+                                at++;
+                        }
+
+                        if (at == past)
+                        {
+                                *state = (positive)row >> many->shift;
+                                return null;
+                        }
+
+                        node = (positive)~next;
+
+                        if ((many->flags[node] & GREP_MANY_OUT) &&
+                            grep_many_right(many, at, past))
+                                return at;
+
+                        at++;
+                }
+
+                {
+                        string_address found = grep_many_through(many, address_of node,
+                                                                 address_of at, past);
+
+                        if (found)
+                                return found;
+
+                        if (at == past && node >= many->dense)
+                        {
+                                *state = node;
+                                return null;
+                        }
+                }
+        }
+}
+
+static string_address grep_many_hunt(const grep_many address_to many,
+                                     string_address at, string_address past)
+{
+        positive state = 0;
+
+        return grep_many_run(many, address_of state, at, past);
+}
+
+/*
+        The leftmost string in line[from, length) that the boundary lets
+        stand, and the longest of those at that start. With none it is false.
+        A word is bounded where no name byte is next to it, a line where
+        nothing is, and no boundary is no condition.
+*/
+static bool grep_many_find(const grep_many address_to many, string_address line,
+                           positive length, positive from, bool longest,
+                           positive address_to begin, positive address_to finish)
+{
+        const p8 address_to classes = many->classes;
+        bool word = many->boundary == REGEX_BOUNDARY_WORD;
+        bool whole = many->boundary == REGEX_BOUNDARY_LINE;
+
+        for (positive at = from; at <= length; at++)
+        {
+                positive node = 0;
+                positive best = positive_max;
+
+                if (whole && at)
+                        break;
+
+                if (word && at && string_set_name[line[at - 1]])
+                        continue;
+
+                for (positive to = at;; to++)
+                {
+                        if ((many->flags[node] & GREP_MANY_END) &&
+                            (whole ? to == length
+                                   : !word || to == length || !string_set_name[line[to]]))
+                        {
+                                best = to;
+
+                                if (!longest)
+                                        break;
+                        }
+
+                        if (to == length)
+                                break;
+
+                        node = node ? grep_many_child(many, node, classes[line[to]])
+                                    : grep_many_go(many, 0, classes[line[to]]);
+
+                        if (!node)
+                                break;
+                }
+
+                if (best != positive_max)
+                {
+                        if (begin)
+                                *begin = at;
+
+                        if (finish)
+                                *finish = best;
+
+                        return true;
+                }
+        }
+
+        return false;
+}
+
+/*
+        Whether a record holds a string the boundary lets stand, when the
+        automaton has said a string ends at `found`: the first end there is,
+        so no string starts earlier than the longest one's length before it.
+*/
+static bool grep_many_near(const grep_many address_to many, string_address line,
+                           positive length, string_address found)
+{
+        positive ends = (positive)(found - line) + 1;
+
+        // The empty string ends before the byte it is found at, and anywhere.
+        return grep_many_find(many, line, length,
+                              ends > many->longest && !many->empty ? ends - many->longest : 0,
+                              false, null, null);
+}
+
+// Whether a record holds a string the boundary lets stand.
+static bool grep_many_has(const grep_many address_to many, string_address line,
+                          positive length)
+{
+        if (many->boundary == REGEX_BOUNDARY_NONE)
+                return many->empty || grep_many_hunt(many, line, line + length) != null;
+
+        return grep_many_find(many, line, length, 0, false, null, null);
+}
+
+/*
+        The delimiter that ends the first record of [at, past) holding a
+        string, or null when none does; every record there ends with one. A
+        string found is only where the record might be, when the boundary is
+        a word, and the record is asked in full; under a line the strings are
+        not hunted at all, since a record is one of them or it is not.
+*/
+static string_address grep_many_scan(const grep_many address_to many,
+                                     string_address at, string_address past)
+{
+        const p8 address_to classes = many->classes;
+
+        while (at < past)
+        {
+                string_address hit;
+                string_address stop;
+                string_address line = at;
+
+                if (many->boundary == REGEX_BOUNDARY_LINE)
+                {
+                        // The trie walked down the record until it has no
+                        // byte for the next, which is the delimiter at the
+                        // record's end where a string ends exactly there.
+                        positive node = 0;
+
+                        hit = at;
+
+                        while (hit < past)
+                        {
+                                p8 class = classes[*hit];
+                                positive next = node ? grep_many_child(many, node, class)
+                                                     : grep_many_go(many, 0, class);
+
+                                if (!next)
+                                        break;
+
+                                node = next;
+                                hit++;
+                        }
+
+                        if (hit < past && *hit == many->delimiter &&
+                            (many->flags[node] & GREP_MANY_END))
+                                return hit;
+
+                        stop = (string_address)memory_first_of(hit, many->delimiter,
+                                                               (positive)(past - hit));
+                        at = stop ? stop + 1 : past;
+                        continue;
+                }
+
+                hit = grep_many_hunt(many, at, past);
+
+                if (!hit)
+                        return null;
+
+                stop = (string_address)memory_first_of(hit, many->delimiter,
+                                                       (positive)(past - hit));
+                stop = stop ? stop : past - 1;
+
+                if (many->boundary == REGEX_BOUNDARY_NONE)
+                        return stop;
+
+                if (many->boundary == REGEX_BOUNDARY_WORD)
+                {
+                        string_address before = (string_address)memory_last_of(
+                            at, many->delimiter, (positive)(hit - at));
+
+                        line = before ? before + 1 : at;
+                }
+
+                if (grep_many_near(many, line, (positive)(stop - line), hit))
+                        return stop;
+
+                at = stop + 1;
+        }
+
+        return null;
+}
+
+typedef struct
+{
+        // Where the stretch began, which is a record's first byte.
+        string_address at, past, begin;
+        b32 row;
+} grep_many_lane;
+
+/*
+        What a lane does with a cell that is not a row: the record it ended
+        is a hit, or the node it came to is walked until a row takes it back.
+        Under a word a string is only where the record might be, and the
+        record is asked in full.
+*/
+static fn grep_many_event(const grep_many address_to many,
+                          grep_many_lane address_to lane, b32 cell,
+                          string_address address_to hit)
+{
+        positive node = (positive)~cell;
+
+        *hit = null;
+
+        if (!((many->flags[node] & GREP_MANY_OUT) &&
+              grep_many_right(many, lane->at, lane->past)))
+        {
+                lane->at++;
+
+                if (!grep_many_through(many, address_of node, address_of lane->at, lane->past))
+                {
+                        if (node < many->dense)
+                                lane->row = (b32)(node << many->shift);
+
+                        // Past the rows at the span's end, or back on them:
+                        // either way the lane goes on from where it is.
+                        return;
+                }
+
+                // The byte that ended the string is where `at` stands.
+        }
+
+        {
+                string_address found = lane->at;
+                string_address stop = (string_address)memory_first_of(
+                    lane->at, many->delimiter, (positive)(lane->past - lane->at));
+
+                *hit = stop ? stop : lane->past - 1;
+                lane->at = stop ? stop + 1 : lane->past;
+                lane->row = 0;
+
+                if (many->boundary == REGEX_BOUNDARY_WORD)
+                {
+                        string_address before = (string_address)memory_last_of(
+                            lane->begin, many->delimiter, (positive)(found - lane->begin));
+                        string_address line = before ? before + 1 : lane->begin;
+
+                        if (!grep_many_near(many, line, (positive)(*hit - line), found))
+                                *hit = null;
+                }
+        }
+}
+
+/*
+        The records of a span, walked four stretches at a time as the
+        machine's are: one byte of a walk waits for the load that named its
+        row, and four walks that share nothing keep four in flight. Only
+        where the answer is a count or a list of records that hold a string,
+        and a word, whose records the strings only choose; a line is the
+        scan's, and positive maximum says so. The stretches begin and end at
+        records, which end every state, so what each finds is in order.
+*/
+static positive grep_many_lanes(const grep_many address_to many, string_address at,
+                                string_address past, rx_dfa_hits address_to out,
+                                string_address address_to block)
+{
+        const p8 address_to classes = many->classes;
+        const b32 address_to rows = many->rows;
+        const string_address base = at;
+        grep_many_lane lane[RX_DFA_LANES];
+        positive total = 0;
+        string_address cut = at;
+
+        *block = past;
+
+        if (many->boundary == REGEX_BOUNDARY_LINE || many->empty)
+                return positive_max;
+
+        if (out)
+        {
+                memory_fill(out->count, 0, sizeof(out->count));
+
+                if ((positive)(past - at) > RX_DFA_LANES * RX_DFA_LANE_BLOCK)
+                {
+                        string_address from = at + RX_DFA_LANES * RX_DFA_LANE_BLOCK - 1;
+                        string_address stop = (string_address)memory_first_of(
+                            from, many->delimiter, (positive)(past - from));
+
+                        past = stop ? stop + 1 : past;
+                }
+
+                *block = past;
+        }
+
+        for (positive k = 0; k < RX_DFA_LANES; k++)
+        {
+                string_address next = past;
+
+                if (k < RX_DFA_LANES - 1)
+                {
+                        string_address target = at + (positive)(past - at) / RX_DFA_LANES * (k + 1);
+                        string_address stop;
+
+                        if (target < cut)
+                                target = cut;
+
+                        stop = (string_address)memory_first_of(target, many->delimiter,
+                                                               (positive)(past - target));
+                        next = stop ? stop + 1 : past;
+                }
+
+                lane[k] = (grep_many_lane){.at = cut, .past = next, .begin = cut, .row = 0};
+                cut = next;
+        }
+
+        for (;;)
+        {
+                positive m = positive_max, live = 0;
+                positive mask = (1u << RX_DFA_LANES) - 1;
+                b32 n[RX_DFA_LANES] = {0};
+
+                for (positive k = 0; k < RX_DFA_LANES; k++)
+                {
+                        positive left = (positive)(lane[k].past - lane[k].at);
+
+                        m = left < m ? left : m;
+                        live += left != 0;
+                }
+
+                if (!live)
+                        break;
+
+                if (m)
+                {
+                        string_address a0 = lane[0].at, a1 = lane[1].at, a2 = lane[2].at,
+                                       a3 = lane[3].at;
+                        b32 r0 = lane[0].row, r1 = lane[1].row, r2 = lane[2].row,
+                            r3 = lane[3].row;
+                        b32 n0 = 0, n1 = 0, n2 = 0, n3 = 0;
+                        bool stopped = false;
+
+                        while (m--)
+                        {
+                                n0 = rows[r0 + classes[*a0]];
+                                n1 = rows[r1 + classes[*a1]];
+                                n2 = rows[r2 + classes[*a2]];
+                                n3 = rows[r3 + classes[*a3]];
+
+                                if ((n0 | n1 | n2 | n3) < 0)
+                                {
+                                        stopped = true;
+                                        break;
+                                }
+
+                                a0++, a1++, a2++, a3++;
+                                r0 = n0, r1 = n1, r2 = n2, r3 = n3;
+                        }
+
+                        lane[0].at = a0, lane[1].at = a1, lane[2].at = a2, lane[3].at = a3;
+                        lane[0].row = r0, lane[1].row = r1, lane[2].row = r2, lane[3].row = r3;
+
+                        if (!stopped)
+                                continue;
+
+                        n[0] = n0, n[1] = n1, n[2] = n2, n[3] = n3;
+                }
+                else
+                {
+                        positive one = 0;
+                        grep_many_lane address_to l;
+                        b32 next = 0;
+
+                        while (lane[one].at == lane[one].past)
+                                one++;
+
+                        l = lane + one;
+
+                        while (l->at < l->past && (next = rows[l->row + classes[*l->at]]) >= 0)
+                        {
+                                l->row = next;
+                                l->at++;
+                        }
+
+                        if (l->at == l->past)
+                                continue;
+
+                        n[one] = next;
+                        mask = 1u << one;
+                }
+
+                for (positive k = 0; k < RX_DFA_LANES; k++)
+                {
+                        grep_many_lane address_to l = lane + k;
+                        string_address hit;
+
+                        if (!(mask >> k & 1))
+                                continue;
+
+                        if (n[k] >= 0)
+                        {
+                                l->row = n[k];
+                                l->at++;
+                                continue;
+                        }
+
+                        grep_many_event(many, l, n[k], address_of hit);
+
+                        if (!hit)
+                                continue;
+
+                        total++;
+
+                        if (out)
+                        {
+                                if (out->count[k] == RX_DFA_LANE_HITS)
+                                        return positive_max;
+
+                                out->at[k][out->count[k]++] = (p32)(hit - base);
+                        }
+                }
+        }
+
+        return total;
+}
+
+/*
+        regex_find for what grep asks of a line, with the automaton in the
+        regex's place when it holds the strings. The answer is in regex_slots
+        as the regex leaves it. A line the automaton finds nothing in is
+        refused before any start is tried.
+*/
+static bool grep_search(p8 mode, string_address line, positive length, positive from)
+{
+        positive begin, finish;
+
+        if (!grep_many_on)
+                return regex_find(mode, line, length, from);
+
+        if (!grep_many_set.empty && from <= length &&
+            !grep_many_hunt(address_of grep_many_set, line + from, line + length))
+                return false;
+
+        if (!grep_many_find(address_of grep_many_set, line, length, from,
+                            mode != REGEX_FIRST, address_of begin, address_of finish))
+                return false;
+
+        regex_slots[0] = begin;
+        regex_slots[1] = finish;
+        return true;
+}
+
+/*
         GNU's binary rule, byte for byte where it can be. GNU reads 98304
         bytes at a time and looks for a NUL in each read before searching the
         lines in it. From the first read holding one the file is binary:
@@ -26163,6 +27310,8 @@ typedef struct
         const grep_set address_to set;
         // The set is the whole program, and not only where a match must be.
         bool set_proves;
+        // The automaton over strings that are the whole program, or null.
+        const grep_many address_to many;
         // The deterministic machine, when a record needs the whole question
         // asked and the question has no backreference in it; null otherwise.
         rx_dfa_cache address_to dfa;
@@ -26214,6 +27363,38 @@ typedef struct
 } grep_state;
 
 /*
+        What the machine is for the records of a span: the deterministic
+        machine, or the automaton over a great many strings, which answers
+        the same questions the same way and cannot give up.
+*/
+static inline INLINE bool grep_machine_ready(const grep_plan address_to plan)
+{
+        return plan->many || (plan->dfa && !plan->dfa->failed);
+}
+
+static inline INLINE bool grep_machine_failed(const grep_plan address_to plan)
+{
+        return !plan->many && plan->dfa->failed;
+}
+
+static inline INLINE string_address grep_machine_scan(const grep_plan address_to plan,
+                                                      string_address at,
+                                                      string_address past)
+{
+        return plan->many ? grep_many_scan(plan->many, at, past)
+                          : rx_dfa_scan(plan->dfa, at, past);
+}
+
+static inline INLINE positive grep_machine_lanes(const grep_plan address_to plan,
+                                                 string_address at, string_address past,
+                                                 rx_dfa_hits address_to out,
+                                                 string_address address_to block)
+{
+        return plan->many ? grep_many_lanes(plan->many, at, past, out, block)
+                          : rx_dfa_lanes(plan->dfa, at, past, out, block);
+}
+
+/*
         A fixed-string program under -x or -w, answered without the machine.
 
         -x is the line and the string being the same bytes. -w is some
@@ -26255,6 +27436,9 @@ static bool grep_line_matches(const grep_plan address_to plan,
                               grep_state address_to state,
                               string_address line, positive length)
 {
+        if (plan->many)
+                return grep_many_has(plan->many, line, length);
+
         // A line the hunt landed in holds the string; a string that is the
         // whole program is then the whole answer.
         if (plan->literal_proves && (plan->whole || length < TEXT_LINE_MAX))
@@ -26571,6 +27755,9 @@ static string_address grep_set_next(const grep_plan address_to plan,
 static bool grep_bytes_hold(const grep_plan address_to plan,
                             string_address bytes, positive size)
 {
+        if (plan->many)
+                return plan->many->empty || grep_many_hunt(plan->many, bytes, bytes + size);
+
         if (plan->literal)
                 return text_literal_find(bytes, size, 0,
                                          (string_address)plan->literal->literal,
@@ -26603,6 +27790,9 @@ static fn grep_record_stream(const grep_plan address_to plan,
                              grep_state address_to state)
 {
         positive longest = plan->literal ? plan->literal->literal_length : 0;
+        // Where the automaton stands between fills: a string that crosses
+        // one is carried by the walk, so it keeps no window of bytes.
+        positive node = 0;
 
         for (positive i = 0; plan->set && i < plan->set->count; i++)
                 if (plan->set->size[i] > longest)
@@ -26612,7 +27802,7 @@ static fn grep_record_stream(const grep_plan address_to plan,
         // longest - 1 of the next fill beside them. A set's strings share
         // GREP_SET_BYTES and a single string is shorter still.
         p8 edge[2 * GREP_SET_BYTES];
-        positive window = longest - 1;
+        positive window = plan->many ? 0 : longest - 1;
         positive kept = 0;
         bool found = false;
         bool ended = false;
@@ -26652,7 +27842,10 @@ static fn grep_record_stream(const grep_plan address_to plan,
                         found = grep_bytes_hold(plan, edge, kept + head);
                 }
 
-                found = found || grep_bytes_hold(plan, at, size);
+                found = found || (plan->many
+                                      ? plan->many->empty ||
+                                            grep_many_run(plan->many, &node, at, at + size) != null
+                                      : grep_bytes_hold(plan, at, size));
 
                 if (stop)
                 {
@@ -26724,7 +27917,7 @@ static string_address grep_span_machine(const grep_plan address_to plan,
 {
         bool dense = false;
 
-        while (plan->dfa && !plan->dfa->failed && at < past && !state->done)
+        while (grep_machine_ready(plan) && at < past && !state->done)
         {
                 /*
                         Four stretches of the span at once when it is long
@@ -26740,12 +27933,12 @@ static string_address grep_span_machine(const grep_plan address_to plan,
                         string_address block;
                         bool counted = plan->mode == GREP_SPAN_COUNT &&
                                        plan->limit == TEXT_UNSET;
-                        positive got = rx_dfa_lanes(plan->dfa, at, past,
-                                                    counted ? null : &hits, &block);
+                        positive got = grep_machine_lanes(plan, at, past,
+                                                          counted ? null : &hits, &block);
 
                         if (got == positive_max)
                         {
-                                if (plan->dfa->failed)
+                                if (grep_machine_failed(plan))
                                         break;
 
                                 dense = true;
@@ -26789,9 +27982,9 @@ static string_address grep_span_machine(const grep_plan address_to plan,
                         continue;
                 }
 
-                string_address hit = rx_dfa_scan(plan->dfa, at, past);
+                string_address hit = grep_machine_scan(plan, at, past);
 
-                if (!hit && plan->dfa->failed)
+                if (!hit && grep_machine_failed(plan))
                         break;
 
                 string_address line = past;
@@ -27119,7 +28312,8 @@ typedef struct
         file_facts output_facts;
         bool never, icase, invert, counting, listing, listing_without, quiet,
              quietly, whole_line, whole_word, only, null_data, literal_proves,
-             literal_set, literal_hunt, machine, grouped, discarded, refuse_output;
+             literal_set, literal_hunt, many, machine, grouped, discarded,
+             refuse_output;
         // Every file of a walk is handed back to the line loop, unread.
         bool serial;
         bool found_any, shown_any;
@@ -27144,6 +28338,7 @@ static grep_plan grep_plan_of(const grep_run address_to run,
             .literal = run->literal->literal_length ? run->literal : null,
             .set = run->literal_set || run->literal_hunt ? address_of grep_literals : null,
             .set_proves = run->literal_set,
+            .many = run->many ? address_of grep_many_set : null,
             .dfa = dfa,
             .limit = limit,
             .mode = first_mode      ? GREP_SPAN_FIRST
@@ -27206,7 +28401,7 @@ static bool grep_one(grep_run address_to run, string_address name)
         bool only = run->only;
         bool null_data = run->null_data;
         bool literal_proves = run->literal_proves;
-        bool literal_set = run->literal_set;
+        bool literal_set = run->literal_set || run->many;
         bool machine = run->machine;
         bool grouped = run->grouped;
         bool discarded = run->discarded;
@@ -27542,7 +28737,7 @@ static bool grep_one(grep_run address_to run, string_address name)
                         }
                         else if (plan.mode != GREP_SPAN_PRINT &&
                                  grep_binary_files != GREP_BINARY_WITHOUT &&
-                                 (plan.literal_proves || plan.set_proves) &&
+                                 (plan.literal_proves || plan.set_proves || plan.many) &&
                                  plan.boundary == REGEX_BOUNDARY_NONE)
                         {
                                 grep_record_stream(address_of plan,
@@ -27760,7 +28955,7 @@ static bool grep_one(grep_run address_to run, string_address name)
 
                 bool hit = !never &&
                            ((sure && text_line_length < TEXT_LINE_MAX) ||
-                            regex_find(REGEX_FIRST, line, text_line_length, 0));
+                            grep_search(REGEX_FIRST, line, text_line_length, 0));
 
                 /*
                         As the spans do: from the line ending in or
@@ -27920,7 +29115,7 @@ static bool grep_one(grep_run address_to run, string_address name)
                         positive from = 0;
 
                         while (from <= text_line_length &&
-                               regex_find(REGEX_LONGEST, line, text_line_length, from))
+                               grep_search(REGEX_LONGEST, line, text_line_length, from))
                         {
                                 positive begin = regex_slots[0];
                                 positive stop = regex_slots[1];
@@ -28316,7 +29511,7 @@ static bool grep_pieces_search_one(address_any context, positive index,
         grep_pieces address_to task = run->task;
         grep_run address_to grep = task->run;
         grep_slot address_to scratch = grep_slot_get();
-        bool graph = !grep->literal_proves && !grep->literal_set;
+        bool graph = !grep->literal_proves && !grep->literal_set && !grep->many;
 
         if (!scratch)
                 return false;
@@ -28587,6 +29782,9 @@ static PURE bool grep_nul_free(const grep_plan address_to plan)
                 return !memory_first_of(plan->literal->literal, 0,
                                         plan->literal->literal_length);
 
+        if (plan->many)
+                return !plan->many->empty;
+
         if (!plan->set || !plan->set->count)
                 return false;
 
@@ -28626,7 +29824,7 @@ static bool grep_leaf_file(grep_run address_to run, string_address path,
         bool printing = !counting && !listing && !listing_without && !quiet &&
                         !discard_file;
         bool first_mode = quiet || listing || listing_without || discard_file;
-        bool literal_only = (run->literal_proves || run->literal_set) && !invert &&
+        bool literal_only = (run->literal_proves || run->literal_set || run->many) && !invert &&
                             regex_boundary == REGEX_BOUNDARY_NONE;
         bool zap_hits = counting && !first_mode && literal_only &&
                         run->literal_proves && literal->literal_length &&
@@ -28662,7 +29860,7 @@ static bool grep_leaf_file(grep_run address_to run, string_address path,
         plan.whole = true;
         plan.zap_hits = zap_hits;
         // A string or a set that is the whole program never asks the graph.
-        bool graph = !run->literal_proves && !run->literal_set;
+        bool graph = !run->literal_proves && !run->literal_set && !run->many;
         grep_state state = {
             .match = graph ? grep_slot_match(scratch) : null,
             .name = path,
@@ -28679,6 +29877,9 @@ static bool grep_leaf_file(grep_run address_to run, string_address path,
         for (positive i = 0; plan.set && i < plan.set->count; i++)
                 if (plan.set->size[i] > longest)
                         longest = plan.set->size[i];
+
+        if (plan.many)
+                longest = plan.many->longest;
 
         // Where the rest of a binary file is only whether it holds a string,
         // what is kept between reads is where one could cross them.
@@ -29293,7 +30494,7 @@ static bool grep_tree(grep_run address_to run, string_address path)
         return whole;
 }
 
-static b32 text_grep()
+static b32 text_grep_run()
 {
         file_taking taking = {
             .program = (string_address) "grep",
@@ -29323,7 +30524,9 @@ static b32 text_grep()
         grep_pattern_dangling = grep_pattern_dangling_bad = false;
         grep_pattern_count = 0;
         grep_pattern_empty = false;
+        grep_pattern_filled = false;
         grep_pattern_groups = 0;
+        grep_many_release();
         grep_file_globs = null;
         grep_exclude_dir = null;
         grep_list_last = 0;
@@ -29477,7 +30680,12 @@ static b32 text_grep()
                 grep_pattern_add(value, string_length(value), fixed, extended);
         }
 
-        if (grep_pattern_broken)
+        // Plain strings past what the set and the machine take are the
+        // automaton's, and need no expression at all: what an expression
+        // could not hold is no reason to refuse them.
+        bool many = !never && grep_many_wanted(icase);
+
+        if (grep_pattern_broken && !many)
                 return text_done(string_diagnostic(&text_diagnostic, 2, null, "pattern too long"));
 
         if (grep_pattern_dangling_bad || (grep_pattern_dangling && grep_pattern_count == 1))
@@ -29489,7 +30697,8 @@ static b32 text_grep()
         if (!have_pattern)
                 return text_done(string_diagnostic(&text_diagnostic, 2, null, "no pattern given"));
 
-        if (!never && !regex_compile(grep_pattern, extended, icase, false,
+        if (!never && !regex_compile(many ? (string_address) "" : grep_pattern, extended,
+                                     icase, false,
                                      text_regex_policy() | REGEX_LEADING_REPEATS))
                 return text_done(string_diagnostic(&text_diagnostic, 2, null,
                                                    regex_failure == REGEX_FAILED_OTHER || !regex_failure
@@ -29510,12 +30719,12 @@ static b32 text_grep()
         regex_boundary = whole_line ? REGEX_BOUNDARY_LINE :
                          whole_word ? REGEX_BOUNDARY_WORD : REGEX_BOUNDARY_NONE;
         const rx_hints *literal = regex_current.hints;
-        bool literal_proves = (regex_current.flags & RX_LITERAL_PROVES) != 0;
+        bool literal_proves = !many && (regex_current.flags & RX_LITERAL_PROVES) != 0;
 
         grep_literals.count = 0;
         grep_literals.used = 0;
 
-        bool literal_set = !never && !literal_proves && !literal->literal_length &&
+        bool literal_set = !never && !many && !literal_proves && !literal->literal_length &&
                            (regex_current.flags & RX_BRANCHING) &&
                            !(regex_current.flags & RX_HAS_BACKREF) &&
                            grep_set_gather(address_of regex_current,
@@ -29526,7 +30735,7 @@ static b32 text_grep()
         grep_literals.count = literal_set ? grep_literals.count : 0;
         grep_literals.used = literal_set ? grep_literals.used : 0;
 
-        bool literal_hunt = !never && !literal_proves && !literal_set &&
+        bool literal_hunt = !never && !many && !literal_proves && !literal_set &&
                             !literal->literal_length &&
                             (regex_current.flags & RX_BRANCHING) &&
                             grep_set_gather(address_of regex_current,
@@ -29542,9 +30751,20 @@ static b32 text_grep()
         if (null_data)
                 text_delimiter = '\0';
 
+        // The automaton knows the delimiter too: it is the byte that ends
+        // a record in every one of its states.
+        if (many)
+        {
+                if (!grep_many_build(icase, regex_boundary, text_delimiter))
+                        return text_done(string_diagnostic(&text_diagnostic, 2, null,
+                                                           "memory exhausted"));
+
+                grep_many_on = true;
+        }
+
         // Only where no string answers the whole question, and after the
         // delimiter is known, since it is a column of the machine.
-        bool machine = !never && !literal_proves && !literal_set &&
+        bool machine = !never && !many && !literal_proves && !literal_set &&
                        rx_dfa_compile(address_of regex_dfa, address_of regex_current,
                                       regex_boundary, text_delimiter);
 
@@ -29563,9 +30783,11 @@ static b32 text_grep()
 
         /* GNU resolves an explicit empty pattern under -v before opening an
            input. In count mode that means no "0" line is printed at all.
-           Keep -w/-x and file-listing priority on their normal paths: their
-           wrapping or output policy changes the question. */
-        if (grep_pattern_empty && invert && counting && !whole_line &&
+           That is when the empty pattern is every pattern there is: with
+           others beside it GNU opens the input and counts. Keep -w/-x and
+           file-listing priority on their normal paths: their wrapping or
+           output policy changes the question. */
+        if (grep_pattern_empty && !grep_pattern_filled && invert && counting && !whole_line &&
             !whole_word && !listing && !listing_without)
                 return text_done(1);
 
@@ -29726,6 +30948,7 @@ static b32 text_grep()
             .literal_proves = literal_proves,
             .literal_set = literal_set,
             .literal_hunt = literal_hunt,
+            .many = many,
             .machine = machine,
             .grouped = grouped,
             .discarded = discarded,
@@ -29750,6 +30973,15 @@ static b32 text_grep()
                 return text_done(2);
 
         return text_done(run.found_any ? 0 : 1);
+}
+
+static b32 text_grep()
+{
+        b32 status = text_grep_run();
+
+        // The automaton and the strings it was made of are this run's.
+        grep_many_release();
+        return status;
 }
 
 /*
