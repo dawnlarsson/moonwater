@@ -37,11 +37,13 @@ import base64
 import bisect
 import collections
 import dataclasses
+import fcntl
 import hashlib
 import inspect
 import importlib
 import itertools
 import json
+import math
 import os
 from pathlib import Path
 import random
@@ -2371,6 +2373,93 @@ def self_test():
                              "a lane_<name> exists that lanes= never runs")
             self.assertEqual([n for n in named if n not in described], [],
                              "a lane nothing says the purpose of")
+
+        def test_scale_judge_names_what_is_wrong_and_only_that(self):
+            """The scale lane's verdict is a function of the medians it is
+            given. A loss, a known loss that stays, one that worsens, a cliff
+            that GNU does not share and one it does, super-linear growth, a
+            ratio past the record, a refusal and a broken series are each
+            asked for here with numbers made up, because the lane's own run
+            is ten minutes on one machine and a judge that never said no
+            would be that run's silence."""
+            def points(series, rows):
+                made = []
+                for point, ours, gnu in rows:
+                    p = ScalePoint(point)
+                    p.samples = {"ours": [ours], "gnu": [gnu]}
+                    made.append(p)
+                return made
+
+            def judged(rows, baseline=None, known=None, dim="bytes", floors=None, issues=()):
+                series = ScaleSeries("synthetic", "x", dim, [row[0] for row in rows], None)
+                made = points(series, rows)
+                for impl, kind, text in issues:
+                    made[0].issues.append((impl, kind, text))
+                return {(kind, point, fail) for kind, point, text, fail in
+                        scale_judge(series, made, floors or {"ours": 0.0, "gnu": 0.0},
+                                    baseline or {}, known or {}, "ours")}
+
+            M = 10 ** 6
+            steady = [(M, 0.010, 0.020), (10 * M, 0.100, 0.200), (100 * M, 1.0, 2.0)]
+            self.assertEqual(judged(steady), set())
+            loss = [(M, 0.010, 0.020), (10 * M, 0.100, 0.200), (100 * M, 1.7, 1.5)]
+            self.assertIn(("loss", 100 * M, True), judged(loss))
+            self.assertEqual(judged(loss, {"synthetic": {100 * M: 1.2}}), {("known", 100 * M, False)})
+            self.assertIn(("loss", 100 * M, True), judged(loss, {"synthetic": {100 * M: 0.8}}))
+            self.assertIn(("loss", 100 * M, True), judged([(M, 0.010, 0.020), (10 * M, 0.100, 0.200), (100 * M, 3.0, 1.5)],
+                                                          {"synthetic": {100 * M: 1.2}}))
+            below = [(M, 0.010, 0.020), (10 * M, 0.100, 0.200), (100 * M, 1.0, 2.0)]
+            self.assertIn(("record", 100 * M, True), judged(below, {"synthetic": {100 * M: 0.3}}))
+            self.assertEqual(judged(below, {"synthetic": {100 * M: 0.5}}), set())
+            cliff = [(M, 0.010, 0.020), (10 * M, 0.100, 0.200), (100 * M, 3.0, 3.5)]
+            self.assertIn(("cliff", 100 * M, True), judged(cliff))
+            held = judged(cliff, known={"synthetic@%d:cliff" % (100 * M): "why"})
+            self.assertIn(("known:cliff", 100 * M, False), held)
+            self.assertNotIn(("cliff", 100 * M, True), held)
+            shared = [(M, 0.010, 0.020), (10 * M, 0.100, 0.200), (100 * M, 3.0, 6.0)]
+            self.assertEqual(judged(shared), set())
+            quadratic = [(M, 0.010, 0.020), (10 * M, 0.100, 0.200), (100 * M, 10.0, 2.0)]
+            self.assertIn(("superlinear", 100 * M, True), judged(quadratic))
+            both = [(M, 0.010, 0.100), (10 * M, 1.0, 10.0), (100 * M, 100.0, 1000.0)]
+            self.assertEqual({k for k in judged(both) if k[2]}, set())
+            floored = [(M, 0.0012, 0.0020), (10 * M, 0.0015, 0.003), (100 * M, 0.5, 1.0)]
+            self.assertEqual({k for k in judged(floored, floors={"ours": 0.001, "gnu": 0.0015}) if k[2]}, set())
+            self.assertIn(("refusal", M, True), judged(steady, issues=[("ours", "refusal", "status 2 against 0")]))
+            self.assertIn(("series", M, True), judged(steady, issues=[("gnu", "series", "the host's own exits 2")]))
+            held = judged(steady, issues=[("ours", "refusal", "status 2 against 0")],
+                          known={"synthetic@%d:refusal" % M: "why"})
+            self.assertIn(("known:refusal", M, False), held)
+            self.assertNotIn(("refusal", M, True), held)
+            self.assertEqual(judged(steady, issues=[("ours", "note", "the host's own timed out")]), {("note", M, False)})
+            threads = [(1, 1.0, 2.0), (4, 0.3, 2.0), (8, 1.6, 2.0)]
+            self.assertIn(("inversion", 8, True), judged(threads, dim="cpus"))
+            levels = [(1, 0.01, 0.02), (6, 0.5, 0.2), (9, 4.0, 1.0)]
+            self.assertEqual({k for k in judged(levels, dim="level") if k[0] == "inversion"}, set())
+
+        def test_scale_catalog_is_well_formed(self):
+            """Every series has a name of its own, points to run in either mode,
+            and a first point that builds a job; a catalog edited by hand is the
+            thing that goes wrong here, a series shadowed by another of the same
+            name being the quietest way. The jobs are only built for the smallest
+            input of each series that needs none made on disk."""
+            data = ScaleData(self.root / "scale-data")
+            series = scale_catalog(data)
+            names = [s.name for s in series]
+            self.assertEqual(sorted(n for n in set(names) if names.count(n) > 1), [],
+                             "two series with one name: the baseline is keyed by it")
+            for s in series:
+                self.assertTrue(s.chosen(False), s.name + " has no default points")
+                self.assertTrue(s.chosen(True), s.name + " has no points in a full run")
+                self.assertTrue(set(s.chosen(False)) <= set(s.points) or s.quick, s.name)
+                self.assertIsInstance(s.tool, str)
+                self.assertTrue(callable(s.build), s.name)
+            self.assertGreater(len([s for s in series if s.core]), 100)
+            self.assertLess(len([s for s in series if s.core]), len(series))
+            #       The ones that need nothing on disk are built through.
+            for s in series:
+                if s.dim == "probe" or s.name.startswith("sed -e") or s.name.startswith("env -i"):
+                    job = s.build(s.chosen(False)[0])
+                    self.assertIsInstance(job.args, list, s.name)
 
         def test_every_harness_is_registered_defined_and_invoked(self):
             """A harness that loses its registration stops running and says
@@ -72270,8 +72359,2916 @@ def harness_g_tables(argv):
     return 0 if ok else 1
 
 
+#
+#       scale: every tool against the host's own, at every size.
+#
+#           sh test/run scale                  the lane (a farm of ours, and the host's tools)
+#           python3 test/differential.py --harness scale --farm ours=DIR [--farm parent=DIR]
+#                       [--full] [--series WORD,WORD] [--dim DIM,DIM] [--skip WORD] [--shard I/N]
+#                       [--list] [--tables] [--update] [--data DIR] [--lock FILE] [--cpus LIST]
+#
+#       A tool can be faster than GNU's on the file a benchmark picks and fall
+#       off a cliff on the next decade: a fixed table, a quadratic loop, a
+#       slow path chosen too early, a refusal GNU does not have. This walks
+#       each tool along the dimension that bites (bytes, lines, line length,
+#       patterns, keys, fields, files, directory entries, commands, arguments,
+#       depth, entropy, processors, and the sizes the source fixes), runs ours
+#       and the host's on the same job turn about, checks that they wrote the
+#       same bytes, and judges each series on what it found:
+#
+#           loss         ours / GNU at a point is past SCALE_LOSS, and still is
+#                        on a second, longer look at that point
+#           cliff        ours costs 2x more a unit than at the point before it,
+#                        GNU's cost did not move with it, and ours is no longer
+#                        far ahead of it
+#           superlinear  the log-log slope between points is past 1.25 and
+#                        GNU's is not (time beyond the empty-input floor)
+#           refusal      ours exits or writes differently where GNU answers
+#           record       the ratio is 1.6x the one SCALE_BASELINE holds
+#           inversion    more processors, and ours slower than on one
+#
+#       SCALE_BASELINE is the checked-in table of ratios ours/GNU, one per
+#       point, written by --update from a run on the box (a Ryzen 9 9950X, cores
+#       8-15: ours and GNU's run on the same cores, so the ratio is the thing
+#       that carries over). A ratio past 1 that the table already holds is
+#       KNOWN: it passes while it does not get worse, and the lane says so every
+#       run, so a loss that is left is on the page and not forgotten.
+#       SCALE_KNOWN does the same for a refusal, a cliff or a slope, and fails
+#       the run in which one stops being true. Times are medians of interleaved
+#       runs; stdout goes to a file, never /dev/null, which GNU grep and others
+#       short-cut. --lock holds the benchmarks' lock around each series, so that
+#       two people's runs take turns.
+#
+#       A series is one tool and one dimension. Its default points are three
+#       or four spread over the decades, and a default run takes every Nth
+#       series (SCALE_STRIDE) and stops a series where the next point would
+#       take seconds; --full runs everything, every decade up to a gigabyte or
+#       a million entries. Dimensions beyond bytes subtract the time of the
+#       empty or smallest input before they compute a cost a unit, because
+#       below a few hundred kilobytes it is process start.
+#
+
+SCALE_LOSS = 1.12          # ours / GNU past this, on a second and longer look, is a loss
+SCALE_CLOCK = 0.0004       # a difference under this many seconds is the clock
+SCALE_STEP = 2.0           # a cliff: the cost a unit more than doubles
+SCALE_SHARED = 1.5         # ... and GNU's did not do the same: ours / GNU grew 1.5x
+SCALE_SLOPE = 1.25         # super-linear: log-log slope over this
+SCALE_RECORD = 1.6         # a ratio this far over the record, and 0.15 absolute
+SCALE_DECADES = tuple(10 ** k for k in range(3, 10))
+SCALE_MULTIPLY = 0.0       # filled by the budget
+
+
+class ScaleData:
+    """The inputs, made once, outside every timed region, and kept for the
+    series that share them. A file of a kind and a size is the first bytes of
+    one growing base file of the kind, so ten sizes are one generation."""
+
+    WORDS = 6000
+
+    def __init__(self, root):
+        self.root = Path(root)
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.base = {}
+        self.made = {}
+        rng = random.Random(0x5CA1E)
+        syllables = [a + b for a in ("", "b", "c", "d", "f", "g", "h", "k", "l", "m", "n", "p", "r", "s", "t", "v", "w", "z", "ch", "sh", "th", "st", "tr")
+                     for b in ("a", "e", "i", "o", "u", "ar", "en", "ing", "ou")]
+        vocabulary = []
+        for _ in range(self.WORDS):
+            vocabulary.append("".join(rng.choice(syllables) for _ in range(rng.choice((1, 1, 2, 2, 2, 3, 3, 4)))))
+        self.vocabulary = vocabulary
+        weights, total = [], 0.0
+        for rank in range(len(vocabulary)):
+            total += 1.0 / (rank + 3)
+            weights.append(total)
+        self.weights = weights
+
+    # one megabyte of a kind, the same every time: chunk i of the kind
+    def chunk(self, kind, i):
+        rng = random.Random(sum(map(ord, kind)) * 1000003 + i)
+        size = 1 << 20
+        if kind in ("text", "crlf", "words"):
+            count = size // 7
+            picks = rng.choices(self.vocabulary, cum_weights=self.weights, k=count)
+            if kind == "words":
+                return ("\n".join(picks) + "\n").encode()
+            seps = rng.choices((" ", " ", " ", " ", " ", " ", " ", "\n"), k=count)
+            text = "".join(itertools_chain(picks, seps)).encode()
+            return text.replace(b"\n", b"\r\n") if kind == "crlf" else text
+        if kind == "records":
+            first = i * 65536
+            return "".join("%s:%03d:%s\n" % ("alpha" if (first + j) % 3 else "beta", (first + j) % 1000,
+                                             "needle" if (first + j) % 17 == 0 else "plain")
+                           for j in range(65536)).encode()
+        if kind == "numbers":
+            return "".join("%d\n" % rng.getrandbits(rng.choice((8, 16, 24, 32, 40))) for _ in range(size // 9)).encode()
+        if kind == "signed":
+            return "".join("%d\n" % (rng.getrandbits(32) - (1 << 31)) for _ in range(size // 11)).encode()
+        if kind == "csv":
+            return "".join("%08x,%s,%d,%s\n" % (rng.getrandbits(32), rng.choice(self.vocabulary), rng.getrandbits(20),
+                                                rng.choice(self.vocabulary)) for _ in range(size // 30)).encode()
+        if kind == "human":
+            return "".join("%d%s\n" % (rng.randrange(1, 1000), rng.choice(("", "K", "M", "G", "T"))) for _ in range(size // 6)).encode()
+        if kind == "versions":
+            return "".join("%d.%d.%d%s\n" % (rng.randrange(20), rng.randrange(200), rng.randrange(50),
+                                             rng.choice(("", "", "-rc1", "-beta", "a"))) for _ in range(size // 9)).encode()
+        if kind == "dupes":
+            return "".join(rng.choice(self.vocabulary[:200]) + "\n" for _ in range(size // 6)).encode()
+        if kind == "ab":
+            return rng.randbytes(size).translate(bytes((97 if b & 1 else 98) if b % 41 else 10 for b in range(256)))
+        if kind == "tabbed":
+            count = size // 8
+            picks = rng.choices(self.vocabulary, cum_weights=self.weights, k=count)
+            seps = rng.choices((" ", "  ", "\t", "    ", "\t\t", " ", "\n"), k=count)
+            return "".join(itertools_chain(picks, seps)).encode()
+        if kind == "runs":
+            out, have = [], 0
+            while have < size:
+                run = (rng.choice(self.vocabulary) + "\n") * rng.randint(1, 5)
+                out.append(run)
+                have += len(run)
+            return "".join(out).encode()[:size]
+        if kind == "b64":
+            return base64.encodebytes(rng.randbytes(size // 4 * 3))
+        if kind == "random":
+            return rng.randbytes(size)
+        if kind == "zero":
+            return bytes(size)
+        if kind == "same":
+            return b"a" * size
+        if kind.startswith("entropy"):
+            bits = int(kind[7:])
+            mask = (1 << bits) - 1
+            return rng.randbytes(size).translate(bytes(b & mask for b in range(256)))
+        if kind == "utf8":
+            alphabet = "abcdefghijklmnopqrstuvwxyz     \n" + "éèàüößñçåø" + "日本語中文字漢語한국어" + "αβγδεζηθικλμνξοπρστυφχψω" + "😀🎉🚀"
+            return "".join(rng.choices(alphabet, k=size // 3)).encode()
+        if kind == "binary":
+            data = bytearray(rng.randbytes(size))
+            for k in range(0, size, 4096):
+                data[k:k + 64] = bytes(64)
+            return bytes(data)
+        raise ValueError(kind)
+
+    def ensure(self, kind, n):
+        path = self.root / ("base-" + kind)
+        have = path.stat().st_size if path.exists() else 0
+        i = have >> 20
+        if have < n:
+            with open(path, "ab") as out:
+                while have < n:
+                    block = self.chunk(kind, i)
+                    out.write(block)
+                    have += len(block)
+                    i += 1
+        return path
+
+    def file(self, kind, n):
+        """Exactly n bytes of the kind, the last one a newline for the kinds
+        that are lines."""
+        key = (kind, n)
+        if key in self.made:
+            return self.made[key]
+        path = self.root / ("%s-%d" % (kind, n))
+        if kind == "b64":
+            #       Whole lines of 76 characters, from the host's own encoder, so
+            #       that a cut is never inside a group of four.
+            lines = n // 77
+            path = self.made_by("b64-%d" % n, ["/usr/bin/base64", "-w76"], self.file("random", lines * 57)) if lines else path
+            if not lines:
+                path.write_bytes(b"")
+        elif not path.exists():
+            if n == 0:
+                path.write_bytes(b"")
+            else:
+                base = self.ensure(kind, n)
+                with open(base, "rb") as source, open(path, "wb") as out:
+                    left = n
+                    while left:
+                        block = source.read(min(left, 1 << 24))
+                        out.write(block)
+                        left -= len(block)
+                if kind not in ("random", "zero", "same", "binary") and not kind.startswith("entropy"):
+                    #       A line kind ends at its last whole line, so that no
+                    #       tool is handed half a line and no line is empty.
+                    with open(path, "r+b") as out:
+                        out.seek(max(n - 4096, 0))
+                        tail = out.read()
+                        cut = tail.rfind(b"\n")
+                        if cut >= 0:
+                            out.truncate(max(n - 4096, 0) + cut + 1)
+        self.made[key] = path
+        return path
+
+    def lines(self, width, count):
+        """count lines of width letters, and the newline."""
+        path = self.root / ("lines-%d-%d" % (width, count))
+        if not path.exists():
+            rng = random.Random(width * 7919 + count)
+            table = bytes(97 + b % 26 for b in range(256))
+            total = (width + 1) * count
+            with open(path, "wb") as out:
+                left = total
+                while left:
+                    take = min(left, ((1 << 22) // (width + 1) + 1) * (width + 1))
+                    block = bytearray(rng.randbytes(take).translate(table))
+                    block[width::width + 1] = b"\n" * len(range(width, take, width + 1))
+                    out.write(block)
+                    left -= take
+        return path
+
+    def made_by(self, name, command, source=None):
+        """A file a host program makes from another, once: the sorted copy of a
+        file, a compressed one. command is the argument list, run with the source
+        on standard input and its standard output kept."""
+        path = self.root / name
+        if not path.exists():
+            partial = self.root / (name + ".partial")
+            with open(partial, "wb") as out, open(source, "rb") if source else open(os.devnull, "rb") as stdin:
+                subprocess.run(command, stdin=stdin, stdout=out, check=True,
+                               env={"LC_ALL": "C", "PATH": "/usr/bin:/bin", "TMPDIR": str(self.root)})
+            partial.rename(path)
+        return path
+
+    def sorted(self, kind, n, flags=()):
+        return self.made_by("sorted-%s-%d-%s" % (kind, n, "".join(flags).replace("-", "")),
+                            ["/usr/bin/sort", *flags], self.file(kind, n))
+
+    def packed(self, codec, kind, n, level):
+        flag = {"gzip": "-%d", "xz": "-%d", "zstd": "-%d"}[codec] % level
+        extra = ["--ultra"] if codec == "zstd" and level > 19 else []
+        return self.made_by("packed-%s-%s-%d-%d" % (codec, kind, n, level),
+                            ["/usr/bin/" + codec, "-c", flag, *extra, "-T1"] if codec != "gzip" else ["/usr/bin/gzip", "-c", flag],
+                            self.file(kind, n))
+
+    def pair(self, n):
+        """Two sorted files of about n bytes for join and comm: nine-digit keys,
+        left the even ones, right the multiples of three."""
+        left, right = self.root / ("pair-left-%d" % n), self.root / ("pair-right-%d" % n)
+        if not left.exists():
+            rows = max(n // 18, 0)
+            with open(left, "w") as a, open(right, "w") as b:
+                for i in range(rows):
+                    if i % 2 == 0:
+                        a.write("%09d left-%02d\n" % (i, i % 97))
+                    if i % 3 == 0:
+                        b.write("%09d right-%02d\n" % (i, i % 89))
+                    if i % 2 and i % 3:
+                        a.write("%09d left-%02d\n" % (i, i % 97)) if i % 5 == 0 else None
+        return left, right
+
+    def fields(self, count, total):
+        """lines of count three-letter fields, about total bytes of them."""
+        path = self.root / ("fields-%d-%d" % (count, total))
+        if not path.exists():
+            rng = random.Random(count * 31 + total)
+            table = bytes(97 + b % 26 for b in range(256))
+            width = count * 4
+            lines = max(total // width, 1)
+            with open(path, "wb") as out:
+                for _ in range(lines):
+                    line = bytearray(rng.randbytes(width).translate(table))
+                    line[3::4] = b" " * count
+                    line[-1:] = b"\n"
+                    out.write(line)
+        return path
+
+    def words(self, count):
+        """One short word a line, count of them."""
+        path = self.root / ("words-%d" % count)
+        if not path.exists():
+            rng = random.Random(count)
+            with open(path, "w") as out:
+                for i in range(count):
+                    out.write("w%d\n" % rng.getrandbits(24))
+        return path
+
+    def patterns(self, count, kind):
+        """A file of count distinct patterns. words: from the vocabulary, six
+        letters or more, so they match; miss: twelve random letters, so they do
+        not; regex: a word and a class."""
+        path = self.root / ("patterns-%s-%d" % (kind, count))
+        if not path.exists():
+            rng = random.Random(count * 17 + len(kind))
+            seen, rows = set(), []
+            pool = sorted(set(w for w in self.vocabulary if len(w) >= 6))
+            while len(rows) < count:
+                if kind == "words" and len(seen) < len(pool):
+                    word = rng.choice(pool)
+                else:
+                    word = "".join(rng.choices("abcdefghijklmnopqrstuvwxyz", k=12 if kind == "miss" else 9))
+                if word in seen:
+                    continue
+                seen.add(word)
+                rows.append(word if kind != "regex" else word[:4] + "[a-z]" + word[5:])
+            path.write_text("\n".join(rows) + "\n")
+        return path
+
+    def changed(self, kind, n, rate):
+        """The file of the kind and a copy of it with every 1/rate-th line changed."""
+        a = self.file(kind, n)
+        b = self.root / ("changed-%s-%d-%s" % (kind, n, rate))
+        if not b.exists():
+            step = max(int(1 / rate), 1) if rate < 1 else 1
+            with open(a, "rb") as source, open(b, "wb") as out:
+                for number, line in enumerate(source):
+                    out.write(b"CHANGED " + line if number % step == step - 1 else line)
+        return a, b
+
+    def churn(self, kind, n, changes):
+        """A copy of the file with exactly `changes` lines changed, spread evenly."""
+        a = self.file(kind, n)
+        b = self.root / ("churn-%s-%d-%d" % (kind, n, changes))
+        if not b.exists():
+            lines = a.read_bytes().split(b"\n")
+            stride = max(len(lines) // max(changes, 1), 1)
+            for k in range(changes):
+                at = min(k * stride + stride // 2, len(lines) - 1)
+                lines[at] = b"CHANGED " + lines[at]
+            b.write_bytes(b"\n".join(lines))
+        return a, b
+
+    def sparse(self, n):
+        """n apparent bytes, a block of data every 16 MiB, holes between."""
+        path = self.root / ("sparse-%d" % n)
+        if not path.exists():
+            with open(path, "wb") as out:
+                out.truncate(n)
+                for at in range(0, n, 1 << 24):
+                    out.seek(at)
+                    out.write(b"data" * 256)
+        return path
+
+    def archive(self, shape, count):
+        """A tar of the tree, made by the host's tar."""
+        tree = self.tree(shape, count)
+        path = self.root / ("archive-%s-%d.tar" % (shape, count))
+        if not path.exists():
+            subprocess.run(["/usr/bin/tar", "-cf", str(path), "-C", str(tree), "."], check=True,
+                           env={"LC_ALL": "C", "PATH": "/usr/bin:/bin"})
+        return path
+
+    def longnames(self, depth):
+        """depth nested directories of 200-letter names and a file at the bottom."""
+        path = self.root / ("longnames-%d" % depth)
+        if not path.exists():
+            building = self.root / ("building-longnames-%d" % depth)
+            shutil.rmtree(building, ignore_errors=True)
+            building.mkdir()
+            descriptor = os.open(building, os.O_RDONLY)
+            for i in range(depth):
+                name = ("%03d" % i) + "n" * 197
+                os.mkdir(name, dir_fd=descriptor)
+                follow = os.open(name, os.O_RDONLY, dir_fd=descriptor)
+                os.close(descriptor)
+                descriptor = follow
+            os.close(os.open("leaf.txt", os.O_CREAT | os.O_WRONLY, 0o644, dir_fd=descriptor))
+            os.close(descriptor)
+            building.rename(path)
+        return path
+
+    def edges(self, count):
+        """count lines `a b` of a partial order, for tsort."""
+        path = self.root / ("edges-%d" % count)
+        if not path.exists():
+            rng = random.Random(count)
+            with open(path, "w") as out:
+                for _ in range(count):
+                    i = rng.randrange(max(count // 2, 2))
+                    out.write("n%07d n%07d\n" % (i, i + rng.randrange(1, 40)))
+        return path
+
+    def tree(self, shape, count):
+        """A tree of count files, built once. flat: one directory; bushy: a
+        hundred to a directory; deep: count nested directories with one file
+        at the bottom; small: bushy files with a few hundred bytes of text."""
+        path = self.root / ("tree-%s-%d" % (shape, count))
+        if path.exists():
+            return path
+        building = self.root / ("building-%s-%d" % (shape, count))
+        shutil.rmtree(building, ignore_errors=True)
+        building.mkdir()
+        rng = random.Random(count)
+        if shape == "flat":
+            for i in range(count):
+                os.close(os.open(building / ("Entry-%07d.%s" % (i, "TxT" if i % 3 else "dat")), os.O_CREAT | os.O_WRONLY, 0o644))
+        elif shape == "dirs":
+            for i in range(count):
+                where = building / ("Dir-%07d" % i)
+                where.mkdir()
+                os.close(os.open(where / "file.txt", os.O_CREAT | os.O_WRONLY, 0o644))
+        elif shape in ("bushy", "small"):
+            for k in range((count + 99) // 100):
+                where = building / ("Dir-%05d" % k)
+                where.mkdir()
+                for i in range(min(100, count - k * 100)):
+                    descriptor = os.open(where / ("File-%05d-%02d.%s" % (k, i, "c" if i % 2 else "txt")), os.O_CREAT | os.O_WRONLY, 0o644)
+                    if shape == "small":
+                        os.write(descriptor, ("".join(rng.choices(self.vocabulary, k=rng.randrange(8, 120)))).encode() + b"\n")
+                    os.close(descriptor)
+        elif shape == "deep":
+            descriptor = os.open(building, os.O_RDONLY)
+            for i in range(count):
+                os.mkdir("d", dir_fd=descriptor)
+                follow = os.open("d", os.O_RDONLY, dir_fd=descriptor)
+                os.close(descriptor)
+                descriptor = follow
+            os.close(os.open("leaf.txt", os.O_CREAT | os.O_WRONLY, 0o644, dir_fd=descriptor))
+            os.close(descriptor)
+        else:
+            raise ValueError(shape)
+        building.rename(path)
+        return path
+
+
+def itertools_chain(left, right):
+    for a, b in zip(left, right):
+        yield a
+        yield b
+
+
+class ScaleJob:
+    """One run of one tool: arguments after the program, a file on its standard
+    input, an environment, a working directory, a fresh copy of a tree where
+    the command changes it, and what to read back to prove both sides did it."""
+
+    def __init__(self, args, stdin=None, env=None, cwd=None, fresh=None, check=None,
+                 verify="same", status=(0,), cpus=None, tool=None):
+        self.args = list(args)
+        self.stdin = stdin
+        self.env = env or {}
+        self.cwd = cwd
+        self.fresh = fresh
+        self.check = check
+        self.verify = verify
+        self.status = status
+        self.cpus = cpus
+        self.tool = tool
+
+
+class ScaleSeries:
+    def __init__(self, name, tool, dim, points, build, quick=None, unit=None, floor=None,
+                 gnu=None, full_to=None, note=""):
+        self.name = name
+        self.tool = tool
+        self.dim = dim
+        self.points = list(points)
+        self.build = build
+        self.quick = quick
+        self.unit = unit or (lambda n: n)
+        self.floor = floor
+        self.gnu = gnu or tool
+        self.full_to = full_to
+        self.note = note
+        self.core = True
+
+    def chosen(self, full):
+        points = [p for p in self.points if full and (self.full_to is None or p <= self.full_to)] if full else None
+        if full:
+            return points or self.points[:1]
+        if self.quick:
+            return [p for p in self.quick if p in self.points]
+        if len(self.points) <= 4:
+            return self.points
+        last = len(self.points) - 1
+        return [self.points[round(i * last / 3)] for i in range(4)]
+
+
+class ScaleRun:
+    """What one run left behind."""
+
+    def __init__(self, status, seconds, out, err, extra=None):
+        self.status = status
+        self.seconds = seconds
+        self.out = out
+        self.err = err
+        self.extra = extra
+
+
+def scale_digest_file(path, mode="same"):
+    digest = hashlib.blake2b(digest_size=16)
+    if mode == "sorted":
+        digest.update(b"\n".join(sorted(Path(path).read_bytes().split(b"\n"))))
+        return digest.hexdigest()
+    with open(path, "rb") as source:
+        while True:
+            block = source.read(1 << 22)
+            if not block:
+                return digest.hexdigest()
+            digest.update(block)
+
+
+def scale_digest_tree(root):
+    digest = hashlib.blake2b(digest_size=16)
+    root = str(root)
+    for here, directories, files in os.walk(root):
+        directories.sort()
+        for name in sorted(files):
+            path = os.path.join(here, name)
+            digest.update(os.path.relpath(path, root).encode(errors="replace") + b"\0")
+            try:
+                if os.path.islink(path):
+                    digest.update(b"L" + os.readlink(path).encode(errors="replace"))
+                else:
+                    digest.update(scale_digest_file(path).encode())
+            except OSError as error:
+                digest.update(str(error.errno).encode())
+        for name in directories:
+            digest.update(b"D" + os.path.relpath(os.path.join(here, name), root).encode(errors="replace") + b"\0")
+    return digest.hexdigest()
+
+
+class ScalePoint:
+    def __init__(self, point):
+        self.point = point
+        self.samples = {}
+        self.issues = []
+        self.repeat = 1
+        self.rounds = 0
+        self.skipped = False
+        self.timed_out = False
+
+    def median(self, impl):
+        values = self.samples.get(impl)
+        return statistics.median(values) if values else None
+
+
+class ScaleTimeout(Exception):
+    pass
+
+
+def scale_alarm(signal_number, frame):
+    raise ScaleTimeout()
+
+
+class ScaleBench:
+    def __init__(self, farms, data, scratch, cpus, budget, full, timeout, gnu_dir="/usr/bin"):
+        self.home = os.getcwd()
+        signal.signal(signal.SIGALRM, scale_alarm)
+        self.farms = farms
+        self.impls = [label for label, _ in farms] + ["gnu"]
+        self.farm = dict(farms)
+        self.data = data
+        self.scratch = Path(scratch)
+        self.cpus = cpus
+        self.budget = budget
+        self.full = full
+        self.timeout = timeout
+        self.stop = 3.0 if not full else 1e9
+        self.gnu_dir = gnu_dir
+        #       Output goes to a file, so that GNU grep and others cannot skip
+        #       discarded output, and to memory, so that the disk's writeback is
+        #       not a part of what is timed.
+        shm = Path("/dev/shm")
+        where = shm if shm.is_dir() and os.access(shm, os.W_OK) else self.scratch
+        self.out = where / ("scale-%d.out" % os.getpid())
+        self.err = where / ("scale-%d.err" % os.getpid())
+        self.order = 0
+
+    def executable(self, impl, tool):
+        if impl == "gnu":
+            for directory in (self.gnu_dir, "/bin", "/usr/local/bin"):
+                if os.access(os.path.join(directory, tool), os.X_OK):
+                    return os.path.join(directory, tool)
+            return None
+        path = os.path.join(self.farm[impl], tool)
+        return path if os.access(path, os.X_OK) else None
+
+    def environment(self, impl, job):
+        base = "/usr/bin:/bin"
+        env = {"PATH": (self.farm[impl] + ":" + base) if impl != "gnu" else base,
+               "LC_ALL": "C", "TMPDIR": str(self.scratch), "HOME": str(self.scratch),
+               "TZ": "UTC", "LANG": "C"}
+        env.update(job.env)
+        return env
+
+    def once(self, impl, tool, job, series, timed=True):
+        """Run one impl on a job: a fresh working directory if the job changes one,
+        the output to a file. Returns a ScaleRun, or None where ours has no such tool."""
+        path = self.executable(impl, series.gnu if impl == "gnu" else tool)
+        if path is None:
+            return None
+        work = None
+        if job.fresh is not None:
+            work = self.scratch / "fresh"
+            subprocess.run(["/usr/bin/rm", "-rf", str(work)], check=True)
+            if callable(job.fresh):
+                job.fresh(work)
+            else:
+                subprocess.run(["/usr/bin/cp", "-a", str(job.fresh), str(work)], check=True)
+        args = [part.replace("{w}", str(work)) if work else part for part in job.args]
+        cwd = job.cwd.replace("{w}", str(work)) if (job.cwd and work) else job.cwd
+        name = series.gnu if impl == "gnu" else tool
+        cpus = set(sorted(self.cpus)[:job.cpus]) if job.cpus else self.cpus
+        os.sched_setaffinity(0, cpus)
+        if cwd:
+            os.chdir(cwd)
+        descriptors = []
+        try:
+            descriptors = [os.open(job.stdin or os.devnull, os.O_RDONLY),
+                           os.open(self.out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644),
+                           os.open(self.err, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)]
+            actions = [(os.POSIX_SPAWN_DUP2, descriptors[k], k) for k in range(3)]
+            started = time.perf_counter()
+            try:
+                pid = os.posix_spawn(path, [name, *args], self.environment(impl, job), file_actions=actions)
+            except OSError as error:
+                return ScaleRun(126, 0.0, "", "cannot start: %s" % error)
+            timeout = self.timeout
+            signal.setitimer(signal.ITIMER_REAL, timeout)
+            try:
+                _, code = os.waitpid(pid, 0)
+                status = os.waitstatus_to_exitcode(code)
+            except ScaleTimeout:
+                os.kill(pid, signal.SIGKILL)
+                os.waitpid(pid, 0)
+                status = -9999
+            finally:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+            elapsed = time.perf_counter() - started
+        finally:
+            for descriptor in descriptors:
+                os.close(descriptor)
+            if cwd:
+                os.chdir(self.home)
+        run = ScaleRun(status, elapsed, None, None)
+        if timed == "verify":
+            run.out = scale_digest_file(self.out, "sorted" if job.verify == "sorted" else "same") \
+                if job.verify != "status" else ""
+            run.err = self.err.read_bytes()[:300].decode("utf-8", "replace").strip()
+            if job.check:
+                run.extra = job.check(impl, self, work)
+            elif job.fresh is not None and job.verify == "tree":
+                run.extra = scale_digest_tree(work)
+        if work is not None:
+            subprocess.run(["/usr/bin/rm", "-rf", str(work)], check=False)
+        return run
+
+    def rounds_for(self, total):
+        if total < 0.01:
+            low = 5
+        elif total < 0.2:
+            low = 3
+        elif total < 20:
+            low = 2
+        else:
+            low = 1
+        return int(min(15, max(low, self.budget / max(total, 1e-6))))
+
+    def measure(self, series, point, extend=None):
+        job = series.build(point)
+        result = extend or ScalePoint(point)
+        impls = [i for i in self.impls if self.executable(i, series.gnu if i == "gnu" else series.tool)]
+        if extend is None:
+            seen = {}
+            for impl in impls:
+                seen[impl] = self.once(impl, series.tool, job, series, "verify")
+            reference = seen.get("gnu")
+            for impl in impls:
+                if impl == "gnu":
+                    continue
+                run = seen[impl]
+                #       The host's own tool timing out or dying of a signal on a
+                #       job ours answers is not a refusal of ours: it is a number
+                #       to put beside the answer, and nothing to time against.
+                if reference is not None and reference.status < 0 and run.status in job.status:
+                    result.issues.append((impl, "note", "the host's own %s; ours answered in %s" %
+                                          ("timed out" if reference.status == -9999 else "died of signal %d" % -reference.status,
+                                           scale_seconds(run.seconds))))
+                    result.skipped = True
+                elif reference is not None and (run.status != reference.status or run.out != reference.out
+                                                or run.extra != reference.extra):
+                    detail = "status %s against %s" % (run.status, reference.status) \
+                        if run.status != reference.status else "output differs"
+                    if run.status == -9999:
+                        detail = "no answer in %d s (the host's: %s)" % (self.timeout, reference.status)
+                        result.timed_out = True
+                    if run.status != reference.status and run.err:
+                        detail += " (%s)" % run.err.splitlines()[0][:100] if run.err else ""
+                    result.issues.append((impl, "refusal", detail))
+                    result.skipped = True
+            if reference is not None and reference.status not in job.status and reference.status >= 0:
+                result.issues.append(("gnu", "series", "the host's own exits %s: %s" % (reference.status, reference.err[:100])))
+                result.skipped = True
+            result.verify_seconds = {impl: seen[impl].seconds for impl in impls}
+            if result.skipped:
+                result.samples = {impl: [seen[impl].seconds] for impl in impls}
+                return result
+            total = sum(seen[i].seconds for i in impls)
+            result.rounds = self.rounds_for(total)
+            result.repeat = 1 if job.fresh is not None else max(1, min(40, int(0.02 / max(max(seen[i].seconds for i in impls), 1e-5))))
+            #       A run that long was measured as well as any other, and is
+            #       a sample of its own; it is kept when another costs seconds.
+            for impl in impls:
+                result.samples[impl] = [seen[impl].seconds] if total >= 1.0 else []
+            result.total = total
+            rounds = result.rounds - (1 if total >= 1.0 else 0)
+        else:
+            rounds = max(3, result.rounds)
+        for r in range(rounds):
+            turn = impls[r % len(impls):] + impls[:r % len(impls)]
+            for impl in turn:
+                if result.repeat == 1:
+                    run = self.once(impl, series.tool, job, series, True)
+                    seconds = run.seconds
+                else:
+                    seconds = sum(self.once(impl, series.tool, job, series, True).seconds
+                                  for _ in range(result.repeat)) / result.repeat
+                result.samples[impl].append(seconds)
+        return result
+
+
+def scale_seconds(value):
+    if value is None:
+        return "-"
+    if value < 0.001:
+        return "%.0f us" % (value * 1e6)
+    if value < 1.0:
+        return "%.2f ms" % (value * 1e3)
+    return "%.2f s" % value
+
+
+def scale_judge(series, points, floors, baseline, known, label):
+    """The findings for one impl of one series: (kind, point, text, fail)."""
+    found = []
+    record = baseline.get(series.name, {})
+    ordered = [p for p in points if not p.skipped]
+    for p in points:
+        for impl, kind, text in p.issues:
+            if impl == label and kind == "note":
+                found.append(("note", p.point, text, False))
+            elif impl == label:
+                fail = known.get("%s@%s:refusal" % (series.name, p.point)) is None
+                found.append(("refusal" if fail else "known:refusal", p.point, text, fail))
+            elif impl == "gnu":
+                found.append(("series", p.point, text, True))
+    ratios = {}
+    for p in ordered:
+        t, g = p.median(label), p.median("gnu")
+        if t is None or g is None or g <= 0:
+            continue
+        ratios[p.point] = t / g
+        before = record.get(p.point)
+        if t / g > SCALE_LOSS and t - g > SCALE_CLOCK:
+            if before is not None and before >= 1.0 and t / g <= max(before * 1.3, SCALE_LOSS):
+                found.append(("known", p.point, "ours %s, GNU %s, ratio %.2f (record %.2f)" %
+                              (scale_seconds(t), scale_seconds(g), t / g, before), False))
+            else:
+                found.append(("loss", p.point, "ours %s, GNU %s, ratio %.2f%s" %
+                              (scale_seconds(t), scale_seconds(g), t / g,
+                               "" if before is None else " (record %.2f)" % before), True))
+        elif before is not None and t / g > before * SCALE_RECORD and t / g - before > 0.15 and \
+                t - before * g > SCALE_CLOCK:
+            found.append(("record", p.point, "ratio %.2f, the record is %.2f" % (t / g, before), True))
+    if series.dim == "cpus":
+        lone, wide = [p for p in ordered if p.point == min(q.point for q in ordered)], \
+            [p for p in ordered if p.point == max(q.point for q in ordered)]
+        if lone and wide and lone[0] is not wide[0]:
+            a, b = lone[0].median(label), wide[0].median(label)
+            if a and b and b > a * 1.15 and b - a > 0.002:
+                found.append(("inversion", wide[0].point, "%d processors %s, %d processors %s" %
+                              (wide[0].point, scale_seconds(b), lone[0].point, scale_seconds(a)), True))
+        return found
+    if series.dim in ("level", "entropy"):
+        return found
+    floor = floors.get(label), floors.get("gnu")
+    for a, b in zip(ordered, ordered[1:]):
+        ta, tb = a.median(label), b.median(label)
+        ga, gb = a.median("gnu"), b.median("gnu")
+        if None in (ta, tb, ga, gb):
+            continue
+        if floor[0] is not None and floor[1] is not None:
+            ta, tb, ga, gb = ta - floor[0], tb - floor[0], ga - floor[1], gb - floor[1]
+        if min(ta, ga) < 0.002 or min(tb, gb) < 0.002:
+            continue
+        ua, ub = series.unit(a.point), series.unit(b.point)
+        if ua <= 0 or ub <= 0 or ua == ub:
+            continue
+        ours_step = (tb / ub) / (ta / ua)
+        gnu_step = (gb / ub) / (ga / ua)
+        text = "%s -> %s: ours %.2f ns/unit -> %.2f (x%.1f), GNU %.2f -> %.2f (x%.1f)" % (
+            a.point, b.point, ta / ua * 1e9, tb / ub * 1e9, ours_step, ga / ua * 1e9, gb / ub * 1e9, gnu_step)
+        #       A step that leaves ours less than half of GNU's cost is not one
+        #       to act on: it is a cache, or a tool a good deal ahead of its
+        #       reference getting a little less ahead.
+        if tb < 0.5 * gb:
+            continue
+        if ours_step > SCALE_STEP and ours_step / max(gnu_step, 1e-9) > SCALE_SHARED:
+            fail = known.get("%s@%s:cliff" % (series.name, b.point)) is None
+            found.append(("cliff" if fail else "known:cliff", b.point, text, fail))
+        slope = math.log(tb / ta) / math.log(ub / ua)
+        gnu_slope = math.log(gb / ga) / math.log(ub / ua)
+        if slope > SCALE_SLOPE and slope - gnu_slope > 0.15:
+            fail = known.get("%s@%s:slope" % (series.name, b.point)) is None
+            found.append(("superlinear" if fail else "known:slope", b.point,
+                          "%s -> %s: slope %.2f, GNU's %.2f" % (a.point, b.point, slope, gnu_slope), fail))
+    return found
+
+
+def scale_table(series, points, floors, baseline, labels):
+    record = baseline.get(series.name, {})
+    head = "  %12s" % series.dim
+    for label in labels:
+        head += " %10s" % label
+    head += " %10s" % "gnu"
+    for label in labels:
+        head += " %7s" % ("x" + label[:5])
+    head += " %7s %9s" % ("record", "ns/unit")
+    print(head)
+    for p in points:
+        row = "  %12s" % p.point
+        for label in labels + ["gnu"]:
+            row += " %10s" % scale_seconds(p.median(label))
+        g = p.median("gnu")
+        for label in labels:
+            t = p.median(label)
+            row += " %7s" % ("%.2f" % (t / g) if (t and g and not p.skipped) else "-")
+        before = record.get(p.point)
+        row += " %7s" % ("-" if before is None else "%.2f" % before)
+        t = p.median(labels[0])
+        unit = series.unit(p.point)
+        if t and unit:
+            row += " %9.2f" % (t / unit * 1e9)
+        print(row)
+
+
+def scale_mkdir(work):
+    work.mkdir()
+
+
+def scale_catalog_text(D, out):
+    """Every series, as data. A series is a tool, a dimension, the points along
+    it, and a function from a point to the job to run; the checks for what the
+    two sides must agree on live in the job."""
+    DEC = SCALE_DECADES
+    SMALL = tuple(10 ** k for k in range(3, 7))
+    Q4 = (10 ** 5, 10 ** 7, 10 ** 8)
+    Q3 = (10 ** 5, 10 ** 6, 10 ** 7)
+    COUNTS = (10 ** 2, 10 ** 3, 10 ** 4, 10 ** 5, 10 ** 6)
+    C3 = (10 ** 2, 10 ** 4, 10 ** 5)
+    UTF8 = {"LC_ALL": "en_US.utf8"}
+
+    def add(name, tool, dim, points, build, **kw):
+        out.append(ScaleSeries(name, tool, dim, points, build, **kw))
+
+    def put(args, **names):
+        result = []
+        for a in args:
+            for key, value in names.items():
+                a = a.replace("{%s}" % key, str(value))
+            result.append(a)
+        return result
+
+    def byt(name, tool, args, kind="text", stdin=False, points=DEC, quick=Q4, full_to=10 ** 9,
+            env=None, verify="same", status=(0,), gnu=None, check=None, fresh=None, cwd=None, dim="bytes"):
+        def build(n):
+            f = D.file(kind, n)
+            a = put(args, f=f)
+            if not stdin and not any("{f}" in x for x in args):
+                a.append(str(f))
+            return ScaleJob(a, stdin=f if stdin else None, env=env, verify=verify, status=status,
+                            check=check, fresh=fresh, cwd=cwd)
+        add(name, tool, dim, points, build, quick=quick, floor=0, full_to=full_to, gnu=gnu)
+
+    def tool_of(spec):
+        return spec.split()[0]
+
+    # ---- the product's own default locale, C.UTF-8, where the multibyte paths run
+    #      over the same ASCII text: what a user who never set a locale gets
+    PRODUCT = {"LC_ALL": "C.UTF-8"}
+    for label, tool, args, kind in (
+        ("sort", "sort", [], "text"), ("sort -u", "sort", ["-u"], "dupes"), ("sort -f", "sort", ["-f"], "text"),
+        ("sort -k2,2", "sort", ["-k2,2"], "text"), ("uniq -c", "uniq", ["-c"], "runs"),
+        ("cut -c3-20", "cut", ["-c3-20"], "text"), ("wc -m", "wc", ["-m"], "text"), ("wc -L", "wc", ["-L"], "text"),
+        ("wc -w", "wc", ["-w"], "text"), ("fold -w 40", "fold", ["-w", "40"], "text"),
+        ("expand", "expand", [], "tabbed"), ("rev", "rev", [], "text"), ("tac", "tac", [], "text"),
+        ("tr [:lower:] [:upper:]", "tr", ["[:lower:]", "[:upper:]"], "text"), ("nl -ba", "nl", ["-ba"], "text"),
+        ("grep -c the", "grep", ["-c", "the"], "text"), ("grep -c -i THE", "grep", ["-c", "-i", "THE"], "text"),
+        ("grep -c -w the", "grep", ["-c", "-w", "the"], "text"), ("grep -c -E [a-z]+ing", "grep", ["-c", "-E", "[a-z]+ing"], "text"),
+        ("sed s/the/THE/g", "sed", ["s/the/THE/g"], "text"), ("sed y/abc/xyz/", "sed", ["y/abc/xyz/"], "text"),
+        ("awk length", "awk", ["{s+=length($0)}END{print s}"], "text"), ("awk toupper", "awk", ["{print toupper($0)}"], "text"),
+        ("awk {print $2}", "awk", ["{print $2}"], "text"),
+    ):
+        byt("%s (C.UTF-8)" % label, tool, args, kind, stdin=(tool == "tr"), env=PRODUCT, status=(0, 1),
+            points=(10 ** 5, 10 ** 6, 10 ** 7, 10 ** 8), quick=(10 ** 6, 10 ** 7), full_to=10 ** 8, dim="locale")
+
+    # ---- the whole file through, byte by byte
+    byt("cat", "cat", [])
+    byt("cat -n", "cat", ["-n"])
+    byt("cat -A (binary)", "cat", ["-A"], "binary", full_to=10 ** 8)
+    byt("cat -s (text)", "cat", ["-s"])
+    byt("tac", "tac", [])
+    byt("rev", "rev", [])
+    byt("wc", "wc", [])
+    byt("wc -l", "wc", ["-l"])
+    byt("wc -c", "wc", ["-c"])
+    byt("wc -w", "wc", ["-w"])
+    byt("wc -L", "wc", ["-L"])
+    byt("wc -m (UTF-8)", "wc", ["-m"], "utf8", env=UTF8)
+    byt("head -n 10", "head", ["-n", "10"])
+    byt("head -n -10", "head", ["-n", "-10"])
+    byt("head -c -100", "head", ["-c", "-100"])
+    byt("tail -n 10", "tail", ["-n", "10"])
+    byt("tail -c 100", "tail", ["-c", "100"])
+    byt("tail -n +100", "tail", ["-n", "+100"])
+    byt("tail -n 100000", "tail", ["-n", "100000"])
+    byt("cut -d, -f2", "cut", ["-d,", "-f2"], "csv")
+    byt("cut -d, -f1,3-", "cut", ["-d,", "-f1,3-"], "csv")
+    byt("cut --complement -f2", "cut", ["-d,", "--complement", "-f2"], "csv")
+    byt("cut -c3-20", "cut", ["-c3-20"])
+    byt("cut -b5-", "cut", ["-b5-"])
+    byt("paste -s", "paste", ["-s"])
+    byt("paste f f", "paste", ["{f}", "{f}"])
+    byt("paste - - -", "paste", ["-d,", "-", "-", "-"], stdin=True)
+    byt("tr a-z A-Z", "tr", ["a-z", "A-Z"], stdin=True)
+    byt("tr -d aeiou", "tr", ["-d", "aeiou"], stdin=True)
+    byt("tr -s ' '", "tr", ["-s", " "], stdin=True)
+    byt("tr -cd a-z", "tr", ["-cd", "a-z\\n"], stdin=True)
+    byt("tr -d CR", "tr", ["-d", "\\r"], "crlf", stdin=True)
+    byt("tr [:lower:] [:upper:]", "tr", ["[:lower:]", "[:upper:]"], stdin=True)
+    byt("tr -dc alnum (random)", "tr", ["-dc", "[:alnum:]"], "random", stdin=True)
+    byt("fold -w 40", "fold", ["-w", "40"])
+    byt("fold -s -w 70", "fold", ["-s", "-w", "70"])
+    byt("expand", "expand", [], "tabbed")
+    byt("expand -t 4", "expand", ["-t", "4"], "tabbed")
+    byt("unexpand", "unexpand", [], "tabbed")
+    byt("unexpand -a", "unexpand", ["-a"], "tabbed")
+    byt("nl", "nl", [])
+    byt("nl -ba", "nl", ["-ba"])
+    byt("nl -ba -w9 -s:", "nl", ["-ba", "-w9", "-s:"])
+    byt("od -An -tx1", "od", ["-An", "-tx1"], "random")
+    byt("od -c", "od", ["-c"], "random", full_to=10 ** 8)
+    byt("od -An -tu4 -v", "od", ["-An", "-tu4", "-v"], "random", full_to=10 ** 8)
+    byt("hexdump -C", "hexdump", ["-C"], "random", full_to=10 ** 8)
+    byt("hexdump -v", "hexdump", ["-v"], "random", full_to=10 ** 8)
+    byt("base64", "base64", [], "random")
+    byt("base64 -w0", "base64", ["-w0"], "random")
+    byt("base64 -d", "base64", ["-d"], "b64")
+    byt("base32", "base32", [], "random")
+    byt("basenc --base16", "basenc", ["--base16"], "random")
+    byt("basenc --base64url -w0", "basenc", ["--base64url", "-w0"], "random")
+    for tool in ("md5sum", "sha1sum", "sha224sum", "sha256sum", "sha384sum", "sha512sum", "b2sum", "cksum", "sum"):
+        byt(tool, tool, [], "random")
+    byt("uniq", "uniq", [], "runs")
+    byt("uniq -c", "uniq", ["-c"], "runs")
+    byt("uniq -d", "uniq", ["-d"], "runs")
+    byt("uniq -u", "uniq", ["-u"], "runs")
+    byt("uniq -i", "uniq", ["-i"], "runs")
+    byt("uniq -f1", "uniq", ["-f1"], "text")
+    byt("fmt -w 60", "fmt", ["-w", "60"], full_to=10 ** 8)
+    byt("pr -t -2", "pr", ["-t", "-2"], full_to=10 ** 8)
+    byt("numfmt --to=iec", "numfmt", ["--to=iec"], "numbers", stdin=True, full_to=10 ** 7)
+    byt("numfmt --from=si", "numfmt", ["--from=si"], "human", stdin=True, full_to=10 ** 7)
+    byt("factor", "factor", [], "numbers", stdin=True, quick=(10 ** 4, 10 ** 5, 10 ** 6), full_to=10 ** 7)
+
+    # ---- sort in every dialect
+    S = dict(full_to=10 ** 8, quick=Q3)
+    byt("sort", "sort", [], **S)
+    byt("sort -r", "sort", ["-r"], **S)
+    byt("sort -f", "sort", ["-f"], **S)
+    byt("sort -u (dupes)", "sort", ["-u"], "dupes", **S)
+    byt("sort -n", "sort", ["-n"], "numbers", **S)
+    byt("sort -nr", "sort", ["-nr"], "signed", **S)
+    byt("sort -g", "sort", ["-g"], "numbers", **S)
+    byt("sort -h", "sort", ["-h"], "human", **S)
+    byt("sort -V", "sort", ["-V"], "versions", **S)
+    byt("sort -t, -k2,2", "sort", ["-t,", "-k2,2"], "csv", **S)
+    byt("sort -t, -k3,3n", "sort", ["-t,", "-k3,3n"], "csv", **S)
+    byt("sort -t, -k1,1 -k3,3n -k2,2r", "sort", ["-t,", "-k1,1", "-k3,3n", "-k2,2r"], "csv", **S)
+    byt("sort -s -k1,1 (dupes)", "sort", ["-s", "-k1,1"], "dupes", **S)
+    byt("sort -u -n", "sort", ["-u", "-n"], "numbers", **S)
+    byt("sort -b -k2", "sort", ["-b", "-k2"], **S)
+    byt("shuf", "shuf", [], verify="sorted", **S)
+    byt("sort -S 1M (spills)", "sort", ["-S", "1M"], **S)
+    byt("sort -u -S 1M (spills)", "sort", ["-u", "-S", "1M"], "dupes", **S)
+    byt("sort -n -S 1M (spills)", "sort", ["-n", "-S", "1M"], "numbers", **S)
+
+    def sort_sorted(args, kind, flags, name):
+        def build(n):
+            f = D.sorted(kind, n, flags)
+            return ScaleJob(put(args, f=f))
+        add(name, "sort", "bytes", DEC, build, quick=Q3, floor=0, full_to=10 ** 8)
+    sort_sorted(["-c", "{f}"], "text", (), "sort -c")
+    sort_sorted(["-m", "{f}", "{f}"], "text", (), "sort -m")
+
+    # ---- two sorted files
+    def pairs(name, tool, args):
+        def build(n):
+            left, right = D.pair(n)
+            return ScaleJob(put(args, f=left, g=right))
+        add(name, tool, "bytes", DEC, build, quick=Q4, floor=0, full_to=10 ** 8)
+    pairs("comm -12", "comm", ["-12", "{f}", "{g}"])
+    pairs("comm -3", "comm", ["-3", "{f}", "{g}"])
+    pairs("join", "join", ["{f}", "{g}"])
+    pairs("join -a1 -e-", "join", ["-a1", "-e-", "-o", "0,1.2,2.2", "{f}", "{g}"])
+    pairs("join -v1", "join", ["-v1", "{f}", "{g}"])
+    pairs("paste f g", "paste", ["{f}", "{g}"])
+
+    # ---- counts instead of bytes
+    def counted(name, tool, args, points=COUNTS, quick=C3, stdin=False, verify="same", full_to=10 ** 6):
+        def build(n):
+            return ScaleJob(put(args, n=n), verify=verify)
+        add(name, tool, "count", points, build, quick=quick, floor=points[0], full_to=full_to)
+    counted("seq 1 N", "seq", ["1", "{n}"], points=(10 ** 3, 10 ** 4, 10 ** 5, 10 ** 6, 10 ** 7, 10 ** 8), quick=(10 ** 4, 10 ** 6, 10 ** 7), full_to=10 ** 8)
+    counted("seq -f %05g 1 N", "seq", ["-f", "%05g", "1", "{n}"], points=(10 ** 3, 10 ** 4, 10 ** 5, 10 ** 6, 10 ** 7), quick=(10 ** 4, 10 ** 6, 10 ** 7), full_to=10 ** 7)
+    counted("seq -s, 1 N", "seq", ["-s,", "1", "{n}"], points=(10 ** 3, 10 ** 4, 10 ** 5, 10 ** 6, 10 ** 7), quick=(10 ** 4, 10 ** 6, 10 ** 7), full_to=10 ** 7)
+    counted("seq 0.5 0.25 N", "seq", ["0.5", "0.25", "{n}"], points=(10 ** 3, 10 ** 4, 10 ** 5, 10 ** 6), quick=(10 ** 3, 10 ** 5, 10 ** 6), full_to=10 ** 6)
+    counted("shuf -i 1-N", "shuf", ["-i", "1-{n}"], points=(10 ** 3, 10 ** 4, 10 ** 5, 10 ** 6, 10 ** 7), quick=(10 ** 4, 10 ** 6), verify="sorted", full_to=10 ** 7)
+    counted("shuf -n 5 -i 1-N", "shuf", ["-n", "5", "-i", "1-{n}"], points=(10 ** 3, 10 ** 5, 10 ** 7), quick=(10 ** 3, 10 ** 7), verify="status", full_to=10 ** 7)
+
+    def tsort(n):
+        return ScaleJob([str(D.edges(n))], verify="sorted")
+    add("tsort", "tsort", "count", (10 ** 3, 10 ** 4, 10 ** 5, 10 ** 6), tsort, quick=(10 ** 3, 10 ** 5, 10 ** 6), floor=10 ** 3, full_to=10 ** 6)
+
+    # ---- grep
+    def grepb(name, args, kind="records", status=(0, 1), **kw):
+        byt("grep " + name, "grep", args, kind, status=status, **kw)
+    R = "records"
+    grepb("-c needle", ["-c", "needle"])
+    grepb("-F -c needle", ["-F", "-c", "needle"])
+    grepb("-v -c needle", ["-v", "-c", "needle"])
+    grepb("-n needle", ["-n", "needle"])
+    grepb("-o needle", ["-o", "needle"])
+    grepb("-w -c needle", ["-w", "-c", "needle"])
+    grepb("-i -c NEEDLE", ["-i", "-c", "NEEDLE"])
+    grepb("-x -c needle", ["-x", "-c", "alpha:000:needle"])
+    grepb("-E -c alpha:[0-9]+:needle", ["-E", "-c", "alpha:[0-9]+:needle"])
+    grepb("-E -c (alpha|beta):0[0-4]+:", ["-E", "-c", "(alpha|beta):0[0-4]+:"])
+    grepb("-c ^beta", ["-c", "^beta"])
+    grepb("-c plain$", ["-c", "plain$"])
+    grepb("-l needle", ["-l", "needle"])
+    grepb("-q needle", ["-q", "needle"])
+    grepb("-m 5 needle", ["-m", "5", "needle"])
+    grepb("-c ''", ["-c", ""])
+    grepb("-c -v ''", ["-c", "-v", ""])
+    grepb("-E -c x*", ["-E", "-c", "x*"])
+    grepb("-b -o needle", ["-b", "-o", "needle"])
+    grepb("-H -n needle", ["-H", "-n", "needle"])
+    grepb("--color=always needle", ["--color=always", "needle"])
+    grepb("-C 2 needle", ["-C", "2", "needle"], full_to=10 ** 8)
+    grepb("-z -c needle", ["-z", "-c", "needle"])
+    grepb("-a -c needle (binary)", ["-a", "-c", "x"], "binary")
+    grepb("-c x (binary)", ["-c", "x"], "binary")
+    grepb("-c the (text)", ["-c", "the"], "text")
+    grepb("-c -i the", ["-c", "-i", "the"], "text")
+    grepb("-c -w the", ["-c", "-w", "the"], "text")
+    grepb("-o -E [a-z]+ing", ["-o", "-E", "[a-z]+ing\\b"], "text", full_to=10 ** 8)
+    grepb("-c -E (a|e)(b|c)(d|f)", ["-c", "-E", "(a|e)(b|c)(d|f)"], "text")
+    grepb("-c backref", ["-c", "\\(.\\)\\1"], "text", full_to=10 ** 8)
+    grepb("-c a.*b.*c.*d.*e", ["-c", "a.*b.*c.*d.*e"], "text")
+    grepb("-c -E q[^u]", ["-c", "-E", "q[^u]"], "text")
+    grepb("-c é (UTF-8)", ["-c", "é"], "utf8", env=UTF8)
+    grepb("-c -i É (UTF-8)", ["-c", "-i", "É"], "utf8", env=UTF8)
+    grepb("-c -E [α-ω]+ (UTF-8)", ["-c", "-E", "[α-ω]+"], "utf8", env=UTF8)
+    grepb("-c . (UTF-8)", ["-c", "."], "utf8", env=UTF8)
+    grepb("-o 日本 (UTF-8)", ["-o", "日本"], "utf8", env=UTF8)
+    grepb("-c -w ar (UTF-8)", ["-c", "-w", "ar"], "utf8", env=UTF8)
+    grepb("-c a$ (CRLF)", ["-c", "a$"], "crlf")
+    grepb("-c -E ^(a+)+$ (one line)", ["-c", "-E", "^(a+)+$"], "same", points=SMALL + (10 ** 7,), quick=(10 ** 3, 10 ** 5, 10 ** 7))
+    grepb("-c a*b (one line)", ["-c", "a*b"], "same")
+    grepb("-c -E a{2,}b (one line)", ["-c", "-E", "a{2,}b"], "same")
+    grepb("-c -v b (one line)", ["-c", "-v", "b"], "same")
+
+    # grep at a fixed size, along the other dimensions
+    HAY = 2 * 10 ** 7
+
+    def patterns(name, flags, kind, hay="text", points=(1, 4, 16, 64, 256, 1024, 4096, 16384, 65536),
+                 quick=(1, 16, 256, 1024, 16384), full_to=65536):
+        def build(n):
+            return ScaleJob(flags + ["-f", str(D.patterns(n, kind)), str(D.file(hay, HAY))], status=(0, 1))
+        add("grep %s patterns (%s)" % (" ".join(flags), kind), "grep", "patterns", points, build, quick=quick, full_to=full_to)
+    patterns("-F -c", ["-F", "-c"], "words")
+    patterns("-F -c", ["-F", "-c"], "miss")
+    patterns("-E -c", ["-E", "-c"], "regex", quick=(1, 16, 256, 1024), points=(1, 4, 16, 64, 256, 1024, 4096), full_to=4096)
+    patterns("-F -w -c", ["-F", "-w", "-c"], "words")
+    patterns("-F -i -c", ["-F", "-i", "-c"], "words")
+    patterns("-F -x -c", ["-F", "-x", "-c"], "words", points=(1, 16, 256, 4096, 65536), quick=(1, 256, 4096))
+    patterns("-F -o", ["-F", "-o"], "words", points=(1, 16, 256, 4096), quick=(1, 16, 256, 4096), full_to=4096)
+    patterns("-F -v -c", ["-F", "-v", "-c"], "miss")
+
+    def args_patterns(n):
+        words = D.patterns(n, "words").read_text().split()
+        flags = []
+        for w in words:
+            flags += ["-e", w]
+        return ScaleJob(["-F", "-c", *flags, str(D.file("text", 10 ** 7))], status=(0, 1))
+    add("grep -F -e W -e W ... (arguments)", "grep", "patterns", (1, 4, 16, 64, 256, 1024, 4096), args_patterns,
+        quick=(1, 16, 256, 1024), full_to=4096)
+
+    def alternation(n):
+        words = D.patterns(n, "words").read_text().split()
+        return ScaleJob(["-E", "-c", "|".join(words), str(D.file("text", 10 ** 7))], status=(0, 1))
+    add("grep -E W|W|... (one pattern)", "grep", "patterns", (1, 4, 16, 64, 256, 1024, 4096), alternation,
+        quick=(1, 16, 256, 1024), full_to=4096)
+
+    def repeat(n):
+        return ScaleJob(["-E", "-c", "q[a-z]{%d}x" % n, str(D.file("text", 10 ** 7))], status=(0, 1))
+    add("grep -E [a-z]{N}", "grep", "repeat", (1, 10, 100, 1000, 10000), repeat, quick=(1, 100, 1000), full_to=10000)
+
+    def longpattern(n):
+        return ScaleJob(["-c", "x" * n, str(D.file("text", 10 ** 7))], status=(0, 1))
+    add("grep -c LITERAL (length N)", "grep", "length", (10, 100, 1000, 10000, 100000), longpattern, quick=(10, 1000, 10000), full_to=100000)
+
+    def linelen(args, kind="lines", total=32 * 10 ** 6):
+        def build(w):
+            return ScaleJob(put(args, f=D.lines(w, max(total // (w + 1), 1))), status=(0, 1))
+        return build
+    W = (1, 10, 100, 1000, 10000, 100000, 1000000)
+    WQ = (10, 1000, 100000, 1000000)
+    for name, tool, args in (
+        ("grep -c a", "grep", ["-c", "a", "{f}"]),
+        ("grep -c -v a", "grep", ["-c", "-v", "a", "{f}"]),
+        ("grep -c -F ab", "grep", ["-c", "-F", "ab", "{f}"]),
+        ("grep -c -E a.*b", "grep", ["-c", "-E", "a.*b", "{f}"]),
+        ("grep -o ab", "grep", ["-o", "ab", "{f}"]),
+        ("grep -c -w ab", "grep", ["-c", "-w", "ab", "{f}"]),
+        ("sed s/a/b/g", "sed", ["s/a/b/g", "{f}"]),
+        ("sed -n /ab/p", "sed", ["-n", "/ab/p", "{f}"]),
+        ("sed y/abc/xyz/", "sed", ["y/abc/xyz/", "{f}"]),
+        ("sed s/\\(a\\)\\(b\\)/\\2\\1/g", "sed", ["s/\\(a\\)\\(b\\)/\\2\\1/g", "{f}"]),
+        ("cut -c2-5", "cut", ["-c2-5", "{f}"]),
+        ("cut -b2-", "cut", ["-b2-", "{f}"]),
+        ("wc", "wc", ["{f}"]),
+        ("wc -L", "wc", ["-L", "{f}"]),
+        ("rev", "rev", ["{f}"]),
+        ("tac", "tac", ["{f}"]),
+        ("sort", "sort", ["{f}"]),
+        ("sort -u", "sort", ["-u", "{f}"]),
+        ("uniq", "uniq", ["{f}"]),
+        ("fold -w 20", "fold", ["-w", "20", "{f}"]),
+        ("fold -s -w 20", "fold", ["-s", "-w", "20", "{f}"]),
+        ("nl", "nl", ["{f}"]),
+        ("tr a-c x-z", "tr", ["a-c", "x-z"]),
+        ("head -n 100", "head", ["-n", "100", "{f}"]),
+        ("tail -n 100", "tail", ["-n", "100", "{f}"]),
+        ("awk {print length($0)}", "awk", ["{print length($0)}", "{f}"]),
+        ("awk {n+=NF}END{print n}", "awk", ["{n+=NF}END{print n}", "{f}"]),
+        ("awk {gsub(/a/,\"b\")}1", "awk", ["{gsub(/a/,\"b\")}1", "{f}"]),
+        ("awk {print toupper($0)}", "awk", ["{print toupper($0)}", "{f}"]),
+        ("awk {print substr($0,2,3)}", "awk", ["{print substr($0,2,3)}", "{f}"]),
+        ("awk {print index($0,\"ab\")}", "awk", ["{print index($0,\"ab\")}", "{f}"]),
+        ("awk /ab/{n++}END{print n+0}", "awk", ["/ab/{n++}END{print n+0}", "{f}"]),
+    ):
+        if tool == "tr":
+            def build(w, args=args):
+                return ScaleJob(put(args), stdin=D.lines(w, max(32 * 10 ** 6 // (w + 1), 1)))
+            add("tr a-c x-z (line length)", "tr", "line length", W, build, quick=WQ, full_to=10 ** 6)
+        else:
+            add(name + " (line length)", tool, "line length", W, linelen(args), quick=WQ, full_to=10 ** 6)
+
+    # ---- sed
+    sedtool = lambda name, args, kind=R, **kw: byt("sed " + name, "sed", args, kind, **kw)
+    sedtool("s/alpha/omega/g", ["s/alpha/omega/g"])
+    sedtool("s/[aeiou]/X/g", ["s/[aeiou]/X/g"], "text")
+    sedtool("s/\\(a\\)\\(.\\)/\\2\\1/g", ["s/\\(a\\)\\(.\\)/\\2\\1/g"], "text")
+    sedtool("-E s/(a|b)+/<&>/g", ["-E", "s/(a|b)+/<&>/g"], "text")
+    sedtool("-E s/\\s+/ /g", ["-E", "s/\\s+/ /g"], "text")
+    sedtool("y/abcdef/ABCDEF/", ["y/abcdef/ABCDEF/"], "text")
+    sedtool("-n /needle/p", ["-n", "/needle/p"])
+    sedtool("-n $p", ["-n", "$p"])
+    sedtool("5q", ["5q"])
+    sedtool("-n 5p", ["-n", "5p"])
+    sedtool("1~3d", ["1~3d"])
+    sedtool("/alpha/,/beta/d", ["/alpha/,/beta/d"])
+    sedtool("$!N;P;D", ["$!N;P;D"], full_to=10 ** 8)
+    sedtool("G", ["G"])
+    sedtool("s/^/> /", ["s/^/> /"])
+    sedtool("s/$/ </", ["s/$/ </"])
+    sedtool("-z s/\\n/,/g", ["-z", "s/\\n/,/g"], "text", full_to=10 ** 8)
+    sedtool("-s -n $=", ["-n", "$="])
+    sedtool("=", ["="])
+    sedtool("l", ["l"], "text", full_to=10 ** 8)
+    sedtool("s/.*/\\U&/", ["s/.*/\\U&/"], "text")
+    sedtool("s/a/b/2", ["s/a/b/2"], "text")
+    sedtool("-n s/needle/X/p", ["-n", "s/needle/X/p"])
+    sedtool("/start/I,+2d", ["/ALPHA:00/I,+2d"])
+    sedtool("-n $!{h;d};H;x;p", ["-n", "$!{h;d};H;x;p"], full_to=10 ** 8)
+
+    def one_line(args, name, points=DEC, quick=(10 ** 3, 10 ** 5, 10 ** 7), full_to=10 ** 8):
+        def build(n):
+            return ScaleJob(put(args, f=D.file("same", n)), status=(0, 1))
+        add(name, name.split()[0], "bytes", points, build, quick=quick, floor=0, full_to=full_to)
+    one_line(["s/a/b/g", "{f}"], "sed s/a/b/g (one line)")
+    one_line(["s/a*/<&>/g", "{f}"], "sed s/a*/<&>/g (one line)")
+    one_line(["-E", "s/(a)+/b/", "{f}"], "sed -E s/(a)+/b/ (one line)")
+    one_line(["y/a/b/", "{f}"], "sed y/a/b/ (one line)")
+    one_line(["-n", "$=", "{f}"], "sed -n $= (one line)")
+    one_line(["-n", "l", "{f}"], "sed -n l (one line)", quick=(10 ** 3, 10 ** 5, 10 ** 6), full_to=10 ** 7)
+
+    def manycommands(n):
+        words = D.patterns(n, "words").read_text().split()
+        script = D.root / ("script-%d.sed" % n)
+        if not script.exists():
+            script.write_text("".join("s/%s/%d/g\n" % (w, i) for i, w in enumerate(words)))
+        return ScaleJob(["-f", str(script), str(D.file("text", 10 ** 6))])
+    add("sed -f (N commands)", "sed", "commands", (1, 10, 100, 1000, 10000), manycommands, quick=(1, 100, 1000, 10000), full_to=10000)
+
+    def manyexpr(n):
+        flags = []
+        for i in range(n):
+            flags += ["-e", "s/w%d/x/g" % i]
+        return ScaleJob([*flags, str(D.file("text", 10 ** 6))])
+    add("sed -e ... (N arguments)", "sed", "commands", (1, 10, 100, 1000, 5000), manyexpr, quick=(1, 100, 1000, 5000), full_to=5000)
+
+    def manylabels(n):
+        script = D.root / ("labels-%d.sed" % n)
+        if not script.exists():
+            script.write_text("".join(":l%d\n" % i for i in range(n)) + "s/e/E/g\n")
+        return ScaleJob(["-f", str(script), str(D.file("text", 10 ** 6))])
+    add("sed -f (N labels and one s)", "sed", "commands", (10, 100, 1000, 10000), manylabels, quick=(10, 1000, 10000), full_to=10000)
+
+    def longregex(n):
+        return ScaleJob(["-E", "s/(a|b){%d}/X/" % n, str(D.file("text", 10 ** 6))], status=(0, 1))
+    add("sed -E s/(a|b){N}/X/", "sed", "repeat", (1, 10, 100, 1000), longregex, quick=(1, 100, 1000), full_to=1000)
+
+    # ---- awk
+    def awk(name, program, kind=R, args=(), **kw):
+        byt("awk " + name, "awk", [*args, program, "{f}"], kind, **kw)
+    awk("{n+=NF}END{print n}", "{n+=NF}END{print n}", "text")
+    awk("{s+=$1}END (numbers)", "{s+=$1}END{print s}", "numbers")
+    awk("{s+=length($0)}END", "{s+=length($0)}END{print s}", "text")
+    awk("{print $1}", "{print $1}", "text")
+    awk("{print $NF}", "{print $NF}", "text")
+    awk("-F: {print $2}", "{print $2}", R, ["-F:"])
+    awk("-F: {s+=$2}END", "{s+=$2}END{print s}", R, ["-F:"])
+    awk("-F: {c[$1]++}END", "{c[$1]++}END{for(k in c)n++;print n}", R, ["-F:"])
+    awk("-F, {c[$1]++}END (csv)", "{c[$1]++}END{for(k in c)n++;print n}", "csv", ["-F,"], full_to=10 ** 8)
+    awk("/needle/{n++}END", "/needle/{n++}END{print n}")
+    awk("{gsub(/a/,\"b\")}1", "{gsub(/a/,\"b\")}1", "text")
+    awk("{print length($0)}", "{print length($0)}", "text")
+    awk("{print toupper($0)}", "{print toupper($0)}", "text")
+    awk("{$2=\"x\";print}", "{$2=\"x\";print}", "text")
+    awk("{print NR\": \"$0}", "{print NR\": \"$0}", "text")
+    awk("NR%2==0", "NR%2==0", "text")
+    awk("{a[NR]=$0}END tac", "{a[NR]=$0}END{for(i=NR;i>0;i--)print a[i]}", "text", full_to=10 ** 8, quick=Q3)
+    awk("{printf \"%s %d\\n\",$1,NR}", "{printf \"%s %d\\n\",$1,NR}", "text")
+    awk("{print substr($0,3,5)}", "{print substr($0,3,5)}", "text")
+    awk("{n=split($0,p,\":\");s+=n}END", "{n=split($0,p,\":\");s+=n}END{print s}")
+    awk("{sub(/:.*/,\"\")}1", "{sub(/:.*/,\"\")}1")
+    awk("{if(match($0,/[0-9]+/))s+=RLENGTH}END", "{if(match($0,/[0-9]+/))s+=RLENGTH}END{print s}", R)
+    awk("{x=x $1}END{print length(x)}", "{x=x $1}END{print length(x)}", "text", full_to=10 ** 8, quick=Q3)
+    awk("{s=sprintf(\"%05d-%s\",NR,$1);n+=length(s)}END", "{s=sprintf(\"%05d-%s\",NR,$1);n+=length(s)}END{print n}", "text")
+    awk("BEGIN{RS=\"\"}{n++}END (paragraph)", "BEGIN{RS=\"\"}{n++}END{print n+0}", "text", full_to=10 ** 8)
+    awk("{print $1,$2}OFS=,", "BEGIN{OFS=\",\"}{print $1,$2}", "text")
+    awk("{print > \"/dev/null\"}", "{print > \"/dev/null\"}", "text")
+
+    def awkloop(name, program, points=(10 ** 3, 10 ** 4, 10 ** 5, 10 ** 6, 10 ** 7), quick=(10 ** 4, 10 ** 5, 10 ** 6, 10 ** 7), full_to=10 ** 7, status=(0,)):
+        def build(n):
+            return ScaleJob([program.replace("N", str(n))], status=status)
+        add("awk BEGIN " + name, "awk", "count", points, build, quick=quick, floor=0, full_to=full_to)
+    awkloop("{for(i=0;i<N;i++)s+=i}", "BEGIN{for(i=0;i<N;i++)s+=i;print s}")
+    awkloop("{for(i=0;i<N;i++)a[i]=i}", "BEGIN{for(i=0;i<N;i++)a[i]=i;for(k in a)s+=a[k];print s}", full_to=10 ** 7)
+    awkloop("{for(i=0;i<N;i++)a[\"k\" i]=i}", "BEGIN{for(i=0;i<N;i++)a[\"k\" i]=i;print length(a)}", full_to=10 ** 7)
+    awkloop("{s=s \"x\"}", "BEGIN{for(i=0;i<N;i++)s=s \"x\";print length(s)}", points=(10 ** 3, 10 ** 4, 10 ** 5, 10 ** 6, 10 ** 7), quick=(10 ** 4, 10 ** 5, 10 ** 6, 10 ** 7))
+    awkloop("{s=s sprintf(...)}split", "BEGIN{for(i=0;i<N;i++)s=s sprintf(\"%d,\",i);print split(s,a,\",\")}", points=(10 ** 3, 10 ** 4, 10 ** 5, 10 ** 6), quick=(10 ** 4, 10 ** 5, 10 ** 6), full_to=10 ** 6)
+    awkloop("{printf \"%d\\n\",i}", "BEGIN{for(i=0;i<N;i++)printf \"%d\\n\",i}", full_to=10 ** 7)
+    awkloop("{x=substr(s,i%100+1,5)}", "BEGIN{s=sprintf(\"%1000s\",\"\");for(i=0;i<N;i++)x=substr(s,i%100+1,5);print length(x)}")
+    awkloop("{delete a[i]}", "BEGIN{for(i=0;i<N;i++)a[i]=1;for(i=0;i<N;i++)delete a[i];print length(a)}", full_to=10 ** 7)
+    awkloop("{function f(x){return x+1}}", "function f(x){return x+1}BEGIN{for(i=0;i<N;i++)s=f(s);print s}")
+    awkloop("{s=s \"x\"}END gsub", "BEGIN{for(i=0;i<N;i++)s=s \"ab\";gsub(/a/,\"c\",s);print length(s)}", points=(10 ** 3, 10 ** 4, 10 ** 5, 10 ** 6), quick=(10 ** 4, 10 ** 5, 10 ** 6), full_to=10 ** 6)
+    awkloop("{s=s \"x\"}END match", "BEGIN{for(i=0;i<N;i++)s=s \"ab\";print match(s,/b$/)}", points=(10 ** 3, 10 ** 4, 10 ** 5, 10 ** 6), quick=(10 ** 4, 10 ** 5, 10 ** 6), full_to=10 ** 6)
+
+    def awkfields(args, name, points=(1, 10, 100, 1000, 10 ** 4, 10 ** 5)):
+        def build(n):
+            return ScaleJob(put(args, f=D.fields(n, 16 * 10 ** 6)))
+        add("awk " + name + " (N fields)", "awk", "fields", points, build, quick=(10, 1000, 10 ** 5), full_to=10 ** 5)
+    awkfields(["{print NF}", "{f}"], "{print NF}")
+    awkfields(["{print $NF}", "{f}"], "{print $NF}")
+    awkfields(["{for(i=1;i<=NF;i++)s+=length($i)}END{print s}", "{f}"], "{for(i=1;i<=NF;i++)...}")
+    awkfields(["{$1=$1;print length($0)}", "{f}"], "{$1=$1}")
+    awkfields(["{$(NF+1)=\"x\";print NF}", "{f}"], "{$(NF+1)=x}")
+    awkfields(["{NF=3;print}", "{f}"], "{NF=3}")
+    awkfields(["{n=split($0,a);s+=n}END{print s}", "{f}"], "split")
+
+    # ---- fields and keys for the other tools
+    def fieldtool(tool, args, name, points=(1, 10, 100, 1000, 10 ** 4, 10 ** 5), total=16 * 10 ** 6, quick=(10, 1000, 10 ** 5)):
+        def build(n):
+            return ScaleJob(put(args, f=D.fields(n, total)))
+        add(name + " (N fields)", tool, "fields", points, build, quick=quick, full_to=points[-1])
+    fieldtool("cut", ["-d", " ", "-f2", "{f}"], "cut -d' ' -f2")
+    fieldtool("cut", ["-d", " ", "-f1-", "{f}"], "cut -d' ' -f1-")
+    fieldtool("cut", ["-d", " ", "--complement", "-f1", "{f}"], "cut --complement -f1")
+    fieldtool("sort", ["-k1,1", "{f}"], "sort -k1,1")
+    fieldtool("sort", ["-k2", "{f}"], "sort -k2")
+    fieldtool("paste", ["-s", "{f}"], "paste -s")
+    fieldtool("wc", ["-w", "{f}"], "wc -w")
+    fieldtool("expand", ["{f}"], "expand")
+    fieldtool("fold", ["-s", "-w", "40", "{f}"], "fold -s -w 40")
+    fieldtool("fmt", ["{f}"], "fmt", points=(1, 10, 100, 1000), quick=(10, 100, 1000), total=4 * 10 ** 6)
+
+    def keys(n):
+        flags = []
+        for k in range(1, n + 1):
+            flags.append("-k%d,%d" % (k, k))
+        return ScaleJob([*flags, str(D.fields(100, 8 * 10 ** 6))])
+    add("sort -kN,N ... (N keys)", "sort", "keys", (1, 2, 4, 8, 16, 32, 64, 100), keys, quick=(1, 8, 64, 100), full_to=100)
+
+    # ---- tools that read many files named on the command line
+    def manyfiles(tool, args, name, shape="small", points=(10 ** 2, 10 ** 3, 10 ** 4, 5 * 10 ** 4), quick=(10 ** 2, 10 ** 3, 10 ** 4)):
+        def build(n):
+            tree = D.tree(shape, n)
+            names = sorted(str(p.relative_to(tree)) for p in tree.rglob("*") if p.is_file())
+            return ScaleJob([*args, *names], cwd=str(tree), verify="same")
+        add(name, tool, "files", points, build, quick=quick, full_to=points[-1])
+    manyfiles("sha256sum", [], "sha256sum (N files)")
+    manyfiles("md5sum", [], "md5sum (N files)")
+    manyfiles("cat", [], "cat (N files)")
+    manyfiles("wc", ["-l"], "wc -l (N files)")
+    manyfiles("grep", ["-c", "the"], "grep -c (N files)")
+    manyfiles("head", ["-n", "1"], "head -n 1 (N files)")
+    manyfiles("tail", ["-n", "1"], "tail -n 1 (N files)")
+    manyfiles("cksum", [], "cksum (N files)")
+    manyfiles("stat", ["-c", "%s"], "stat -c %s (N files)")
+    manyfiles("ls", ["-l"], "ls -l (N names)")
+    manyfiles("ls", [], "ls (N names)")
+    manyfiles("basename", ["-a"], "basename -a (N names)")
+    manyfiles("realpath", [], "realpath (N names)")
+    manyfiles("readlink", ["-f"], "readlink -f (N names)")
+    manyfiles("sort", [], "sort (N files)")
+    manyfiles("cut", ["-c1-3"], "cut -c1-3 (N files)")
+    manyfiles("sed", ["-n", "$="], "sed -n $= (N files)")
+    manyfiles("awk", ["END{print NR}"], "awk END{print NR} (N files)")
+    manyfiles("tar", ["-cf", "/dev/null"], "tar -cf /dev/null (N names)")
+    manyfiles("env", ["true"], "env true (N args)")
+
+
+def scale_catalog_codecs(D, out):
+    DEC = SCALE_DECADES
+    Q4 = (10 ** 5, 10 ** 7, 10 ** 8)
+
+    def add(name, tool, dim, points, build, **kw):
+        out.append(ScaleSeries(name, tool, dim, points, build, **kw))
+
+    def roundtrip(codec):
+        def check(impl, bench, work):
+            with open(bench.out, "rb") as packed, open(bench.scratch / "round.out", "wb") as plain:
+                status = subprocess.run(["/usr/bin/" + codec, "-dc"], stdin=packed, stdout=plain).returncode
+            return "%d:%s" % (status, scale_digest_file(bench.scratch / "round.out"))
+        return check
+
+    LEVELS = {"gzip": (1, 6, 9), "xz": (0, 1, 6, 9), "zstd": (1, 3, 9, 19)}
+    SLOW = {("xz", 9): 10 ** 7, ("xz", 6): 10 ** 8, ("zstd", 19): 10 ** 7, ("gzip", 9): 10 ** 8, ("xz", 1): 10 ** 8}
+    for codec, levels in LEVELS.items():
+        for level in levels:
+            cap = SLOW.get((codec, level), 10 ** 9)
+
+            def build(n, codec=codec, level=level, kind="text"):
+                return ScaleJob(["-c", "-%d" % level, str(D.file(kind, n))], verify="status", check=roundtrip(codec))
+            quick = tuple(p for p in Q4 if p <= min(cap, 10 ** 7 if level in (9, 19) or (codec == "xz" and level >= 6) else 10 ** 8))
+            add("%s -%d (text)" % (codec, level), codec, "bytes", DEC, build, quick=quick, floor=0, full_to=cap)
+        for kind in ("random", "zero", "entropy2", "utf8"):
+            level = {"gzip": 6, "xz": 6, "zstd": 3}[codec]
+
+            def build(n, codec=codec, level=level, kind=kind):
+                return ScaleJob(["-c", "-%d" % level, str(D.file(kind, n))], verify="status", check=roundtrip(codec))
+            add("%s -%d (%s)" % (codec, level, kind), codec, "bytes", DEC, build, quick=(10 ** 4, 10 ** 6, 10 ** 7),
+                floor=0, full_to=10 ** 8 if codec == "xz" else 10 ** 9)
+
+        def decode(n, codec=codec, kind="text"):
+            level = {"gzip": 6, "xz": 6, "zstd": 3}[codec]
+            return ScaleJob(["-dc", str(D.packed(codec, kind, n, level))])
+        for kind in ("text", "random", "zero"):
+            add("%s -dc (%s)" % (codec, kind), codec, "bytes", DEC,
+                lambda n, codec=codec, kind=kind: ScaleJob(["-dc", str(D.packed(codec, kind, n, {"gzip": 6, "xz": 6, "zstd": 3}[codec]))]),
+                quick=Q4, floor=0, full_to=10 ** 8)
+        # the empty file, one byte, a hundred: what a small file costs
+        add("%s -c (tiny)" % codec, codec, "bytes", (0, 1, 10, 100, 1000),
+            lambda n, codec=codec: ScaleJob(["-c", str(D.file("text", n))], verify="status", check=roundtrip(codec)),
+            quick=(0, 1, 100, 1000))
+        add("%s -dc (tiny)" % codec, codec, "bytes", (0, 1, 10, 100, 1000),
+            lambda n, codec=codec: ScaleJob(["-dc", str(D.packed(codec, "text", n, {"gzip": 6, "xz": 6, "zstd": 3}[codec]))]),
+            quick=(0, 1, 100, 1000))
+        # entropy 0..8 bits a byte, 4 MB: where the encoder's strategy changes
+        level = {"gzip": 6, "xz": 6, "zstd": 3}[codec]
+        add("%s -%d (entropy)" % (codec, level), codec, "entropy", (0, 1, 2, 3, 4, 6, 8),
+            lambda n, codec=codec, level=level: ScaleJob(["-c", "-%d" % level, str(D.file("entropy%d" % n, 4 * 10 ** 6))],
+                                                          verify="status", check=roundtrip(codec)),
+            quick=(0, 2, 4, 8), full_to=8)
+        add("%s -dc (entropy)" % codec, codec, "entropy", (0, 1, 2, 3, 4, 6, 8),
+            lambda n, codec=codec, level=level: ScaleJob(["-dc", str(D.packed(codec, "entropy%d" % n, 4 * 10 ** 6, level))]),
+            quick=(0, 2, 4, 8), full_to=8)
+        top = {"gzip": 9, "xz": 9, "zstd": 19}[codec]
+        low = {"gzip": 1, "xz": 0, "zstd": 1}[codec]
+        add("%s -N (level, 4 MB text)" % codec, codec, "level", tuple(range(low, top + 1)),
+            lambda n, codec=codec: ScaleJob(["-c", "-%d" % n, str(D.file("text", 4 * 10 ** 6))], verify="status", check=roundtrip(codec)),
+            quick=(low, (low + top) // 2, top), full_to=top)
+
+    # processors: the pool paths against the host's, at the same affinity
+    def threads(name, tool, args, kind="text", n=64 * 10 ** 6, verify="same", check=None, counts=(1, 2, 4, 8), stdin=False):
+        def build(c):
+            f = D.file(kind, n)
+            return ScaleJob(put(args, f=f) if (stdin or any("{f}" in a for a in args)) else [*args, str(f)],
+                            stdin=f if stdin else None, verify=verify, check=check, cpus=c)
+        add(name + " (processors)", tool, "cpus", counts, build, quick=(1, 4, 8), full_to=8)
+
+    def put(args, **names):
+        result = []
+        for a in args:
+            for key, value in names.items():
+                a = a.replace("{%s}" % key, str(value))
+            result.append(a)
+        return result
+    threads("xz -6 -T{cpus}", "xz", ["-c", "-6", "-T0"], verify="status", check=roundtrip("xz"), n=32 * 10 ** 6)
+    threads("zstd -3 -T0", "zstd", ["-c", "-3", "-T0"], verify="status", check=roundtrip("zstd"))
+    threads("zstd -19 -T0", "zstd", ["-c", "-19", "-T0"], verify="status", check=roundtrip("zstd"), n=8 * 10 ** 6)
+    threads("gzip -6", "gzip", ["-c", "-6"], verify="status", check=roundtrip("gzip"))
+    threads("sort", "sort", [])
+    threads("sort -n", "sort", ["-n"], "numbers")
+    threads("sort -u", "sort", ["-u"], "dupes")
+    threads("sort -t, -k2,2", "sort", ["-t,", "-k2,2"], "csv")
+    threads("cat", "cat", [], n=256 * 10 ** 6)
+    threads("wc -l", "wc", ["-l"], n=256 * 10 ** 6)
+    threads("wc -m (UTF-8)", "wc", ["-m"], "utf8", n=128 * 10 ** 6)
+    threads("grep -c needle", "grep", ["-c", "needle"], "records", n=256 * 10 ** 6)
+    threads("grep -c the", "grep", ["-c", "the"], "text", n=256 * 10 ** 6)
+    threads("grep -c -i the", "grep", ["-c", "-i", "the"], "text", n=256 * 10 ** 6)
+    threads("grep -c -E (a|e)(b|c)(d|f)", "grep", ["-c", "-E", "(a|e)(b|c)(d|f)"], "text", n=128 * 10 ** 6)
+    threads("tr a-z A-Z", "tr", ["a-z", "A-Z"], n=256 * 10 ** 6, stdin=True)
+    threads("cut -d, -f2", "cut", ["-d,", "-f2"], "csv", n=256 * 10 ** 6)
+    threads("head -n -10", "head", ["-n", "-10"], n=256 * 10 ** 6)
+    threads("tail -n 100000", "tail", ["-n", "100000"], n=256 * 10 ** 6)
+    threads("sed s/alpha/omega/g", "sed", ["s/alpha/omega/g"], "records", n=128 * 10 ** 6)
+    threads("awk {n+=NF}END", "awk", ["{n+=NF}END{print n}"], n=128 * 10 ** 6)
+    threads("sha256sum", "sha256sum", [], "random", n=256 * 10 ** 6)
+    threads("md5sum", "md5sum", [], "random", n=256 * 10 ** 6)
+    threads("b2sum", "b2sum", [], "random", n=256 * 10 ** 6)
+    threads("cksum", "cksum", [], "random", n=256 * 10 ** 6)
+    threads("base64", "base64", [], "random", n=256 * 10 ** 6)
+    threads("uniq -c", "uniq", ["-c"], "runs", n=128 * 10 ** 6)
+
+    # ---- tar
+    def untar(impl, bench, work):
+        target = bench.scratch / "untar"
+        subprocess.run(["/usr/bin/rm", "-rf", str(target)], check=True)
+        target.mkdir()
+        status = subprocess.run(["/usr/bin/tar", "-xf", str(bench.out), "-C", str(target)], stderr=subprocess.DEVNULL).returncode
+        return "%d:%s" % (status, scale_digest_tree(target))
+
+    def tree_files(shape, args, name, points=(10 ** 2, 10 ** 3, 10 ** 4, 10 ** 5), quick=(10 ** 2, 10 ** 4, 10 ** 5),
+                   mode="same", fresh=None, check=None, full_to=10 ** 6):
+        def build(n):
+            tree = D.tree(shape, n)
+            a = [x.replace("{t}", str(tree)).replace("{a}", str(D.archive(shape, n)) if "{a}" in "".join(args) else "") for x in args]
+            return ScaleJob(a, verify=mode, fresh=fresh, check=check)
+        add(name, args and name.split()[0], "files", points, build, quick=quick, full_to=full_to)
+    tree_files("small", ["-cf", "-", "-C", "{t}", "."], "tar -c (N small files)", mode="status", check=untar, points=(10 ** 2, 10 ** 3, 10 ** 4, 10 ** 5))
+    tree_files("small", ["-tf", "{a}"], "tar -t (N members)")
+    tree_files("small", ["-tvf", "{a}"], "tar -tv (N members)")
+    tree_files("small", ["-xf", "{a}", "-C", "{w}"], "tar -x (N small files)", mode="tree", fresh=scale_mkdir)
+    tree_files("flat", ["-cf", "-", "-C", "{t}", "."], "tar -c (N empty files in one directory)", mode="status", check=untar)
+    tree_files("deep", ["-cf", "-", "-C", "{t}", "."], "tar -c (deep, N levels)", mode="status", check=untar, points=(10, 100, 500, 1000, 1900), quick=(10, 500, 1900), full_to=1900)
+
+    def tarbig(kind, flags, name, points=DEC, quick=(10 ** 4, 10 ** 6, 10 ** 8), full_to=10 ** 9):
+        def build(n):
+            f = D.file(kind, n)
+            return ScaleJob([*flags, "-cf", "-", "-C", str(f.parent), f.name], verify="status", check=untar)
+        add(name, "tar", "bytes", points, build, quick=quick, floor=0, full_to=full_to)
+    tarbig("text", [], "tar -c (one file, text)")
+    tarbig("random", [], "tar -c (one file, random)")
+
+    def tarbigx(kind, name, points=DEC, quick=(10 ** 4, 10 ** 6, 10 ** 8), full_to=10 ** 9):
+        def build(n):
+            f = D.file(kind, n)
+            archive = D.made_by("tarred-%s-%d.tar" % (kind, n), ["/usr/bin/tar", "-cf", "-", "-C", str(f.parent), f.name])
+            return ScaleJob(["-xf", str(archive), "-C", "{w}"], verify="tree", fresh=scale_mkdir)
+        add(name, "tar", "bytes", points, build, quick=quick, floor=0, full_to=full_to)
+    tarbigx("text", "tar -x (one file, text)")
+
+    def tarsparse(n):
+        f = D.sparse(n)
+        return ScaleJob(["-cSf", "-", "-C", str(f.parent), f.name], verify="status", check=untar)
+    add("tar -cS (sparse, N apparent bytes)", "tar", "bytes", (10 ** 7, 10 ** 8, 10 ** 9, 10 ** 10), tarsparse, quick=(10 ** 8, 10 ** 9), full_to=10 ** 10)
+
+    def tarlong(n):
+        return ScaleJob(["-cf", "-", "-C", str(D.longnames(n)), "."], verify="status", check=untar)
+    add("tar -c (N levels of 200-letter names)", "tar", "levels", (1, 2, 4, 8, 15), tarlong, quick=(1, 4, 15), full_to=15)
+
+    def tarz(flag, extract=False):
+        def build(n):
+            tree = D.tree("small", n)
+            if extract:
+                packed = D.made_by("tarz-%s-%d" % (flag.strip("-"), n), ["/usr/bin/tar", flag, "-cf", "-", "-C", str(tree), "."])
+                return ScaleJob([flag, "-xf", str(packed), "-C", "{w}"], verify="tree", fresh=scale_mkdir)
+            return ScaleJob([flag, "-cf", "-", "-C", str(tree), "."], verify="status", check=lambda impl, bench, work: untar_z(flag, bench))
+        return build
+
+    def untar_z(flag, bench):
+        target = bench.scratch / "untar"
+        subprocess.run(["/usr/bin/rm", "-rf", str(target)], check=True)
+        target.mkdir()
+        status = subprocess.run(["/usr/bin/tar", "-xf", str(bench.out), "-C", str(target)], stderr=subprocess.DEVNULL).returncode
+        return "%d:%s" % (status, scale_digest_tree(target))
+    for flag in ("-z", "-J", "--zstd"):
+        add("tar %s -c (N small files)" % flag, "tar", "files", (10 ** 2, 10 ** 3, 10 ** 4), tarz(flag), quick=(10 ** 2, 10 ** 4), full_to=10 ** 4)
+        add("tar %s -x (N small files)" % flag, "tar", "files", (10 ** 2, 10 ** 3, 10 ** 4), tarz(flag, True), quick=(10 ** 2, 10 ** 4), full_to=10 ** 4)
+
+
+def scale_catalog_files(D, out):
+    DEC = SCALE_DECADES
+    COUNTS = (10 ** 2, 10 ** 3, 10 ** 4, 10 ** 5, 10 ** 6)
+    C3 = (10 ** 2, 10 ** 4, 10 ** 5)
+
+    def add(name, tool, dim, points, build, **kw):
+        out.append(ScaleSeries(name, tool, dim, points, build, **kw))
+
+    def sub(args, **names):
+        result = []
+        for a in args:
+            for key, value in names.items():
+                a = a.replace("{%s}" % key, str(value))
+            result.append(a)
+        return result
+
+    # a walk of a tree of N entries, flat or bushy, read-only
+    def walk(tool, args, label, shape, points=COUNTS, quick=C3, verify="sorted", status=(0,), full_to=10 ** 6):
+        def build(n):
+            return ScaleJob(sub(args, t=D.tree(shape, n)), verify=verify, status=status)
+        add("%s %s (%s, N entries)" % (tool, label, shape), tool, "entries", points, build, quick=quick, full_to=full_to)
+    for shape in ("flat", "bushy"):
+        walk("find", ["{t}"], "T", shape)
+        walk("find", ["{t}", "-type", "f"], "-type f", shape)
+        walk("find", ["{t}", "-name", "*.TxT"], "-name", shape)
+        walk("find", ["{t}", "-iname", "*.TXT"], "-iname", shape)
+        walk("find", ["{t}", "-regex", ".*/E[a-z]*-00[0-9]*\\.TxT"], "-regex", shape)
+        walk("find", ["{t}", "-size", "+0"], "-size +0", shape)
+        walk("find", ["{t}", "-empty"], "-empty", shape)
+        walk("find", ["{t}", "-maxdepth", "1"], "-maxdepth 1", shape)
+        walk("find", ["{t}", "-printf", "%p %s %m\\n"], "-printf", shape)
+        walk("find", ["{t}", "-exec", "echo", "{}", "+"], "-exec +", shape, verify="status")
+        walk("find", ["{t}", "-perm", "-644"], "-perm", shape)
+        walk("find", ["{t}", "-newer", "{t}"], "-newer", shape)
+        walk("find", ["{t}", "-type", "f", "-not", "-name", "*.dat"], "-not -name", shape)
+        walk("find", ["{t}", "-mindepth", "1", "-prune"], "-prune", shape)
+        walk("du", ["-a", "{t}"], "-a", shape)
+        walk("du", ["-s", "{t}"], "-s", shape)
+        walk("du", ["-sh", "--apparent-size", "{t}"], "-sh --apparent-size", shape)
+        if shape == "flat":
+            walk("ls", ["-U", "{t}"], "-U", shape, verify="same")
+            walk("ls", ["{t}"], "", shape, verify="same")
+            walk("ls", ["-l", "{t}"], "-l", shape, verify="same")
+            walk("ls", ["-lh", "{t}"], "-lh", shape, verify="same")
+            walk("ls", ["-S", "{t}"], "-S", shape, verify="sorted")
+            walk("ls", ["-t", "{t}"], "-t", shape, verify="sorted")
+            walk("ls", ["-F", "{t}"], "-F", shape, verify="same")
+            walk("ls", ["-i", "{t}"], "-i", shape, verify="sorted")
+            walk("ls", ["--color=always", "-l", "{t}"], "--color=always -l", shape, verify="same")
+        if shape == "bushy":
+            walk("ls", ["-R", "{t}"], "-R", shape, verify="sorted")
+            walk("ls", ["-lR", "{t}"], "-lR", shape, verify="sorted")
+        walk("stat", ["-c", "%n %s", "{t}"], "-c", shape)
+    walk("grep", ["-r", "-c", "the", "{t}"], "-r -c", "small", points=(10 ** 2, 10 ** 3, 10 ** 4, 10 ** 5), quick=(10 ** 2, 10 ** 4, 10 ** 5), full_to=10 ** 5)
+    walk("grep", ["-r", "-l", "the", "{t}"], "-r -l", "small", points=(10 ** 2, 10 ** 3, 10 ** 4, 10 ** 5), quick=(10 ** 2, 10 ** 4, 10 ** 5), full_to=10 ** 5)
+    walk("grep", ["-r", "-F", "-c", "-e", "the", "-e", "and", "{t}"], "-r -F -c", "small", points=(10 ** 2, 10 ** 3, 10 ** 4, 10 ** 5), quick=(10 ** 2, 10 ** 4, 10 ** 5), full_to=10 ** 5)
+
+    # deep: depth, in levels
+    DEEP = (10, 100, 500, 1000, 1900)
+    for tool, args, label in (("find", ["{t}"], ""), ("find", ["{t}", "-type", "f"], "-type f"),
+                              ("du", ["-a", "{t}"], "-a"), ("ls", ["-R", "{t}"], "-R"), ("ls", ["-lR", "{t}"], "-lR"),
+                              ("stat", ["-c", "%n", "{t}"], "")):
+        walk(tool, args, label, "deep", points=DEEP, quick=(10, 500, 1900), full_to=1900)
+
+    # trees that a command changes: a fresh copy each run, the result compared
+    def change(tool, args, label, shape, points=COUNTS, quick=C3, copy=True, full_to=10 ** 6, verify="tree", source=False):
+        def build(n):
+            tree = D.tree(shape, n)
+            return ScaleJob(sub(args, t=tree), fresh=(tree if copy else scale_mkdir), verify=verify)
+        add("%s %s (%s, N entries)" % (tool, label, shape), tool, "entries", points, build, quick=quick, full_to=full_to)
+    for shape in ("flat", "bushy"):
+        change("rm", ["-r", "{w}"], "-r", shape, verify="status")
+        change("rm", ["-rf", "{w}"], "-rf", shape, verify="status")
+        change("cp", ["-r", "{t}", "{w}/copy"], "-r", shape, copy=False)
+        change("cp", ["-a", "{t}", "{w}/copy"], "-a", shape, copy=False)
+        change("cp", ["-rl", "{t}", "{w}/copy"], "-rl", shape, copy=False)
+        change("mv", ["{w}", "{w}.moved"], "(rename)", shape, verify="status")
+        change("chmod", ["-R", "go-w", "{w}"], "-R", shape)
+        change("find", ["{w}", "-type", "f", "-delete"], "-type f -delete", shape)
+        change("find", ["{w}", "-type", "f", "-exec", "chmod", "600", "{}", "+"], "-exec chmod +", shape, points=(10 ** 2, 10 ** 3, 10 ** 4, 10 ** 5), quick=(10 ** 2, 10 ** 4, 10 ** 5), full_to=10 ** 5)
+    for tool, args, label in (("rm", ["-r", "{w}"], "-r"), ("cp", ["-r", "{t}", "{w}/copy"], "-r"), ("chmod", ["-R", "go-w", "{w}"], "-R"),
+                              ("cp", ["-a", "{t}", "{w}/copy"], "-a")):
+        change(tool, args, label, "deep", points=DEEP, quick=(10, 500, 1900), full_to=1900, copy=(tool != "cp"))
+
+    # arguments by the thousand, to the tools that make or remove things
+    def named(tool, args, label, points=(10 ** 2, 10 ** 3, 10 ** 4, 5 * 10 ** 4), quick=(10 ** 2, 10 ** 3, 10 ** 4), fresh="tree"):
+        def build(n):
+            tree = D.tree("flat", n)
+            names = sorted(os.listdir(tree))
+            if fresh == "tree":
+                return ScaleJob([*args, *["{w}/" + x for x in names]], fresh=tree, verify="tree")
+            if fresh == "empty":
+                return ScaleJob([*sub(args), *["{w}/" + x for x in names]], fresh=scale_mkdir, verify="tree")
+            return ScaleJob([*args, *[str(tree / x) for x in names]], verify="same")
+        add("%s %s (N arguments)" % (tool, label), tool, "arguments", points, build, quick=quick, full_to=points[-1])
+    named("rm", [], "", fresh="tree")
+    named("touch", [], "", fresh="empty")
+    named("mkdir", [], "", fresh="empty")
+    named("chmod", ["600"], "600", fresh="tree")
+    named("ls", ["-d"], "-d", fresh=None)
+    named("stat", ["-c", "%s"], "-c %s", fresh=None)
+    named("realpath", [], "", fresh=None)
+    named("basename", ["-a"], "-a", fresh=None)
+    named("dirname", [], "", fresh=None)
+    named("wc", ["-c"], "-c", fresh=None)
+    named("du", ["-b"], "-b", fresh=None)
+    named("sha1sum", [], "", fresh=None)
+    named("env", ["true"], "true", fresh=None)
+
+    def linkargs(n):
+        tree = D.tree("flat", n)
+        names = sorted(os.listdir(tree))
+        return ScaleJob(["-s", "-t", "{w}", *[str(tree / x) for x in names]], fresh=scale_mkdir, verify="tree")
+    add("ln -s -t (N arguments)", "ln", "arguments", (10 ** 2, 10 ** 3, 10 ** 4, 5 * 10 ** 4), linkargs, quick=(10 ** 2, 10 ** 3, 10 ** 4), full_to=5 * 10 ** 4)
+
+    def cpargs(n):
+        tree = D.tree("flat", n)
+        names = sorted(os.listdir(tree))
+        return ScaleJob(["-t", "{w}", *[str(tree / x) for x in names]], fresh=scale_mkdir, verify="tree")
+    add("cp -t (N arguments)", "cp", "arguments", (10 ** 2, 10 ** 3, 10 ** 4, 5 * 10 ** 4), cpargs, quick=(10 ** 2, 10 ** 3, 10 ** 4), full_to=5 * 10 ** 4)
+
+    def mvargs(n):
+        tree = D.tree("flat", n)
+        names = sorted(os.listdir(tree))
+        return ScaleJob(["-t", "{w}.moved", *["{w}/" + x for x in names]], fresh=lambda w: (shutil.copytree(tree, w, symlinks=True), (w.parent / (w.name + ".moved")).mkdir(exist_ok=True)),
+                        verify="tree")
+    add("mv -t (N arguments)", "mv", "arguments", (10 ** 2, 10 ** 3, 10 ** 4), mvargs, quick=(10 ** 2, 10 ** 4), full_to=10 ** 4)
+
+    def mkdirp(n):
+        return ScaleJob(["-p", "{w}/" + "/".join(["d"] * n)], fresh=scale_mkdir, verify="tree")
+    add("mkdir -p (N levels)", "mkdir", "levels", (10, 100, 500, 1000, 1900), mkdirp, quick=(10, 500, 1900), full_to=1900)
+
+    def realpaths(n):
+        return ScaleJob(["-e", "-s", str(D.tree("deep", n)) + "/" + "/".join(["d"] * n)], verify="same", status=(0, 1))
+    add("realpath (N levels)", "realpath", "levels", (10, 100, 500, 1000, 1900), realpaths, quick=(10, 500, 1900), full_to=1900)
+
+    # copying, moving, writing a file of N bytes
+    def filed(name, tool, args, kind="text", points=DEC, quick=(10 ** 4, 10 ** 6, 10 ** 8), full_to=10 ** 9, verify="tree", fresh=scale_mkdir, stdin=False):
+        def build(n):
+            f = D.file(kind, n)
+            return ScaleJob(sub(args, f=f), fresh=fresh, verify=verify, stdin=f if stdin else None)
+        add(name, tool, "bytes", points, build, quick=quick, floor=0, full_to=full_to)
+    filed("cp (one file)", "cp", ["{f}", "{w}/out"])
+    filed("cp --sparse=always (one file)", "cp", ["--sparse=always", "{f}", "{w}/out"], "zero")
+    filed("dd bs=512", "dd", ["if={f}", "of={w}/out", "bs=512", "status=none"], points=(10 ** 3, 10 ** 4, 10 ** 5, 10 ** 6, 10 ** 7, 10 ** 8), quick=(10 ** 4, 10 ** 6, 10 ** 8), full_to=10 ** 8)
+    filed("dd bs=64k", "dd", ["if={f}", "of={w}/out", "bs=64k", "status=none"])
+    filed("dd bs=1M conv=notrunc", "dd", ["if={f}", "of={w}/out", "bs=1M", "conv=notrunc", "status=none"])
+    filed("dd ibs=1 obs=64k", "dd", ["if={f}", "of={w}/out", "ibs=1", "obs=64k", "status=none"], points=(10 ** 3, 10 ** 4, 10 ** 5, 10 ** 6), quick=(10 ** 3, 10 ** 5, 10 ** 6), full_to=10 ** 6)
+    filed("dd conv=ucase", "dd", ["if={f}", "of={w}/out", "conv=ucase", "status=none"], full_to=10 ** 8)
+    filed("dd skip/seek/count", "dd", ["if={f}", "of={w}/out", "bs=1", "skip=100", "count=1000", "status=none"])
+    filed("tee", "tee", ["{w}/out"], stdin=True)
+    filed("split -l 1000", "split", ["-l", "1000", "{f}", "{w}/x"], full_to=10 ** 8)
+    filed("split -b 1M", "split", ["-b", "1M", "{f}", "{w}/x"], full_to=10 ** 8)
+    filed("split -n 8", "split", ["-n", "8", "{f}", "{w}/x"], full_to=10 ** 8)
+    filed("split -n l/8", "split", ["-n", "l/8", "{f}", "{w}/x"], full_to=10 ** 8)
+    filed("split -C 64k", "split", ["-C", "64k", "{f}", "{w}/x"], full_to=10 ** 8)
+    filed("csplit /needle/ {*}", "csplit", ["-s", "-f", "{w}/c", "{f}", "/needle/", "{*}"], "records", points=(10 ** 3, 10 ** 4, 10 ** 5, 10 ** 6), quick=(10 ** 4, 10 ** 6), full_to=10 ** 6)
+    filed("csplit /e/ {50}", "csplit", ["-s", "-f", "{w}/c", "{f}", "/e/", "{50}"], "text", points=(10 ** 4, 10 ** 5, 10 ** 6, 10 ** 7), quick=(10 ** 4, 10 ** 6, 10 ** 7), full_to=10 ** 7)
+
+    # cmp and diff
+    def cmpcase(name, args, kind="text", changes=1, status=(0, 1), full_to=10 ** 9, quick=(10 ** 4, 10 ** 6, 10 ** 8), same=False):
+        def build(n):
+            if same:
+                a = D.file(kind, n)
+                return ScaleJob(sub(args, f=a, g=a), status=status)
+            a, b = D.churn(kind, n, changes)
+            return ScaleJob(sub(args, f=a, g=b), status=status)
+        add(name, name.split()[0], "bytes", DEC, build, quick=quick, floor=0, full_to=full_to)
+    cmpcase("cmp (identical)", ["{f}", "{g}"], same=True)
+    cmpcase("cmp -s (differ in the middle)", ["-s", "{f}", "{g}"])
+    cmpcase("cmp (differ in the middle)", ["{f}", "{g}"])
+    cmpcase("cmp -l (one difference)", ["-l", "{f}", "{g}"])
+    cmpcase("cmp -l (a thousand)", ["-l", "{f}", "{g}"], changes=1000)
+    cmpcase("cmp -i 100 (skip)", ["-i", "100", "{f}", "{g}"], same=True)
+
+    def diffcase(name, args, kind="text", rate=0.01, status=(0, 1), full_to=10 ** 8, quick=(10 ** 4, 10 ** 6, 10 ** 7), same=False):
+        def build(n):
+            if same:
+                a = D.file(kind, n)
+                return ScaleJob(sub(args, f=a, g=a), status=status)
+            a, b = D.changed(kind, n, rate)
+            return ScaleJob(sub(args, f=a, g=b), status=status)
+        add(name, "diff", "bytes", DEC, build, quick=quick, floor=0, full_to=full_to)
+    diffcase("diff (1% of lines changed)", ["{f}", "{g}"])
+    diffcase("diff -u (1% changed)", ["-u", "{f}", "{g}"])
+    diffcase("diff -y --width=100 (1% changed)", ["-y", "--width=100", "{f}", "{g}"], full_to=10 ** 7)
+    diffcase("diff -q (1% changed)", ["-q", "{f}", "{g}"])
+    diffcase("diff (identical)", ["{f}", "{g}"], same=True, full_to=10 ** 9)
+    diffcase("diff (every line changed)", ["{f}", "{g}"], rate=1.0, full_to=10 ** 6, quick=(10 ** 4, 10 ** 5, 10 ** 6))
+    diffcase("diff -w (1% changed)", ["-w", "{f}", "{g}"])
+    diffcase("diff -i -b (1% changed)", ["-i", "-b", "{f}", "{g}"])
+    diffcase("diff --minimal (1% changed)", ["-d", "{f}", "{g}"], full_to=10 ** 7)
+    diffcase("diff -e (1% changed)", ["-e", "{f}", "{g}"])
+
+    def churned(args, name, kind="text", n=10 ** 7, points=(1, 10, 100, 1000, 10 ** 4, 10 ** 5), quick=(1, 100, 10 ** 4, 10 ** 5)):
+        def build(k):
+            a, b = D.churn(kind, n, k)
+            return ScaleJob(sub(args, f=a, g=b), status=(0, 1))
+        add(name + " (10 MB, N changes)", "diff", "changes", points, build, quick=quick, full_to=points[-1])
+    churned(["{f}", "{g}"], "diff")
+    churned(["-u", "{f}", "{g}"], "diff -u")
+    churned(["-d", "{f}", "{g}"], "diff -d", points=(1, 10, 100, 1000, 10 ** 4), quick=(1, 100, 10 ** 4))
+
+    def difftree(n):
+        left = D.tree("small", n)
+        right = D.root / ("small-copy-%d" % n)
+        if not right.exists():
+            subprocess.run(["/usr/bin/cp", "-a", str(left), str(right)], check=True)
+            files = sorted(p for p in right.rglob("*.txt"))
+            for k in range(0, len(files), max(len(files) // 20, 1)):
+                files[k].write_bytes(files[k].read_bytes() + b"changed\n")
+        return ScaleJob(["-rq", str(left), str(right)], status=(0, 1), verify="sorted")
+    add("diff -rq (N files)", "diff", "files", (10 ** 2, 10 ** 3, 10 ** 4, 10 ** 5), difftree, quick=(10 ** 2, 10 ** 4, 10 ** 5), full_to=10 ** 5)
+
+    # xargs, env: the argument counts
+    def xargs(args, name, points=(10 ** 2, 10 ** 3, 10 ** 4, 10 ** 5, 10 ** 6), quick=(10 ** 2, 10 ** 4, 10 ** 6), full_to=10 ** 6, verify="same"):
+        def build(n):
+            return ScaleJob(args, stdin=D.words(n), verify=verify)
+        add("xargs %s (N words)" % name, "xargs", "words", points, build, quick=quick, full_to=full_to)
+    xargs(["-n", "1000", "echo"], "-n 1000 echo")
+    xargs(["-n", "100", "echo"], "-n 100 echo", points=(10 ** 2, 10 ** 3, 10 ** 4, 10 ** 5), quick=(10 ** 3, 10 ** 5), full_to=10 ** 5)
+    xargs(["echo"], "echo", verify="status")
+    xargs(["-s", "1000", "echo"], "-s 1000 echo", points=(10 ** 2, 10 ** 3, 10 ** 4, 10 ** 5), quick=(10 ** 3, 10 ** 5), full_to=10 ** 5)
+    xargs(["-n", "1", "true"], "-n 1 true", points=(10, 10 ** 2, 10 ** 3, 10 ** 4), quick=(10 ** 2, 10 ** 3, 3000), full_to=10 ** 4, verify="status")
+    xargs(["-P", "4", "-n", "10", "true"], "-P 4 -n 10 true", points=(10 ** 2, 10 ** 3, 10 ** 4, 10 ** 5), quick=(10 ** 3, 10 ** 5), full_to=10 ** 5, verify="status")
+    xargs(["-I", "{}", "echo", "x{}"], "-I {} echo", points=(10, 10 ** 2, 10 ** 3, 10 ** 4), quick=(10 ** 2, 3000), full_to=10 ** 4, verify="status")
+
+    def envvars(n):
+        return ScaleJob(["-i", *["V%d=%d" % (i, i) for i in range(n)], "/usr/bin/true"])
+    add("env -i V=... true (N variables)", "env", "variables", (10, 100, 1000, 10 ** 4, 5 * 10 ** 4), envvars, quick=(10, 1000, 10 ** 4), full_to=5 * 10 ** 4)
+
+    def bigenv(n):
+        return ScaleJob(["/usr/bin/true"], env={"BIG": "x" * n})
+
+    def cutlist(n):
+        return ScaleJob(["-d,", "-f" + ",".join(str(2 * i + 1) for i in range(n)), str(D.file("csv", 10 ** 6))])
+    add("cut -f LIST (N ranges)", "cut", "ranges", (1, 10, 100, 1000, 10 ** 4), cutlist, quick=(1, 100, 10 ** 4), full_to=10 ** 4)
+
+    def trset(n):
+        return ScaleJob(["a-z", "A-Z"], stdin=D.file("text", 10 ** 6))
+
+
+def scale_catalog_shell(D, out):
+    """The shell against dash (the POSIX scripts, run as sh) and against bash
+    (the scripts that use arrays and brace expansion, run as bash): the work a
+    script does as it grows, one script a point."""
+    def add(name, tool, dim, points, build, **kw):
+        out.append(ScaleSeries(name, tool, dim, points, build, **kw))
+
+    P = (10 ** 3, 10 ** 4, 10 ** 5, 10 ** 6)
+    PQ = (10 ** 3, 10 ** 4, 10 ** 5)
+
+    def script(name, n, text):
+        path = D.root / ("script-%s-%d.sh" % (name.replace(" ", "_").replace("/", "_"), n))
+        if not path.exists():
+            path.write_text(text)
+        return path
+
+    def posix(name, text, points=P, quick=PQ, full_to=None, dim="count", status=(0,), files=None):
+        def build(n):
+            body = text.replace("@N@", str(n))
+            if "@F@" in body:
+                body = body.replace("@F@", str(D.file("records", n)))
+            if "@T@" in body:
+                body = body.replace("@T@", str(D.tree("flat", n)))
+            return ScaleJob([str(script(name, n, body))], status=status)
+        add("sh " + name, "sh", dim, points, build, quick=quick, full_to=full_to or points[-1], gnu="dash")
+
+    def bashy(name, text, points=P, quick=PQ, full_to=None, dim="count", status=(0,)):
+        def build(n):
+            body = text.replace("@N@", str(n))
+            if "@F@" in body:
+                body = body.replace("@F@", str(D.file("records", n)))
+            if "@T@" in body:
+                body = body.replace("@T@", str(D.tree("flat", n)))
+            return ScaleJob([str(script("b-" + name, n, body))], status=status)
+        add("bash " + name, "bash", dim, points, build, quick=quick, full_to=full_to or points[-1])
+
+    both_points = (10 ** 3, 10 ** 4, 10 ** 5, 10 ** 6, 10 ** 7)
+    posix("startup", ":\n", points=(1,), quick=(1,), dim="count")
+    posix("while [ $i -lt N ]; i=$((i+1))", "i=0\nwhile [ $i -lt @N@ ]; do i=$((i+1)); done\necho $i\n", points=both_points, quick=(10 ** 4, 10 ** 5, 10 ** 6))
+    posix("function call loop", "f() { :; }\ni=0\nwhile [ $i -lt @N@ ]; do f; i=$((i+1)); done\necho $i\n", points=P, quick=PQ)
+    posix("string append s=$s.", "s=\ni=0\nwhile [ $i -lt @N@ ]; do s=$s.; i=$((i+1)); done\necho ${#s}\n", points=P, quick=PQ)
+    posix("${s#?} shrink", "s=$(head -c @N@ /dev/zero | tr '\\0' a)\nwhile [ -n \"$s\" ] && [ ${#s} -gt $((@N@-2000)) ]; do s=${s#?}; done\necho ${#s}\n", points=(10 ** 4, 10 ** 5, 10 ** 6), quick=(10 ** 4, 10 ** 5, 10 ** 6))
+    posix("for i in $(seq 1 N)", "n=0\nfor i in $(seq 1 @N@); do n=$((n+1)); done\necho $n\n", points=P, quick=PQ)
+    posix("set -- $(seq 1 N); echo $#", "set -- $(seq 1 @N@)\necho $#\n", points=P, quick=PQ)
+    posix("shift loop", "set -- $(seq 1 @N@)\nwhile [ $# -gt 0 ]; do shift; done\necho done\n", points=(10 ** 3, 10 ** 4, 10 ** 5), quick=(10 ** 3, 10 ** 4, 10 ** 5))
+    posix("\"$@\" through a function", "f() { echo $#; }\nset -- $(seq 1 @N@)\nf \"$@\"\n", points=P, quick=PQ)
+    posix("read loop over N bytes", "n=0\nwhile read -r l; do n=$((n+1)); done < @F@\necho $n\n", points=(10 ** 4, 10 ** 5, 10 ** 6, 10 ** 7), quick=(10 ** 5, 10 ** 6, 10 ** 7), dim="bytes")
+    posix("cat file | while read line (N bytes)", "cat @F@ | { n=0; while read -r l; do n=$((n+1)); done; echo $n; }\n", points=(10 ** 4, 10 ** 5, 10 ** 6, 10 ** 7), quick=(10 ** 5, 10 ** 6, 10 ** 7), dim="bytes")
+    posix("x=$(cat file) of N bytes", "x=$(cat @F@)\necho ${#x}\n", points=(10 ** 4, 10 ** 6, 10 ** 7, 10 ** 8), quick=(10 ** 4, 10 ** 6, 10 ** 7), dim="bytes")
+    posix("echo $(printf ... N words) | wc -c", "echo $(seq 1 @N@) | wc -c\n", points=P, quick=PQ)
+    posix("glob over N entries", "echo @T@/* | wc -c\n", points=(10 ** 2, 10 ** 3, 10 ** 4, 10 ** 5), quick=(10 ** 2, 10 ** 4, 10 ** 5), dim="entries")
+    posix("for f in glob; do :; done", "n=0\nfor f in @T@/*; do n=$((n+1)); done\necho $n\n", points=(10 ** 2, 10 ** 3, 10 ** 4, 10 ** 5), quick=(10 ** 2, 10 ** 4, 10 ** 5), dim="entries")
+    posix("glob with pattern *.TxT", "echo @T@/*.TxT | wc -c\n", points=(10 ** 2, 10 ** 3, 10 ** 4, 10 ** 5), quick=(10 ** 2, 10 ** 4, 10 ** 5), dim="entries")
+    posix("[ -e ] over N names", "n=0\nfor f in @T@/*; do [ -e \"$f\" ] && n=$((n+1)); done\necho $n\n", points=(10 ** 2, 10 ** 3, 10 ** 4, 10 ** 5), quick=(10 ** 2, 10 ** 4, 10 ** 5), dim="entries")
+
+    def lines(n):
+        path = D.root / ("script-lines-%d.sh" % n)
+        if not path.exists():
+            path.write_text(": line\n" * n + "echo done\n")
+        return ScaleJob([str(path)])
+    add("sh N lines of script", "sh", "lines", P, lines, quick=PQ, full_to=10 ** 6, gnu="dash")
+    add("bash N lines of script", "bash", "lines", P, lines, quick=PQ, full_to=10 ** 6)
+
+    def longline(n):
+        path = D.root / ("script-long-%d.sh" % n)
+        if not path.exists():
+            path.write_text(": " + "word " * n + "\necho done\n")
+        return ScaleJob([str(path)])
+    add("sh one command with N words", "sh", "words", P, longline, quick=PQ, full_to=10 ** 6, gnu="dash")
+    add("bash one command with N words", "bash", "words", P, longline, quick=PQ, full_to=10 ** 6)
+
+    def functions(n):
+        path = D.root / ("script-functions-%d.sh" % n)
+        if not path.exists():
+            path.write_text("".join("f%d() { echo %d; }\n" % (i, i) for i in range(n)) + "f%d\n" % (n - 1))
+        return ScaleJob([str(path)])
+    add("sh N functions defined", "sh", "functions", (10 ** 2, 10 ** 3, 10 ** 4, 10 ** 5), functions, quick=(10 ** 2, 10 ** 3, 10 ** 4), full_to=10 ** 5, gnu="dash")
+    add("bash N functions defined", "bash", "functions", (10 ** 2, 10 ** 3, 10 ** 4, 10 ** 5), functions, quick=(10 ** 2, 10 ** 3, 10 ** 4), full_to=10 ** 5)
+
+    def cases(n):
+        path = D.root / ("script-case-%d.sh" % n)
+        if not path.exists():
+            path.write_text("x=p%d\ncase $x in\n" % (n - 1) + "".join("p%d) echo %d ;;\n" % (i, i) for i in range(n)) + "esac\n")
+        return ScaleJob([str(path)])
+    add("sh case with N patterns", "sh", "patterns", (10 ** 2, 10 ** 3, 10 ** 4, 10 ** 5), cases, quick=(10 ** 2, 10 ** 4, 10 ** 5), full_to=10 ** 5, gnu="dash")
+    add("bash case with N patterns", "bash", "patterns", (10 ** 2, 10 ** 3, 10 ** 4, 10 ** 5), cases, quick=(10 ** 2, 10 ** 4, 10 ** 5), full_to=10 ** 5)
+
+    def pipeline(n):
+        path = D.root / ("script-pipe-%d.sh" % n)
+        if not path.exists():
+            path.write_text(" | ".join(["cat"] * n) + " < /dev/null\necho done\n")
+        return ScaleJob([str(path)])
+    add("sh pipeline of N stages", "sh", "stages", (2, 8, 32, 128, 512), pipeline, quick=(2, 32, 512), full_to=512, gnu="dash")
+
+    def nesting(n):
+        path = D.root / ("script-nest-%d.sh" % n)
+        if not path.exists():
+            path.write_text("{ " * n + ":" + "; }" * n + "\necho done\n")
+        return ScaleJob([str(path)], status=(0, 1, 2))
+    add("sh { { { N deep", "sh", "depth", (10, 100, 1000, 5000), nesting, quick=(10, 1000, 5000), full_to=5000, gnu="dash")
+
+    def subshells(n):
+        path = D.root / ("script-sub-%d.sh" % n)
+        if not path.exists():
+            path.write_text("( " * n + ":" + " )" * n + "\necho done\n")
+        return ScaleJob([str(path)], status=(0, 1, 2))
+    add("sh ( ( ( N deep subshells", "sh", "depth", (10, 100, 500), subshells, quick=(10, 100, 500), full_to=500, gnu="dash")
+
+    def arith(n):
+        path = D.root / ("script-arith-%d.sh" % n)
+        if not path.exists():
+            path.write_text("echo $(( " + "(" * n + "1" + ")" * n + " ))\n")
+        return ScaleJob([str(path)], status=(0, 1, 2))
+    add("sh $(( ( ( N deep ))", "sh", "depth", (10, 100, 1000, 10000), arith, quick=(10, 1000, 10000), full_to=10000, gnu="dash")
+
+    def cmdsub(n):
+        path = D.root / ("script-cmdsub-%d.sh" % n)
+        if not path.exists():
+            path.write_text("echo " + "$(echo " * n + "x" + ")" * n + "\n")
+        return ScaleJob([str(path)], status=(0, 1, 2))
+    add("sh $(echo $(echo ... N deep", "sh", "depth", (3, 10, 30, 100), cmdsub, quick=(3, 30, 100), full_to=100, gnu="dash")
+
+    def spawning(n):
+        path = D.root / ("script-spawn-%d.sh" % n)
+        if not path.exists():
+            path.write_text("i=0\nwhile [ $i -lt %d ]; do x=$(/usr/bin/echo hi); i=$((i+1)); done\necho $x\n" % n)
+        return ScaleJob([str(path)])
+    add("sh N command substitutions", "sh", "spawns", (10, 100, 1000, 3000), spawning, quick=(100, 1000, 3000), full_to=3000, gnu="dash")
+
+    def subshelling(n):
+        path = D.root / ("script-fork-%d.sh" % n)
+        if not path.exists():
+            path.write_text("i=0\nwhile [ $i -lt %d ]; do ( : ); i=$((i+1)); done\necho done\n" % n)
+        return ScaleJob([str(path)])
+    add("sh N subshells ( : )", "sh", "forks", (10, 100, 1000, 10000), subshelling, quick=(100, 1000, 10000), full_to=10000, gnu="dash")
+
+    def pipes(n):
+        path = D.root / ("script-pipes-%d.sh" % n)
+        if not path.exists():
+            path.write_text("i=0\nwhile [ $i -lt %d ]; do echo x | cat > /dev/null; i=$((i+1)); done\necho done\n" % n)
+        return ScaleJob([str(path)])
+    add("sh N times echo | cat", "sh", "spawns", (10, 100, 1000, 3000), pipes, quick=(100, 1000, 3000), full_to=3000, gnu="dash")
+
+    def heredoc(n):
+        path = D.root / ("script-here-%d.sh" % n)
+        if not path.exists():
+            path.write_text("cat <<'EOF' | wc -l\n" + "line of a here document\n" * n + "EOF\n")
+        return ScaleJob([str(path)])
+    add("sh here-document of N lines", "sh", "lines", P, heredoc, quick=PQ, full_to=10 ** 6, gnu="dash")
+
+    def globfail(n):
+        path = D.root / ("script-star-%d.sh" % n)
+        if not path.exists():
+            path.write_text("s=%s\ncase $s in *a*a*a*a*a*a*b) echo yes ;; *) echo no ;; esac\n" % ("a" * n))
+        return ScaleJob([str(path)])
+    add("sh case $s in *a*a*a*a*a*a*b) (N a's)", "sh", "bytes", (10, 30, 100, 300, 1000, 3000), globfail, quick=(10, 100, 3000), full_to=3000, gnu="dash")
+
+    def printf_many(n):
+        path = D.root / ("script-printf-%d.sh" % n)
+        if not path.exists():
+            path.write_text("i=0\nwhile [ $i -lt %d ]; do printf '%%s\\n' $i; i=$((i+1)); done > /dev/null\necho done\n" % n)
+        return ScaleJob([str(path)])
+    add("sh N printf builtins", "sh", "count", P, printf_many, quick=PQ, full_to=10 ** 6, gnu="dash")
+
+    def echoout(n):
+        path = D.root / ("script-echo-%d.sh" % n)
+        if not path.exists():
+            path.write_text("i=0\nwhile [ $i -lt %d ]; do echo line $i; i=$((i+1)); done\n" % n)
+        return ScaleJob([str(path)])
+    add("sh N echo lines to the output", "sh", "count", P, echoout, quick=PQ, full_to=10 ** 6, gnu="dash")
+
+    # pipelines of several tools, which is what a script is made of: the pipe's
+    # throughput, each tool's start and the shell's own fork and wait
+    def pipeline_series(name, command, points, quick, kind=None, dim="count", full_to=None):
+        def build(n):
+            text = command.replace("@N@", str(n))
+            if "@F@" in text:
+                text = text.replace("@F@", str(D.file(kind, n)))
+            if "@T@" in text:
+                text = text.replace("@T@", str(D.tree("flat", n)))
+            return ScaleJob([str(script("pipe-" + name, n, text + "\n"))])
+        add("sh | " + name, "sh", dim, points, build, quick=quick, full_to=full_to or points[-1], gnu="dash")
+    C4 = (10 ** 4, 10 ** 5, 10 ** 6, 10 ** 7)
+    pipeline_series("yes | head -n N | wc -l", "yes | head -n @N@ | wc -l", C4, (10 ** 5, 10 ** 7))
+    pipeline_series("seq 1 N | sort -n | tail -n 1", "seq 1 @N@ | sort -n | tail -n 1", C4, (10 ** 4, 10 ** 6, 10 ** 7))
+    pipeline_series("seq 1 N | grep -c 7", "seq 1 @N@ | grep -c 7", C4, (10 ** 5, 10 ** 7))
+    pipeline_series("seq 1 N | awk sum", "seq 1 @N@ | awk '{s+=$1} END{print s}'", C4, (10 ** 5, 10 ** 6))
+    pipeline_series("cat F | tr | wc -c", "cat @F@ | tr a-z A-Z | wc -c", (10 ** 5, 10 ** 6, 10 ** 7, 10 ** 8), (10 ** 6, 10 ** 8), kind="text", dim="bytes")
+    pipeline_series("cat F | gzip | gunzip | wc -c", "cat @F@ | gzip -c | gzip -dc | wc -c", (10 ** 5, 10 ** 6, 10 ** 7, 10 ** 8), (10 ** 6, 10 ** 7), kind="text", dim="bytes")
+    pipeline_series("word frequency", "cat @F@ | tr ' ' '\\n' | sort | uniq -c | sort -rn | head -n 1", (10 ** 5, 10 ** 6, 10 ** 7), (10 ** 5, 10 ** 7), kind="text", dim="bytes")
+    pipeline_series("find | xargs cat | wc -c", "find @T@ -type f | xargs cat | wc -c", (10 ** 2, 10 ** 3, 10 ** 4, 10 ** 5), (10 ** 2, 10 ** 4), dim="entries")
+    pipeline_series("ls | wc -l, N entries", "ls @T@ | wc -l", (10 ** 2, 10 ** 3, 10 ** 4, 10 ** 5), (10 ** 3, 10 ** 5), dim="entries")
+
+    # bash
+    bashy("brace {1..N} | wc -c", "echo {1..@N@} | wc -c\n", points=P, quick=PQ)
+    bashy("array a+=($i) N", "a=()\nfor ((i=0;i<@N@;i++)); do a+=($i); done\necho ${#a[@]}\n", points=P, quick=PQ)
+    bashy("array a[i]=i N", "for ((i=0;i<@N@;i++)); do a[i]=$i; done\necho ${#a[@]}\n", points=P, quick=PQ)
+    bashy("array sum", "a=({1..@N@})\ns=0\nfor x in \"${a[@]}\"; do s=$((s+x)); done\necho $s\n", points=P, quick=PQ)
+    bashy("\"${a[@]:5:10}\" slice in a loop", "a=({1..@N@})\ni=0\nwhile [ $i -lt 1000 ]; do x=(\"${a[@]:5:10}\"); i=$((i+1)); done\necho ${#x[@]}\n", points=P, quick=PQ)
+    bashy("assoc m[k$i]=i N", "declare -A m\nfor ((i=0;i<@N@;i++)); do m[k$i]=$i; done\necho ${#m[@]}\n", points=P, quick=PQ)
+    bashy("assoc lookup N", "declare -A m\nfor ((i=0;i<@N@;i++)); do m[k$i]=$i; done\ns=0\nfor ((i=0;i<@N@;i++)); do s=$((s+m[k$i])); done\necho $s\n", points=(10 ** 3, 10 ** 4, 10 ** 5), quick=(10 ** 3, 10 ** 4))
+    bashy("${s//a/b} on N bytes", "s=$(head -c @N@ /dev/zero | tr '\\0' a)\nt=${s//a/b}\necho ${#t}\n", points=(10 ** 4, 10 ** 5, 10 ** 6, 10 ** 7), quick=(10 ** 4, 10 ** 6), dim="bytes")
+    bashy("${s/a*b/X} on N bytes", "s=$(head -c @N@ /dev/zero | tr '\\0' a)\nt=${s/a*b/X}\necho ${#t}\n", points=(10 ** 3, 10 ** 4, 10 ** 5), quick=(10 ** 3, 10 ** 4, 10 ** 5), dim="bytes")
+    bashy("${s:i:1} loop on N bytes", "s=$(head -c @N@ /dev/zero | tr '\\0' a)\nfor ((i=0;i<@N@;i++)); do c=${s:i:1}; done\necho $c\n", points=(10 ** 3, 10 ** 4, 10 ** 5), quick=(10 ** 3, 10 ** 4, 10 ** 5), dim="bytes")
+    bashy("${#s} and s+=x N", "s=\nfor ((i=0;i<@N@;i++)); do s+=x; done\necho ${#s}\n", points=P, quick=PQ)
+    bashy("[[ $s =~ a+$ ]] on N bytes", "s=$(head -c @N@ /dev/zero | tr '\\0' a)\n[[ $s =~ ^a+$ ]] && echo yes\n", points=(10 ** 3, 10 ** 4, 10 ** 5, 10 ** 6), quick=(10 ** 3, 10 ** 5, 10 ** 6), dim="bytes")
+    bashy("[[ $s == *a*a*a*b ]] on N bytes", "s=$(head -c @N@ /dev/zero | tr '\\0' a)\n[[ $s == *a*a*a*a*b ]] && echo yes\necho no\n", points=(10, 30, 100, 300, 1000), quick=(10, 100, 1000), dim="bytes")
+    bashy("mapfile -t a < file (N bytes)", "mapfile -t a < @F@\necho ${#a[@]}\n", points=(10 ** 4, 10 ** 6, 10 ** 7), quick=(10 ** 4, 10 ** 6, 10 ** 7), dim="bytes")
+    bashy("read -a f <<< line of N fields", "read -a f <<< \"$(seq -s ' ' 1 @N@)\"\necho ${#f[@]}\n", points=P, quick=PQ)
+    bashy("printf -v s %s%s N", "s=\nfor ((i=0;i<@N@;i++)); do printf -v s '%s%s' \"$s\" x; done\necho ${#s}\n", points=(10 ** 3, 10 ** 4, 10 ** 5), quick=PQ)
+    bashy("(( i++ )) loop", "for ((i=0;i<@N@;i++)); do :; done\necho $i\n", points=both_points, quick=(10 ** 4, 10 ** 5, 10 ** 6))
+    bashy("local in a function loop", "f() { local a=1 b=2; echo $((a+b)) > /dev/null; }\nfor ((i=0;i<@N@;i++)); do f; done\necho done\n", points=P, quick=PQ)
+    bashy("$(< file) of N bytes", "x=$(< @F@)\necho ${#x}\n", points=(10 ** 4, 10 ** 6, 10 ** 7, 10 ** 8), quick=(10 ** 4, 10 ** 6, 10 ** 7), dim="bytes")
+    bashy("for f in glob (N entries)", "n=0\nfor f in @T@/*; do n=$((n+1)); done\necho $n\n", points=(10 ** 2, 10 ** 3, 10 ** 4, 10 ** 5), quick=(10 ** 2, 10 ** 4, 10 ** 5), dim="entries")
+    bashy("extglob @(a|b)* over N entries", "shopt -s extglob\necho @T@/@(Entry)*.TxT | wc -c\n", points=(10 ** 2, 10 ** 3, 10 ** 4, 10 ** 5), quick=(10 ** 2, 10 ** 4, 10 ** 5), dim="entries")
+    bashy("declare -p of N elements", "a=({1..@N@})\ndeclare -p a | wc -c\n", points=P, quick=PQ)
+    bashy("sort a lot: sort <<< \"${a[*]}\"", "a=({1..@N@})\nprintf '%s\\n' \"${a[@]}\" | sort -n | tail -1\n", points=P, quick=PQ)
+    bashy("N lines in a here-string", "x=$(seq 1 @N@)\nwc -l <<< \"$x\"\n", points=P, quick=PQ)
+    bashy("trap + N signals-free loop", "trap : USR1\nfor ((i=0;i<@N@;i++)); do :; done\necho $i\n", points=both_points, quick=(10 ** 4, 10 ** 5, 10 ** 6))
+
+
+def scale_probes(D, out):
+    """Where GNU has no limit and a number is only a number: a size, a count or
+    a width far past anything a file holds. Each is one run; what is judged is
+    that ours answers as GNU does."""
+    def add(name, tool, args, stdin_kind=None, status=(0, 1, 2), verify="status"):
+        def build(n):
+            f = D.file("text", 10 ** 5)
+            a = [x.replace("{f}", str(f)) for x in args]
+            return ScaleJob(a, stdin=f if stdin_kind else None, status=status, verify=verify)
+        out.append(ScaleSeries("limit: %s %s" % (tool, " ".join(args)[:60].replace("{f}", "FILE")), tool, "probe", [1], build, quick=[1]))
+    big = "99999999999999999999"
+    for tool, args in (
+        ("head", ["-n", big, "{f}"]), ("head", ["-c", big, "{f}"]), ("head", ["-n", "-" + big, "{f}"]),
+        ("tail", ["-n", big, "{f}"]), ("tail", ["-c", big, "{f}"]), ("tail", ["-n", "+" + big, "{f}"]),
+        ("fold", ["-w", big, "{f}"]), ("expand", ["-t", "99999999999", "{f}"]), ("cut", ["-f", "9999999999999999-", "{f}"]),
+        ("cut", ["-c", "1-" + big, "{f}"]), ("seq", ["1", "0"]), ("seq", ["-w", big, big]),
+        ("od", ["-N", big, "-An", "-tx1", "{f}"]), ("od", ["-j", big, "{f}"]), ("sort", ["-S", "99999999999", "{f}"]),
+        ("sort", ["-k", "9999999999,9999999999", "{f}"]), ("sort", ["--parallel=1000", "{f}"]), ("split", ["-b", "99999999999", "{f}", "/dev/null/x"]),
+        ("nl", ["-w", "99999", "{f}"]), ("nl", ["-v", "-" + big, "{f}"]), ("pr", ["-w", "99999", "-l", "99999", "{f}"]),
+        ("fmt", ["-w", "99999999", "{f}"]), ("tr", ["a-z", "A-Z"]), ("uniq", ["-f", big, "{f}"]), ("uniq", ["-s", big, "{f}"]), ("uniq", ["-w", big, "{f}"]),
+        ("grep", ["-m", big, "the", "{f}"]), ("grep", ["-A", big, "-c", "the", "{f}"]), ("grep", ["-C", "99999999", "-c", "the", "{f}"]),
+        ("sed", ["-n", "99999999999p", "{f}"]), ("sed", ["-n", "1~99999999999p", "{f}"]), ("sed", ["s/a/b/99999999", "{f}"]), ("sed", ["-l", "99999", "-n", "l", "{f}"]),
+        ("awk", ["BEGIN{printf \"%99999d\\n\", 1}"]), ("awk", ["BEGIN{x=sprintf(\"%1000000s\",\"\");print length(x)}"]),
+        ("dd", ["if={f}", "of=/dev/null", "bs=2G", "status=none"]), ("dd", ["if={f}", "of=/dev/null", "count=99999999999", "status=none"]),
+        ("truncate", ["-s", "99999999999999", "/dev/null"]), ("shuf", ["-n", big, "{f}"]), ("shuf", ["-i", "1-99999999999", "-n", "3"]),
+        ("numfmt", ["--to=iec", "99999999999999999999"]), ("factor", ["340282366920938463463374607431768211455"]),
+        ("expr", ["length", "x" * 100000]), ("basename", ["x" * 100000]), ("wc", ["-L", "{f}"]),
+        ("base64", ["-w", big, "{f}"]), ("hexdump", ["-n", big, "{f}"]), ("xz", ["-c", "--memlimit-compress=99999999999", "{f}"]),
+        ("zstd", ["-c", "--long=27", "{f}"]), ("gzip", ["-c", "-9", "{f}"]),
+    ):
+        add(tool, tool, args)
+
+
+
+
+def scale_catalog_caps(D, out):
+    """The fixed sizes in the source -- a table of 1,024 variables, 4,096 sed
+    commands, 256 sort keys, a 1,024-stop tab list -- with a point under each
+    one and points past it. GNU has none of them, so a refusal here is a
+    difference, and the time past one is where a slow path may start."""
+    def add(name, tool, dim, points, build, **kw):
+        out.append(ScaleSeries(name, tool, dim, points, build, **kw))
+
+    def text(name, body):
+        path = D.root / name
+        if not path.exists():
+            path.write_text(body)
+        return path
+
+    TEXT = lambda: str(D.file("text", 10 ** 6))
+
+    def awkfile(name, program_of, points, quick, tool_args=()):
+        def build(n):
+            program = text("%s-%d.awk" % (name.replace(" ", "_").replace("/", "_"), n), program_of(n))
+            return ScaleJob([*tool_args, "-f", str(program), TEXT()], status=(0, 1, 2))
+        add("awk " + name, "awk", "cap", points, build, quick=quick, full_to=points[-1])
+    awkfile("N variables", lambda n: "BEGIN{" + "".join("v%d=%d;" % (i, i) for i in range(n)) + "print v%d}\n" % (n - 1),
+            (100, 1000, 1030, 5000, 20000), (100, 1030, 20000))
+    awkfile("N functions", lambda n: "".join("function f%d(){return %d}\n" % (i, i) for i in range(n)) + "BEGIN{print f%d()}\n" % (n - 1),
+            (100, 250, 300, 1000, 5000), (100, 300, 5000))
+    awkfile("N rules", lambda n: "".join("/zzzzq%d/{c++}\n" % i for i in range(n)) + "END{print c+0}\n",
+            (100, 500, 600, 2000, 10000), (100, 600, 10000))
+    awkfile("N parameters", lambda n: "function f(" + ",".join("a%d" % i for i in range(n)) + "){return a0}BEGIN{print f(7)}\n",
+            (10, 100, 130, 500, 2000), (10, 130, 2000))
+    awkfile("N locals", lambda n: "function f(a,   " + ",".join("l%d" % i for i in range(n)) + "){l0=a;return l0}BEGIN{print f(7)}\n",
+            (10, 100, 130, 500, 2000), (10, 130, 2000))
+
+    def recursion(n):
+        return ScaleJob(["function f(n){return n?f(n-1)+1:0}BEGIN{print f(%d)}" % n], status=(0, 1, 2))
+    add("awk recursion N deep", "awk", "cap", (100, 1000, 10000, 40000, 200000), recursion, quick=(100, 10000, 40000, 200000), full_to=200000)
+
+    def openfiles(n):
+        return ScaleJob(["-v", "d={w}", "BEGIN{for(i=0;i<%d;i++)print i > (d \"/f\" i)}" % n], fresh=scale_mkdir, verify="tree", status=(0, 1, 2))
+    add("awk N output files open", "awk", "cap", (10, 100, 1000, 3000), openfiles, quick=(10, 1000, 3000), full_to=3000)
+
+    # sed
+    def sedfile(name, script_of, points, quick, status=(0, 1)):
+        def build(n):
+            path = text("sed-%s-%d.sed" % (name.replace(" ", "_").replace("/", "_"), n), script_of(n))
+            return ScaleJob(["-f", str(path), TEXT()], status=status)
+        add("sed -f " + name, "sed", "cap", points, build, quick=quick, full_to=points[-1])
+    sedfile("(N s commands)", lambda n: "".join("s/k%d/x/g\n" % i for i in range(n)), (100, 400, 600, 1000, 4100, 20000), (100, 600, 4100))
+    sedfile("(N y commands)", lambda n: "".join("y/a/b/\n" for i in range(n)), (10, 100, 130, 1000), (10, 130, 1000))
+    sedfile("(N a commands)", lambda n: "".join("a\\\nx%d\n" % i for i in range(n)), (10, 1000, 4100, 20000), (10, 4100, 20000))
+    sedfile("(one a text of N bytes)", lambda n: "1a\\\n" + "x" * n + "\n", (10 ** 3, 10 ** 5, 270000, 10 ** 6, 10 ** 7), (10 ** 3, 270000, 10 ** 7))
+    sedfile("(a script of N bytes of comments)", lambda n: "#" + "c" * (n - 2) + "\np\n", (10 ** 3, 10 ** 5, 530000, 10 ** 7), (10 ** 3, 530000, 10 ** 7))
+    sedfile("(N blocks { })", lambda n: "{" * n + "p" + "}" * n + "\n", (10, 100, 1000, 10000), (10, 1000, 10000))
+    sedfile("(N labels)", lambda n: "".join(":l%d\n" % i for i in range(n)) + "s/e/E/\n", (10, 100, 1000, 10000), (10, 1000, 10000))
+
+    def sedwrites(n):
+        flags = []
+        for i in range(n):
+            flags += ["-e", "/zzq%d/w {w}/o%d" % (i, i)]
+        return ScaleJob(["-n", *flags, TEXT()], fresh=scale_mkdir, verify="tree", status=(0, 1, 4))
+    add("sed N w files", "sed", "cap", (10, 60, 70, 300), sedwrites, quick=(10, 70, 300), full_to=300)
+
+    def sedexprs(n):
+        flags = []
+        for i in range(n):
+            flags += ["-e", "s/k%d/x/g" % i]
+        return ScaleJob([*flags, TEXT()], status=(0, 1))
+    add("sed -e N (arguments)", "sed", "cap", (100, 400, 600, 5000), sedexprs, quick=(100, 600, 5000), full_to=5000)
+
+    def sedlong(name, script_of, points=(100, 1000, 1030, 4000, 100000), quick=(100, 1030, 100000)):
+        def build(n):
+            return ScaleJob(["-n", script_of(n), TEXT()], status=(0, 1))
+        add("sed " + name, "sed", "cap", points, build, quick=quick, full_to=points[-1])
+    sedlong("s/PATTERN/x/ (N bytes of pattern)", lambda n: "s/" + "x" * n + "/y/p")
+    sedlong("s/a/REPLACEMENT/ (N bytes)", lambda n: "s/the/" + "y" * n + "/p")
+    sedlong("/REGEX/p (N bytes of address)", lambda n: "/" + "x" * n + "/p")
+    sedlong("y/FROM/TO/ (N bytes)", lambda n: "y/" + "a" * n + "/" + "b" * n + "/", points=(100, 1000, 1030, 4000), quick=(100, 1030, 4000))
+    sedlong("a TEXT (N bytes of text)", lambda n: "1a\\\n" + "x" * n, points=(100, 1000, 1030, 4000, 100000), quick=(100, 1030, 100000))
+    sedlong("i TEXT (N bytes of text)", lambda n: "1i\\\n" + "x" * n, points=(100, 1000, 1030, 100000), quick=(100, 1030, 100000))
+    sedlong("c TEXT (N bytes of text)", lambda n: "1c\\\n" + "x" * n, points=(100, 1000, 1030, 100000), quick=(100, 1030, 100000))
+    sedlong(":LABEL (N bytes)", lambda n: ":" + "l" * n + "\ns/e/E/;t " + "l" * n, points=(10, 100, 130, 1000, 10000), quick=(10, 130, 10000))
+    sedlong("r FILE (N bytes of name)", lambda n: "1r " + "/" + "x" * n, points=(100, 1000, 4000, 10000), quick=(100, 4000, 10000))
+
+    # sort, expand, fmt, join, od
+    def sortkeys(n):
+        return ScaleJob([*["-k%d,%d" % (1 + k % 1000, 1 + k % 1000) for k in range(n)], str(D.fields(1000, 4 * 10 ** 6))], status=(0, 1, 2))
+    add("sort -k N times", "sort", "cap", (16, 256, 300, 1000, 5000), sortkeys, quick=(16, 300, 5000), full_to=5000)
+
+    def tabs(n):
+        return ScaleJob(["-t", ",".join(str(2 * (i + 1)) for i in range(n)), str(D.file("tabbed", 10 ** 6))], status=(0, 1))
+    add("expand -t N stops", "expand", "cap", (10, 100, 1000, 1100, 5000, 20000), tabs, quick=(10, 1100, 20000), full_to=20000)
+    out.append(ScaleSeries("unexpand -t N stops", "unexpand", "cap", (10, 100, 1000, 1100, 5000, 20000),
+                           lambda n: ScaleJob(["-t", ",".join(str(2 * (i + 1)) for i in range(n)), str(D.file("tabbed", 10 ** 6))], status=(0, 1)),
+                           quick=(10, 1100, 20000), full_to=20000))
+
+    def fmtwords(n):
+        path = text("fmt-words-%d" % n, "word " * n + "\n")
+        return ScaleJob(["-w", "72", str(path)])
+    add("fmt a paragraph of N words", "fmt", "cap", (100, 1000, 1100, 10 ** 4, 10 ** 5, 10 ** 6), fmtwords, quick=(100, 1100, 10 ** 6), full_to=10 ** 6)
+
+    def fmtword(n):
+        path = text("fmt-word-%d" % n, "x" * n + "\n")
+        return ScaleJob(["-w", "72", str(path)])
+    add("fmt one word of N bytes", "fmt", "cap", (100, 1000, 5100, 10 ** 5, 10 ** 6), fmtword, quick=(100, 5100, 10 ** 6), full_to=10 ** 6)
+
+    def joinout(n):
+        left, right = D.pair(10 ** 5)
+        return ScaleJob(["-o", ",".join(["1.1", "2.2"] * (n // 2)), "-e", "-", str(left), str(right)], status=(0, 1))
+    add("join -o N fields", "join", "cap", (4, 100, 256, 300, 2000, 10000), joinout, quick=(4, 300, 10000), full_to=10000)
+
+    def odformats(n):
+        return ScaleJob(["-An", *["-tx1"] * n, str(D.file("random", 10 ** 5))], status=(0, 1))
+    add("od -t N formats", "od", "cap", (1, 4, 16, 17, 100, 1000), odformats, quick=(1, 17, 1000), full_to=1000)
+
+    def factors(n):
+        return ScaleJob(["1" + "0" * n], status=(0, 1))
+    add("factor 10^N", "factor", "cap", (10, 100, 1000, 2600, 6000), factors, quick=(10, 1000, 2600, 6000), full_to=6000)
+
+    def expr(op):
+        def build(n):
+            a, b = "9" * n, "7" * n
+            return ScaleJob([a, op, b], status=(0, 1, 2, 3))
+        return build
+    add("expr N-digit + N-digit", "expr", "digits", (10, 100, 1000, 10000, 100000), expr("+"), quick=(10, 1000, 100000), full_to=100000)
+    add("expr N-digit * N-digit", "expr", "digits", (10, 100, 1000, 10000, 30000), expr("*"), quick=(10, 1000, 30000), full_to=30000)
+    add("expr N-digit / 7", "expr", "digits", (10, 100, 1000, 10000, 100000), lambda n: ScaleJob(["9" * n, "/", "7"], status=(0, 1, 2, 3)),
+        quick=(10, 1000, 100000), full_to=100000)
+    add("expr length of N bytes", "expr", "bytes", (10, 1000, 10 ** 5, 130000), lambda n: ScaleJob(["length", "x" * n], status=(0, 1, 2, 3)),
+        quick=(10, 10 ** 5, 130000), full_to=130000)
+
+    def seqbig(n):
+        return ScaleJob(["1" + "0" * n, "1" + "0" * n], status=(0, 1))
+    add("seq N-digit number", "seq", "digits", (5, 18, 19, 20, 30, 300), seqbig, quick=(5, 20, 300), full_to=300)
+
+    # regular expressions whose state sets blow up: a DFA past its table must not fall off a cliff
+    def ab(n, tool):
+        f = D.file("ab", 10 ** 6)
+        if tool == "grep":
+            return ScaleJob(["-E", "-c", "(a|b)*a(a|b){%d}$" % n, str(f)])
+        if tool == "sed":
+            return ScaleJob(["-E", "-n", "/(a|b)*a(a|b){%d}$/p" % n, str(f)])
+        return ScaleJob(["/(a|b)*a(a|b){%d}$/{c++}END{print c+0}" % n, str(f)])
+    for tool in ("grep", "sed", "awk"):
+        add("%s DFA blow-up (a|b)*a(a|b){N}" % tool, tool, "states", (2, 4, 6, 8, 10, 12, 14, 16),
+            lambda n, tool=tool: ab(n, tool), quick=(4, 8, 12), full_to=16)
+    add("grep -E (x+x+)+y", "grep", "bytes", (10, 100, 1000, 10 ** 4, 10 ** 5),
+        lambda n: ScaleJob(["-E", "-c", "(x+x+)+y", str(text("xs-%d" % n, "x" * n + "\n"))], status=(0, 1)),
+        quick=(10, 1000, 10 ** 5), full_to=10 ** 5)
+    add("grep -c \\(x*\\)*y backtracking", "grep", "bytes", (10, 100, 1000, 10 ** 4, 10 ** 5),
+        lambda n: ScaleJob(["-c", "\\(x*\\)*y", str(text("xs-%d" % n, "x" * n + "\n"))], status=(0, 1)), quick=(10, 1000, 10 ** 5), full_to=10 ** 5)
+    add("grep -E ((a|b)c?)*d one line", "grep", "bytes", (10, 100, 1000, 10 ** 4, 10 ** 5),
+        lambda n: ScaleJob(["-E", "-c", "((a|b)c?)*d$", str(text("abs-%d" % n, "ab" * (n // 2) + "\n"))], status=(0, 1)), quick=(10, 1000, 10 ** 5), full_to=10 ** 5)
+
+    def classes(n):
+        chars = "".join(chr(0x100 + i) for i in range(n))
+        return ScaleJob(["-c", "[%s]" % chars, str(D.file("utf8", 10 ** 6))], env={"LC_ALL": "en_US.utf8"}, status=(0, 1))
+    add("grep [N distinct characters] (UTF-8)", "grep", "cap", (10, 100, 500, 520, 2000, 10000), classes, quick=(10, 520, 10000), full_to=10000)
+
+    def backrefs(n):
+        return ScaleJob(["-c", "\\(a\\)" * n + "\\%d" % min(n, 9), str(D.file("text", 10 ** 6))], status=(0, 1, 2))
+    add("grep N groups and a back-reference", "grep", "cap", (1, 5, 9, 10, 20, 100), backrefs, quick=(1, 9, 100), full_to=100)
+
+    # tar
+    def tarexclude(n):
+        tree = D.tree("small", 10 ** 3)
+        flags = ["--exclude=zq%d*" % i for i in range(n)]
+        return ScaleJob(["-cf", "-", *flags, "-C", str(tree), "."], verify="status",
+                        check=lambda impl, bench, work: scale_tar_list(bench))
+    add("tar -c --exclude N times", "tar", "cap", (10, 1000, 4100, 20000), tarexclude, quick=(10, 4100, 20000), full_to=20000)
+
+    def tartransform(n):
+        tree = D.tree("small", 10 ** 3)
+        flags = ["--transform=s/zq%d/x/" % i for i in range(n)]
+        return ScaleJob(["-cf", "-", *flags, "-C", str(tree), "."], verify="status",
+                        check=lambda impl, bench, work: scale_tar_list(bench))
+    add("tar -c --transform N times", "tar", "cap", (1, 16, 17, 100, 250), tartransform, quick=(1, 17, 250), full_to=250)
+
+    # dirs, not files: the walkers' own tables
+    def dirs(tool, args, name, verify="sorted", fresh=False, points=(10 ** 2, 10 ** 3, 4100, 10 ** 4, 10 ** 5), quick=(10 ** 2, 4100, 10 ** 5)):
+        def build(n):
+            tree = D.tree("dirs", n)
+            return ScaleJob([a.replace("{t}", str(tree)) for a in args], fresh=tree if fresh else None, verify="tree" if fresh else verify, status=(0, 1))
+        add("%s %s (N directories)" % (tool, name), tool, "dirs", points, build, quick=quick, full_to=points[-1])
+    dirs("find", ["{t}"], "T")
+    dirs("find", ["{t}", "-type", "d"], "-type d")
+    dirs("du", ["-a", "{t}"], "-a")
+    dirs("ls", ["-R", "{t}"], "-R")
+    dirs("cp", ["-r", "{t}", "{w}/c"], "-r", fresh=False)
+    dirs("tar", ["-cf", "/dev/null", "{t}"], "-cf /dev/null")
+    dirs("rm", ["-r", "{w}"], "-r", fresh=True)
+    dirs("chmod", ["-R", "go-w", "{w}"], "-R", fresh=True)
+    dirs("grep", ["-r", "-c", "x", "{t}"], "-r -c")
+
+    # shell tables
+    def shellscript(name, body_of, points, quick, tool="sh", status=(0,)):
+        def build(n):
+            path = text("script-cap-%s-%d.sh" % (name.replace(" ", "_").replace("/", "_"), n), body_of(n))
+            return ScaleJob([str(path)], status=status + (1, 2))
+        add("%s %s" % (tool, name), tool, "cap", points, build, quick=quick, full_to=points[-1], gnu="dash" if tool == "sh" else tool)
+    shellscript("N redirections on one command", lambda n: ": " + " ".join(">/dev/null" for i in range(n)) + "\necho done\n", (10, 60, 70, 1000), (10, 70, 1000))
+    shellscript("N background jobs", lambda n: "i=0\nwhile [ $i -lt %d ]; do : & i=$((i+1)); done\nwait\necho done\n" % n, (10, 100, 1000, 4100, 10000), (10, 1000, 10000))
+    shellscript("N variables set", lambda n: "".join("v%d=%d\n" % (i, i) for i in range(n)) + "echo $v%d\n" % (n - 1), (100, 1000, 10000, 100000), (100, 10000, 100000))
+    shellscript("N exported variables then exec", lambda n: "".join("export v%d=%d\n" % (i, i) for i in range(n)) + "/usr/bin/true\necho done\n", (100, 1000, 10000, 30000), (100, 1000, 30000))
+    shellscript("N here-documents in a function", lambda n: "f() {\n" + "".join("cat <<E%d >/dev/null\nx\nE%d\n" % (i, i) for i in range(n)) + "}\nf\necho done\n", (10, 100, 190, 200, 1000), (10, 200, 1000))
+    shellscript("N levels cd then pwd", lambda n: "mkdir -p /dev/shm/scale-cd.$$/" + "/".join(["d"] * n) + " && cd /dev/shm/scale-cd.$$ && i=0 && while [ $i -lt %d ]; do cd d || break; i=$((i+1)); done; echo $i; cd /; rm -rf /dev/shm/scale-cd.$$\n" % n, (100, 1000, 2000, 2100, 3000), (100, 2000, 3000))
+    shellscript("N-word case pattern", lambda n: "x=%s\ncase $x in %s) echo yes;; *) echo no;; esac\n" % ("a" * n, "a*" * 50 + "b"), (10, 30, 100, 1000, 10000), (10, 30, 100))
+    shellscript("N levels of function recursion", lambda n: "f() { [ $1 -le 0 ] && return 0; f $(($1-1)); }\nf %d\necho done\n" % n, (10, 100, 1000, 5000, 20000), (10, 1000, 20000))
+    shellscript("one word of N bytes", lambda n: "x=" + "a" * n + "\necho ${#x}\n", (10 ** 3, 10 ** 5, 10 ** 6, 10 ** 7), (10 ** 3, 10 ** 6, 10 ** 7))
+    shellscript("one line of N bytes", lambda n: ": " + "a" * n + "\necho done\n", (10 ** 3, 10 ** 5, 10 ** 6, 10 ** 7), (10 ** 3, 10 ** 6, 10 ** 7))
+    shellscript("N-byte here-document line", lambda n: "cat <<E | wc -c\n" + "a" * n + "\nE\n", (10 ** 3, 10 ** 5, 10 ** 6, 10 ** 7), (10 ** 3, 10 ** 6, 10 ** 7))
+    shellscript("N-byte command substitution", lambda n: "x=$(head -c %d /dev/zero | tr '\\0' a)\necho ${#x}\n" % n, (10 ** 4, 10 ** 6, 10 ** 7, 10 ** 8), (10 ** 4, 10 ** 6, 10 ** 8))
+    shellscript("N-byte read from a pipe", lambda n: "head -c %d /dev/zero | tr '\\0' a | { read x; echo ${#x}; }\n" % n, (10 ** 4, 10 ** 6, 10 ** 7, 10 ** 8), (10 ** 4, 10 ** 6, 10 ** 8))
+    shellscript("N arguments to a program", lambda n: "/usr/bin/echo $(seq 1 %d) | wc -c\n" % n, (10 ** 3, 10 ** 4, 10 ** 5, 10 ** 6), (10 ** 3, 10 ** 5, 10 ** 6))
+    shellscript("N-byte argument to a program", lambda n: "x=$(head -c %d /dev/zero | tr '\\0' a)\n/usr/bin/echo \"$x\" | wc -c\n" % n, (10 ** 3, 10 ** 5, 130000, 10 ** 6), (10 ** 3, 130000, 10 ** 6))
+
+def scale_tar_list(bench):
+    """The names a tar archive holds, as the host's tar reads them."""
+    done = subprocess.run(["/usr/bin/tar", "-tf", str(bench.out)], capture_output=True)
+    names = sorted(done.stdout.split(b"\n"))
+    return "%d:%s" % (done.returncode, hashlib.blake2b(b"\n".join(names), digest_size=16).hexdigest())
+
+
+#       What the lane runs without --full. The catalog is every tool along
+#       every dimension that has bitten, which is more than ten minutes; a
+#       default run takes every Nth series of each dimension, the first of
+#       them always, and all of the ones whose dimension is a fixed size in
+#       the source or a count GNU has no opinion on. Which ones are in is a
+#       function of the catalog's order and nothing else, so a run on another
+#       day measures the same series.
+SCALE_STRIDE = {"bytes": 5, "files": 3, "entries": 3, "cpus": 4, "arguments": 3, "line length": 3,
+                "dirs": 2, "count": 2, "fields": 2, "words": 2, "cap": 2, "entropy": 2, "patterns": 3}
+
+
+#       The ones a default run takes whatever their place in the order: a loss
+#       somebody measured on the product, kept where it will be seen.
+SCALE_ALWAYS = frozenset(("awk {s+=$1}END (numbers)", "awk {s+=length($0)}END", "sh read loop over N bytes",
+                          "sh cat file | while read line (N bytes)", "cmp -s (differ in the middle)",
+                          "diff (1% of lines changed)"))
+
+
+def scale_catalog(D):
+    out = []
+    scale_catalog_text(D, out)
+    scale_catalog_codecs(D, out)
+    scale_catalog_files(D, out)
+    scale_catalog_shell(D, out)
+    scale_catalog_caps(D, out)
+    scale_probes(D, out)
+    seen = {}
+    for series in out:
+        number = seen.get(series.dim, 0)
+        seen[series.dim] = number + 1
+        series.core = number % SCALE_STRIDE.get(series.dim, 1) == 0 or series.name in SCALE_ALWAYS
+    return out
+
+
+def scale_judge_steps(series, ordered, label):
+    """The dimensions with no scale to them -- entropy, level -- are judged by
+    the jump in the ratio between neighbours."""
+    found = []
+    for a, b in zip(ordered, ordered[1:]):
+        ta, tb, ga, gb = a.median(label), b.median(label), a.median("gnu"), b.median("gnu")
+        if None in (ta, tb, ga, gb) or ga <= 0 or gb <= 0:
+            continue
+        ra, rb = ta / ga, tb / gb
+        if rb > 2 * ra and rb > 0.6 and tb - gb > 0.005:
+            found.append(("cliff", b.point, "%s -> %s: ratio %.2f -> %.2f" % (a.point, b.point, ra, rb), True))
+    return found
+
+
+def scale_run_series(bench, series, baseline, known, full, labels):
+    wanted = series.chosen(full)
+    points = []
+    for p in wanted:
+        #       Past a few seconds a point is more of the same slope. A default
+        #       run stops where the next would take that long, and says so;
+        #       --full goes on to the gigabyte.
+        if not full and points and not points[-1].skipped and getattr(points[-1], "total", 0) > 0:
+            last = points[-1]
+            grow = series.unit(p) / max(series.unit(last.point), 1)
+            if last.total * max(grow, 1.0) > bench.stop:
+                print("  (%s not run: the point before took %s a round, and this is %.0fx more)" %
+                      (p, scale_seconds(last.total), grow))
+                continue
+        points.append(bench.measure(series, p))
+        if points[-1].timed_out:
+            print("  (nothing past %s is run: ours gave no answer in %d s)" % (p, bench.timeout))
+            break
+    floors = {}
+    if series.floor is not None:
+        first = bench.measure(series, series.floor)
+        floors = {impl: first.median(impl) for impl in bench.impls if first.median(impl) is not None}
+
+    def judge():
+        found = {}
+        for label in labels:
+            findings = scale_judge(series, points, floors, baseline, known, label)
+            if series.dim in ("entropy", "level"):
+                findings += scale_judge_steps(series, [p for p in points if not p.skipped], label)
+            found[label] = findings
+        return found
+    found = judge()
+    again = set()
+    for label in labels:
+        for kind, point, text, fail in found[label]:
+            if fail and kind in ("loss", "cliff", "superlinear", "record", "inversion"):
+                again.add(point)
+                before = [p.point for p in points if p.point < point]
+                if kind in ("cliff", "superlinear") and before:
+                    again.add(before[-1])
+    if again:
+        for p in points:
+            if p.point in again and not p.skipped:
+                bench.measure(series, p.point, extend=p)
+        found = judge()
+    return points, floors, found
+
+
+def scale_literal(table):
+    lines = ["SCALE_BASELINE = {"]
+    for name in sorted(table):
+        row = ", ".join("%s: %s" % (point, ("%.2f" % ratio).rstrip("0").rstrip(".") if ratio >= 0.01 else "0.01")
+                        for point, ratio in sorted(table[name].items()))
+        lines.append("    %s: {%s}," % (json.dumps(name), row))
+    lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
+def scale_known_literal(table):
+    lines = ["SCALE_KNOWN = {"]
+    for key in sorted(table):
+        lines.append("    %s: %s," % (json.dumps(key), json.dumps(table[key])))
+    lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
+def harness_scale(argv):
+    """--harness scale: every tool against the host's, at every size."""
+    parser = argparse.ArgumentParser(prog="differential.py --harness scale")
+    parser.add_argument("--farm", action="append", default=[], metavar="LABEL=DIR",
+                        help="a directory of the tools, each a link to the multicall; the first is the one judged")
+    parser.add_argument("--full", action="store_true", help="every decade, up to a gigabyte and a million entries")
+    parser.add_argument("--series", default="", help="only the series whose name has one of these words, comma apart")
+    parser.add_argument("--dim", default="", help="only the series along these dimensions, comma apart (bytes, cap, probe...)")
+    parser.add_argument("--tables", action="store_true", help="print every series' table, not only the ones with something to say")
+    parser.add_argument("--skip", default="", help="leave out the series whose name has one of these words, comma apart")
+    parser.add_argument("--shard", default="", help="I/N: only every Nth series from the Ith, to split a run across processors")
+    parser.add_argument("--list", action="store_true")
+    parser.add_argument("--update", action="store_true", help="write this run's ratios into SCALE_BASELINE")
+    parser.add_argument("--data", help="where the inputs are made and kept (default: a directory of its own)")
+    parser.add_argument("--budget", type=float, help="seconds of timing a point may take (default 1, full 0.6)")
+    parser.add_argument("--timeout", type=float, help="seconds a run may take before it is killed")
+    parser.add_argument("--lock", help="a file to hold an exclusive lock on while each series is timed, so that the "
+                                       "benchmarks of two people share the machine in turns")
+    parser.add_argument("--cpus", help="the processors to use, as taskset writes them (default: the ones this process has)")
+    options = parser.parse_args(argv)
+    if not options.list:
+        if not sys.platform.startswith("linux"):
+            print("scale: NOT RUN -- it times Linux programs against GNU's")
+            return 2
+        if not options.farm:
+            parser.error("--farm LABEL=DIR is required")
+    farms = []
+    for item in options.farm:
+        label, sep, directory = item.partition("=")
+        if not sep or not label or label == "gnu" or not Path(directory).is_dir():
+            parser.error("--farm wants LABEL=DIR and a directory that is there")
+        farms.append((label, str(Path(directory).resolve())))
+    for name in () if options.list else ("sort", "grep", "awk", "dash", "bash", "tar", "xz", "zstd", "gzip", "diff", "find"):
+        if not os.access("/usr/bin/" + name, os.X_OK):
+            print("scale: NOT RUN -- no /usr/bin/%s to measure against" % name)
+            return 2
+    cpus = set(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else {0}
+    if options.cpus:
+        cpus = set()
+        for part in options.cpus.split(","):
+            low, _, high = part.partition("-")
+            cpus.update(range(int(low), int(high or low) + 1))
+    with tempfile.TemporaryDirectory(prefix="scale-") as temporary:
+        root = Path(temporary)
+        data = ScaleData(options.data or root / "data")
+        bench_scratch = root / "scratch"
+        bench_scratch.mkdir()
+        #   Each farm is copied, with a name for the shell the personalities
+        #   answer to, so that PATH can hold it without the host's own.
+        made = []
+        for label, directory in farms:
+            copy = root / ("farm-" + label)
+            copy.mkdir()
+            for entry in sorted(os.listdir(directory)):
+                (copy / entry).symlink_to(os.path.realpath(os.path.join(directory, entry)))
+            if (copy / "bash").exists():
+                for alias in ("sh",):
+                    if not (copy / alias).exists():
+                        (copy / alias).symlink_to(os.path.realpath(copy / "bash"))
+            made.append((label, str(copy)))
+        series = scale_catalog(data)
+        if options.series:
+            words = [w for w in options.series.split(",") if w]
+            series = [s for s in series if any(w.lower() in ("%s %s" % (s.tool, s.name)).lower() for w in words)]
+        if not options.full:
+            series = [s for s in series if s.core]
+        if options.skip:
+            words = [w for w in options.skip.split(",") if w]
+            series = [s for s in series if not any(w.lower() in ("%s %s" % (s.tool, s.name)).lower() for w in words)]
+        if options.dim:
+            series = [s for s in series if s.dim in options.dim.split(",")]
+        if options.shard:
+            index, _, count = options.shard.partition("/")
+            series = series[int(index)::int(count)]
+        if options.list:
+            for s in series:
+                print("%-52s %-10s %s" % (s.name, s.dim, " ".join(str(p) for p in s.chosen(options.full))))
+            print("%d series" % len(series))
+            return 0
+        budget = options.budget or (0.5 if options.full else 0.2)
+        bench = ScaleBench(made, data, bench_scratch, cpus, budget, options.full,
+                           options.timeout or (900 if options.full else 20))
+        labels = [label for label, _ in made]
+        baseline, known = SCALE_BASELINE, SCALE_KNOWN
+        started = time.time()
+        passed = failed = skipped = 0
+        recorded = {}
+        recorded_points = {}
+        recorded_findings = {}
+        reproduced = set()
+        failures = []
+        notes = []
+        for s in series:
+            if bench.executable(labels[0], s.tool) is None:
+                print("== %s: no %s in the farm" % (s.name, s.tool))
+                skipped += 1
+                continue
+            print("== %s  [%s]" % (s.name, s.dim), flush=True)
+            try:
+                lock = open(options.lock, "a") if options.lock else None
+                try:
+                    if lock:
+                        fcntl.flock(lock, fcntl.LOCK_EX)
+                    began = time.time()
+                    points, floors, found = scale_run_series(bench, s, baseline, known, options.full, labels)
+                finally:
+                    if lock:
+                        lock.close()
+            except Exception as error:
+                print("  FAILED to run: %r" % (error,))
+                failures.append("%s: did not run: %r" % (s.name, error))
+                failed += 1
+                continue
+            quiet = not options.tables and not any(found[label] for label in labels) and \
+                not any(p.issues for p in points)
+            if quiet:
+                ratios = [p.median(labels[0]) / p.median("gnu") for p in points
+                          if p.median(labels[0]) and p.median("gnu") and not p.skipped]
+                print("  clean: ratio %s of the host's, in %.1f s" %
+                      (" ".join("%.2f" % r for r in ratios), time.time() - began))
+            else:
+                scale_table(s, points, floors, baseline, labels)
+                print("  (%.1f s)" % (time.time() - began))
+            bad = False
+            for label in labels:
+                for kind, point, text, fail in found[label]:
+                    print("  %s %s %s at %s: %s" % ("FAIL" if fail else ("note" if kind == "note" else "known"),
+                                                       label if len(labels) > 1 else "", kind, point, text))
+                    if fail and label == labels[0]:
+                        bad = True
+                        failures.append("%s at %s: %s %s" % (s.name, point, kind, text))
+                    elif kind.startswith("known"):
+                        notes.append("%s at %s: %s" % (s.name, point, text))
+            if bad:
+                failed += 1
+            else:
+                passed += 1
+            ours = recorded.setdefault(s.name, {})
+            recorded_points[s.name] = points
+            recorded_findings[s.name] = found[labels[0]]
+            for kind_found, point_found, _, _ in found[labels[0]]:
+                if kind_found.startswith("known:"):
+                    reproduced.add("%s@%s:%s" % (s.name, point_found, kind_found[6:]))
+            for p in points:
+                t, g = p.median(labels[0]), p.median("gnu")
+                if t and g and not p.skipped:
+                    ours[p.point] = t / g
+        for leftover in (bench.out, bench.err):
+            leftover.unlink(missing_ok=True)
+        print("\nscale: %d of %d series clean in %.0f s (%d not run)" % (passed, passed + failed, time.time() - started, skipped))
+        for line in notes:
+            print("  known  %s" % line)
+        for line in failures:
+            print("  FAIL   %s" % line)
+        #       A known entry that no longer reproduces is a fix nobody wrote
+        #       down: it fails here until the line is taken out.
+        ran = {s.name: set(p.point for p in recorded_points.get(s.name, ())) for s in series}
+        for key, why in sorted(SCALE_KNOWN.items()):
+            name, _, rest = key.rpartition("@")
+            point, _, kind = rest.partition(":")
+            if name in ran and int(point) in ran[name] and key not in reproduced:
+                print("  FAIL   %s no longer reproduces (%s): take it out of SCALE_KNOWN" % (key, why))
+                failed += 1
+        if options.update:
+            merged = {name: dict(row) for name, row in SCALE_BASELINE.items()}
+            for name, row in recorded.items():
+                merged.setdefault(name, {}).update(row)
+            #       What ours does that GNU does not and that has not been fixed
+            #       is written down by name, for the lane to say every run until
+            #       the fix takes it out.
+            kept = {key: why for key, why in SCALE_KNOWN.items() if key.rpartition("@")[0] not in recorded}
+            for s in series:
+                for kind, point, text, fail in recorded_findings.get(s.name, ()):
+                    if kind in ("refusal", "cliff", "superlinear", "known:refusal", "known:cliff", "known:slope"):
+                        word = {"superlinear": "slope"}.get(kind, kind.split(":")[-1])
+                        kept["%s@%s:%s" % (s.name, point, word)] = re.sub(r"/(?:home|tmp|dev/shm|var|usr)/[^\s\"')]*", "<path>", text)[:100]
+            path = Path(__file__).resolve()
+            text = path.read_text()
+            begin = text.index("# scale baseline begin\n") + len("# scale baseline begin\n")
+            end = text.index("# scale baseline end\n")
+            path.write_text(text[:begin] + scale_literal(merged) + "\n" +
+                            "#       What ours does that GNU's does not, and has not been fixed: a refusal, a\n"
+                            "#       cliff or a slope, as \"<series>@<point>:<kind>\" and the line it said.\n"
+                            "#       The lane says each of them every run, and fails the run in which one\n"
+                            "#       stops being true, so that a fix is written down by whoever made it.\n" +
+                            scale_known_literal(kept) + text[end:])
+            print("scale: baseline written (%d series, %d known)" % (len(merged), len(kept)))
+        write_tally("scale", passed, passed + failed)
+        return 1 if failed else 0
+
+
+# scale baseline begin
+SCALE_BASELINE = {
+    "awk /needle/{n++}END": {100000: 0.3, 10000000: 0.41, 100000000: 0.39},
+    "awk BEGIN {delete a[i]}": {10000: 0.14, 100000: 0.14, 1000000: 0.14, 10000000: 0.14},
+    "awk BEGIN {for(i=0;i<N;i++)a[i]=i}": {10000: 0.15, 100000: 0.14, 1000000: 0.14, 10000000: 0.13},
+    "awk BEGIN {printf \"%d\\n\",i}": {10000: 0.14, 100000: 0.13, 1000000: 0.14, 10000000: 0.12},
+    "awk BEGIN {s=s \"x\"}": {10000: 0.13, 100000: 0.13, 1000000: 0.12, 10000000: 0.14},
+    "awk BEGIN {s=s \"x\"}END gsub": {10000: 0.14, 100000: 0.14, 1000000: 0.14},
+    "awk BEGIN{RS=\"\"}{n++}END (paragraph)": {100000: 0.48, 10000000: 1.98, 100000000: 2.09},
+    "awk DFA blow-up (a|b)*a(a|b){N}": {4: 0.02, 8: 0.01, 12: 1.5},
+    "awk N locals": {10: 0.2},
+    "awk N output files open": {10: 0.3, 1000: 0.83},
+    "awk N rules": {100: 1.55},
+    "awk N variables": {100: 0.2},
+    "awk length (C.UTF-8)": {1000000: 0.78, 10000000: 0.96},
+    "awk split (N fields)": {10: 0.6},
+    "awk toupper (C.UTF-8)": {1000000: 0.18, 10000000: 0.15},
+    "awk {$(NF+1)=x} (N fields)": {10: 0.82},
+    "awk {for(i=1;i<=NF;i++)...} (N fields)": {10: 0.9},
+    "awk {n+=NF}END (processors)": {1: 0.57},
+    "awk {n=split($0,p,\":\");s+=n}END": {100000: 0.37, 10000000: 0.43, 100000000: 0.42},
+    "awk {print $2} (C.UTF-8)": {1000000: 0.84, 10000000: 0.93},
+    "awk {print $NF}": {100000: 0.41, 10000000: 0.79, 100000000: 0.76},
+    "awk {print NF} (N fields)": {10: 0.56},
+    "awk {print NR\": \"$0}": {100000: 0.42, 10000000: 0.96, 100000000: 0.99},
+    "awk {s+=$1}END (numbers)": {100000: 0.54, 10000000: 0.72, 100000000: 0.74},
+    "awk {s+=length($0)}END": {100000: 0.43, 10000000: 1.53, 100000000: 1.55},
+    "b2sum": {100000: 0.65, 10000000: 1.01, 100000000: 0.99},
+    "base64 -d": {100000: 0.34, 10000000: 0.29, 100000000: 0.23},
+    "bash \"${a[@]:5:10}\" slice in a loop": {1000: 0.04, 10000: 0.02},
+    "bash $(< file) of N bytes": {10000: 0.29, 1000000: 0.32, 10000000: 0.25},
+    "bash ${s/a*b/X} on N bytes": {1000: 0.35, 10000: 0.31, 100000: 0.34},
+    "bash (( i++ )) loop": {10000: 0.14, 100000: 0.13, 1000000: 0.14},
+    "bash N functions defined": {100: 0.27, 1000: 0.7, 10000: 4.78},
+    "bash N lines in a here-string": {1000: 0.31, 10000: 0.34, 100000: 0.31},
+    "bash N lines of script": {1000: 0.22, 10000: 0.21, 100000: 0.2},
+    "bash array a[i]=i N": {1000: 0.31, 10000: 0.35, 100000: 0.38},
+    "bash assoc lookup N": {1000: 0.52, 10000: 2.57},
+    "bash brace {1..N} | wc -c": {1000: 0.3, 10000: 0.28, 100000: 0.25},
+    "bash declare -p of N elements": {1000: 0.33, 10000: 0.51, 100000: 0.5},
+    "bash for f in glob (N entries)": {100: 0.27, 10000: 0.36, 100000: 0.4},
+    "bash one command with N words": {1000: 0.2, 10000: 0.14, 100000: 0.16},
+    "bash read -a f <<< line of N fields": {1000: 0.55, 10000: 0.62, 100000: 0.64},
+    "cat": {100000: 0.44, 10000000: 1, 100000000: 0.9},
+    "cat (processors)": {1: 1.02, 4: 1.01, 8: 0.99},
+    "chmod 600 (N arguments)": {100: 0.9, 1000: 1.16, 10000: 1.11},
+    "cksum (processors)": {1: 0.88, 4: 0.9, 8: 0.94},
+    "cmp -l (a thousand)": {10000: 0.38, 1000000: 0.42},
+    "cmp -s (differ in the middle)": {10000: 0.38, 1000000: 0.56, 100000000: 17.41},
+    "comm -12": {100000: 0.58, 10000000: 0.67, 100000000: 0.63},
+    "cp (one file)": {10000: 0.53, 1000000: 0.66, 100000000: 0.94},
+    "cp -r (N directories)": {100: 0.33, 4100: 0.33, 100000: 0.35},
+    "cp -r (deep, N entries)": {10: 0.68, 500: 2.61, 1900: 0.81},
+    "cp -rl (bushy, N entries)": {100: 0.73, 10000: 0.52, 100000: 0.21},
+    "cp -rl (flat, N entries)": {100: 0.5, 10000: 0.85, 100000: 0.83},
+    "csplit /e/ {50}": {10000: 1.33, 1000000: 0.65, 10000000: 0.36},
+    "cut -c1-3 (N files)": {100: 0.64, 1000: 1.03, 10000: 0.94},
+    "cut -c3-20 (C.UTF-8)": {1000000: 0.13, 10000000: 0.09},
+    "cut -d' ' -f1- (N fields)": {10: 0.09},
+    "cut -d, -f1,3-": {100000: 0.36, 10000000: 0.16, 100000000: 0.09},
+    "cut -d, -f2 (processors)": {1: 0.32, 4: 0.08, 8: 0.06},
+    "cut -f LIST (N ranges)": {1: 0.38, 100: 0.28, 10000: 0.34},
+    "dd ibs=1 obs=64k": {1000: 0.66, 100000: 0.97, 1000000: 0.95},
+    "diff (1% of lines changed)": {10000: 0.49, 1000000: 0.62, 10000000: 0.74},
+    "diff (10 MB, N changes)": {1: 0.97, 100: 0.58},
+    "diff --minimal (1% changed)": {},
+    "diff -d (10 MB, N changes)": {},
+    "diff -q (1% changed)": {10000: 0.48, 1000000: 0.64, 10000000: 7.94},
+    "diff -u (10 MB, N changes)": {1: 0.82, 100: 0.52},
+    "du -a (N directories)": {100: 0.69, 4100: 0.5, 100000: 0.44},
+    "du -s (bushy, N entries)": {100: 0.5, 10000: 0.44, 100000: 0.24},
+    "du -s (flat, N entries)": {100: 0.52, 10000: 0.88, 100000: 0.64},
+    "env -i V=... true (N variables)": {10: 0.69, 1000: 1.52, 10000: 2.01},
+    "env true (N arguments)": {100: 0.71, 1000: 0.84, 10000: 1.06},
+    "expand (C.UTF-8)": {1000000: 0.2, 10000000: 0.22},
+    "expand (N fields)": {10: 0.05},
+    "expand -t N stops": {10: 0.12},
+    "expr N-digit * N-digit": {10: 0.41, 1000: 0.47, 30000: 7.35},
+    "expr N-digit + N-digit": {10: 0.43, 1000: 0.43, 100000: 0.11},
+    "expr N-digit / 7": {10: 0.5, 1000: 0.68, 100000: 11.48},
+    "factor 10^N": {10: 0.32, 1000: 5.07},
+    "find -empty (bushy, N entries)": {100: 0.51, 10000: 0.57, 100000: 0.28},
+    "find -empty (flat, N entries)": {100: 0.53, 10000: 0.98, 100000: 0.7},
+    "find -exec + (bushy, N entries)": {100: 0.66, 10000: 2.18, 100000: 3.12},
+    "find -exec + (flat, N entries)": {100: 0.65, 10000: 2.24, 100000: 1.05},
+    "find -iname (bushy, N entries)": {100: 0.37, 10000: 0.33, 100000: 0.17},
+    "find -iname (flat, N entries)": {100: 0.37, 10000: 0.53, 100000: 0.34},
+    "find -not -name (bushy, N entries)": {100: 0.36, 10000: 0.33, 100000: 0.18},
+    "find -not -name (flat, N entries)": {100: 0.38, 10000: 0.51, 100000: 0.3},
+    "find -type f (deep, N entries)": {10: 0.34, 500: 23.89, 1900: 11.18},
+    "find -type f -delete (bushy, N entries)": {100: 0.77, 10000: 0.55, 100000: 0.16},
+    "find -type f -delete (flat, N entries)": {100: 0.64, 10000: 0.97, 100000: 0.96},
+    "find T (N directories)": {100: 0.64, 4100: 0.52, 100000: 0.37},
+    "find T (bushy, N entries)": {100: 0.38, 10000: 0.47, 100000: 0.27},
+    "find T (flat, N entries)": {100: 0.38, 10000: 0.66, 100000: 0.37},
+    "fmt (N fields)": {10: 0.9, 100: 0.88, 1000: 0.88},
+    "fmt a paragraph of N words": {100: 0.58, 1100: 0.62, 1000000: 0.98},
+    "fold -s -w 70": {100000: 0.14, 10000000: 0.11, 100000000: 0.11},
+    "fold -w 40 (C.UTF-8)": {1000000: 0.14, 10000000: 0.11},
+    "grep -E -c (alpha|beta):0[0-4]+:": {100000: 0.54, 10000000: 0.45, 100000000: 0.22},
+    "grep -E W|W|... (one pattern)": {1: 0.15, 16: 0.05, 256: 0.08},
+    "grep -E [a-z]{N}": {1: 1.35, 100: 1.17, 1000: 1.03},
+    "grep -F -c patterns (words)": {1: 0.11, 16: 0.03, 256: 0.14},
+    "grep -F -o patterns (words)": {1: 0.23, 16: 6.92},
+    "grep -F -w -c patterns (words)": {1: 0.11, 16: 0.03, 256: 0.05},
+    "grep -H -n needle": {100000: 0.39, 10000000: 0.17, 100000000: 0.11},
+    "grep -c -E (a|e)(b|c)(d|f)": {100000: 0.42, 10000000: 0.12, 100000000: 0.05},
+    "grep -c -E [a-z]+ing (C.UTF-8)": {1000000: 0.04, 10000000: 0.02},
+    "grep -c -i THE (C.UTF-8)": {1000000: 0.37, 10000000: 0.12},
+    "grep -c -i \u00c9 (UTF-8)": {},
+    "grep -c -w the (C.UTF-8)": {1000000: 0.25, 10000000: 0.07},
+    "grep -c LITERAL (length N)": {10: 0.91, 1000: 0.3},
+    "grep -c a$ (CRLF)": {100000: 0.78, 10000000: 0.67, 100000000: 0.39},
+    "grep -c the (C.UTF-8)": {1000000: 0.27, 10000000: 0.1},
+    "grep -c the (processors)": {1: 0.25, 4: 0.08, 8: 0.04},
+    "grep -c x (binary)": {100000: 0.4, 10000000: 0.27, 100000000: 0.16},
+    "grep -m 5 needle": {100000: 0.42, 10000000: 0.42, 100000000: 0.4},
+    "grep -o needle": {100000: 0.37, 10000000: 0.31, 100000000: 0.28},
+    "grep -r -c (N directories)": {100: 0.86, 4100: 0.51, 100000: 0.39},
+    "grep -r -l (small, N entries)": {100: 0.61, 10000: 0.23, 100000: 0.17},
+    "grep DFA blow-up (a|b)*a(a|b){N}": {4: 0.19, 8: 0.15, 12: 2.48},
+    "grep N groups and a back-reference": {1: 0.46, 9: 3.48, 100: 0.43},
+    "gzip -6 (entropy)": {0: 0.54, 2: 0.05, 4: 0.08, 8: 0.14},
+    "gzip -9 (text)": {100000: 0.45, 10000000: 0.08},
+    "gzip -N (level, 4 MB text)": {1: 0.18, 5: 0.12, 9: 0.08},
+    "gzip -dc (text)": {100000: 0.34, 10000000: 0.3, 100000000: 0.28},
+    "join -o N fields": {4: 0.53},
+    "limit: awk BEGIN{printf \"%99999d\\n\", 1}": {1: 0.22},
+    "limit: awk BEGIN{x=sprintf(\"%1000000s\",\"\");print length(x)}": {1: 0.35},
+    "limit: base64 -w 99999999999999999999 FILE": {1: 0.43},
+    "limit: basename xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx": {1: 0.44},
+    "limit: cut -c 1-99999999999999999999 FILE": {1: 0.41},
+    "limit: cut -f 9999999999999999- FILE": {1: 0.79},
+    "limit: dd if=FILE of=/dev/null bs=2G status=none": {1: 0.45},
+    "limit: dd if=FILE of=/dev/null count=99999999999 status=none": {1: 0.49},
+    "limit: expand -t 99999999999 FILE": {1: 0.1},
+    "limit: expr length xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx": {1: 0.56},
+    "limit: factor 340282366920938463463374607431768211455": {1: 0.64},
+    "limit: fmt -w 99999999 FILE": {1: 0.45},
+    "limit: fold -w 99999999999999999999 FILE": {1: 0.37},
+    "limit: grep -A 99999999999999999999 -c the FILE": {1: 0.4},
+    "limit: grep -C 99999999 -c the FILE": {1: 0.34},
+    "limit: grep -m 99999999999999999999 the FILE": {1: 0.47},
+    "limit: gzip -c -9 FILE": {1: 0.43},
+    "limit: head -c 99999999999999999999 FILE": {1: 0.56},
+    "limit: head -n -99999999999999999999 FILE": {1: 0.5},
+    "limit: head -n 99999999999999999999 FILE": {1: 0.44},
+    "limit: hexdump -n 99999999999999999999 FILE": {1: 0.27},
+    "limit: nl -v -99999999999999999999 FILE": {1: 0.42},
+    "limit: nl -w 99999 FILE": {1: 0.92},
+    "limit: numfmt --to=iec 99999999999999999999": {1: 0.53},
+    "limit: od -N 99999999999999999999 -An -tx1 FILE": {1: 0.39},
+    "limit: od -j 99999999999999999999 FILE": {1: 0.37},
+    "limit: pr -w 99999 -l 99999 FILE": {1: 0.34},
+    "limit: sed -l 99999 -n l FILE": {1: 0.19},
+    "limit: sed -n 1~99999999999p FILE": {1: 0.47},
+    "limit: sed -n 99999999999p FILE": {1: 0.44},
+    "limit: sed s/a/b/99999999 FILE": {1: 0.37},
+    "limit: seq -w 99999999999999999999 99999999999999999999": {1: 0.44},
+    "limit: seq 1 0": {1: 0.38},
+    "limit: shuf -i 1-99999999999 -n 3": {1: 0.51},
+    "limit: shuf -n 99999999999999999999 FILE": {},
+    "limit: sort --parallel=1000 FILE": {1: 0.45},
+    "limit: sort -S 99999999999 FILE": {1: 0.47},
+    "limit: sort -k 9999999999,9999999999 FILE": {1: 0.46},
+    "limit: split -b 99999999999 FILE /dev/null/x": {1: 0.38},
+    "limit: tail -c 99999999999999999999 FILE": {1: 0.59},
+    "limit: tail -n +99999999999999999999 FILE": {1: 0.4},
+    "limit: tail -n 99999999999999999999 FILE": {1: 0.59},
+    "limit: tr a-z A-Z": {1: 0.47},
+    "limit: truncate -s 99999999999999 /dev/null": {1: 0.41},
+    "limit: uniq -f 99999999999999999999 FILE": {1: 0.31},
+    "limit: uniq -s 99999999999999999999 FILE": {1: 0.39},
+    "limit: uniq -w 99999999999999999999 FILE": {1: 0.45},
+    "limit: wc -L FILE": {1: 0.24},
+    "limit: xz -c --memlimit-compress=99999999999 FILE": {},
+    "limit: zstd -c --long=27 FILE": {1: 0.58},
+    "ls  (flat, N entries)": {100: 0.42, 10000: 0.77, 100000: 0.69},
+    "ls -S (flat, N entries)": {100: 0.43, 10000: 0.9, 100000: 0.82},
+    "ls -i (flat, N entries)": {100: 0.43, 10000: 0.74, 100000: 0.79},
+    "ls -l (N names)": {100: 0.28, 1000: 0.58, 10000: 0.81},
+    "ls -lR (bushy, N entries)": {100: 0.33, 10000: 0.69, 100000: 0.81},
+    "ls -lR (deep, N entries)": {10: 0.29},
+    "mkdir -p (N levels)": {10: 0.67, 500: 1.09, 1900: 1.04},
+    "mv -t (N arguments)": {100: 1.1, 10000: 1.24},
+    "nl": {100000: 0.3, 10000000: 0.29, 100000000: 0.29},
+    "nl -ba (C.UTF-8)": {1000000: 0.26, 10000000: 0.26},
+    "od -An -tu4 -v": {100000: 0.18, 10000000: 0.16, 100000000: 0.17},
+    "paste -s (N fields)": {10: 0.19, 1000: 0.24, 100000: 0.21},
+    "paste f f": {100000: 0.42, 10000000: 0.35, 100000000: 0.35},
+    "paste f g": {100000: 0.5, 10000000: 0.53, 100000000: 0.42},
+    "pr -t -2": {100000: 0.41, 10000000: 0.43, 100000000: 0.43},
+    "realpath  (N arguments)": {100: 0.93, 1000: 1.35, 10000: 1.36},
+    "realpath (N levels)": {10: 0.42, 500: 8.55, 1900: 67.17},
+    "realpath (N names)": {100: 0.71, 1000: 1.28, 10000: 1.38},
+    "rev": {100000: 0.1, 10000000: 0.04, 100000000: 0.02},
+    "rev (C.UTF-8)": {1000000: 0.08, 10000000: 0.03},
+    "rm  (N arguments)": {100: 0.84, 1000: 0.91, 10000: 0.83},
+    "rm -r (N directories)": {100: 0.81, 4100: 0.76, 100000: 0.79},
+    "rm -rf (bushy, N entries)": {100: 1.05, 10000: 0.43, 100000: 0.17},
+    "rm -rf (flat, N entries)": {100: 0.81, 10000: 0.9, 100000: 1.02},
+    "sed -E s/(a|b){N}/X/": {1: 0.32, 100: 1.26, 1000: 0.97},
+    "sed -e ... (N arguments)": {1: 0.41, 100: 0.45},
+    "sed -f (N blocks { })": {10: 0.52, 1000: 0.94},
+    "sed -f (N commands)": {1: 0.37, 100: 0.29},
+    "sed -f (N labels and one s)": {10: 0.43, 1000: 0.72},
+    "sed -f (N y commands)": {10: 0.42},
+    "sed -f (one a text of N bytes)": {1000: 0.5},
+    "sed -n l (one line)": {1000: 0.36, 100000: 0.18, 1000000: 0.13},
+    "sed /REGEX/p (N bytes of address)": {100: 0.42},
+    "sed 1~3d": {100000: 0.41, 10000000: 0.57, 100000000: 0.44},
+    "sed DFA blow-up (a|b)*a(a|b){N}": {4: 52.45, 8: 51.61, 12: 2.3},
+    "sed N w files": {10: 0.4},
+    "sed a TEXT (N bytes of text)": {100: 0.53},
+    "sed c TEXT (N bytes of text)": {100: 0.55},
+    "sed r FILE (N bytes of name)": {100: 0.53, 4000: 0.53, 10000: 0.58},
+    "sed s/$/ </": {100000: 1.56, 10000000: 0.51, 100000000: 0.38},
+    "sed s/.*/\\U&/": {100000: 0.1, 10000000: 0.03, 100000000: 0.02},
+    "sed s/PATTERN/x/ (N bytes of pattern)": {100: 0.42},
+    "sed s/a/b/g (one line)": {1000: 0.34, 100000: 0.27, 10000000: 0.22},
+    "sed s/alpha/omega/g": {100000: 0.36, 10000000: 0.11, 100000000: 0.08},
+    "sed s/the/THE/g (C.UTF-8)": {1000000: 0.4, 10000000: 0.13},
+    "sed y/abc/xyz/ (C.UTF-8)": {1000000: 0.05, 10000000: 0.02},
+    "sed y/abcdef/ABCDEF/": {100000: 0.43, 10000000: 0.26, 100000000: 0.13},
+    "seq -s, 1 N": {10000: 0.39, 1000000: 0.34, 10000000: 0.38},
+    "seq 1 N": {10000: 0.38, 1000000: 0.31, 10000000: 0.31},
+    "seq N-digit number": {5: 0.34, 20: 0.35, 300: 0.39},
+    "sh \"$@\" through a function": {1000: 0.54, 10000: 0.58, 100000: 0.62},
+    "sh $(( ( ( N deep ))": {10: 0.35, 1000: 0.87},
+    "sh $(echo $(echo ... N deep": {3: 0.68, 30: 0.99, 100: 1.38},
+    "sh ${s#?} shrink": {10000: 0.55, 100000: 0.56},
+    "sh ( ( ( N deep subshells": {10: 0.36, 100: 0.41, 500: 0.57},
+    "sh N arguments to a program": {1000: 0.62, 100000: 0.75, 1000000: 0.61},
+    "sh N background jobs": {10: 0.77, 1000: 7.39},
+    "sh N command substitutions": {100: 1.12, 1000: 1.2, 3000: 1.01},
+    "sh N exported variables then exec": {100: 0.73, 1000: 0.93, 30000: 0.21},
+    "sh N functions defined": {100: 0.47, 1000: 1.4, 10000: 6.42},
+    "sh N levels cd then pwd": {100: 1.24, 2000: 2.95},
+    "sh N levels of function recursion": {10: 0.43, 1000: 1.49},
+    "sh N lines of script": {1000: 0.51, 10000: 0.65, 100000: 0.69},
+    "sh N printf builtins": {1000: 0.37, 10000: 0.34, 100000: 0.34},
+    "sh N subshells ( : )": {100: 0.71, 1000: 0.72, 10000: 0.77},
+    "sh N times echo | cat": {100: 0.56, 1000: 0.45, 3000: 0.4},
+    "sh N-byte command substitution": {10000: 0.49, 1000000: 0.97, 100000000: 0.89},
+    "sh [ -e ] over N names": {100: 0.53, 10000: 0.74, 100000: 0.76},
+    "sh case $s in *a*a*a*a*a*a*b) (N a's)": {10: 0.36},
+    "sh cat file | while read line (N bytes)": {10000: 0.96, 100000: 2.8, 1000000: 2.52, 10000000: 3.15},
+    "sh function call loop": {1000: 0.36, 10000: 0.32, 100000: 0.28},
+    "sh glob over N entries": {100: 0.45, 10000: 0.86, 100000: 0.51},
+    "sh here-document of N lines": {1000: 0.33, 10000: 0.29, 100000: 0.3},
+    "sh one line of N bytes": {1000: 0.31, 1000000: 0.21, 10000000: 0.13},
+    "sh pipeline of N stages": {2: 0.34, 32: 0.56, 512: 0.73},
+    "sh read loop over N bytes": {100000: 1.01, 1000000: 1.18, 10000000: 1.11},
+    "sh set -- $(seq 1 N); echo $#": {1000: 0.41, 10000: 0.43, 100000: 0.49},
+    "sh startup": {1: 0.36},
+    "sh { { { N deep": {10: 0.28, 1000: 0.83},
+    "sh | seq 1 N | grep -c 7": {100000: 0.34, 10000000: 0.31},
+    "sh | yes | head -n N | wc -l": {100000: 0.35, 10000000: 0.23},
+    "sha1sum": {100000: 0.21, 10000000: 0.87, 100000000: 1},
+    "sha256sum (N files)": {100: 0.26, 1000: 0.2, 10000: 0.18},
+    "shuf -i 1-N": {10000: 0.43, 1000000: 0.49},
+    "sort (C.UTF-8)": {1000000: 0.33, 10000000: 0.22},
+    "sort (processors)": {1: 0.32, 4: 0.32, 8: 0.36},
+    "sort -S 1M (spills)": {100000: 0.41, 1000000: 0.47, 10000000: 0.48},
+    "sort -f (C.UTF-8)": {1000000: 0.09, 10000000: 0.07},
+    "sort -g": {100000: 0.08, 1000000: 0.05, 10000000: 0.07},
+    "sort -k1,1 (N fields)": {10: 0.28},
+    "sort -k2,2 (C.UTF-8)": {1000000: 0.3, 10000000: 0.18},
+    "sort -kN,N ... (N keys)": {1: 0.51, 8: 0.51, 64: 0.51, 100: 0.5},
+    "sort -r": {100000: 0.39, 1000000: 0.44, 10000000: 0.32},
+    "sort -t, -k1,1 -k3,3n -k2,2r": {100000: 0.35, 1000000: 0.3, 10000000: 0.24},
+    "sort -u (C.UTF-8)": {1000000: 0.18, 10000000: 0.16},
+    "split -b 1M": {10000: 0.59, 1000000: 0.67, 100000000: 1.05},
+    "tac (C.UTF-8)": {1000000: 0.79, 10000000: 0.76},
+    "tail -n 1 (N files)": {100: 0.69, 1000: 0.97, 10000: 0.97},
+    "tail -n 10": {100000: 0.45, 10000000: 0.44, 100000000: 0.43},
+    "tar --zstd -c (N small files)": {100: 0.34, 10000: 0.88},
+    "tar -c (N empty files in one directory)": {100: 0.31, 10000: 1.25, 100000: 1.23},
+    "tar -c (N levels of 200-letter names)": {1: 0.15, 4: 0.17, 15: 0.25},
+    "tar -c --transform N times": {1: 0.62},
+    "tar -cf /dev/null (N names)": {100: 0.33, 1000: 1.07, 10000: 1.53},
+    "tar -t (N members)": {100: 0.19, 10000: 0.22, 100000: 0.21},
+    "tar -z -x (N small files)": {100: 0.55, 10000: 0.91},
+    "tr -cd a-z": {100000: 0.32, 10000000: 0.14, 100000000: 0.11},
+    "tr [:lower:] [:upper:] (C.UTF-8)": {1000000: 0.36, 10000000: 0.42},
+    "tsort": {1000: 0.34, 100000: 0.27, 1000000: 0.28},
+    "uniq -c (C.UTF-8)": {1000000: 0.41, 10000000: 0.43},
+    "uniq -d": {100000: 0.46, 10000000: 0.64, 100000000: 0.66},
+    "wc -L": {100000: 0.22, 10000000: 0.05, 100000000: 0.02},
+    "wc -L (C.UTF-8)": {1000000: 0.07, 10000000: 0.04},
+    "wc -c (N arguments)": {100: 0.59, 1000: 0.68, 10000: 0.81},
+    "wc -l (N files)": {100: 0.38, 1000: 0.54, 10000: 0.54},
+    "wc -m (C.UTF-8)": {1000000: 0.04, 10000000: 0.02},
+    "wc -w (C.UTF-8)": {1000000: 0.09, 10000000: 0.05},
+    "xargs -I {} echo (N words)": {100: 0.97},
+    "xargs -n 1 true (N words)": {100: 1.08, 1000: 1.12},
+    "xargs -n 1000 echo (N words)": {100: 0.77, 10000: 0.89, 1000000: 0.85},
+    "xargs echo (N words)": {100: 0.85, 10000: 0.74, 1000000: 0.88},
+    "xz -0 (text)": {100000: 0.67, 10000000: 2.37, 100000000: 0.76},
+    "xz -6 (entropy)": {0: 2.42, 2: 0.62},
+    "xz -6 (zero)": {10000: 0.62, 1000000: 2.34, 10000000: 2.31},
+    "xz -6 -T{cpus} (processors)": {1: 1.07},
+    "xz -N (level, 4 MB text)": {0: 1.99, 4: 0.69, 9: 0.56},
+    "xz -dc (zero)": {100000: 0.27, 10000000: 0.21, 100000000: 0.17},
+    "zstd -3 (entropy)": {0: 0.36, 2: 1.04, 4: 1, 8: 1.05},
+    "zstd -3 (utf8)": {10000: 0.25, 1000000: 1.06, 10000000: 1.04},
+    "zstd -9 (text)": {100000: 0.94, 10000000: 1.13},
+    "zstd -N (level, 4 MB text)": {1: 0.93, 10: 1.2, 19: 1.02},
+    "zstd -dc (tiny)": {0: 0.17, 1: 0.18, 100: 0.19, 1000: 0.19},
+}
+
+#       What ours does that GNU's does not, and has not been fixed: a refusal, a
+#       cliff or a slope, as "<series>@<point>:<kind>" and the line it said.
+#       The lane says each of them every run, and fails the run in which one
+#       stops being true, so that a fix is written down by whoever made it.
+SCALE_KNOWN = {
+    "awk DFA blow-up (a|b)*a(a|b){N}@12:cliff": "8 -> 12: ours 802483.44 ns/unit -> 89483495.92 (x111.5), GNU 65633231.63 -> 59803288.38 (x0.9)",
+    "awk DFA blow-up (a|b)*a(a|b){N}@12:slope": "8 -> 12: slope 12.63, GNU's 0.77",
+    "awk N locals@130:refusal": "status 1 against 0 (awk: line 1: too many parameters)",
+    "awk N locals@2000:refusal": "status 1 against 0 (awk: line 1: too many parameters)",
+    "awk N output files open@3000:refusal": "status 2 against 0 (awk: <path> cann)",
+    "awk N variables@1030:refusal": "status 2 against 0 (awk: too many variables)",
+    "awk N variables@20000:refusal": "status 2 against 0 (awk: too many variables)",
+    "bash assoc lookup N@10000:cliff": "1000 -> 10000: ours 2753.92 ns/unit -> 11754.07 (x4.3), GNU 5246.36 -> 4566.28 (x0.9)",
+    "bash assoc lookup N@10000:slope": "1000 -> 10000: slope 1.63, GNU's 0.94",
+    "diff --minimal (1% changed)@10000000:refusal": "status 2 against 1 (diff: invalid option -- 'd')",
+    "diff --minimal (1% changed)@1000000:refusal": "status 2 against 1 (diff: invalid option -- 'd')",
+    "diff --minimal (1% changed)@10000:refusal": "status 2 against 1 (diff: invalid option -- 'd')",
+    "diff -d (10 MB, N changes)@10000:refusal": "status 2 against 1 (diff: invalid option -- 'd')",
+    "diff -d (10 MB, N changes)@100:refusal": "status 2 against 1 (diff: invalid option -- 'd')",
+    "diff -d (10 MB, N changes)@1:refusal": "status 2 against 1 (diff: invalid option -- 'd')",
+    "expand -t N stops@1100:refusal": "status 1 against 0 (expand: too many tab stops)",
+    "expand -t N stops@20000:refusal": "status 1 against 0 (expand: too many tab stops)",
+    "factor 10^N@2600:refusal": "status 1 against 0 (factor: 100000000000000000000000000000000000000000000000000000000000000000000000",
+    "factor 10^N@6000:refusal": "status 1 against 0 (factor: 100000000000000000000000000000000000000000000000000000000000000000000000",
+    "grep -E W|W|... (one pattern)@1024:refusal": "status 2 against 0 (grep: invalid regular expression)",
+    "grep -F -o patterns (words)@16:cliff": "1 -> 16: ours 2153865.06 ns/unit -> 37464273.00 (x17.4), GNU 9199769.93 -> 5410669.03 (x0.6)",
+    "grep -F -o patterns (words)@16:slope": "1 -> 16: slope 2.03, GNU's 0.81",
+    "grep -c -i \u00c9 (UTF-8)@100000000:refusal": "status 1 against 0",
+    "grep -c -i \u00c9 (UTF-8)@10000000:refusal": "status 1 against 0",
+    "grep -c -i \u00c9 (UTF-8)@100000:refusal": "status 1 against 0",
+    "grep -c LITERAL (length N)@10000:refusal": "status 2 against 1 (grep: invalid regular expression)",
+    "join -o N fields@10000:refusal": "status 1 against 0 (join: memory exhausted)",
+    "join -o N fields@300:refusal": "status 1 against 0 (join: memory exhausted)",
+    "limit: shuf -n 99999999999999999999 FILE@1:refusal": "status 1 against 0 (shuf: invalid line count: '99999999999999999999')",
+    "limit: xz -c --memlimit-compress=99999999999 FILE@1:refusal": "status 2 against 0 (xz: unrecognized option '--memlimit-compress=99999999999')",
+    "ls -lR (deep, N entries)@1900:refusal": "status 1 against 0 (ls: '<path>)",
+    "ls -lR (deep, N entries)@500:refusal": "status 1 against 0 (ls: '<path>)",
+    "sed -e ... (N arguments)@1000:refusal": "status 1 against 0 (sed: unsupported or invalid script)",
+    "sed -e ... (N arguments)@5000:refusal": "status 1 against 0 (sed: unsupported or invalid script)",
+    "sed -f (N blocks { })@10000:refusal": "status 1 against 0 (sed: unsupported or invalid script)",
+    "sed -f (N commands)@10000:refusal": "status 1 against 0 (sed: unsupported or invalid script)",
+    "sed -f (N commands)@1000:refusal": "status 1 against 0 (sed: unsupported or invalid script)",
+    "sed -f (N labels and one s)@10000:refusal": "status 1 against 0 (sed: unsupported or invalid script)",
+    "sed -f (N y commands)@1000:refusal": "status 1 against 0 (sed: unsupported or invalid script)",
+    "sed -f (N y commands)@130:refusal": "status 1 against 0 (sed: unsupported or invalid script)",
+    "sed -f (one a text of N bytes)@10000000:refusal": "status 1 against 0 (sed: unsupported or invalid script)",
+    "sed -f (one a text of N bytes)@270000:refusal": "status 1 against 0 (sed: unsupported or invalid script)",
+    "sed /REGEX/p (N bytes of address)@100000:refusal": "status 1 against 0 (sed: unsupported or invalid script)",
+    "sed /REGEX/p (N bytes of address)@1030:refusal": "status 1 against 0 (sed: unsupported or invalid script)",
+    "sed N w files@300:refusal": "status 1 against 0 (sed: unsupported or invalid script)",
+    "sed N w files@70:refusal": "status 1 against 0 (sed: unsupported or invalid script)",
+    "sed a TEXT (N bytes of text)@100000:refusal": "status 1 against 0 (sed: unsupported or invalid script)",
+    "sed a TEXT (N bytes of text)@1030:refusal": "status 1 against 0 (sed: unsupported or invalid script)",
+    "sed c TEXT (N bytes of text)@100000:refusal": "status 1 against 0 (sed: unsupported or invalid script)",
+    "sed c TEXT (N bytes of text)@1030:refusal": "status 1 against 0 (sed: unsupported or invalid script)",
+    "sed s/PATTERN/x/ (N bytes of pattern)@100000:refusal": "status 1 against 0 (sed: unsupported or invalid script)",
+    "sed s/PATTERN/x/ (N bytes of pattern)@1030:refusal": "status 1 against 0 (sed: unsupported or invalid script)",
+    "sh $(( ( ( N deep ))@10000:refusal": "status 2 against 0 (<path> 1: arithmetic expression: expec)",
+    "sh $(echo $(echo ... N deep@100:slope": "30 -> 100: slope 1.72, GNU's 1.44",
+    "sh N background jobs@10000:refusal": "no answer in 20 s (the host's: 0)",
+    "sh N levels cd then pwd@3000:refusal": "output differs",
+    "sh { { { N deep@5000:refusal": "status 2 against 0 (<path> 1: Syntax error: \"{\" unexpected)",
+    "tar -c --transform N times@17:refusal": "status 2 against 0 (tar: Invalid transform expression: s/zq16/x/)",
+    "tar -c --transform N times@250:refusal": "status 2 against 0 (tar: Invalid transform expression: s/zq16/x/)",
+}
+# scale baseline end
+
+
 HARNESS_CHECKS = {
     "g_tables": harness_g_tables,
+    "scale": harness_scale,
     "hot_order": harness_hot_order,
     "https_bench": harness_https_bench,
     "compression": harness_compression,

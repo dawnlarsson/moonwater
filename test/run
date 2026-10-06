@@ -89,7 +89,7 @@ export TEST_TALLY
 #       fuzz an hour a target, msan a clang with MemorySanitizer, ring0 an
 #       image and a machine that boots it, best one built with
 #       kernel/profile/sec_sanitize.
-asked_lanes="wifi fuzz msan ring0"
+asked_lanes="wifi fuzz msan ring0 scale"
 
 lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex slurp wait writer native probe stack checksum storage_io storage_format machine sensors cli differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep"
 
@@ -172,6 +172,7 @@ describe()
         fuzz)     echo "every network libFuzzer target for an hour each, or a release report" ;;
         msan)     echo "the net wire parsers under MemorySanitizer" ;;
         ring0)    echo "a hostile program's windows, ioctls, images and log lines against a booted kernel, and what its sanitizers say" ;;
+        scale)    echo "every tool against the host's own from a kilobyte to a gigabyte and from one entry to a million: a loss, a cliff, a refusal or a super-linear step fails (NOT RUN off Linux or without the host tools)" ;;
         esac
 }
 
@@ -17061,6 +17062,53 @@ counted
 )
 
 #
+#       Every tool against the host's own, at every size.
+#
+#           taskset -c 8-15 sh test/run scale
+#
+#       A series is one tool along one dimension -- bytes, lines, a line's
+#       length, patterns, keys, fields, files, entries in a directory,
+#       arguments, commands, depth, entropy, processors -- run turn about
+#       with the host's tool on the same job, and judged for a loss (ours
+#       slower than GNU's), a cliff (the cost of a unit more than doubling
+#       where GNU's does not), super-linear growth, a refusal GNU does not
+#       have, and a ratio worse than the one test/differential.py's
+#       SCALE_BASELINE recorded. It is a lane of timings, so it wants a quiet
+#       machine: the taskset names the cores the multi-threaded tools may use
+#       (eight of one die of the box this was recorded on), and a lock the
+#       other benchmarks share can be held series by series. About ten
+#       minutes; MOONWATER_SCALE_FULL=1 runs every decade (an hour or more).
+#
+#           MOONWATER_SCALE_SERIES=grep,sort    only the series with these words
+#           MOONWATER_SCALE_DATA=DIR            keep the inputs between runs
+#           MOONWATER_SCALE_FARMS="parent=DIR"  more farms, to time beside ours
+#                                               (a parent built apart is how a
+#                                               new row is shown red there)
+#           MOONWATER_SCALE_LOCK=FILE           hold FILE (flock) around each series, so
+#                                               that benchmarks of other people's take turns
+#           MOONWATER_SCALE_UPDATE=1            write the ratios into the baseline
+#
+lane_scale()
+(
+if [ "$host_arch" != x86_64 ] || [ "$(uname -s)" != Linux ]; then
+        echo "  scale        NOT RUN -- it times Linux programs against GNU's, on the box that recorded the baseline"
+        exit 2
+fi
+command -v python3 > /dev/null 2>&1 || { echo "  scale        NOT RUN -- no python3"; exit 2; }
+need_shell || exit 1
+set -- --farm "ours=$farm"
+for scale_farm in ${MOONWATER_SCALE_FARMS:-}; do
+        set -- "$@" --farm "$scale_farm"
+done
+[ -z "${MOONWATER_SCALE_FULL:-}" ] || set -- "$@" --full
+[ -z "${MOONWATER_SCALE_SERIES:-}" ] || set -- "$@" --series "$MOONWATER_SCALE_SERIES"
+[ -z "${MOONWATER_SCALE_DATA:-}" ] || set -- "$@" --data "$MOONWATER_SCALE_DATA"
+[ -z "${MOONWATER_SCALE_LOCK:-}" ] || set -- "$@" --lock "$MOONWATER_SCALE_LOCK"
+[ -z "${MOONWATER_SCALE_UPDATE:-}" ] || set -- "$@" --update
+python3 test/differential.py --harness scale "$@"
+)
+
+#
 #       The benchmarks.
 #
 #           sh test/run bench                every benchmark
@@ -18601,7 +18649,7 @@ case $jobs in
 '' | *[!0-9]* | 0) echo "run: -j wants a count" >&2; exit 2 ;;
 esac
 
-alone_lanes="text files misc util_linux shell builtins awk term edit differential_oracle boot install canvas wifi ring0"
+alone_lanes="text files misc util_linux shell builtins awk term edit differential_oracle boot install canvas wifi ring0 scale"
 
 if [ "$#" -gt 0 ]; then
         requested=$*
