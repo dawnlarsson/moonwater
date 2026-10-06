@@ -10672,7 +10672,110 @@ def files_collation_ls(farm):
     return passed, total, notes
 
 
-FILES_CHECKS = (files_uname_identity, files_cp_into_self, files_collation_ls, files_large_inputs, files_column_layout, files_xargs_parallel, files_zones, files_tar,
+LOCALE_NAMES = (None, "", "C", "POSIX", "C.UTF-8", "C.utf8", "en_US.UTF-8", "xx_YY.UTF-8", "C.UTF-8@x")
+
+
+def files_locale_names(farm):
+    """The names a shell's default environment can carry, against the reference,
+    and what an applet looks for on disk under them.
+
+    LANG=C.UTF-8 is the default of every shell here and the C library builds
+    that locale in, so no file is read for it and none is looked for: under
+    qemu's -strace no start of sort, ls or comm may open anything below
+    /usr/lib/locale, where each of them tried four paths a category. A name
+    with no built-in locale is still looked for, and sort reads the month
+    names and the number marks only for the keys that use them. The same
+    commands under each name the environment can hold (unset, empty, C,
+    POSIX, both spellings of C.UTF-8, a locale this machine may have, one it
+    does not, a modifier) answer what the reference answers, so a machine
+    that ships files for C.utf8 reads the same as one that does not."""
+    import platform
+    import shutil
+    import subprocess
+    import tempfile
+
+    passed = total = 0
+    notes = []
+    farm = Path(farm)
+
+    def run(program, args, locale, data=b""):
+        environment = {"PATH": "/usr/bin:/bin", "TZ": "UTC0"}
+        if locale is not None:
+            environment["LANG"] = locale
+        done = subprocess.run([program, *args], input=data, capture_output=True, env=environment, timeout=60)
+        return done.returncode, done.stdout
+
+    lines = "b\nB\na\nA\n\u00e9\ne\nz\nZ\n\u00c9\n10\n9\n1,5\n1.5\n".encode()
+    months = b"mar\nJan\nfeb\nDEC\nxyz\nAug\n"
+    numbers = b"1,234\n12\n1.5\n-3\n1e3\n0x10\n5K\n2M\n"
+    cases = (
+        ("sort", [], lines), ("sort", ["-f"], lines), ("sort", ["-u"], lines),
+        ("sort", ["-M"], months), ("sort", ["-n"], numbers), ("sort", ["-g"], numbers),
+        ("sort", ["-h"], numbers), ("sort", ["-r"], lines),
+        ("comm", ["-12", "/dev/stdin", "/dev/null"], lines),
+        ("date", ["-u", "-d", "@1700000000", "+%a %b %c|%x|%X|%p|%Z"], b""),
+        ("date", ["-u", "-d", "@1700000000"], b""),
+        ("cut", ["-c", "1-2"], lines), ("uniq", ["-i"], lines),
+        ("printf", ["%'d\\n", "1234567"], b""), ("numfmt", ["--grouping", "1234567"], b""),
+    )
+    def gnu(program):
+        try:
+            done = subprocess.run([program, "--version"], capture_output=True, timeout=10)
+        except OSError:
+            return False
+        return b"GNU" in done.stdout
+
+    for name in LOCALE_NAMES:
+        for tool, args, data in cases:
+            reference = shutil.which(tool, path="/usr/bin:/bin")
+            if not reference or not (farm / tool).exists() or not gnu(reference):
+                continue
+            total += 1
+            want = run(reference, args, name, data)
+            got = run(str(farm / tool), args, name, data)
+            if want == got:
+                passed += 1
+            elif len(notes) < 12:
+                notes.append(f"{tool} {' '.join(args)} under {name!r}: {want[1][:50]!r} against {got[1][:50]!r}")
+
+    qemu = shutil.which("qemu-x86_64") if platform.machine() in ("x86_64", "AMD64") else None
+    if not qemu or platform.system() != "Linux":
+        return passed, total, notes
+
+    def opened(tool, args, locale):
+        done = subprocess.run([qemu, "-strace", str(farm / tool), *args], stdin=subprocess.DEVNULL,
+                              stdout=subprocess.DEVNULL, capture_output=False, stderr=subprocess.PIPE,
+                              env={"PATH": "/usr/bin:/bin", "LANG": locale}, timeout=60)
+        return [line for line in done.stderr.decode("utf-8", "replace").splitlines()
+                if " openat(" in line and "/usr/lib/locale" in line]
+
+    #       A category a name has no built-in locale for is looked for in four
+    #       places (two spellings of the name, each as a file and in the archive),
+    #       so a sort of bytes under a name nobody has makes four of them, one
+    #       category, and -M and -n a second one each.
+    expectations = (
+        ("sort", ["/dev/null"], "C.UTF-8", 0),
+        ("sort", ["-M", "/dev/null"], "C.UTF-8", 0),
+        ("sort", ["-n", "/dev/null"], "C.utf8", 0),
+        ("ls", ["/dev/null"], "C.UTF-8", 0),
+        ("comm", ["/dev/null", "/dev/null"], "C.UTF-8", 0),
+        ("sort", ["/dev/null"], "xx_YY.UTF-8", 4),
+        ("sort", ["-M", "/dev/null"], "xx_YY.UTF-8", 8),
+        ("sort", ["-n", "/dev/null"], "xx_YY.UTF-8", 8),
+    )
+    for tool, args, locale, wanted in expectations:
+        if not (farm / tool).exists():
+            continue
+        total += 1
+        seen = len(opened(tool, args, locale))
+        if seen == wanted:
+            passed += 1
+        elif len(notes) < 12:
+            notes.append(f"{tool} {' '.join(args)} under {locale}: {seen} lookups under /usr/lib/locale, wanted {wanted}")
+    return passed, total, notes
+
+
+FILES_CHECKS = (files_uname_identity, files_cp_into_self, files_locale_names, files_collation_ls, files_large_inputs, files_column_layout, files_xargs_parallel, files_zones, files_tar,
                 files_tar_formats,
                 files_find_terminal, files_zone_names, files_hostname_set, files_move_across,
                 files_address_cap)

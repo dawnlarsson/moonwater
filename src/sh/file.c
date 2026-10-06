@@ -5914,12 +5914,35 @@ static bool locale_archive_read(string_address name, positive category,
                 positive room = head[4];
                 positive length = string_length(name);
 
+                // The table is read in windows of 340 slots, a seek and a read
+                // each, and not a seek and a read a slot: a hundred reads for the
+                // 907 slots the C library makes, and an archive of eight names
+                // has most of them empty.
+                p32 window[340 * 3];
+                positive loaded = 0;
+                positive first = 0;
+
+                if (room > (1 << 20))
+                        room = 1 << 20;
                 for (positive at = 0; at < room && !found; at++)
                 {
-                        p32 entry[3];
+                        if (at - first >= loaded)
+                        {
+                                positive want = room - at < 340 ? room - at : 340;
 
-                        if (system_seek((positive)handle, (bipolar)(table + 12 * at), 0) < 0 ||
-                            system_read_retry((positive)handle, entry, 12) != 12 || !entry[1])
+                                first = at;
+                                loaded = 0;
+                                if (system_seek((positive)handle, (bipolar)(table + 12 * at), 0) < 0)
+                                        break;
+                                got = system_read_retry((positive)handle, window, want * 12);
+                                if (got < 12)
+                                        break;
+                                loaded = (positive)got / 12;
+                        }
+
+                        p32 address_to entry = window + 3 * (at - first);
+
+                        if (!entry[1])
                                 continue;
 
                         p8 text[80];
@@ -5965,6 +5988,13 @@ static fn locale_join(p8 address_to into, positive room, string_address a,
         into[at] = end;
 }
 
+// The C library builds this locale in, under either spelling, and a machine
+// that ships files for it ships what is built in: no file is looked for.
+static bool locale_builtin(string_address name)
+{
+        return string_equals(name, "C.UTF-8") || string_equals(name, "C.utf8");
+}
+
 // The category's file for the locale the environment names, or null.
 static HOT locale_category address_to locale_open(positive category)
 {
@@ -5988,7 +6018,7 @@ static HOT locale_category address_to locale_open(positive category)
                 one->name[keep] = end;
         }
 
-        if (!name)
+        if (!name || locale_builtin(name))
                 return null;
 
         // NAME.CODESET@MODIFIER: the C library looks for the codeset in its

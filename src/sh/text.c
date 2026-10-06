@@ -35778,8 +35778,7 @@ static bool sort_locale_named(string_address name)
 // and any locale this machine has the data of.
 static bool sort_locale_known(string_address name)
 {
-        return sort_locale_named(name) || string_equals(name, "C.UTF-8") ||
-               string_equals(name, "C.utf8") || locale_open(LOCALE_COLLATE) != null;
+        return sort_locale_named(name) || locale_builtin(name) || locale_open(LOCALE_COLLATE) != null;
 }
 
 // Whether setlocale(LC_ALL, "") would take the environment: every category's
@@ -39818,14 +39817,25 @@ static b32 sort_check(bool quiet)
         return code ? code : text_status ? 2 : 0;
 }
 
-static b32 text_sort()
+// The month names and the number marks of the locale, for the keys that read
+// them: -M names months and -n, -g and -h read a point and a thousands mark,
+// and a sort by bytes, which is nearly all of them, asks for neither file.
+static fn sort_locale_data(positive kinds)
 {
-        sort_months_local = locale_open(LOCALE_TIME) != null;
-        for (positive m = 0; sort_months_local && m < 12; m++)
+        sort_months_local = false;
+        sort_point = sort_point_byte = sort_thousands = 0;
+        sort_numeric_local = false;
+
+        if (kinds & SORT_KIND_M)
         {
-                sort_months[m] = locale_string(LOCALE_TIME, LOCALE_TIME_ABMON + m);
-                sort_months_local = sort_months[m] != null;
+                sort_months_local = locale_open(LOCALE_TIME) != null;
+                for (positive m = 0; sort_months_local && m < 12; m++)
+                {
+                        sort_months[m] = locale_string(LOCALE_TIME, LOCALE_TIME_ABMON + m);
+                        sort_months_local = sort_months[m] != null;
+                }
         }
+        if (kinds & (SORT_KIND_N | SORT_KIND_G | SORT_KIND_H))
         {
                 string_address point = locale_open(LOCALE_NUMERIC)
                                           ? locale_string(LOCALE_NUMERIC, LOCALE_NUMERIC_DECIMAL) : null;
@@ -39839,6 +39849,11 @@ static b32 text_sort()
                 sort_thousands = group && group[0] && !group[1] ? (p8)group[0] : 0;
                 sort_numeric_local = sort_point_byte || sort_thousands;
         }
+}
+
+static b32 text_sort()
+{
+        sort_locale_data(0);
         file_taking taking = {
             .program = (string_address) "sort",
             .options = sort_options,
@@ -40080,6 +40095,13 @@ static b32 text_sort()
                 text_delimiter = '\0';
 
         sort_release();
+        {
+                positive read_by_keys = 0;
+
+                for (b32 i = 0; i < sort_key_count; i++)
+                        read_by_keys |= sort_keys[i].order.kinds;
+                sort_locale_data(read_by_keys);
+        }
         sort_collating = collate_ready();
         sort_stages_ready();
         sort_kept_ready();
