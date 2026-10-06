@@ -20942,7 +20942,7 @@ def text_grep_many(farm):
             (base / name).write_text("\n".join(strings) + "\n", encoding="latin1")
             return name
 
-        sizes = sorted({cutoff - 1, cutoff, cutoff + 1, cutoff + 2, 4 * cutoff, 10 * cutoff,
+        sizes = sorted({2, 3, 4, 8, cutoff - 1, cutoff, cutoff + 1, cutoff + 2, 4 * cutoff, 10 * cutoff,
                         258, 500, 900, 2000, 6000})
         lists = {}
         for size in sizes:
@@ -21004,6 +21004,22 @@ def text_grep_many(farm):
         (base / "bytes_hay").write_bytes(b"".join(bytes([byte, byte ^ 1, 7]) + b" " + bytes([byte]) + b"\n"
                                                     for byte in range(2, 256) if byte not in (10, 11, 12, 13))
                                          + b"\xe9\xe9\n")
+        # A list said in one pattern, which is a bar between strings in either
+        # dialect, and what is not one: a bar beside an operator, a bar and
+        # nothing, and a pattern of the list's size said twice over.
+        for size in (cutoff - 1, cutoff + 1, 10 * cutoff, 258, 900, 2000):
+            many = everything[:size]
+            for mode in (("-c",), ("-o",), ("-w", "-c"), ("-x", "-c"), ("-i", "-c"), ("-v", "-c"), ("-n",)):
+                cases.append((("-E", *mode, "|".join(many), "hay"), None))
+                cases.append((("-G", *mode, "\\|".join(many), "hay"), None))
+                cases.append((("-E", *mode, "-e", "|".join(many[:size // 2]), "-e", "|".join(many[size // 2:]),
+                               "hay"), None))
+        for pattern in ("|".join(everything[:cutoff + 4]) + "|", "|" + "|".join(everything[:cutoff + 4]),
+                        "|".join(everything[:cutoff + 4]) + "||" + everything[0],
+                        "|".join(everything[:cutoff + 4]) + "|x.y", "|".join(everything[:cutoff + 4]) + "|(z)",
+                        "|".join(everything[:cutoff + 4]) + "\\|q", "|".join(everything[:cutoff + 4]) + "|[a-c]x"):
+            for mode in (("-c",), ("-w", "-c"), ("-o",)):
+                cases.append((("-E", *mode, pattern, "hay"), None))
         # A walk, whose files are read on the pool: the same lines in files
         # of every size, a binary one and an empty one.
         for name, data in (("tree/a", hay), ("tree/sub/b", hay[:20000]), ("tree/sub/c", hay[5:300]),
@@ -74987,18 +75003,18 @@ SCALE_BASELINE = {
     "fold -s -w 70": {100000: 0.14, 10000000: 0.11, 100000000: 0.11},
     "fold -w 40 (C.UTF-8)": {1000000: 0.14, 10000000: 0.11},
     "grep -E -c (alpha|beta):0[0-4]+:": {100000: 0.54, 10000000: 0.45, 100000000: 0.22},
-    "grep -E W|W|... (one pattern)": {1: 0.15, 16: 0.05, 256: 0.08},
+    "grep -E W|W|... (one pattern)": {1: 0.25, 16: 0.17, 256: 0.02, 1024: 0.01},
     "grep -E [a-z]{N}": {1: 1.35, 100: 1.17, 1000: 1.03},
-    "grep -F -c patterns (words)": {1: 0.11, 16: 0.03, 256: 0.14},
-    "grep -F -o patterns (words)": {1: 0.23, 16: 6.92},
-    "grep -F -w -c patterns (words)": {1: 0.11, 16: 0.03, 256: 0.05},
+    "grep -F -c patterns (words)": {1: 0.13, 16: 0.05, 256: 0.02, 1024: 0.08, 16384: 0.21},
+    "grep -F -o patterns (words)": {1: 0.26, 16: 0.73, 256: 0.69},
+    "grep -F -w -c patterns (words)": {1: 0.13, 16: 0.04, 256: 0.03, 1024: 0.04},
     "grep -H -n needle": {100000: 0.39, 10000000: 0.17, 100000000: 0.11},
     "grep -c -E (a|e)(b|c)(d|f)": {100000: 0.42, 10000000: 0.12, 100000000: 0.05},
     "grep -c -E [a-z]+ing (C.UTF-8)": {1000000: 0.04, 10000000: 0.02},
     "grep -c -i THE (C.UTF-8)": {1000000: 0.37, 10000000: 0.12},
     "grep -c -i \u00c9 (UTF-8)": {},
     "grep -c -w the (C.UTF-8)": {1000000: 0.25, 10000000: 0.07},
-    "grep -c LITERAL (length N)": {10: 0.91, 1000: 0.3},
+    "grep -c LITERAL (length N)": {10: 0.85, 1000: 0.37, 10000: 0.02},
     "grep -c a$ (CRLF)": {100000: 0.78, 10000000: 0.67, 100000000: 0.39},
     "grep -c the (C.UTF-8)": {1000000: 0.27, 10000000: 0.1},
     "grep -c the (processors)": {1: 0.25, 4: 0.08, 8: 0.04},
@@ -75222,13 +75238,9 @@ SCALE_KNOWN = {
     "expand -t N stops@20000:refusal": "status 1 against 0 (expand: too many tab stops)",
     "factor 10^N@2600:refusal": "status 1 against 0 (factor: 100000000000000000000000000000000000000000000000000000000000000000000000",
     "factor 10^N@6000:refusal": "status 1 against 0 (factor: 100000000000000000000000000000000000000000000000000000000000000000000000",
-    "grep -E W|W|... (one pattern)@1024:refusal": "status 2 against 0 (grep: invalid regular expression)",
-    "grep -F -o patterns (words)@16:cliff": "1 -> 16: ours 2153865.06 ns/unit -> 37464273.00 (x17.4), GNU 9199769.93 -> 5410669.03 (x0.6)",
-    "grep -F -o patterns (words)@16:slope": "1 -> 16: slope 2.03, GNU's 0.81",
     "grep -c -i \u00c9 (UTF-8)@100000000:refusal": "status 1 against 0",
     "grep -c -i \u00c9 (UTF-8)@10000000:refusal": "status 1 against 0",
     "grep -c -i \u00c9 (UTF-8)@100000:refusal": "status 1 against 0",
-    "grep -c LITERAL (length N)@10000:refusal": "status 2 against 1 (grep: invalid regular expression)",
     "join -o N fields@10000:refusal": "status 1 against 0 (join: memory exhausted)",
     "join -o N fields@300:refusal": "status 1 against 0 (join: memory exhausted)",
     "limit: shuf -n 99999999999999999999 FILE@1:refusal": "status 1 against 0 (shuf: invalid line count: '99999999999999999999')",

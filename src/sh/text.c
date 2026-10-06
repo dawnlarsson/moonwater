@@ -25980,6 +25980,17 @@ static bool grep_set_gather(const regex_program address_to program, p16 node,
 #ifndef GREP_MANY_BYTES
 #define GREP_MANY_BYTES 4096
 #endif
+/*
+        The matches of a line, which -o, colour and context ask for, are
+        found by the graph a line at a time even where the set tells which
+        lines have one, and the graph tries every string at every byte: on
+        that file 47 ms for 2 strings, 86 for 4, 220 for 8 and 850 for 16,
+        against the automaton's 35 whatever the number. In those modes it
+        takes over from the third string.
+*/
+#ifndef GREP_MANY_FROM_LINES
+#define GREP_MANY_FROM_LINES 2
+#endif
 // What the rows may take; the nodes past them are walked.
 #define GREP_MANY_ROWS (8u << 20)
 // Ranges at most this long are sorted by insertion.
@@ -26011,7 +26022,7 @@ typedef struct
 
 // The strings as they are given, each with its newline after it.
 static p8 address_to grep_many_pool;
-static positive grep_many_used, grep_many_room, grep_many_total;
+static positive grep_many_used, grep_many_room, grep_many_total, grep_many_lines;
 // Every string so far is plain, and whether one holds a byte of 0x80 or more.
 static bool grep_many_plain, grep_many_high;
 static grep_many grep_many_set;
@@ -26030,7 +26041,7 @@ static fn grep_many_release()
         memory_give(many->rows);
         memory_fill(many, 0, sizeof(*many));
         grep_many_pool = null;
-        grep_many_used = grep_many_room = grep_many_total = 0;
+        grep_many_used = grep_many_room = grep_many_total = grep_many_lines = 0;
         grep_many_plain = true;
         grep_many_high = false;
         grep_many_on = false;
@@ -26038,45 +26049,23 @@ static fn grep_many_release()
 
 /*
         One more pattern, if it is bytes and nothing else in the language it
-        is given in. A fixed string always is. In basic syntax the backslash,
-        the bracket, the dot, the star and the two anchors are operators, and
-        in extended syntax the plus, the question mark, the brace, the bar
-        and the parentheses are too; every other byte is itself. A NUL is
-        never plain: no string of the set holds one, since a binary file's
-        NULs end its lines.
+        is given in, or bytes with the bar between them, which is a list of
+        strings said in one: a|b|c in extended syntax and a\|b\|c in basic.
+        A fixed string always is. In basic syntax the backslash, the bracket,
+        the dot, the star and the two anchors are operators, and in extended
+        syntax the plus, the question mark, the brace and the parentheses
+        are too; every other byte is itself. A NUL is never plain: no string
+        of the set holds one, since a binary file's NULs end its lines.
 */
-static fn grep_many_add(string_address text, positive length, bool fixed,
-                        bool extended)
+static fn grep_many_refuse()
 {
-        bool high = false;
+        memory_give(grep_many_pool);
+        grep_many_pool = null;
+        grep_many_plain = false;
+}
 
-        if (!grep_many_plain)
-                return;
-
-        for (positive at = 0; at < length; at++)
-        {
-                p8 byte = text[at];
-                bool operator_byte = !byte;
-
-                if (!fixed)
-                        operator_byte = operator_byte || byte == '\\' || byte == '[' ||
-                                        byte == '.' || byte == '*' || byte == '^' ||
-                                        byte == '$' ||
-                                        (extended && (byte == '+' || byte == '?' ||
-                                                      byte == '{' || byte == '|' ||
-                                                      byte == '(' || byte == ')'));
-
-                if (operator_byte)
-                {
-                        memory_give(grep_many_pool);
-                        grep_many_pool = null;
-                        grep_many_plain = false;
-                        return;
-                }
-
-                high = high || byte >= 0x80;
-        }
-
+static fn grep_many_put(string_address text, positive length)
+{
         if (grep_many_used + length + 1 > grep_many_room)
         {
                 positive room = grep_many_room * 2;
@@ -26092,9 +26081,7 @@ static fn grep_many_add(string_address text, positive length, bool fixed,
 
                 if (!grown)
                 {
-                        memory_give(grep_many_pool);
-                        grep_many_pool = null;
-                        grep_many_plain = false;
+                        grep_many_refuse();
                         return;
                 }
 
@@ -26110,17 +26097,61 @@ static fn grep_many_add(string_address text, positive length, bool fixed,
         grep_many_pool[grep_many_used + length] = '\n';
         grep_many_used += length + 1;
         grep_many_total++;
-        grep_many_high = grep_many_high || high;
+}
+
+static fn grep_many_add(string_address text, positive length, bool fixed,
+                        bool extended)
+{
+        positive from = 0;
+
+        if (!grep_many_plain)
+                return;
+
+        for (positive at = 0; at <= length && grep_many_plain; at++)
+        {
+                p8 byte = at < length ? text[at] : 0;
+                bool bar = at == length || (!fixed && extended && byte == '|') ||
+                           (!fixed && !extended && byte == '\\' && at + 1 < length &&
+                            text[at + 1] == '|');
+                bool operator_byte = at < length && !byte;
+
+                if (bar)
+                {
+                        grep_many_put(text + from, at - from);
+                        // The bar of basic syntax is two bytes.
+                        at += at < length && !extended;
+                        from = at + 1;
+                        continue;
+                }
+
+                if (!fixed)
+                        operator_byte = operator_byte || byte == '\\' || byte == '[' ||
+                                        byte == '.' || byte == '*' || byte == '^' ||
+                                        byte == '$' ||
+                                        (extended && (byte == '+' || byte == '?' ||
+                                                      byte == '{' || byte == '(' ||
+                                                      byte == ')'));
+
+                if (operator_byte)
+                {
+                        grep_many_refuse();
+                        return;
+                }
+
+                grep_many_high = grep_many_high || byte >= 0x80;
+        }
+
+        grep_many_lines++;
 }
 
 // Whether the strings are better served by the automaton than by the set
 // and the machine: more of them than the set holds, or more bytes.
-static bool grep_many_wanted(bool icase)
+static bool grep_many_wanted(bool icase, bool lines)
 {
         return grep_many_plain && grep_many_total &&
-               grep_many_total == grep_pattern_count &&
+               grep_many_lines == grep_pattern_count &&
                !(grep_utf8 && icase && grep_many_high) &&
-               (grep_many_total > GREP_MANY_FROM ||
+               (grep_many_total > (lines ? GREP_MANY_FROM_LINES : GREP_MANY_FROM) ||
                 grep_many_used - grep_many_total > GREP_MANY_BYTES);
 }
 
@@ -30683,7 +30714,12 @@ static b32 text_grep_run()
         // Plain strings past what the set and the machine take are the
         // automaton's, and need no expression at all: what an expression
         // could not hold is no reason to refuse them.
-        bool many = !never && grep_many_wanted(icase);
+        // The matches of a line are found a line at a time where they are
+        // printed one by one, painted, or put among the lines around them.
+        bool many = !never &&
+                    grep_many_wanted(icase, (only || grep_coloring || before || after) &&
+                                                !counting && !listing && !listing_without &&
+                                                !quiet);
 
         if (grep_pattern_broken && !many)
                 return text_done(string_diagnostic(&text_diagnostic, 2, null, "pattern too long"));
