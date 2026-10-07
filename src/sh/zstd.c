@@ -2394,23 +2394,8 @@ static fn zstd_ct_init(void)
                 zstd_ct_ready = true;
 }
 
-static const p8 zstd_ll_codes[64] = {
-        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
-        16, 16, 17, 17, 18, 18, 19, 19, 20, 20, 20, 20, 21, 21, 21, 21,
-        22, 22, 22, 22, 22, 22, 22, 22, 23, 23, 23, 23, 23, 23, 23, 23,
-        24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24,
-};
-static const p8 zstd_ml_codes[131] = {
-        0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
-        13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28,
-        29, 30, 31, 32, 32, 33, 33, 34, 34, 35, 35, 36, 36, 36, 36, 37,
-        37, 37, 37, 38, 38, 38, 38, 38, 38, 38, 38, 39, 39, 39, 39, 39,
-        39, 39, 39, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40,
-        40, 40, 40, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41,
-        41, 41, 41, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
-        42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
-        42, 42, 42,
-};
+#define zstd_ll_codes (zstd_sequence_tab.ll_codes)
+#define zstd_ml_codes (zstd_sequence_tab.ml_codes)
 
 typedef struct
 {
@@ -3213,7 +3198,7 @@ _Static_assert(sizeof(zstd_enc_seq) == 16 &&
                __builtin_offsetof(zstd_ctable, delta_nb) == 1024 &&
                __builtin_offsetof(zstd_ctable, delta_find) == 1240 &&
                sizeof(zstd_seq_encode) == 96 &&
-               sizeof(zstd_sequence_codes) == 896,
+               sizeof(zstd_sequence_codes) == 1100,
                "the layouts lib.c's zstd_sequences_encode reads");
 
 /* The table of a stream of one symbol: no bits, and the state stays 0. */
@@ -3678,129 +3663,65 @@ zstd_repeat_run(zstd_encoder address_to e, p8 address_to ip,
 }
 
 /*
-        fast, libzstd 1.5's: positions go in pairs, ip0 and ip1 adjacent,
-        each hashed one step before its table slot is read and that slot's
-        candidate one step before it is compared, so no load waits on the
-        one before it.  A repeat is tried at ip2, the pair after.  Pairs
-        start step apart, 2 (or --fast's target length + 1), and the step
-        grows by one every 128 bytes without a match.
+        fast, libzstd 1.5's, which lib.c's zstd_fast_parse runs: positions go
+        in pairs, ip0 and ip1 adjacent, each hashed one step before its table
+        slot is read and that slot's candidate one step before it is
+        compared, so no load waits on the one before it.  A repeat is tried
+        at ip2, the pair after.  Pairs start step apart, 2 (or --fast's
+        target length + 1), and the step grows by one every 128 bytes without
+        a match.  The routine takes the encoder's tables and arrays as a job
+        and answers where the literals not yet stored begin.
 */
+typedef struct
+{
+        p8 address_to base;
+        p32 address_to table;
+        zstd_enc_seq address_to seqs;
+        p8 address_to lits;
+        zstd_seq_freq address_to freq;
+        positive from;
+        positive to;
+        positive low;
+        positive hash_log;
+        positive min_match;
+        positive step;
+        p32 address_to rep;
+        p8 address_to anchor;
+} zstd_fast_job;
+
+_Static_assert(sizeof(zstd_fast_job) == 104 &&
+               __builtin_offsetof(zstd_fast_job, seqs) == 16 &&
+               __builtin_offsetof(zstd_fast_job, lits) == 24 &&
+               __builtin_offsetof(zstd_fast_job, freq) == 32 &&
+               __builtin_offsetof(zstd_fast_job, from) == 40 &&
+               __builtin_offsetof(zstd_fast_job, hash_log) == 64 &&
+               __builtin_offsetof(zstd_fast_job, rep) == 88 &&
+               __builtin_offsetof(zstd_fast_job, anchor) == 96 &&
+               __builtin_offsetof(zstd_seq_freq, of) == 144 &&
+               __builtin_offsetof(zstd_seq_freq, ml) == 272,
+               "the layouts lib.c's zstd_fast_parse reads");
+
 static p8 address_to zstd_parse_fast(zstd_encoder address_to e, p32 from,
                                      p32 to, p32 low)
 {
-        p8 address_to const base = e->base;
-        p32 address_to const table = e->hash;
-        p8 const hlog = e->p.hash_log;
-        p8 const mls = e->p.min_match < 4 ? 4 : e->p.min_match > 8 ? 8 : e->p.min_match;
-        positive const step_size = (positive)e->p.target_length + !e->p.target_length + 1;
-        p8 address_to const lowest = base + low;
-        p8 address_to const iend = base + to;
-        p8 address_to const ilimit = iend - 8;
-        p8 address_to ip0 = base + from;
-        p8 address_to anchor = ip0;
-        p32 rep = e->rep[0];
+        zstd_fast_job job;
 
-        ip0 += ip0 == lowest;
-        if (rep > (p32)(ip0 - lowest))
-                rep = 0;
-        for (;;)
-        {
-                positive step = step_size;
-                p8 address_to next_step = ip0 + 128;
-                p8 address_to ip1 = ip0 + 1;
-                p8 address_to ip2 = ip0 + step;
-                p8 address_to ip3 = ip2 + 1;
-                p8 address_to match0;
-                positive h0;
-                positive h1;
-                positive distance;
-                positive length;
-                p32 candidate;
-                p32 cur0;
-
-                if (ip3 >= ilimit)
-                        break;
-                h0 = zstd_hash_bytes(ip0, hlog, mls);
-                h1 = zstd_hash_bytes(ip1, hlog, mls);
-                candidate = table[h0];
-                for (;;)
-                {
-                        p32 const rval = memory_load_unaligned(p32, ip2 - rep);
-
-                        cur0 = (p32)(ip0 - base);
-                        table[h0] = cur0;
-                        if (rep && memory_load_unaligned(p32, ip2) == rval)
-                        {
-                                ip0 = ip2;
-                                match0 = ip0 - rep;
-                                length = ip0[-1] == match0[-1];
-                                ip0 -= length;
-                                match0 -= length;
-                                length += 4;
-                                distance = rep;
-                                table[h1] = (p32)(ip1 - base);
-                                goto matched;
-                        }
-                        if (candidate >= low &&
-                            memory_load_unaligned(p32, ip0) == memory_load_unaligned(p32, base + candidate))
-                        {
-                                table[h1] = (p32)(ip1 - base);
-                                goto found;
-                        }
-                        candidate = table[h1];
-                        h0 = h1;
-                        h1 = zstd_hash_bytes(ip2, hlog, mls);
-                        ip0 = ip1;
-                        ip1 = ip2;
-                        ip2 = ip3;
-                        cur0 = (p32)(ip0 - base);
-                        table[h0] = cur0;
-                        if (candidate >= low &&
-                            memory_load_unaligned(p32, ip0) == memory_load_unaligned(p32, base + candidate))
-                        {
-                                if (step <= 4)
-                                        table[h1] = (p32)(ip1 - base);
-                                goto found;
-                        }
-                        candidate = table[h1];
-                        h0 = h1;
-                        h1 = zstd_hash_bytes(ip2, hlog, mls);
-                        ip0 = ip1;
-                        ip1 = ip2;
-                        ip2 = ip0 + step;
-                        ip3 = ip1 + step;
-                        if (ip2 >= next_step)
-                        {
-                                step++;
-                                __builtin_prefetch(ip1 + 64);
-                                __builtin_prefetch(ip1 + 128);
-                                next_step += 128;
-                        }
-                        if (ip3 >= ilimit)
-                                return anchor;
-                }
-        found:
-                match0 = base + candidate;
-                distance = (positive)(ip0 - match0);
-                length = 4;
-                while (ip0 > anchor && match0 > lowest && ip0[-1] == match0[-1])
-                        ip0--, match0--, length++;
-        matched:
-                length += zstd_common(ip0 + length, match0 + length,
-                                               (positive)(iend - ip0 - length));
-                zstd_store(e, anchor, (positive)(ip0 - anchor), distance, length);
-                ip0 += length;
-                anchor = ip0;
-                if (ip0 <= ilimit)
-                {
-                        table[zstd_hash_bytes(base + cur0 + 2, hlog, mls)] = cur0 + 2;
-                        table[zstd_hash_bytes(ip0 - 2, hlog, mls)] = (p32)(ip0 - 2 - base);
-                        ip0 = zstd_repeat_run(e, ip0, ilimit + 1, iend, low, table, hlog, mls);
-                        anchor = ip0;
-                }
-                rep = e->rep[0];
-        }
-        return anchor;
+        job.base = e->base;
+        job.table = e->hash;
+        job.seqs = e->seqs + e->nseq;
+        job.lits = e->lits + e->nlit;
+        job.freq = address_of e->freq;
+        job.from = from;
+        job.to = to;
+        job.low = low;
+        job.hash_log = e->p.hash_log;
+        job.min_match = e->p.min_match < 4 ? 4 : e->p.min_match > 8 ? 8 : e->p.min_match;
+        job.step = (positive)e->p.target_length + !e->p.target_length + 1;
+        job.rep = e->rep;
+        zstd_fast_parse(address_of job);
+        e->nseq = (positive)(job.seqs - e->seqs);
+        e->nlit = (positive)(job.lits - e->lits);
+        return job.anchor;
 }
 
 /*
@@ -3811,7 +3732,7 @@ static p8 address_to zstd_parse_fast(zstd_encoder address_to e, p32 from,
         longer.  The step starts at 1 and grows by one every 256 bytes
         without a match.
 */
-static p8 address_to zstd_parse_dfast(zstd_encoder address_to e, p32 from,
+static __attribute__((noinline)) p8 address_to zstd_parse_dfast(zstd_encoder address_to e, p32 from,
                                       p32 to, p32 low)
 {
         p8 address_to const base = e->base;

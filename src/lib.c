@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        384 routines (363 public, 21 local), 376 of them on all three and 8 local to one.
+        385 routines (364 public, 21 local), 377 of them on all three and 8 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -446,6 +446,7 @@
           zstd_bits_get                  public  yes     yes     yes
           zstd_bits_open                 public  yes     yes     yes
           zstd_bits_reload               public  yes     yes     yes
+          zstd_fast_parse                public  yes     yes     yes
           zstd_fse_cells                 public  yes     yes     yes
           zstd_huffman_4x                public  yes     yes     yes
           zstd_huffman_cells             public  yes     yes     yes
@@ -2155,7 +2156,8 @@ __asm__(
    for n up to 16 (u32). At 576, 640 and 704 for a count n of pending bits
    below 64 the whole bytes n >> 3, the bits they take n & 56 and the bits
    left n & 7 (u8). At 768 the powers 1 << n up to 31 (u32), the base of an
-   offset code's extra bits. */
+   offset code's extra bits. At 896 and 960 the literal length code of each
+   length under 64 and the match length code of each under 131 (u8). */
 typedef struct
 {
     p32 ll_base[36];
@@ -2169,6 +2171,9 @@ typedef struct
     p8 bits[64];
     p8 rest[64];
     p32 power[32];
+    p8 ll_codes[64];
+    p8 ml_codes[131];
+    p8 spare2[9];
 } zstd_sequence_codes;
 extern const zstd_sequence_codes zstd_sequence_tab;
 __asm__(
@@ -2205,6 +2210,20 @@ __asm__(
     ".long 256, 512, 1024, 2048, 4096, 8192, 16384, 32768\n"
     ".long 65536, 131072, 262144, 524288, 1048576, 2097152, 4194304, 8388608\n"
     ".long 16777216, 33554432, 67108864, 134217728, 268435456, 536870912, 1073741824, 2147483648\n"
+    ".byte 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15\n"
+    ".byte 16, 16, 17, 17, 18, 18, 19, 19, 20, 20, 20, 20, 21, 21, 21, 21\n"
+    ".byte 22, 22, 22, 22, 22, 22, 22, 22, 23, 23, 23, 23, 23, 23, 23, 23\n"
+    ".byte 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24\n"
+    ".byte 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12\n"
+    ".byte 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28\n"
+    ".byte 29, 30, 31, 32, 32, 33, 33, 34, 34, 35, 35, 36, 36, 36, 36, 37\n"
+    ".byte 37, 37, 37, 38, 38, 38, 38, 38, 38, 38, 38, 39, 39, 39, 39, 39\n"
+    ".byte 39, 39, 39, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40\n"
+    ".byte 40, 40, 40, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41\n"
+    ".byte 41, 41, 41, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42\n"
+    ".byte 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42\n"
+    ".byte 42, 42, 42\n"
+    ".zero 9\n"
     ASM_OBJECT_END(zstd_sequence_tab)
 );
 
@@ -13428,6 +13447,140 @@ __asm__(
     ".Lzstd_seq_enc_x64_bmi_out:\n   add $16,%rsp\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n" ASM_RET
 #endif
     ASM_END(zstd_sequences_encode)
+    /* zstd_fast_parse(job) is libzstd 1.5's fast strategy, which zstd -1 to -3
+       run, over the bytes [from, to) of a block: positions go in pairs, ip0
+       and ip1 adjacent, each hashed one step before its table slot is read and
+       that slot's candidate one step before it is compared; a repeat of the
+       last offset is tried at ip2, a pair on; a match is taken back over the
+       literals before it, its length found sixteen bytes at a time, and
+       stored (the literals, the sequence record with the repeat-offset coding
+       of RFC 8878, and the three code counts); the table then takes the two
+       positions in the match's first and last bytes, and a run of matches at
+       the second repeat offset goes in with no literals between. The step
+       starts at the job's step and grows by one every 128 bytes without a
+       match. The hash is the first mls bytes times 0x9E3779B185EBCA87 less
+       the high bytes, taken as ((bytes * (K << (64 - 8 mls))) >> (64 -
+       hlog)): a shift fewer than the C had. The 104-byte job, * what the
+       routine changes: base 0 (index i is base[i]), table 8 (u32 positions,
+       1 << hlog of them), *seqs 16 (the next 16-byte record, as
+       zstd_sequences_encode reads them), *lits 24 (the next literal byte),
+       freq 32 (the counts the codes are added to: 36 literal length, 32
+       offset, 53 match length u32, in that order), from 40, to 48, low 56
+       (indices; nothing before low is matched), hlog 64, mls 72 (4 to 8),
+       step 80 (target length + 1, or 2), *rep 88 (the three u32 repeat
+       offsets), *anchor 96 (where the literals not yet stored begin: the
+       caller keeps the rest). It stops, as the C did, when the next pair
+       passes to - 8. Sixteen bytes are always copied for the literals and up
+       to fifteen more past a longer run, so lits needs 16 bytes of room, and
+       reads reach 16 bytes past to; the encoder's buffers carry 64.
+       test/codec_floor/reference/zstd_fast_parse.c is the reference, the
+       parse as it was in C. Measured, user cycles of the parse alone on a
+       9950X over 3 MiB blocks, the C against this: text -4, source tar -21,
+       binary tar -13 percent (the match on text is a chain of loads and
+       the instruction count fell 26 percent without moving it). The arm64
+       and riscv64 bodies follow. */
+    ASM_FUNC(zstd_fast_parse)
+#ifdef KERNEL_MODE
+    ASM_RET
+#else
+    "push %rbx\n   push %rbp\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n   sub $120,%rsp\n   mov %rdi,0(%rsp)\n   mov (%rdi),%rbx\n   mov 8(%rdi),%rbp\n"
+    "movabs $0x9E3779B185EBCA87,%r12\n   mov 72(%rdi),%rax\n   mov $64,%ecx\n   lea (,%rax,8),%rdx\n   sub %edx,%ecx\n   shl %cl,%r12\n   mov 64(%rdi),%rax\n"
+    "mov $64,%ecx\n   sub %eax,%ecx\n   mov 56(%rdi),%r13\n   mov 80(%rdi),%rax\n   mov %rax,32(%rsp)\n   lea (%rbx,%r13),%rax\n   mov %rax,88(%rsp)\n"
+    "mov 48(%rdi),%rax\n   add %rbx,%rax\n   mov %rax,24(%rsp)\n   sub $8,%rax\n   mov %rax,16(%rsp)\n   mov 16(%rdi),%rax\n   mov %rax,56(%rsp)\n   mov 24(%rdi),%rax\n"
+    "mov %rax,64(%rsp)\n   mov 32(%rdi),%rax\n   mov %rax,72(%rsp)\n   mov 88(%rdi),%rsi\n   mov (%rsi),%eax\n   mov %eax,96(%rsp)\n   mov 4(%rsi),%eax\n"
+    "mov %eax,40(%rsp)\n   mov 8(%rsi),%eax\n   mov %eax,48(%rsp)\n   mov 40(%rdi),%rax\n   lea (%rbx,%rax),%rdi\n   mov %rdi,%r14\n   cmp 88(%rsp),%rdi\n"
+    "jne .Lzfp_x64_i1\n   inc %rdi\n"
+    ".Lzfp_x64_i1:\n   mov 96(%rsp),%r11d\n   mov %rdi,%rax\n   sub 88(%rsp),%rax\n   cmp %eax,%r11d\n   jbe .Lzfp_x64_i2\n   xor %r11d,%r11d\n"
+    ".Lzfp_x64_i2:\n   .balign 16\n"
+    ".Lzfp_x64_top:\n   mov 32(%rsp),%r15\n   lea (%rdi,%r15),%rsi\n   lea 1(%rsi),%rax\n   cmp 16(%rsp),%rax\n   jae .Lzfp_x64_ret\n   lea 128(%rdi),%rax\n"
+    "mov %rax,8(%rsp)\n   mov (%rdi),%rax\n   imul %r12,%rax\n   shr %cl,%rax\n   mov %rax,%r8\n   mov 1(%rdi),%rax\n   imul %r12,%rax\n   shr %cl,%rax\n   mov %rax,%r9\n"
+    "mov (%rbp,%r8,4),%r10d\n   .balign 16\n"
+    ".Lzfp_x64_probe:\n   mov %rsi,%rax\n   sub %r11,%rax\n   mov (%rax),%eax\n   mov %rdi,%rdx\n   sub %rbx,%rdx\n   mov %edx,(%rbp,%r8,4)\n   test %r11,%r11\n"
+    "jz .Lzfp_x64_c1\n   cmp (%rsi),%eax\n   je .Lzfp_x64_rep1\n"
+    ".Lzfp_x64_c1:\n   cmp %r13d,%r10d\n   jb .Lzfp_x64_n1\n   mov (%rbx,%r10),%eax\n   cmp (%rdi),%eax\n   jne .Lzfp_x64_n1\n   lea 1(%rdx),%eax\n   mov %eax,(%rbp,%r9,4)\n"
+    "mov %edx,80(%rsp)\n   jmp .Lzfp_x64_found\n"
+    ".Lzfp_x64_n1:\n   mov (%rbp,%r9,4),%r10d\n   mov %r9,%r8\n   mov (%rsi),%rax\n   imul %r12,%rax\n   shr %cl,%rax\n   mov %rax,%r9\n   inc %rdi\n   mov %rdi,%rdx\n"
+    "sub %rbx,%rdx\n   mov %edx,(%rbp,%r8,4)\n   cmp %r13d,%r10d\n   jb .Lzfp_x64_n2\n   mov (%rbx,%r10),%eax\n   cmp (%rdi),%eax\n   jne .Lzfp_x64_n2\n   cmp $4,%r15\n"
+    "ja .Lzfp_x64_h2\n   mov %rsi,%rax\n   sub %rbx,%rax\n   mov %eax,(%rbp,%r9,4)\n"
+    ".Lzfp_x64_h2:\n   mov %edx,80(%rsp)\n   jmp .Lzfp_x64_found\n"
+    ".Lzfp_x64_n2:\n   mov (%rbp,%r9,4),%r10d\n   mov %r9,%r8\n   mov 1(%rsi),%rax\n   imul %r12,%rax\n   shr %cl,%rax\n   mov %rax,%r9\n   mov %rsi,%rdi\n"
+    "lea (%rdi,%r15),%rsi\n   lea 1(%rsi),%rax\n   cmp 8(%rsp),%rsi\n   jb .Lzfp_x64_ns\n   inc %r15\n   prefetcht0 65(%rdi)\n   prefetcht0 129(%rdi)\n"
+    "addq $128,8(%rsp)\n"
+    ".Lzfp_x64_ns:\n   cmp 16(%rsp),%rax\n   jb .Lzfp_x64_probe\n   jmp .Lzfp_x64_ret\n"
+    ".Lzfp_x64_rep1:\n   mov %edx,80(%rsp)\n   lea 1(%rdx),%eax\n   mov %eax,(%rbp,%r9,4)\n   mov %rsi,%rdi\n   mov %rdi,%rax\n   sub %r11,%rax\n   movzbl -1(%rdi),%edx\n"
+    "cmp -1(%rax),%dl\n   sete %dl\n   movzbl %dl,%edx\n   sub %rdx,%rdi\n   sub %rdx,%rax\n   add $4,%rdx\n   jmp .Lzfp_x64_matched\n"
+    ".Lzfp_x64_found:\n   lea (%rbx,%r10),%rax\n   mov %rdi,%r11\n   sub %rax,%r11\n   mov $4,%edx\n   mov 88(%rsp),%rsi\n"
+    ".Lzfp_x64_back:\n   cmp %r14,%rdi\n   jbe .Lzfp_x64_matched\n   cmp %rsi,%rax\n   jbe .Lzfp_x64_matched\n   movzbl -1(%rdi),%r8d\n   cmp -1(%rax),%r8b\n"
+    "jne .Lzfp_x64_matched\n   dec %rdi\n   dec %rax\n   inc %edx\n   jmp .Lzfp_x64_back\n"
+    ".Lzfp_x64_matched:\n   lea (%rdi,%rdx),%rsi\n   lea (%rax,%rdx),%r8\n   mov 24(%rsp),%r9\n   sub %rsi,%r9\n   mov %rdx,%r10\n   xor %r15d,%r15d\n"
+    ".Lzfp_x64_cm1:\n   cmp $16,%r9\n   jb .Lzfp_x64_ct1\n   movdqu (%rsi,%r15),%xmm0\n   movdqu (%r8,%r15),%xmm1\n   pcmpeqb %xmm1,%xmm0\n   pmovmskb %xmm0,%eax\n"
+    "xor $0xffff,%eax\n   jnz .Lzfp_x64_ch1\n   add $16,%r15\n   sub $16,%r9\n   jmp .Lzfp_x64_cm1\n"
+    ".Lzfp_x64_ch1:\n   bsf %eax,%eax\n   add %rax,%r15\n   jmp .Lzfp_x64_cd1\n"
+    ".Lzfp_x64_ct1:\n   test %r9,%r9\n   jz .Lzfp_x64_cd1\n   movzbl (%rsi,%r15),%eax\n   cmp (%r8,%r15),%al\n   jne .Lzfp_x64_cd1\n   inc %r15\n   dec %r9\n"
+    "jmp .Lzfp_x64_ct1\n"
+    ".Lzfp_x64_cd1:\n   add %r15,%r10\n   mov %rdi,%rax\n   sub %r14,%rax\n   mov 64(%rsp),%r8\n   movdqu (%r14),%xmm0\n   movdqu %xmm0,(%r8)\n   cmp $16,%rax\n"
+    "ja .Lzfp_x64_sl1\n"
+    ".Lzfp_x64_sb1:\n   add %rax,%r8\n   mov %r8,64(%rsp)\n   mov 96(%rsp),%r9d\n   mov 40(%rsp),%esi\n   mov 48(%rsp),%edx\n   lea 3(%r11),%r15d\n   test %eax,%eax\n"
+    "jz .Lzfp_x64_sz1\n   cmp %r9d,%r11d\n   je .Lzfp_x64_sA1\n   cmp %esi,%r11d\n   je .Lzfp_x64_sB21\n   cmp %edx,%r11d\n   jne .Lzfp_x64_sall1\n   mov $3,%r15d\n"
+    "jmp .Lzfp_x64_sall1\n"
+    ".Lzfp_x64_sz1:\n   cmp %esi,%r11d\n   je .Lzfp_x64_sB11\n   cmp %edx,%r11d\n   je .Lzfp_x64_sC21\n   lea -1(%r9),%r8d\n   cmp %r8d,%r11d\n   jne .Lzfp_x64_sall1\n"
+    "mov $3,%r15d\n   jmp .Lzfp_x64_sall1\n"
+    ".Lzfp_x64_sC21:\n   mov $2,%r15d\n   jmp .Lzfp_x64_sall1\n"
+    ".Lzfp_x64_sB21:\n   mov $2,%r15d\n   jmp .Lzfp_x64_sB1\n"
+    ".Lzfp_x64_sB11:\n   mov $1,%r15d\n"
+    ".Lzfp_x64_sB1:\n   mov %r9d,40(%rsp)\n   mov %r11d,96(%rsp)\n   jmp .Lzfp_x64_sr1\n"
+    ".Lzfp_x64_sA1:\n   mov $1,%r15d\n   jmp .Lzfp_x64_sr1\n"
+    ".Lzfp_x64_sall1:\n   mov %esi,48(%rsp)\n   mov %r9d,40(%rsp)\n   mov %r11d,96(%rsp)\n"
+    ".Lzfp_x64_sr1:\n   lea zstd_sequence_tab(%rip),%r9\n   cmp $63,%rax\n   ja .Lzfp_x64_bl1\n   movzbl 896(%r9,%rax),%edx\n"
+    ".Lzfp_x64_ll1:\n   cmp $130,%r10\n   ja .Lzfp_x64_bm1\n   movzbl 960(%r9,%r10),%esi\n"
+    ".Lzfp_x64_ml1:\n   bsr %r15d,%r8d\n   mov 72(%rsp),%r9\n   incl (%r9,%rdx,4)\n   incl 272(%r9,%rsi,4)\n   incl 144(%r9,%r8,4)\n   shl $32,%rdx\n   shl $40,%rsi\n"
+    "shl $48,%r8\n   or %rsi,%rdx\n   or %r8,%rdx\n   or %r15,%rdx\n   mov %r10,%rsi\n   shl $32,%rsi\n   or %rax,%rsi\n   mov 56(%rsp),%r8\n   mov %rsi,(%r8)\n"
+    "mov %rdx,8(%r8)\n   add $16,%r8\n   mov %r8,56(%rsp)\n   jmp .Lzfp_x64_sd1\n"
+    ".Lzfp_x64_sl1:\n   lea 16(%r8),%rdx\n   lea 16(%r14),%rsi\n   lea (%r14,%rax),%r9\n"
+    ".Lzfp_x64_lc1:\n   movdqu (%rsi),%xmm0\n   movdqu %xmm0,(%rdx)\n   add $16,%rsi\n   add $16,%rdx\n   cmp %r9,%rsi\n   jb .Lzfp_x64_lc1\n   jmp .Lzfp_x64_sb1\n"
+    ".Lzfp_x64_bl1:\n   bsr %rax,%rdx\n   add $19,%edx\n   jmp .Lzfp_x64_ll1\n"
+    ".Lzfp_x64_bm1:\n   lea -3(%r10),%esi\n   bsr %esi,%esi\n   add $36,%esi\n   jmp .Lzfp_x64_ml1\n"
+    ".Lzfp_x64_sd1:\n   add %r10,%rdi\n   mov %rdi,%r14\n   cmp 16(%rsp),%rdi\n   ja .Lzfp_x64_after\n   mov 80(%rsp),%edx\n   lea 2(%rdx),%esi\n   mov 2(%rbx,%rdx),%rax\n"
+    "imul %r12,%rax\n   shr %cl,%rax\n   mov %esi,(%rbp,%rax,4)\n   mov -2(%rdi),%rax\n   imul %r12,%rax\n   shr %cl,%rax\n   mov %rdi,%rsi\n   sub %rbx,%rsi\n"
+    "sub $2,%esi\n   mov %esi,(%rbp,%rax,4)\n"
+    ".Lzfp_x64_rr:\n   cmp 16(%rsp),%rdi\n   ja .Lzfp_x64_rrd\n   mov %rdi,%rdx\n   sub %rbx,%rdx\n   mov 40(%rsp),%esi\n   test %esi,%esi\n   jz .Lzfp_x64_rrd\n"
+    "mov %edx,%eax\n   sub %r13d,%eax\n   cmp %eax,%esi\n   ja .Lzfp_x64_rrd\n   mov %rdi,%rax\n   sub %rsi,%rax\n   mov (%rax),%eax\n   cmp (%rdi),%eax\n"
+    "jne .Lzfp_x64_rrd\n   mov (%rdi),%rax\n   imul %r12,%rax\n   shr %cl,%rax\n   mov %edx,(%rbp,%rax,4)\n   mov %rsi,%r11\n   lea 4(%rdi),%rsi\n   mov %rsi,%r8\n"
+    "sub %r11,%r8\n   mov 24(%rsp),%r9\n   sub %rsi,%r9\n   xor %r15d,%r15d\n"
+    ".Lzfp_x64_cm2:\n   cmp $16,%r9\n   jb .Lzfp_x64_ct2\n   movdqu (%rsi,%r15),%xmm0\n   movdqu (%r8,%r15),%xmm1\n   pcmpeqb %xmm1,%xmm0\n   pmovmskb %xmm0,%eax\n"
+    "xor $0xffff,%eax\n   jnz .Lzfp_x64_ch2\n   add $16,%r15\n   sub $16,%r9\n   jmp .Lzfp_x64_cm2\n"
+    ".Lzfp_x64_ch2:\n   bsf %eax,%eax\n   add %rax,%r15\n   jmp .Lzfp_x64_cd2\n"
+    ".Lzfp_x64_ct2:\n   test %r9,%r9\n   jz .Lzfp_x64_cd2\n   movzbl (%rsi,%r15),%eax\n   cmp (%r8,%r15),%al\n   jne .Lzfp_x64_cd2\n   inc %r15\n   dec %r9\n"
+    "jmp .Lzfp_x64_ct2\n"
+    ".Lzfp_x64_cd2:\n   lea 4(%r15),%r10\n   xor %eax,%eax\n   mov 64(%rsp),%r8\n   movdqu (%rdi),%xmm0\n   movdqu %xmm0,(%r8)\n   cmp $16,%rax\n   ja .Lzfp_x64_sl2\n"
+    ".Lzfp_x64_sb2:\n   add %rax,%r8\n   mov %r8,64(%rsp)\n   mov 96(%rsp),%r9d\n   mov 40(%rsp),%esi\n   mov 48(%rsp),%edx\n   lea 3(%r11),%r15d\n   test %eax,%eax\n"
+    "jz .Lzfp_x64_sz2\n   cmp %r9d,%r11d\n   je .Lzfp_x64_sA2\n   cmp %esi,%r11d\n   je .Lzfp_x64_sB22\n   cmp %edx,%r11d\n   jne .Lzfp_x64_sall2\n   mov $3,%r15d\n"
+    "jmp .Lzfp_x64_sall2\n"
+    ".Lzfp_x64_sz2:\n   cmp %esi,%r11d\n   je .Lzfp_x64_sB12\n   cmp %edx,%r11d\n   je .Lzfp_x64_sC22\n   lea -1(%r9),%r8d\n   cmp %r8d,%r11d\n   jne .Lzfp_x64_sall2\n"
+    "mov $3,%r15d\n   jmp .Lzfp_x64_sall2\n"
+    ".Lzfp_x64_sC22:\n   mov $2,%r15d\n   jmp .Lzfp_x64_sall2\n"
+    ".Lzfp_x64_sB22:\n   mov $2,%r15d\n   jmp .Lzfp_x64_sB2\n"
+    ".Lzfp_x64_sB12:\n   mov $1,%r15d\n"
+    ".Lzfp_x64_sB2:\n   mov %r9d,40(%rsp)\n   mov %r11d,96(%rsp)\n   jmp .Lzfp_x64_sr2\n"
+    ".Lzfp_x64_sA2:\n   mov $1,%r15d\n   jmp .Lzfp_x64_sr2\n"
+    ".Lzfp_x64_sall2:\n   mov %esi,48(%rsp)\n   mov %r9d,40(%rsp)\n   mov %r11d,96(%rsp)\n"
+    ".Lzfp_x64_sr2:\n   lea zstd_sequence_tab(%rip),%r9\n   cmp $63,%rax\n   ja .Lzfp_x64_bl2\n   movzbl 896(%r9,%rax),%edx\n"
+    ".Lzfp_x64_ll2:\n   cmp $130,%r10\n   ja .Lzfp_x64_bm2\n   movzbl 960(%r9,%r10),%esi\n"
+    ".Lzfp_x64_ml2:\n   bsr %r15d,%r8d\n   mov 72(%rsp),%r9\n   incl (%r9,%rdx,4)\n   incl 272(%r9,%rsi,4)\n   incl 144(%r9,%r8,4)\n   shl $32,%rdx\n   shl $40,%rsi\n"
+    "shl $48,%r8\n   or %rsi,%rdx\n   or %r8,%rdx\n   or %r15,%rdx\n   mov %r10,%rsi\n   shl $32,%rsi\n   or %rax,%rsi\n   mov 56(%rsp),%r8\n   mov %rsi,(%r8)\n"
+    "mov %rdx,8(%r8)\n   add $16,%r8\n   mov %r8,56(%rsp)\n   jmp .Lzfp_x64_sd2\n"
+    ".Lzfp_x64_sl2:\n   lea 16(%r8),%rdx\n   lea 16(%rdi),%rsi\n   lea (%rdi,%rax),%r9\n"
+    ".Lzfp_x64_lc2:\n   movdqu (%rsi),%xmm0\n   movdqu %xmm0,(%rdx)\n   add $16,%rsi\n   add $16,%rdx\n   cmp %r9,%rsi\n   jb .Lzfp_x64_lc2\n   jmp .Lzfp_x64_sb2\n"
+    ".Lzfp_x64_bl2:\n   bsr %rax,%rdx\n   add $19,%edx\n   jmp .Lzfp_x64_ll2\n"
+    ".Lzfp_x64_bm2:\n   lea -3(%r10),%esi\n   bsr %esi,%esi\n   add $36,%esi\n   jmp .Lzfp_x64_ml2\n"
+    ".Lzfp_x64_sd2:\n   add %r10,%rdi\n   jmp .Lzfp_x64_rr\n"
+    ".Lzfp_x64_rrd:\n   mov %rdi,%r14\n"
+    ".Lzfp_x64_after:\n   mov 96(%rsp),%r11d\n   jmp .Lzfp_x64_top\n"
+    ".Lzfp_x64_ret:\n   mov 0(%rsp),%rdx\n   mov %r14,96(%rdx)\n   mov 56(%rsp),%rax\n   mov %rax,16(%rdx)\n   mov 64(%rsp),%rax\n   mov %rax,24(%rdx)\n   mov 88(%rdx),%rsi\n"
+    "mov 96(%rsp),%eax\n   mov %eax,(%rsi)\n   mov 40(%rsp),%eax\n   mov %eax,4(%rsi)\n   mov 48(%rsp),%eax\n   mov %eax,8(%rsi)\n   add $120,%rsp\n   pop %r15\n"
+    "pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n" ASM_RET
+#endif
+    ASM_END(zstd_fast_parse)
     // Exact memmove semantics, followed by one terminator, with the end handed
     // back. The copy core stays single-sourced: keeping dst+n on the stack is
     // enough to survive its caller-saved register use. A real call is required
@@ -20932,6 +21085,105 @@ __asm__(
     ".Lzstd_seq_enc_arm64_out:\n   ldp x19, x20, [sp, #16]\n   ldp x21, x22, [sp, #32]\n   ldp x23, x24, [sp, #48]\n   ldp x25, x26, [sp, #64]\n   ldp x27, x28, [sp, #80]\n"
     "ldp x29, x30, [sp], #96\n" ASM_RET
     ASM_END(zstd_sequences_encode)
+    // zstd_fast_parse: see the x86_64 block for the contract. The hash
+    // multiplies by K << (64 - 8 mls) and shifts once; the literal copy is a
+    // pair load and store; a match runs sixteen bytes a turn by ldp, eor and
+    // rbit with clz, one branch for each word.
+    ASM_FUNC(zstd_fast_parse)
+    "stp x29, x30, [sp, #-112]!\n   stp x19, x20, [sp, #16]\n   stp x21, x22, [sp, #32]\n   stp x23, x24, [sp, #48]\n   stp x25, x26, [sp, #64]\n"
+    "stp x27, x28, [sp, #80]\n   str x0, [sp, #96]\n   ldp x4, x5, [x0]\n   ldp x19, x20, [x0, #16]\n   ldr x21, [x0, #32]\n   ldp x26, x27, [x0, #40]\n"
+    "ldp x8, x28, [x0, #56]\n   ldp x29, x30, [x0, #72]\n   ldr x0, [x0, #88]\n   ldp w22, w23, [x0]\n   ldr w24, [x0, #8]\n   movz x6, #0xca87\n"
+    "movk x6, #0x85eb, lsl #16\n   movk x6, #0x79b1, lsl #32\n   movk x6, #0x9e37, lsl #48\n   mov x0, #64\n   sub x7, x0, x28\n   lsl x0, x29, #3\n   mov x29, #64\n"
+    "sub x0, x29, x0\n   lsl x6, x6, x0\n   str x30, [sp, #104]\n   add x17, x4, x8\n   add x16, x4, x27\n   sub x15, x16, #8\n   add x1, x4, x26\n   mov x3, x1\n"
+    "cmp x1, x17\n   cinc x1, x1, eq\n   mov w12, w22\n   sub x0, x1, x17\n   cmp w12, w0\n   csel w12, wzr, w12, hi\n   adrp x25, zstd_sequence_tab\n"
+    "add x25, x25, :lo12:zstd_sequence_tab\n   .balign 16\n"
+    ".Lzfp_arm64_top:\n   ldr x13, [sp, #104]\n   add x2, x1, x13\n   add x0, x2, #1\n   cmp x0, x15\n   b.hs .Lzfp_arm64_ret\n   add x14, x1, #128\n   ldr x0, [x1]\n"
+    "mul x0, x0, x6\n   lsr x9, x0, x7\n   ldur x0, [x1, #1]\n   mul x0, x0, x6\n   lsr x10, x0, x7\n   ldr w11, [x5, x9, lsl #2]\n   .balign 16\n"
+    ".Lzfp_arm64_probe:\n   sub x0, x2, x12\n   ldr w27, [x0]\n   sub x26, x1, x4\n   str w26, [x5, x9, lsl #2]\n   cbz x12, .Lzfp_arm64_c1\n   ldr w28, [x2]\n"
+    "cmp w28, w27\n   b.eq .Lzfp_arm64_rep1\n"
+    ".Lzfp_arm64_c1:\n   cmp w11, w8\n   b.lo .Lzfp_arm64_n1\n   ldr w28, [x4, x11]\n   ldr w29, [x1]\n   cmp w28, w29\n   b.ne .Lzfp_arm64_n1\n   add w28, w26, #1\n"
+    "str w28, [x5, x10, lsl #2]\n   b .Lzfp_arm64_found\n"
+    ".Lzfp_arm64_n1:\n   ldr w11, [x5, x10, lsl #2]\n   mov x9, x10\n   ldr x0, [x2]\n   mul x0, x0, x6\n   lsr x10, x0, x7\n   add x1, x1, #1\n   sub x26, x1, x4\n"
+    "str w26, [x5, x9, lsl #2]\n   cmp w11, w8\n   b.lo .Lzfp_arm64_n2\n   ldr w28, [x4, x11]\n   ldr w29, [x1]\n   cmp w28, w29\n   b.ne .Lzfp_arm64_n2\n   cmp x13, #4\n"
+    "b.hi .Lzfp_arm64_found\n   sub x28, x2, x4\n   str w28, [x5, x10, lsl #2]\n   b .Lzfp_arm64_found\n"
+    ".Lzfp_arm64_n2:\n   ldr w11, [x5, x10, lsl #2]\n   mov x9, x10\n   ldur x0, [x2, #1]\n   mul x0, x0, x6\n   lsr x10, x0, x7\n   mov x1, x2\n   add x2, x1, x13\n"
+    "add x0, x2, #1\n   cmp x2, x14\n   b.lo .Lzfp_arm64_ns\n   add x13, x13, #1\n   prfum pldl1keep, [x1, #65]\n   prfum pldl1keep, [x1, #129]\n   add x14, x14, #128\n"
+    ".Lzfp_arm64_ns:\n   cmp x0, x15\n   b.lo .Lzfp_arm64_probe\n   b .Lzfp_arm64_ret\n"
+    ".Lzfp_arm64_rep1:\n   add w28, w26, #1\n   str w28, [x5, x10, lsl #2]\n   mov x1, x2\n   sub x0, x1, x12\n   ldurb w27, [x1, #-1]\n   ldurb w28, [x0, #-1]\n"
+    "cmp w27, w28\n   cset x27, eq\n   sub x1, x1, x27\n   sub x0, x0, x27\n   add x27, x27, #4\n   b .Lzfp_arm64_matched0\n"
+    ".Lzfp_arm64_found:\n   add x0, x4, x11\n   sub x12, x1, x0\n   mov x27, #4\n"
+    ".Lzfp_arm64_back:\n   cmp x1, x3\n   b.ls .Lzfp_arm64_matched0\n   cmp x0, x17\n   b.ls .Lzfp_arm64_matched0\n   ldurb w28, [x1, #-1]\n   ldurb w29, [x0, #-1]\n"
+    "cmp w28, w29\n   b.ne .Lzfp_arm64_matched0\n   sub x1, x1, #1\n   sub x0, x0, #1\n   add x27, x27, #1\n   b .Lzfp_arm64_back\n"
+    ".Lzfp_arm64_matched0:\n   add x9, x1, x27\n   add x10, x0, x27\n   sub x11, x16, x9\n   mov x13, xzr\n"
+    ".Lzfp_arm64_cm1:\n   cmp x11, #16\n   b.lo .Lzfp_arm64_ct1\n   ldp x28, x29, [x9]\n   ldp x30, x0, [x10]\n   eor x28, x28, x30\n   eor x29, x29, x0\n"
+    "cbnz x28, .Lzfp_arm64_c01\n   cbnz x29, .Lzfp_arm64_c11\n   add x9, x9, #16\n   add x10, x10, #16\n   add x13, x13, #16\n   sub x11, x11, #16\n"
+    "b .Lzfp_arm64_cm1\n"
+    ".Lzfp_arm64_c01:\n   rbit x28, x28\n   clz x28, x28\n   add x13, x13, x28, lsr #3\n   b .Lzfp_arm64_cd1\n"
+    ".Lzfp_arm64_c11:\n   rbit x29, x29\n   clz x29, x29\n   lsr x29, x29, #3\n   add x13, x13, x29\n   add x13, x13, #8\n   b .Lzfp_arm64_cd1\n"
+    ".Lzfp_arm64_ct1:\n   cbz x11, .Lzfp_arm64_cd1\n   ldrb w28, [x9]\n   ldrb w29, [x10]\n   cmp w28, w29\n   b.ne .Lzfp_arm64_cd1\n   add x9, x9, #1\n   add x10, x10, #1\n"
+    "add x13, x13, #1\n   sub x11, x11, #1\n   b .Lzfp_arm64_ct1\n"
+    ".Lzfp_arm64_cd1:\n   add x27, x27, x13\n   sub x0, x1, x3\n   ldp x9, x10, [x3]\n   stp x9, x10, [x20]\n   cmp x0, #16\n   b.hi .Lzfp_arm64_sl1\n"
+    ".Lzfp_arm64_sb1:\n   add x20, x20, x0\n   add w13, w12, #3\n   cbz x0, .Lzfp_arm64_sz1\n   cmp w12, w22\n   b.eq .Lzfp_arm64_sA1\n   cmp w12, w23\n"
+    "b.eq .Lzfp_arm64_sB21\n   cmp w12, w24\n   b.ne .Lzfp_arm64_sall1\n   mov w13, #3\n   b .Lzfp_arm64_sall1\n"
+    ".Lzfp_arm64_sz1:\n   cmp w12, w23\n   b.eq .Lzfp_arm64_sB11\n   cmp w12, w24\n   b.eq .Lzfp_arm64_sC21\n   sub w9, w22, #1\n   cmp w12, w9\n   b.ne .Lzfp_arm64_sall1\n"
+    "mov w13, #3\n   b .Lzfp_arm64_sall1\n"
+    ".Lzfp_arm64_sC21:\n   mov w13, #2\n   b .Lzfp_arm64_sall1\n"
+    ".Lzfp_arm64_sB21:\n   mov w13, #2\n   b .Lzfp_arm64_sB1\n"
+    ".Lzfp_arm64_sB11:\n   mov w13, #1\n"
+    ".Lzfp_arm64_sB1:\n   mov w23, w22\n   mov w22, w12\n   b .Lzfp_arm64_sr1\n"
+    ".Lzfp_arm64_sA1:\n   mov w13, #1\n   b .Lzfp_arm64_sr1\n"
+    ".Lzfp_arm64_sall1:\n   mov w24, w23\n   mov w23, w22\n   mov w22, w12\n"
+    ".Lzfp_arm64_sr1:\n   cmp x0, #63\n   b.hi .Lzfp_arm64_bl1\n   add x9, x25, #896\n   ldrb w9, [x9, x0]\n"
+    ".Lzfp_arm64_ll1:\n   cmp x27, #130\n   b.hi .Lzfp_arm64_bm1\n   add x10, x25, #960\n   ldrb w10, [x10, x27]\n"
+    ".Lzfp_arm64_ml1:\n   clz w11, w13\n   eor w11, w11, #31\n   ldr w14, [x21, x9, lsl #2]\n   add w14, w14, #1\n   str w14, [x21, x9, lsl #2]\n   add x28, x21, #144\n"
+    "ldr w14, [x28, x11, lsl #2]\n   add w14, w14, #1\n   str w14, [x28, x11, lsl #2]\n   add x28, x21, #272\n   ldr w14, [x28, x10, lsl #2]\n   add w14, w14, #1\n"
+    "str w14, [x28, x10, lsl #2]\n   orr x28, x0, x27, lsl #32\n   orr x29, x13, x9, lsl #32\n   orr x29, x29, x10, lsl #40\n   orr x29, x29, x11, lsl #48\n"
+    "stp x28, x29, [x19], #16\n   b .Lzfp_arm64_sd1\n"
+    ".Lzfp_arm64_sl1:\n   add x9, x20, #16\n   add x10, x3, #16\n   add x11, x3, x0\n"
+    ".Lzfp_arm64_lc1:\n   ldp x28, x29, [x10], #16\n   stp x28, x29, [x9], #16\n   cmp x10, x11\n   b.lo .Lzfp_arm64_lc1\n   b .Lzfp_arm64_sb1\n"
+    ".Lzfp_arm64_bl1:\n   clz x9, x0\n   eor x9, x9, #63\n   add x9, x9, #19\n   b .Lzfp_arm64_ll1\n"
+    ".Lzfp_arm64_bm1:\n   sub w10, w27, #3\n   clz w10, w10\n   eor w10, w10, #31\n   add w10, w10, #36\n   b .Lzfp_arm64_ml1\n"
+    ".Lzfp_arm64_sd1:\n   add x1, x1, x27\n   mov x3, x1\n   cmp x1, x15\n   b.hi .Lzfp_arm64_after\n   add x28, x26, #2\n   add x0, x4, x28\n   ldr x0, [x0]\n"
+    "mul x0, x0, x6\n   lsr x0, x0, x7\n   str w28, [x5, x0, lsl #2]\n   ldur x0, [x1, #-2]\n   mul x0, x0, x6\n   lsr x0, x0, x7\n   sub x28, x1, x4\n"
+    "sub w28, w28, #2\n   str w28, [x5, x0, lsl #2]\n"
+    ".Lzfp_arm64_rr:\n   cmp x1, x15\n   b.hi .Lzfp_arm64_rrd\n   sub x26, x1, x4\n   cbz w23, .Lzfp_arm64_rrd\n   sub w0, w26, w8\n   cmp w23, w0\n   b.hi .Lzfp_arm64_rrd\n"
+    "sub x0, x1, x23\n   ldr w27, [x0]\n   ldr w28, [x1]\n   cmp w27, w28\n   b.ne .Lzfp_arm64_rrd\n   ldr x0, [x1]\n   mul x0, x0, x6\n   lsr x0, x0, x7\n"
+    "str w26, [x5, x0, lsl #2]\n   mov x12, x23\n   add x9, x1, #4\n   sub x10, x9, x12\n   sub x11, x16, x9\n   mov x13, xzr\n"
+    ".Lzfp_arm64_cm2:\n   cmp x11, #16\n   b.lo .Lzfp_arm64_ct2\n   ldp x28, x29, [x9]\n   ldp x30, x0, [x10]\n   eor x28, x28, x30\n   eor x29, x29, x0\n"
+    "cbnz x28, .Lzfp_arm64_c02\n   cbnz x29, .Lzfp_arm64_c12\n   add x9, x9, #16\n   add x10, x10, #16\n   add x13, x13, #16\n   sub x11, x11, #16\n"
+    "b .Lzfp_arm64_cm2\n"
+    ".Lzfp_arm64_c02:\n   rbit x28, x28\n   clz x28, x28\n   add x13, x13, x28, lsr #3\n   b .Lzfp_arm64_cd2\n"
+    ".Lzfp_arm64_c12:\n   rbit x29, x29\n   clz x29, x29\n   lsr x29, x29, #3\n   add x13, x13, x29\n   add x13, x13, #8\n   b .Lzfp_arm64_cd2\n"
+    ".Lzfp_arm64_ct2:\n   cbz x11, .Lzfp_arm64_cd2\n   ldrb w28, [x9]\n   ldrb w29, [x10]\n   cmp w28, w29\n   b.ne .Lzfp_arm64_cd2\n   add x9, x9, #1\n   add x10, x10, #1\n"
+    "add x13, x13, #1\n   sub x11, x11, #1\n   b .Lzfp_arm64_ct2\n"
+    ".Lzfp_arm64_cd2:\n   add x27, x13, #4\n   mov x0, xzr\n   ldp x9, x10, [x1]\n   stp x9, x10, [x20]\n   cmp x0, #16\n   b.hi .Lzfp_arm64_sl2\n"
+    ".Lzfp_arm64_sb2:\n   add x20, x20, x0\n   add w13, w12, #3\n   cbz x0, .Lzfp_arm64_sz2\n   cmp w12, w22\n   b.eq .Lzfp_arm64_sA2\n   cmp w12, w23\n"
+    "b.eq .Lzfp_arm64_sB22\n   cmp w12, w24\n   b.ne .Lzfp_arm64_sall2\n   mov w13, #3\n   b .Lzfp_arm64_sall2\n"
+    ".Lzfp_arm64_sz2:\n   cmp w12, w23\n   b.eq .Lzfp_arm64_sB12\n   cmp w12, w24\n   b.eq .Lzfp_arm64_sC22\n   sub w9, w22, #1\n   cmp w12, w9\n   b.ne .Lzfp_arm64_sall2\n"
+    "mov w13, #3\n   b .Lzfp_arm64_sall2\n"
+    ".Lzfp_arm64_sC22:\n   mov w13, #2\n   b .Lzfp_arm64_sall2\n"
+    ".Lzfp_arm64_sB22:\n   mov w13, #2\n   b .Lzfp_arm64_sB2\n"
+    ".Lzfp_arm64_sB12:\n   mov w13, #1\n"
+    ".Lzfp_arm64_sB2:\n   mov w23, w22\n   mov w22, w12\n   b .Lzfp_arm64_sr2\n"
+    ".Lzfp_arm64_sA2:\n   mov w13, #1\n   b .Lzfp_arm64_sr2\n"
+    ".Lzfp_arm64_sall2:\n   mov w24, w23\n   mov w23, w22\n   mov w22, w12\n"
+    ".Lzfp_arm64_sr2:\n   cmp x0, #63\n   b.hi .Lzfp_arm64_bl2\n   add x9, x25, #896\n   ldrb w9, [x9, x0]\n"
+    ".Lzfp_arm64_ll2:\n   cmp x27, #130\n   b.hi .Lzfp_arm64_bm2\n   add x10, x25, #960\n   ldrb w10, [x10, x27]\n"
+    ".Lzfp_arm64_ml2:\n   clz w11, w13\n   eor w11, w11, #31\n   ldr w14, [x21, x9, lsl #2]\n   add w14, w14, #1\n   str w14, [x21, x9, lsl #2]\n   add x28, x21, #144\n"
+    "ldr w14, [x28, x11, lsl #2]\n   add w14, w14, #1\n   str w14, [x28, x11, lsl #2]\n   add x28, x21, #272\n   ldr w14, [x28, x10, lsl #2]\n   add w14, w14, #1\n"
+    "str w14, [x28, x10, lsl #2]\n   orr x28, x0, x27, lsl #32\n   orr x29, x13, x9, lsl #32\n   orr x29, x29, x10, lsl #40\n   orr x29, x29, x11, lsl #48\n"
+    "stp x28, x29, [x19], #16\n   b .Lzfp_arm64_sd2\n"
+    ".Lzfp_arm64_sl2:\n   add x9, x20, #16\n   add x10, x1, #16\n   add x11, x1, x0\n"
+    ".Lzfp_arm64_lc2:\n   ldp x28, x29, [x10], #16\n   stp x28, x29, [x9], #16\n   cmp x10, x11\n   b.lo .Lzfp_arm64_lc2\n   b .Lzfp_arm64_sb2\n"
+    ".Lzfp_arm64_bl2:\n   clz x9, x0\n   eor x9, x9, #63\n   add x9, x9, #19\n   b .Lzfp_arm64_ll2\n"
+    ".Lzfp_arm64_bm2:\n   sub w10, w27, #3\n   clz w10, w10\n   eor w10, w10, #31\n   add w10, w10, #36\n   b .Lzfp_arm64_ml2\n"
+    ".Lzfp_arm64_sd2:\n   add x1, x1, x27\n   b .Lzfp_arm64_rr\n"
+    ".Lzfp_arm64_rrd:\n   mov x3, x1\n"
+    ".Lzfp_arm64_after:\n   mov w12, w22\n   b .Lzfp_arm64_top\n"
+    ".Lzfp_arm64_ret:\n   ldr x0, [sp, #96]\n   str x3, [x0, #96]\n   stp x19, x20, [x0, #16]\n   ldr x0, [x0, #88]\n   stp w22, w23, [x0]\n   str w24, [x0, #8]\n"
+    "ldp x19, x20, [sp, #16]\n   ldp x21, x22, [sp, #32]\n   ldp x23, x24, [sp, #48]\n   ldp x25, x26, [sp, #64]\n   ldp x27, x28, [sp, #80]\n"
+    "ldp x29, x30, [sp], #112\n" ASM_RET
+    ASM_END(zstd_fast_parse)
     ASM_FUNC(memory_copy_end)
     "add x3, x0, x2\n   stp x3, x30, [sp,  #-16]!\n   bl memory_copy\n   ldp x0, x30, [sp], #16\n   strb wzr, [x0]\n" ASM_RET
     ASM_END(memory_copy_end)
@@ -27603,6 +27855,151 @@ __asm__(
     ".Lzstd_seq_enc_rv_out:\n   ld s0, 0(sp)\n   ld s1, 8(sp)\n   ld s2, 16(sp)\n   ld s3, 24(sp)\n   ld s4, 32(sp)\n   ld s5, 40(sp)\n   ld s6, 48(sp)\n   ld s7, 56(sp)\n"
     "ld s8, 64(sp)\n   addi sp, sp, 112\n" ASM_RET
     ASM_END(zstd_sequences_encode)
+    // zstd_fast_parse: see the x86_64 block for the contract. Base RV64I does
+    // not promise a misaligned ld or sd: every wide read is the two
+    // doublewords it lies across (RV_LOAD64U), the window one position on is
+    // the same word slid a byte, a literal run copies a byte at a time and the
+    // sequence record is written a word at a time.
+    ASM_FUNC(zstd_fast_parse)
+    "addi sp, sp, -176\n   sd ra, 0(sp)\n   sd s0, 8(sp)\n   sd s1, 16(sp)\n   sd s2, 24(sp)\n   sd s3, 32(sp)\n   sd s4, 40(sp)\n   sd s5, 48(sp)\n   sd s6, 56(sp)\n"
+    "sd s7, 64(sp)\n   sd s8, 72(sp)\n   sd s9, 80(sp)\n   sd s10, 88(sp)\n   sd s11, 96(sp)\n   sd a0, 104(sp)\n   ld s0, 0(a0)\n   ld s1, 8(a0)\n   ld s8, 16(a0)\n"
+    "ld s9, 24(a0)\n   ld s10, 32(a0)\n   ld s4, 56(a0)\n   ld t0, 64(a0)\n   ld t1, 72(a0)\n   ld t2, 80(a0)\n   sd t2, 112(sp)\n   li s2, 0x9E3779B185EBCA87\n"
+    "li t3, 64\n   slli t4, t1, 3\n   sub t3, t3, t4\n   sll s2, s2, t3\n   li s3, 64\n   sub s3, s3, t0\n   add s7, s0, s4\n   ld t0, 48(a0)\n   add s6, s0, t0\n"
+    "addi s5, s6, -8\n   ld t0, 40(a0)\n   add a1, s0, t0\n   mv a3, a1\n   ld t1, 88(a0)\n   lwu t2, 0(t1)\n   sd t2, 128(sp)\n   lwu t2, 4(t1)\n   sd t2, 136(sp)\n"
+    "lwu t2, 8(t1)\n   sd t2, 144(sp)\n   bne a1, s7, 1f\n   addi a1, a1, 1\n   1:\n   ld a7, 128(sp)\n   sub t0, a1, s7\n   slli t0, t0, 32\n   srli t0, t0, 32\n"
+    "bgeu t0, a7, 2f\n   mv a7, zero\n   2:\n   lla s11, zstd_sequence_tab\n   .balign 16\n"
+    ".Lzfp_rv_top:\n   ld t5, 112(sp)\n   sd t5, 152(sp)\n   add a2, a1, t5\n   addi t0, a2, 1\n   bgeu t0, s5, .Lzfp_rv_ret\n   addi t0, a1, 128\n   sd t0, 160(sp)\n"
+    "andi t0, a1, 7\n   sub t4, a1, t0\n   ld t1, 0(t4)\n   ld a0, 8(t4)\n   slli t0, t0, 3\n   srl t1, t1, t0\n   xori t0, t0, 63\n   slli a0, a0, 1\n   sll a0, a0, t0\n"
+    "or t1, t1, a0\n   mul a4, t1, s2\n   srl a4, a4, s3\n   srli t2, t1, 8\n   lbu t0, 8(a1)\n   slli t0, t0, 56\n   or t2, t2, t0\n   mul a5, t2, s2\n   srl a5, a5, s3\n"
+    "slli t0, a4, 2\n   add t0, s1, t0\n   lwu a6, 0(t0)\n   .balign 16\n"
+    ".Lzfp_rv_probe:\n   andi t0, a2, 7\n   sub t4, a2, t0\n   ld t3, 0(t4)\n   ld a0, 8(t4)\n   slli t0, t0, 3\n   srl t3, t3, t0\n   xori t0, t0, 63\n   slli a0, a0, 1\n"
+    "sll a0, a0, t0\n   or t3, t3, a0\n   sub t0, a1, s0\n   sd t0, 120(sp)\n   slli t4, a4, 2\n   add t4, s1, t4\n   sw t0, 0(t4)\n   beqz a7, .Lzfp_rv_c1\n"
+    "sub t4, a2, a7\n   andi t0, t4, 7\n   sub t6, t4, t0\n   ld t5, 0(t6)\n   ld a0, 8(t6)\n   slli t0, t0, 3\n   srl t5, t5, t0\n   xori t0, t0, 63\n   slli a0, a0, 1\n"
+    "sll a0, a0, t0\n   or t5, t5, a0\n   xor t5, t5, t3\n   slli t5, t5, 32\n   beqz t5, .Lzfp_rv_rep1\n"
+    ".Lzfp_rv_c1:\n   bltu a6, s4, .Lzfp_rv_n1\n   add t4, s0, a6\n   andi t0, t4, 7\n   sub t6, t4, t0\n   ld t5, 0(t6)\n   ld a0, 8(t6)\n   slli t0, t0, 3\n"
+    "srl t5, t5, t0\n   xori t0, t0, 63\n   slli a0, a0, 1\n   sll a0, a0, t0\n   or t5, t5, a0\n   xor t5, t5, t1\n   slli t5, t5, 32\n   bnez t5, .Lzfp_rv_n1\n"
+    "ld t0, 120(sp)\n   addi t0, t0, 1\n   slli t4, a5, 2\n   add t4, s1, t4\n   sw t0, 0(t4)\n   j .Lzfp_rv_found\n"
+    ".Lzfp_rv_n1:\n   slli t4, a5, 2\n   add t4, s1, t4\n   lwu a6, 0(t4)\n   mv a4, a5\n   mul a5, t3, s2\n   srl a5, a5, s3\n   addi a1, a1, 1\n   sub t0, a1, s0\n"
+    "sd t0, 120(sp)\n   slli t4, a4, 2\n   add t4, s1, t4\n   sw t0, 0(t4)\n   bltu a6, s4, .Lzfp_rv_n2\n   add t4, s0, a6\n   andi t0, t4, 7\n   sub t6, t4, t0\n"
+    "ld t5, 0(t6)\n   ld a0, 8(t6)\n   slli t0, t0, 3\n   srl t5, t5, t0\n   xori t0, t0, 63\n   slli a0, a0, 1\n   sll a0, a0, t0\n   or t5, t5, a0\n   xor t5, t5, t2\n"
+    "slli t5, t5, 32\n   bnez t5, .Lzfp_rv_n2\n   ld t0, 152(sp)\n   li t4, 4\n   bltu t4, t0, .Lzfp_rv_found\n   sub t0, a2, s0\n   slli t4, a5, 2\n   add t4, s1, t4\n"
+    "sw t0, 0(t4)\n   j .Lzfp_rv_found\n"
+    ".Lzfp_rv_n2:\n   slli t4, a5, 2\n   add t4, s1, t4\n   lwu a6, 0(t4)\n   mv a4, a5\n   srli t2, t3, 8\n   lbu t0, 8(a2)\n   slli t0, t0, 56\n   or t2, t2, t0\n"
+    "mul a5, t2, s2\n   srl a5, a5, s3\n   mv a1, a2\n   ld t0, 152(sp)\n   add a2, a1, t0\n   addi t4, a2, 1\n   ld t5, 160(sp)\n   bltu a2, t5, .Lzfp_rv_ns\n"
+    "addi t0, t0, 1\n   sd t0, 152(sp)\n   addi t5, t5, 128\n   sd t5, 160(sp)\n"
+    ".Lzfp_rv_ns:\n   mv t1, t3\n   bltu t4, s5, .Lzfp_rv_probe\n   j .Lzfp_rv_ret\n"
+    ".Lzfp_rv_rep1:\n   ld t0, 120(sp)\n   addi t0, t0, 1\n   slli t4, a5, 2\n   add t4, s1, t4\n   sw t0, 0(t4)\n   mv a1, a2\n   sub t0, a1, a7\n   lbu t4, -1(a1)\n"
+    "lbu t5, -1(t0)\n   xor t4, t4, t5\n   seqz t4, t4\n   sub a1, a1, t4\n   sub t0, t0, t4\n   addi t4, t4, 4\n   j .Lzfp_rv_matched\n"
+    ".Lzfp_rv_found:\n   add t0, s0, a6\n   sub a7, a1, t0\n   li t4, 4\n"
+    ".Lzfp_rv_back:\n   bgeu a3, a1, .Lzfp_rv_matched\n   bgeu s7, t0, .Lzfp_rv_matched\n   lbu t5, -1(a1)\n   lbu t6, -1(t0)\n   bne t5, t6, .Lzfp_rv_matched\n"
+    "addi a1, a1, -1\n   addi t0, t0, -1\n   addi t4, t4, 1\n   j .Lzfp_rv_back\n"
+    ".Lzfp_rv_matched:\n   mv a4, t4\n   add t5, a1, t4\n   add t6, t0, t4\n   sub a0, s6, t5\n   mv t3, zero\n   li t4, 8\n"
+    ".Lzfp_rv_cb1:\n   beqz a0, .Lzfp_rv_cd1\n   lbu t0, 0(t5)\n   lbu t1, 0(t6)\n   bne t0, t1, .Lzfp_rv_cd1\n   addi t5, t5, 1\n   addi t6, t6, 1\n   addi t3, t3, 1\n"
+    "addi a0, a0, -1\n   bltu t3, t4, .Lzfp_rv_cb1\n"
+    ".Lzfp_rv_cw1:\n   li t4, 8\n   bltu a0, t4, .Lzfp_rv_cb1x\n   andi t0, t5, 7\n   sub t1, t5, t0\n   ld a5, 0(t1)\n   ld t2, 8(t1)\n   slli t0, t0, 3\n   srl a5, a5, t0\n"
+    "xori t0, t0, 63\n   slli t2, t2, 1\n   sll t2, t2, t0\n   or a5, a5, t2\n   andi t0, t6, 7\n   sub t1, t6, t0\n   ld a6, 0(t1)\n   ld t2, 8(t1)\n   slli t0, t0, 3\n"
+    "srl a6, a6, t0\n   xori t0, t0, 63\n   slli t2, t2, 1\n   sll t2, t2, t0\n   or a6, a6, t2\n   xor a5, a5, a6\n   bnez a5, .Lzfp_rv_cx1\n   addi t5, t5, 8\n"
+    "addi t6, t6, 8\n   addi t3, t3, 8\n   addi a0, a0, -8\n   j .Lzfp_rv_cw1\n"
+    ".Lzfp_rv_cx1:\n   neg t0, a5\n   and t0, t0, a5\n   addi t0, t0, -1\n   li ra, 0x8080808080808080\n   and t0, t0, ra\n   srli t0, t0, 7\n   li ra, 0x0101010101010101\n"
+    "mul t0, t0, ra\n   srli t1, t0, 56\n   add t3, t3, t1\n   j .Lzfp_rv_cd1\n"
+    ".Lzfp_rv_cb1x:\n   beqz a0, .Lzfp_rv_cd1\n   lbu t0, 0(t5)\n   lbu t1, 0(t6)\n   bne t0, t1, .Lzfp_rv_cd1\n   addi t5, t5, 1\n   addi t6, t6, 1\n   addi t3, t3, 1\n"
+    "addi a0, a0, -1\n   j .Lzfp_rv_cb1x\n"
+    ".Lzfp_rv_cd1:\n   add a4, a4, t3\n   sub a0, a1, a3\n   mv t0, a3\n   mv t1, s9\n   add t2, t0, a0\n   bgeu t0, t2, .Lzfp_rv_sc1x\n"
+    ".Lzfp_rv_sc1:\n   lbu t3, 0(t0)\n   sb t3, 0(t1)\n   addi t0, t0, 1\n   addi t1, t1, 1\n   bltu t0, t2, .Lzfp_rv_sc1\n"
+    ".Lzfp_rv_sc1x:\n   add s9, s9, a0\n   ld t0, 128(sp)\n   ld t1, 136(sp)\n   ld t2, 144(sp)\n   addiw t5, a7, 3\n   beqz a0, .Lzfp_rv_sz1\n   beq a7, t0, .Lzfp_rv_sA1\n"
+    "beq a7, t1, .Lzfp_rv_sB21\n   bne a7, t2, .Lzfp_rv_sall1\n   li t5, 3\n   j .Lzfp_rv_sall1\n"
+    ".Lzfp_rv_sz1:\n   beq a7, t1, .Lzfp_rv_sB11\n   beq a7, t2, .Lzfp_rv_sC21\n   addiw t3, t0, -1\n   bne a7, t3, .Lzfp_rv_sall1\n   li t5, 3\n   j .Lzfp_rv_sall1\n"
+    ".Lzfp_rv_sC21:\n   li t5, 2\n   j .Lzfp_rv_sall1\n"
+    ".Lzfp_rv_sB21:\n   li t5, 2\n   j .Lzfp_rv_sB1\n"
+    ".Lzfp_rv_sB11:\n   li t5, 1\n"
+    ".Lzfp_rv_sB1:\n   sd t0, 136(sp)\n   sd a7, 128(sp)\n   j .Lzfp_rv_sr1\n"
+    ".Lzfp_rv_sA1:\n   li t5, 1\n   j .Lzfp_rv_sr1\n"
+    ".Lzfp_rv_sall1:\n   sd t1, 144(sp)\n   sd t0, 136(sp)\n   sd a7, 128(sp)\n"
+    ".Lzfp_rv_sr1:\n   li t0, 63\n   bltu t0, a0, .Lzfp_rv_bl1\n   add t1, s11, a0\n   lbu t1, 896(t1)\n"
+    ".Lzfp_rv_ll1:\n   li t0, 130\n   bltu t0, a4, .Lzfp_rv_bm1\n   add t2, s11, a4\n   lbu t2, 960(t2)\n"
+    ".Lzfp_rv_ml1:\n   mv t4, t5\n   li t3, 0\n   srli t0, t4, 16\n   beqz t0, .Lzfp_rv_x2\n   mv t4, t0\n   addi t3, t3, 16\n"
+    ".Lzfp_rv_x2:\n   srli t0, t4, 8\n   beqz t0, .Lzfp_rv_x3\n   mv t4, t0\n   addi t3, t3, 8\n"
+    ".Lzfp_rv_x3:\n   srli t0, t4, 4\n   beqz t0, .Lzfp_rv_x4\n   mv t4, t0\n   addi t3, t3, 4\n"
+    ".Lzfp_rv_x4:\n   srli t0, t4, 2\n   beqz t0, .Lzfp_rv_x5\n   mv t4, t0\n   addi t3, t3, 2\n"
+    ".Lzfp_rv_x5:\n   srli t0, t4, 1\n   beqz t0, .Lzfp_rv_x6\n   addi t3, t3, 1\n"
+    ".Lzfp_rv_x6:\n   slli t0, t1, 2\n   add t0, s10, t0\n   lw t4, 0(t0)\n   addiw t4, t4, 1\n   sw t4, 0(t0)\n   slli t0, t3, 2\n   add t0, s10, t0\n   lw t4, 144(t0)\n"
+    "addiw t4, t4, 1\n   sw t4, 144(t0)\n   slli t0, t2, 2\n   add t0, s10, t0\n   lw t4, 272(t0)\n   addiw t4, t4, 1\n   sw t4, 272(t0)\n   sw a0, 0(s8)\n"
+    "sw a4, 4(s8)\n   sw t5, 8(s8)\n   slli t2, t2, 8\n   or t1, t1, t2\n   slli t3, t3, 16\n   or t1, t1, t3\n   sw t1, 12(s8)\n   addi s8, s8, 16\n   j .Lzfp_rv_sd1\n"
+    ".Lzfp_rv_bl1:\n   mv t4, a0\n   li t1, 0\n   srli t0, t4, 32\n   beqz t0, .Lzfp_rv_x7\n   mv t4, t0\n   addi t1, t1, 32\n"
+    ".Lzfp_rv_x7:\n   srli t0, t4, 16\n   beqz t0, .Lzfp_rv_x8\n   mv t4, t0\n   addi t1, t1, 16\n"
+    ".Lzfp_rv_x8:\n   srli t0, t4, 8\n   beqz t0, .Lzfp_rv_x9\n   mv t4, t0\n   addi t1, t1, 8\n"
+    ".Lzfp_rv_x9:\n   srli t0, t4, 4\n   beqz t0, .Lzfp_rv_x10\n   mv t4, t0\n   addi t1, t1, 4\n"
+    ".Lzfp_rv_x10:\n   srli t0, t4, 2\n   beqz t0, .Lzfp_rv_x11\n   mv t4, t0\n   addi t1, t1, 2\n"
+    ".Lzfp_rv_x11:\n   srli t0, t4, 1\n   beqz t0, .Lzfp_rv_x12\n   addi t1, t1, 1\n"
+    ".Lzfp_rv_x12:\n   addi t1, t1, 19\n   j .Lzfp_rv_ll1\n"
+    ".Lzfp_rv_bm1:\n   addiw a5, a4, -3\n   mv t4, a5\n   li t2, 0\n   srli t0, t4, 16\n   beqz t0, .Lzfp_rv_x14\n   mv t4, t0\n   addi t2, t2, 16\n"
+    ".Lzfp_rv_x14:\n   srli t0, t4, 8\n   beqz t0, .Lzfp_rv_x15\n   mv t4, t0\n   addi t2, t2, 8\n"
+    ".Lzfp_rv_x15:\n   srli t0, t4, 4\n   beqz t0, .Lzfp_rv_x16\n   mv t4, t0\n   addi t2, t2, 4\n"
+    ".Lzfp_rv_x16:\n   srli t0, t4, 2\n   beqz t0, .Lzfp_rv_x17\n   mv t4, t0\n   addi t2, t2, 2\n"
+    ".Lzfp_rv_x17:\n   srli t0, t4, 1\n   beqz t0, .Lzfp_rv_x18\n   addi t2, t2, 1\n"
+    ".Lzfp_rv_x18:\n   addi t2, t2, 36\n   j .Lzfp_rv_ml1\n"
+    ".Lzfp_rv_sd1:\n   add a1, a1, a4\n   mv a3, a1\n   bgtu a1, s5, .Lzfp_rv_after\n   ld t0, 120(sp)\n   addi t1, t0, 2\n   add t2, s0, t1\n   andi t0, t2, 7\n"
+    "sub t4, t2, t0\n   ld t3, 0(t4)\n   ld a0, 8(t4)\n   slli t0, t0, 3\n   srl t3, t3, t0\n   xori t0, t0, 63\n   slli a0, a0, 1\n   sll a0, a0, t0\n   or t3, t3, a0\n"
+    "mul t3, t3, s2\n   srl t3, t3, s3\n   slli t4, t3, 2\n   add t4, s1, t4\n   sw t1, 0(t4)\n   addi t2, a1, -2\n   andi t0, t2, 7\n   sub t4, t2, t0\n   ld t3, 0(t4)\n"
+    "ld a0, 8(t4)\n   slli t0, t0, 3\n   srl t3, t3, t0\n   xori t0, t0, 63\n   slli a0, a0, 1\n   sll a0, a0, t0\n   or t3, t3, a0\n   mul t3, t3, s2\n   srl t3, t3, s3\n"
+    "slli t4, t3, 2\n   add t4, s1, t4\n   sub t0, a1, s0\n   addi t0, t0, -2\n   sw t0, 0(t4)\n"
+    ".Lzfp_rv_rr:\n   bgtu a1, s5, .Lzfp_rv_rrd\n   sub t0, a1, s0\n   ld t1, 136(sp)\n   beqz t1, .Lzfp_rv_rrd\n   sub t2, t0, s4\n   slli t2, t2, 32\n   srli t2, t2, 32\n"
+    "bltu t2, t1, .Lzfp_rv_rrd\n   sub t2, a1, t1\n   andi t4, t2, 7\n   sub t5, t2, t4\n   ld t3, 0(t5)\n   ld t6, 8(t5)\n   slli t4, t4, 3\n   srl t3, t3, t4\n"
+    "xori t4, t4, 63\n   slli t6, t6, 1\n   sll t6, t6, t4\n   or t3, t3, t6\n   andi t4, a1, 7\n   sub t5, a1, t4\n   ld t2, 0(t5)\n   ld t6, 8(t5)\n   slli t4, t4, 3\n"
+    "srl t2, t2, t4\n   xori t4, t4, 63\n   slli t6, t6, 1\n   sll t6, t6, t4\n   or t2, t2, t6\n   xor t3, t3, t2\n   slli t3, t3, 32\n   bnez t3, .Lzfp_rv_rrd\n"
+    "mul t3, t2, s2\n   srl t3, t3, s3\n   slli t4, t3, 2\n   add t4, s1, t4\n   sub t0, a1, s0\n   sw t0, 0(t4)\n   ld a7, 136(sp)\n   addi t5, a1, 4\n   sub t6, t5, a7\n"
+    "sub a0, s6, t5\n   mv t3, zero\n   li t4, 8\n"
+    ".Lzfp_rv_cb2:\n   beqz a0, .Lzfp_rv_cd2\n   lbu t0, 0(t5)\n   lbu t1, 0(t6)\n   bne t0, t1, .Lzfp_rv_cd2\n   addi t5, t5, 1\n   addi t6, t6, 1\n   addi t3, t3, 1\n"
+    "addi a0, a0, -1\n   bltu t3, t4, .Lzfp_rv_cb2\n"
+    ".Lzfp_rv_cw2:\n   li t4, 8\n   bltu a0, t4, .Lzfp_rv_cb2x\n   andi t0, t5, 7\n   sub t1, t5, t0\n   ld a5, 0(t1)\n   ld t2, 8(t1)\n   slli t0, t0, 3\n   srl a5, a5, t0\n"
+    "xori t0, t0, 63\n   slli t2, t2, 1\n   sll t2, t2, t0\n   or a5, a5, t2\n   andi t0, t6, 7\n   sub t1, t6, t0\n   ld a6, 0(t1)\n   ld t2, 8(t1)\n   slli t0, t0, 3\n"
+    "srl a6, a6, t0\n   xori t0, t0, 63\n   slli t2, t2, 1\n   sll t2, t2, t0\n   or a6, a6, t2\n   xor a5, a5, a6\n   bnez a5, .Lzfp_rv_cx2\n   addi t5, t5, 8\n"
+    "addi t6, t6, 8\n   addi t3, t3, 8\n   addi a0, a0, -8\n   j .Lzfp_rv_cw2\n"
+    ".Lzfp_rv_cx2:\n   neg t0, a5\n   and t0, t0, a5\n   addi t0, t0, -1\n   li ra, 0x8080808080808080\n   and t0, t0, ra\n   srli t0, t0, 7\n   li ra, 0x0101010101010101\n"
+    "mul t0, t0, ra\n   srli t1, t0, 56\n   add t3, t3, t1\n   j .Lzfp_rv_cd2\n"
+    ".Lzfp_rv_cb2x:\n   beqz a0, .Lzfp_rv_cd2\n   lbu t0, 0(t5)\n   lbu t1, 0(t6)\n   bne t0, t1, .Lzfp_rv_cd2\n   addi t5, t5, 1\n   addi t6, t6, 1\n   addi t3, t3, 1\n"
+    "addi a0, a0, -1\n   j .Lzfp_rv_cb2x\n"
+    ".Lzfp_rv_cd2:\n   addi a4, t3, 4\n   mv a0, zero\n   mv t0, a1\n   mv t1, s9\n   add t2, t0, a0\n   bgeu t0, t2, .Lzfp_rv_sc2x\n"
+    ".Lzfp_rv_sc2:\n   lbu t3, 0(t0)\n   sb t3, 0(t1)\n   addi t0, t0, 1\n   addi t1, t1, 1\n   bltu t0, t2, .Lzfp_rv_sc2\n"
+    ".Lzfp_rv_sc2x:\n   add s9, s9, a0\n   ld t0, 128(sp)\n   ld t1, 136(sp)\n   ld t2, 144(sp)\n   addiw t5, a7, 3\n   beqz a0, .Lzfp_rv_sz2\n   beq a7, t0, .Lzfp_rv_sA2\n"
+    "beq a7, t1, .Lzfp_rv_sB22\n   bne a7, t2, .Lzfp_rv_sall2\n   li t5, 3\n   j .Lzfp_rv_sall2\n"
+    ".Lzfp_rv_sz2:\n   beq a7, t1, .Lzfp_rv_sB12\n   beq a7, t2, .Lzfp_rv_sC22\n   addiw t3, t0, -1\n   bne a7, t3, .Lzfp_rv_sall2\n   li t5, 3\n   j .Lzfp_rv_sall2\n"
+    ".Lzfp_rv_sC22:\n   li t5, 2\n   j .Lzfp_rv_sall2\n"
+    ".Lzfp_rv_sB22:\n   li t5, 2\n   j .Lzfp_rv_sB2\n"
+    ".Lzfp_rv_sB12:\n   li t5, 1\n"
+    ".Lzfp_rv_sB2:\n   sd t0, 136(sp)\n   sd a7, 128(sp)\n   j .Lzfp_rv_sr2\n"
+    ".Lzfp_rv_sA2:\n   li t5, 1\n   j .Lzfp_rv_sr2\n"
+    ".Lzfp_rv_sall2:\n   sd t1, 144(sp)\n   sd t0, 136(sp)\n   sd a7, 128(sp)\n"
+    ".Lzfp_rv_sr2:\n   li t0, 63\n   bltu t0, a0, .Lzfp_rv_bl2\n   add t1, s11, a0\n   lbu t1, 896(t1)\n"
+    ".Lzfp_rv_ll2:\n   li t0, 130\n   bltu t0, a4, .Lzfp_rv_bm2\n   add t2, s11, a4\n   lbu t2, 960(t2)\n"
+    ".Lzfp_rv_ml2:\n   mv t4, t5\n   li t3, 0\n   srli t0, t4, 16\n   beqz t0, .Lzfp_rv_x20\n   mv t4, t0\n   addi t3, t3, 16\n"
+    ".Lzfp_rv_x20:\n   srli t0, t4, 8\n   beqz t0, .Lzfp_rv_x21\n   mv t4, t0\n   addi t3, t3, 8\n"
+    ".Lzfp_rv_x21:\n   srli t0, t4, 4\n   beqz t0, .Lzfp_rv_x22\n   mv t4, t0\n   addi t3, t3, 4\n"
+    ".Lzfp_rv_x22:\n   srli t0, t4, 2\n   beqz t0, .Lzfp_rv_x23\n   mv t4, t0\n   addi t3, t3, 2\n"
+    ".Lzfp_rv_x23:\n   srli t0, t4, 1\n   beqz t0, .Lzfp_rv_x24\n   addi t3, t3, 1\n"
+    ".Lzfp_rv_x24:\n   slli t0, t1, 2\n   add t0, s10, t0\n   lw t4, 0(t0)\n   addiw t4, t4, 1\n   sw t4, 0(t0)\n   slli t0, t3, 2\n   add t0, s10, t0\n   lw t4, 144(t0)\n"
+    "addiw t4, t4, 1\n   sw t4, 144(t0)\n   slli t0, t2, 2\n   add t0, s10, t0\n   lw t4, 272(t0)\n   addiw t4, t4, 1\n   sw t4, 272(t0)\n   sw a0, 0(s8)\n"
+    "sw a4, 4(s8)\n   sw t5, 8(s8)\n   slli t2, t2, 8\n   or t1, t1, t2\n   slli t3, t3, 16\n   or t1, t1, t3\n   sw t1, 12(s8)\n   addi s8, s8, 16\n   j .Lzfp_rv_sd2\n"
+    ".Lzfp_rv_bl2:\n   mv t4, a0\n   li t1, 0\n   srli t0, t4, 32\n   beqz t0, .Lzfp_rv_x25\n   mv t4, t0\n   addi t1, t1, 32\n"
+    ".Lzfp_rv_x25:\n   srli t0, t4, 16\n   beqz t0, .Lzfp_rv_x26\n   mv t4, t0\n   addi t1, t1, 16\n"
+    ".Lzfp_rv_x26:\n   srli t0, t4, 8\n   beqz t0, .Lzfp_rv_x27\n   mv t4, t0\n   addi t1, t1, 8\n"
+    ".Lzfp_rv_x27:\n   srli t0, t4, 4\n   beqz t0, .Lzfp_rv_x28\n   mv t4, t0\n   addi t1, t1, 4\n"
+    ".Lzfp_rv_x28:\n   srli t0, t4, 2\n   beqz t0, .Lzfp_rv_x29\n   mv t4, t0\n   addi t1, t1, 2\n"
+    ".Lzfp_rv_x29:\n   srli t0, t4, 1\n   beqz t0, .Lzfp_rv_x30\n   addi t1, t1, 1\n"
+    ".Lzfp_rv_x30:\n   addi t1, t1, 19\n   j .Lzfp_rv_ll2\n"
+    ".Lzfp_rv_bm2:\n   addiw a5, a4, -3\n   mv t4, a5\n   li t2, 0\n   srli t0, t4, 16\n   beqz t0, .Lzfp_rv_x32\n   mv t4, t0\n   addi t2, t2, 16\n"
+    ".Lzfp_rv_x32:\n   srli t0, t4, 8\n   beqz t0, .Lzfp_rv_x33\n   mv t4, t0\n   addi t2, t2, 8\n"
+    ".Lzfp_rv_x33:\n   srli t0, t4, 4\n   beqz t0, .Lzfp_rv_x34\n   mv t4, t0\n   addi t2, t2, 4\n"
+    ".Lzfp_rv_x34:\n   srli t0, t4, 2\n   beqz t0, .Lzfp_rv_x35\n   mv t4, t0\n   addi t2, t2, 2\n"
+    ".Lzfp_rv_x35:\n   srli t0, t4, 1\n   beqz t0, .Lzfp_rv_x36\n   addi t2, t2, 1\n"
+    ".Lzfp_rv_x36:\n   addi t2, t2, 36\n   j .Lzfp_rv_ml2\n"
+    ".Lzfp_rv_sd2:\n   add a1, a1, a4\n   j .Lzfp_rv_rr\n"
+    ".Lzfp_rv_rrd:\n   mv a3, a1\n"
+    ".Lzfp_rv_after:\n   ld a7, 128(sp)\n   j .Lzfp_rv_top\n"
+    ".Lzfp_rv_ret:\n   ld t0, 104(sp)\n   sd a3, 96(t0)\n   sd s8, 16(t0)\n   sd s9, 24(t0)\n   ld t1, 88(t0)\n   ld t2, 128(sp)\n   sw t2, 0(t1)\n   ld t2, 136(sp)\n"
+    "sw t2, 4(t1)\n   ld t2, 144(sp)\n   sw t2, 8(t1)\n   ld ra, 0(sp)\n   ld s0, 8(sp)\n   ld s1, 16(sp)\n   ld s2, 24(sp)\n   ld s3, 32(sp)\n   ld s4, 40(sp)\n"
+    "ld s5, 48(sp)\n   ld s6, 56(sp)\n   ld s7, 64(sp)\n   ld s8, 72(sp)\n   ld s9, 80(sp)\n   ld s10, 88(sp)\n   ld s11, 96(sp)\n   addi sp, sp, 176\n" ASM_RET
+    ASM_END(zstd_fast_parse)
     // memory_copy_end: exact overlap-aware copy, one terminator, and dst+n.
     // The x86_64 block carries the contract; the only state across the shared
     // core is the end pointer and the caller's return address.
@@ -32316,6 +32713,9 @@ WRITES(1) bipolar zstd_sequences_run(address_any job);
 /* The backward loop of a zstd sequence bitstream; 96-byte job, see the
    x86_64 assembly. 0, or 1 when the room ran out. */
 READS_WRITES(1) bipolar zstd_sequences_encode(address_any job);
+/* libzstd 1.5's fast strategy over a block; 104-byte job, see the x86_64
+   assembly. */
+READS_WRITES(1) fn zstd_fast_parse(address_any job);
 PURE positive2 string_hash_33_length(string_address source);
 PURE positive memory_span_byte(address_any block, p8 value, positive size);
 PURE positive memory_span_byte_reverse(address_any block, p8 value,

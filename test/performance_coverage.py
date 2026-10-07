@@ -510,6 +510,14 @@ cover('correctness_only', 'test/checks.c#CHECK_compression_floor', 'zstd_sequenc
       'rule; end-to-end zstd -1 timing, and the native arm64 row against the C '
       'reference in test/codec_floor/reference/zstd_sequences_encode.c',
       anchors={'zstd_sequences_encode': 'floor_zstd_sequences_encode'})
+cover('correctness_only', 'test/checks.c#CHECK_zstd', 'zstd_fast_parse',
+      'the sequences, literals, code counts, repeat offsets, table and anchor '
+      'of 240 random blocks (copies at near, far and repeated distances, runs, '
+      'every table width, minimum match, step and window, empty and full '
+      'tables) against the parse as it was in C, on three machines; end-to-end '
+      'zstd -1 timing, and the native arm64 row against gcc and clang builds '
+      'of the C it replaces; test/codec_floor/reference/zstd_fast_parse.c',
+      anchors={'zstd_fast_parse': 'fast_parse'})
 cover('correctness_only', 'test/checks.c#CHECK_compression_floor', 'deflate_decode_span',
       'all length/distance combinations with guard pages; end-to-end gzip '
       'timing is available, but there is no isolated token-loop timing row',
