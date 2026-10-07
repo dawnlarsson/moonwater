@@ -6025,10 +6025,22 @@ static const struct bowl_component bowl_desktop_components[] = {
         The session names no desktop or platform of its own: startplasma sets
         the session type, KDE_FULL_SESSION and XDG_CURRENT_DESKTOP, and Qt
         takes Wayland from the compositor's socket.
+
+        KWallet is off until somebody turns it on. The first program that
+        asks the session's secret service for a key (Chrome and every
+        browser built on it does, before it loads a cookie, whenever
+        XDG_CURRENT_DESKTOP says KDE or a session bus is there) makes KDE
+        show "choose a password for the new wallet", and the program waits
+        on the answer: every page stays at "Loading..." behind a small
+        dialog, and there is no login password for a wallet to be opened
+        with. Disabled, the secret service is not started and the program
+        takes its own store. A kwalletrc that is there is the user's.
 */
 static string_address bowl_desktop_session[] = {
     "layout=$(moonwater keyboard xkb 2>/dev/null) && "
     "[ -n \"$layout\" ] && export XKB_DEFAULT_LAYOUT=$layout",
+    "[ -e \"$HOME/.config/kwalletrc\" ] || { mkdir -p \"$HOME/.config\" && "
+    "printf '[Wallet]\\nEnabled=false\\n' > \"$HOME/.config/kwalletrc\"; }",
     "bowl udev",
     "bowl bus",
     "exec dbus-run-session -- startplasma-wayland",
