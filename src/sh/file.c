@@ -50417,6 +50417,11 @@ static b32 file_date()
 #define XARGS_BATCH_BYTES 131072
 #define XARGS_READ_BYTES 65536
 
+//      The bytes xargs reads that are not plain data: a blank, a newline, a
+//      quote and a backslash.
+static const p8 xargs_special[256] = {[' '] = 1, ['\t'] = 1, ['\n'] = 1,
+                                      ['\\'] = 1, ['\''] = 1, ['"'] = 1};
+
 static positive xargs_used;
 static string_address address_to xargs_words;
 static positive xargs_word_count;
@@ -51782,7 +51787,11 @@ static b32 file_xargs()
         xargs_item = (p8 address_to)utility_arena_take(XARGS_BATCH_BYTES + 1);
         xargs_buffer = (p8 address_to)utility_arena_take(XARGS_READ_BYTES);
 
-        if (!xargs_item || !xargs_buffer)
+        //      Where the bytes that are not plain data are, in a block as it
+        //      is read (see the loop): room for every byte to be one.
+        p32 address_to stops = (p32 address_to)utility_arena_take(XARGS_READ_BYTES * sizeof(p32));
+
+        if (!xargs_item || !xargs_buffer || !stops)
         {
                 xargs_answer_raise(1);
                 goto xargs_finished;
@@ -51817,9 +51826,59 @@ static b32 file_xargs()
                 if (!got)
                         break;
 
+                /*      Between one blank, newline, quote or backslash and the
+                        next, a byte is data and is kept, so the block is
+                        looked over once for those and the bytes between are
+                        copied whole instead of tested and stored a byte at a
+                        time (a byte store followed by the wide load that
+                        copies the word out of the item stalled for every
+                        word). A NUL not yet warned of goes through the byte
+                        loop, which warns of it. -0 and -d have no such bytes
+                        and their own scan. */
+                positive stopped = 0;
+                positive next_stop = 0;
+                bool runs = !xargs_delimited &&
+                            (xargs_said_nul || !memory_first_of(xargs_buffer, 0, (positive)got));
+
+                if (runs)
+                        stopped = memory_offsets_in_set(stops, xargs_buffer, (positive)got,
+                                                        xargs_special, (positive)got);
+
                 for (positive at = 0;
                      at < (positive)got && !xargs_done && !xargs_ended; at++)
                 {
+                        if (runs && !escaped)
+                        {
+                                positive end_of_run;
+
+                                if (quote)
+                                {
+                                        //      Inside quotes only the quote itself ends the run.
+                                        p8 address_to close = memory_first_of(
+                                            xargs_buffer + at, quote, (positive)got - at);
+
+                                        end_of_run = close ? (positive)(close - xargs_buffer)
+                                                           : (positive)got;
+                                }
+                                else
+                                {
+                                        while (next_stop < stopped && stops[next_stop] < at)
+                                                next_stop++;
+                                        end_of_run = next_stop < stopped ? stops[next_stop]
+                                                                         : (positive)got;
+                                }
+
+                                if (end_of_run > at)
+                                {
+                                        xargs_item_append(xargs_buffer + at, end_of_run - at);
+                                        started = true;
+                                        blank_last = false;
+                                        at = end_of_run;
+                                        if (at >= (positive)got)
+                                                break;
+                                }
+                        }
+
                         p8 letter = xargs_buffer[at];
 
                         /* -0 and -d: the item is everything up to the next
