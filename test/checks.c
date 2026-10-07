@@ -24177,6 +24177,100 @@ static void library_names_one(positive length, positive slack_a, positive slack_
                 same_bytes("bcopy", "backwards", b, libc_model_b, length + gap);
         }
 
+        // strsep and strtok_r over the string, split at up to three delimiters
+        {
+                p8 delimiters[4];
+                positive members = (next() >> 11) % 4;
+                p8 address_to z = libc_place(libc_c, length + 1, slack_b, anchor & 4);
+                char address_to holder;
+                char address_to token;
+                positive at = 0;
+                positive seen = 0;
+
+                for (positive i = 0; i < members; i++)
+                        delimiters[i] = libc_alphabet[(next() >> 29) % 4 + 2];
+                delimiters[members] = 0;
+
+                // strsep keeps every field, empty ones too
+                for (positive i = 0; i <= length; i++)
+                        z[i] = s[i];
+                holder = (char address_to)z;
+                while ((token = strsep(&holder, (char address_to)delimiters)) != null)
+                {
+                        positive stop = at;
+                        positive is_delimiter = 0;
+
+                        same("strsep", "token starts where the last ended", (positive)token, (positive)(z + at));
+                        while (stop < length)
+                        {
+                                is_delimiter = 0;
+                                for (positive i = 0; i < members; i++)
+                                        is_delimiter |= delimiters[i] == s[stop];
+                                if (is_delimiter)
+                                        break;
+                                stop++;
+                        }
+                        same("strsep", "token ends at a delimiter or the end", string_length(token), stop - at);
+                        seen++;
+                        if (stop >= length)
+                        {
+                                same("strsep", "last field leaves the cursor null", (positive)holder, 0);
+                                at = length + 1;
+                                break;
+                        }
+                        same("strsep", "cursor after the delimiter", (positive)holder, (positive)(z + stop + 1));
+                        at = stop + 1;
+                }
+                same("strsep", "reached the end", at, length + 1);
+
+                // strtok_r skips runs of delimiters and never answers an empty token
+                for (positive i = 0; i <= length; i++)
+                        z[i] = s[i];
+                {
+                        char address_to save = null;
+                        positive cursor = 0;
+                        char address_to start = (char address_to)z;
+
+                        for (;;)
+                        {
+                                positive begin = cursor;
+                                positive stop;
+
+                                while (begin < length)
+                                {
+                                        positive is_delimiter = 0;
+
+                                        for (positive i = 0; i < members; i++)
+                                                is_delimiter |= delimiters[i] == s[begin];
+                                        if (!is_delimiter)
+                                                break;
+                                        begin++;
+                                }
+                                stop = begin;
+                                while (stop < length)
+                                {
+                                        positive is_delimiter = 0;
+
+                                        for (positive i = 0; i < members; i++)
+                                                is_delimiter |= delimiters[i] == s[stop];
+                                        if (is_delimiter)
+                                                break;
+                                        stop++;
+                                }
+                                token = strtok_r(start, (char address_to)delimiters, &save);
+                                start = null;
+                                if (begin >= length)
+                                {
+                                        same("strtok_r", "no more tokens", (positive)token, 0);
+                                        break;
+                                }
+                                same("strtok_r", "token", (positive)token, (positive)(z + begin));
+                                same("strtok_r", "token length", string_length(token), stop - begin);
+                                cursor = stop < length ? stop + 1 : length;
+                        }
+                }
+        }
+
         // the word fills, at every alignment their callers can have
         {
                 positive count = length;
@@ -24304,6 +24398,138 @@ fn check_null_zero()
         same("memmem", "empty haystack, empty needle", (positive)memmem(none, 0, none, 0), 0);
         same("memccpy", "null and zero finds nothing", (positive)memccpy(none, none, 7, 0), 0);
         same("hash_xxh64", "null and zero is the empty digest", hash_xxh64(none, 0, 0), hash_xxh64("", 0, 0));
+}
+
+/*
+        A bound that is no bound. strnlen(s, SIZE_MAX) is the idiom for "a
+        string of whatever length", and the end of the span the bound names
+        wraps below its start, so every routine that works out where the bound
+        ends has to saturate it. The string is run against the end of a page,
+        so a read, or a copy, that goes on past the terminator is a fault.
+*/
+fn check_huge_bounds()
+{
+        static const positive huge[] = {~0ull, ~0ull - 1, ~0ull - 64, 1ull << 63,
+                                        (1ull << 63) - 1, 1ull << 40};
+        p8 address_to pages = memory(7 * 4096);
+
+        if (!((bipolar)(positive)pages > 0))
+        {
+                same("huge bounds", "mapping", 0, 1);
+                return;
+        }
+        for (positive i = 0; i < 7; i += 2)
+                system_call_3(syscall(mprotect), (positive)(pages + 4096 * i), 4096, 0);
+        libc_a = pages + 4096;
+        libc_b = pages + 3 * 4096;
+        libc_c = pages + 5 * 4096;
+
+        p8 had_avx2 = 0;
+        p8 had_avx512 = 0;
+        b8 set[256];
+
+#if X64
+        had_avx2 = cpu_has_avx2;
+        had_avx512 = cpu_has_avx512;
+#endif
+        memory_fill(set, 0, sizeof(set));
+        string_set_add(set, "a");
+
+        for (positive pass = 0; pass < BULK_TIERS; pass++)
+        {
+        bulk_tier(pass, had_avx2, had_avx512);
+        for (positive length = 0; length <= 300; length++)
+                for (positive h = 0; h < sizeof(huge) / sizeof(huge[0]); h++)
+                        for (positive a = 0; a < LIBC_SLACK; a += 2)
+                        {
+                                p8 address_to s = libc_place(libc_a, length + 1, libc_slack[a], 0);
+                                p8 address_to t = libc_place(libc_b, length + 1, libc_slack[(a + 3) % LIBC_SLACK], 0);
+                                p8 address_to d = libc_place(libc_c, length + 1, libc_slack[(a + 5) % LIBC_SLACK], 0);
+                                positive bound = huge[h];
+
+                                for (positive i = 0; i < length; i++)
+                                        t[i] = s[i] = 'a' + (i & 15);
+                                s[length] = t[length] = 0;
+
+                                same("string_length_max", "huge bound", string_length_max((string_address)s, bound), length);
+                                same("string_compare_max", "huge bound, equal",
+                                     string_compare_max((string_address)s, (string_address)t, bound), 0);
+                                same("string_compare_folded_max", "huge bound, equal",
+                                     string_compare_folded_max((string_address)s, (string_address)t, bound), 0);
+                                same("string_first_of_max", "huge bound, absent",
+                                     (positive)string_first_of_max((string_address)s, bound, 'z'), 0);
+                                same("string_first_of_max", "huge bound, the terminator",
+                                     (positive)string_first_of_max((string_address)s, bound, 0), (positive)(s + length));
+                                same("string_copy_max", "huge bound answers destination",
+                                     (positive)string_copy_max((string_address)d, (string_address)s, bound), (positive)d);
+                                same_bytes("string_copy_max", "huge bound bytes", d, s, length + 1);
+                                same("string_copy_max_end", "huge bound answers the terminator",
+                                     (positive)string_copy_max_end(d, (string_address)s, bound), (positive)(d + length));
+                                same_bytes("string_copy_max_end", "huge bound bytes", d, s, length + 1);
+                                d[0] = 0;
+                                same("string_append_max", "huge bound answers destination",
+                                     (positive)string_append_max((string_address)d, (string_address)s, bound), (positive)d);
+                                same_bytes("string_append_max", "huge bound bytes", d, s, length + 1);
+                                same("string_copy_bounded", "huge capacity answers the length",
+                                     string_copy_bounded((string_address)d, (string_address)s, bound), length);
+                                same_bytes("string_copy_bounded", "huge capacity bytes", d, s, length + 1);
+                                d[0] = 0;
+                                same("string_append_bounded", "huge capacity answers the length",
+                                     string_append_bounded((string_address)d, (string_address)s, bound), length);
+                                same_bytes("string_append_bounded", "huge capacity bytes", d, s, length + 1);
+                                same("string_span_max", "huge bound counts the run of a",
+                                     string_span_max((string_address)s, bound, set), s[0] == 'a');
+                                {
+                                        positive used = 77;
+
+                                        same("string_digits_max", "huge bound, no digits",
+                                             string_digits_max((string_address)s, bound, &used), 0);
+                                }
+                        }
+        }
+
+        // The digit readers, with the bound the string's own length gives and with none
+        for (positive length = 0; length <= 40; length++)
+                for (positive a = 0; a < LIBC_SLACK; a += 3)
+                        for (positive kind = 0; kind < 6; kind++)
+                        {
+                                p8 address_to s = libc_place(libc_a, length + 1, libc_slack[a], 0);
+                                static const char digits[] = "0123456789abcdefABCDEFxX7zZ89";
+
+                                for (positive i = 0; i < length; i++)
+                                        s[i] = digits[(next() >> 20) % (kind & 1 ? 10 : sizeof(digits) - 1)];
+                                s[length] = 0;
+
+                                for (positive h = 0; h < 3; h++)
+                                {
+                                        positive big = huge[h];
+                                        positive used_big = 111;
+                                        positive used_own = 222;
+                                        positive got = 0;
+                                        positive want = 0;
+
+                                        switch (kind >> 1)
+                                        {
+                                        case 0:
+                                                got = string_digits_max((string_address)s, big, &used_big);
+                                                want = string_digits_max((string_address)s, length + 1, &used_own);
+                                                break;
+                                        case 1:
+                                                got = string_digits_octal_max((string_address)s, big, &used_big);
+                                                want = string_digits_octal_max((string_address)s, length + 1, &used_own);
+                                                break;
+                                        default:
+                                                got = string_digits_hexadecimal_max((string_address)s, big, &used_big);
+                                                want = string_digits_hexadecimal_max((string_address)s, length + 1, &used_own);
+                                                break;
+                                        }
+                                        same("string_digits*_max", "huge bound, value", got, want);
+                                        same("string_digits*_max", "huge bound, used", used_big, used_own);
+                                }
+                        }
+
+        bulk_tier(0, had_avx2, had_avx512);
+        memory_free(pages, 7 * 4096);
 }
 
 fn check_bulk_moves()
@@ -28508,6 +28734,7 @@ b32 main()
         check_libc_names();
         check_library_names();
         check_null_zero();
+        check_huge_bounds();
         check_bulk_wide_strings();
 #endif
 

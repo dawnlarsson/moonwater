@@ -18798,8 +18798,8 @@ __asm__(
     "mov %rdi, %rax\n   test %rdx, %rdx\n   jz 9f  # not even a terminator\n"
     ASM_NARROW("cpu_has_avx2", "5f")
     ASM_USERSPACE_WIDE(
-    "vpxor %xmm1, %xmm1, %xmm1\n   lea (%rsi,%rdx), %r9  # one past the last byte we may read\n"
-    "mov %rsi, %r8\n   and $-32, %r8\n   mov %esi, %ecx\n   and $31, %ecx\n"
+    "vpxor %xmm1, %xmm1, %xmm1\n   mov %rsi, %r9\n   add %rdx, %r9\n   jnc 6f\n   mov $-1, %r9  # a bound with no end: strncpy(d, s, SIZE_MAX)\n"
+    "6:  mov %rsi, %r8\n   and $-32, %r8\n   mov %esi, %ecx\n   and $31, %ecx\n"
     "vpcmpeqb (%r8), %ymm1, %ymm0\n   vpmovmskb %ymm0, %eax\n   shr %cl, %eax\n   test %eax, %eax\n"
     "jnz 2f\n"
     "1:  add $32, %r8\n   cmp %r9, %r8\n   jae 4f  # the bound is behind us\n"
@@ -18812,7 +18812,8 @@ __asm__(
     "4:  vzeroupper\n   jmp memory_copy_apart\n"
     )
     "9:  " ASM_RET
-    "5:  lea (%rsi,%rdx), %r9\n   mov %rsi, %r8\n   mov %esi, %ecx\n   and $7, %ecx\n"
+    "5:  mov %rsi, %r9\n   add %rdx, %r9\n   jnc 6f\n   mov $-1, %r9  # saturated, as above\n"
+    "6:  mov %rsi, %r8\n   mov %esi, %ecx\n   and $7, %ecx\n"
     "and $-8, %r8\n   mov (%r8), %r10\n   shl $3, %ecx\n   mov $1, %rax\n"
     "shl %cl, %rax\n   dec %rax\n   or %rax, %r10\n   movabs $0x0101010101010101, %rcx\n"
     "movabs $0x8080808080808080, %r11\n"
@@ -31436,7 +31437,7 @@ __asm__(
     ASM_RET
 #else
     "mov x3, x0\n   cbz x2, 9f  // not even a terminator\n"
-    "add x7, x1, x2  // one past the last byte we may read\n"
+    "adds x7, x1, x2\n   csinv x7, x7, xzr, cc  // one past the last byte we may read, and no lower than the start\n"
     "and x4, x1, #15\n"
     "bic x5, x1, #15\n"
     "ldr q0, [x5]\n   cmeq v2.16b, v0.16b, #0\n"
@@ -45586,7 +45587,8 @@ __asm__(
     ASM_FUNC(string_copy_max)
     "mv a3, a0\n   beqz a2, 9f  # not even a terminator\n"
     "add a7, a1, a2  # one past the last byte we may read\n"
-    "lui t0, 0x1010\n   addi t0, t0, 257\n   slli t1, t0, 32\n   add t0, t0, t1\n"
+    "bgeu a7, a1, 5f\n   li a7, -1  # a bound with no end: the sum wrapped\n"
+    "5:  lui t0, 0x1010\n   addi t0, t0, 257\n   slli t1, t0, 32\n   add t0, t0, t1\n"
     "slli t1, t0, 7\n   andi a4, a1, 7\n   andi a5, a1, -8\n   ld a6, 0(a5)\n"
     "beqz a4, 1f\n   slli a4, a4, 3\n   li t4, 1\n   sll t4, t4, a4\n"
     "addi t4, t4, -1\n   or a6, a6, t4\n"
