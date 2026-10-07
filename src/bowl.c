@@ -5953,8 +5953,10 @@ static b32 bowl_bus(positive count)
                                    "desktop adds one, or add dbus to the "
                                    "bowl\n");
 
-        /* A socket left by a daemon that is gone is in the way of the next. */
+        /* A socket and a pidfile left by a daemon that is gone are in the way
+           of the next: dbus-daemon refuses to start beside a pidfile. */
         system_remove_at(AT_FDCWD, BOWL_BUS_SOCKET, 0);
+        system_remove_at(AT_FDCWD, BOWL_BUS_PIDFILE, 0);
         failed = bowl_mkdir(BOWL_BUS_DIRECTORY);
         if (failed || bowl_write_bytes(BOWL_BUS_CONFIG, bowl_bus_config,
                                        sizeof(bowl_bus_config) - 1))
@@ -6094,12 +6096,31 @@ static const struct bowl_component bowl_desktop_components[] = {
         dialog, and there is no login password for a wallet to be opened
         with. Disabled, the secret service is not started and the program
         takes its own store. A kwalletrc that is there is the user's.
+
+        The screen does not lock itself, and unlocks with no password. KDE's
+        lock screen asks PAM's kde service, whose file includes base-auth,
+        which a bowl of Alpine's has not got, so every attempt failed: a
+        screen locked by the idle timer (five minutes) or Meta+L could never
+        be unlocked, and a machine with no login passwords has nothing for
+        PAM to ask. The service permits, as the machine does everywhere
+        else, and the idle lock is off until a kscreenlockerrc says otherwise.
+        A second `desktop` while kwin runs is refused, and the display the
+        shell was started under is not the one the session draws on.
 */
 static string_address bowl_desktop_session[] = {
+    "[ -z \"$(pidof kwin_wayland)\" ] || "
+    "{ echo \"a desktop session is already running\" >&2; exit 1; }",
+    "unset WAYLAND_DISPLAY DISPLAY",
     "layout=$(moonwater keyboard xkb 2>/dev/null) && "
     "[ -n \"$layout\" ] && export XKB_DEFAULT_LAYOUT=$layout",
     "[ -e \"$HOME/.config/kwalletrc\" ] || { mkdir -p \"$HOME/.config\" && "
     "printf '[Wallet]\\nEnabled=false\\n' > \"$HOME/.config/kwalletrc\"; }",
+    "[ -e \"$HOME/.config/kscreenlockerrc\" ] || "
+    "printf '[Daemon]\\nAutolock=false\\nLockOnResume=false\\n' > "
+    "\"$HOME/.config/kscreenlockerrc\"",
+    "[ -d /bowls/alpine/etc/pam.d ] && printf 'auth sufficient pam_permit.so\\n"
+    "account sufficient pam_permit.so\\nsession optional pam_permit.so\\n' "
+    "> /bowls/alpine/etc/pam.d/kde",
     "bowl udev",
     "bowl bus",
     "exec dbus-run-session -- startplasma-wayland",

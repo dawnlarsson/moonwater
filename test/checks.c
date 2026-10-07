@@ -80663,11 +80663,18 @@ static fn profiles(void)
         */
         {
                 const struct bowl_profile address_to desktop = bowl_find_profile("desktop");
-                positive udev = 0, compositor = 0, layout = 0, wallet = 0, at = 0;
+                positive udev = 0, compositor = 0, layout = 0, wallet = 0, locker = 0, pam = 0,
+                         guard = 0, at = 0;
 
                 for (string_address address_to line = desktop ? desktop->session : null;
                      line && *line; line++, at++)
                 {
+                        if (strstr(*line, "kscreenlockerrc") && strstr(*line, "Autolock=false"))
+                                locker = at + 1;
+                        if (strstr(*line, "pam.d/kde") && strstr(*line, "pam_permit"))
+                                pam = at + 1;
+                        if (strstr(*line, "pidof kwin_wayland") && strstr(*line, "exit 1"))
+                                guard = at + 1;
                         if (string_has_prefix(*line, "[ -e \"$HOME/.config/kwalletrc\" ] ||") &&
                             strstr(*line, "Enabled=false"))
                                 wallet = at + 1;
@@ -80684,6 +80691,10 @@ static fn profiles(void)
                       layout && layout < compositor);
                 check("The desktop session turns KWallet off unless a kwalletrc is there, before the compositor",
                       wallet && wallet < compositor);
+                check("The desktop session cannot lock its user out: no idle lock, and the kde PAM service permits",
+                      locker && pam && locker < compositor && pam < compositor);
+                check("A second desktop session is refused before anything starts",
+                      guard && guard < udev);
         }
 
         check("A command is looked for in /sbin as well, where Alpine keeps udevd",
