@@ -434,6 +434,34 @@ then
 fi
 
 #
+#       The fold, taken away where FORTIFY_SOURCE is on (kernel/patch/
+#       fold-x86-fortify.h says why). Its own step and its own marker rather
+#       than part of the block above, because a linux/ that was folded before
+#       this existed has the fold and not this, and the block above leaves it
+#       alone: every edit here is idempotent, and this one catches up the trees
+#       that have the older half.
+#
+if [ -n "${fold_header:-}" ] && [ -f kernel/patch/fold-x86-fortify.h ] &&
+   grep -q MOONWATER_FOLD_X86 "$fold_header" &&
+   ! grep -q MOONWATER_FOLD_X86_FORTIFY "$fold_header"
+then
+        fold_work=$(mktemp)
+        awk -v add=kernel/patch/fold-x86-fortify.h '
+                /^#endif \/\* __KERNEL__ \*\/$/ && !placed {
+                        while ((getline line < add) > 0)
+                                print line
+                        placed = 1
+                }
+                { print }
+                END { if (!placed) exit 3 }
+        ' "$fold_header" > "$fold_work" &&
+        sudo cp "$fold_work" "$fold_header" ||
+                die "keeping the fold out of FORTIFY_SOURCE in $fold_header, which has no #endif /* __KERNEL__ */ to place it before"
+        rm -f "$fold_work"
+        echo "  kept the fold out of FORTIFY_SOURCE in $(basename "$fold_header")"
+fi
+
+#
 #       Settings kept in the boot image, which is the fifth kind of edit: the
 #       image's own layout, and the EFI stub that reads it.
 #
