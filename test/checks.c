@@ -23418,6 +23418,894 @@ static positive bulk_move_sizes[] = {0, 1, 3, 7, 8, 9, 15, 16, 17, 31, 32, 33,
 
 #define BULK_MOVE_COUNT (sizeof(bulk_move_sizes) / sizeof(bulk_move_sizes[0]))
 
+/*
+        What the copiers answer, and where they read and write. Every length
+        from nothing to three hundred, and the sizes where the wide bodies
+        change loops, is run with the source and the destination each
+        touching the end of a mapped page (a vector load that reads past it
+        faults) or its start, at the residues the bodies change their head
+        and tail handling at, in every x86 tier. The answer is the
+        destination, for memory_copy, memory_copy_apart, memcpy, memmove and
+        memory_fill, and the bytes either side of the span are untouched.
+        Overlapping moves run against a page too, forwards and backwards, and
+        a move onto itself changes nothing and still answers.
+*/
+static positive copy_residues[] = {0, 1, 3, 8, 15, 16, 31, 32, 63};
+static positive copy_gaps[] = {1, 2, 3, 7, 8, 15, 16, 31, 32, 33, 63, 64, 65, 127,
+                               128, 129, 200};
+static positive copy_big[] = {511, 512, 513, 1000, 1024, 2047, 2048, 2049, 4095, 4096};
+static string_address copy_names[] = {"memory_copy", "memory_copy_apart", "memcpy",
+                                      "memmove", "memory_fill"};
+static b8 copy_expected[4096 + 256];
+
+#define COPY_RESIDUES (sizeof(copy_residues) / sizeof(copy_residues[0]))
+#define COPY_GAPS (sizeof(copy_gaps) / sizeof(copy_gaps[0]))
+#define COPY_BIG (sizeof(copy_big) / sizeof(copy_big[0]))
+
+static address_any copy_call(positive what, p8 address_to to, p8 address_to from,
+                              positive size)
+{
+        switch (what)
+        {
+        case 0: return memory_copy(to, from, size);
+        case 1: return memory_copy_apart(to, from, size);
+        case 2: return memcpy(to, from, size);
+        case 3: return memmove(to, from, size);
+        }
+        return memory_fill(to, 0xC3, size);
+}
+
+fn check_copy_returns_size(p8 address_to from, p8 address_to to, positive size)
+{
+        for (positive what = 0; what < 5; what++)
+                for (positive sm = 0; sm < 2 * COPY_RESIDUES; sm++)
+                        for (positive dm = 0; dm < 2 * COPY_RESIDUES; dm++)
+                        {
+                                positive sr = copy_residues[sm >> 1];
+                                positive dr = copy_residues[dm >> 1];
+                                p8 address_to src = sm & 1 ? from + sr : from + 4096 - size - sr;
+                                p8 address_to dst = dm & 1 ? to + dr : to + 4096 - size - dr;
+                                address_any answer;
+                                positive low = dst - to < 64 ? 0 : dst - to - 64;
+                                positive high = dst - to + size + 64 > 4096 ? 4096 : dst - to + size + 64;
+                                positive bad = 0;
+
+                                if (size + sr > 4096 || size + dr > 4096)
+                                        continue;
+
+                                answer = copy_call(what, dst, src, size);
+                                same(copy_names[what], "answers the destination",
+                                     (positive)answer, (positive)dst);
+
+                                for (positive i = low; i < high; i++)
+                                {
+                                        p8 want = 0x5A;
+
+                                        if (to + i >= dst && to + i < dst + size)
+                                                want = what == 4 ? 0xC3 : src[to + i - dst];
+                                        bad += to[i] != want;
+                                }
+
+                                same(copy_names[what], "bytes round the span", bad, 0);
+                                reference_fill(dst, 0x5A, size);
+                        }
+}
+
+fn check_move_returns(p8 address_to page, positive gap, positive size, positive atend)
+{
+        for (positive what = 0; what < 2; what++)
+                for (positive back = 0; back < 3; back++)
+                {
+                        p8 address_to base = atend ? page + 4096 - size - gap : page;
+                        p8 address_to src = back == 1 ? base + gap : base;
+                        p8 address_to dst = back == 0 ? base + gap : base;
+                        address_any answer;
+
+                        if (back == 2)
+                                dst = src = base + gap;
+
+                        if (size + gap > 4096)
+                                continue;
+
+                        for (positive i = 0; i < size + gap; i++)
+                                base[i] = (b8)(i * 7 + 3 + size);
+
+                        for (positive i = 0; i < size + gap; i++)
+                                copy_expected[i] = base[i];
+
+                        reference_copy(copy_expected + (dst - base), copy_expected + (src - base), size);
+                        answer = what ? memmove(dst, src, size) : memory_copy(dst, src, size);
+                        same(what ? "memmove" : "memory_copy", "overlap answers the destination",
+                             (positive)answer, (positive)dst);
+                        same_bytes(what ? "memmove" : "memory_copy", "overlap bytes", base,
+                                   copy_expected, size + gap);
+                }
+}
+
+fn check_copy_returns()
+{
+        p8 address_to pages = memory(5 * 4096);
+        p8 address_to from;
+        p8 address_to to;
+        p8 had_avx2 = 0;
+        p8 had_avx512 = 0;
+
+        if (!((bipolar)(positive)pages > 0))
+        {
+                same("copy returns", "mapping", 0, 1);
+                return;
+        }
+        system_call_3(syscall(mprotect), (positive)pages, 4096, 0);
+        system_call_3(syscall(mprotect), (positive)(pages + 8192), 4096, 0);
+        system_call_3(syscall(mprotect), (positive)(pages + 16384), 4096, 0);
+        from = pages + 4096;
+        to = pages + 12288;
+#if X64
+        had_avx2 = cpu_has_avx2;
+        had_avx512 = cpu_has_avx512;
+#endif
+
+        for (positive i = 0; i < 4096; i++)
+        {
+                from[i] = (b8)(i * 29 + 11 + (i >> 8));
+                to[i] = 0x5A;
+        }
+
+        for (positive pass = 0; pass < BULK_TIERS; pass++)
+        {
+                bulk_tier(pass, had_avx2, had_avx512);
+
+                for (positive size = 0; size <= 300; size++)
+                        check_copy_returns_size(from, to, size);
+
+                for (positive big = 0; big < COPY_BIG; big++)
+                        check_copy_returns_size(from, to, copy_big[big]);
+
+                for (positive g = 0; g < COPY_GAPS; g++)
+                {
+                        for (positive size = 0; size <= 300; size++)
+                                for (positive atend = 0; atend < 2; atend++)
+                                        check_move_returns(from, copy_gaps[g], size, atend);
+
+                        for (positive big = 0; big < COPY_BIG; big++)
+                                for (positive atend = 0; atend < 2; atend++)
+                                        check_move_returns(from, copy_gaps[g], copy_big[big], atend);
+
+                        check_move_returns(from, copy_gaps[g], 4096 - copy_gaps[g], 0);
+                }
+        }
+
+        bulk_tier(0, had_avx2, had_avx512);
+        memory_free(pages, 5 * 4096);
+}
+
+/*
+        The library under the names C gives it, against models written here
+        from the C standard (and glibc where the standard leaves an answer
+        open: memmem with no needle, the end pointer of stpncpy). Every
+        input sits against a guard page, at the end of one (a read past the
+        last byte faults) and at the start of one (a read in front of the
+        first does), at the residues the bodies change their head handling
+        at; lengths run from nothing to past the widest vector, and bytes
+        come from a small alphabet that holds the high half, 0xff and the
+        letters of both cases, so matches are common and sign errors show.
+*/
+static p8 libc_alphabet[] = {1, 2, 'a', 'b', 'A', 'B', 0x7f, 0x80, 0xff, 'c', ' '};
+static positive libc_slack[] = {0, 1, 2, 3, 5, 8, 15, 16, 31, 32, 33, 63};
+#define LIBC_SLACK (sizeof(libc_slack) / sizeof(libc_slack[0]))
+static p8 address_to libc_a;
+static p8 address_to libc_b;
+static p8 address_to libc_c;
+static p8 libc_model[1024];
+static p8 libc_model_b[1024];
+
+static p8 libc_byte(positive zeros)
+{
+        positive r = next();
+
+        if (zeros && (r >> 40) % 8 == 0)
+                return 0;
+        return libc_alphabet[(r >> 8) % sizeof(libc_alphabet)];
+}
+
+static positive libc_sign(bipolar v) { return v < 0 ? 2 : v > 0 ? 1 : 0; }
+
+// A place for n bytes: against the end of the page (guard after) or the start
+// (guard before), slack bytes in from the edge.
+static p8 address_to libc_place(p8 address_to page, positive n, positive slack,
+                                positive at_start)
+{
+        return at_start ? page + slack : page + 4096 - n - slack;
+}
+
+static void libc_names_one(positive length, positive slack_a, positive slack_b,
+                           positive anchor)
+{
+        p8 address_to s = libc_place(libc_a, length + 1, slack_a, anchor & 1);
+        p8 address_to t = libc_place(libc_b, length + 1, slack_b, anchor & 2);
+        p8 address_to d = libc_place(libc_c, length + 1, slack_b, anchor & 4);
+        positive other = (next() >> 12) % (length + 1);
+        positive at;
+        p8 c;
+
+        // a string, and one that differs from it late or not at all
+        for (positive i = 0; i < length; i++)
+                s[i] = libc_byte(0);
+        s[length] = 0;
+
+        for (positive i = 0; i <= length; i++)
+                t[i] = s[i];
+        if (other < length && (next() & 3))
+                t[other] = t[other] ^ ((next() & 1) ? 0x20 : 0x80);
+        if (length && !(next() & 7))
+                t[length - 1] = 0;
+
+        c = !(next() & 3) ? 0 : !(next() & 3) ? 'z' : s[(next() >> 16) % (length + 1)];
+
+        // strlen strnlen
+        same("strlen", "length", strlen((char address_to)s), length);
+        for (positive bound = 0; bound <= length + 2; bound += 1 + (length >> 5))
+                same("strnlen", "bound", strnlen((char address_to)s, bound),
+                     bound < length ? bound : length);
+
+        // strchr strrchr strchrnul
+        at = length + 1;
+        for (positive i = 0; i <= length; i++)
+                if (s[i] == c)
+                {
+                        at = i;
+                        break;
+                }
+        same("strchr", "first", (positive)strchr((char address_to)s, c | ((next() & 1) << 8)),
+             at <= length ? (positive)(s + at) : 0);
+        same("strchrnul", "first", (positive)strchrnul((char address_to)s, c),
+             (positive)(s + (at <= length ? at : length)));
+        at = length + 1;
+        for (positive i = length + 1; i-- > 0;)
+                if (s[i] == c)
+                {
+                        at = i;
+                        break;
+                }
+        same("strrchr", "last", (positive)strrchr((char address_to)s, c),
+             at <= length ? (positive)(s + at) : 0);
+
+        // strcmp strncmp strcasecmp strncasecmp
+        {
+                positive want = 0;
+                positive want_fold = 0;
+                positive bound = (next() >> 20) % (length + 2);
+                positive want_n = 0;
+                positive want_fold_n = 0;
+
+                for (positive i = 0;; i++)
+                {
+                        p8 x = s[i];
+                        p8 y = t[i];
+                        p8 fx = x >= 'A' && x <= 'Z' ? x + 32 : x;
+                        p8 fy = y >= 'A' && y <= 'Z' ? y + 32 : y;
+
+                        if (!want && x != y)
+                                want = x < y ? 2 : 1;
+                        if (!want_fold && fx != fy)
+                                want_fold = fx < fy ? 2 : 1;
+                        if (i < bound && !want_n && x != y)
+                                want_n = x < y ? 2 : 1;
+                        if (i < bound && !want_fold_n && fx != fy)
+                                want_fold_n = fx < fy ? 2 : 1;
+                        if (!x || !y)
+                                break;
+                }
+
+                // each stops at the first terminator, so the verdict is the first
+                // difference at or before it
+                same("strcmp", "sign", libc_sign(strcmp((char address_to)s, (char address_to)t)), want);
+                same("strcasecmp", "sign", libc_sign(strcasecmp((char address_to)s, (char address_to)t)), want_fold);
+                same("strncmp", "sign", libc_sign(strncmp((char address_to)s, (char address_to)t, bound)), want_n);
+                same("strncasecmp", "sign", libc_sign(strncasecmp((char address_to)s, (char address_to)t, bound)), want_fold_n);
+        }
+
+        // memcmp bcmp over the same bytes, which include the terminator
+        {
+                positive want = 0;
+
+                for (positive i = 0; i <= length && !want; i++)
+                        if (s[i] != t[i])
+                                want = s[i] < t[i] ? 2 : 1;
+                same("memcmp", "sign", libc_sign(memcmp(s, t, length + 1)), want);
+                same("bcmp", "zero", bcmp(s, t, length + 1) != 0, want != 0);
+        }
+
+        // memchr memrchr: with zeros inside
+        for (positive i = 0; i < length; i++)
+                s[i] = libc_byte(1);
+        {
+                positive first = length;
+                positive last = length;
+                positive want_first;
+                positive want_last;
+
+                for (positive i = 0; i < length; i++)
+                        if (s[i] == c)
+                        {
+                                if (first == length)
+                                        first = i;
+                                last = i;
+                        }
+                want_first = first == length ? 0 : (positive)(s + first);
+                want_last = last == length ? 0 : (positive)(s + last);
+                same("memchr", "first", (positive)memchr(s, c | ((next() & 1) << 9), length), want_first);
+                same("memrchr", "last", (positive)memrchr(s, c, length), want_last);
+        }
+
+        // memmem: a needle taken from the haystack, one made up, and none
+        {
+                positive nl = length ? (next() >> 9) % (length < 9 ? length + 1 : 9) : 0;
+                positive from = length - nl ? (next() >> 30) % (length - nl + 1) : 0;
+                positive want = length + 1;
+
+                for (positive i = 0; i < nl; i++)
+                        t[i] = s[from + i];
+                if (nl && !(next() & 3))
+                        t[nl - 1] ^= 1;
+
+                for (positive i = 0; i + nl <= length; i++)
+                {
+                        positive j = 0;
+
+                        while (j < nl && s[i + j] == t[j])
+                                j++;
+                        if (j == nl)
+                        {
+                                want = i;
+                                break;
+                        }
+                }
+                same("memmem", "first", (positive)memmem(s, length, t, nl),
+                     want <= length ? (positive)(s + want) : 0);
+        }
+
+        // copies: strcpy stpcpy strcat strncpy stpncpy strncat memccpy
+        for (positive i = 0; i < length; i++)
+                s[i] = libc_byte(0);
+        s[length] = 0;
+        {
+                positive bound = (next() >> 18) % (length + 4);
+                p8 address_to e = d;
+
+                d = libc_place(libc_c, length + 1 + 3, slack_b, anchor & 4);
+                same("strcpy", "answers destination", (positive)strcpy((char address_to)d, (char address_to)s), (positive)d);
+                same_bytes("strcpy", "bytes", d, s, length + 1);
+                same("stpcpy", "answers the terminator", (positive)stpcpy((char address_to)d, (char address_to)s),
+                     (positive)(d + length));
+
+                // strncpy pads with zeros to the bound and does not terminate when cut
+                {
+                        positive n = bound < 1024 ? bound : 1023;
+                        p8 address_to z = libc_place(libc_c, n + 1, slack_b, anchor & 4);
+
+                        for (positive i = 0; i < n; i++)
+                                libc_model[i] = i < length ? s[i] : 0;
+                        same("strncpy", "answers destination", (positive)strncpy((char address_to)z, (char address_to)s, n), (positive)z);
+                        same_bytes("strncpy", "bytes", z, libc_model, n);
+                        same("stpncpy", "answers", (positive)stpncpy((char address_to)z, (char address_to)s, n),
+                             (positive)(z + (n < length ? n : length)));
+                        same_bytes("stpncpy", "bytes", z, libc_model, n);
+                }
+
+                // strcat and strncat on a destination that already holds a string
+                {
+                        positive base = (next() >> 25) % 9;
+                        positive room = base + length + 1;
+                        positive take = bound < length ? bound : length;
+                        p8 address_to z = libc_place(libc_c, room + 1, slack_b, anchor & 4);
+
+                        for (positive i = 0; i < base; i++)
+                                z[i] = libc_model_b[i] = libc_byte(0);
+                        z[base] = libc_model_b[base] = 0;
+                        same("strcat", "answers destination", (positive)strcat((char address_to)z, (char address_to)s), (positive)z);
+                        for (positive i = 0; i < length; i++)
+                                libc_model[base + i] = s[i];
+                        for (positive i = 0; i < base; i++)
+                                libc_model[i] = libc_model_b[i];
+                        libc_model[base + length] = 0;
+                        same_bytes("strcat", "bytes", z, libc_model, base + length + 1);
+
+                        z[base] = 0;
+                        same("strncat", "answers destination", (positive)strncat((char address_to)z, (char address_to)s, bound), (positive)z);
+                        libc_model[base + take] = 0;
+                        same_bytes("strncat", "bytes", z, libc_model, base + take + 1);
+                }
+
+                // memccpy
+                {
+                        p8 stop = !(next() & 3) ? 'z' : s[(next() >> 20) % (length + 1)];
+                        positive upto = length + 1;
+                        positive n = bound < length + 1 ? bound : length + 1;
+                        p8 address_to z = libc_place(libc_c, n + 1, slack_b, anchor & 4);
+                        positive found = n;
+
+                        for (positive i = 0; i < n; i++)
+                                if (s[i] == stop)
+                                {
+                                        found = i;
+                                        break;
+                                }
+                        (void)upto;
+                        for (positive i = 0; i < n; i++)
+                                z[i] = 0x99;
+                        same("memccpy", "answers past the byte", (positive)memccpy(z, s, stop, n),
+                             found < n ? (positive)(z + found + 1) : 0);
+                        for (positive i = 0; i < (found < n ? found + 1 : n); i++)
+                                libc_model[i] = s[i];
+                        same_bytes("memccpy", "bytes", z, libc_model, found < n ? found + 1 : n);
+                        for (positive i = found < n ? found + 1 : n; i < n; i++)
+                                same("memccpy", "left the rest", z[i], 0x99);
+                }
+                (void)e;
+        }
+
+        // strstr
+        {
+                positive nl = length ? (next() >> 9) % (length < 7 ? length + 1 : 7) : 0;
+                positive from = length - nl ? (next() >> 30) % (length - nl + 1) : 0;
+                positive want = length + 1;
+
+                for (positive i = 0; i < nl; i++)
+                        t[i] = s[from + i];
+                t[nl] = 0;
+                if (nl && !(next() & 3))
+                        t[nl - 1] = 'q';
+                nl = string_length((char address_to)t);
+
+                for (positive i = 0; i + nl <= length; i++)
+                {
+                        positive j = 0;
+
+                        while (j < nl && s[i + j] == t[j])
+                                j++;
+                        if (j == nl)
+                        {
+                                want = i;
+                                break;
+                        }
+                }
+                same("strstr", "first", (positive)strstr((char address_to)s, (char address_to)t),
+                     want <= length ? (positive)(s + want) : 0);
+        }
+
+        // strspn strcspn strpbrk over a set of up to four members
+        {
+                p8 set[6];
+                positive members = (next() >> 11) % 5;
+                positive span = 0;
+                positive cspan = 0;
+                positive hit = length + 1;
+
+                for (positive i = 0; i < members; i++)
+                        set[i] = libc_alphabet[(next() >> 33) % sizeof(libc_alphabet)];
+                set[members] = 0;
+
+                while (span < length)
+                {
+                        positive in = 0;
+
+                        for (positive i = 0; i < members; i++)
+                                in |= set[i] == s[span];
+                        if (!in)
+                                break;
+                        span++;
+                }
+                while (cspan < length)
+                {
+                        positive in = 0;
+
+                        for (positive i = 0; i < members; i++)
+                                in |= set[i] == s[cspan];
+                        if (in)
+                        {
+                                hit = cspan;
+                                break;
+                        }
+                        cspan++;
+                }
+                same("strspn", "count", strspn((char address_to)s, (char address_to)set), span);
+                same("strcspn", "count", strcspn((char address_to)s, (char address_to)set), cspan);
+                same("strpbrk", "first", (positive)strpbrk((char address_to)s, (char address_to)set),
+                     hit <= length ? (positive)(s + hit) : 0);
+        }
+
+        // memset memcpy answers
+        {
+                p8 v = (p8)next();
+
+                same("memset", "answers destination", (positive)memset(d, v, length), (positive)d);
+                for (positive i = 0; i < length; i++)
+                        libc_model[i] = v;
+                same_bytes("memset", "bytes", d, libc_model, length);
+        }
+}
+
+fn check_libc_names()
+{
+        p8 address_to pages = memory(7 * 4096);
+        p8 had_avx2 = 0;
+        p8 had_avx512 = 0;
+
+        if (!((bipolar)(positive)pages > 0))
+        {
+                same("libc names", "mapping", 0, 1);
+                return;
+        }
+        for (positive i = 0; i < 7; i += 2)
+                system_call_3(syscall(mprotect), (positive)(pages + 4096 * i), 4096, 0);
+        libc_a = pages + 4096;
+        libc_b = pages + 3 * 4096;
+        libc_c = pages + 5 * 4096;
+#if X64
+        had_avx2 = cpu_has_avx2;
+        had_avx512 = cpu_has_avx512;
+#endif
+
+        for (positive pass = 0; pass < BULK_TIERS; pass++)
+        {
+                bulk_tier(pass, had_avx2, had_avx512);
+
+                for (positive length = 0; length <= 140; length++)
+                        for (positive a = 0; a < LIBC_SLACK; a++)
+                                for (positive anchor = 0; anchor < 8; anchor++)
+                                        libc_names_one(length, libc_slack[a],
+                                                       libc_slack[(a + length) % LIBC_SLACK], anchor);
+
+                for (positive length = 141; length <= 600; length += 7)
+                        for (positive a = 0; a < LIBC_SLACK; a += 3)
+                                for (positive anchor = 0; anchor < 8; anchor++)
+                                        libc_names_one(length, libc_slack[a],
+                                                       libc_slack[(a + length) % LIBC_SLACK], anchor);
+        }
+
+        bulk_tier(0, had_avx2, had_avx512);
+        memory_free(pages, 7 * 4096);
+}
+
+/*
+        The names of the library that C does not have, against models written
+        here, on the same guarded pages as check_libc_names: strlcpy and
+        strlcat (the answer is the length wanted, a capacity of zero touches
+        nothing), strsep, strcasestr, the case-folding and common-prefix
+        compares, the hex encoder in both cases, memory_zero and bzero, bcopy
+        through an overlap, and the fills by word.
+*/
+static void library_names_one(positive length, positive slack_a, positive slack_b,
+                              positive anchor)
+{
+        p8 address_to s = libc_place(libc_a, length + 1, slack_a, anchor & 1);
+        p8 address_to t = libc_place(libc_b, length + 1, slack_b, anchor & 2);
+        p8 address_to d;
+        positive capacity = (next() >> 17) % (length + 4);
+        positive base = (next() >> 27) % 7;
+
+        for (positive i = 0; i < length; i++)
+                s[i] = libc_byte(0);
+        s[length] = 0;
+        for (positive i = 0; i <= length; i++)
+                t[i] = s[i];
+        if (length && (next() & 1))
+                t[(next() >> 22) % length] ^= 0x20;
+
+        // strlcpy
+        d = libc_place(libc_c, capacity + 1, slack_b, anchor & 4);
+        for (positive i = 0; i < capacity + 1; i++)
+                d[i] = 0x77;
+        same("string_copy_bounded", "answers the length wanted",
+             string_copy_bounded((string_address)d, (string_address)s, capacity), length);
+        if (capacity)
+        {
+                positive take = length < capacity - 1 ? length : capacity - 1;
+
+                same_bytes("string_copy_bounded", "bytes", d, s, take);
+                same("string_copy_bounded", "terminator", d[take], 0);
+                for (positive i = take + 1; i < capacity + 1; i++)
+                        same("string_copy_bounded", "left the rest", d[i], 0x77);
+        }
+        else
+                same("string_copy_bounded", "capacity zero touches nothing", d[0], 0x77);
+        same("string_copy_bounded", "capacity zero, null destination",
+             string_copy_bounded(null, (string_address)s, 0), length);
+
+        // strlcat onto a string of `base` bytes, with room for capacity in all
+        {
+                positive room = capacity + base + 1;
+                positive have = base < capacity ? base : capacity;
+
+                d = libc_place(libc_c, room + 2, slack_b, anchor & 4);
+                for (positive i = 0; i < room + 2; i++)
+                        d[i] = 0x77;
+                for (positive i = 0; i < base; i++)
+                        d[i] = libc_model_b[i] = libc_byte(0);
+                d[base] = libc_model_b[base] = 0;
+                // a destination with no terminator inside its capacity
+                if (!(next() & 7) && capacity && capacity <= base)
+                        for (positive i = 0; i < capacity; i++)
+                                libc_model_b[i] = d[i];
+                same("string_append_bounded", "answers the length wanted",
+                     string_append_bounded((string_address)d, (string_address)s, capacity),
+                     have + length);
+                if (capacity && base < capacity)
+                {
+                        positive take = length < capacity - base - 1 ? length : capacity - base - 1;
+
+                        same_bytes("string_append_bounded", "kept", d, libc_model_b, base);
+                        same_bytes("string_append_bounded", "appended", d + base, s, take);
+                        same("string_append_bounded", "terminator", d[base + take], 0);
+                        for (positive i = base + take + 1; i < room + 2; i++)
+                                same("string_append_bounded", "left the rest", d[i], 0x77);
+                }
+                else
+                        same_bytes("string_append_bounded", "full destination untouched", d,
+                                   libc_model_b, base);
+        }
+
+        // strcasestr: a needle cut from the haystack with its case flipped, and one that is not there
+        {
+                positive nl = length ? (next() >> 9) % (length < 7 ? length + 1 : 7) : 0;
+                positive from = length - nl ? (next() >> 30) % (length - nl + 1) : 0;
+                positive want = length + 1;
+
+                for (positive i = 0; i < nl; i++)
+                {
+                        p8 x = s[from + i];
+
+                        if (!(next() & 3) && x >= 'a' && x <= 'z')
+                                x -= 32;
+                        else if (!(next() & 3) && x >= 'A' && x <= 'Z')
+                                x += 32;
+                        t[i] = x;
+                }
+                t[nl] = 0;
+                if (nl && !(next() & 3))
+                        t[nl - 1] = 'q';
+                nl = string_length((char address_to)t);
+
+                for (positive i = 0; i + nl <= length && want > length; i++)
+                {
+                        positive j = 0;
+
+                        while (j < nl)
+                        {
+                                p8 x = s[i + j];
+                                p8 y = t[j];
+
+                                x = x >= 'A' && x <= 'Z' ? x + 32 : x;
+                                y = y >= 'A' && y <= 'Z' ? y + 32 : y;
+                                if (x != y)
+                                        break;
+                                j++;
+                        }
+                        if (j == nl)
+                                want = i;
+                }
+                same("strcasestr", "first", (positive)strcasestr((char address_to)s, (char address_to)t),
+                     want <= length ? (positive)(s + want) : 0);
+        }
+
+        // memory_compare_ascii_case and memory_common_prefix over the same bytes
+        {
+                positive want = 0;
+                positive prefix = 0;
+
+                for (positive i = 0; i < length; i++)
+                        t[i] = s[i];
+                if (length && (next() & 3))
+                {
+                        positive at = (next() >> 21) % length;
+
+                        t[at] = (next() & 1) ? (s[at] ^ 0x20) : (s[at] + 1);
+                }
+                for (positive i = 0; i < length && !want; i++)
+                {
+                        p8 x = s[i];
+                        p8 y = t[i];
+
+                        x = x >= 'A' && x <= 'Z' ? x + 32 : x;
+                        y = y >= 'A' && y <= 'Z' ? y + 32 : y;
+                        if (x != y)
+                                want = x < y ? 2 : 1;
+                }
+                while (prefix < length && s[prefix] == t[prefix])
+                        prefix++;
+                same("memory_compare_ascii_case", "sign",
+                     libc_sign(memory_compare_ascii_case(s, t, length)), want);
+                same("memory_common_prefix", "count", memory_common_prefix(s, t, length), prefix);
+        }
+
+        // memory_into_hex, in both cases; the destination ends at a guard too
+        {
+                static const char lower[] = "0123456789abcdef";
+                static const char upper[] = "0123456789ABCDEF";
+
+                d = libc_place(libc_c, 2 * length, slack_b, anchor & 4);
+                for (positive upcase = 0; upcase < 2; upcase++)
+                {
+                        positive wrote = upcase ? memory_into_hex_case(d, s, length, 1)
+                                                : memory_into_hex(d, s, length);
+                        positive bad = 0;
+
+                        same("memory_into_hex", "count", wrote, 2 * length);
+                        for (positive i = 0; i < length; i++)
+                        {
+                                const char address_to digits = upcase ? upper : lower;
+
+                                bad += d[2 * i] != (p8)digits[s[i] >> 4];
+                                bad += d[2 * i + 1] != (p8)digits[s[i] & 15];
+                        }
+                        same("memory_into_hex", "digits", bad, 0);
+                        same("memory_into_hex_case", "lower matches memory_into_hex",
+                             memory_into_hex_case(d, s, length, 0), 2 * length);
+                }
+        }
+
+        // memory_zero, bzero
+        {
+                d = libc_place(libc_c, length, slack_b, anchor & 4);
+                for (positive i = 0; i < length; i++)
+                        d[i] = 0x77;
+                memory_zero(d, length);
+                for (positive i = 0; i < length; i++)
+                        libc_model[i] = 0;
+                same_bytes("memory_zero", "bytes", d, libc_model, length);
+                for (positive i = 0; i < length; i++)
+                        d[i] = 0x77;
+                bzero(d, length);
+                same_bytes("bzero", "bytes", d, libc_model, length);
+        }
+
+        // bcopy through an overlap, both ways, at the end of a page
+        {
+                positive gap = 1 + (next() >> 13) % 70;
+                p8 address_to b = libc_place(libc_c, length + gap, slack_b, anchor & 4);
+
+                for (positive i = 0; i < length + gap; i++)
+                        b[i] = libc_model_b[i] = (p8)(i * 11 + 5);
+                bcopy(b, b + gap, length);
+                reference_copy(libc_model_b + gap, libc_model_b, length);
+                same_bytes("bcopy", "forwards", b, libc_model_b, length + gap);
+                for (positive i = 0; i < length + gap; i++)
+                        b[i] = libc_model_b[i] = (p8)(i * 11 + 5);
+                bcopy(b + gap, b, length);
+                reference_copy(libc_model_b, libc_model_b + gap, length);
+                same_bytes("bcopy", "backwards", b, libc_model_b, length + gap);
+        }
+
+        // the word fills, at every alignment their callers can have
+        {
+                positive count = length;
+                p32 address_to w = (p32 address_to)libc_place(libc_c, 4 * count, slack_b & ~3ull, anchor & 4);
+                p64 address_to q = (p64 address_to)libc_place(libc_a, 8 * count, slack_a & ~7ull, anchor & 1);
+
+                if ((positive)w & 3)
+                        w = (p32 address_to)((positive)w & ~3ull);
+                if ((positive)q & 7)
+                        q = (p64 address_to)((positive)q & ~7ull);
+                if ((p8 address_to)w >= libc_c && (p8 address_to)q >= libc_a &&
+                    (p8 address_to)w + 4 * count <= libc_c + 4096 &&
+                    (p8 address_to)q + 8 * count <= libc_a + 4096)
+                {
+                        p32 v = (p32)next();
+                        p64 v64 = next();
+                        positive bad = 0;
+
+                        same("memory_fill_32", "answers destination",
+                             (positive)memory_fill_32(w, v, count), (positive)w);
+                        for (positive i = 0; i < count; i++)
+                                bad += w[i] != v;
+                        memory_fill_u32(w, count, ~v);
+                        for (positive i = 0; i < count; i++)
+                                bad += w[i] != (p32)~v;
+                        same("memory_fill_32/u32", "words", bad, 0);
+
+                        bad = 0;
+                        same("memory_fill_64", "answers destination",
+                             (positive)memory_fill_64(q, v64, count), (positive)q);
+                        for (positive i = 0; i < count; i++)
+                                bad += q[i] != v64;
+                        memory_fill_u64_aligned(q, count, ~v64);
+                        for (positive i = 0; i < count; i++)
+                                bad += q[i] != ~v64;
+                        same("memory_fill_64/u64_aligned", "words", bad, 0);
+                }
+        }
+}
+
+fn check_library_names()
+{
+        p8 address_to pages = memory(7 * 4096);
+        p8 had_avx2 = 0;
+        p8 had_avx512 = 0;
+
+        if (!((bipolar)(positive)pages > 0))
+        {
+                same("library names", "mapping", 0, 1);
+                return;
+        }
+        for (positive i = 0; i < 7; i += 2)
+                system_call_3(syscall(mprotect), (positive)(pages + 4096 * i), 4096, 0);
+        libc_a = pages + 4096;
+        libc_b = pages + 3 * 4096;
+        libc_c = pages + 5 * 4096;
+#if X64
+        had_avx2 = cpu_has_avx2;
+        had_avx512 = cpu_has_avx512;
+#endif
+
+        for (positive pass = 0; pass < BULK_TIERS; pass++)
+        {
+                bulk_tier(pass, had_avx2, had_avx512);
+
+                for (positive length = 0; length <= 140; length++)
+                        for (positive a = 0; a < LIBC_SLACK; a++)
+                                for (positive anchor = 0; anchor < 8; anchor++)
+                                        library_names_one(length, libc_slack[a],
+                                                          libc_slack[(a + length) % LIBC_SLACK], anchor);
+
+                for (positive length = 141; length <= 600; length += 7)
+                        for (positive a = 0; a < LIBC_SLACK; a += 3)
+                                for (positive anchor = 0; anchor < 8; anchor++)
+                                        library_names_one(length, libc_slack[a],
+                                                          libc_slack[(a + length) % LIBC_SLACK], anchor);
+        }
+
+        bulk_tier(0, had_avx2, had_avx512);
+        memory_free(pages, 7 * 4096);
+}
+
+/*
+        Nothing asked of nothing: a null pointer and a size of zero, which
+        the routines whose headers say a zero size touches neither pointer
+        must take, and answer as they would for a real one. The pointers come
+        through a variable the compiler cannot see through, so the call is
+        made.
+*/
+fn check_null_zero()
+{
+        static address_any volatile nothing = null;
+        address_any none = nothing;
+        p8 address_to bytes = (p8 address_to)none;
+
+        same("memory_copy", "null and zero answers null", (positive)memory_copy(none, none, 0), 0);
+        same("memory_copy_apart", "null and zero answers null", (positive)memory_copy_apart(none, none, 0), 0);
+        same("memory_fill", "null and zero answers null", (positive)memory_fill(none, 7, 0), 0);
+        same("memcpy", "null and zero answers null", (positive)memcpy(none, none, 0), 0);
+        same("memmove", "null and zero answers null", (positive)memmove(none, none, 0), 0);
+        same("memset", "null and zero answers null", (positive)memset(none, 7, 0), 0);
+        same("memcmp", "null and zero is equal", memcmp(none, none, 0), 0);
+        same("bcmp", "null and zero is equal", bcmp(none, none, 0), 0);
+        same("memchr", "null and zero finds nothing", (positive)memchr(none, 7, 0), 0);
+        same("memrchr", "null and zero finds nothing", (positive)memrchr(none, 7, 0), 0);
+        same("strnlen", "null and zero is zero", strnlen((char address_to)bytes, 0), 0);
+        same("strncmp", "null and zero is equal", strncmp((char address_to)bytes, (char address_to)bytes, 0), 0);
+        same("strncasecmp", "null and zero is equal", strncasecmp((char address_to)bytes, (char address_to)bytes, 0), 0);
+        same("strncpy", "null and zero answers null", (positive)strncpy((char address_to)bytes, "x", 0), 0);
+        same("memory_zero", "null and zero", (memory_zero(none, 0), 0), 0);
+        same("bzero", "null and zero", (bzero(none, 0), 0), 0);
+        same("bcopy", "null and zero", (bcopy(none, none, 0), 0), 0);
+        same("memory_reverse", "null and zero answers null", (positive)memory_reverse(none, 0), 0);
+        same("memory_frob", "null and zero answers null", (positive)memory_frob(none, 0), 0);
+        same("memory_to_lower_ascii", "null and zero answers null", (positive)memory_to_lower_ascii(none, 0), 0);
+        same("memory_to_upper_ascii", "null and zero answers null", (positive)memory_to_upper_ascii(none, 0), 0);
+        same("memory_exchange_apart", "null and zero", (memory_exchange_apart(none, none, 0), 0), 0);
+        same("memory_into_hex", "null and zero writes nothing", memory_into_hex(none, none, 0), 0);
+        same("memory_hash_33", "null and zero is the seed", memory_hash_33(none, 0), memory_hash_33("", 0));
+        same("memory_common_prefix", "null and zero is zero", memory_common_prefix(none, none, 0), 0);
+        same("memory_compare_ascii_case", "null and zero is equal", memory_compare_ascii_case(none, none, 0), 0);
+        same("memory_count", "null and zero is zero", memory_count(none, 0, 7), 0);
+        same("memory_first_of", "null and zero finds nothing", (positive)memory_first_of(none, 7, 0), 0);
+        same("memory_last_of", "null and zero finds nothing", (positive)memory_last_of(none, 7, 0), 0);
+        same("memmem", "empty haystack, empty needle", (positive)memmem(none, 0, none, 0), 0);
+        same("memccpy", "null and zero finds nothing", (positive)memccpy(none, none, 7, 0), 0);
+        same("hash_xxh64", "null and zero is the empty digest", hash_xxh64(none, 0, 0), hash_xxh64("", 0, 0));
+}
+
 fn check_bulk_moves()
 {
         p8 wide = 0;
@@ -27616,6 +28504,10 @@ b32 main()
         check_copy_max_end();
         check_bulk_alignments();
         check_bulk_moves();
+        check_copy_returns();
+        check_libc_names();
+        check_library_names();
+        check_null_zero();
         check_bulk_wide_strings();
 #endif
 
@@ -27729,7 +28621,11 @@ static void reference_move(p8 address_to to, const p8 address_to from, positive 
 #define CHECK_COPY(K)                                                         \
         do {                                                                  \
                 prepare();                                                    \
-                memory_copy_apart(FIELD, model, K);                            \
+                answer = memory_copy_apart(FIELD, model, K);                   \
+                checks++;                                                     \
+                if (answer != (address_any)FIELD)                             \
+                        fail((const p8 address_to)"memory_copy_apart", K,      \
+                             "did not answer the destination");               \
                 inspect((const p8 address_to)"memory_copy_apart", K, model, 0);\
         } while (0)
 
@@ -27737,7 +28633,11 @@ static void reference_move(p8 address_to to, const p8 address_to from, positive 
         do {                                                                  \
                 p8 value = (p8)(0x3c ^ (K));                                  \
                 prepare();                                                    \
-                memory_fill(FIELD, value, K);                                 \
+                answer = memory_fill(FIELD, value, K);                        \
+                checks++;                                                     \
+                if (answer != (address_any)FIELD)                             \
+                        fail((const p8 address_to)"memory_fill", K,            \
+                             "did not answer the destination");               \
                 inspect((const p8 address_to)"memory_fill", K, &value, 1);    \
         } while (0)
 
@@ -27754,7 +28654,11 @@ static void reference_move(p8 address_to to, const p8 address_to from, positive 
                         for (positive i = 0; i < sizeof(field_room); i++)     \
                                 field_room[i] = shadow[i] = model_byte(i);    \
                                                                               \
-                        memory_copy(to, from, K);                             \
+                        answer = memory_copy(to, from, K);                    \
+                        checks++;                                             \
+                        if (answer != (address_any)to)                        \
+                                fail((const p8 address_to)"memory_copy", K,    \
+                                     "did not answer the destination");       \
                         reference_move(shade, shadow + SLIDE, K);             \
                                                                               \
                         checks++;                                             \
@@ -27771,6 +28675,8 @@ static void reference_move(p8 address_to to, const p8 address_to from, positive 
 //      Every size, once. Called once per tier below.
 static void sweep(void)
 {
+        address_any answer;
+
 #define CHECK_SIZE(K) CHECK_COPY(K); CHECK_FILL(K); CHECK_MOVE(K);
         EACH_SIZE(CHECK_SIZE)
 #undef CHECK_SIZE
