@@ -1,0 +1,33 @@
+#
+# Security region: dma, hardened
+#
+# A device that can write to memory can write to all of it unless an IOMMU
+# stands between it. The base configuration turns the IOMMU layer on and
+# builds no driver for one, and profile/any chooses passthrough for the case
+# where there is one, so a Thunderbolt or PCIe device, a malicious USB4 dock
+# or a bad network card has the machine's memory. This region builds the
+# drivers and makes translation the default:
+#
+#   sec_dma_hardened   Intel VT-d and AMD-Vi, translation (strict mode, so
+#                      an unmapped buffer is unmapped at once and not at the
+#                      next flush), no passthrough, and the firmware asked
+#                      not to leave PCI bus mastering on before the kernel
+#                      has its tables up
+#   sec_dma_locked     everything above, and no hotplug bus a device can
+#                      arrive on after boot: no Thunderbolt or USB4 tunnels,
+#                      no FireWire, no PCI hotplug, no PCMCIA
+#
+# Strict mode costs on every DMA unmap (a flush per unmap instead of one per
+# batch), which a machine that moves a lot of NVMe or network traffic sees as
+# a few percent of one core. The gaming profile that wants passthrough names
+# profile/any's line back after this one.
+#
+#> includes sec_baseline
+#> overrides CONFIG_IOMMU_DEFAULT_PASSTHROUGH
+
+CONFIG_IOMMU_DEFAULT_PASSTHROUGH=n
+CONFIG_IOMMU_DEFAULT_DMA_STRICT=y
+CONFIG_IOMMU_DEFAULT_DMA_LAZY=n
+CONFIG_EFI_DISABLE_PCI_DMA=y
+
+#> cmdline iommu.strict=1 iommu.passthrough=0

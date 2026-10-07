@@ -1,0 +1,29 @@
+#
+# Security region: surface, hardened
+#
+# What the kernel offers a process that is not meant to have it. The base
+# configuration is already narrow (no bpf(2), no userfaultfd, no /dev/mem, no
+# kexec, no debugfs, no magic sysrq: debug_none and the allnoconfig it starts
+# from see to that); this region closes the ways in that a general-purpose
+# machine keeps open for software this image may never run, and reports the
+# ones a tier cannot take without breaking something the image needs.
+#
+#   sec_surface_hardened  a process cannot replace an ACPI table or an EFI
+#                         SSDT from userspace, cannot ask for the CPU's
+#                         model-specific registers or the raw cpuid through a
+#                         device, cannot reach the I/O port space (ioperm and
+#                         iopl), and sees no legacy vsyscall page
+#   sec_surface_locked    everything above, and no 32-bit or x32 syscall
+#                         ABI, no local descriptor table, no filesystems in
+#                         userspace (FUSE), no binary format registration,
+#                         no key and device notification queue and no POSIX
+#                         message queues, and no io_uring or file handle
+#                         system calls. A kiosk's program is a native
+#                         64-bit one
+#
+# Not here, because the image stands on it and the build refuses to lose it:
+# user namespaces (a bowl's program is root mapped into one) and seccomp
+# filters (a browser's sandbox). A kiosk that wants user namespaces off sets
+# user.max_user_namespaces to 0 from its own script.
+#
+#> includes sec_baseline

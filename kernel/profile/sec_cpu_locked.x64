@@ -1,0 +1,4 @@
+#
+# sec_cpu_locked on x86-64: nothing the hardened one does not have. The
+# command line is the whole difference, and it is in sec_cpu_locked.
+#

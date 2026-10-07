@@ -1,0 +1,20 @@
+#
+# Security region: files, hardened
+#
+# What a tool does to a path it was given. STRICT_FILES 2: mkdir, mkfifo,
+# mknod, install and cp refuse to make an entry in a world-writable directory
+# without the sticky bit, cp and every output open replace a link at the
+# destination rather than write through it, cp -r builds a directory in a
+# private stage and publishes it whole, chown -R -L follows no link below the
+# operand, and a security.* attribute in an archive is not applied. The
+# fs.protected_fifos and fs.protected_regular switches are 2: group-writable
+# sticky directories too. The README lists each refusal and the check that
+# holds it.
+#
+# And what find may do to the tree it walks: it cannot delete (-delete) and
+# cannot write a file it was told to name (-fprint, -fprint0, -fprintf), the
+# two ways a walked tree's file names become a destroyed or a created file.
+#
+CONFIG_MOONWATER_STRICT_FILES=2
+CONFIG_MOONWATER_FLOODLIGHT_FIND_DELETE=n
+CONFIG_MOONWATER_FLOODLIGHT_FIND_WRITE=n

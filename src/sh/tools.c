@@ -1534,7 +1534,7 @@ static positive login_field(p8 address_to into, positive room,
 */
 static fn login_field_spelled(p8 address_to text)
 {
-#if MOONWATER_STRICT >= STRICT_SAFE
+#if MOONWATER_STRICT_TEXT >= STRICT_SAFE
         for (; *text; text++)
                 if (*text < ' ' || *text == 0x7f)
                         *text = '?';
@@ -2924,9 +2924,9 @@ static positive login_last_duration(p8 address_to into, b64 start, b64 finish)
         for tight does not want a listing that can ring. Tab stays whole
         at every tier: escaping it would move the columns of output that
         was never hostile, which is the one thing no tier may do. */
-#if MOONWATER_STRICT >= STRICT_TIGHT
+#if MOONWATER_STRICT_TEXT >= STRICT_TIGHT
 #define LOGIN_LAST_WHOLE(one) ((one) == '\t')
-#elif MOONWATER_STRICT >= STRICT_SAFE
+#elif MOONWATER_STRICT_TEXT >= STRICT_SAFE
 #define LOGIN_LAST_WHOLE(one) ((one) == '\t' || (one) == '\a')
 #else
 #define LOGIN_LAST_WHOLE(one)                                                \
@@ -3984,7 +3984,7 @@ static fn login_pinky_long(string_address name, bool home_and_shell,
                 text_put_character('\n');
         }
 
-#if MOONWATER_STRICT < STRICT_TIGHT
+#if MOONWATER_STRICT_TEXT < STRICT_TIGHT
         if (project)
                 login_pinky_cat("Project: ", directory, ".project");
         if (plan)
@@ -18722,7 +18722,7 @@ static fn ul_uclamp_report(b32 pid, ul_sched_attr address_to attr)
            escapes on the terminal of root asking about it. Safe spells what
            a terminal acts on, as rfkill's plain listing does; reference
            writes it whole. */
-#if MOONWATER_STRICT >= STRICT_SAFE
+#if MOONWATER_STRICT_TEXT >= STRICT_SAFE
         writer_hex_escaped(log, name, string_length(name),
                            HEX_CONTROL | HEX_TAB);
 #else
@@ -29972,7 +29972,7 @@ static PURE bool ul_rfkill_matches(ul_rfkill_row address_to row,
         the reference's answer, which is to write them out. */
 static fn ul_rfkill_spell(string_address text)
 {
-#if MOONWATER_STRICT >= STRICT_SAFE
+#if MOONWATER_STRICT_TEXT >= STRICT_SAFE
         writer_hex_escaped(log, text, string_length(text),
                            HEX_CONTROL | HEX_TAB);
 #else

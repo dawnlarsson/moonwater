@@ -1,0 +1,17 @@
+#
+# Security region: cpu, locked
+#
+# sec_cpu_hardened, and the processor-side settings a machine that does one
+# job runs at their strongest whether the part says it needs them or not. See
+# sec_cpu_hardened for the region.
+#
+# What it costs is the machine's second thread of every core (mitigations=
+# auto,nosmt: a sibling thread is the channel several of the attacks use, and
+# the mitigations that close it are partial), the kernel unmapped from every
+# user address space even on a part that is not vulnerable to Meltdown
+# (pti=on), and the buffer-clearing instructions on every return to user mode
+# on a part that has them. A kiosk is rarely at its core count.
+#
+#> includes sec_cpu_hardened
+
+#> cmdline mitigations=auto,nosmt pti=on tsx=off

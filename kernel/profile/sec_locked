@@ -3,8 +3,12 @@
 #
 # A kiosk or an appliance: one program on the screen or behind a port, and a
 # machine that should do nothing else. Every tool and builtin is off unless
-# it is named here, STRICT=2, and the monitor is gone. See sec_default for
-# the tiers and how to pick one.
+# it is named here, STRICT=3 (what the tight tier refuses, and what init can
+# shut until the next boot: no module loads, no ptrace attach, no other
+# user's process in /proc), the kernel's regions at their locked level (zeroed
+# memory on free, no SMT, strict IOMMU with no hotplug bus, confidentiality
+# lockdown, no 32-bit ABI) and the monitor is gone. See sec_default for the
+# tiers and how to pick one.
 #
 #   sh build.sh debug_none limbo desktop serial sec_locked
 #
@@ -34,11 +38,13 @@
 # switch either; the shell is not a shell without them.
 #
 
+#> includes sec_baseline sec_mem_locked sec_cpu_locked sec_surface_locked sec_dma_locked sec_lockdown_locked sec_build_hardened
+
 CONFIG_SECURITY=y
 CONFIG_SECURITY_YAMA=y
 CONFIG_INTEGRITY=n
 
-CONFIG_MOONWATER_STRICT=2
+CONFIG_MOONWATER_STRICT=3
 CONFIG_MOONWATER_SHELL_MONITOR=n
 CONFIG_MOONWATER_TOOLS_ALL=n
 CONFIG_MOONWATER_BUILTINS_ALL=n

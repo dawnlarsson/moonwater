@@ -202,7 +202,8 @@ static fn mount_devpts()
                 log_flush();
         }
 
-        bipolar mounted = system_mount("devpts", "/dev/pts", "devpts", 0, 0);
+        bipolar mounted = system_mount("devpts", "/dev/pts", "devpts",
+                                       MS_NOSUID | MS_NOEXEC, 0);
 
         // Nothing needs a pty this early, so this is not worth refusing to
         // boot over. It is worth saying: without it the terminal fails much
@@ -234,8 +235,18 @@ static fn mount_shm()
                 return;
         }
 
+        //      The locked tier also refuses to run what is written there: a
+        //      program that maps shared memory executable (a JIT through a
+        //      memfd or a shm file) is not what a machine that does one job
+        //      runs.
+#if MOONWATER_STRICT_HOST >= STRICT_LOCKED
+        bipolar mounted = system_mount("tmpfs", "/dev/shm", "tmpfs",
+                                       MS_NOSUID | MS_NODEV | MS_NOEXEC,
+                                       "mode=1777");
+#else
         bipolar mounted = system_mount("tmpfs", "/dev/shm", "tmpfs",
                                        MS_NOSUID | MS_NODEV, "mode=1777");
+#endif
 
         if (mounted < 0)
         {
@@ -279,9 +290,130 @@ static fn link_dev_fd()
         }
 }
 
+/*
+        What the image asks of the kernel before it starts anything.
+
+        The kernel ships its sysctls at the settings that suit a general
+        machine, and nothing in this image wrote /proc/sys but the network
+        watcher, so the settings below were applied by whichever process
+        happened to be that, a moment after the machine was already running
+        everything else, and not at all where the watcher never started or
+        gave up. They are init's, written once before the first service.
+
+        FILES: fs.protected_symlinks and protected_hardlinks 1 (a link in a
+        sticky world-writable directory is followed or made only by its
+        owner or the directory's), protected_fifos and protected_regular 1
+        (2 at the tight tier: group-writable sticky directories too).
+        Root is not exempt from these four: they judge the file's owner
+        against the opener's, not capabilities, so root's `>file` onto a
+        file another user made in a sticky /tmp fails with EACCES, and so
+        does root following that user's symlink there. That is the attack
+        they close, and no tool of this image writes that way. The locked tier
+        also writes fs.suid_dumpable 0, the kernel's default, written so that
+        nothing earlier in a boot can have raised it.
+
+        HOST: kptr_restrict 1 (pointers read as zero to a process without
+        CAP_SYSLOG; 2 hides them from root as well), dmesg_restrict 1,
+        io_uring_disabled 1 (2 at the tight tier: io_uring_setup refused to
+        everybody; 1 refuses it to processes without CAP_SYS_ADMIN, and
+        nothing in the image uses it) and randomize_va_space 2. At the tight
+        tier mmap's randomisation is the widest the kernel allows (28 bits is
+        its default on x86-64, 32 its limit), and ptrace attach needs
+        CAP_SYS_PTRACE (Yama 2); at the locked tier
+        it is refused to everybody (Yama 3) and no module can be loaded
+        (modules_disabled), both until the next boot. Floodlight's confined
+        launches read Yama's scope and want 1 or more, so every setting
+        here keeps them working.
+
+        A leaf the kernel was built without is not there and the write fails
+        quietly: there is no unprivileged_bpf_disabled because the image has
+        no bpf(2), and user namespaces stay as the kernel has them, because
+        bowls need them. The reference tier (STRICT_REFERENCE) writes
+        nothing: the kernel's own values are what it is for.
+*/
+#if MOONWATER_STRICT_FILES >= STRICT_SAFE || MOONWATER_STRICT_HOST >= STRICT_SAFE
+static COLD fn system_sysctl(string_address path, string_address value)
+{
+        bipolar handle = system_open_at(AT_FDCWD, path, 1 | O_CLOEXEC);
+
+        if (handle < 0)
+                return;
+
+        system_write_all((positive)handle, (p8 address_to)value,
+                         string_length(value));
+        system_close((positive)handle);
+}
+
+//      The widest address space randomisation the kernel allows: bits are
+//      tried from the most any architecture has (33 on arm64 with a 48-bit
+//      address space, 32 on x86-64) down to the kernel's own default, and the
+//      kernel refuses a number above its limit with EINVAL, so the first that
+//      is taken is the limit. Nothing is left running on fewer bits than the
+//      machine can do, and no architecture's maximum is written down here.
+static COLD fn system_sysctl_widest(string_address path, positive most,
+                                    positive least)
+{
+        bipolar handle = system_open_at(AT_FDCWD, path, 1 | O_CLOEXEC);
+
+        if (handle < 0)
+                return;
+
+        for (positive bits = most; bits >= least; bits--)
+        {
+                p8 text[8];
+                positive length = positive_into(text, bits);
+
+                text[length++] = '\n';
+
+                system_write_result done = system_write_all_checked(
+                    (positive)handle, text, length);
+
+                if (!done.error && done.bytes == length)
+                        break;
+        }
+
+        system_close((positive)handle);
+}
+
+static COLD fn system_kernel_defaults(void)
+{
+#if MOONWATER_STRICT_FILES >= STRICT_SAFE
+        system_sysctl("/proc/sys/fs/protected_symlinks", "1\n");
+        system_sysctl("/proc/sys/fs/protected_hardlinks", "1\n");
+        system_sysctl("/proc/sys/fs/protected_fifos",
+                      MOONWATER_STRICT_FILES >= STRICT_TIGHT ? "2\n" : "1\n");
+        system_sysctl("/proc/sys/fs/protected_regular",
+                      MOONWATER_STRICT_FILES >= STRICT_TIGHT ? "2\n" : "1\n");
+#if MOONWATER_STRICT_FILES >= STRICT_LOCKED
+        system_sysctl("/proc/sys/fs/suid_dumpable", "0\n");
+#endif
+#endif
+#if MOONWATER_STRICT_HOST >= STRICT_SAFE
+        system_sysctl("/proc/sys/kernel/randomize_va_space", "2\n");
+        system_sysctl("/proc/sys/kernel/kptr_restrict",
+                      MOONWATER_STRICT_HOST >= STRICT_TIGHT ? "2\n" : "1\n");
+        system_sysctl("/proc/sys/kernel/dmesg_restrict", "1\n");
+        system_sysctl("/proc/sys/kernel/io_uring_disabled",
+                      MOONWATER_STRICT_HOST >= STRICT_TIGHT ? "2\n" : "1\n");
+#if MOONWATER_STRICT_HOST >= STRICT_TIGHT
+        system_sysctl_widest("/proc/sys/vm/mmap_rnd_bits", 33, 28);
+        system_sysctl_widest("/proc/sys/vm/mmap_rnd_compat_bits", 16, 8);
+        system_sysctl("/proc/sys/kernel/yama/ptrace_scope",
+                      MOONWATER_STRICT_HOST >= STRICT_LOCKED ? "3\n" : "2\n");
+#endif
+#if MOONWATER_STRICT_HOST >= STRICT_LOCKED
+        system_sysctl("/proc/sys/kernel/modules_disabled", "1\n");
+#endif
+#endif
+}
+#endif
+
 static DEAD_END b32 system_init()
 {
         system_call(syscall(setsid));
+#if MOONWATER_STRICT_FILES >= STRICT_SAFE || MOONWATER_STRICT_HOST >= STRICT_SAFE
+        system_kernel_defaults();
+#endif
         mount_devpts();
         mount_shm();
         link_dev_fd();

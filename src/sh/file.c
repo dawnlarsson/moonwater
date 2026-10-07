@@ -7453,7 +7453,7 @@ static bipolar file_stage_new_open_at(
             !string_last_of(destination, '/') &&
             !(length == 1 && destination[0] == '.') &&
             !(length == 2 && destination[0] == '.' && destination[1] == '.')
-#if MOONWATER_STRICT >= STRICT_TIGHT
+#if MOONWATER_STRICT_FILES >= STRICT_TIGHT
             && system_path_parent_cleanup_safe(directory)
 #endif
             )
@@ -7646,7 +7646,7 @@ static bipolar file_direct_endpoint_open(
     bipolar directory, string_address name,
     file_facts address_to entry, positive flags);
 
-#if MOONWATER_STRICT < STRICT_TIGHT
+#if MOONWATER_STRICT_FILES < STRICT_TIGHT
 /* The directory that holds the last name of a chain of links, and that name
    in leaf, or -1 when leaf is not a link (or the chain is too long). A name
    that leads nowhere still has a place to be made: GNU's open goes through
@@ -7715,7 +7715,7 @@ static HOT bipolar file_staged_name_open_at(
 {
         stage->directory = system_open_parent_pinned(base, path, stage->leaf,
                                                      FILE_PATH_MAX);
-#if MOONWATER_STRICT < STRICT_TIGHT
+#if MOONWATER_STRICT_FILES < STRICT_TIGHT
         /*      A name that is a link is written through, as GNU's split, csplit
                 and every other tool that opens its output do; STRICT_TIGHT
                 replaces the link with the new file and never touches what it
@@ -8060,7 +8060,7 @@ static HOT bool file_name_stable(bipolar directory,
             (parent.mask & STATX_BASIC) != STATX_BASIC ||
             (parent.mode & MODE_FORMAT) != MODE_DIRECTORY)
                 return false;
-#if MOONWATER_STRICT < STRICT_TIGHT
+#if MOONWATER_STRICT_FILES < STRICT_TIGHT
         /* What the reference does, and what system_path_parent_cleanup_safe
            allows below the tight tier: a rename in any directory the kernel
            lets this process write, root's in a user's included. Refusing it
@@ -22247,7 +22247,7 @@ static fn chown_tree_enter(address_any context, address_any node_address,
 
                 file_facts facts;
                 positive name_length = string_length(name);
-#if MOONWATER_STRICT < STRICT_TIGHT
+#if MOONWATER_STRICT_FILES < STRICT_TIGHT
                 /*      -L follows a link met in the tree into the directory it
                         names, as fts's FTS_LOGICAL does; -H and -P follow none
                         below the operand. STRICT_TIGHT follows none at all. */
@@ -22383,7 +22383,7 @@ static bool chown_tree_sink(address_any context, address_any node_address,
 // Whether the walk follows the links it meets: -L, below STRICT_TIGHT.
 static bool chown_tree_follows(void)
 {
-#if MOONWATER_STRICT < STRICT_TIGHT
+#if MOONWATER_STRICT_FILES < STRICT_TIGHT
         return chown_selected.traverse == 'L';
 #else
         return false;
@@ -36369,7 +36369,7 @@ static bool file_copy_one(bipolar source_directory, string_address source,
         bipolar entry_looked = -ERROR_NO_ENTRY;
 
         bool through = false;
-#if MOONWATER_STRICT < STRICT_TIGHT
+#if MOONWATER_STRICT_FILES < STRICT_TIGHT
         /*      A destination that is a link is written through, as GNU's
                 open does it, and a link to nothing is the thing to make
                 under POSIXLY_CORRECT: the copy goes where the link points,
@@ -37082,7 +37082,7 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                 only, while it is copied, and is given its mode and owner
                 when it is done. STRICT_TIGHT builds it in a private stage
                 and publishes it whole. */
-#if MOONWATER_STRICT < STRICT_TIGHT
+#if MOONWATER_STRICT_FILES < STRICT_TIGHT
         bool in_place = !fresh && !moving && !destination_exists &&
                         !destination_entry_exists;
 #else
@@ -38964,7 +38964,7 @@ static COLD fn install_pair(string_address source, string_address destination)
         //      The tight tier takes the copy away instead of leaving a file
         //      owned by the wrong user.
         bool keeping = false;
-#if MOONWATER_STRICT < STRICT_TIGHT
+#if MOONWATER_STRICT_FILES < STRICT_TIGHT
         keeping = copied;
 #endif
         bipolar published = file_stage_publish_protected_at(

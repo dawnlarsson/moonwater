@@ -1,0 +1,11 @@
+#
+# Security region: host, hardened
+#
+# What the machine takes from the media and the kernel it runs on. STRICT_HOST
+# 2: a disk with this build that the session did not start from is asked
+# about even on an internal bus (a disk whose script runs as root is the
+# machine's to choose, not the first one the kernel lists), media announces
+# nothing to the shell, kptr_restrict is 2, io_uring is refused to everybody,
+# and ptrace attach needs CAP_SYS_PTRACE (Yama 2).
+#
+CONFIG_MOONWATER_STRICT_HOST=2

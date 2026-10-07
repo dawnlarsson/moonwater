@@ -1,0 +1,25 @@
+#
+# Security region: cpu, hardened
+#
+# Speculation, control flow and the isolation the processor offers between
+# kernel and user. sec_baseline compiles the vulnerability mitigations in,
+# and the processor picks at boot the ones it needs; this region turns on
+# what is off for every machine because it costs on every machine, which is
+# why profile/latency took indirect branch tracking out.
+#
+#   sec_cpu_hardened   indirect branch tracking (every indirect call lands on
+#                      an endbr64 or the processor stops it), call depth
+#                      tracking for the Skylake generation's return buffer
+#                      underflow, straight-line speculation barriers, user
+#                      shadow stacks for programs that ask for one, and the
+#                      transactional memory extension off
+#   sec_cpu_locked     everything above, and the mitigations run at their
+#                      strongest whatever the processor claims: page table
+#                      isolation on every part, every vulnerable-or-not
+#                      sibling thread off, microcode-assisted buffer clearing
+#                      always
+#
+# The architecture's lines are in sec_cpu_hardened.x64 (and .arm). A region
+# profile for an architecture that has nothing to add is just this file.
+#
+#> includes sec_baseline

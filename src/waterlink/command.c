@@ -644,7 +644,7 @@ static b32 link_group_join(string_address address_to words, positive count)
                 secret = (string_address)typed;
         }
         else
-                return_if(secret && MOONWATER_STRICT >= STRICT_TIGHT,
+                return_if(secret && MOONWATER_STRICT_NET >= STRICT_TIGHT,
                           host_refuse("a secret on the command line is "
                                       "refused: give it on standard input "
                                       "with -\n"));

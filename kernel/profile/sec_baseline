@@ -1,0 +1,71 @@
+#
+# Security: the kernel's baseline
+#
+# What every security tier stands on, composed by each of them with
+# `#> includes sec_baseline`. It is the hardening a mainstream kernel ships
+# on, and the reason it has to be written down is that this tree's kernel is
+# built from allnoconfig: a symbol that reads "default y" in Kconfig is not
+# asked for by allnoconfig, so an option no profile names is off, whatever
+# the kernel's own default says. Until this profile existed the shipped kernel
+# had no stack protector, no usercopy bounds check, no FORTIFY_SOURCE, no
+# slab freelist hardening and, on x86-64, none of the CPU vulnerability
+# mitigations compiled in at all (CPU_MITIGATIONS is a prompt that allnoconfig
+# turns off, and everything under it goes with it). profile/latency said the
+# speculative execution defences "stay at the kernel default"; they were not
+# at the kernel's default, they were not there.
+#
+# Everything here costs close to nothing on the paths this project measures,
+# and where it costs, the cost is the kernel's own default. The CPU
+# mitigations in particular are chosen at run time from what the processor
+# says it is vulnerable to, so a CPU that is not affected pays for the
+# thunk's size and nothing else (the alternatives patch the thunks back to
+# plain branches at boot). What does cost -- zeroing memory, the indirect
+# branch tracking latency turned off, pattern-initialised stacks -- is in the
+# region profiles sec_mem_hardened and sec_cpu_hardened, where it is a choice.
+#
+# The architecture's own lines are in sec_baseline.x64, .arm and .riscv,
+# composed beside this one.
+#
+
+#
+# Stack and heap.
+#
+# A stack canary on every function that has an array or takes an address of
+# a local, a stack the guard page of which turns an overflow into a fault
+# rather than a neighbour's data, bounds on every copy to or from userspace
+# (the object it lands in is checked against the slab it came from), the
+# compiler's checks on str*/mem* with a known object size, and a freelist a
+# heap overflow cannot read a next pointer out of or forge one in.
+#
+CONFIG_STACKPROTECTOR=y
+CONFIG_STACKPROTECTOR_STRONG=y
+CONFIG_VMAP_STACK=y
+CONFIG_HARDENED_USERCOPY=y
+CONFIG_HARDENED_USERCOPY_DEFAULT_ON=y
+CONFIG_FORTIFY_SOURCE=y
+CONFIG_SLAB_FREELIST_RANDOM=y
+CONFIG_SLAB_FREELIST_HARDENED=y
+
+#
+# The kernel's own image and its modules are mapped read-only or no-execute
+# where they are code or constants. x86-64 and arm64 had it from their own
+# Kconfig; riscv64 had it off.
+#
+CONFIG_STRICT_KERNEL_RWX=y
+CONFIG_STRICT_MODULE_RWX=y
+
+#
+# Nothing maps page zero or the first sixteen pages above it: a null pointer
+# the kernel dereferences is then a fault and not whatever a process put at
+# the address. allnoconfig leaves the floor at its minimum.
+#
+CONFIG_DEFAULT_MMAP_MIN_ADDR=65536
+
+#
+# What the kernel says about itself.
+#
+# Addresses in /proc, in dmesg and in the oops go to a reader that is not
+# root only as zeros, and the log is read by root alone. The shell's dmesg
+# and the console both run as root; nothing that is not root reads either.
+#
+CONFIG_SECURITY_DMESG_RESTRICT=y

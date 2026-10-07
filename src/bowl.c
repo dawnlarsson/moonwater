@@ -1566,6 +1566,46 @@ static b32 bowl_write_bytes(string_address path, string_address text,
         The machine id is written last, so one access() says all three are
         there: a shell start runs this too.
 */
+/*
+        The names of this machine: localhost for both families, and the
+        machine's own name on 127.0.1.1, the way every distribution's
+        installer leaves them. Without /etc/hosts glibc answers localhost
+        with ::1 alone, and a program that asks for the machine's own name
+        (sudo, X, CUPS, a Java or MPI program, a mail agent) is told it does
+        not exist and waits for a resolver to say otherwise.
+*/
+static fn bowl_session_hosts(void)
+{
+        static const p8 fixed[] = "127.0.0.1 localhost\n"
+                                  "::1 localhost ip6-localhost ip6-loopback\n";
+        p8 text[sizeof(fixed) + 80];
+        p8 name[66];
+        bipolar got;
+        positive used = sizeof(fixed) - 1;
+        positive length = 0;
+
+        if (system_access_at(AT_FDCWD, "/etc/hosts", 0) >= 0)
+                return;
+
+        memory_copy(text, fixed, used);
+        got = file_slurp("/proc/sys/kernel/hostname", name, sizeof(name) - 1);
+        while (got > 0 && length < (positive)got && name[length] != '\n' &&
+               (string_first_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-.",
+                                name[length]) != null))
+                length++;
+        if (length && length == (positive)got - (name[got - 1] == '\n'))
+        {
+                memory_copy(text + used, "127.0.1.1 ", 10);
+                used += 10;
+                memory_copy(text + used, name, length);
+                used += length;
+                text[used++] = '\n';
+        }
+        bowl_quiet = true;
+        bowl_write_bytes("/etc/hosts", text, used);
+        bowl_quiet = false;
+}
+
 static fn bowl_session_identity(void)
 {
         static const struct { string_address path; string_address text; } files[] = {
@@ -1580,6 +1620,7 @@ static fn bowl_session_identity(void)
         p8 raw[16];
         p8 id[33];
 
+        bowl_session_hosts();
         if (system_access_at(AT_FDCWD, "/etc/machine-id", 0) >= 0)
                 return;
 
@@ -1636,7 +1677,7 @@ static fn bowl_session_prepare_at(string_address home, string_address runtime,
             than safe makes none of it and waits for the directory to be
             there. */
         p8 make = runtime == bowl_runtime_path ? BOWL_MAKE_CHAIN
-                : MOONWATER_STRICT >= STRICT_TIGHT ? BOWL_MAKE_NONE
+                : MOONWATER_STRICT_BOWL >= STRICT_TIGHT ? BOWL_MAKE_NONE
                                                    : BOWL_MAKE_LEAF;
 
         /*  A shell start on a machine that is already set up asks one

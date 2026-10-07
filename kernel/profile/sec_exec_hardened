@@ -1,0 +1,21 @@
+#
+# Security region: exec, hardened
+#
+# What Floodlight lets a tool start, and the policy sealed at boot so no later
+# line to /dev/floodlight loosens it. Every switch is off that makes a command
+# out of data: awk's system() and pipes, script and setarch starting a shell,
+# find -exec, xargs, split --filter, sort --compress-program, env -S, the
+# launchers (timeout, nice, nohup, stdbuf and kin) and the namespace tools.
+# Each switch's help in src/moonwater/Kconfig names the exploit class it
+# closes. A script that meets one of them was meant to.
+#
+CONFIG_MOONWATER_FLOODLIGHT_SEAL=y
+CONFIG_MOONWATER_FLOODLIGHT_AWK_SPAWN=n
+CONFIG_MOONWATER_FLOODLIGHT_SHELL_ESCAPES=n
+CONFIG_MOONWATER_FLOODLIGHT_FIND_EXEC=n
+CONFIG_MOONWATER_FLOODLIGHT_XARGS=n
+CONFIG_MOONWATER_FLOODLIGHT_SPLIT_FILTER=n
+CONFIG_MOONWATER_FLOODLIGHT_SORT_COMPRESS=n
+CONFIG_MOONWATER_FLOODLIGHT_ENV_SPLIT=n
+CONFIG_MOONWATER_FLOODLIGHT_LAUNCHERS=n
+CONFIG_MOONWATER_FLOODLIGHT_NAMESPACES=n

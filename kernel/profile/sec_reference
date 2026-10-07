@@ -9,6 +9,8 @@
 #   sh build.sh debug_none limbo desktop wifi serial sec_reference
 #
 
+#> includes sec_baseline
+
 CONFIG_SECURITY=y
 CONFIG_SECURITY_YAMA=y
 CONFIG_INTEGRITY=n

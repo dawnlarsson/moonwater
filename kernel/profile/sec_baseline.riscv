@@ -1,0 +1,7 @@
+#
+# sec_baseline on riscv64: the CPU mitigation switch the generic code reads.
+#
+CONFIG_CPU_MITIGATIONS=y
+
+CONFIG_RELOCATABLE=y
+CONFIG_RANDOMIZE_BASE=y

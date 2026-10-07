@@ -1774,6 +1774,116 @@ static string_address build_cmdline(string_address text, bool address_to given)
         return (string_address)line.bytes;
 }
 
+/*
+        A profile that names its parts.
+
+        The security tiers are built out of regions -- memory, cpu, surface,
+        dma, lockdown -- and a whole tier is those regions at one level. Each
+        tier repeating its regions' lines would drift the first time one
+        region moved, so a profile says what it is made of instead:
+
+            #> includes sec_mem_hardened sec_cpu_hardened
+
+        Each included profile is composed ahead of the one that names it,
+        itself after the profiles it includes, and once however many tiers
+        name it. A profile named on the line wins an option over one it only
+        includes, because it comes later.
+
+        Lines that only one architecture can take live beside the profile, in
+        a file named NAME.ARCH (sec_cpu_hardened.x64), which follows NAME
+        whenever an arch/ profile of that architecture is composed with it:
+        arch/x64 is x64, arch/arm and arch/arm.pi are arm, arch/riscv is
+        riscv. A region then asks a kernel for x86's indirect branch tracking
+        without every other architecture's build reporting it dropped.
+*/
+#define BUILD_PROFILE_ROOM 256
+#define BUILD_PROFILE_DEPTH 8
+
+static string_address build_profile_all[BUILD_PROFILE_ROOM];
+
+static bool build_profile_listed(string_address address_to list, positive count,
+                                 string_address name)
+{
+        for (positive at = 0; at < count; at++)
+                if (string_equals(list[at], name))
+                        return true;
+
+        return false;
+}
+
+static positive build_profile_add(string_address address_to into, positive count,
+                                  string_address name, string_address architecture,
+                                  positive depth)
+{
+        string_address path;
+
+        if (build_profile_listed(into, count, name) || depth > BUILD_PROFILE_DEPTH)
+                return count;
+
+        path = build_join(build_setting_get("profile_root"), "/", name, null);
+
+        if (build_is_file(path) &&
+            file_slurp(path, build_file_two, BUILD_FILE_ROOM) >= 0)
+        {
+                string_address parts[BUILD_ARGUMENT_ROOM];
+                positive many = build_split(build_key_from((string_address)build_file_two,
+                                                           "includes", null),
+                                            (string_address address_to)parts,
+                                            BUILD_ARGUMENT_ROOM);
+
+                for (positive at = 0; at < many; at++)
+                        count = build_profile_add(into, count, parts[at],
+                                                  architecture, depth + 1);
+        }
+
+        if (count >= BUILD_PROFILE_ROOM || build_profile_listed(into, count, name))
+                return count;
+
+        into[count++] = name;
+
+        if (architecture && !string_has_prefix(name, "arch/"))
+        {
+                string_address beside = build_join(name, ".", architecture, null);
+
+                if (build_is_file(build_join(build_setting_get("profile_root"), "/",
+                                             beside, null)))
+                        count = build_profile_add(into, count, beside, architecture,
+                                                  depth + 1);
+        }
+
+        return count;
+}
+
+//      The list as composed, left in build_profile_all: every profile in
+//      order with what it includes before it and its architecture's file
+//      after. Names that are not files stay in it, so the missing-profile
+//      report still names them.
+static positive build_profiles_expand(string_address address_to profiles,
+                                      positive count)
+{
+        string_address architecture = null;
+        positive total = 0;
+
+        for (positive at = 0; at < count && !architecture; at++)
+                if (string_has_prefix(profiles[at], "arch/"))
+                {
+                        positive length = 0;
+                        string_address word = profiles[at] + 5;
+
+                        while (word[length] && word[length] != '.')
+                                length++;
+
+                        architecture = build_text_keep(word, length);
+                }
+
+        for (positive at = 0; at < count; at++)
+                total = build_profile_add(build_profile_all, total, profiles[at],
+                                          architecture, 0);
+
+        build_profile_all[total] = null;
+        return total;
+}
+
 static b32 build_config(string_address address_to profiles, positive count)
 {
         string_address artifacts = build_setting_get("artifacts");
@@ -1781,6 +1891,12 @@ static b32 build_config(string_address address_to profiles, positive count)
         string_address information = build_join(artifacts, "/info", null);
         bool missing = false;
         positive used = 0;
+
+        if (count)
+        {
+                count = build_profiles_expand(profiles, count);
+                profiles = build_profile_all;
+        }
 
         if (!count)
         {
@@ -1985,6 +2101,12 @@ static b32 build_verify_config(string_address config,
         build_lines walk;
 
         build_name_storage.used = 0;
+
+        if (profile_count)
+        {
+                profile_count = build_profiles_expand(profiles, profile_count);
+                profiles = build_profile_all;
+        }
 
         refuse_if(!build_is_file(config), 1, "verify_config: no such config: %s\n", config);
 
@@ -4003,6 +4125,12 @@ static bool build_moon_shell_monitor;
 //      switches share rather than through it.
 static positive build_moon_strict;
 
+//      The regions a build can lean differently in: -1 follows the whole
+//      build's level, 0 to 2 is that region's own.
+static const string_address build_strict_regions[] = {"FILES", "TEXT", "NET",
+                                                      "HOST", "BOWL", null};
+static bipolar build_moon_strict_region[array_count(build_strict_regions)];
+
 /*
         The per-tool and per-builtin switches the .config named, as the part
         after CONFIG_MOONWATER_ -- TOOL_CAT, BUILTIN_ECHO -- and their value.
@@ -4090,6 +4218,9 @@ static fn build_components(string_address config)
         build_moon_util_linux = true;
         build_moon_shell_monitor = true;
         build_moon_strict = STRICT_SAFE;
+
+        for (positive region = 0; build_strict_regions[region]; region++)
+                build_moon_strict_region[region] = -1;
         build_moon_tools_all = true;
         build_moon_builtins_all = true;
         build_moon_floodlight = true;
@@ -4130,10 +4261,53 @@ static fn build_components(string_address config)
                         level = string_digits_max(pair.value, pair.value_length,
                                                   address_of used);
 
-                        if (used == pair.value_length && level <= STRICT_TIGHT)
+                        if (used == pair.value_length && level <= STRICT_LOCKED)
                                 build_moon_strict = level;
 
                         continue;
+                }
+
+                //      STRICT_FILES and its kin: a region's own level, or -1
+                //      for the whole build's. Kconfig pins the default of a
+                //      symbol that follows another one into the .config the
+                //      first time it is written, which would stop it
+                //      following, so "follow" is a value of its own.
+                if (string_has_prefix(name, "STRICT_") && pair.value)
+                {
+                        bool taken = false;
+
+                        for (positive region = 0; build_strict_regions[region]; region++)
+                        {
+                                positive used = 0;
+                                positive level;
+                                bool negative = pair.value_length == 2 &&
+                                                pair.value[0] == '-' &&
+                                                pair.value[1] == '1';
+
+                                if (length - 7 != string_length(build_strict_regions[region]) ||
+                                    memory_compare(name + 7, build_strict_regions[region],
+                                                   length - 7))
+                                        continue;
+
+                                taken = true;
+
+                                if (negative)
+                                {
+                                        build_moon_strict_region[region] = -1;
+                                        break;
+                                }
+
+                                level = string_digits_max(pair.value,
+                                                          pair.value_length,
+                                                          address_of used);
+
+                                if (used == pair.value_length && level <= STRICT_LOCKED)
+                                        build_moon_strict_region[region] = (bipolar)level;
+                                break;
+                        }
+
+                        if (taken)
+                                continue;
                 }
 
                 //      The policy string is a value, not a switch, and is kept
@@ -4253,6 +4427,18 @@ static string_address build_config_header(string_address from,
 
         text = build_join(text, "#define MOONWATER_STRICT ",
                           build_number(build_moon_strict), "\n", null);
+
+        //      Every region is written out, resolved, so the header says what
+        //      each one is and a region that stopped being read is a record
+        //      that changed. A region at the build's own level still gets its
+        //      line: the programs name the region, never the whole.
+        for (positive region = 0; build_strict_regions[region]; region++)
+                text = build_join(text, "#define MOONWATER_STRICT_",
+                                  build_strict_regions[region], " ",
+                                  build_number(build_moon_strict_region[region] < 0
+                                                   ? build_moon_strict
+                                                   : (positive)build_moon_strict_region[region]),
+                                  "\n", null);
 
         //      SYSTEM rows are counted apart: the utility-only program
         //      drops them itself, so the one header serves either program.

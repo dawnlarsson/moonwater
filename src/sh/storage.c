@@ -1797,7 +1797,7 @@ static bool storage_blkid_visit(
                            writes it as util-linux does. */
                         if (context->mode == STORAGE_OUTPUT_VALUE)
                         {
-#if MOONWATER_STRICT >= STRICT_SAFE
+#if MOONWATER_STRICT_TEXT >= STRICT_SAFE
                                 writer_hex_escaped(context->output, value,
                                                    string_length(value),
                                                    HEX_CONTROL | HEX_TAB);
@@ -4151,7 +4151,7 @@ static b32 storage_mount_list(writer write, writer diagnostic,
                         /* util-linux writes the target's control bytes
                            as '?' and the source's whole; safe spells the
                            source the same way, since a FUSE user names it. */
-#if MOONWATER_STRICT >= STRICT_SAFE
+#if MOONWATER_STRICT_TEXT >= STRICT_SAFE
                         file_write_controls_hidden(write, record->source, 0);
 #else
                         write(record->source, 0);

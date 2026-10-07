@@ -1,0 +1,16 @@
+#
+# Security region: dma, locked
+#
+# sec_dma_hardened and no bus a device can show up on after boot. See
+# sec_dma_hardened for the region. A machine that keeps a keyboard on USB has
+# to keep USB, and USB is not in this list: the tier does not take the input
+# devices of a kiosk with it.
+#
+#> includes sec_dma_hardened
+#> overrides CONFIG_HOTPLUG_PCI CONFIG_HOTPLUG_PCI_PCIE CONFIG_USB4 CONFIG_USB4_CONFIGFS
+
+CONFIG_USB4=n
+CONFIG_HOTPLUG_PCI=n
+CONFIG_HOTPLUG_PCI_PCIE=n
+CONFIG_FIREWIRE=n
+CONFIG_PCCARD=n

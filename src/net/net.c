@@ -9487,7 +9487,7 @@ static bipolar http_split_into(string_address url, p8 address_to host, positive 
            The same strict scheme rule already applies to redirects. Other
            explicit schemes with an authority are always refused. */
         if (scheme &&
-            (MOONWATER_STRICT >= STRICT_TIGHT || http_web_scheme(url, scheme)) &&
+            (MOONWATER_STRICT_NET >= STRICT_TIGHT || http_web_scheme(url, scheme)) &&
             (url[scheme] != '/' || url[scheme + 1] != '/'))
                 return HTTP_SCHEME;
         if (scheme && url[scheme] == '/' && url[scheme + 1] == '/')
@@ -9956,7 +9956,7 @@ static bipolar http_response_framing_from(p8 address_to bytes, positive size,
                    response.  (Plain C, not #if: a hosted lift of this section that
                    forgets to define the tier fails to build instead of
                    silently running as the tight one.) */
-                if (MOONWATER_STRICT >= STRICT_TIGHT &&
+                if (MOONWATER_STRICT_NET >= STRICT_TIGHT &&
                     ((response->code == 204 &&
                       response->body_kind != HTTP_BODY_CLOSE) ||
                      (response->code == 205 &&
@@ -11093,7 +11093,7 @@ static bipolar http_run(string_address start, const http_manners address_to how,
         http_buffer whole = {0};
         positive hop;
         bool secure = false;
-#if MOONWATER_STRICT >= STRICT_TIGHT
+#if MOONWATER_STRICT_NET >= STRICT_TIGHT
         bool reached_public = false;
 #endif
         bipolar status;
@@ -11134,7 +11134,7 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                             how->version_minor, how->agent, address_of used);
                 if (!status && !(ip = http_lookup(host)))
                         status = HTTP_NO_HOST;
-#if MOONWATER_STRICT >= STRICT_TIGHT
+#if MOONWATER_STRICT_NET >= STRICT_TIGHT
                 /* Once a chain has reached public space no later hop may
                    go back inside: a name that resolves, or a Location that
                    spells, an address on this host or its network is how a
@@ -11207,7 +11207,7 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                            holds it to the RFC: the framing is consumed and a
                            zero-capacity store refuses any content before it
                            reaches the caller's output. */
-                        bool reset = MOONWATER_STRICT >= STRICT_TIGHT &&
+                        bool reset = MOONWATER_STRICT_NET >= STRICT_TIGHT &&
                                      response.code == 205;
                         http_body body = {
                             .link = address_of link,
@@ -11226,7 +11226,7 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                            wget, the default's reference, puts no total time
                            on one, and a large file over a slow link is not an
                            attack. */
-                        if ((into || MOONWATER_STRICT >= STRICT_TIGHT) &&
+                        if ((into || MOONWATER_STRICT_NET >= STRICT_TIGHT) &&
                             !network_deadline_begin(address_of body.deadline,
                                                     how->body_seconds, 0))
                                 status = HTTP_NO_REPLY;

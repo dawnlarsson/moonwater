@@ -26,6 +26,7 @@
 #include <linux/mman.h>
 #include <linux/fs.h>
 #include <linux/mount.h>
+#include <uapi/linux/mount.h>
 #include <linux/miscdevice.h>
 #include <linux/uaccess.h>
 #include <linux/slab.h>
@@ -167,14 +168,42 @@ int init_mkdir(const char *pathname, umode_t mode);
         handful of nodes the initramfs was built with -- no /dev/dri, and so
         nothing for the compositor to open.
 */
+/*
+        None of the three is somewhere a program is run from or a setuid file
+        is kept, so each is mounted without the right to honour one: nosuid
+        and noexec on all of them, and nodev on all but devtmpfs, which is
+        where the device nodes are. They were mounted with no flags at all;
+        every distribution's init mounts them this way, and a bowl's private
+        /proc already is.
+
+        The locked tier (MOONWATER_STRICT_HOST 3, or the whole build's level
+        when that region follows it) also hides every other user's process
+        from /proc with hidepid=invisible. Root still sees all of them.
+*/
+#if defined(CONFIG_MOONWATER_STRICT_HOST) && CONFIG_MOONWATER_STRICT_HOST >= 0
+#define MOUNT_HOST_LEVEL CONFIG_MOONWATER_STRICT_HOST
+#elif defined(CONFIG_MOONWATER_STRICT)
+#define MOUNT_HOST_LEVEL CONFIG_MOONWATER_STRICT
+#else
+#define MOUNT_HOST_LEVEL 1
+#endif
+
+#if MOUNT_HOST_LEVEL >= 3
+#define PROC_MOUNT_DATA "hidepid=invisible"
+#else
+#define PROC_MOUNT_DATA null
+#endif
+
 static const struct
 {
         string_address filesystem;
         string_address path;
+        unsigned long flags;
+        string_address data;
 } mounts[] = {
-    {"proc", "/proc"},
-    {"sysfs", "/sys"},
-    {"devtmpfs", "/dev"},
+    {"proc", "/proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, PROC_MOUNT_DATA},
+    {"sysfs", "/sys", MS_NOSUID | MS_NODEV | MS_NOEXEC, null},
+    {"devtmpfs", "/dev", MS_NOSUID | MS_NOEXEC, null},
 
     /*
             Not devpts. It registers itself with module_init, which for
@@ -340,7 +369,8 @@ static fn init_mount()
 
                 if (!ret)
                 {
-                        ret = path_mount(mounts[i].filesystem, &path, mounts[i].filesystem, 0, null);
+                        ret = path_mount(mounts[i].filesystem, &path, mounts[i].filesystem,
+                                         mounts[i].flags, (void *)mounts[i].data);
                         path_put(&path);
                 }
 

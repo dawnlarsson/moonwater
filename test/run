@@ -89,7 +89,7 @@ export TEST_TALLY
 #       fuzz an hour a target, msan a clang with MemorySanitizer, ring0 an
 #       image and a machine that boots it, best one built with
 #       kernel/profile/sec_sanitize.
-asked_lanes="wifi fuzz msan ring0 scale desktop chrome"
+asked_lanes="wifi fuzz msan ring0 tier scale desktop chrome"
 
 lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex slurp wait writer native probe stack checksum storage_io storage_format machine sensors cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep"
 
@@ -175,6 +175,7 @@ describe()
         fuzz)     echo "every network libFuzzer target for an hour each, or a release report" ;;
         msan)     echo "the net wire parsers under MemorySanitizer" ;;
         ring0)    echo "a hostile program's windows, ioctls, images and log lines against a booted kernel, and what its sanitizers say" ;;
+        tier)     echo "a security tier's image, booted: the sysctls init wrote, the mount flags, lockdown, the W+X check and the IOMMU the tier asked for (MOONWATER_TIER names the tier)" ;;
         scale)    echo "every tool against the host's own from a kilobyte to a gigabyte and from one entry to a million: a loss, a cliff, a refusal or a super-linear step fails (NOT RUN off Linux or without the host tools)" ;;
         esac
 }
@@ -583,6 +584,47 @@ freestanding()
         if [ -n "${MW_UBSAN:-}" ]; then
                 set -- "$@" -fsanitize=undefined -fno-sanitize=alignment \
                         -fsanitize-undefined-trap-on-error
+        fi
+
+        #       MW_HARDEN=1 builds every program and check the way
+        #       kernel/profile/sec_build_hardened asks the compiler to build
+        #       the image's: locals zeroed where they are declared, a frame of
+        #       any size probed a page at a time, and every register a call
+        #       used cleared at its return. A lane run this way proves the
+        #       programs do not stand on an uninitialised local or on a stack
+        #       that is not probed, and has to be run on its own for the same
+        #       reason MW_UBSAN does.
+        #
+        #           MW_HARDEN=1 sh test/run shell text
+        if [ -n "${MW_HARDEN:-}" ]; then
+                set -- "$@" -ftrivial-auto-var-init=zero \
+                        -fstack-clash-protection -fzero-call-used-regs=used-gpr
+        fi
+
+        #       MW_AUTOINIT=pattern fills every local with 0xFE where it is
+        #       declared instead of zero, so a program that reads one it never
+        #       wrote disagrees with the zeroed build as well as the plain
+        #       one. A lane whose answers move between the plain, the zero and
+        #       the pattern build has found a read of memory nobody wrote; it
+        #       found `2>/dev/null` becoming a redirect of stdout through a
+        #       PURE function that stored through a pointer.
+        #
+        #           MW_AUTOINIT=pattern sh test/run shell text
+        if [ -n "${MW_AUTOINIT:-}" ]; then
+                set -- "$@" -ftrivial-auto-var-init="$MW_AUTOINIT"
+        fi
+
+        #       MW_CFLAGS adds whatever else a run wants the compiler told,
+        #       a word at a time, after everything above and so winning over
+        #       it. The question it asks is whether the programs mean what
+        #       they say or only what -O2 happened to make of it:
+        #
+        #           MW_CFLAGS="-O0" sh test/run shell text
+        #           MW_CFLAGS="-O1 -fno-strict-aliasing -fwrapv" sh test/run shell
+        #           MW_CFLAGS="-O3 -fno-inline" sh test/run text
+        if [ -n "${MW_CFLAGS:-}" ]; then
+                # shellcheck disable=SC2086
+                set -- "$@" $MW_CFLAGS
         fi
 
         coverage_build "$architecture" "$output" || return 1
@@ -11248,6 +11290,120 @@ else
         lost 'reference build' 'the header or the shell did not build'
 fi
 
+#       The regions. A region left at -1 is the whole build's level, one
+#       named is its own, a level past the last or a word that is not a
+#       number leaves the region following (the way a bad MOONWATER_STRICT
+#       leaves the default), and every region is written out resolved so
+#       that the record of the header moves when one does. Header only: the
+#       programs name MOONWATER_STRICT_<REGION> and are built by the groups
+#       around this one.
+group regions
+region_header()
+{
+        printf '%s\n' 'CONFIG_MOONWATER_CORE=y' "$@" > "$work/switch-region.config"
+        build_tool config-header "$work/switch-region.config" \
+                "$work/switch-region.h" > "$work/switch-region.log" 2>&1 || return 1
+        grep '^#define MOONWATER_STRICT' "$work/switch-region.h" |
+                sed 's/^#define MOONWATER_STRICT /ALL /;s/^#define MOONWATER_STRICT_//' |
+                tr '\n' ' ' | sed 's/ $//'
+}
+region_record()
+{
+        sed -n 's/^#define MOONWATER_CONFIG_RECORD "\(.*\)"$/\1/p' \
+                "$work/switch-region.h"
+}
+same 'follows the build' 'ALL 1 FILES 1 TEXT 1 NET 1 HOST 1 BOWL 1' \
+        "$(region_header CONFIG_MOONWATER_STRICT=1)"
+record_one=$(region_record)
+same 'a region of its own' 'ALL 2 FILES 2 TEXT 1 NET 3 HOST 2 BOWL 2' \
+        "$(region_header CONFIG_MOONWATER_STRICT=2 CONFIG_MOONWATER_STRICT_TEXT=1 \
+                CONFIG_MOONWATER_STRICT_NET=3)"
+same 'minus one follows' 'ALL 3 FILES 3 TEXT 3 NET 3 HOST 3 BOWL 3' \
+        "$(region_header CONFIG_MOONWATER_STRICT=3 CONFIG_MOONWATER_STRICT_FILES=-1)"
+same 'a bad level follows' 'ALL 1 FILES 1 TEXT 1 NET 1 HOST 1 BOWL 1' \
+        "$(region_header CONFIG_MOONWATER_STRICT=1 CONFIG_MOONWATER_STRICT_NET=4 \
+                CONFIG_MOONWATER_STRICT_HOST=high)"
+same 'a region without the whole' 'ALL 1 FILES 0 TEXT 1 NET 1 HOST 1 BOWL 2' \
+        "$(region_header CONFIG_MOONWATER_STRICT_FILES=0 CONFIG_MOONWATER_STRICT_BOWL=2)"
+region_header CONFIG_MOONWATER_STRICT=1 CONFIG_MOONWATER_STRICT_NET=2 > /dev/null
+record_two=$(region_record)
+if [ -n "$record_one" ] && [ -n "$record_two" ] && [ "$record_one" != "$record_two" ]; then
+        won
+else
+        lost 'record moves with a region' "[$record_one] [$record_two]"
+fi
+
+#       One region at a level the rest of the build is not at. The FILES
+#       region tight in a build whose whole level is the default refuses
+#       to make an entry in a world-writable directory without the sticky bit
+#       (mkdir, the first row of what sec_hardened refuses), and the whole
+#       build tight with FILES left at the default does not: the region is
+#       the dial, in either direction, and the whole level is only what a
+#       region left at -1 follows.
+group isolation
+for iso_case in 'tight:CONFIG_MOONWATER_STRICT=1 CONFIG_MOONWATER_STRICT_FILES=2:1' \
+        'loose:CONFIG_MOONWATER_STRICT=2 CONFIG_MOONWATER_STRICT_FILES=1:0' \
+        'follows:CONFIG_MOONWATER_STRICT=2:1' \
+        'default:CONFIG_MOONWATER_STRICT=1:0'; do
+        iso_name=${iso_case%%:*}
+        iso_rest=${iso_case#*:}
+        iso_lines=${iso_rest%:*}
+        iso_want=${iso_rest##*:}
+        { echo CONFIG_MOONWATER_CORE=y; for iso_line in $iso_lines; do echo "$iso_line"; done; } \
+                > "$work/switch-iso-$iso_name.config"
+        if switch_header "$work/switch-iso-$iso_name.config" "$work/switch-iso-$iso_name.h" &&
+                switch_shell "$work/switch-iso-$iso_name.h" "$work/switch-iso-$iso_name"; then
+                iso_dir=$(mktemp -d "$work/iso.XXXXXX") && chmod 0777 "$iso_dir"
+                same "files $iso_name: mkdir in an unsticky 0777 directory" "$iso_want" \
+                        "$(switch_status "$work/switch-iso-$iso_name" "mkdir -p $iso_dir/x")"
+                rm -rf "$iso_dir"
+        else
+                lost "isolation $iso_name build" 'the header or the shell did not build'
+        fi
+done
+
+#       The composition of the security profiles, with nothing built: what a
+#       tier names it includes, the architecture's file follows the profile
+#       it belongs to and only that architecture's, and no tier asks for an
+#       option another profile asked the other way without saying so (a
+#       "Profiles disagree" report is what a region that undoes a trade of
+#       profile/latency prints when it forgot its #> overrides line).
+group tiers
+tier_compose()
+{
+        mkdir -p "$work/tier-art" || return 1
+        build_tool config --set artifacts="$work/tier-art" any general gpu guests \
+                latency prod "arch/$1" debug_none limbo desktop wifi $2 serial \
+                > "$work/tier.log" 2>&1
+}
+for tier_arch in x64 arm riscv; do
+        for tier_line in sec_default sec_reference sec_hardened sec_locked \
+                'sec_default sec_mem_locked sec_cpu_hardened sec_dma_hardened'; do
+                tier_name="$tier_arch ${tier_line%% *}"
+                if tier_compose "$tier_arch" "$tier_line"; then
+                        same "$tier_name agrees" 0 \
+                                "$(grep -c 'Profiles disagree' "$work/tier.log")"
+                        same "$tier_name stack protector" 1 \
+                                "$(grep -c '^CONFIG_STACKPROTECTOR_STRONG=y' "$work/tier-art/.config")"
+                else
+                        lost "$tier_name composes" "$(tail -3 "$work/tier.log" | tr '\n' ' ')"
+                fi
+        done
+done
+tier_compose x64 sec_hardened
+same 'x64 hardened has IBT' 1 \
+        "$(grep -c '^CONFIG_X86_KERNEL_IBT=y' "$work/tier-art/.config")"
+tier_compose x64 sec_default
+same 'x64 default has none' 0 \
+        "$(grep -c '^CONFIG_X86_KERNEL_IBT=y' "$work/tier-art/.config")"
+tier_compose arm sec_hardened
+same 'arm takes no x86 line' 0 "$(grep -c '^CONFIG_X86_KERNEL_IBT=y\|^CONFIG_MITIGATION_PAGE_TABLE_ISOLATION=y' "$work/tier-art/.config")"
+same 'arm hardened has MTE' 1 "$(grep -c '^CONFIG_ARM64_MTE=y' "$work/tier-art/.config")"
+tier_compose x64 'sec_default sec_mem_locked'
+same 'a region alone: KFENCE' 1 "$(grep -c '^CONFIG_KFENCE=y' "$work/tier-art/.config")"
+same 'a region alone: no IBT' 0 "$(grep -c '^CONFIG_X86_KERNEL_IBT=y' "$work/tier-art/.config")"
+same 'baseline once' 1 "$(grep -c '^Adding profile: sec_baseline$' "$work/tier.log")"
+
 group utility
 printf '%s\n' 'CONFIG_MOONWATER_CORE=y' '# CONFIG_MOONWATER_SHELL is not set' \
         '# CONFIG_MOONWATER_TOOL_TAC is not set' > "$work/switch-utility.config"
@@ -11324,7 +11480,7 @@ if switch_header "$work/switch-locked.config" "$work/switch-locked.h" &&
         switch_shell "$work/switch-locked.h" "$work/switch-locked"; then
         won
         switch_bin=$work/switch-locked
-        same 'strict level' 'MOONWATER_STRICT 2' \
+        same 'strict level' 'MOONWATER_STRICT 3' \
                 "$(grep -o 'MOONWATER_STRICT [0-9]*' "$work/switch-locked.h")"
         for switch_name in cat ls sed grep ip mount blkid echo printf test \
                 read poweroff cd exit trap eval; do
@@ -12567,6 +12723,118 @@ counted
 )
 
 #
+#       A security tier, as its image boots.
+#
+#           MOONWATER_IMAGE=dist/bootx64.efi MOONWATER_TIER=hardened sh test/run tier
+#
+#       The tiers are profiles (kernel/profile/sec_*), and what a profile asks
+#       for is only a request until the kernel built from it is up: an option
+#       a dependency dropped, a sysctl init did not write, a mount flag the
+#       module did not pass all look like a tier and are not one. This boots
+#       the image a tier made and reads what it did: the fs and kernel sysctls
+#       init writes before it starts anything, the flags /proc, /sys, /dev and
+#       /dev/shm were mounted with, the mmap floor and randomisation, the
+#       lockdown line, the W+X page-table check (CONFIG_DEBUG_WX, in sec_mem)
+#       and the IOMMU's strict mode (sec_dma). x86-64 only: the messages and
+#       the number of random bits are its own.
+#
+#       The answers come back upper-cased by tr, which every tier keeps (the
+#       boot lane's rev is not in the locked tier's allow list), so the typed
+#       command cannot be what was found.
+#
+#       What each tier is expected to say is the table below, and the table is
+#       the contract: a tier that wants a stronger answer changes the profile
+#       and this in the same commit.
+#
+lane_tier()
+(
+image=${MOONWATER_IMAGE:-dist/bootx64.efi}
+tier=${MOONWATER_TIER:-default}
+
+case $tier in
+reference|default|workstation|hardened|locked) ;;
+*) echo "  tier         NOT RUN -- MOONWATER_TIER is reference, default, workstation, hardened or locked"; exit 2 ;;
+esac
+case $image in
+*riscv64.efi|*aa64.efi) echo "  tier         NOT RUN -- the messages it reads are x86-64's"; exit 2 ;;
+esac
+for need in qemu-system-x86_64 timeout; do
+        if ! command -v "$need" > /dev/null 2>&1; then
+                echo "  tier         NOT RUN -- no $need"
+                exit 2
+        fi
+done
+if [ ! -f "$image" ]; then
+        echo "  tier         NOT RUN -- no image at $image"
+        exit 2
+fi
+
+#       sys: protected_fifos protected_regular kptr_restrict io_uring_disabled
+#       ptrace_scope modules_disabled; rnd: mmap_rnd_bits; the rest are 1 for
+#       a line the log has and 0 for none. A reference image writes none of
+#       the sysctls, so it reads the kernel's own; the locked tier has no
+#       io_uring system call, so there is no leaf to read and the field is
+#       empty.
+case $tier in
+reference)   want_sys=0-0-0-0-1-0   want_rnd=28 want_lock=0 want_wx=0 want_iommu=0 want_hide=0 want_shm=0 ;;
+default)     want_sys=1-1-1-1-1-0   want_rnd=28 want_lock=0 want_wx=0 want_iommu=0 want_hide=0 want_shm=0 ;;
+workstation) want_sys=1-1-1-1-1-0   want_rnd=28 want_lock=0 want_wx=1 want_iommu=1 want_hide=0 want_shm=0 ;;
+hardened)    want_sys=2-2-2-2-2-0   want_rnd=32 want_lock=1 want_wx=1 want_iommu=1 want_hide=0 want_shm=0 ;;
+locked)      want_sys=2-2-2--3-1    want_rnd=32 want_lock=1 want_wx=1 want_iommu=1 want_hide=1 want_shm=1 ;;
+esac
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT INT TERM
+
+counting tier 12 40
+
+cat > "$work/commands" <<'COMMANDS'
+this line is eaten by the console
+has() { [ "$(dmesg | grep -c "$1")" -ge 1 ] && echo 1 || echo 0; }
+printf 'sys-%s-%s-%s-%s-%s-%s-end\n' "$(cat /proc/sys/fs/protected_fifos)" "$(cat /proc/sys/fs/protected_regular)" "$(cat /proc/sys/kernel/kptr_restrict)" "$(cat /proc/sys/kernel/io_uring_disabled)" "$(cat /proc/sys/kernel/yama/ptrace_scope)" "$(cat /proc/sys/kernel/modules_disabled)" | tr a-z A-Z
+printf 'rnd-%s-end\n' "$(cat /proc/sys/vm/mmap_rnd_bits)" | tr a-z A-Z
+printf 'floor-%s-end\n' "$(cat /proc/sys/vm/mmap_min_addr)" | tr a-z A-Z
+printf 'mnt-%s-%s-%s-end\n' "$(grep -c '^proc /proc proc rw,nosuid,nodev,noexec' /proc/self/mounts)" "$(grep -c '^sysfs /sys sysfs rw,nosuid,nodev,noexec' /proc/self/mounts)" "$(grep -c '^devtmpfs /dev devtmpfs rw,nosuid,noexec' /proc/self/mounts)" | tr a-z A-Z
+printf 'hide-%s-end\n' "$(grep -c 'hidepid=invisible' /proc/self/mounts)" | tr a-z A-Z
+printf 'shm-%s-end\n' "$(grep -c ' /dev/shm tmpfs rw,nosuid,nodev,noexec' /proc/self/mounts)" | tr a-z A-Z
+printf 'lock-%s-end\n' "$(has 'Kernel is locked down')" | tr a-z A-Z
+printf 'wx-%s-end\n' "$(has 'Checked W+X mappings: passed')" | tr a-z A-Z
+printf 'iommu-%s-end\n' "$(has 'strict mode (set via kernel command line)')" | tr a-z A-Z
+printf 'dev-%s-%s-end\n' "$(stat -c %a /dev/spark)" "$(stat -c %a /dev/kmsg)" | tr a-z A-Z
+poweroff
+COMMANDS
+
+set -- -cpu Nehalem
+[ -w /dev/kvm ] && set -- -enable-kvm -cpu host
+timeout 300 qemu-system-x86_64 -m 2G -smp 2 "$@" -kernel "$image" \
+        -no-reboot -display none -device VGA,xres=1600,yres=1200 -serial stdio -nic none \
+        -append "console=ttyS0 drm_client_lib.active=" \
+        < "$work/commands" > "$work/transcript" 2>&1 || true
+tr -d '\r' < "$work/transcript" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g' > "$work/said"
+mv "$work/said" "$work/transcript"
+
+rv()
+{
+        printf '%s' "$1" | tr a-z A-Z
+}
+
+says transcript "$tier: the sysctls init wrote"    "$(rv "sys-$want_sys-end")"
+says transcript "$tier: mmap randomisation"        "$(rv "rnd-$want_rnd-end")"
+says transcript "$tier: nothing maps the low pages" "$(rv "floor-65536-end")"
+says transcript "$tier: /proc /sys /dev flags"     "$(rv "mnt-1-1-1-end")"
+says transcript "$tier: hidepid on /proc"          "$(rv "hide-$want_hide-end")"
+says transcript "$tier: /dev/shm noexec"           "$(rv "shm-$want_shm-end")"
+says transcript "$tier: lockdown"                  "$(rv "lock-$want_lock-end")"
+says transcript "$tier: W+X check"                 "$(rv "wx-$want_wx-end")"
+says transcript "$tier: strict IOMMU"              "$(rv "iommu-$want_iommu-end")"
+says transcript "$tier: /dev/spark and /dev/kmsg modes" "$(rv "dev-666-644-end")"
+never transcript "$tier: no kernel panic" 'Kernel panic'
+never transcript "$tier: nothing warned" 'cut here'
+
+counted
+)
+
+#
 #       The whole thing, started.
 #
 #           sh test/run boot          (MOONWATER_IMAGE names the image)
@@ -12706,6 +12974,8 @@ n=$(uname -n); r=$(cat /root/name); case $n in moonwater-box|'') k=default;; *-*
 printf 'asked-%s\n' "$([ "$(moonwater name)" = "$(uname -n)" ] && echo same || echo different)"
 printf 'owners-%s-end\n' "$(stat -c %u / /etc /root /tmp /var /usr /bin /sbin /lib /lib64 /opt /bowls /bowls/bin | sort -u | tr -d '\n ')"
 printf 'shm-%s-%s-end\n' "$(stat -c %a /dev/shm)" "$(grep -c ' /dev/shm tmpfs ' /proc/self/mounts)"
+printf 'mnt-%s-%s-%s-end\n' "$(grep -c '^proc /proc proc rw,nosuid,nodev,noexec' /proc/self/mounts)" "$(grep -c '^sysfs /sys sysfs rw,nosuid,nodev,noexec' /proc/self/mounts)" "$(grep -c '^devtmpfs /dev devtmpfs rw,nosuid,noexec' /proc/self/mounts)" | rev
+printf 'floor-%s-%s-end\n' "$(cat /proc/sys/vm/mmap_min_addr)" "$(cat /proc/sys/kernel/randomize_va_space)" | rev
 printf 'devfd-%s-%s-end\n' "$(readlink /dev/fd)" "$(readlink /dev/stderr)"
 mkdir /tmp/theirs && chown 1000:1000 /tmp/theirs && echo a > /tmp/theirs/a && echo b > /tmp/theirs/b && mv /tmp/theirs/a /tmp/theirs/b; printf 'replaced-%s-%s\n' $? "$(cat /tmp/theirs/b)"
 before=$(stat -c %i /etc/resolv.conf)
@@ -13136,6 +13406,8 @@ says transcript 'moonwater name says it'  'asked-same'
 #
 says transcript 'the image tree is root-owned'   'owners-0-end'
 says transcript '/dev/shm is a tmpfs anybody may write'   'shm-1777-1-end'
+says transcript '/proc, /sys and /dev are mounted without the right to hold a setuid file or run a program' 'dne-1-1-1-tnm'
+says transcript 'nothing maps the first sixteen pages, and the address space is randomised' 'dne-2-63556-roolf'
 says transcript '/dev/fd and /dev/stderr are there before any package manager has run' 'devfd-/proc/self/fd-/proc/self/fd/2-end'
 says transcript 'root replaces a name in another user'"'"'s directory' 'replaced-0-a'
 says transcript 'the watcher came back with an address' 'watch-killed-yes-back-1'

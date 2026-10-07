@@ -91,19 +91,57 @@ never a pass.
   side), and `host_lone_taken` is the one line that flips it. The census
   holds the disk it found, so a second disk with copied partition identities
   cannot be mounted in its place.
-- **Kernel defaults** the network watcher writes with the network's: the four
-  `fs.protected_*` switches, `kptr_restrict`, `dmesg_restrict`,
-  `io_uring_disabled` (what Debian and Arch ship; the tight tier raises
-  fifos, regular, `kptr_restrict` and `io_uring_disabled` to 2; the reference
-  tier keeps the kernel's own). `protected_regular` and `protected_fifos` bind
+- **Kernel defaults** init writes before it starts anything
+  (`system_kernel_defaults`, src/sh/system.c): the four `fs.protected_*`
+  switches, `kptr_restrict`, `dmesg_restrict`, `io_uring_disabled` and
+  `randomize_va_space` (what Debian and Arch ship; the tight tier raises
+  fifos, regular, `kptr_restrict` and `io_uring_disabled` to 2, widens mmap's
+  randomisation to the kernel's limit and sets Yama's `ptrace_scope` 2; the
+  locked tier sets Yama 3 and `modules_disabled`, both until the next boot;
+  the reference tier keeps the kernel's own). They were the network
+  watcher's, written a moment after boot by whichever process was that, and not
+  at all where it never started. `protected_regular` and `protected_fifos` bind
   root as well: its `>file` onto a file another user made in a sticky `/tmp`
   fails, which is the attack they close; the boot, install and desktop lanes
   run with them on. `kptr_restrict` 1 and `dmesg_restrict` 1 leave root's
   kallsyms, perf and dmesg (`CAP_SYSLOG`) alone.
-- **OUT-D2, the data partition is mounted without `nodev` and `nosuid`:** it
-  holds `/root`, `/home` and the bowls; a bowl's `sudo` and `su` need setuid,
-  and a device node on it can only have been made by root. Whose disk boot
-  takes without asking is the control (OUT-D1).
+- **The kernel's build configuration is part of the security record.** The
+  kernel is built from `allnoconfig`, where an option nobody names is off
+  whatever its Kconfig default says, so a hardening option that every
+  distribution takes for granted was not in the image until a profile named it
+  (`sec_baseline`: stack protector, usercopy and `FORTIFY_SOURCE`, slab freelist
+  hardening, `VMAP_STACK`, the x86-64 mitigations under `CPU_MITIGATIONS`,
+  `W^X` on riscv64, the `mmap_min_addr` floor). Every tier composes the
+  baseline; the hardened and locked tiers add five kernel regions (`sec_mem`,
+  `sec_cpu`, `sec_surface`, `sec_dma`, `sec_lockdown`), each a profile of its
+  own at each level, and five userspace regions that set
+  `MOONWATER_STRICT_<REGION>`. The README lists what each region does. The
+  gate for a region is `sh test/run switches` (what composes, what a region
+  names) and a boot of the tier's image; `build verify-config` reports an
+  option a tier asked for and did not get, and the build says so for every
+  tier on all three architectures.
+- **Mounts:** the kernel module mounts `/proc` and `/sys` `nosuid,nodev,noexec`
+  and `/dev` `nosuid,noexec`, init mounts `/dev/pts` `nosuid,noexec` and
+  `/dev/shm` `nosuid,nodev` (`noexec` as well at the locked tier, which also
+  adds `hidepid=invisible` to `/proc`). `/` is the initramfs's tmpfs root, 1777 as the kernel makes it:
+  sticky, so another user cannot replace or remove a name root made there, but
+  anyone can make a new name at the top.
+- **The image's own programs, built with the compiler's hardening, are a region
+  (`sec_build_hardened`):** locals zeroed (`-ftrivial-auto-var-init=zero`),
+  frames probed (`-fstack-clash-protection`) and call-used registers cleared
+  (`-fzero-call-used-regs=used-gpr`). The cost is in the profile (+3% on a
+  shell start). There is no stack protector: it needs a guard and a failure
+  handler the freestanding library does not have, and the programs are not
+  position independent (the Spark format has no relocations), so code is at a
+  fixed address in every process. `MW_HARDEN=1`, `MW_AUTOINIT` and `MW_CFLAGS`
+  in `test/run` build every lane's programs with the flags and found a `PURE`
+  function that stored through a pointer (the redirect of `2>/dev/null` went
+  to the wrong descriptor when locals were zeroed); `pure_stores` (kit)
+  refuses the class.
+- **OUT-D2, the data partition is mounted `nodev` and not `nosuid`:** it
+  holds `/root`, `/home` and the bowls; a bowl's `sudo` and `su` need setuid.
+  The locked tier mounts it `nosuid` as well, since it has no bowl and no one
+  to run `su`. Whose disk boot takes without asking is the control (OUT-D1).
 - **OUT-D3, unprivileged user namespaces stay as the kernel has them:** bowls
   need them, no tool here creates one otherwise, and `user.max_user_namespaces`
   0 would take them from the test harnesses on the same kernel; a kiosk tier

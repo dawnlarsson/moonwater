@@ -1,0 +1,15 @@
+#
+# sec_cpu_hardened on arm64.
+#
+# The kernel's own pointer authentication and branch target identification
+# are in sec_baseline; what a hardened build adds is the hardware's memory
+# tagging (a synchronous tag check on kernel heap objects: a use after free or
+# an overflow of a tagged object faults on the access that did it, on a part
+# that has MTE, and costs nothing on one that does not) and the erratum
+# workarounds a plain build leaves out.
+#
+CONFIG_ARM64_TAGGED_ADDR_ABI=y
+CONFIG_ARM64_MTE=y
+CONFIG_KASAN=y
+CONFIG_KASAN_HW_TAGS=y
+CONFIG_ARM64_E0PD=y

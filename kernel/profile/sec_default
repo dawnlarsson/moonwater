@@ -8,15 +8,44 @@
 # unaffected and hostile input was dangerous (escaping a remote peer's utmp
 # host field, refusing a symlinked component under mkdir -p).
 #
-# The four tiers, each a whole answer -- name one last, after the rest of the
+# The tiers, each a whole answer -- name one last, after the rest of the
 # default line, in place of this one:
 #
 #   sh build.sh debug_none limbo desktop wifi serial sec_hardened
 #
 #   sec_reference   the reference exactly, holes and all (STRICT=0)
 #   sec_default     this
-#   sec_hardened    refuse where default sanitises (STRICT=2)
-#   sec_locked      a kiosk or appliance: a short allow list of tools
+#   sec_workstation the default's userspace, and the kernel hardened in every
+#                   region that costs a program nothing it expects (not
+#                   lockdown, not the 32-bit ABI): a machine somebody sits at
+#   sec_hardened    refuse where default sanitises (STRICT=2), and the kernel
+#                   at its hardened level in every region
+#   sec_locked      a kiosk or appliance: a short allow list of tools,
+#                   STRICT=3, and the kernel locked in every region
+#
+# The kernel is the same story in several sizes. Every tier stands on
+# sec_baseline, which is what a mainstream kernel ships on and what this
+# tree's allnoconfig base did not have until it was written down (stack
+# protector, usercopy and FORTIFY checks, slab freelist hardening, the CPU
+# vulnerability mitigations, W^X on riscv64, a floor under mmap). The
+# hardened and locked tiers add the regions' own levels on top.
+#
+# A region is a part of the hardening that can move alone. Name its profile
+# after the tier to take that one further, or take a whole tier and keep a
+# region at a gentler level by composing that region's profile before it
+# (the last word on an option wins, and a region's file says so with
+# `#> overrides` where it undoes another's):
+#
+#   kernel     sec_mem_hardened   sec_mem_locked       heap, stack, zeroing
+#              sec_cpu_hardened   sec_cpu_locked       speculation, IBT, SMT
+#              sec_surface_...    sec_surface_locked   what a process can ask
+#              sec_dma_hardened   sec_dma_locked       IOMMU, hotplug buses
+#              sec_lockdown_...   sec_lockdown_locked  integrity, confidentiality
+#   userspace  sec_files_...      sec_text_...         paths, terminals
+#              sec_net_...        sec_host_...         the wire, media and sysctls
+#              sec_bowl_...       sec_exec_hardened    bowls, what may start
+#
+# (each ..._hardened beside its ..._locked; sec_exec has no locked level.)
 #
 # Only the default promises the reference's behaviour. The others are a
 # choice, and what they refuse is refused on purpose.
@@ -29,6 +58,8 @@
 # names yama. INTEGRITY is on by default under SECURITY and brings in
 # nothing any profile asks for, so it stays out.
 #
+#> includes sec_baseline
+
 CONFIG_SECURITY=y
 CONFIG_SECURITY_YAMA=y
 CONFIG_INTEGRITY=n

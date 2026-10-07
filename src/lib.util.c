@@ -127,6 +127,12 @@
           STRICT_TIGHT      refuse where safe would sanitise, and tighten
                             what a careful operator would want tightened
                             even though ordinary use never arrives there.
+          STRICT_LOCKED     tight, and what a machine that does one job and
+                            is never administered by hand can have shut
+                            for good: things that cannot be undone until
+                            the next boot, or that a person at a keyboard
+                            would notice missing. Every check that asks
+                            for tight asks for locked too.
 
         A tier is a ceiling on what a build will do, not a promise that
         every utility has something to say at every tier. Most have
@@ -135,9 +141,54 @@
 #define STRICT_REFERENCE 0
 #define STRICT_SAFE 1
 #define STRICT_TIGHT 2
+#define STRICT_LOCKED 3
 
 #ifndef MOONWATER_STRICT
 #define MOONWATER_STRICT STRICT_SAFE
+#endif
+
+/*
+        Where a build leans, region by region.
+
+        One number for the whole image is the right default and the wrong
+        dial: a machine that wants its files treated as hostile has no reason
+        to give up what a script reads off a terminal, and one that faces a
+        network wants the network at the strictest tier long before it wants
+        mkdir to refuse a sticky directory. A region is the set of tools that
+        protect the same thing, named for what it is and not for the file the
+        code sits in:
+
+          FILES  what a tool does to a path it was given: links, sticky and
+                 world-writable directories, publishing a copy whole, the
+                 security attributes an archive carries
+          TEXT   what a tool writes to a terminal that another party chose:
+                 utmp and mount names, a peer's host, an archive's member
+                 names, a process's comm
+          NET    what a tool accepts from the wire and what it puts on a
+                 command line: the HTTP framing, secrets in argv, the clock
+          HOST   what the machine takes from the media and the kernel it
+                 runs on: a disk it did not install from, kernel sysctls
+          BOWL   what a bowl makes on the user's behalf
+
+        The build writes MOONWATER_STRICT_<REGION> into its header, resolved:
+        a region the configuration leaves at -1 is the whole build's level.
+        A tool names its region and never MOONWATER_STRICT itself, so that
+        moving one tool's lean is one line of Kconfig and never a code change.
+*/
+#ifndef MOONWATER_STRICT_FILES
+#define MOONWATER_STRICT_FILES MOONWATER_STRICT
+#endif
+#ifndef MOONWATER_STRICT_TEXT
+#define MOONWATER_STRICT_TEXT MOONWATER_STRICT
+#endif
+#ifndef MOONWATER_STRICT_NET
+#define MOONWATER_STRICT_NET MOONWATER_STRICT
+#endif
+#ifndef MOONWATER_STRICT_HOST
+#define MOONWATER_STRICT_HOST MOONWATER_STRICT
+#endif
+#ifndef MOONWATER_STRICT_BOWL
+#define MOONWATER_STRICT_BOWL MOONWATER_STRICT
 #endif
 
 /* C varargs adapters shared by the standard compatibility families. */
@@ -1407,7 +1458,7 @@ static bool system_path_parent_cleanup_safe(bipolar directory)
 
         if (found < 0 || (parent.mode & 0170000) != 0040000)
                 return false;
-#if MOONWATER_STRICT < STRICT_TIGHT
+#if MOONWATER_STRICT_FILES < STRICT_TIGHT
         /* What the reference does: it makes an entry in any directory the
            kernel lets it, a world-writable one included, and takes the
            chance of another writer there that every mkdir, cp and mknod

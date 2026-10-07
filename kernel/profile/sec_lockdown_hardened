@@ -1,0 +1,42 @@
+#
+# Security region: lockdown, hardened
+#
+# Root is not the kernel. With lockdown in integrity mode a process that holds
+# every capability still cannot write kernel memory through /dev/mem, load an
+# unsigned module, replace the running kernel (kexec), hibernate to an image
+# it could have rewritten, write model-specific registers, reach PCI
+# configuration space or I/O ports from userspace, or change ACPI tables.
+# That is the line between a root shell and a kernel compromise, and the
+# reason a tier's "root cannot loosen it" (Floodlight's seal) means something:
+# the seal's file is a kernel object, and without lockdown a root process
+# could write the object's bytes.
+#
+#   sec_lockdown_hardened     integrity mode from the first instruction after
+#                             the LSMs are up, modules must be signed by the
+#                             key this build made (every module the image
+#                             has is signed with it already: limbo's
+#                             MODULE_SIG_ALL), and Landlock for a program
+#                             that wants to give up filesystem access itself
+#   sec_lockdown_locked       confidentiality mode: also no reading kernel
+#                             memory back, no /proc/kcore, no perf or
+#                             tracing, no reading MSRs, and the kernel
+#                             refuses a module that is not signed at all
+#
+# Confidentiality is the one that costs a feature: perf and the resource
+# monitor's counters that read model-specific registers stop answering, and
+# so does anything that profiles the kernel. sec_locked has no monitor.
+#
+#> includes sec_baseline
+
+CONFIG_SECURITY=y
+# The lockdown module registers its state file in securityfs and says so at
+# boot ("failed LSM lockdown core initcall with errno -19") when there is
+# none; the lock itself was already in force.
+CONFIG_SECURITYFS=y
+CONFIG_SECURITY_LOCKDOWN_LSM=y
+CONFIG_SECURITY_LOCKDOWN_LSM_EARLY=y
+CONFIG_LOCK_DOWN_KERNEL_FORCE_NONE=n
+CONFIG_LOCK_DOWN_KERNEL_FORCE_INTEGRITY=y
+CONFIG_LOCK_DOWN_KERNEL_FORCE_CONFIDENTIALITY=n
+CONFIG_SECURITY_LANDLOCK=y
+CONFIG_MODULE_SIG_FORCE=y

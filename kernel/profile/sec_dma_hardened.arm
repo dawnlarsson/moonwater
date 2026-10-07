@@ -1,0 +1,7 @@
+#
+# sec_dma_hardened on arm64: the SMMU drivers, which is the arm64 machine's
+# IOMMU (Apple's DART is the Mac's, and is a platform driver this image's
+# platform profile asks for when there is a Mac to build for).
+#
+CONFIG_ARM_SMMU=y
+CONFIG_ARM_SMMU_V3=y

@@ -1,0 +1,20 @@
+#
+# sec_baseline on arm64. CPU_MITIGATIONS, the unmapped kernel at EL0, the
+# branch history mitigation, pointer authentication and BTI all come in with
+# the architecture's own defaults and are in the built image already; this
+# pins them so a profile composed later cannot take one without a word.
+#
+CONFIG_CPU_MITIGATIONS=y
+CONFIG_UNMAP_KERNEL_AT_EL0=y
+CONFIG_MITIGATE_SPECTRE_BRANCH_HISTORY=y
+CONFIG_ARM64_PTR_AUTH=y
+CONFIG_ARM64_PTR_AUTH_KERNEL=y
+CONFIG_ARM64_BTI=y
+CONFIG_ARM64_EPAN=y
+
+#
+# The kernel image at a random place each boot. The EFI stub asks the
+# firmware's RNG for the seed, and a machine without one boots at the link
+# address, which is what it did before.
+#
+CONFIG_RANDOMIZE_BASE=y

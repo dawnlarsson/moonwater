@@ -39951,6 +39951,11 @@ static bipolar bowl_dev_link(string_address target, string_address name) {
 #ifndef MOONWATER_STRICT
 #define MOONWATER_STRICT STRICT_SAFE
 #endif
+#define MOONWATER_STRICT_FILES MOONWATER_STRICT
+#define MOONWATER_STRICT_TEXT MOONWATER_STRICT
+#define MOONWATER_STRICT_NET MOONWATER_STRICT
+#define MOONWATER_STRICT_HOST MOONWATER_STRICT
+#define MOONWATER_STRICT_BOWL MOONWATER_STRICT
 static bool mock_made = true;
 /*  The mode the first make of a prepare asked for, which is the runtime
     directory's: the home directories come after it and would otherwise
@@ -48786,6 +48791,11 @@ static positive string_digits_max(string_address source, positive bound,
 #ifndef MOONWATER_STRICT
 #define MOONWATER_STRICT STRICT_SAFE
 #endif
+#define MOONWATER_STRICT_FILES MOONWATER_STRICT
+#define MOONWATER_STRICT_TEXT MOONWATER_STRICT
+#define MOONWATER_STRICT_NET MOONWATER_STRICT
+#define MOONWATER_STRICT_HOST MOONWATER_STRICT
+#define MOONWATER_STRICT_BOWL MOONWATER_STRICT
 typedef struct { int handle; bool tls; } tls_conn;
 typedef struct { bipolar handle; bool tls; tls_conn session; } http_link;
 typedef struct { p8 *bytes; positive used; positive room; } http_buffer;
@@ -49530,6 +49540,11 @@ typedef const p8 *const_string;
 #ifndef MOONWATER_STRICT
 #define MOONWATER_STRICT STRICT_SAFE
 #endif
+#define MOONWATER_STRICT_FILES MOONWATER_STRICT
+#define MOONWATER_STRICT_TEXT MOONWATER_STRICT
+#define MOONWATER_STRICT_NET MOONWATER_STRICT
+#define MOONWATER_STRICT_HOST MOONWATER_STRICT
+#define MOONWATER_STRICT_BOWL MOONWATER_STRICT
 #define INLINE
 #define COLD
 #define CONST
@@ -49537,6 +49552,11 @@ typedef const p8 *const_string;
 #define STRICT_SAFE 1
 #define STRICT_TIGHT 2
 #define MOONWATER_STRICT STRICT_SAFE
+#define MOONWATER_STRICT_FILES MOONWATER_STRICT
+#define MOONWATER_STRICT_TEXT MOONWATER_STRICT
+#define MOONWATER_STRICT_NET MOONWATER_STRICT
+#define MOONWATER_STRICT_HOST MOONWATER_STRICT
+#define MOONWATER_STRICT_BOWL MOONWATER_STRICT
 #define fn void
 #define address_to *
 #define address_of &

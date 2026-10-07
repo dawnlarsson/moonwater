@@ -1,0 +1,20 @@
+#
+# sec_cpu_hardened on x86-64.
+#
+# Indirect branch tracking is the one with a price on this tree: objtool
+# checks every indirect call target of the kernel image for its endbr64, and
+# an assembly body in src/lib.c reached by an indirect call without one is a
+# #CP at the first call. The kernel replaces a handful of library routines
+# (kernel/patch), so a build of this region is only as good as the boot it
+# was given: objtool names the missing ones at build time, and the image has
+# to be booted once before it is called good.
+#
+#> overrides CONFIG_X86_KERNEL_IBT CONFIG_MITIGATION_CALL_DEPTH_TRACKING CONFIG_MITIGATION_SLS CONFIG_X86_INTEL_TSX_MODE_ON
+
+CONFIG_X86_KERNEL_IBT=y
+CONFIG_MITIGATION_CALL_DEPTH_TRACKING=y
+CONFIG_MITIGATION_SLS=y
+CONFIG_X86_USER_SHADOW_STACK=y
+CONFIG_X86_INTEL_TSX_MODE_OFF=y
+CONFIG_X86_INTEL_TSX_MODE_ON=n
+CONFIG_X86_INTEL_TSX_MODE_AUTO=n

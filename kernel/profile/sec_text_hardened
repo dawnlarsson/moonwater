@@ -1,0 +1,10 @@
+#
+# Security region: text, hardened
+#
+# What a tool writes to a terminal that another party chose. STRICT_TEXT 2:
+# the bell is spelled with the other bytes a terminal acts on in last's
+# listing, pinky -l leaves out each user's ~/.project and ~/.plan (they are
+# copied to the terminal as the user wrote them), and every name from a utmp
+# record, a mount table, a disk label or an archive is spelled.
+#
+CONFIG_MOONWATER_STRICT_TEXT=2

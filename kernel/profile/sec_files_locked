@@ -1,0 +1,9 @@
+#
+# Security region: files, locked
+#
+# sec_files_hardened, and what a machine nobody logs into can have for good:
+# STRICT_FILES 3, which is 2 and fs.suid_dumpable 0.
+#
+CONFIG_MOONWATER_STRICT_FILES=3
+CONFIG_MOONWATER_FLOODLIGHT_FIND_DELETE=n
+CONFIG_MOONWATER_FLOODLIGHT_FIND_WRITE=n

@@ -1,0 +1,12 @@
+#
+# Security region: net, hardened
+#
+# What a tool accepts from the wire and puts on a command line. STRICT_NET 2:
+# a 204 that declares a body and a 205 with content are refused (RFC 9110
+# 15.3.5 and 15.3.6), a secret on the command line (wifi, waterlink) is
+# refused and must come on standard input, a clock reply that is not exactly
+# a packet is not read, and wget and fetch do not run: Floodlight's network
+# fetch switch is off.
+#
+CONFIG_MOONWATER_STRICT_NET=2
+CONFIG_MOONWATER_FLOODLIGHT_NETWORK_FETCH=n

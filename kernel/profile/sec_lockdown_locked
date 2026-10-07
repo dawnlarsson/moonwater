@@ -1,0 +1,11 @@
+#
+# Security region: lockdown, locked
+#
+# sec_lockdown_hardened with the kernel's confidentiality mode in place of
+# integrity. See sec_lockdown_hardened for the region.
+#
+#> includes sec_lockdown_hardened
+#> overrides CONFIG_LOCK_DOWN_KERNEL_FORCE_INTEGRITY CONFIG_LOCK_DOWN_KERNEL_FORCE_CONFIDENTIALITY
+
+CONFIG_LOCK_DOWN_KERNEL_FORCE_INTEGRITY=n
+CONFIG_LOCK_DOWN_KERNEL_FORCE_CONFIDENTIALITY=y

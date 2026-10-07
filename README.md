@@ -633,25 +633,83 @@ both of its switches are off. The switches live in
 
 ### Security tiers
 
-Four profiles in `kernel/profile/` choose how the build leans where safety and
-the reference disagree:
+Five profiles in `kernel/profile/` choose how the build leans where safety and
+the reference disagree, and how hard the kernel under it is:
 
-| Profile | Tools and builtins | `MOONWATER_STRICT` |
-| --- | --- | --- |
-| `sec_reference` | all | 0: the reference exactly, holes and all |
-| `sec_default` | all | 1: sanitise only what hostile input made dangerous |
-| `sec_hardened` | all | 2: refuse where the default sanitises |
-| `sec_locked` | a kiosk's allow list | 2 |
+| Profile | Tools and builtins | `MOONWATER_STRICT` | The kernel |
+| --- | --- | --- | --- |
+| `sec_reference` | all | 0: the reference exactly, holes and all | the baseline |
+| `sec_default` | all | 1: sanitise only what hostile input made dangerous | the baseline |
+| `sec_workstation` | all | 1 | hardened in every region that costs a program nothing it expects: not lockdown, not the 32-bit ABI |
+| `sec_hardened` | all | 2: refuse where the default sanitises | every region hardened |
+| `sec_locked` | a kiosk's allow list | 3: and what init can shut until the next boot | every region locked |
 
 `sec_default` is in the default profile list, and it is the only tier that
 promises bash, dash and GNU behaviour for anything a script does. The others
-are choices, and what they refuse is refused on purpose. All four turn on Yama,
-which Floodlight's restricted launches need. To pick one, name it last after
-the rest of the default list:
+are choices, and what they refuse is refused on purpose. All of them turn on
+Yama, which Floodlight's restricted launches need. To pick one, name it last
+after the rest of the default list:
 
 ```sh
 sh build.sh debug_none limbo desktop wifi serial sec_hardened
 ```
+
+**The baseline.** The kernel is built from `allnoconfig`, where an option
+nobody names is off whatever Kconfig says its default is. Until `sec_baseline`
+existed the shipped kernel had no stack protector, no usercopy bounds check, no
+`FORTIFY_SOURCE`, no slab freelist hardening, no CPU vulnerability mitigations
+on x86-64 (`CPU_MITIGATIONS` is a prompt that `allnoconfig` turns off, and
+every mitigation under it goes with it), no `W^X` on riscv64 and a null-page
+floor of 4 KiB. Every tier composes `sec_baseline` and its architecture's file
+(`sec_baseline.x64`, `.arm`, `.riscv`); it costs close to nothing on the paths
+this project measures, and the mitigations are chosen at boot from what the
+processor says it is vulnerable to. A profile names its parts with
+`#> includes NAME...` and an architecture's own lines sit in `NAME.ARCH`
+beside it, which is how a region asks for x86's indirect branch tracking
+without every other build reporting it dropped.
+
+**The regions.** A tier is every region at one level; a region is a part of the
+hardening that can move alone. Name its profile after the tier to take that one
+further (`sh build.sh ... sec_default sec_net_locked sec_mem_hardened`), or keep
+one at a gentler level than the tier around it by composing its profile first.
+Each region has a hardened and a locked level, and the locked one is the
+hardened one and more, so name one or the other. The files are
+`sec_<region>_hardened` and `sec_<region>_locked`; `sec_exec` and `sec_build`
+have only `sec_exec_hardened` and `sec_build_hardened`.
+
+| Region | Hardened | Locked adds |
+| --- | --- | --- |
+| `sec_mem` (kernel) | heap zeroed on allocation, locals zeroed, caches never merged, typed buckets, shuffled free lists, random stack offset per syscall, checked lists, W+X mappings warned about at boot | zeroed on free and every call-used register cleared at return, partitioned kmalloc caches, corruption and an oops panic (and reboot after 5 s), KFENCE |
+| `sec_cpu` (kernel) | indirect branch tracking, call depth tracking, straight-line speculation barriers, user shadow stacks, TSX off; arm64 memory tagging | `mitigations=auto,nosmt pti=on` |
+| `sec_surface` (kernel) | no ACPI table or SSDT replacement from userspace, no MSR/cpuid devices, no ioperm/iopl, no vsyscall | no 32-bit or x32 ABI, no LDT, no FUSE, no binfmt_misc, no watch queue, no POSIX message queues, no io_uring or file handle calls |
+| `sec_dma` (kernel) | VT-d, AMD-Vi and SMMU, strict translated DMA, no passthrough, firmware PCI DMA off | no PCI hotplug, USB4, FireWire or PC card |
+| `sec_lockdown` (kernel) | integrity lockdown from boot, signed modules only, Landlock | confidentiality lockdown |
+| `sec_files` | `STRICT_FILES` 2 and find without `-delete` or `-fprint*` | 3 |
+| `sec_text` | `STRICT_TEXT` 2 | 3 |
+| `sec_net` | `STRICT_NET` 2 and no `wget` or `fetch` | 3 |
+| `sec_host` | `STRICT_HOST` 2: a disk is asked about, `kptr_restrict` 2, io_uring refused, Yama 2, widest mmap randomisation | 3: no module loads, no ptrace attach (Yama 3), `hidepid` on /proc, the data partition `nosuid`, `/dev/shm` `noexec` |
+| `sec_bowl` | `STRICT_BOWL` 2 | 3 |
+| `sec_exec` | Floodlight sealed with every command-making switch off | (none) |
+| `sec_build` | the image's own programs built with zeroed locals, probed stack frames and cleared call-used registers (+3% on a shell start, inside the noise on a compute loop) | (none) |
+
+The userspace regions are what `MOONWATER_STRICT_FILES`, `_TEXT`, `_NET`, `_HOST`
+and `_BOWL` set (`-1` follows the whole build's level, so a region left alone
+changes nothing), and a tool names its region and never the whole level. The
+sysctls init writes before it starts anything are the FILES and HOST regions'
+(`fs.protected_*`, `kptr_restrict`, `dmesg_restrict`, `io_uring_disabled`,
+`randomize_va_space`, at the tight level Yama and mmap's randomisation, at
+the locked level Yama 3 and `modules_disabled`); they used to be written by the network
+watcher a moment after boot, and not at all where it never started.
+`/proc` and `/sys` are mounted `nosuid,nodev,noexec` and `/dev`
+`nosuid,noexec` by the kernel module, at every tier.
+
+What a tier's image is expected to say once it has booted is a table in
+`lane_tier` (`test/run`), and `MOONWATER_IMAGE=dist/bootx64.efi
+MOONWATER_TIER=hardened sh test/run tier` reads it back from a guest: the
+sysctls init wrote, the mount flags, the lockdown line, the W+X page-table
+check and the IOMMU's strict mode. `sh test/run switches` is the composition
+half (what each tier and region names, and that a region keeps to its own
+level).
 
 What `sec_hardened` (`STRICT_TIGHT`) refuses where the default does what GNU
 coreutils does:

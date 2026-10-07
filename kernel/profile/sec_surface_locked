@@ -1,0 +1,23 @@
+#
+# Security region: surface, locked
+#
+# sec_surface_hardened and what a machine with one native program has no use
+# for. See sec_surface_hardened for the region.
+#
+#> includes sec_surface_hardened
+#> overrides CONFIG_COMPAT CONFIG_COMPAT_32 CONFIG_COMPAT_32BIT_TIME CONFIG_SYSVIPC_COMPAT CONFIG_FUSE_FS CONFIG_BINFMT_MISC CONFIG_WATCH_QUEUE CONFIG_POSIX_MQUEUE CONFIG_POSIX_MQUEUE_SYSCTL CONFIG_FS_VERITY
+
+CONFIG_FUSE_FS=n
+CONFIG_BINFMT_MISC=n
+CONFIG_WATCH_QUEUE=n
+CONFIG_POSIX_MQUEUE=n
+CONFIG_POSIX_MQUEUE_SYSCTL=n
+
+# Two system calls a machine with one native program has no use for and the
+# kernel has had bugs in each of: io_uring (the largest attack surface of any
+# call, and the one init already refuses everybody at the tight tier) and the
+# file handle calls (open_by_handle_at is how a container's root reads a
+# host's files). kcmp stays: DRM selects it, and the card is what the screen
+# is drawn on.
+CONFIG_IO_URING=n
+CONFIG_FHANDLE=n

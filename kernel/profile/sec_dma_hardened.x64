@@ -1,0 +1,12 @@
+#
+# sec_dma_hardened on x86-64: both vendors' drivers, translation on from the
+# start, and the interrupt remapping the translation needs to mean anything
+# (without it a device can still forge interrupts).
+#
+CONFIG_INTEL_IOMMU=y
+CONFIG_INTEL_IOMMU_DEFAULT_ON=y
+CONFIG_INTEL_IOMMU_SVM=y
+CONFIG_INTEL_IOMMU_FLOPPY_WA=n
+CONFIG_AMD_IOMMU=y
+CONFIG_IRQ_REMAP=y
+CONFIG_X86_X2APIC=y

@@ -99,8 +99,13 @@ static fn host_prefix(bool label)
 #define HOST_READ_ONLY (MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC)
 #define HOST_WRITABLE (MS_NOSUID | MS_NODEV | MS_NOEXEC)
 /* The data partition runs programs, and a bowl's sudo and su need their set-user
-   bits, so it is mounted without device files only. */
+   bits, so it is mounted without device files only. The locked tier has no
+   bowl and no one to run su, and keeps the set-user bits out as well. */
+#if MOONWATER_STRICT_HOST >= STRICT_LOCKED
+#define HOST_DATA_MOUNT (MS_NODEV | MS_NOSUID)
+#else
 #define HOST_DATA_MOUNT MS_NODEV
+#endif
 #define HOST_LOCK HOST_STATE "/lock"
 #define HOST_LOCK_WAIT_NS ((p64)30000000000)
 #define HOST_LOCK_POLL_NS ((p64)10000000)
@@ -2309,7 +2314,7 @@ static b32 host_boot(void)
         if (same == 1 && chosen &&
             !host_install_booted(chosen, running, known ? address_of settings : null) &&
             !host_lone_taken(host_disk_external(chosen->disk),
-                             MOONWATER_STRICT >= STRICT_TIGHT))
+                             MOONWATER_STRICT_HOST >= STRICT_TIGHT))
         {
                 refused = chosen;
                 chosen = null;
@@ -3819,7 +3824,7 @@ static bool host_settings_session(host_settings address_to settings)
         /*  Tighter than safe hears nothing from a disk at all: the switches
             are only a nuisance, but a machine that wants no word from media
             somebody pushed in gets none. */
-        if (MOONWATER_STRICT >= STRICT_TIGHT)
+        if (MOONWATER_STRICT_HOST >= STRICT_TIGHT)
                 return true;
 
         memory_zero(address_of search, sizeof(search));
@@ -9924,7 +9929,7 @@ static b32 host_wifi(string_address address_to arguments, positive count)
                 //      history of any shell that does not know this verb;
                 //      the tight tier refuses the form, and anywhere it is
                 //      taken a person at a terminal is told the other.
-                return_if(MOONWATER_STRICT >= STRICT_TIGHT && count == 5 &&
+                return_if(MOONWATER_STRICT_NET >= STRICT_TIGHT && count == 5 &&
                               !string_equals(arguments[4], (string_address) "-"),
                           host_refuse("a password on the command line is "
                                       "refused: give it on standard input "
@@ -12545,7 +12550,7 @@ static HOT bipolar sntp_exchange(b32 handle,
                                 return SNTP_NO_REPLY;
                         continue;
                 }
-                if_rare (received < SNTP_PACKET || (MOONWATER_STRICT >= STRICT_TIGHT && received != SNTP_PACKET))
+                if_rare (received < SNTP_PACKET || (MOONWATER_STRICT_NET >= STRICT_TIGHT && received != SNTP_PACKET))
                 {
                         if (discarded++ == NETWORK_DISCARD_MAX)
                                 return SNTP_NO_REPLY;

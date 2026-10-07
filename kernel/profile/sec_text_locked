@@ -1,0 +1,6 @@
+#
+# Security region: text, locked
+#
+# sec_text_hardened at STRICT_TEXT 3.
+#
+CONFIG_MOONWATER_STRICT_TEXT=3

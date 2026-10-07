@@ -1178,7 +1178,7 @@ static positive tar_header_word(p8 address_to into, p8 address_to field,
 
         if (!length)
                 length = positive_into(into, (positive)number);
-#if MOONWATER_STRICT >= STRICT_SAFE
+#if MOONWATER_STRICT_TEXT >= STRICT_SAFE
         else
         {
                 /*      Text past ASCII stays as it is when it is UTF-8 and
@@ -2171,7 +2171,7 @@ static fn tar_attrs_apply(bipolar fd, string_address path, positive at,
                             !string_compare_max((string_address)text,
                                                 "system.posix_acl_", 17))
                                 continue;
-#if MOONWATER_STRICT >= STRICT_TIGHT
+#if MOONWATER_STRICT_FILES >= STRICT_TIGHT
                         /* An archive says what security.* attributes a file
                            gets -- a capability, an SELinux label -- and root
                            carrying it out gives a file what only a package
@@ -4217,7 +4217,7 @@ static fn tar_diff_prefix_once(string_address prefix, positive length,
                 as it is, so `a\e]0;title\a/../x` set the terminal's title.
                 Spelled here as a member name is, and raw for a build that
                 diffs against GNU. */
-#if MOONWATER_STRICT >= STRICT_SAFE
+#if MOONWATER_STRICT_TEXT >= STRICT_SAFE
         string_format(log_error, link ? "tar: Removing leading `%w' from hard link targets\n"
                                       : "tar: Removing leading `%w' from member names\n",
                       tar_quoted, (string_address)shown);

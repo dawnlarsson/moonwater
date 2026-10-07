@@ -1,0 +1,8 @@
+#
+# Security region: bowl, hardened
+#
+# What a bowl makes on the user's behalf. STRICT_BOWL 2: a runtime directory
+# that does not exist is not made, since a path nobody prepared is a typo far
+# more often than it is a plan.
+#
+CONFIG_MOONWATER_STRICT_BOWL=2

@@ -1,0 +1,6 @@
+#
+# Security region: bowl, locked
+#
+# sec_bowl_hardened at STRICT_BOWL 3.
+#
+CONFIG_MOONWATER_STRICT_BOWL=3

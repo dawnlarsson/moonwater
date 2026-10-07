@@ -8629,7 +8629,7 @@ static b32 text_rev()
 
                 // Under STRICT_REFERENCE a file is looked at whole before any of it
                 // is printed in a UTF-8 locale, which the line reader does.
-#if MOONWATER_STRICT == STRICT_REFERENCE
+#if MOONWATER_STRICT_TEXT == STRICT_REFERENCE
                 bool bulk = !utf8;
 #else
                 bool bulk = true;
@@ -8655,7 +8655,7 @@ static b32 text_rev()
                         if (!text_line_view(address_of line, address_of length, null, 0, null))
                                 break;
 
-#if MOONWATER_STRICT == STRICT_REFERENCE
+#if MOONWATER_STRICT_TEXT == STRICT_REFERENCE
                         if (utf8 && !text_utf8_whole((string_address)line, length))
                         {
                                 string_diagnostic(&text_diagnostic, 0, null,

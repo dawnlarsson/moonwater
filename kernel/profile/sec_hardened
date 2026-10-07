@@ -4,10 +4,16 @@
 # Everything built, and STRICT=2: refuse where the default sanitises, and
 # tighten what a careful operator would want tightened even though ordinary
 # use never arrives there. A script that meets one of those refusals was
-# meant to. See sec_default for the tiers and how to pick one.
+# meant to. The kernel is every region at its hardened level: the allocator
+# keeps its caches apart and zeroes what it hands out, indirect branch
+# tracking and the strongest mitigations are on, root cannot write the
+# kernel's memory (integrity lockdown), a device cannot read all of it (strict
+# IOMMU). See sec_default for the tiers and how to pick one.
 #
 #   sh build.sh debug_none limbo desktop wifi serial sec_hardened
 #
+
+#> includes sec_baseline sec_mem_hardened sec_cpu_hardened sec_surface_hardened sec_dma_hardened sec_lockdown_hardened sec_build_hardened
 
 CONFIG_SECURITY=y
 CONFIG_SECURITY_YAMA=y

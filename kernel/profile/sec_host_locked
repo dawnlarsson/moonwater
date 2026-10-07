@@ -1,0 +1,8 @@
+#
+# Security region: host, locked
+#
+# sec_host_hardened, and for good until the next boot: no module can be
+# loaded (kernel.modules_disabled), nothing attaches to anything (Yama 3),
+# and /proc shows a process to its own user and to root only (hidepid).
+#
+CONFIG_MOONWATER_STRICT_HOST=3

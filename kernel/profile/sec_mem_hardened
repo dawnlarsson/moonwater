@@ -1,0 +1,62 @@
+#
+# Security region: memory, hardened
+#
+# Heap and stack corruption, and what an attacker reads out of memory the
+# kernel handed back without cleaning. sec_baseline has the checks that cost
+# nothing; this one has the ones that cost a little on the allocation and the
+# system call paths, which is why profile/latency turned some of them off and
+# why a tier asks for them back by name:
+#
+#   sec_mem_hardened   what a hardened distribution kernel runs: new heap
+#                      memory is zeroed, locals are zeroed at declaration, the
+#                      allocator keeps its caches apart and its typed buckets
+#                      separate, free pages come back in random order, the
+#                      stack's start moves on every system call, and a list
+#                      with a corrupted link is refused instead of followed
+#   sec_mem_locked     everything above, memory zeroed again when it is freed
+#                      and every register a call leaves behind cleared at the
+#                      return, a corrupted list or credential panics the
+#                      machine rather than carrying on, and the sampling
+#                      allocator that finds a use after free or an overflow in
+#                      production is on
+#
+# Name one of them after the tier, or neither. The two do not compose: the
+# locked one is the hardened one and more, so naming both only makes the
+# build's disagreement report say so.
+#
+#> includes sec_baseline
+#> overrides CONFIG_INIT_ON_ALLOC_DEFAULT_ON CONFIG_INIT_STACK_NONE CONFIG_INIT_STACK_ALL_ZERO CONFIG_SLAB_MERGE_DEFAULT
+
+# Memory is zeroed where the allocator hands it out, so a structure that is
+# only partly filled in leaks nothing the previous owner left in it, and a
+# local the code never wrote is zero rather than a stale return address.
+CONFIG_INIT_ON_ALLOC_DEFAULT_ON=y
+CONFIG_INIT_STACK_NONE=n
+CONFIG_INIT_STACK_ALL_ZERO=y
+
+# An object of one kind never sits next to an object of another in a slab,
+# and the allocations that hold a user-controlled length are kept in caches
+# apart from the ones that hold pointers. The limbo profile merges compatible
+# caches to save half a megabyte at idle; that is the cost, and slab_nomerge
+# is the same switch at run time.
+CONFIG_SLAB_MERGE_DEFAULT=n
+CONFIG_SLAB_BUCKETS=y
+
+# Pages come off the free lists in a random order, and the kernel stack starts
+# at a random offset on every system call, so neither the address of the next
+# allocation nor a stack slot is the same twice.
+CONFIG_SHUFFLE_PAGE_ALLOCATOR=y
+CONFIG_RANDOMIZE_KSTACK_OFFSET=y
+CONFIG_RANDOMIZE_KSTACK_OFFSET_DEFAULT=y
+CONFIG_SCHED_STACK_END_CHECK=y
+
+# A list or a tree whose link points somewhere it cannot is a corrupted one:
+# the operation is refused and warned about, where it used to write through.
+CONFIG_LIST_HARDENED=y
+
+# W^X, checked rather than assumed: the page tables are walked once at boot and
+# any mapping that is both writable and executable is warned about, which is
+# how a mapping the kernel left open after it applied NX gets found.
+CONFIG_DEBUG_WX=y
+
+#> cmdline slab_nomerge page_alloc.shuffle=1 init_on_alloc=1

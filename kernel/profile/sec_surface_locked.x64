@@ -1,0 +1,14 @@
+#
+# sec_surface_locked on x86-64: the 32-bit and x32 syscall ABIs and the local
+# descriptor table go. Steam and Wine need all three, which is why this is
+# the locked tier's and not the hardened one's.
+#
+#> overrides CONFIG_IA32_EMULATION CONFIG_COMPAT CONFIG_COMPAT_32 CONFIG_COMPAT_32BIT_TIME CONFIG_SYSVIPC_COMPAT CONFIG_MODIFY_LDT_SYSCALL CONFIG_X86_X32_ABI
+
+CONFIG_IA32_EMULATION=n
+CONFIG_X86_X32_ABI=n
+CONFIG_MODIFY_LDT_SYSCALL=n
+CONFIG_COMPAT=n
+CONFIG_COMPAT_32=n
+CONFIG_COMPAT_32BIT_TIME=n
+CONFIG_SYSVIPC_COMPAT=n

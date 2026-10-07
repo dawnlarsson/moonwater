@@ -1,0 +1,38 @@
+#
+# Security tier: workstation
+#
+# A machine somebody sits at, plays on and installs software on: the kernel
+# hardened in every region that does not cost a program anything it expects,
+# and the userspace the default's, because a script a person runs there meets
+# bash's and GNU's behaviour. What it leaves out of sec_hardened is what the
+# machine's own owner would trip over:
+#
+#   lockdown    integrity lockdown refuses what undervolting and fan tools do
+#               (writing model-specific registers, PCI configuration space
+#               from userspace)
+#   STRICT 2    mkdir and cp refusing a world-writable directory, a secret on
+#               a command line, a disk that is asked about, every tool that
+#               turns data into a command (Floodlight), and wget and fetch
+#   32-bit      the 32-bit ABI and the LDT stay: Steam and Wine need both
+#
+# What it takes: the allocator's hardening, zeroed heap and stack, indirect
+# branch tracking, call depth tracking and the mitigations for every
+# processor, and strict IOMMU translation so a Thunderbolt or PCIe device is
+# not handed the machine's memory. The surface region goes with it, and with
+# it the MSR and cpuid devices, ioperm and iopl, and the ACPI table
+# replacement: a tool that reads a processor's registers through /dev/cpu
+# (rdmsr, turbostat) has nothing to open. A machine that wants them keeps
+# this tier's other regions by naming them itself after sec_default
+# (sec_mem_hardened sec_cpu_hardened sec_dma_hardened) and leaves
+# sec_surface_hardened out. See sec_default for the tiers and how to pick
+# one:
+#
+#   sh build.sh debug_none limbo desktop wifi serial sec_workstation
+#
+#> includes sec_baseline sec_mem_hardened sec_cpu_hardened sec_surface_hardened sec_dma_hardened
+
+CONFIG_SECURITY=y
+CONFIG_SECURITY_YAMA=y
+CONFIG_INTEGRITY=n
+
+CONFIG_MOONWATER_STRICT=1

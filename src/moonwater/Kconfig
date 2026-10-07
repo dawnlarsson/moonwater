@@ -239,7 +239,7 @@ menu "Moonwater"
     config MOONWATER_STRICT
         int "How strict this build is where safety and the reference disagree"
         depends on MOONWATER_UTILITIES
-        range 0 2
+        range 0 3
         default 1
         help
           The utility surface is written against the tool on the machine
@@ -263,9 +263,79 @@ menu "Moonwater"
           would want tightened even though ordinary use never arrives
           there.
 
+          3 is 2, and what a machine that does one job and is never
+          administered by hand can have shut for good: settings that stay
+          until the next boot (no module loads, no ptrace attach, no
+          process of another user in /proc) and refusals a person at a
+          keyboard would notice. Every check that asks for 2 asks for 3 too.
+
           This is a ceiling on what the build will do, not a promise that
           every utility has something to say at every level. Most have
           nothing to say and never read it.
+
+          The regions below lean on their own where this says nothing: a
+          region left at -1 is this level.
+
+    menu "Strictness by region"
+        depends on MOONWATER_UTILITIES
+
+    comment "Each follows MOONWATER_STRICT at -1 and has its own level 0 to 3 otherwise"
+
+    config MOONWATER_STRICT_FILES
+        int "FILES: what a tool does to a path it was given"
+        range -1 3
+        default -1
+        help
+          Links, sticky and world-writable directories, whether a copy is
+          published whole or built where it will live, the security
+          attributes an archive carries, and the fs.protected_* switches.
+          At 2 mkdir, cp, install and every output open refuse the shapes
+          a planted link or a directory anyone can write turn into a write
+          somewhere else; see the table in README.md.
+
+    config MOONWATER_STRICT_TEXT
+        int "TEXT: what a tool writes to a terminal that another party chose"
+        range -1 3
+        default -1
+        help
+          utmp and mount names, a peer's host, an archive's member names, a
+          process's comm and a disk's label. At 1 a byte a terminal acts on
+          is spelled; at 0 it is written as the reference writes it, and at
+          2 even the bell is.
+
+    config MOONWATER_STRICT_NET
+        int "NET: what a tool accepts from the wire and what it puts on a command line"
+        range -1 3
+        default -1
+        help
+          The HTTP framing the clients accept, a secret in an argument, the
+          reply a clock accepts, and the kernel network settings written at
+          boot. At 2 a 204 that declares a body and a 205 with content are
+          refused, a secret in argv is refused, and a time reply of the
+          wrong size is not read.
+
+    config MOONWATER_STRICT_HOST
+        int "HOST: what the machine takes from the media and the kernel it runs on"
+        range -1 3
+        default -1
+        help
+          Which disk a boot may take its script from, what media may
+          announce, and the kernel settings init writes before it starts
+          anything (kptr_restrict, io_uring, ptrace scope). At 2 a disk
+          that is not the one the machine booted from is never taken
+          without being asked, kptr_restrict is 2 and ptrace attach needs
+          CAP_SYS_PTRACE; at 3 modules can no longer be loaded and nothing
+          attaches at all.
+
+    config MOONWATER_STRICT_BOWL
+        int "BOWL: what a bowl makes on the user's behalf"
+        range -1 3
+        default -1
+        help
+          Whether a runtime directory that is missing is made at all (at 2
+          it is not: a path nobody prepared is a typo).
+
+    endmenu
 
     config MOONWATER_MACHINE_SCRIPT
         string "Default machine script"

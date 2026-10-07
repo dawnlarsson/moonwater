@@ -1,0 +1,7 @@
+#
+# Security region: net, locked
+#
+# sec_net_hardened at STRICT_NET 3.
+#
+CONFIG_MOONWATER_STRICT_NET=3
+CONFIG_MOONWATER_FLOODLIGHT_NETWORK_FETCH=n
