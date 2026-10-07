@@ -927,6 +927,40 @@ fi
 #
 sh kernel/patch/functions || die "kernel/kernel.c: its functions were not put in place"
 
+#
+#       overlayfs keeps what it looked up, and a bowl's /usr/bin, /bin and
+#       /sbin are overlays of the bowl's directory over Moonwater's: mounted
+#       read-only, standing as long as the processes in them do, while the
+#       directories under them are written by whatever installs a package or
+#       publishes a launcher. A name looked up before it existed stayed a
+#       negative dentry and answered "no such file" for the life of the view,
+#       and a name that was replaced kept its old file. An overlay with no
+#       upper layer is only a view of directories somebody else writes, so
+#       its dentries are not kept once nobody holds them, and no overlay
+#       keeps a negative one.
+#
+cat > "$settings_work/ovl_delete" <<EOF
+/*
+ * Moonwater: a view with no upper layer keeps no unused dentry, and no view
+ * keeps a negative one, so what a lower directory gains or changes is found.
+ */
+static int ovl_dentry_delete(const struct dentry *dentry)
+{
+${tab}return d_really_is_negative(dentry) ||
+${tab}       !ovl_upper_mnt(OVL_FS(dentry->d_sb));
+}
+
+EOF
+settings_insert linux/fs/overlayfs/super.c ovl_dentry_delete \
+        "static const struct dentry_operations ovl_dentry_operations = {" before \
+        "$settings_work/ovl_delete" "overlayfs"
+if ! grep -q -F ".d_delete = ovl_dentry_delete" linux/fs/overlayfs/super.c; then
+        awk '{ print } /^\t\.d_real = ovl_d_real,$/ { print "\t.d_delete = ovl_dentry_delete," }' \
+                linux/fs/overlayfs/super.c > "$settings_work/edit" &&
+                sudo cp "$settings_work/edit" linux/fs/overlayfs/super.c ||
+                die "overlayfs: super.c no longer has the operations ovl_dentry_delete goes in"
+fi
+
 rm -rf "$settings_work"
 
 line_add_padded "linux/Kconfig" "source \"kernel/moonwater/Kconfig\"" ||

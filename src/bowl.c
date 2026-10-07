@@ -85,13 +85,27 @@ static struct bowl_mount_point bowl_isolated_mounts[] = {
 };
 
 /*
-        Fast view: libraries, not commands.
+        Fast view: the bowl's own programs at the paths it expects.
 
-        The guest binary is executed at /bowls/NAME/usr/bin/jq. ld.so still
-        looks for the interpreter and DT_NEEDED names under /lib and /usr/lib,
-        which an empty Moonwater host does not have, so those trees are bound
-        read-only from the bowl. /bin, /usr/bin and /opt stay Moonwater's:
-        overlaying them hid every native applet.
+        The guest binary is executed at the path the guest calls it, and
+        /proc/PID/exe says that path: /usr/bin/plasmashell, not
+        /bowls/alpine/usr/bin/plasmashell. KWin matches a client to its
+        desktop file by that name, polkit, portals and D-Bus policy name a
+        program by it, ps and crash reporters print it, and Chrome, Firefox
+        and Electron look for their resources next to it.
+
+        /usr is the bowl's, one read-only bind, with Moonwater's under
+        /usr/bin, /bin and /sbin: each of those is an overlay of the bowl's
+        directory over a snapshot of Moonwater's, so a name the bowl has is
+        the bowl's and every other name is still there: Moonwater's applets,
+        and the launchers that make the programs of other bowls start from
+        this one. A program that execs /usr/bin/NAME of another bowl goes
+        through its launcher as it always did; one of the bowl's own is
+        started in place and no longer costs a launcher hop.
+
+        ld.so looks for the interpreter and DT_NEEDED names under /lib and
+        /usr/lib, which an empty Moonwater host does not have, so those trees
+        are the bowl's too, and so is /opt, where vendor packages live.
 
         /var stays Moonwater's, as do /home, /root, /tmp, /run, /dev, /proc
         and /sys. /etc is Moonwater's with the bowl's under it: an overlay of
@@ -109,12 +123,11 @@ static struct bowl_mount_point bowl_isolated_mounts[] = {
         Debian glibc bowl cannot replace Arch's loader in another process.
         The host /lib is untouched.
 
-        /usr/share is the data tree desktop programs read: Weston, GTK
-        schemas, icons, mime. ncurses as root ignores $TERMINFO and reads
-        only the directory it was built with, so /usr/share/terminfo is
-        still listed for a bowl that has the database but no broader share
-        tree. /usr/libexec is weston-desktop-shell and the rest of the
-        helpers compiled next to the libraries.
+        A bowl without a /usr/bin of its own (a Nix profile is links into
+        the store) gets the trees one by one instead. ncurses as root
+        ignores $TERMINFO and reads only the directory it was built with, so
+        /usr/share/terminfo is still listed for a bowl that has the database
+        but no broader share tree.
 
         /nix is a Nix bowl's store. Everything Nix installs names its loader
         and libraries by /nix/store paths, so without it a program from
@@ -123,6 +136,12 @@ static struct bowl_mount_point bowl_isolated_mounts[] = {
 static string_address bowl_fast_layers[] = {
     "/lib",
     "/lib64",
+    "/opt",
+    "/nix",
+    null,
+};
+
+static string_address bowl_fast_usr_layers[] = {
     "/usr/lib",
     "/usr/lib64",
     "/usr/share",
@@ -130,7 +149,6 @@ static string_address bowl_fast_layers[] = {
     "/usr/libexec",
     "/usr/local/lib",
     "/usr/local/share",
-    "/nix",
     null,
 };
 
@@ -1091,6 +1109,92 @@ static bipolar bowl_isolated_enter(string_address root)
         return 0;
 }
 
+/*
+        What the view maps: the directories, as the guest spells them, whose
+        files are the bowl's and not Moonwater's. A program found below one
+        of them is executed by that name, so the kernel reports it.
+*/
+#define BOWL_VIEW_MAX 16
+#define BOWL_HOST_ETC "/run/bowl-etc"
+#define BOWL_HOST_BIN "/run/bowl-bin"
+#define BOWL_HOST_SBIN "/run/bowl-sbin"
+#define BOWL_OVERLAY_MAGIC 0x794c7630
+
+static string_address bowl_view_mapped[BOWL_VIEW_MAX];
+static positive bowl_view_count;
+
+static void bowl_view_map(string_address target)
+{
+        if (bowl_view_count < BOWL_VIEW_MAX)
+                bowl_view_mapped[bowl_view_count++] = target;
+}
+
+static bool bowl_view_maps(string_address path)
+{
+        for (positive i = 0; i < bowl_view_count; i++)
+        {
+                positive length = string_length(bowl_view_mapped[i]);
+
+                if (!string_compare_max(path, bowl_view_mapped[i], length) &&
+                    path[length] == '/')
+                        return true;
+        }
+
+        return false;
+}
+
+static bool bowl_overlaid(string_address path)
+{
+        file_mount_facts facts;
+
+        return system_call_2(syscall(statfs), (positive)path,
+                             (positive)address_of facts) >= 0 &&
+               facts.type == BOWL_OVERLAY_MAGIC;
+}
+
+/* Where an open handle really is, as the host spells it: the answer to a
+   mount option, which the kernel reads against the host's root, and to
+   which name the kernel will report the program by. */
+static bipolar bowl_handle_path(bipolar handle, p8 address_to into,
+                                positive room)
+{
+        static const p8 prefix[] = "/proc/self/fd/";
+        p8 link[sizeof(prefix) + 12];
+        positive length = sizeof(prefix) - 1;
+        positive digits = 1;
+
+        memory_copy(link, prefix, length);
+        for (positive rest = (positive)handle; rest >= 10; rest /= 10)
+                digits++;
+        link[length + digits] = end;
+        for (positive rest = (positive)handle, at = digits; at; at--)
+        {
+                link[length + at - 1] = (p8)('0' + rest % 10);
+                rest /= 10;
+        }
+
+        return file_link_text(link, into, room);
+}
+
+/* A directory of the bowl, by the host path the bowl's own links lead to. */
+static bool bowl_real_directory(string_address root, string_address path,
+                                p8 address_to into, positive room)
+{
+        positive root_length = string_length(root);
+        bipolar handle = bowl_open_in_root(root, path,
+                                           O_PATH | O_DIRECTORY | O_CLOEXEC);
+        bipolar got;
+
+        if (handle < 0)
+                return false;
+        got = bowl_handle_path(handle, into, room);
+        system_close(handle);
+
+        return got > (bipolar)root_length &&
+               !string_compare_max(into, root, root_length) &&
+               into[root_length] == '/';
+}
+
 /* Bind only the loader search paths a guest binary still spells in ELF. */
 static bipolar bowl_fast_layer(string_address root, string_address layer)
 {
@@ -1108,7 +1212,10 @@ static bipolar bowl_fast_layer(string_address root, string_address layer)
         if (failed < 0)
                 return failed;
 
-        return bowl_bind_ro(source, layer);
+        failed = bowl_bind_ro(source, layer);
+        if (!failed)
+                bowl_view_map(layer);
+        return failed;
 }
 
 /*
@@ -1122,14 +1229,10 @@ static bipolar bowl_fast_layer(string_address root, string_address layer)
         which is the last view's overlay, but a read-only bind of Moonwater's
         own that the first view made and every view inside it carries.
 */
-#define BOWL_HOST_ETC "/run/bowl-etc"
-#define BOWL_OVERLAY_MAGIC 0x794c7630
-
 static bipolar bowl_fast_etc(string_address root)
 {
         static const p8 lower[] = "lowerdir=" BOWL_HOST_ETC ":";
         p8 options[BOWL_PATH_LIMIT];
-        file_mount_facts facts;
         positive length = sizeof(lower) - 1;
         bipolar failed;
 
@@ -1139,9 +1242,7 @@ static bipolar bowl_fast_etc(string_address root)
         if (system_access_at(AT_FDCWD, options + length, 0) < 0)
                 return 0;
 
-        if (system_call_2(syscall(statfs), (positive)"/etc",
-                          (positive)address_of facts) < 0 ||
-            facts.type != BOWL_OVERLAY_MAGIC)
+        if (!bowl_overlaid("/etc"))
         {
                 bowl_doing("make the directory", BOWL_HOST_ETC);
                 failed = bowl_mkdir(BOWL_HOST_ETC);
@@ -1156,9 +1257,103 @@ static bipolar bowl_fast_etc(string_address root)
         return system_mount("overlay", "/etc", "overlay", MS_RDONLY, options);
 }
 
-static bipolar bowl_fast_enter(string_address root)
+/*
+        Moonwater's /bin and /sbin as no view has covered them yet, for the
+        same reason as /etc: the lower layer of a view inside a view.
+*/
+static bipolar bowl_fast_snapshot(string_address from, string_address copy)
 {
         bipolar failed;
+
+        if (bowl_overlaid(from))
+                return 0;
+
+        bowl_doing("make the directory", copy);
+        failed = bowl_mkdir(copy);
+        return failed ? failed : bowl_bind_ro(from, copy);
+}
+
+/*
+        The bowl's directory over Moonwater's, one mount, at TARGET: a name
+        the bowl has is the bowl's. A bowl with no such directory leaves the
+        target as it is.
+*/
+static bipolar bowl_fast_union(string_address root, string_address target,
+                               string_address inside, string_address host)
+{
+        static const p8 lower[] = "lowerdir=";
+        p8 options[BOWL_PATH_LIMIT];
+        p8 real[BOWL_PATH_LIMIT];
+        positive length = sizeof(lower) - 1;
+        positive real_length;
+        bipolar failed;
+
+        if (!bowl_real_directory(root, inside, real, sizeof(real)))
+                return 0;
+        real_length = string_length(real);
+
+        /* A path with the overlay's own separators in it cannot be a layer. */
+        if (string_first_of(real, ',') || string_first_of(real, ':') ||
+            string_first_of(real, '\\'))
+                return 0;
+        if (length + real_length + 1 + string_length(host) >= sizeof(options))
+                return -ENAMETOOLONG;
+
+        memory_copy(options, lower, length);
+        memory_copy(options + length, real, real_length);
+        options[length + real_length] = ':';
+        memory_copy(options + length + real_length + 1, host,
+                    string_length(host) + 1);
+
+        failed = bowl_mkdir_parents(target);
+        if (failed < 0)
+                return failed;
+
+        bowl_doing("overlay a directory from", options + length);
+        failed = system_mount("overlay", target, "overlay", MS_RDONLY, options);
+        if (!failed)
+                bowl_view_map(target);
+        return failed;
+}
+
+/*
+        /usr is the bowl's whole, when the bowl keeps a /usr/bin of its own
+        in it (a link out of the tree, or none, is not a directory the
+        union can stand on).
+*/
+static bipolar bowl_fast_usr(string_address root, bool address_to whole)
+{
+        p8 usr[BOWL_PATH_LIMIT];
+        p8 bin[BOWL_PATH_LIMIT];
+        positive length;
+
+        if (!bowl_real_directory(root, "/usr", usr, sizeof(usr)) ||
+            !bowl_real_directory(root, "/usr/bin", bin, sizeof(bin)))
+                return 0;
+
+        length = string_length(usr);
+        if (string_compare_max(bin, usr, length) || !string_equals(bin + length, "/bin"))
+                return 0;
+
+        bowl_doing("make the directory", "/usr");
+        if (bowl_mkdir_parents("/usr") < 0)
+                return -ERROR_NO_ENTRY;
+
+        address_to whole = true;
+        bowl_view_map("/usr");
+        return bowl_bind_ro(usr, "/usr");
+}
+
+static bipolar bowl_fast_enter(string_address root)
+{
+        bool whole = false;
+        bipolar failed;
+
+        failed = bowl_fast_snapshot("/bin", BOWL_HOST_BIN);
+        if (!failed)
+                failed = bowl_fast_snapshot("/sbin", BOWL_HOST_SBIN);
+        if (failed)
+                return failed;
 
         for (positive i = 0; bowl_fast_layers[i]; i++)
         {
@@ -1167,7 +1362,55 @@ static bipolar bowl_fast_enter(string_address root)
                         return failed;
         }
 
+        failed = bowl_fast_usr(root, address_of whole);
+        if (failed)
+                return failed;
+
+        if (whole)
+                failed = bowl_fast_union(root, "/usr/bin", "/usr/bin",
+                                         BOWL_HOST_BIN);
+        for (positive i = 0; !whole && !failed && bowl_fast_usr_layers[i]; i++)
+                failed = bowl_fast_layer(root, bowl_fast_usr_layers[i]);
+        if (!failed)
+                failed = bowl_fast_union(root, "/bin", "/bin", BOWL_HOST_BIN);
+        if (!failed)
+                failed = bowl_fast_union(root, "/sbin", "/sbin",
+                                         BOWL_HOST_SBIN);
+        if (failed)
+                return failed;
+
         return bowl_fast_etc(root);
+}
+
+/*
+        The name the guest knows a program by, when the view maps it, as
+        the kernel will report it: the path the bowl's links lead to,
+        which is below the root and below something the view put there.
+        The same file, or this is not the name of it.
+*/
+static bool bowl_view_program(string_address root, bipolar handle,
+                              p8 address_to into, positive room)
+{
+        positive root_length = string_length(root);
+        file_facts held;
+        file_facts named;
+        bipolar got = bowl_handle_path(handle, into, room);
+
+        if (got <= (bipolar)root_length ||
+            string_compare_max(into, root, root_length) ||
+            into[root_length] != '/')
+                return false;
+
+        memory_copy(into, into + root_length, got - root_length + 1);
+        if (!bowl_view_maps(into) ||
+            file_look_code(handle, "", AT_EMPTY_PATH, address_of held) < 0 ||
+            file_look_code(AT_FDCWD, into, AT_SYMLINK_NOFOLLOW,
+                           address_of named) < 0)
+                return false;
+
+        return held.mode == named.mode && held.size == named.size &&
+               held.modified.seconds == named.modified.seconds &&
+               held.modified.nanoseconds == named.modified.nanoseconds;
 }
 
 static b32 bowl_launch_failed(bipolar native_shell, string_address what,
@@ -1191,6 +1434,7 @@ static DEAD_END fn bowl_inside(string_address root,
                                bipolar native_shell, bool isolated)
 {
         bipolar program_handle = -1;
+        p8 named[BOWL_PATH_LIMIT];
         bipolar failed;
 
         /* Fast keeps the host's /run and /tmp, and the files this writes are
@@ -1236,6 +1480,18 @@ static DEAD_END fn bowl_inside(string_address root,
                 {
                         bowl_fail(program, program_handle);
                         exit(1);
+                }
+
+                /* The view holds the bowl's own file under the name the
+                   guest has for it: execute that, and /proc/PID/exe, the
+                   argument of a script and the directory a program finds
+                   its resources in are the guest's. */
+                if (bowl_view_program(root, program_handle, named,
+                                      sizeof(named)))
+                {
+                        system_close(program_handle);
+                        program_handle = -1;
+                        program = named;
                 }
         }
 

@@ -4728,7 +4728,7 @@ static b32 build_tool_links(string_address image, string_address applet, bool dr
                         directory = "sbin";
 
                 if (directory &&
-                    build_tool_link(image, build_join("../", applet, null),
+                    build_tool_link(image, build_join("/", applet, null),
                                     build_join(directory, "/", one->name, null),
                                     dry))
                         return 1;
@@ -5211,7 +5211,7 @@ static b32 build_userspace()
                         names[2] = "bash";
 
                         for (positive at = 0; at < 3; at++)
-                                if (build_link("../shell",
+                                if (build_link("/shell",
                                                build_join(image, "/bin/", names[at],
                                                           null)))
                                         return build_die(build_join("linking /bin/",
@@ -5241,9 +5241,9 @@ static b32 build_userspace()
 
                         if (build_link("monitor.sh",
                                        build_join(image, "/mointor.sh", null)) ||
-                            build_link("../monitor.sh",
+                            build_link("/monitor.sh",
                                        build_join(image, "/bin/monitor.sh", null)) ||
-                            build_link("../monitor.sh",
+                            build_link("/monitor.sh",
                                        build_join(image, "/bin/mointor.sh", null)))
                                 return build_die("linking the monitor");
                 }
