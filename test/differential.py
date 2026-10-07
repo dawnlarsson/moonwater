@@ -40383,8 +40383,11 @@ def harness_objtool_shape(argv):
     objtool runs only inside `sh build.sh --host box`, and no lane builds the
     kernel, so three of its refusals reached main in one day: a table after
     ret in .text (285637fe), a jump from one ASM_FUNC to a label inside the
-    next (c6c80712), and a bare ret that skipped the return thunk and left
-    the ASM_RET after it unreachable (e9e1c2b1). Each is visible in the
+    next (c6c80712), a bare ret that skipped the return thunk and left the
+    ASM_RET after it unreachable (e9e1c2b1), and an indirect call spelled
+    `call *%rbx` in a kernel built with retpolines, where objtool says
+    "indirect call found in MITIGATION_RETPOLINE build" (bipolar_to_string).
+    Each is visible in the
     source, so this reads lib.c the way the kernel build would see its x86_64
     half -- every body outside a !KERNEL_MODE guard -- and refuses: data
     directives in a text section, a ret not spelled ASM_RET, an instruction
@@ -40580,6 +40583,11 @@ def harness_objtool_shape(argv):
                 if line == "ASM_RET":
                     after = "ASM_RET"
                     continue
+                if re.match(r"^(call|jmp)[qlw]?\s+\*", line):
+                    failures.append("%s: bare %s; the kernel is built with retpolines and an "
+                                    "indirect branch it makes is spelled ASM_CALL (a call "
+                                    "through __x86_indirect_thunk_REG)" % (where, line))
+                    continue
                 if word in ("ud2", "jmp", "jmpq"):
                     after = line
                 if frame_scratch(word, line):
@@ -40627,6 +40635,7 @@ def harness_objtool_shape(argv):
         "inside a": shape % ('".La_in: nop\\n" ASM_RET', '"jmp .La_in\\n"'),
         "writes %rbp": shape % ('"push %rbp\\n mov %rsi, %rbp\\n pop %rbp\\n" ASM_RET',
                                 '"nop\\n"'),
+        "bare call *%rbx": shape % ('"call *%rbx\\n" ASM_RET', '"nop\\n"'),
     }
     framed = shape % ('"push %rbp\\n mov %rsp, %rbp\\n cmp %rbp, %rax\\n pop %rbp\\n" ASM_RET',
                       '"nop\\n"')
@@ -40982,6 +40991,98 @@ int main(void) {
           % (sites, said.strip().splitlines()[-1] if said.strip() else "?", parent_lost))
     write_tally("host-writes", 1 if not failures else 0, 1)
     return 1 if failures else 0
+
+
+def harness_pure_stores(argv):
+    """No function declared PURE or CONST stores through a pointer parameter,
+    and none declared CONST reads through one.
+
+    A pure function may read memory but not write it, and GCC acts on that: a
+    call to one is not taken to change anything it was handed. parse.c's
+    parse_redirect_fd_number was PURE and stored the descriptor through its
+    third parameter. The plain build was right by the luck of where the
+    compiler left an uninitialised local, and a build that zeroed locals
+    (-ftrivial-auto-var-init=zero, MW_HARDEN=1) turned `2>/dev/null` into a
+    redirect of the wrong descriptor, which is how it was found. The attribute
+    gains nothing in a program that is one translation unit, so a store under
+    it is only ever a bug waiting for a compiler to notice.
+
+    Every function definition in src/ is read with comments, strings and
+    character literals blanked; one whose declaration says PURE, CONST or
+    __attribute__((pure|const)) and whose body assigns through a parameter
+    that is a pointer or an array (*p =, p->field =, p[i] =, address_to p =)
+    is reported. A store through a local that was copied from a parameter is
+    not seen, and a call that stores is not either: this is the shape that
+    was there, not a proof.
+
+        python3 test/differential.py --harness pure_stores
+    """
+    del argv
+    import re
+
+    def blank(text):
+        text = re.sub(r"/\*.*?\*/", lambda m: re.sub(r"[^\n]", " ", m.group(0)), text, flags=re.S)
+        text = re.sub(r"//[^\n]*", lambda m: " " * len(m.group(0)), text)
+        text = re.sub(r"'(?:\\.|[^'\\])'", lambda m: "'x'" + " " * (len(m.group(0)) - 3), text)
+        text = re.sub(r'"(?:\\.|[^"\\])*"', lambda m: '"' + " " * (len(m.group(0)) - 2) + '"', text)
+        return text
+
+    header = re.compile(r"\b(\w+)\s*\(([^;{}()]*(?:\([^()]*\)[^;{}()]*)*)\)\s*\{")
+    stores = (r"\*\s*{n}\s*(?:=(?!=)|\+=|-=|\|=|&=|\^=|<<=|>>=)",
+              r"\baddress_to\s+{n}\s*(?:=(?!=)|\+=|-=|\|=|&=)",
+              r"\b{n}\s*->\s*\w+(?:(?:\.|->)\w+|\[[^\]]*\])*\s*(?:=(?!=)|\+=|-=|\|=|&=|\^=|<<=|>>=)",
+              r"\b{n}\s*\[[^\]]*\]\s*(?:=(?!=)|\+=|-=|\|=|&=)")
+    found = []
+    seen = 0
+    for path in sorted((HARNESS_ROOT / "src").rglob("*")):
+        if path.suffix not in (".c", ".inc", ".h"):
+            continue
+        text = blank(path.read_text(errors="replace"))
+        for match in header.finditer(text):
+            name = match.group(1)
+            if name in ("if", "while", "for", "switch", "return", "sizeof", "defined"):
+                continue
+            start = max(text.rfind(";", 0, match.start()), text.rfind("}", 0, match.start()),
+                        text.rfind("{", 0, match.start()))
+            declaration = text[start + 1:match.start()]
+            if "\n#" in declaration:
+                declaration = declaration.split("\n#")[-1]
+            if not re.search(r"\b(?:PURE|CONST)\b|__attribute__\s*\(\(\s*(?:pure|const)", declaration):
+                continue
+            seen += 1
+            depth = 0
+            at = match.end() - 1
+            while at < len(text):
+                if text[at] == "{":
+                    depth += 1
+                elif text[at] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                at += 1
+            body = text[match.end() - 1:at]
+            constant = re.search(r"\bCONST\b|__attribute__\s*\(\(\s*const", declaration)
+            for parameter in match.group(2).split(","):
+                named = re.search(r"(\w+)\s*(?:\[[^\]]*\])?\s*$", parameter.strip())
+                if not named or not re.search(r"address_to|\*|\[|string_address", parameter):
+                    continue
+                n = re.escape(named.group(1))
+                line = text.count("\n", 0, match.start(1)) + 1
+                if any(re.search(shape.format(n=n), body) for shape in stores):
+                    found.append("%s:%d %s stores through %s" % (path.relative_to(HARNESS_ROOT), line,
+                                                               name, named.group(1)))
+                # A const function may not read memory either: its result is
+                # taken to depend on its arguments' values and nothing else,
+                # so two calls over a buffer that changed between them are
+                # one call.
+                elif constant and re.search(r"\b%s\s*\[|\*\s*%s\b|\b%s\s*->" % (n, n, n), body):
+                    found.append("%s:%d %s is CONST and reads through %s" % (path.relative_to(HARNESS_ROOT),
+                                                                           line, name, named.group(1)))
+    for one in found:
+        print("  FAIL " + one)
+    print("pure stores: %d PURE or CONST definitions read, %d break their attribute" % (seen, len(found)))
+    write_tally("pure-stores", 0 if found else 1, 1)
+    return 1 if found else 0
 
 
 def harness_net_sysctl(argv):
@@ -77599,6 +77700,7 @@ HARNESS_CHECKS = {
     "native_extract_test": harness_native_extract_test,
     "surface_coreutils_gap": harness_surface_coreutils_gap,
     "shell_functions": harness_shell_functions,
+    "pure_stores": harness_pure_stores,
     "audit_shell_functions": harness_audit_shell_functions,
     "canvas_lifetime": harness_canvas_lifetime,
     "canvas_hold": harness_canvas_hold,

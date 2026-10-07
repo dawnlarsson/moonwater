@@ -1924,8 +1924,15 @@ static PURE bool parse_redirect_brace(string_address text, positive length)
 /* A numbered redirect prefix. Dash 0.5.x only takes a single digit 0-9:
    `10>file` and `255>file` are that number as a word plus a stdout
    redirect, so `exec 255>x` is `exec 255` with stdout on x. Bash,
-   including --posix, takes any fd. */
-static PURE bool parse_redirect_fd_number(string_address text, positive length,
+   including --posix, takes any fd.
+
+   Not PURE: it stores the number through its third parameter, and a pure
+   function may not write memory. GCC is entitled to take the call's effect
+   on `parsed` to be none, and did as soon as the local was initialised
+   (-ftrivial-auto-var-init=zero turned `2>/dev/null` into a redirect of
+   descriptor 0's default): the build had been right by the luck of where the
+   compiler left an uninitialised word. */
+static bool parse_redirect_fd_number(string_address text, positive length,
                                           positive address_to descriptor)
 {
         positive parsed;

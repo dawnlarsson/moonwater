@@ -2031,7 +2031,7 @@ static COLD fn array_element_forget(array_table address_to table, positive at)
 /* Bash's string hash, FNV-1 over the bytes read as signed chars: the order
    its associative arrays, completion specifications and command hash table
    list their entries in, which is the order these have to agree with. */
-static CONST p32 shell_fnv1(string_address key, positive length)
+static PURE p32 shell_fnv1(string_address key, positive length)
 {
         p32 hash = 2166136261u;
 

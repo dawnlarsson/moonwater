@@ -13556,7 +13556,9 @@ ASM_FUNC(positive_to_string)
     //       every value including the most negative, where the C this replaces
     //       was relying on signed overflow.
     //
-    "neg %rsi\n   mov %rsi, %r12\n   movb $45, (%rsp)\n   mov %rsp, %rdi\n   mov $1, %esi\n   call *%rbx\n   mov %rbx, %rdi\n   mov %r12, %rsi\n"
+    "neg %rsi\n   mov %rsi, %r12\n   movb $45, (%rsp)\n   mov %rsp, %rdi\n   mov $1, %esi\n"
+    ASM_CALL("rbx")
+    "mov %rbx, %rdi\n   mov %r12, %rsi\n"
     "add $24, %rsp\n   pop %r12\n   pop %rbx\n   jmp positive_to_string\n"
     ASM_END(bipolar_to_string)
     //
