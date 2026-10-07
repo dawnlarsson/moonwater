@@ -2539,6 +2539,30 @@ static COLD bipolar net_watch_events(b32 events, netlink_buffer address_to messa
         interfaces already there, so each directory under net/ipv6/conf is
         written.
 
+        Not the network's, but the same moment's and the same table: the
+        settings a machine that was never told anything else runs on the
+        kernel's own, and the default is what Debian and Arch ship.
+        fs.protected_symlinks and protected_hardlinks 1 (a link in a sticky
+        world-writable directory is followed or made only by its owner or the
+        directory's), fs.protected_fifos and protected_regular 1 (2 at the
+        tight tier: group-writable sticky directories too), kptr_restrict 1
+        (pointers read as zero to a process without CAP_SYSLOG; 2 hides them
+        from root as well), dmesg_restrict 1 and io_uring_disabled 1 (2 at
+        the tight tier: io_uring_setup refused to everybody; 1 refuses it to
+        processes without CAP_SYS_ADMIN, and nothing in the image uses it).
+        Root is not exempt from the four protected_* switches: they judge the
+        file's owner against the opener's, not capabilities, so root's `>file`
+        onto a file another user made in a sticky /tmp fails with EACCES, and
+        so does root following that user's symlink there. That is the attack
+        they close, and no tool of this image writes that way; the boot,
+        install and desktop lanes run with them on to show it. Root keeps
+        kallsyms, perf and dmesg (CAP_SYSLOG) under kptr_restrict 1 and
+        dmesg_restrict 1. unprivileged_bpf_disabled has no knob here, the
+        image is built without bpf(2) (classic socket filters, which the DHCP
+        client uses, are unaffected), and unprivileged user namespaces stay as
+        the kernel has them: bowls need them, and a kiosk tier that wants them
+        off sets user.max_user_namespaces itself.
+
         The reference tier (STRICT_REFERENCE) keeps the kernel's own values,
         the rest write the table below. rp_filter is left alone on purpose: the
         DHCP client is a UDP socket, its OFFER comes from an address with no
@@ -2646,6 +2670,17 @@ static COLD fn net_kernel_defaults(void)
                                   "0\n", true);
         net_sysctl("/proc/sys/net/ipv4/tcp_rfc1337", "1\n");
         net_sysctl("/proc/sys/net/ipv4/tcp_syncookies", "1\n");
+        net_sysctl("/proc/sys/fs/protected_symlinks", "1\n");
+        net_sysctl("/proc/sys/fs/protected_hardlinks", "1\n");
+        net_sysctl("/proc/sys/fs/protected_fifos",
+                   MOONWATER_STRICT >= STRICT_TIGHT ? "2\n" : "1\n");
+        net_sysctl("/proc/sys/fs/protected_regular",
+                   MOONWATER_STRICT >= STRICT_TIGHT ? "2\n" : "1\n");
+        net_sysctl("/proc/sys/kernel/kptr_restrict",
+                   MOONWATER_STRICT >= STRICT_TIGHT ? "2\n" : "1\n");
+        net_sysctl("/proc/sys/kernel/dmesg_restrict", "1\n");
+        net_sysctl("/proc/sys/kernel/io_uring_disabled",
+                   MOONWATER_STRICT >= STRICT_TIGHT ? "2\n" : "1\n");
 }
 #endif
 
