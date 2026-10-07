@@ -113894,7 +113894,18 @@ static fn floor_deflate_parse(void)
         p32 lit_got[288], lit_want[288], dist_got[32], dist_want[32];
         p32 random = 0x7a3c91d5u;
         bool same = true, anything = false;
+        //      The input the walk reads lives against a guard page, its end on even
+        //      trials and its start on odd ones, so a read past the last byte or
+        //      before the first (a candidate, a window, a sixteen byte compare) is a
+        //      fault and not a quiet wrong answer.
+        p8 address_to guarded = floor_pages(24);
+        positive usable = 22 * 4096;
 
+        if (!guarded)
+        {
+                check("deflate parse fast: guard pages mapped", false);
+                return;
+        }
 #define FLOOR_RANDOM() (random ^= random << 13, random ^= random >> 17, random ^= random << 5, random)
         for (positive trial = 0; trial < 180; trial++)
         {
@@ -113945,6 +113956,9 @@ static fn floor_deflate_parse(void)
                                 at++;
                         }
                 }
+                p8 address_to input = trial % 2 ? guarded + 4096 : guarded + 4096 + usable - total;
+
+                memory_copy(input, data, total);
                 start = pos - FLOOR_RANDOM() % (pos + 1) % 5000;
                 limit = pos + 1 + FLOOR_RANDOM() % 65535;
                 if (limit > total)
@@ -113968,7 +113982,7 @@ static fn floor_deflate_parse(void)
                         lit_got[i] = lit_want[i] = (p32)(FLOOR_RANDOM() % 5);
                 for (positive i = 0; i < 32; i++)
                         dist_got[i] = dist_want[i] = (p32)(FLOOR_RANDOM() % 5);
-                got.base = want.base = data;
+                got.base = want.base = input;
                 got.total = want.total = total;
                 got.start = want.start = start;
                 got.pos = want.pos = pos;
@@ -114001,6 +114015,7 @@ static fn floor_deflate_parse(void)
                        !memory_compare(dist_got, dist_want, sizeof(dist_got));
         }
 #undef FLOOR_RANDOM
+        memory_free(guarded, 24 * 4096);
         check("deflate parse fast agrees with the position at a time walk: pairs, counts, table, stopping place", same && anything);
 }
 
