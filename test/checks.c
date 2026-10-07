@@ -72832,7 +72832,7 @@ static bool wls_sandbox(void)
         bipolar gid = system_call_1(syscall(getgid), 0);
         positive at;
 
-        if (system_call_1(syscall(unshare), 0x10000000 | 0x00020000) < 0)
+        if (system_call_1(syscall(unshare), 0x10000000 | 0x00020000 | 0x04000000) < 0)
                 return false;
         map[0] = '0';
         map[1] = ' ';
@@ -76408,6 +76408,62 @@ static fn nearby_reload_failures(void)
         link_nearby_close();
 }
 
+/*
+        The name this machine offers is its host name in lowercase, as far as
+        it reads as one a member would keep, and a plain "machine" where it
+        does not start as one.
+*/
+static fn machine_names(void)
+{
+        static const struct
+        {
+                string_address host;
+                string_address name;
+        } cases[] = {
+            {"Box", "box"},
+            {"MY-Box.local", "my-box"},
+            {"a_b", "a_b"},
+            {"9lives", "9lives"},
+            {"-x", "machine"},
+            {"_x", "machine"},
+            {".local", "machine"},
+            {"UPPER_Case9", "upper_case9"},
+            {"abcdefghijklmnopqrstuvwxyz0123456789ABCDEF",
+             "abcdefghijklmnopqrstuvwxyz01234"},
+            {"x y", "x"},
+            {"\xc3\xbcx", "machine"},
+        };
+        p8 name[WATERLINK_NAME_MAX];
+        positive wrong = 0;
+
+        if (system_call_2(syscall(sethostname), (positive) "wls-host", 8) < 0)
+                return;
+        link_machine_name(name);
+        check("a host name is the name", string_equals((string_address)name,
+                                                       "wls-host"));
+        for (positive at = 0; at < array_count(cases); at++)
+        {
+                memory_fill(name, 0xa5, sizeof name);
+                (void)system_call_2(syscall(sethostname),
+                                    (positive)cases[at].host,
+                                    string_length(cases[at].host) < 64
+                                            ? string_length(cases[at].host)
+                                            : 64);
+                link_machine_name(name);
+                wrong += !string_equals((string_address)name, cases[at].name) ||
+                         memory_span_byte(name +
+                                                  string_length((string_address)name),
+                                          0,
+                                          WATERLINK_NAME_MAX -
+                                                  string_length((string_address)name)) !=
+                                 WATERLINK_NAME_MAX -
+                                         string_length((string_address)name);
+        }
+        check("sec: it is the host name lowercased as far as it reads as one, "
+              "whole to the end of its room, and machine where it does not",
+              wrong == 0);
+}
+
 //      The records of a file keep the names that could have been paired, and
 //      the last record takes the place of one that could not (the peers and
 //      the groups read their files through the same walk).
@@ -76503,6 +76559,13 @@ static fn wifi_source_checks(void)
         from.halen = 6;
         check("the kernel's 18 bytes of it are enough", wifi_eapol_from(address_of link, address_of from, 18));
         check("one the kernel gave no address for is not", !wifi_eapol_from(address_of link, address_of from, 4));
+        from.halen = 6;
+        for (p8 kind = 1; kind < 5; kind++)
+        {
+                from.pkttype = kind;
+                check("one to everyone, to a group, to another station or from this one is not taken",
+                      !wifi_eapol_from(address_of link, address_of from, sizeof(from)));
+        }
 }
 
 static fn wifi_air_capacity(void)
@@ -78525,6 +78588,7 @@ b32 main(void)
         groups_unreadable();
         nearby_reload_failures();
         records_named();
+        machine_names();
         labels();
         wpa_key();
         wifi_unwrap_checks();

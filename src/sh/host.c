@@ -4876,9 +4876,17 @@ static b32 host_canvas(string_address address_to arguments, positive count)
                 if (!control.running)
                         return host_refuse("Canvas is already off\n");
 
+                //      A pipe closed on the banner (`canvas off | true`) must not
+                //      end this before the desktop is; the signal is put back at once,
+                //      since the console shell started below would inherit it ignored.
+                positive piped[4];
+                bool quiet = system_signal_install(13, 1, 0, 0, piped);
+
                 host_say(log, host_label "Canvas off: every window closes, this one too. "
                                          "On the text console, moonwater canvas on "
                                          "brings the desktop back.\n");
+                if (quiet)
+                        system_signal_action(13, piped, null, 8);
 
                 system_signal_install(1, 1, 0, 0, null);
 
@@ -5283,6 +5291,7 @@ static b32 host_bios(string_address address_to arguments, positive count)
 #define NL80211_CONNECT_SECONDS 20
 #define WIFI_EAPOL_SECONDS 8
 #define WIFI_EAPOL_HDR 99
+#define PACKET_HOST 0
 
 typedef struct
 {
@@ -6228,7 +6237,8 @@ static COLD bool wifi_eapol_from(wifi_link address_to link, socket_address_packe
         //      The kernel gives back the address only as far as the hardware
         //      address goes, which is 18 bytes of the 20 here.
         return size >= (p32)((p8 address_to)from->addr - (p8 address_to)from) + 6 &&
-               from->halen == 6 && !memory_compare(from->addr, link->bssid, 6);
+               from->pkttype == PACKET_HOST && from->halen == 6 &&
+               !memory_compare(from->addr, link->bssid, 6);
 }
 
 /* One frame off the EAPOL socket, through the state machine. */
@@ -15928,8 +15938,10 @@ static b32 host_bind(string_address address_to arguments, positive count)
 
         if (!event)
         {
-                if (host_bind_request(SPARK_BIND_GET, 1, null, address_of probe) < 0)
-                        return host_fail(SPARK_DEVICE, -ENODEV);
+                bipolar failed = host_bind_request(SPARK_BIND_GET, 1, null, address_of probe);
+
+                if (failed < 0)
+                        return host_fail(SPARK_DEVICE, failed);
 
                 if (second)
                         string_format(log_error,

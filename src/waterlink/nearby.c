@@ -248,26 +248,25 @@ static fn link_peers_unlock(bipolar handle)
 
 /*
         This machine's name as it offers it to a member, and as `link pair`
-        prints it: the host name in lowercase, held to what link_name_good
-        takes. The far side checks it again all the same.
+        prints it: the host name in lowercase, as far as it is letters,
+        digits, dashes and underscores and starting with a letter or digit,
+        which is what link_name_good takes. The far side checks it again all
+        the same.
 */
 fn link_machine_name(p8 address_to name)
 {
         p8 uts[6 * 65];
-        positive used = 0;
+        positive used;
 
         memory_zero(name, WATERLINK_NAME_MAX);
         if (system_call_1(syscall(uname), (positive)uts) >= 0)
-                for (positive at = 65; at < 130 && uts[at] &&
-                                       used < WATERLINK_NAME_MAX - 1;
-                     at++)
-                {
-                        p8 c = byte_to_lower(uts[at]);
-
-                        if (byte_is_alnum(c) || (used && (c == '-' || c == '_')))
-                                name[used++] = c;
-                }
-        if (!used)
+                for (positive at = 0;
+                     at < WATERLINK_NAME_MAX - 1 && uts[65 + at]; at++)
+                        name[at] = byte_to_lower(uts[65 + at]);
+        used = string_span_of_set((string_address)name,
+                                  "abcdefghijklmnopqrstuvwxyz0123456789-_");
+        memory_zero(name + used, WATERLINK_NAME_MAX - used);
+        if (!used || !byte_is_alnum(name[0]))
                 memory_copy(name, "machine", 8);
 }
 
