@@ -84,8 +84,17 @@ def anchor(row, cache, errors):
     if row.evidence not in cache:
         text = evidence_path.read_text(encoding='utf-8', errors='replace')
         if section:
+            # A section may share its body with its twins: #if defined(A) ||
+            # defined(B) ... #endif /* A || B */. It still opens and closes
+            # on its own name.
             begin = text.find('#ifdef %s\n' % section)
             end = text.find('#endif /* %s */\n' % section)
+            if begin < 0:
+                opened = re.search(r'^#if[^\n]*defined\(%s\)' % re.escape(section), text, re.M)
+                begin = opened.start() if opened else -1
+            if end < 0:
+                closed = re.search(r'^#endif /\* (?:\w+ \|\| )*%s(?: \|\| \w+)* \*/\n' % re.escape(section), text, re.M)
+                end = closed.start() if closed else -1
             if begin < 0 or end < begin:
                 errors.append('%s: no section %s in %s' %
                               (row.routine, section, file))
