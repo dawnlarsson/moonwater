@@ -1341,6 +1341,13 @@ static bool host_install_refresh(host_install address_to install)
             !string_equals(system_disk, data_disk))
                 return false;
 
+        /*      The disk the census found, and no other: a second disk that
+                carries the same partition identities (copied from this one,
+                which anybody who has read its table can do) answers the tag
+                first some boots, and would be mounted in its place. */
+        if (install->disk[0] && !string_equals(install->disk, system_disk))
+                return false;
+
         string_copy(install->disk, system_disk);
         string_copy(install->system, system);
         string_copy(install->data, data);
@@ -2068,10 +2075,99 @@ static fn host_booted(host_settings address_to settings)
 }
 
 /*
+        Whether a disk's place in sysfs says something can be plugged into
+        it: a USB or Thunderbolt bus in the path. The link is what
+        /sys/class/block/NAME points at.
+*/
+static PURE bool host_link_external(string_address link)
+{
+        return string_find(link, "/usb") || string_find(link, "/thunderbolt");
+}
+
+/*
+        Whether a disk is on a bus something can be plugged into. The path
+        says USB or Thunderbolt, the block device says removable, and a device
+        above it may say so itself: a PCI device behind an external-facing
+        port (a USB4 or Thunderbolt NVMe enclosure looks like any NVMe disk)
+        reads "removable" in its own `removable` file, as does a USB device
+        that is not soldered in. A disk that cannot be told is taken to be
+        external.
+*/
+static bool host_disk_external(string_address disk)
+{
+        p8 sysfs[HOST_PATH_ROOM];
+        p8 link[HOST_PATH_ROOM * 2];
+        p8 path[HOST_PATH_ROOM * 2];
+        p8 flag[16];
+        string_address devices;
+
+        if (!host_name_valid(disk) ||
+            !host_join(sysfs, sizeof(sysfs), "/sys/class/block/", disk) ||
+            file_link_text(sysfs, link, sizeof(link)) <= 0 ||
+            host_link_external(link))
+                return true;
+
+        if (!host_join(sysfs, sizeof(sysfs), "/sys/block/", disk) ||
+            !host_join(path, sizeof(path), sysfs, "/removable") ||
+            host_read_kernel(path, flag, sizeof(flag)) < 0 || flag[0] != '0')
+                return true;
+
+        //      Every directory above the block device, up to /sys/devices.
+        devices = string_find(link, "/devices/");
+        if (!devices || !host_join(path, sizeof(path), "/sys", devices))
+                return true;
+
+        for (;;)
+        {
+                p8 address_to slash = memory_last_of(path, '/', string_length(path));
+
+                if (!slash || slash <= path + sizeof("/sys/devices") - 1)
+                        break;
+                *slash = end;
+                if (host_join(sysfs, sizeof(sysfs), path, "/removable") &&
+                    host_read_kernel(sysfs, flag, sizeof(flag)) >= 0 &&
+                    (string_equals(flag, "removable") || string_equals(flag, "1")))
+                        return true;
+        }
+
+        return false;
+}
+
+/*
+        Whether an install is the one the session started from: the settings
+        an image boots with carry the medium they were written for, and the
+        same number is in the image on the disk they came from. Only an
+        install of the running build can be.
+*/
+static bool host_install_booted(host_install address_to install,
+                                string_address running,
+                                host_settings address_to booted)
+{
+        host_settings theirs;
+
+        return booted && !host_medium_blank(booted->medium, sizeof(booted->medium)) &&
+               install->readable && string_equals(install->build, running) &&
+               host_settings_install(install, address_of theirs) &&
+               !memory_compare(theirs.medium, booted->medium, sizeof(theirs.medium));
+}
+
+/*
+        Whether boot takes, without asking, the only disk with this build when
+        it is not known to be the one the session started from. On a bus
+        nothing is plugged into it is; on one something is, a USB or
+        Thunderbolt stick or a removable disk, it is asked about, and the
+        tight tier asks about it wherever it is. Whether a lone stick of this
+        build is taken on a machine that has no install of its own is the one
+        decision here: to take it, return !tight.
+*/
+static PURE bool host_lone_taken(bool external, bool tight)
+{
+        return !external && !tight;
+}
+
+/*
         The one install of this build that the session started from, if it
-        is one: the settings an image boots with carry the medium they were
-        written for, and the same number is in the image on the disk they came
-        from.
+        is one.
 */
 static host_install address_to host_census_booted(host_census address_to census,
                                                   string_address running,
@@ -2080,22 +2176,12 @@ static host_install address_to host_census_booted(host_census address_to census,
         host_install address_to found = null;
         positive count = 0;
 
-        if (host_medium_blank(booted->medium, sizeof(booted->medium)))
-                return null;
-
         for (positive at = 0; at < census->count; at++)
-        {
-                host_install address_to install = census->found + at;
-                host_settings theirs;
-
-                if (!install->readable || !string_equals(install->build, running) ||
-                    !host_settings_install(install, address_of theirs) ||
-                    memory_compare(theirs.medium, booted->medium, sizeof(theirs.medium)))
-                        continue;
-
-                found = install;
-                count++;
-        }
+                if (host_install_booted(census->found + at, running, booted))
+                {
+                        found = census->found + at;
+                        count++;
+                }
 
         return count == 1 ? found : null;
 }
@@ -2106,6 +2192,7 @@ static b32 host_boot(void)
         p8 verdict[HOST_NAME_ROOM + 16];
         host_census census;
         host_install address_to chosen = null;
+        host_install address_to refused = null;
         host_settings settings;
         positive same = 0;
         bool known;
@@ -2214,6 +2301,20 @@ static b32 host_boot(void)
                 }
         }
 
+        /*      One disk with this build is no better a reason than two when
+                it is not known to be the one this session started from: a
+                public release's build is what every copy says, and a stick
+                somebody pushed in says it as well as the machine's own disk,
+                its /root/main.moonwater.sh then running as root. */
+        if (same == 1 && chosen &&
+            !host_install_booted(chosen, running, known ? address_of settings : null) &&
+            !host_lone_taken(host_disk_external(chosen->disk),
+                             MOONWATER_STRICT >= STRICT_TIGHT))
+        {
+                refused = chosen;
+                chosen = null;
+        }
+
         if (chosen)
         {
                 if (!known && host_settings_install(chosen, address_of settings))
@@ -2245,10 +2346,14 @@ static b32 host_boot(void)
                 return 1;
         }
 
-        chosen = census.found;
+        chosen = refused ? refused : census.found;
         host_write_text(HOST_QUESTION, "");
         host_verdict_set("ask ", chosen->disk);
-        host_say(log, chosen->readable
+        host_say(log, refused
+                          ? host_label "%s has Moonwater installed from this build, "
+                                       "on a disk that is not known to be the one "
+                                       "this started from.\n"
+                      : chosen->readable
                           ? host_label "%s has Moonwater installed from another build.\n"
                           : host_label "%s has Moonwater's partitions and no image on "
                                        "them: an install that did not finish.\n",

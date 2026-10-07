@@ -80539,6 +80539,40 @@ static fn secret_arguments(void)
 }
 #endif
 
+/*
+        The disks boot takes on the install's word are the ones on a bus
+        nothing is plugged into: the place sysfs gives a disk says USB or
+        Thunderbolt for the rest (host_link_external); the `removable` files
+        above it are read from the real sysfs and are the install lane's to
+        show (an NVMe disk in a guest is taken), and a disk that cannot be
+        told is external. The only disk with this build that is not the one
+        the session started from is taken when it is not external and the
+        tier is not tight (host_lone_taken).
+*/
+static fn boot_links(void)
+{
+        static const struct { string_address link; bool external; } links[] = {
+            {"../../devices/pci0000:00/0000:00:14.0/usb2/2-1/2-1:1.0/host6/target6:0:0/6:0:0:0/block/sdb", true},
+            {"../../devices/pci0000:00/0000:00:03.0/usb1/1-1/1-1:1.0/host0/target0:0:0/0:0:0:0/block/sda", true},
+            {"../../devices/pci0000:00/0000:00:0d.2/0-0/thunderbolt/0-1/nvme/nvme1/nvme1n1", true},
+            {"../../devices/pci0000:00/0000:00:1d.0/0000:3d:00.0/nvme/nvme0/nvme0n1", false},
+            {"../../devices/pci0000:00/0000:00:17.0/ata1/host0/target0:0:0/0:0:0:0/block/sda", false},
+            {"../../devices/platform/soc/mmc_host/mmc0/mmc0:0001/block/mmcblk0", false},
+            {"../../devices/virtual/block/loop0", false},
+        };
+
+        for (positive at = 0; at < array_count(links); at++)
+                check("A disk on USB or Thunderbolt is external, one on NVMe or SATA is not",
+                      host_link_external(links[at].link) == links[at].external);
+        check("A disk named with a path is external", host_disk_external("no/such"));
+        check("A disk that is not there is external", host_disk_external("nosuchdisk9"));
+        check("No disk at all is external", host_disk_external(""));
+        check("A fixed disk is taken at the default tier", host_lone_taken(false, false));
+        check("An external disk is asked about at the default tier", !host_lone_taken(true, false));
+        check("No disk is taken at the tight tier", !host_lone_taken(false, true));
+        check("An external disk is asked about at the tight tier", !host_lone_taken(true, true));
+}
+
 b32 main(void)
 {
         names();
@@ -80559,6 +80593,7 @@ b32 main(void)
 #if MOONWATER_STRICT >= STRICT_TIGHT
         secret_arguments();
 #endif
+        boot_links();
         json();
         oci();
         nix();

@@ -119,7 +119,11 @@ disk keeps them there; a disk that says it is removable, a USB stick, is
 installed only with the word `removable`. When a stick finds an install of
 another build, `setup use` runs this build on the disk's data, `setup update`
 writes this build onto the disk first, and `setup live` leaves the disk alone.
-`moonwater setup` says which of these a session is.
+The same three are asked of an install of this very build that is not known to
+be the one the session started from (more than one disk has it, or the only one
+is on USB or Thunderbolt or says it is removable, or `MOONWATER_STRICT` is
+tight): every copy of a release says the same build, and a stick pushed in
+says it too. `moonwater setup` says which of these a session is.
 
 **Settings.** Binds, init and exit live in the boot image: set them on a live
 stick and `setup install` carries them to the disk, while `setup update` keeps
