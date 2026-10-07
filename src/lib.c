@@ -3358,6 +3358,29 @@ __asm__(
 //      back to were entered with %eax clear and return it as the answer for
 //      two spans that agree.
 //
+//      Which of the two shapes depends on what is done with the answer. A
+//      masked window ends in a mask register, and getting the flags out of it
+//      into an integer register is a kmov, about three cycles of latency that
+//      the masked store or the branch on a compare never waits for and that
+//      a search whose answer is the next search's start waits on every time.
+//      The searches (memory_first_of, memory_last_of, memory_common_prefix,
+//      memory_span_byte, memory_ascii_span) therefore read the first sixty
+//      four bytes as two 256-bit vectors and combine their vpmovmskb into one
+//      register, cut to the count by a mask a shift makes: the same single
+//      branch-free path at random sizes, within five percent of the masked
+//      window, and 8 to 11 ticks a call quicker in a chain, which a parser is.
+//      Counts of 48 over runs of 8 to 27 bytes, each call starting past the
+//      last, ticks on a 9950X: memory_first_of 14.7 for the ladder, 21.4 for
+//      the masked window and 16.8 for the two vectors; memory_last_of 17.2,
+//      26.3, 18.5; memory_ascii_span 23.1, 24.9, 16.4. They also run on a
+//      processor that has AVX2 and not AVX-512, which the masked windows
+//      cannot. They are not masked, so they need the pointer's page to exist
+//      for sixty four bytes, which a count of nothing does not promise (a
+//      pointer one past the end of its mapping is a valid argument), so a
+//      count of nothing is answered before any load. The stores and the branches
+//      keep the masked window: memory_fill, memory_copy, memory_compare and
+//      the string routines.
+//
 #define TINY_PAGE_EDGE(reg, out) \
     "mov %" reg ", %ecx\n   not %ecx\n   test $0xfc0, %ecx\n   jz " out "\n"
 #define TINY_MASK(n) \
@@ -5665,26 +5688,44 @@ __asm__(
     // Kernel builds reach that entry directly and never read feature bytes.
     "xor %eax, %eax\n"
     ASM_USERSPACE_WIDE(
-        WIDE_PICK_MAX
-        "cmp $64, %rdx\n   jbe .Lfirst_tiny\n"
-        WIDE_MEMORY(AVX512_WIDTH, AVX512_BROADCAST, "", AVX512_HUNT,
-                    AVX512_HUNT_QUAD, AVX512_HUNT_QUAD_WHICH, AVX512_LEAVE, "7f")
-        ".Lfirst_tiny:\n"
-        TINY_PAGE_EDGE("edi", "7f") TINY_MASK("%rdx")
-        "vpbroadcastb %esi, %zmm0\n   vpcmpeqb (%rdi), %zmm0, %k0{%k1}\n   kmovq %k0, %rcx\n   xor %eax, %eax\n   test %rcx, %rcx\n   jz .Lfirst_tiny_done\n"
-        "tzcnt %rcx, %rcx\n   lea (%rdi,%rcx), %rax\n"
-        ".Lfirst_tiny_done:\n   vzeroupper\n" ASM_RET
-        "7:\n" ASM_NARROW("cpu_has_avx2", "5f")
-        //      Two 256-bit vectors where there is no AVX-512: sixty four bytes under a mask that a shift makes.
-        "cmp $64, %rdx\n   ja .Lfirst_avx2_big\n"
-        TINY_PAGE_EDGE("edi", ".Lfirst_avx2_big")
-        "test %rdx, %rdx\n   jz .Lfirst_avx2_none\n"
+        ASM_NARROW("cpu_has_avx2", "5f")
+        //
+        //      Sixty four bytes or fewer: two 256-bit compares of the first sixty four, the flags of both in one
+        //      register, a mask a shift makes cut to the count, and the lowest flag left. No branch on the size,
+        //      and none on where the byte is but the one that asks whether it is there. The processors with
+        //      AVX-512 take this too, and not a masked 512-bit window, because the address is wanted at once:
+        //      a compare into a mask register and a kmov out of it cost about three cycles of latency more than
+        //      a compare and a vpmovmskb, and a search whose answer is the next one's start -- a line, a field,
+        //      a word -- waits on that. Fixed counts of 32, 48 and 64 over lines of 8 to 27 bytes, each search
+        //      starting where the last ended, ticks a call on a 9950X: 14.7 for the word ladder this replaces,
+        //      21.4 for the masked window, 17.8 for this; counts drawn at random from 1 to 64, with the byte
+        //      absent, 41.6 for the ladder, 10.1 for the masked window and 10.5 for this.
+        //
+        "cmp $64, %rdx\n   ja .Lfirst_far\n"
+        TINY_PAGE_EDGE("edi", ".Lfirst_edge")
+        "test %rdx, %rdx\n   jz .Lfirst_none\n"
         "vmovd %esi, %xmm2\n   vpbroadcastb %xmm2, %ymm2\n   vpcmpeqb (%rdi), %ymm2, %ymm0\n   vpmovmskb %ymm0, %eax\n   vpcmpeqb 32(%rdi), %ymm2, %ymm1\n   vpmovmskb %ymm1, %ecx\n"
         "shl $32, %rcx\n   or %rcx, %rax\n   mov $64, %ecx\n   sub %edx, %ecx\n   mov $-1, %r8\n   shr %cl, %r8\n"
-        "and %r8, %rax\n   jz .Lfirst_avx2_absent\n   bsf %rax, %rax\n   add %rdi, %rax\n   vzeroupper\n" ASM_RET
-        ".Lfirst_avx2_absent:\n   vzeroupper\n"
-        ".Lfirst_avx2_none:\n   xor %eax, %eax\n" ASM_RET
-        ".Lfirst_avx2_big:\n   cmp $32, %rdx\n   jb 5f\n"
+        "and %r8, %rax\n   jz .Lfirst_absent\n   tzcnt %rax, %rax\n   add %rdi, %rax\n   vzeroupper\n" ASM_RET
+        ".Lfirst_absent:\n   vzeroupper\n"
+        ".Lfirst_none:\n   xor %eax, %eax\n" ASM_RET
+        //
+        //      Past sixty four bytes the count licenses the first sixty four, and the byte is usually in them: a
+        //      line, a field, a word. Two 256-bit compares answer that without the four vector block below,
+        //      which has to be entered, folded and asked "which of the four" before it can give an address.
+        //      A chain of searches that each start where the last ended, lines of 8 to 27 bytes in a megabyte,
+        //      a 9950X, ticks a line: 17.7 before, 13.2 after; lines of 20 to 79, 21.2 and 17.6.
+        //
+        ".Lfirst_far:\n   movzbl %sil, %ecx\n   vmovd %ecx, %xmm1\n   vpbroadcastb %xmm1, %ymm1\n   vpcmpeqb (%rdi), %ymm1, %ymm0\n   vpmovmskb %ymm0, %eax\n   test %eax, %eax\n   jz .Lfirst_second\n"
+        "tzcnt %eax, %eax\n   add %rdi, %rax\n   vzeroupper\n" ASM_RET
+        ".Lfirst_second:\n   vpcmpeqb 32(%rdi), %ymm1, %ymm0\n   vpmovmskb %ymm0, %eax\n   test %eax, %eax\n   jnz .Lfirst_second_hit\n"
+        ASM_NARROW("cpu_has_avx512", ".Lfirst_edge")
+        WIDE_MEMORY(AVX512_WIDTH, AVX512_BROADCAST, "", AVX512_HUNT,
+                    AVX512_HUNT_QUAD, AVX512_HUNT_QUAD_WHICH, AVX512_LEAVE, ".Lfirst_edge")
+        ".Lfirst_second_hit:\n   tzcnt %eax, %eax\n   lea 32(%rdi,%rax), %rax\n   vzeroupper\n" ASM_RET
+        //      Sixty four bytes or fewer in the last sixty four of a page, and the longer counts without AVX-512:
+        //      whole vectors inside the count only.
+        ".Lfirst_edge:\n   cmp $32, %rdx\n   jb 5f\n"
         WIDE_MEMORY(AVX2_WIDTH, AVX2_BROADCAST, AVX2_ZEROED, AVX2_HUNT,
                     AVX2_HUNT_QUAD, AVX2_HUNT_QUAD_WHICH, AVX2_LEAVE, "5f")
     )
@@ -5717,7 +5758,7 @@ __asm__(
     // Greatest-address match in one exact bounded span, or null. Vector and
     // word loads subtract from the exclusive end before they read.
     ASM_FUNC(memory_last_of)
-    ASM_USERSPACE_WIDE("cmpb $0, cpu_has_avx512(%rip)\n   jne .Llast_zmm\n.Llast_generic:\n")
+    ASM_USERSPACE_WIDE("cmpb $0, cpu_has_avx2(%rip)\n   jne .Llast_ymm\n.Llast_generic:\n")
     "test %rdx, %rdx\n   jz .Lmemory_last_x64_none\n   lea (%rdi,%rdx), %rax\n"
     ASM_USERSPACE_WIDE(
     ASM_NARROW("cpu_has_avx2", ".Lmemory_last_x64_words")
@@ -5737,12 +5778,20 @@ __asm__(
     ".Lmemory_last_x64_none:\n   xor %eax, %eax\n"
     ".Lmemory_last_x64_done:\n" ASM_RET
     ASM_USERSPACE_WIDE(
-    //      Up to sixty four bytes in one masked window, the highest flag in the mask. See TINY_PAGE_EDGE.
-    ".Llast_zmm:\n   cmp $64, %rdx\n   ja .Llast_generic\n"
-    TINY_PAGE_EDGE("edi", ".Llast_generic") TINY_MASK("%rdx")
-    "vpbroadcastb %esi, %zmm0\n   vpcmpeqb (%rdi), %zmm0, %k0{%k1}\n   kmovq %k0, %rcx\n   xor %eax, %eax\n   test %rcx, %rcx\n   jz .Llast_zmm_done\n"
-    "bsr %rcx, %rcx\n   lea (%rdi,%rcx), %rax\n"
-    ".Llast_zmm_done:\n   vzeroupper\n" ASM_RET
+    //      Up to sixty four bytes in two 256-bit compares, the flags of both in one register cut to the count by a
+    //      mask a shift makes, the highest flag left. Not a masked 512-bit window, whose answer comes out of a mask
+    //      register through a kmov: a search whose result is the next one's end waits on that. A chain of them,
+    //      a count of 48 over lines of 8 to 27 bytes, each search ending where the last found, ticks a call on a
+    //      9950X: 17.2 for the word and vector ladder, 26.3 with the masked window, 18.5 with this; counts drawn
+    //      at random from 1 to 64, 8.1 a call with the masked window and 8.5 with this. See TINY_PAGE_EDGE. A
+    //      count of nothing is for the body below: the pointer may be one past the end of its mapping, and these
+    //      windows are not masked, so n - 1 past 63 covers it and the longer counts in one compare.
+    ".Llast_ymm:\n   lea -1(%rdx), %rcx\n   cmp $63, %rcx\n   ja .Llast_generic\n"
+    TINY_PAGE_EDGE("edi", ".Llast_generic")
+    "vmovd %esi, %xmm2\n   vpbroadcastb %xmm2, %ymm2\n   vpcmpeqb (%rdi), %ymm2, %ymm0\n   vpmovmskb %ymm0, %eax\n   vpcmpeqb 32(%rdi), %ymm2, %ymm1\n   vpmovmskb %ymm1, %ecx\n"
+    "shl $32, %rcx\n   or %rcx, %rax\n   mov $64, %ecx\n   sub %edx, %ecx\n   mov $-1, %r8\n   shr %cl, %r8\n"
+    "and %r8, %rax\n   jz .Llast_ymm_absent\n   bsr %rax, %rax\n   add %rdi, %rax\n   vzeroupper\n" ASM_RET
+    ".Llast_ymm_absent:\n   vzeroupper\n   xor %eax, %eax\n" ASM_RET
     )
     ASM_END(memory_last_of)
     //
@@ -6171,7 +6220,7 @@ __asm__(
     // Length of the equal prefix of two exact bounded spans.  This shares
     // memory_compare's wide/common path but returns the mismatch position.
     ASM_FUNC(memory_common_prefix)
-    ASM_USERSPACE_WIDE("cmpb $0, cpu_has_avx512(%rip)\n   jne .Lprefix_zmm\n.Lprefix_generic:\n")
+    ASM_USERSPACE_WIDE("cmpb $0, cpu_has_avx2(%rip)\n   jne .Lprefix_ymm\n.Lprefix_generic:\n")
     "xor %eax, %eax\n   test %rdx, %rdx\n   jz .Lmemory_prefix_x64_done\n"
     ASM_USERSPACE_WIDE(
     ASM_NARROW("cpu_has_avx2", ".Lmemory_prefix_x64_words")
@@ -6207,11 +6256,16 @@ __asm__(
     "dec %rdx\n   jnz .Lmemory_prefix_x64_byte\n"
     ".Lmemory_prefix_x64_done:\n" ASM_RET
     ASM_USERSPACE_WIDE(
-    //      Up to sixty four bytes in one masked window. No difference in the lanes is a mask of nothing, tzcnt of
-    //      which is sixty four, and the count is never more than n.
-    ".Lprefix_zmm:\n   cmp $64, %rdx\n   ja .Lprefix_generic\n"
-    TINY_PAGE_EDGE("edi", ".Lprefix_generic") TINY_PAGE_EDGE("esi", ".Lprefix_generic") TINY_MASK("%rdx")
-    "vmovdqu8 (%rdi), %zmm0{%k1}{z}\n   vpcmpneqb (%rsi), %zmm0, %k0{%k1}\n   kmovq %k0, %rax\n   tzcnt %rax, %rax\n   cmp %rdx, %rax\n   cmova %rdx, %rax\n   vzeroupper\n" ASM_RET
+    //      Up to sixty four bytes in two 256-bit compares of each side: the flags of both in one register, the
+    //      lowest zero the first difference. All equal is a register of ones, whose complement is nothing, tzcnt
+    //      of which is sixty four, and the count is never more than n. Ticks a call on a 9950X in a chain, a
+    //      count of 48 and a difference every 8 to 27 bytes, each search starting past the last: 16.3 for the
+    //      ladder, 25.5 with a masked window and a kmov, 22.3 with this; counts drawn at random from 1 to 64,
+    //      10.6 a call with the masked window and 10.3 with this.
+    ".Lprefix_ymm:\n   lea -1(%rdx), %rcx\n   cmp $63, %rcx\n   ja .Lprefix_generic\n"
+    TINY_PAGE_EDGE("edi", ".Lprefix_generic") TINY_PAGE_EDGE("esi", ".Lprefix_generic")
+    "vmovdqu (%rdi), %ymm0\n   vpcmpeqb (%rsi), %ymm0, %ymm0\n   vpmovmskb %ymm0, %eax\n   vmovdqu 32(%rdi), %ymm1\n   vpcmpeqb 32(%rsi), %ymm1, %ymm1\n   vpmovmskb %ymm1, %ecx\n"
+    "shl $32, %rcx\n   or %rcx, %rax\n   not %rax\n   tzcnt %rax, %rax\n   cmp %rdx, %rax\n   cmova %rdx, %rax\n   vzeroupper\n" ASM_RET
     )
     ASM_END(memory_common_prefix)
     // memcmp after ASCII a..z have been normalized to A..Z. Bytes outside
@@ -10724,7 +10778,7 @@ __asm__(
     ASM_END(memory_utf8_span)
 
     ASM_FUNC(memory_span_byte)
-    ASM_USERSPACE_WIDE("cmpb $0, cpu_has_avx512(%rip)\n   jne .Lspan_zmm\n.Lspan_generic:\n")
+    ASM_USERSPACE_WIDE("cmpb $0, cpu_has_avx2(%rip)\n   jne .Lspan_ymm\n.Lspan_generic:\n")
     "xor %eax, %eax\n"
 #ifndef KERNEL_MODE
     "cmp $16, %rdx\n   jb .Lmemory_span_byte_x64_tail\n"
@@ -10747,10 +10801,13 @@ __asm__(
 #endif
 #endif
     ASM_USERSPACE_WIDE(
-    //      Up to sixty four bytes in one masked window: the first lane that is not the byte, never more than n.
-    ".Lspan_zmm:\n   cmp $64, %rdx\n   ja .Lspan_generic\n"
-    TINY_PAGE_EDGE("edi", ".Lspan_generic") TINY_MASK("%rdx")
-    "vpbroadcastb %esi, %zmm0\n   vpcmpneqb (%rdi), %zmm0, %k0{%k1}\n   kmovq %k0, %rax\n   tzcnt %rax, %rax\n   cmp %rdx, %rax\n   cmova %rdx, %rax\n   vzeroupper\n" ASM_RET
+    //      Up to sixty four bytes in two 256-bit compares: the first lane that is not the byte, never more than n.
+    //      The same shape as memory_common_prefix, for the same reason. A chain of runs of 8 to 27 bytes, a count
+    //      of 48: 26.0 ticks a call for the ladder, 23.5 with the masked window, 20.1 with this.
+    ".Lspan_ymm:\n   lea -1(%rdx), %rcx\n   cmp $63, %rcx\n   ja .Lspan_generic\n"
+    TINY_PAGE_EDGE("edi", ".Lspan_generic")
+    "vmovd %esi, %xmm2\n   vpbroadcastb %xmm2, %ymm2\n   vpcmpeqb (%rdi), %ymm2, %ymm0\n   vpmovmskb %ymm0, %eax\n   vpcmpeqb 32(%rdi), %ymm2, %ymm1\n   vpmovmskb %ymm1, %ecx\n"
+    "shl $32, %rcx\n   or %rcx, %rax\n   not %rax\n   tzcnt %rax, %rax\n   cmp %rdx, %rax\n   cmova %rdx, %rax\n   vzeroupper\n" ASM_RET
     )
     ASM_END(memory_span_byte)
 
@@ -40300,13 +40357,16 @@ __asm__(
     ASM_FUNC(memory_ascii_span)
     //   rdi = block, rsi = size; rax = the run
     //
-    //   With AVX-512 up to sixty four bytes are one masked window, the sign bits of the lanes the mask keeps
-    //   moved into a mask register and the run the first of them; more are sixty four at a time to the first
-    //   window with a high bit in it. With AVX2 up to sixty four are two 256-bit vectors under a mask a shift
-    //   makes. rev asks this of every line, which is a dozen bytes or twenty: sizes at random from one to
-    //   sixty four, ticks a call, 38 before and 5 after (4 and 8 with AVX2).
+    //   Up to sixty four bytes are two 256-bit vectors under a mask a shift makes, with AVX2 or AVX-512 alike;
+    //   more, with AVX-512, are sixty four at a time to the first window with a high bit in it. rev asks this of
+    //   every line, which is a dozen bytes or twenty: sizes at random from one to sixty four, ticks a call, 38
+    //   before and 8 after. The run it answers is where the next token starts, so the answer is wanted at
+    //   once: a masked 512-bit window, whose sign bits come out through a mask register and a kmov, measured 5
+    //   a call at random sizes and no better than the code before it in a chain (counts of 48 over runs of 8 to
+    //   27 bytes, each search starting past the last: 24.5 ticks before, 24.9 with the window, 17.0 with two
+    //   256-bit vectors).
     //
-    ASM_USERSPACE_WIDE("cmpb $0, cpu_has_avx512(%rip)\n   jne .Lascii_zmm\n   cmpb $0, cpu_has_avx2(%rip)\n   jne .Lascii_ymm\n.Lascii_generic:\n")
+    ASM_USERSPACE_WIDE("cmpb $0, cpu_has_avx2(%rip)\n   jne .Lascii_ymm\n.Lascii_generic:\n")
     "xor %eax, %eax\n   cmp $16, %rsi\n   jb .Lascii_span_x64_small\n   lea 64(%rax), %rcx\n   cmp %rsi, %rcx\n   ja .Lascii_span_x64_16\n"
     ".balign 16\n"
     ".Lascii_span_x64_64:  movdqu (%rdi,%rax), %xmm0\n   movdqu 16(%rdi,%rax), %xmm1\n   movdqu 32(%rdi,%rax), %xmm2\n   movdqu 48(%rdi,%rax), %xmm3\n"
@@ -40326,9 +40386,6 @@ __asm__(
     "1:  cmpb $0, (%rdi,%rax)\n   js .Lascii_span_x64_done\n   inc %rax\n   cmp %rsi, %rax\n   jb 1b\n"
     ".Lascii_span_x64_done:\n" ASM_RET
     ASM_USERSPACE_WIDE(
-    ".Lascii_zmm:\n   cmp $64, %rsi\n   ja .Lascii_zmm_big\n"
-    TINY_PAGE_EDGE("edi", ".Lascii_generic") TINY_MASK("%rsi")
-    "vmovdqu8 (%rdi), %zmm0{%k1}{z}\n   vpmovb2m %zmm0, %k0\n   kmovq %k0, %rax\n   tzcnt %rax, %rax\n   cmp %rsi, %rax\n   cmova %rsi, %rax\n   vzeroupper\n" ASM_RET
     //  More than a window: the first one by itself, which ends a line's worth of text without the loop, then
     //  four a turn to the first with a high bit, then the last window, read again.
     ".Lascii_zmm_big:\n   vmovdqu64 (%rdi), %zmm0\n   vpmovb2m %zmm0, %k0\n   kmovq %k0, %rax\n   test %rax, %rax\n   jnz .Lascii_zmm_found\n   mov $64, %ecx\n   lea -256(%rsi), %rdx\n"
@@ -40340,14 +40397,15 @@ __asm__(
     ".Lascii_zmm_hit:  tzcnt %rax, %rax\n   add %rcx, %rax\n   vzeroupper\n" ASM_RET
     ".Lascii_zmm_found:  tzcnt %rax, %rax\n   vzeroupper\n" ASM_RET
     ".Lascii_zmm_all:  mov %rsi, %rax\n   vzeroupper\n" ASM_RET
-    ".Lascii_ymm:\n   cmp $64, %rsi\n   ja .Lascii_generic\n"
+    ".Lascii_ymm:\n   cmp $64, %rsi\n   ja .Lascii_long\n"
     TINY_PAGE_EDGE("edi", ".Lascii_generic")
     "xor %eax, %eax\n   test %rsi, %rsi\n   jz .Lascii_ymm_zero\n"
     "vmovdqu (%rdi), %ymm0\n   vpmovmskb %ymm0, %eax\n   vmovdqu 32(%rdi), %ymm1\n   vpmovmskb %ymm1, %ecx\n   shl $32, %rcx\n   or %rcx, %rax\n"
     "mov $64, %ecx\n   sub %esi, %ecx\n   mov $-1, %r8\n   shr %cl, %r8\n"
-    "and %r8, %rax\n   jz .Lascii_ymm_all\n   bsf %rax, %rax\n   vzeroupper\n" ASM_RET
+    "and %r8, %rax\n   jz .Lascii_ymm_all\n   tzcnt %rax, %rax\n   vzeroupper\n" ASM_RET
     ".Lascii_ymm_all:  mov %rsi, %rax\n   vzeroupper\n"
     ".Lascii_ymm_zero:\n" ASM_RET
+    ".Lascii_long:\n   cmpb $0, cpu_has_avx512(%rip)\n   jne .Lascii_zmm_big\n   jmp .Lascii_generic\n"
     )
     ASM_END(memory_ascii_span)
 );
