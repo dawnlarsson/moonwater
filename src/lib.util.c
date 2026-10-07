@@ -16432,6 +16432,15 @@ static string_address address_to stdlib_environment_vector = null;
 static positive stdlib_environment_count = 0;
 static positive stdlib_environment_room = 0;
 
+//      How many times an entry was installed or removed. A lookup whose answer
+//      is kept (the zone localtime reads, once a call) is still the answer
+//      while this has not moved, and costs a compare instead of a walk of the
+//      whole vector. Only the four calls below write the vector, so this
+//      moves whenever it does; a string a caller changes in place after
+//      putenv is the one write it cannot see, and tzset, which reads
+//      unconditionally, is the call that sees it.
+static positive stdlib_environment_changes = 0;
+
 /*
         environ, which is this vector under the name every program knows.
 
@@ -16739,6 +16748,7 @@ string_address getenv(string_address name)
 static inline INLINE fn stdlib_environment_install(bipolar found,
                                                    string_address entry)
 {
+        stdlib_environment_changes++;
         if (found >= 0)
         {
                 stdlib_environment_vector[found] = entry;
@@ -16844,6 +16854,7 @@ b32 unsetenv(string_address name)
                                         stdlib_environment_count + 1, index);
 
                         stdlib_environment_count--;
+                        stdlib_environment_changes++;
                         continue;
                 }
 
@@ -16926,6 +16937,7 @@ b32 clearenv(void)
 
         stdlib_environment_count = 0;
         stdlib_environment_vector[0] = null;
+        stdlib_environment_changes++;
 
         return 0;
 }
@@ -18197,7 +18209,28 @@ static bipolar clock_floor_divide(bipolar value, bipolar divisor)
         are exact for any year that fits in a signed 64-bit value, which is
         very much more than any caller here will ask for.
 */
-static bipolar clock_days_from_civil(bipolar year, bipolar month, bipolar day)
+/*
+        The same two directions in the form of Neri and Schneider, "Euclidean
+        affine functions and applications to calendar algorithms" (2021),
+        for every day in two billion either side of the epoch and every year
+        in five million and eight hundred thousand: no signed fixup, no era
+        quotient, no division by 365, 1460, 36524 or 146096 -- one divide by
+        146097, one multiply by 2939745 and two by 2141, the last three
+        read off with a shift and a divide of a 32-bit remainder.
+        The day count is moved up by a whole number of eras (CLOCK_ERAS
+        of 146097 days) so the arithmetic is unsigned; a whole number of
+        eras is a whole number of weeks and of leap cycles, which is what
+        lets the weekday and the leap rule read the shifted number. Outside
+        that range the original runs, which is exact for any year a signed
+        64-bit day count holds. test/checks.c walks the two against each
+        other over the whole fast range.
+*/
+#define CLOCK_ERAS 14700
+#define CLOCK_ERA_DAYS ((positive)146097 * CLOCK_ERAS + 719468)
+#define CLOCK_ERA_YEARS (400 * CLOCK_ERAS)
+
+static bipolar clock_days_from_civil_far(bipolar year, bipolar month,
+                                         bipolar day)
 {
         bipolar era;
         bipolar year_of_era;
@@ -18215,9 +18248,28 @@ static bipolar clock_days_from_civil(bipolar year, bipolar month, bipolar day)
         return era * 146097 + day_of_era - 719468;
 }
 
-static fn clock_civil_from_days(bipolar days, bipolar address_to year,
-                                bipolar address_to month,
-                                bipolar address_to day)
+static bipolar clock_days_from_civil(bipolar year, bipolar month, bipolar day)
+{
+        //      The year window is a bound on the arithmetic below, the month
+        //      window the one the original's table lookup is defined for.
+        if ((positive)year + CLOCK_ERA_YEARS - 1 >=
+                (positive)(2 * CLOCK_ERA_YEARS - 2) ||
+            (positive)month - 1 > 11)
+                return clock_days_from_civil_far(year, month, day);
+
+        positive late = (positive)(month <= 2);
+        positive shifted = (positive)year + CLOCK_ERA_YEARS - late;
+        positive march = (positive)month + 12 * late;
+        positive century = shifted / 100;
+        positive days = (1461 * shifted >> 2) - century + (century >> 2) +
+                        ((979 * march - 2919) >> 5);
+
+        return (bipolar)(days + (positive)day - 1 - CLOCK_ERA_DAYS);
+}
+
+static fn clock_civil_from_days_far(bipolar days, bipolar address_to year,
+                                    bipolar address_to month,
+                                    bipolar address_to day)
 {
         bipolar era;
         bipolar day_of_era;
@@ -18246,6 +18298,63 @@ static fn clock_civil_from_days(bipolar days, bipolar address_to year,
         address_to year = shifted_year + (civil_month <= 2);
 }
 
+//      What the Neri and Schneider form takes apart a day number into, the
+//      day number being already moved up by CLOCK_ERA_DAYS: the century and
+//      the year of it (counted from the first of March), the day of that
+//      year, and the civil year, month and day.
+typedef struct
+{
+        positive year;
+        positive month;
+        positive day;
+        positive day_of_year;
+} clock_date;
+
+static inline INLINE clock_date clock_date_of_shifted(positive shifted_days)
+{
+        clock_date date;
+        positive n1 = 4 * shifted_days + 3;
+        positive century = n1 / 146097;
+        positive of_century = (n1 - century * 146097) >> 2;
+        positive n2 = 4 * of_century + 3;
+        positive product = 2939745 * n2;
+        positive year_of_century = product >> 32;
+        positive day_of_year = (positive)(p32)product / 2939745 >> 2;
+        positive n3 = 2141 * day_of_year + 197913;
+        positive late = day_of_year >= 306;
+
+        date.year = 100 * century + year_of_century + late;
+        date.month = (n3 >> 16) - 12 * late;
+        date.day = (positive)(p16)n3 / 2141 + 1;
+        //      Counted from the first of January: the March year's day, less
+        //      the 306 that come before January in it, or more the 59 (and
+        //      the leap day) that come before March in the civil year.
+        date.day_of_year = late ? day_of_year - 306
+                                : day_of_year + 59 +
+                                      (year_of_century ? !(year_of_century & 3)
+                                                       : !(century & 3));
+        return date;
+}
+
+static fn clock_civil_from_days(bipolar days, bipolar address_to year,
+                                bipolar address_to month,
+                                bipolar address_to day)
+{
+        //      Two billion days either side of the epoch; the third of the
+        //      window above that is the rest of the shift.
+        if ((positive)days + 2147483648ull >= 4294967296ull)
+        {
+                clock_civil_from_days_far(days, year, month, day);
+                return;
+        }
+
+        clock_date date = clock_date_of_shifted((positive)days + CLOCK_ERA_DAYS);
+
+        address_to year = (bipolar)date.year - CLOCK_ERA_YEARS;
+        address_to month = (bipolar)date.month;
+        address_to day = (bipolar)date.day;
+}
+
 /*
         The day of the week, straight from the day count and with no calendar
         in the way. 1970-01-01 was a Thursday, so day zero is weekday four,
@@ -18266,7 +18375,7 @@ static bipolar clock_weekday_from_days(bipolar days)
         answers a null pointer and EOVERFLOW there; this sets the same error
         and its callers turn false into their failure result.
 */
-static bool clock_break_down(bipolar seconds, tm address_to broken)
+static bool clock_break_down_far(bipolar seconds, tm address_to broken)
 {
         bipolar days = clock_floor_divide(seconds, CLOCK_SECONDS_PER_DAY);
         bipolar rest = seconds % CLOCK_SECONDS_PER_DAY;
@@ -18278,8 +18387,8 @@ static bool clock_break_down(bipolar seconds, tm address_to broken)
         if (rest < 0)
                 rest += CLOCK_SECONDS_PER_DAY;
 
-        clock_civil_from_days(days, address_of year, address_of month,
-                              address_of day);
+        clock_civil_from_days_far(days, address_of year, address_of month,
+                                  address_of day);
 
         year_field = year - 1900;
 
@@ -18293,7 +18402,41 @@ static bool clock_break_down(bipolar seconds, tm address_to broken)
         broken->tm_mon = (b32)(month - 1);
         broken->tm_year = (b32)year_field;
         broken->tm_wday = (b32)clock_weekday_from_days(days);
-        broken->tm_yday = (b32)(days - clock_days_from_civil(year, 1, 1));
+        broken->tm_yday = (b32)(days - clock_days_from_civil_far(year, 1, 1));
+        broken->tm_isdst = 0;
+        broken->tm_gmtoff = 0;
+        broken->tm_zone = clock_zone_name;
+
+        return true;
+}
+
+static bool clock_break_down(bipolar seconds, tm address_to broken)
+{
+        //      Within a million years of the epoch the day is split once, as
+        //      a number past zero, and the day of the week and of the year
+        //      come out of that split: the second conversion the original
+        //      made for the first of January, and its division by seven, are
+        //      the whole difference. 2^45 seconds is 1.1 million years.
+        if ((positive)seconds + ((positive)1 << 45) >= ((positive)1 << 46))
+                return clock_break_down_far(seconds, broken);
+
+        positive shifted = (positive)seconds + (positive)CLOCK_SECONDS_PER_DAY * CLOCK_ERA_DAYS;
+        positive days = shifted / CLOCK_SECONDS_PER_DAY;
+        p32 rest = (p32)(shifted - days * CLOCK_SECONDS_PER_DAY);
+        clock_date date = clock_date_of_shifted(days);
+
+        broken->tm_sec = (b32)(rest % 60);
+        broken->tm_min = (b32)(rest / 60 % 60);
+        broken->tm_hour = (b32)(rest / 3600);
+        broken->tm_mday = (b32)date.day;
+        broken->tm_mon = (b32)(date.month - 1);
+        broken->tm_year = (b32)((bipolar)date.year - CLOCK_ERA_YEARS - 1900);
+        //      The shift is a whole number of eras, which is a whole number
+        //      of weeks, plus 719468 days, which is one over a whole number
+        //      of them; the epoch was a Thursday, so the weekday is the
+        //      shifted day number plus three.
+        broken->tm_wday = (b32)((days + 3) % 7);
+        broken->tm_yday = (b32)date.day_of_year;
         broken->tm_isdst = 0;
         broken->tm_gmtoff = 0;
         broken->tm_zone = clock_zone_name;
@@ -19301,9 +19444,7 @@ static fn clock_format_name(clock_format_state address_to state, b32 index,
 */
 static bool clock_year_leap(bipolar year)
 {
-        return clock_days_from_civil(year, 3, 1) -
-                   clock_days_from_civil(year, 2, 1) ==
-               29;
+        return !(year & 3) && (year % 100 || !(year % 400));
 }
 
 static bipolar clock_iso_week_days(bipolar yday, bipolar wday)
@@ -19970,13 +20111,372 @@ static fn clock_format_core(clock_format_state address_to state,
         }
 }
 
+/*
+        The directives that need no decoration, written straight into the
+        buffer: a number is two digits (or four, or three) and a name is a
+        copy, with no flag, width or case to carry from one directive to the
+        next. date's default line and every listing's stamp are made of
+        nothing else, and the state machine below spent a hundred
+        instructions and a handful of calls on each of them.
+
+        Only where the answer cannot differ from the machine's: a field in
+        the range its width holds, a year of four digits (strftime writes
+        1 digit for the year 5 and gnulib writes 4), an offset with no
+        seconds in it, a weekday and a month that name something. Anything
+        else -- a flag, a width, a modifier, %s, a field out of range, a
+        buffer that would not hold it -- gives up and the machine does the
+        whole format from the top. The answer is positive_max for that, and
+        the length otherwise.
+*/
+#define CLOCK_PLAIN_GIVE_UP positive_max
+
+static inline INLINE p8 address_to clock_plain_two(p8 address_to out, bipolar value)
+{
+        out[0] = (p8)('0' + value / 10);
+        out[1] = (p8)('0' + value % 10);
+        return out + 2;
+}
+
+static positive clock_format_plain(p8 address_to into, positive max,
+                                   const char address_to format,
+                                   const tm address_to broken,
+                                   bool extensions, positive nanoseconds)
+{
+        positive at = 0;
+        const char address_to cursor = format;
+
+        while (address_to cursor != end)
+        {
+                if (address_to cursor != '%')
+                {
+                        const char address_to run =
+                                (const char address_to)string_first_of_or_end(
+                                        (string_address)cursor, '%');
+                        positive length = (positive)(run - cursor);
+
+                        if (max - at <= length)
+                                return CLOCK_PLAIN_GIVE_UP;
+                        memory_copy_apart(into + at, (address_any)cursor, length);
+                        at += length;
+                        cursor = run;
+                        continue;
+                }
+
+                p8 which = (p8)cursor[1];
+
+                if (which == end)
+                        return CLOCK_PLAIN_GIVE_UP;
+                cursor += 2;
+
+                //      Room for the longest thing any one directive writes
+                //      here (a composite is 24 bytes, a name 9, a zone name
+                //      is measured) and the terminator after it.
+                if (max - at <= 32)
+                        return CLOCK_PLAIN_GIVE_UP;
+
+                p8 address_to out = into + at;
+                bipolar year = (bipolar)broken->tm_year + 1900;
+                bipolar field;
+
+                switch (which)
+                {
+                case 'Y':
+                case 'y':
+                case 'F':
+                case 'D':
+                case 'x':
+                case 'c':
+                        if (year < 1000 || year > 9999)
+                                return CLOCK_PLAIN_GIVE_UP;
+                        break;
+                default:
+                        break;
+                }
+
+                switch (which)
+                {
+                case 'Y':
+                        out = clock_plain_two(out, year / 100);
+                        out = clock_plain_two(out, year % 100);
+                        break;
+                case 'y':
+                        out = clock_plain_two(out, year % 100);
+                        break;
+                case 'F':
+                        out = clock_plain_two(out, year / 100);
+                        out = clock_plain_two(out, year % 100);
+                        *out++ = '-';
+                        field = (bipolar)broken->tm_mon + 1;
+                        if (field < 0 || field > 99)
+                                return CLOCK_PLAIN_GIVE_UP;
+                        out = clock_plain_two(out, field);
+                        *out++ = '-';
+                        if (broken->tm_mday < 0 || broken->tm_mday > 99)
+                                return CLOCK_PLAIN_GIVE_UP;
+                        out = clock_plain_two(out, broken->tm_mday);
+                        break;
+                case 'D':
+                case 'x':
+                        field = (bipolar)broken->tm_mon + 1;
+                        if (field < 0 || field > 99 || broken->tm_mday < 0 ||
+                            broken->tm_mday > 99)
+                                return CLOCK_PLAIN_GIVE_UP;
+                        out = clock_plain_two(out, field);
+                        *out++ = '/';
+                        out = clock_plain_two(out, broken->tm_mday);
+                        *out++ = '/';
+                        out = clock_plain_two(out, year % 100);
+                        break;
+                case 'm':
+                        field = (bipolar)broken->tm_mon + 1;
+                        if (field < 0 || field > 99)
+                                return CLOCK_PLAIN_GIVE_UP;
+                        out = clock_plain_two(out, field);
+                        break;
+                case 'd':
+                case 'e':
+                        if (broken->tm_mday < 0 || broken->tm_mday > 99)
+                                return CLOCK_PLAIN_GIVE_UP;
+                        out = clock_plain_two(out, broken->tm_mday);
+                        if (which == 'e' && out[-2] == '0')
+                                out[-2] = ' ';
+                        break;
+                case 'H':
+                case 'k':
+                        if (broken->tm_hour < 0 || broken->tm_hour > 99)
+                                return CLOCK_PLAIN_GIVE_UP;
+                        out = clock_plain_two(out, broken->tm_hour);
+                        if (which == 'k' && out[-2] == '0')
+                                out[-2] = ' ';
+                        break;
+                case 'I':
+                case 'l':
+                        field = clock_hour_twelve(broken);
+                        if (field < 0 || field > 99)
+                                return CLOCK_PLAIN_GIVE_UP;
+                        out = clock_plain_two(out, field);
+                        if (which == 'l' && out[-2] == '0')
+                                out[-2] = ' ';
+                        break;
+                case 'M':
+                        if (broken->tm_min < 0 || broken->tm_min > 99)
+                                return CLOCK_PLAIN_GIVE_UP;
+                        out = clock_plain_two(out, broken->tm_min);
+                        break;
+                case 'S':
+                        if (broken->tm_sec < 0 || broken->tm_sec > 99)
+                                return CLOCK_PLAIN_GIVE_UP;
+                        out = clock_plain_two(out, broken->tm_sec);
+                        break;
+                case 'c':
+                        //      "%a %b %e %H:%M:%S %Y"
+                        if (broken->tm_wday < 0 || broken->tm_wday > 6 ||
+                            broken->tm_mon < 0 || broken->tm_mon > 11 ||
+                            broken->tm_mday < 0 || broken->tm_mday > 99 ||
+                            broken->tm_hour < 0 || broken->tm_hour > 99 ||
+                            broken->tm_min < 0 || broken->tm_min > 99 ||
+                            broken->tm_sec < 0 || broken->tm_sec > 99)
+                                return CLOCK_PLAIN_GIVE_UP;
+                        memory_copy_apart(out, (address_any)clock_weekday_short[broken->tm_wday], 3);
+                        out[3] = ' ';
+                        memory_copy_apart(out + 4, (address_any)clock_month_short[broken->tm_mon], 3);
+                        out[7] = ' ';
+                        out = clock_plain_two(out + 8, broken->tm_mday);
+                        if (out[-2] == '0')
+                                out[-2] = ' ';
+                        *out++ = ' ';
+                        out = clock_plain_two(out, broken->tm_hour);
+                        *out++ = ':';
+                        out = clock_plain_two(out, broken->tm_min);
+                        *out++ = ':';
+                        out = clock_plain_two(out, broken->tm_sec);
+                        *out++ = ' ';
+                        out = clock_plain_two(out, year / 100);
+                        out = clock_plain_two(out, year % 100);
+                        break;
+                case 'r':
+                        field = clock_hour_twelve(broken);
+                        if (field < 0 || field > 99 ||
+                            broken->tm_min < 0 || broken->tm_min > 99 ||
+                            broken->tm_sec < 0 || broken->tm_sec > 99)
+                                return CLOCK_PLAIN_GIVE_UP;
+                        out = clock_plain_two(out, field);
+                        *out++ = ':';
+                        out = clock_plain_two(out, broken->tm_min);
+                        *out++ = ':';
+                        out = clock_plain_two(out, broken->tm_sec);
+                        *out++ = ' ';
+                        memory_copy_apart(out, (address_any)clock_half_day[broken->tm_hour >= 12], 2);
+                        out += 2;
+                        break;
+                case 's':
+                {
+                        tm copy = address_to broken;
+
+                        out += bipolar_into_string(out, (bipolar)timegm(address_of copy) -
+                                                            (bipolar)broken->tm_gmtoff);
+                        break;
+                }
+                case 'u':
+                        field = ((bipolar)broken->tm_wday + 6) % 7 + 1;
+                        if (field < 0 || field > 9)
+                                return CLOCK_PLAIN_GIVE_UP;
+                        *out++ = (p8)('0' + field);
+                        break;
+                case 'w':
+                        if (broken->tm_wday < 0 || broken->tm_wday > 9)
+                                return CLOCK_PLAIN_GIVE_UP;
+                        *out++ = (p8)('0' + broken->tm_wday);
+                        break;
+                case 'X':
+                case 'T':
+                        if (broken->tm_hour < 0 || broken->tm_hour > 99 ||
+                            broken->tm_min < 0 || broken->tm_min > 99 ||
+                            broken->tm_sec < 0 || broken->tm_sec > 99)
+                                return CLOCK_PLAIN_GIVE_UP;
+                        out = clock_plain_two(out, broken->tm_hour);
+                        *out++ = ':';
+                        out = clock_plain_two(out, broken->tm_min);
+                        *out++ = ':';
+                        out = clock_plain_two(out, broken->tm_sec);
+                        break;
+                case 'R':
+                        if (broken->tm_hour < 0 || broken->tm_hour > 99 ||
+                            broken->tm_min < 0 || broken->tm_min > 99)
+                                return CLOCK_PLAIN_GIVE_UP;
+                        out = clock_plain_two(out, broken->tm_hour);
+                        *out++ = ':';
+                        out = clock_plain_two(out, broken->tm_min);
+                        break;
+                case 'j':
+                        field = (bipolar)broken->tm_yday + 1;
+                        if (field < 0 || field > 999)
+                                return CLOCK_PLAIN_GIVE_UP;
+                        *out++ = (p8)('0' + field / 100);
+                        out = clock_plain_two(out, field % 100);
+                        break;
+                case 'a':
+                case 'A':
+                case 'b':
+                case 'B':
+                case 'h':
+                {
+                        bool weekday = which == 'a' || which == 'A';
+                        bipolar index = weekday ? broken->tm_wday : broken->tm_mon;
+                        bool full = which == 'A' || which == 'B';
+                        const char address_to name;
+                        positive length;
+
+                        if (index < 0 || index >= (weekday ? 7 : 12))
+                                return CLOCK_PLAIN_GIVE_UP;
+                        name = weekday ? (full ? clock_weekday_long[index] : clock_weekday_short[index])
+                                       : (full ? clock_month_long[index] : clock_month_short[index]);
+                        length = !full ? 3
+                                 : weekday ? clock_weekday_long_length[index]
+                                           : clock_month_long_length[index];
+                        memory_copy_apart(out, (address_any)name, length);
+                        out += length;
+                        break;
+                }
+                case 'p':
+                case 'P':
+                {
+                        const char address_to half = clock_half_day[broken->tm_hour >= 12];
+
+                        out[0] = (p8)(which == 'P' ? byte_to_lower((p8)half[0]) : (p8)half[0]);
+                        out[1] = (p8)(which == 'P' ? byte_to_lower((p8)half[1]) : (p8)half[1]);
+                        out += 2;
+                        break;
+                }
+                case 'Z':
+                {
+                        const char address_to zone = is_null(broken->tm_zone)
+                                                         ? clock_zone_name
+                                                         : broken->tm_zone;
+                        positive length = string_length((string_address)zone);
+
+                        if (max - at <= length + 32)
+                                return CLOCK_PLAIN_GIVE_UP;
+                        memory_copy_apart(out, (address_any)zone, length);
+                        out += length;
+                        break;
+                }
+                case 'z':
+                {
+                        bipolar offset = broken->tm_gmtoff;
+                        bipolar magnitude = offset < 0 ? -offset : offset;
+
+                        if (magnitude % 60 || magnitude >= 100 * 3600)
+                                return CLOCK_PLAIN_GIVE_UP;
+                        *out++ = offset < 0 ? '-' : '+';
+                        out = clock_plain_two(out, magnitude / 3600);
+                        out = clock_plain_two(out, magnitude / 60 % 60);
+                        break;
+                }
+                case 'N':
+                        //      The fraction is date's, and a bare %N is
+                        //      its nine digits.
+                        if (!extensions)
+                                return CLOCK_PLAIN_GIVE_UP;
+                        out += positive_into_padded(out, nanoseconds > 999999999 ? 999999999 : nanoseconds,
+                                                    9, '0');
+                        break;
+                case 'n':
+                        *out++ = '\n';
+                        break;
+                case 't':
+                        *out++ = '\t';
+                        break;
+                case '%':
+                        *out++ = '%';
+                        break;
+                default:
+                        return CLOCK_PLAIN_GIVE_UP;
+                }
+                at = (positive)(out - into);
+        }
+
+        if (at >= max)
+                return CLOCK_PLAIN_GIVE_UP;
+        into[at] = end;
+        return at;
+}
+
+//      The state machine on its own, for a format that has a directive in
+//      it, which is the whole of strftime and the part the plain path above
+//      gives a format up to.
+static positive clock_format_machine(p8 address_to into, positive max,
+                                     const char address_to format,
+                                     const tm address_to broken,
+                                     bool extensions, positive nanoseconds)
+{
+        clock_format_state state;
+
+        state.out = (byte_store){into, max, 0};
+        state.failed = false;
+        state.width = -1;
+        state.pad = 0;
+        state.to_upper = false;
+        state.to_lower = false;
+        state.change_case = false;
+        state.extensions = extensions;
+        state.nanoseconds = nanoseconds > 999999999 ? 999999999 : nanoseconds;
+
+        clock_format_core(address_of state, format, broken);
+
+        if (state.failed || state.out.used + 1 > max)
+                return 0;
+
+        into[state.out.used] = end;
+
+        return state.out.used;
+}
+
 static positive clock_format(p8 address_to into, positive max,
                              const char address_to format,
                              const tm address_to broken, bool extensions,
                              positive nanoseconds)
 {
-        clock_format_state state;
-
         if (is_null(format) || is_null(broken))
                 return 0;
 
@@ -20005,24 +20505,16 @@ static positive clock_format(p8 address_to into, positive max,
                 }
         }
 
-        state.out = (byte_store){into, max, 0};
-        state.failed = false;
-        state.width = -1;
-        state.pad = 0;
-        state.to_upper = false;
-        state.to_lower = false;
-        state.change_case = false;
-        state.extensions = extensions;
-        state.nanoseconds = nanoseconds > 999999999 ? 999999999 : nanoseconds;
+        {
+                positive plain = clock_format_plain(into, max, format, broken,
+                                                    extensions, nanoseconds);
 
-        clock_format_core(address_of state, format, broken);
+                if (plain != CLOCK_PLAIN_GIVE_UP)
+                        return plain;
+        }
 
-        if (state.failed || state.out.used + 1 > max)
-                return 0;
-
-        into[state.out.used] = end;
-
-        return state.out.used;
+        return clock_format_machine(into, max, format, broken, extensions,
+                                    nanoseconds);
 }
 
 positive strftime(p8 address_to into, positive max,
@@ -20705,6 +21197,9 @@ const char address_to address_to tzname = clock_zone_names;
 b64 timezone = 0;
 b32 daylight = 0;
 
+//      Moved on by everything that writes the zone's tables, so an answer
+//      worked out from them can be kept while it stands.
+static positive clock_zone_epoch;
 static bipolar clock_std_west;
 static bipolar clock_dst_west;
 static bool clock_has_dst;
@@ -21968,6 +22463,7 @@ static bool clock_tz_parse_to(string_address text,
         const char address_to s = (const char address_to)text;
 
         address_to rest = "";
+        clock_zone_epoch++;
         clock_has_dst = false;
         clock_std_west = 0;
         clock_dst_west = 0;
@@ -22165,6 +22661,7 @@ static bool clock_history_load(string_address path, p8 address_to footer, positi
                                        O_RDONLY | O_CLOEXEC, 0);
         positive used = 0;
 
+        clock_zone_epoch++;
         clock_history_count = 0;
         if (handle < 0)
                 return false;
@@ -22317,6 +22814,7 @@ static fn clock_history_of(string_address zone)
         positive at = 0;
         const char address_to base = "/usr/share/zoneinfo/";
 
+        clock_zone_epoch++;
         clock_history_count = 0;
         if (!zone || !zone[0])
                 return;
@@ -22342,6 +22840,7 @@ static fn clock_history_of(string_address zone)
 
 static fn clock_tz_reset(void)
 {
+        clock_zone_epoch++;
         clock_history_count = 0;
         clock_has_dst = false;
         clock_std_west = 0;
@@ -22493,6 +22992,16 @@ static bool clock_tz_env_valid;
 static bool clock_tz_file_valid;
 static p64 clock_tz_file_at;
 
+//      The environment as it stood (stdlib_environment_changes plus one)
+//      when the zone in force was last compared with TZ, and whether TZ was
+//      there then. While the environment has not moved, a TZ that was set and
+//      parsed is still the zone and is not looked up again: localtime asks
+//      once a call, and a listing of ten thousand files asked the vector for
+//      the same word ten thousand times. A TZ that was absent still has the
+//      file's age to check, which needs no lookup either.
+static positive clock_tz_seen;
+static bool clock_tz_seen_set;
+
 fn tzset(void)
 {
         string_address value = getenv((string_address) "TZ");
@@ -22501,6 +23010,8 @@ fn tzset(void)
         clock_tz_reset();
         clock_tz_env_valid = false;
         clock_tz_file_valid = false;
+        clock_tz_seen = stdlib_environment_changes + 1;
+        clock_tz_seen_set = value != null;
         if (value)
         {
                 posix = clock_zone_posix(value);
@@ -22524,13 +23035,26 @@ fn tzset(void)
 
 static fn clock_tz_current(void)
 {
-        string_address value = getenv((string_address) "TZ");
+        string_address value;
 
+        if (clock_tz_seen == stdlib_environment_changes + 1)
+        {
+                if (clock_tz_seen_set ? clock_tz_env_valid
+                                      : clock_tz_file_valid &&
+                                            get_cpu_time() - clock_tz_file_at <
+                                                CLOCK_TZ_REREAD)
+                        return;
+        }
+        value = getenv((string_address) "TZ");
         if (value ? clock_tz_env_valid &&
                             string_equals(value, clock_tz_env_held)
                   : clock_tz_file_valid &&
                             get_cpu_time() - clock_tz_file_at < CLOCK_TZ_REREAD)
+        {
+                clock_tz_seen = stdlib_environment_changes + 1;
+                clock_tz_seen_set = value != null;
                 return;
+        }
         tzset();
 }
 

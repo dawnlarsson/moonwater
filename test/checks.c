@@ -45169,12 +45169,185 @@ static fn check_failure_and_precision(void)
              difftime(b64_min, b64_max) == -0x1p64);
 }
 
+/*
+        The calendar's fast forms against the originals they stand in front
+        of. The day count and the year are split in the Neri and Schneider
+        form for two billion days either side of the epoch and by Hinnant's
+        arithmetic beyond it; the two are walked against each other over the
+        decades people live in, over the edge of the window, and over a
+        spread of the rest (the whole window was compared once, all
+        4,294,967,296 days, on a 9950X in two minutes). strftime's plain
+        path -- the directives that carry no flag, width or case -- is
+        compared with the state machine, whose answer is the definition,
+        over a spread of times, zones, formats and buffer sizes.
+*/
+static positive fast_state = 88172645463325252ULL;
+
+static positive fast_random(void)
+{
+        fast_state ^= fast_state << 13;
+        fast_state ^= fast_state >> 7;
+        fast_state ^= fast_state << 17;
+        return fast_state;
+}
+
+static fn fast_civil(bipolar days)
+{
+        bipolar year[2], month[2], day[2];
+
+        clock_civil_from_days(days, address_of year[0], address_of month[0], address_of day[0]);
+        clock_civil_from_days_far(days, address_of year[1], address_of month[1], address_of day[1]);
+        checks++;
+        if (year[0] != year[1] || month[0] != month[1] || day[0] != day[1])
+        {
+                failures++;
+                string_format(log, "  FAILED civil_from_days %b: %b-%b-%b against %b-%b-%b\n", days,
+                              year[0], month[0], day[0], year[1], month[1], day[1]);
+        }
+}
+
+static fn fast_break(bipolar seconds)
+{
+        tm one, two;
+        bool first = clock_break_down(seconds, address_of one);
+        bool second = clock_break_down_far(seconds, address_of two);
+
+        checks++;
+        if (first != second ||
+            (first && (one.tm_sec != two.tm_sec || one.tm_min != two.tm_min || one.tm_hour != two.tm_hour ||
+                       one.tm_mday != two.tm_mday || one.tm_mon != two.tm_mon || one.tm_year != two.tm_year ||
+                       one.tm_wday != two.tm_wday || one.tm_yday != two.tm_yday)))
+        {
+                failures++;
+                string_format(log, "  FAILED break_down %b\n", seconds);
+        }
+}
+
+static fn check_fast_forms(void)
+{
+        static const bipolar edges[] = {0, 1, -1, 2147483647, -2147483648, 2147483648, -2147483649, 4294967295,
+                                        (bipolar)1 << 40, -((bipolar)1 << 40), (bipolar)1 << 60, -((bipolar)1 << 60)};
+
+        for (bipolar days = -800000; days <= 800000; days++)
+                fast_civil(days);
+        for (positive i = 0; i < array_count(edges); i++)
+                for (bipolar offset = -400; offset <= 400; offset++)
+                        fast_civil(edges[i] + offset);
+        for (positive i = 0; i < 400000; i++)
+                fast_civil((bipolar)fast_random() >> (fast_random() % 63));
+
+        for (bipolar year = -6000; year <= 12000; year++)
+                for (bipolar month = 0; month <= 13; month++)
+                        for (bipolar day = -1; day <= 32; day += (day < 28 ? 9 : 1))
+                        {
+                                checks++;
+                                if (clock_days_from_civil(year, month, day) != clock_days_from_civil_far(year, month, day))
+                                {
+                                        failures++;
+                                        string_format(log, "  FAILED days_from_civil %b-%b-%b\n", year, month, day);
+                                }
+                        }
+        for (positive i = 0; i < 400000; i++)
+        {
+                bipolar year = (bipolar)fast_random() >> (14 + fast_random() % 50);
+                bipolar month = (bipolar)(fast_random() % 16) - 2;
+                bipolar day = (bipolar)(fast_random() % 40) - 4;
+
+                checks++;
+                if (clock_days_from_civil(year, month, day) != clock_days_from_civil_far(year, month, day))
+                {
+                        failures++;
+                        string_format(log, "  FAILED days_from_civil %b-%b-%b\n", year, month, day);
+                }
+        }
+        for (bipolar year = -2000; year <= 6000; year++)
+        {
+                checks++;
+                if (clock_year_leap(year) != (clock_days_from_civil_far(year, 3, 1) - clock_days_from_civil_far(year, 2, 1) == 29))
+                {
+                        failures++;
+                        string_format(log, "  FAILED year_leap %b\n", year);
+                }
+        }
+
+        for (positive i = 0; i < array_count(edges); i++)
+                for (bipolar offset = -3000; offset <= 3000; offset += 7)
+                        fast_break(edges[i] + offset * 86400 + offset);
+        for (positive i = 0; i < 600000; i++)
+                fast_break((bipolar)fast_random() >> (fast_random() % 63));
+        for (bipolar seconds = -90000; seconds <= 90000 * 400; seconds += 997)
+                fast_break(seconds);
+
+        /* strftime: the plain path against the state machine */
+        static const char pieces[] =
+                "%Y\0%y\0%F\0%D\0%x\0%m\0%d\0%e\0%H\0%k\0%I\0%l\0%M\0%S\0%T\0%R\0%j\0%a\0%A\0%b\0%B\0%h\0%p\0%P\0%Z\0%z\0"
+                "%n\0%t\0%%\0%c\0%X\0%r\0%s\0%u\0%w\0-\0:\0 \0T\0/\0x\0,\0UTC\0%-d\0%_H\0%05Y\0%Ey\0%Oe\0%U\0%:z\0%N\0%G\0%V\0"
+                "%^a\0%#Z\0%q\0%C\0%g\0%W\0%Q\0%\0%1\0%+Y\0%10z\0";
+        const char address_to piece[80];
+        positive pieces_count = 0;
+
+        for (const char address_to walk = pieces; address_to walk != end; walk += string_length((string_address)walk) + 1)
+                piece[pieces_count++] = walk;
+        for (positive i = 0; i < 400000; i++)
+        {
+                tm broken;
+                p8 format[256];
+                p8 plain[512], machine[512];
+                positive at = 0;
+                positive picks = 1 + fast_random() % 8;
+                bool extensions = fast_random() & 1;
+                positive room = fast_random() % 3 ? 512 : fast_random() % 100;
+
+                if (!clock_break_down((bipolar)fast_random() >> (fast_random() % 20 + 16), address_of broken))
+                        continue;
+                if (fast_random() % 4 == 0)
+                        broken.tm_gmtoff = ((bipolar)(fast_random() % 100000) - 50000) * (fast_random() % 3 ? 60 : 1);
+                if (fast_random() % 6 == 0)
+                        broken.tm_zone = fast_random() % 2 ? null : "CEST";
+                if (fast_random() % 10 == 0)
+                        broken.tm_hour = (b32)(fast_random() % 130) - 10;
+                if (fast_random() % 10 == 0)
+                        broken.tm_mon = (b32)(fast_random() % 20) - 3;
+                if (fast_random() % 10 == 0)
+                        broken.tm_wday = (b32)(fast_random() % 12) - 2;
+                if (fast_random() % 12 == 0)
+                        broken.tm_year = (b32)(fast_random() % 20000) - 5000;
+                for (positive pick = 0; pick < picks; pick++)
+                {
+                        const char address_to text = piece[fast_random() % 10 < 8 ? fast_random() % 43 : fast_random() % pieces_count];
+
+                        for (; address_to text != end && at < 200; text++)
+                                format[at++] = (p8)address_to text;
+                }
+                format[at] = end;
+
+                memory_fill(plain, 0xa5, sizeof(plain));
+                memory_fill(machine, 0xa5, sizeof(machine));
+                positive fraction = fast_random() % 2 ? 123456789 : fast_random() % 1500000000;
+                positive got = clock_format(plain, room, (const char address_to)format, address_of broken, extensions, fraction);
+                positive want = clock_format_machine(machine, room, (const char address_to)format, address_of broken,
+                                                     extensions, fraction);
+                bool same_bytes = got == want && (!got || memory_compare(plain, machine, got + 1) == 0);
+
+                for (positive past = room; past < room + 8 && past < sizeof(plain); past++)
+                        same_bytes = same_bytes && plain[past] == 0xa5;
+                checks++;
+                if (!same_bytes && format[0] == '%')
+                {
+                        failures++;
+                        string_format(log, "  FAILED strftime plain path: [%s] got %p [%s] want %p [%s]\n",
+                                      (string_address)format, got, (string_address)plain, want, (string_address)machine);
+                }
+        }
+}
+
 b32 main(void)
 {
         tm epoch = {0};
 
         setenv((string_address) "TZ", (string_address) "UTC", 1);
         tzset();
+        check_fast_forms();
         good("strptime refuses signed epoch overflow",
              !strptime("9223372036854775808", "%s", &epoch));
         good("strptime refuses wrapped epoch overflow",

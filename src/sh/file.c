@@ -2425,9 +2425,21 @@ fn file_two(writer write, positive value)
 
 static bool date_shape(writer write, b64 when, positive nanoseconds,
                        string_address format);
+static bool date_local(b64 when, tm address_to broken);
 
 fn file_stamp(writer write, b64 seconds, positive nanoseconds)
 {
+        //      One format for the whole stamp, the fraction its %N, whenever
+        //      the instant can be shown and the fraction is a fraction.
+        tm broken;
+
+        if (nanoseconds <= 999999999 && date_local(seconds, address_of broken))
+        {
+                date_shape(write, seconds, nanoseconds,
+                           (string_address)"%Y-%m-%d %H:%M:%S.%N %z");
+                return;
+        }
+
         date_shape(write, seconds, 0, (string_address)"%Y-%m-%d %H:%M:%S.");
         positive_to_padded(write, nanoseconds, 9, '0', 0);
         date_shape(write, seconds, 0, (string_address)" %z");
@@ -2684,6 +2696,11 @@ typedef struct
 
         pd_word zones_here[3];
         p8 local_names[2][32];
+
+        //      The instant the date is read from, kept for the names of the
+        //      local zone, which are asked for once a word could be one.
+        b64 now;
+        bool zones_here_made;
 } pd_parser;
 
 //      date --debug, set by date for the read it is about to make.
@@ -2788,12 +2805,17 @@ static const pd_word address_to pd_find(const pd_word address_to table, string_a
         return null;
 }
 
+static fn pd_zones_here(pd_parser address_to pc);
+
 static const pd_word address_to pd_zone(pd_parser address_to pc, string_address word)
 {
         const pd_word address_to found = pd_find(pd_universal_zones, word);
 
         if (!found)
+        {
+                pd_zones_here(pc);
                 found = pd_find(pc->zones_here, word);
+        }
         if (!found)
                 found = pd_find(pd_zones, word);
         return found;
@@ -4103,6 +4125,44 @@ static fn pd_local_table_add(pd_parser address_to pc, b64 at)
 }
 
 /*
+        The names the zone in force goes by, as the reference finds them
+        (the zone at the instant, and at the first of the next three quarters
+        whose daylight saving differs, to find the other name): a word of the
+        date can only be one of them, so they are looked for when a word that
+        no table knows turns up and not before every date. The zone cannot
+        change while a date is read, so the answer is what it was at the top.
+*/
+static fn pd_zones_here(pd_parser address_to pc)
+{
+        if (pc->zones_here_made)
+                return;
+        pc->zones_here_made = true;
+
+        b64 now = pc->now;
+
+        pd_local_table_add(pc, now);
+        for (b64 quarter = 1; quarter <= 3; quarter++)
+        {
+                pd_tm probe;
+
+                if (pd_local(now + quarter * 90 * 86400, address_of probe) &&
+                    (!pc->zones_here[0].name || probe.isdst != pc->zones_here[0].value))
+                {
+                        pd_local_table_add(pc, now + quarter * 90 * 86400);
+                        if (pc->zones_here[1].name)
+                        {
+                                if (string_equals(pc->zones_here[0].name, pc->zones_here[1].name))
+                                {
+                                        pc->zones_here[0].value = -1;
+                                        pc->zones_here[1].name = null;
+                                }
+                                break;
+                        }
+                }
+        }
+}
+
+/*
         The body of parse_datetime: TEXT read from NOW (seconds and
         nanoseconds) in the zone of TZ, or of TZ="..." in front of it.
 */
@@ -4208,26 +4268,7 @@ static bool pd_parse(string_address text, b64 now, positive now_ns, bool debug,
         pc->meridian = PD_24;
         t.isdst = start.isdst;
 
-        pd_local_table_add(pc, now);
-        for (b64 quarter = 1; quarter <= 3; quarter++)
-        {
-                pd_tm probe;
-
-                if (pd_local(now + quarter * 90 * 86400, address_of probe) &&
-                    (!pc->zones_here[0].name || probe.isdst != pc->zones_here[0].value))
-                {
-                        pd_local_table_add(pc, now + quarter * 90 * 86400);
-                        if (pc->zones_here[1].name)
-                        {
-                                if (string_equals(pc->zones_here[0].name, pc->zones_here[1].name))
-                                {
-                                        pc->zones_here[0].value = -1;
-                                        pc->zones_here[1].name = null;
-                                }
-                                break;
-                        }
-                }
-        }
+        pc->now = now;
 
         //      spec: '@' seconds, or items.
         bool parsed = true;
@@ -5857,7 +5898,7 @@ static string_address locale_category_names[LOCALE_CATEGORIES] = {
 
 // The name the environment gives a category: LC_ALL, then the category's own
 // variable, then LANG, the first that is set and not empty; null when none is.
-static HOT string_address locale_environment(string_address category)
+static string_address locale_environment_scan(string_address category)
 {
         string_address name = file_environment((string_address) "LC_ALL");
 
@@ -5866,6 +5907,42 @@ static HOT string_address locale_environment(string_address category)
         if (!name || !name[0])
                 name = file_environment((string_address) "LANG");
         return name && name[0] ? name : null;
+}
+
+/*      A utility that is not the shell reads the vector it was started with,
+        and nothing can change that: the answer for a category is the same
+        every time it is asked, and it is asked for every day name, month name
+        and number a line puts out. Kept, one entry for each category asked
+        about. Under the shell the variables move between one command and the
+        next, so each ask is a walk, as it was. */
+static struct
+{
+        string_address category;
+        string_address answer;
+} locale_environment_kept[8];
+static positive locale_environment_kept_count;
+
+static HOT string_address locale_environment(string_address category)
+{
+        if (shell_environment_is_initialized())
+                return locale_environment_scan(category);
+
+        for (positive at = 0; at < locale_environment_kept_count; at++)
+                if (string_equals(locale_environment_kept[at].category, category))
+                        return locale_environment_kept[at].answer;
+
+        string_address answer = locale_environment_scan(category);
+
+        if (locale_environment_kept_count < array_count(locale_environment_kept) &&
+            file_environment_all() == program_environment_list())
+        {
+                locale_environment_kept[locale_environment_kept_count].category =
+                    string_duplicate(category);
+                locale_environment_kept[locale_environment_kept_count].answer = answer;
+                if (locale_environment_kept[locale_environment_kept_count].category)
+                        locale_environment_kept_count++;
+        }
+        return answer;
 }
 
 // That name, null for C and POSIX as well.
@@ -49111,6 +49188,17 @@ static bool date_shape(writer write, b64 when, positive nanoseconds,
 static positive date_shape_wide(writer write, b64 when, positive nanoseconds,
                                 string_address format)
 {
+        //      A width past DATE_WIDE is seven digits after a percent, so a
+        //      format with no digit in it holds none.
+        {
+                string_address look = format;
+
+                while (string_get(look) && !byte_is_digit(string_get(look)))
+                        look++;
+                if (!string_get(look))
+                        return 2;
+        }
+
         for (string_address at = format; string_get(at); at++)
         {
                 if (!string_is(at, '%'))
@@ -49219,15 +49307,48 @@ static positive date_shape_wide(writer write, b64 when, positive nanoseconds,
         return 2;
 }
 
+/*      The wall clock of an instant, and the last one asked kept: a date is
+        read, converted and put out (three conversions of one instant), and
+        find -printf '%TY-%Tm-%Td' and stat's four stamps write one instant
+        a field at a time. What localtime answers is a function of the
+        instant and of the zone's tables, and clock_zone_epoch moves when
+        anything writes those; clock_tz_current is asked first, as
+        localtime asks it, so a zone that changed under us is read again. */
+static bool date_local(b64 when, tm address_to broken)
+{
+        static struct
+        {
+                b64 when;
+                positive epoch;
+                bool have;
+                tm broken;
+        } last;
+        time_t stamp = (time_t)when;
+
+        clock_tz_current();
+        if (last.have && last.when == when && last.epoch == clock_zone_epoch)
+        {
+                address_to broken = last.broken;
+                return true;
+        }
+        last.have = false;
+        if (!localtime_r(address_of stamp, broken))
+                return false;
+        last.when = when;
+        last.epoch = clock_zone_epoch;
+        last.broken = address_to broken;
+        last.have = true;
+        return true;
+}
+
 static bool date_shape(writer write, b64 when, positive nanoseconds,
                        string_address format)
 {
-        time_t stamp = (time_t)when;
         tm broken;
         p8 fixed[512];
         positive length;
 
-        if (!localtime_r(address_of stamp, address_of broken))
+        if (!date_local(when, address_of broken))
                 return false;
 
         {
@@ -49474,10 +49595,9 @@ static string_address date_locale_names(string_address format, b64 when)
         if (!locale_open(LOCALE_TIME) && date_calendar_kind() == DATE_CALENDAR_NONE)
                 return format;
 
-        time_t stamp = (time_t)when;
         tm broken;
 
-        if (!localtime_r(address_of stamp, address_of broken))
+        if (!date_local(when, address_of broken))
                 return format;
 
         positive calendar = date_calendar_kind();
@@ -49815,12 +49935,27 @@ static bool date_flagged_put(string_address text, positive length, bool literal)
         return true;
 }
 
+/*      Outside en_US the expansion is the format itself with its O directives
+        written out, whatever the instant: the same text for every line a
+        date -f reads, so it is made once and kept with the format it was
+        made for. The instant matters only where a flagged %c, %x or %X is
+        another format run at it, which is en_US. */
+static p8 date_flagged_key[256];
+static bool date_flagged_kept;
+
 static string_address date_flagged_expand(string_address format, b64 when, positive nanoseconds)
 {
         bool en_us = date_locale_en_us();
 
         if (!string_first_of(format, '%'))
                 return format;
+
+        positive format_length = string_length(format);
+
+        if (date_flagged_kept && !en_us && format_length < sizeof(date_flagged_key) &&
+            !memory_compare(date_flagged_key, format, format_length + 1))
+                return date_flagged.bytes;
+        date_flagged_kept = false;
         date_flagged.used = 0;
         for (string_address at = format; string_get(at); at++)
         {
@@ -49895,12 +50030,16 @@ static string_address date_flagged_expand(string_address format, b64 when, posit
         if (!byte_store_reserve(address_of date_flagged, date_flagged.used + 1, 256))
                 return format;
         date_flagged.bytes[date_flagged.used] = end;
+        if (!en_us && format_length < sizeof(date_flagged_key))
+        {
+                memory_copy(date_flagged_key, format, format_length + 1);
+                date_flagged_kept = true;
+        }
         return date_flagged.bytes;
 }
 
 static bool date_emit(string_address format, b64 when, positive nanoseconds)
 {
-        time_t stamp = (time_t)when;
         tm broken;
 
         if (pd_debug)
@@ -49909,7 +50048,7 @@ static bool date_emit(string_address format, b64 when, positive nanoseconds)
 
         /* A moment no calendar year can hold is out of range, said with
            its seconds, after the empty line GNU's date still writes. */
-        if (!localtime_r(address_of stamp, address_of broken))
+        if (!date_local(when, address_of broken))
         {
                 p8 seconds[32];
 
