@@ -11701,6 +11701,48 @@ static positive dump_named_field(p8 address_to into, p8 value)
         return dump_right(into, name, string_length(name), 3, ' ');
 }
 
+/*      What -c and -a write for each byte: always three columns, the
+        spelling right-aligned or an octal number, so a byte is one 32-bit
+        store of an entry made once by the functions above (the fourth byte
+        is never read). The call per byte, with its fill, its copy and its
+        switch, was 56 cycles of every byte -c wrote. */
+static p32 dump_spelled_tables[2][256];
+static bool dump_spelled_built[2];
+
+static const p32 address_to dump_spelled_table(bool named)
+{
+        p32 address_to table = dump_spelled_tables[named];
+
+        if (!dump_spelled_built[named])
+        {
+                for (positive byte = 0; byte < 256; byte++)
+                {
+                        p8 field[8] = {0};
+
+                        if (named)
+                                dump_named_field(field, (p8)byte);
+                        else
+                                dump_character_field(field, (p8)byte);
+                        table[byte] = (p32)field[0] | (p32)field[1] << 8 | (p32)field[2] << 16;
+                }
+                dump_spelled_built[named] = true;
+        }
+        return table;
+}
+
+/*      Eight bytes with the ones that are not printable ASCII (not 0x20 to
+        0x7e) turned into a point: the three tests are each a carry into the
+        top bit of the byte, which the low seven bits cannot carry past. */
+static inline p64 dump_printable_word(p64 word)
+{
+        p64 low = word & 0x7f7f7f7f7f7f7f7full;
+        p64 kept = (low + 0x6060606060606060ull) & ~(low + 0x0101010101010101ull) &
+                   ~word & 0x8080808080808080ull;
+        p64 mask = (kept >> 7) * 0xff;
+
+        return (word & mask) | (0x2e2e2e2e2e2e2e2eull & ~mask);
+}
+
 static fn dump_canonical_line(p8 address_to bytes, positive length,
                               positive address)
 {
@@ -11709,6 +11751,38 @@ static fn dump_canonical_line(p8 address_to bytes, positive length,
                 return;
         p8 hex[DUMP_CANONICAL_WIDTH * 2];
         memory_into_hex(hex, bytes, length);
+
+        if (length == DUMP_CANONICAL_WIDTH && address <= 0xffffffffu)
+        {
+                //      A whole row at an address of eight digits, which is
+                //      all of them but the last and a dump past 4 GiB.
+                p8 offset[4] = {(p8)(address >> 24), (p8)(address >> 16),
+                                (p8)(address >> 8), (p8)address};
+                p8 address_to out = line;
+
+                memory_into_hex(out, offset, 4);
+                out += 8;
+                *out++ = ' ';
+                *out++ = ' ';
+                for (positive at = 0; at < DUMP_CANONICAL_WIDTH; at++)
+                {
+                        if (at == 8)
+                                *out++ = ' ';
+                        memory_store_unaligned(p16, out, memory_load_unaligned(p16, hex + at * 2));
+                        out[2] = ' ';
+                        out += 3;
+                }
+                *out++ = ' ';
+                *out++ = '|';
+                memory_store_unaligned(p64, out, dump_printable_word(memory_load_unaligned(p64, bytes)));
+                memory_store_unaligned(p64, out + 8, dump_printable_word(memory_load_unaligned(p64, bytes + 8)));
+                out += 16;
+                *out++ = '|';
+                *out++ = '\n';
+                text_out_used -= 96 - (positive)(out - line);
+                return;
+        }
+
         positive made = dump_unsigned_field(line, address, 16, 8, '0');
 
         line[made++] = ' ';
@@ -12312,12 +12386,17 @@ static fn dump_regular_line(dump_format address_to format,
                 if (shared)
                         gap = dump_pad_at(full_fields, full_fields - field, pad) -
                               dump_pad_at(full_fields, full_fields - field - 1, pad);
-                made += dump_pad(line + made, gap, ' ');
+                if (gap == 1)
+                        line[made++] = ' ';
+                else
+                        made += dump_pad(line + made, gap, ' ');
 
-                if (format->kind == DUMP_CHARACTER)
-                        made += dump_character_field(line + made, bytes[field]);
-                else if (format->kind == DUMP_NAMED)
-                        made += dump_named_field(line + made, bytes[field]);
+                if (format->kind == DUMP_CHARACTER || format->kind == DUMP_NAMED)
+                {
+                        memory_store_unaligned(p32, line + made,
+                                               dump_spelled_table(format->kind == DUMP_NAMED)[bytes[field]]);
+                        made += 3;
+                }
                 else if (format->kind == DUMP_FLOAT)
                         made += dump_float_field(line + made, bytes + field * format->size,
                                                  length - field * format->size, format);
