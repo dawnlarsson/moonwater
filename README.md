@@ -690,7 +690,7 @@ have only `sec_exec_hardened` and `sec_build_hardened`.
 | `sec_host` | `STRICT_HOST` 2: a disk is asked about, `kptr_restrict` 2, io_uring refused, Yama 2, widest mmap randomisation | 3: no module loads, no ptrace attach (Yama 3), `hidepid` on /proc, the data partition `nosuid`, `/dev/shm` `noexec` |
 | `sec_bowl` | `STRICT_BOWL` 2 | 3 |
 | `sec_exec` | Floodlight sealed with every command-making switch off | (none) |
-| `sec_build` | the image's own programs built with zeroed locals, probed stack frames and cleared call-used registers (+3% on a shell start, inside the noise on a compute loop) | (none) |
+| `sec_build` | the image's own programs built with zeroed locals, probed stack frames, cleared call-used registers and the stack protector (+5.7% on a shell start, inside the noise on a compute loop) | (none) |
 
 The userspace regions are what `MOONWATER_STRICT_FILES`, `_TEXT`, `_NET`, `_HOST`
 and `_BOWL` set (`-1` follows the whole build's level, so a region left alone

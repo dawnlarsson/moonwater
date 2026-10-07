@@ -589,8 +589,8 @@ freestanding()
         #       MW_HARDEN=1 builds every program and check the way
         #       kernel/profile/sec_build_hardened asks the compiler to build
         #       the image's: locals zeroed where they are declared, a frame of
-        #       any size probed a page at a time, and every register a call
-        #       used cleared at its return. A lane run this way proves the
+        #       any size probed a page at a time, every register a call used
+        #       cleared at its return, and the stack protector on. A lane run this way proves the
         #       programs do not stand on an uninitialised local or on a stack
         #       that is not probed, and has to be run on its own for the same
         #       reason MW_UBSAN does.
@@ -598,7 +598,8 @@ freestanding()
         #           MW_HARDEN=1 sh test/run shell text
         if [ -n "${MW_HARDEN:-}" ]; then
                 set -- "$@" -ftrivial-auto-var-init=zero \
-                        -fstack-clash-protection -fzero-call-used-regs=used-gpr
+                        -fstack-clash-protection -fzero-call-used-regs=used-gpr \
+                        -fstack-protector-strong -mstack-protector-guard=global
         fi
 
         #       MW_AUTOINIT=pattern fills every local with 0xFE where it is
@@ -4796,11 +4797,70 @@ stack_recursion_check()
         esac
 }
 
+#       A program built with the stack protector dies when a frame is
+#       smashed and runs when it is not, and its guard is set from the
+#       kernel's random bytes with the low byte NUL, so two runs differ. The
+#       flags are what kernel/profile/sec_build_hardened adds to
+#       program_flags; the build is a check of its own because a plain build
+#       has no guard to ask about.
+stack_guard_check()
+{
+        freestanding_check stackguard "$work/stackguard" "" \
+                -fstack-protector-strong -mstack-protector-guard=global ||
+                return 1
+
+        guard_failed=0
+
+        guard_got=$("$work/stackguard" ok 2>&1)
+        [ "$guard_got" = ok ] || {
+                note "stack guard: a frame that was not smashed said [$guard_got]"
+                guard_failed=1
+        }
+
+        guard_got=$("$work/stackguard" smash 2>&1)
+        guard_status=$?
+        case $guard_got in
+        *'stack smashing detected'*) ;;
+        *)
+                note "stack guard: a smashed frame said [$guard_got] and not that it was smashed"
+                guard_failed=1 ;;
+        esac
+        [ "$guard_status" -eq 134 ] || {
+                note "stack guard: a smashed frame left with status $guard_status, want 134 (SIGABRT)"
+                guard_failed=1
+        }
+
+        guard_one=$("$work/stackguard" guard 2>&1)
+        guard_two=$("$work/stackguard" guard 2>&1)
+        [ "$guard_one" != "$guard_two" ] || {
+                note "stack guard: two runs had the same guard [$guard_one]"
+                guard_failed=1
+        }
+        case $guard_one in
+        *' 0') ;;
+        *)
+                note "stack guard: the low byte of [$guard_one] is not zero"
+                guard_failed=1 ;;
+        esac
+
+        [ "$guard_failed" -eq 0 ]
+}
+
 lane_stack()
 (
 failed=0
 
 need_shell || exit 1
+
+guard_outcome=0
+stack_guard_check || guard_outcome=$?
+case $guard_outcome in
+0) tally stack-guard 1 1 ;;
+*)
+        tally stack-guard 0 1
+        failed=$((failed + 1))
+        ;;
+esac
 
 frame_outcome=0
 stack_frame_check || frame_outcome=$?

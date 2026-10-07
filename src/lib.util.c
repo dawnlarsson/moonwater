@@ -36402,10 +36402,69 @@ COLD pub DEAD_END fn __assert_fail(string_address claim, string_address file,
 #if !defined(KERNEL_MODE) && !defined(STANDARD_NO_PLATFORM) && \
         defined(STANDARD_MODERN_C_STANDARD_STDLIB)
 
+/*
+        The stack protector's side of the bargain, for a build that asked for
+        one (-fstack-protector-strong -mstack-protector-guard=global, which is
+        what kernel/profile/sec_build_hardened adds to program_flags).
+
+        The compiler puts a copy of __stack_chk_guard between a function's
+        buffers and its return address and compares it before it returns; a
+        write that runs off a buffer and over the return address has to write
+        this too, and the function that finds it changed does not return but
+        calls __stack_chk_fail. There is no thread pointer to keep it in (a
+        Spark program has no TLS block of the kind a C library makes), so the
+        guard is the global the compiler is told to read, which every thread
+        shares and which a fork copies, as a C library's is.
+
+        It is set once, from getrandom, as the first thing main does, with its
+        low byte zero so that a string overflow, which stops at a NUL, cannot
+        write it. main and the function that sets it are the only two that
+        must not be protected: a frame that is open when the guard changes
+        would be compared against the new value on its way out and found
+        smashed. The constant is what a program has until then, and what one
+        has when getrandom refuses; a stack address is mixed into the
+        fallback so that it is at least not the same in every run.
+
+        A smash is said in one line on standard error and the process dies of
+        SIGABRT through abort, so it is a crash a supervisor sees and not an
+        exit status somebody may read as an answer.
+
+        Compiled only when the compiler is protecting: a plain build has
+        neither symbol and loses nothing.
+*/
+#if (defined(__SSP__) || defined(__SSP_ALL__) || defined(__SSP_STRONG__) || \
+     defined(__SSP_EXPLICIT__)) && !defined(KERNEL_MODE) && defined(LINUX)
+#define NO_STACK_PROTECTOR __attribute__((no_stack_protector))
+
+KEEP unsigned long __stack_chk_guard = 0x2f5a8c1d93e6b700ul;
+
+KEEP NO_STACK_PROTECTOR DEAD_END fn __stack_chk_fail(void)
+{
+        static const p8 said[] = "*** stack smashing detected ***: terminated\n";
+
+        system_write_all(2, said, sizeof said - 1);
+        abort();
+}
+
+static NO_STACK_PROTECTOR fn stack_guard_seed(void)
+{
+        unsigned long value = 0;
+
+        if (system_random_fill(address_of value, sizeof value, 1) < 0 || !value)
+                value = __stack_chk_guard ^ (unsigned long)(positive)address_of value;
+
+        __stack_chk_guard = value & ~(unsigned long)0xff;
+}
+#else
+#define NO_STACK_PROTECTOR
+static inline INLINE fn stack_guard_seed(void) {}
+#endif
+
 b32 moonwater_program_main(void);
 
-b32 main(void)
+NO_STACK_PROTECTOR b32 main(void)
 {
+        stack_guard_seed();
         stdlib_program_starting();
 
 #ifdef STANDARD_MODERN_C_STANDARD_STREAM

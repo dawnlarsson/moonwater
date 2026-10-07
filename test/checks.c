@@ -93249,6 +93249,64 @@ b32 main()
 }
 #endif /* CHECK_probe */
 
+#ifdef CHECK_stackguard
+#include "../src/lib.util.c"
+
+/*
+        The stack protector's guard, as lib.util.c gives it to a program built
+        with -fstack-protector-strong -mstack-protector-guard=global (what
+        kernel/profile/sec_build_hardened adds to the image's programs).
+
+        "ok" writes inside a buffer and comes back; "smash" writes past it
+        and must not come back, but die of SIGABRT with the line on standard
+        error; "guard" says the value the guard has, which main sets from
+        getrandom with its low byte zero, so two runs differ and neither is
+        the constant the program is linked with.
+*/
+extern unsigned long __stack_chk_guard;
+
+static __attribute__((noinline)) b32 guard_fill(positive count)
+{
+        volatile p8 buffer[16];
+
+        for (positive at = 0; at < count; at++)
+                buffer[at] = 'A';
+
+        return buffer[0];
+}
+
+b32 main()
+{
+        string_address mode = program_argument_count() > 1
+                                  ? program_argument(1)
+                                  : (string_address) "";
+        b32 answer = 0;
+
+        if (!string_compare(mode, "ok"))
+        {
+                guard_fill(16);
+                string_format(log, "ok\n");
+        }
+        else if (!string_compare(mode, "smash"))
+        {
+                guard_fill(64);
+                string_format(log, "returned\n");
+        }
+        else if (!string_compare(mode, "guard"))
+                string_format(log, "%p %b\n", (positive)__stack_chk_guard,
+                              (b32)(__stack_chk_guard & 0xff));
+        else
+        {
+                string_format(log, "stackguard: ok smash guard\n");
+                answer = 2;
+        }
+
+        log_flush();
+
+        return answer;
+}
+#endif /* CHECK_stackguard */
+
 #ifdef CHECK_checksum_crc
 #include "../src/lib.util.c"
 #include "../src/moonwater/spark.c"

@@ -128,16 +128,23 @@ never a pass.
   anyone can make a new name at the top.
 - **The image's own programs, built with the compiler's hardening, are a region
   (`sec_build_hardened`):** locals zeroed (`-ftrivial-auto-var-init=zero`),
-  frames probed (`-fstack-clash-protection`) and call-used registers cleared
-  (`-fzero-call-used-regs=used-gpr`). The cost is in the profile (+3% on a
-  shell start). There is no stack protector: it needs a guard and a failure
-  handler the freestanding library does not have, and the programs are not
-  position independent (the Spark format has no relocations), so code is at a
-  fixed address in every process. `MW_HARDEN=1`, `MW_AUTOINIT` and `MW_CFLAGS`
-  in `test/run` build every lane's programs with the flags and found a `PURE`
-  function that stored through a pointer (the redirect of `2>/dev/null` went
-  to the wrong descriptor when locals were zeroed); `pure_stores` (kit)
-  refuses the class.
+  frames probed (`-fstack-clash-protection`), call-used registers cleared
+  (`-fzero-call-used-regs=used-gpr`) and the stack protector with a global guard
+  (`-fstack-protector-strong -mstack-protector-guard=global`; lib.util.c seeds
+  `__stack_chk_guard` from `getrandom` at the top of `main` with its low byte
+  zero, and `__stack_chk_fail` says so on standard error and dies of SIGABRT).
+  The cost is in the profile (+5.7% on a shell start). The guard is one global,
+  so a program with an arbitrary write can change it, which is the usual limit
+  of a canary; the programs are not position independent (the Spark format has
+  no relocations), so code is at a fixed address in every process. Held by
+  `stack_guard_check` (lane `stack`: a frame that is not smashed returns, one
+  that is dies with 134 and the line, two runs have different guards with a
+  zero low byte) on all three architectures, and `MW_HARDEN=1` / `MW_AUTOINIT`
+  / `MW_CFLAGS` in `test/run`, which build every lane's programs with the flags
+  and found a `PURE` function that stored through a pointer (the redirect of
+  `2>/dev/null` went to the wrong descriptor when locals were zeroed).
+  `pure_stores` (kit) refuses the class: a `PURE` or `CONST` definition that
+  stores through a pointer parameter, or a `CONST` one that reads through one.
 - **OUT-D2, the data partition is mounted `nodev` and not `nosuid`:** it
   holds `/root`, `/home` and the bowls; a bowl's `sudo` and `su` need setuid.
   The locked tier mounts it `nosuid` as well, since it has no bowl and no one

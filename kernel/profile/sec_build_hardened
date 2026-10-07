@@ -16,19 +16,25 @@
 #   -fzero-call-used-regs=used-gpr every general register a function used is
 #                                  cleared before it returns, so a gadget at
 #                                  the return finds nothing it can use
+#   -fstack-protector-strong       a function with an array or a local whose
+#   -mstack-protector-guard=global address is taken puts a guard between them
+#                                  and its return address and dies of SIGABRT
+#                                  if the guard has changed when it returns;
+#                                  lib.util.c sets the guard from getrandom at
+#                                  the top of main and says so on stderr
 #
-# The cost, measured on a 9950X with the three flags against none on the shell
+# The cost, measured on a 9950X with the four flags against none on the shell
 # (taskset to two cores, seven rounds of 1,500 starts, interleaved): a start of
-# `sh -c :` is 36.5 us and becomes 37.6 (+3%), a loop of 20,000 shell
-# arithmetic steps is 1,953 us and 1,960 (inside the noise of its own rounds,
-# which are 1,909 to 1,978), and the program is 3.4% larger (4.35 MB to 4.50
-# MB before the packer). That is the reason these are a region and not the
-# baseline. `MW_HARDEN=1 sh test/run LANE` builds a lane's programs with the
-# same three flags.
+# `sh -c :` is 37.0 us and becomes 39.1 (+5.7%); the three flags without the
+# protector made it 37.5 (+1%). A loop of 20,000 shell arithmetic steps is
+# inside the noise of the box it ran on (4.5 ms against 4.8 under a load of 10
+# other jobs, the three-flag build faster than the plain one in the same run),
+# and the program is 5.4% larger (4.35 MB to 4.59 MB before the packer). That
+# is the reason these are a region and not the baseline. `MW_HARDEN=1 sh
+# test/run LANE` builds a lane's programs with the same four flags.
 #
-# Not here, and why: -fstack-protector needs a guard value and a failure
-# handler the freestanding library does not have yet (no TLS, and the loader
-# does not hand a program a canary), and -fcf-protection does nothing without
-# a kernel that enforces user indirect branch tracking.
+# Not here, and why: -fcf-protection does nothing without a kernel that
+# enforces user indirect branch tracking, and a program that is not position
+# independent has no code to randomise (the Spark format has no relocations).
 #
-#> program_flags -ftrivial-auto-var-init=zero -fstack-clash-protection -fzero-call-used-regs=used-gpr
+#> program_flags -ftrivial-auto-var-init=zero -fstack-clash-protection -fzero-call-used-regs=used-gpr -fstack-protector-strong -mstack-protector-guard=global
