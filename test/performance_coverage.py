@@ -487,12 +487,14 @@ cover('correctness_only', 'test/checks.c#CHECK_compression_floor', 'huffman_leng
       'the C reference in test/codec_floor/reference/huffman_lengths.c',
       anchors={'huffman_lengths': 'floor_huffman_lengths'})
 cover('correctness_only', 'test/checks.c#CHECK_compression_floor',
-      'deflate_tokens_count deflate_tokens_encode',
+      'deflate_tokens_count deflate_tokens_encode deflate_tokens_encode_bmi2',
       'bit-exact against a bit-at-a-time model from every pending width with '
-      'the output guarded; end-to-end gzip timing, and the native arm64 row '
+      'the output guarded, blocks of fewer and of more than 64 pairs (the BMI2 '
+      'body takes the second); end-to-end gzip timing, and the native arm64 row '
       'against the C reference in test/codec_floor/reference/deflate_tokens.c',
       anchors={'deflate_tokens_count': 'floor_deflate_tokens',
-               'deflate_tokens_encode': 'floor_deflate_tokens'})
+               'deflate_tokens_encode': 'floor_deflate_tokens',
+               'deflate_tokens_encode_bmi2': 'floor_deflate_tokens'})
 cover('correctness_only', 'test/checks.c#CHECK_compression_floor', 'deflate_decode_span',
       'all length/distance combinations with guard pages; end-to-end gzip '
       'timing is available, but there is no isolated token-loop timing row',

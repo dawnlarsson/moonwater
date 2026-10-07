@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        381 routines (361 public, 20 local), 374 of them on all three and 7 local to one.
+        382 routines (361 public, 21 local), 374 of them on all three and 8 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -141,6 +141,7 @@
           deflate_decode_span            public  yes     yes     yes
           deflate_tokens_count           public  yes     yes     yes
           deflate_tokens_encode          public  yes     yes     yes
+          deflate_tokens_encode_bmi2     local   yes     --      --
           exit                           public  yes     yes     yes
           fast_sin                       public  yes     yes     yes
           file_close                     public  yes     yes     yes
@@ -453,6 +454,7 @@
 
         Private to one machine, by choice:
           cpu_vector_detect -- local to riscv64
+          deflate_tokens_encode_bmi2 -- local to x86_64
           memory_offsets_fields_arm64 -- local to arm64
           memory_offsets_fields_rv -- local to riscv64
           memory_offsets_fields_x64 -- local to x86_64
@@ -12020,6 +12022,11 @@ __asm__(
     "popq %r12\n   popq %rbp\n   popq %rbx\n" ASM_RET
     ASM_END(deflate_tokens_count)
     ASM_FUNC(deflate_tokens_encode)
+#ifndef KERNEL_MODE
+    ".Ldt_x64_dispatch:  cmpb $0, cpu_has_mulx(%rip)\n   jne .Ldt_x64_bmi2\n   cmpb $0, cpu_hash_probed(%rip)\n   jne .Ldt_x64_old\n   call cpu_hash_detect\n   jmp .Ldt_x64_dispatch\n"
+    ".Ldt_x64_bmi2:  cmpq $64, 40(%rdi)\n   jae deflate_tokens_encode_bmi2\n"
+    ".Ldt_x64_old:\n"
+#endif
     "pushq %rbx\n   pushq %rbp\n   pushq %r12\n   pushq %r13\n   pushq %r14\n   pushq %r15\n   movq (%rdi), %rsi\n   movq 48(%rdi), %r8\n   movq 64(%rdi), %r15\n   movq 72(%rdi), %rax\n"
     "movq 80(%rdi), %rcx\n   xorl %ebp, %ebp\n   xorl %edx, %edx\n   movq %rax, (%r15)\n   movl %ecx, %r9d\n   shrl $3, %r9d\n   addq %r9, %r15\n   movl %ecx, %r9d\n   andl $7, %r9d\n"
     "andl $56, %ecx\n   shrq %cl, %rax\n   movl %r9d, %ecx\n"
@@ -12045,6 +12052,50 @@ __asm__(
     "shrl $3, %r9d\n   addq %r9, %r15\n   movl %ecx, %r9d\n   andl $7, %r9d\n   andl $56, %ecx\n   shrq %cl, %rax\n   movl %r9d, %ecx\n   movq %r15, 64(%rdi)\n   movq %rax, 72(%rdi)\n"
     "movq %rcx, 80(%rdi)\n   popq %r15\n   popq %r14\n   popq %r13\n   popq %r12\n   popq %rbp\n   popq %rbx\n" ASM_RET
     ASM_END(deflate_tokens_encode)
+#ifndef KERNEL_MODE
+    /* deflate_tokens_encode with BMI2 (cpu_has_mulx) for a block of 64 or
+       more pairs: the same job and the same bits, in about half the
+       instructions a pair. The block's tables are made once at the top on
+       the stack: for each of the 256 lengths a word of its code and its
+       extra bits and the count of both, so a length is two loads and one
+       insert; for each of the 30 distance symbols its code, its code length
+       and its extra-bit count. A distance's extra bits are its low e bits of
+       dist - 1 (every base - 1 is a multiple of 2^e), so bzhi takes them
+       without a base lookup, and shlx and shrx take the shifts out of cl.
+       The flush after a pair is seven instructions and the next pair is
+       entered at once when no literal lies between it and this one (the
+       next mpos is the cursor), as in a run of matches. 1.5 KiB of stack. */
+    ASM_LOCAL_FUNC(deflate_tokens_encode_bmi2)
+    "push %rbx\n   push %rbp\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n   sub $1544, %rsp\n   lea deflate_symbol_tab(%rip), %r13\n   mov 48(%rdi), %r14\n   xor %ecx, %ecx\n"
+    ".Ldtb_x64_len:  movzbl (%r13,%rcx), %ebx\n   mov 1028(%r14,%rbx,4), %edx\n   movzwl %dx, %r8d\n   shr $16, %edx\n   movzwl 832(%r13,%rbx,2), %r9d\n   mov %ecx, %eax\n   sub %r9d, %eax\n"
+    "movzbl 768(%r13,%rbx), %ebx\n   shlx %rdx, %rax, %rax\n   or %r8, %rax\n   mov %eax, (%rsp,%rcx,4)\n   add %ebx, %edx\n   mov %dl, 1024(%rsp,%rcx)\n   inc %ecx\n   cmp $256, %ecx\n   jb .Ldtb_x64_len\n"
+    "mov 56(%rdi), %r8\n   xor %ecx, %ecx\n"
+    ".Ldtb_x64_dist:  mov (%r8,%rcx,4), %edx\n   movzwl %dx, %eax\n   shr $16, %edx\n   mov %eax, 1280(%rsp,%rcx,4)\n   mov %dl, 1408(%rsp,%rcx)\n   movzbl 800(%r13,%rcx), %ebx\n   mov %bl, 1440(%rsp,%rcx)\n"
+    "inc %ecx\n   cmp $30, %ecx\n   jb .Ldtb_x64_dist\n"
+    "mov (%rdi), %rsi\n   mov 8(%rdi), %r11\n   mov 16(%rdi), %r9\n   mov 24(%rdi), %r10\n   mov 64(%rdi), %r15\n   mov 72(%rdi), %rax\n   mov 80(%rdi), %r12\n   xor %ebp, %ebp\n   xor %r8d, %r8d\n"
+    "mov %rax, (%r15)\n   mov %r12d, %ecx\n   and $56, %ecx\n   shrx %rcx, %rax, %rax\n   shr $3, %ecx\n   add %rcx, %r15\n   and $7, %r12d\n"
+    ".Ldtb_x64_top:  mov 32(%rdi), %rbx\n   cmp 40(%rdi), %r8\n   jae .Ldtb_x64_lits\n   mov (%r11,%r8,4), %ecx\n   cmp %rbx, %rcx\n   cmovb %rcx, %rbx\n"
+    ".Ldtb_x64_lits:  cmp %rbx, %rbp\n   jae .Ldtb_x64_pair\n   mov 48(%rdi), %r14\n"
+    ".Ldtb_x64_three:  lea 3(%rbp), %rcx\n   cmp %rbx, %rcx\n   ja .Ldtb_x64_one\n"
+    "movzbl (%rsi,%rbp), %ecx\n   mov (%r14,%rcx,4), %ecx\n   movzwl %cx, %edx\n   shr $16, %ecx\n   shlx %r12, %rdx, %rdx\n   or %rdx, %rax\n   add %rcx, %r12\n"
+    "movzbl 1(%rsi,%rbp), %ecx\n   mov (%r14,%rcx,4), %ecx\n   movzwl %cx, %edx\n   shr $16, %ecx\n   shlx %r12, %rdx, %rdx\n   or %rdx, %rax\n   add %rcx, %r12\n"
+    "movzbl 2(%rsi,%rbp), %ecx\n   mov (%r14,%rcx,4), %ecx\n   movzwl %cx, %edx\n   shr $16, %ecx\n   shlx %r12, %rdx, %rdx\n   or %rdx, %rax\n   add %rcx, %r12\n   add $3, %rbp\n"
+    "mov %rax, (%r15)\n   mov %r12d, %ecx\n   and $56, %ecx\n   shrx %rcx, %rax, %rax\n   shr $3, %ecx\n   add %rcx, %r15\n   and $7, %r12d\n   jmp .Ldtb_x64_three\n"
+    ".Ldtb_x64_one:  cmp %rbx, %rbp\n   jae .Ldtb_x64_pair\n   movzbl (%rsi,%rbp), %ecx\n   mov (%r14,%rcx,4), %ecx\n   movzwl %cx, %edx\n   shr $16, %ecx\n   shlx %r12, %rdx, %rdx\n"
+    "or %rdx, %rax\n   add %rcx, %r12\n   inc %rbp\n   jmp .Ldtb_x64_one\n"
+    ".Ldtb_x64_pair:  mov %rax, (%r15)\n   mov %r12d, %ecx\n   and $56, %ecx\n   shrx %rcx, %rax, %rax\n   shr $3, %ecx\n   add %rcx, %r15\n   and $7, %r12d\n   cmp 40(%rdi), %r8\n   jae .Ldtb_x64_end\n"
+    ".Ldtb_x64_pair_hot:  cmp 32(%rdi), %rbp\n   jae .Ldtb_x64_end\n   movzwl (%r9,%r8,2), %ebx\n   movzwl (%r10,%r8,2), %edx\n   add %rbx, %rbp\n   inc %r8\n"
+    "mov -12(%rsp,%rbx,4), %ecx\n   movzbl 1021(%rsp,%rbx), %ebx\n   shlx %r12, %rcx, %rcx\n   or %rcx, %rax\n   add %rbx, %r12\n"
+    "dec %edx\n   mov %edx, %ebx\n   shr $7, %ebx\n   add $256, %ebx\n   cmp $256, %edx\n   cmovb %edx, %ebx\n   movzbl 256(%r13,%rbx), %ebx\n"
+    "mov 1280(%rsp,%rbx,4), %ecx\n   movzbl 1408(%rsp,%rbx), %r14d\n   movzbl 1440(%rsp,%rbx), %ebx\n   bzhi %ebx, %edx, %edx\n   shlx %r14, %rdx, %rdx\n   or %rdx, %rcx\n   add %r14, %rbx\n"
+    "shlx %r12, %rcx, %rcx\n   or %rcx, %rax\n   add %rbx, %r12\n"
+    "mov %rax, (%r15)\n   mov %r12d, %ecx\n   and $56, %ecx\n   shrx %rcx, %rax, %rax\n   shr $3, %ecx\n   add %rcx, %r15\n   and $7, %r12d\n"
+    "cmp 40(%rdi), %r8\n   jae .Ldtb_x64_top\n   mov (%r11,%r8,4), %ebx\n   cmp %rbx, %rbp\n   je .Ldtb_x64_pair_hot\n   jmp .Ldtb_x64_top\n"
+    ".Ldtb_x64_end:  mov 48(%rdi), %rbx\n   mov 1024(%rbx), %ebx\n   movzwl %bx, %ecx\n   shr $16, %ebx\n   shlx %r12, %rcx, %rcx\n   or %rcx, %rax\n   add %rbx, %r12\n"
+    "mov %rax, (%r15)\n   mov %r12d, %ecx\n   and $56, %ecx\n   shrx %rcx, %rax, %rax\n   shr $3, %ecx\n   add %rcx, %r15\n   and $7, %r12d\n"
+    "mov %r15, 64(%rdi)\n   mov %rax, 72(%rdi)\n   mov %r12, 80(%rdi)\n   add $1544, %rsp\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n" ASM_RET
+    ASM_LOCAL_END(deflate_tokens_encode_bmi2)
+#endif
     /* huffman_lengths(freq, n, length, limit): code lengths of at most
        limit (1..15) bits for n <= 288 counts summing below 2^22, 1 on
        success and 0 when the lengths cannot be limited. The symbols in use are sorted by count,

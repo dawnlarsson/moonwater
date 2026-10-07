@@ -113691,6 +113691,10 @@ static fn floor_deflate_tokens(void)
                 positive length = 0, pairs = 0, extra = 0;
 #define FLOOR_RANDOM() (random ^= random << 13, random ^= random >> 17, random ^= random << 5, random)
                 positive room = 1 + FLOOR_RANDOM() % 4000;
+                //      Every third block is dense in pairs: the tables the wide body
+                //      makes only pay from 64 pairs, and the short pairs run back to
+                //      back with no literal between them.
+                bool dense = trial % 3 == 0;
                 for (positive i = 0; i < GZIP_MAXLIT; i++)
                 {
                         positive len = 1 + FLOOR_RANDOM() % 15;
@@ -113705,10 +113709,10 @@ static fn floor_deflate_tokens(void)
                         src[i] = (p8)FLOOR_RANDOM();
                 while (length < room)
                 {
-                        positive mode = FLOOR_RANDOM() % 4;
+                        positive mode = dense ? (FLOOR_RANDOM() % 6 == 0 ? 1 : 0) : FLOOR_RANDOM() % 4;
                         if (mode == 0 && length + 3 <= room && pairs < 1024)
                         {
-                                positive m = 3 + FLOOR_RANDOM() % 256;
+                                positive m = 3 + FLOOR_RANDOM() % (dense ? 14 : 256);
                                 positive d = FLOOR_RANDOM() % 3 ? 1 + FLOOR_RANDOM() % 32768
                                                                 : 1 + FLOOR_RANDOM() % 8;
                                 if (FLOOR_RANDOM() % 8 == 0) m = 258;
