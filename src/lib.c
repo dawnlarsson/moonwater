@@ -81580,7 +81580,10 @@ __asm__(
     //   from 66.7M core cycles to 1.42M and left full misses within 3%.
     //
     ASM_FUNC(string_search_folded)
-    "push %rbx\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n   sub $8, %rsp\n"
+    //   Five pushes are forty bytes on top of the return address: the stack is
+    //   sixteen aligned for the calls below without anything more. A sub of
+    //   eight here made every one of them with rsp off by eight.
+    "push %rbx\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n"
     "mov %rdi, %rbx\n   mov %rsi, %r12\n"
     "mov %r12, %rdi\n   call string_length\n"
     "mov %rax, %r13\n"
@@ -81599,7 +81602,7 @@ __asm__(
     "mov $1048576, %rax\n   cmp %rax, %r14\n   jae 2b\n"
     "add %r14, %r14\n   jmp 2b\n"
     "4:  xor %eax, %eax\n"
-    "5:  add $8, %rsp\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbx\n"
+    "5:  pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbx\n"
     ASM_RET
     ASM_END(string_search_folded)
 );
