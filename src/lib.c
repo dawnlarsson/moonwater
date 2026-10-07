@@ -11214,7 +11214,7 @@ __asm__(
     "xor %eax, %eax\n   xor %r10d, %r10d\n   test %r9, %r9\n   jz .Lmemory_offsets_x64_done\n"
 #ifndef KERNEL_MODE
     "cmp $64, %rdx\n   jb .Lmemory_offsets_x64_short\n"
-    ASM_NARROW("cpu_has_avx512", ".Lmemory_offsets_x64_narrow")
+    ASM_NARROW("cpu_has_avx512", ".Lmemory_offsets_x64_avx2")
     "vpbroadcastb %ecx, %zmm1\n   movzbl %r8b, %r11d\n   vpbroadcastb %r11d, %zmm2\n"
     // With VBMI2 the block's hits are packed as byte offsets with
     // vpcompressb and widened sixteen at a time, so a sparse block is one
@@ -11256,10 +11256,10 @@ __asm__(
     ".Lmemory_offsets_x64_short:\n"
     // r10 bytes are done and rax offsets written; fewer than 64 bytes remain (the top of the routine, or the wide loop's tail)
     ASM_NARROW("cpu_has_avx512", ".Lmemory_offsets_x64_narrow")
-    "mov %r9, %r11\n   sub %rax, %r11\n   cmp $64, %r11\n   jb .Lmemory_offsets_x64_narrow\n   movzbl cpu_has_avx512_vbmi2(%rip), %r11d\n   test %r11d, %r11d\n   jnz 2f\n"
+    "mov %r9, %r11\n   sub %rax, %r11\n   cmp $64, %r11\n   jb .Lmemory_offsets_x64_avx2\n   movzbl cpu_has_avx512_vbmi2(%rip), %r11d\n   test %r11d, %r11d\n   jnz 2f\n"
     "push %rbx\n   push %rcx\n   push %rdx\n   mov $7, %eax\n   xor %ecx, %ecx\n   cpuid\n   shr $6, %ecx\n   and $1, %ecx\n   inc %ecx\n   mov %cl, cpu_has_avx512_vbmi2(%rip)\n"
     "mov %ecx, %r11d\n   pop %rdx\n   pop %rcx\n   pop %rbx\n   xor %eax, %eax\n"
-    "2:  cmp $2, %r11d\n   jne .Lmemory_offsets_x64_narrow\n   mov %rdx, %r11\n   sub %r10, %r11\n   jbe 3f\n   vpbroadcastb %ecx, %zmm1\n   movzbl %r8b, %edx\n   vpbroadcastb %edx, %zmm2\n"
+    "2:  cmp $2, %r11d\n   jne .Lmemory_offsets_x64_avx2\n   mov %rdx, %r11\n   sub %r10, %r11\n   jbe 3f\n   vpbroadcastb %ecx, %zmm1\n   movzbl %r8b, %edx\n   vpbroadcastb %edx, %zmm2\n"
     "mov $-1, %rdx\n   bzhi %r11, %rdx, %rdx\n   kmovq %rdx, %k1\n   vmovdqu8 (%rsi,%r10), %zmm0{%k1}{z}\n"
     "vpcmpeqb %zmm1, %zmm0, %k2{%k1}\n   vpcmpeqb %zmm2, %zmm0, %k3{%k1}\n   korq %k3, %k2, %k2\n   kmovq %k2, %rdx\n   popcnt %rdx, %r11\n   jz 3f\n"
     "vmovdqu64 .Lmemory_offsets_x64_bytes(%rip), %zmm3\n   vpcompressb %zmm3, %zmm7{%k2}{z}\n   vpbroadcastd %r10d, %zmm4\n"
@@ -11269,6 +11269,38 @@ __asm__(
     "vextracti32x4 $3, %zmm7, %xmm9\n   vpmovzxbd %xmm9, %zmm8\n   vpaddd %zmm4, %zmm8, %zmm8\n   vmovdqu32 %zmm8, 192(%rdi,%rax,4)\n"
     "4:  add %r11, %rax\n"
     "3:  vzeroupper\n" ASM_RET
+    //
+    //      Without AVX-512, sixty four bytes at a time on the 256-bit compares: both bytes asked of both halves,
+    //      the flags of the two in one register, and the offsets written out of it by the bit walk, eight at a
+    //      go whether there are eight or not -- an offset a hit, then the lowest bit cleared -- because a
+    //      branch on how many are left is a branch on how many hits a block has, which is a different number
+    //      every time. What is written past the last hit is not an answer and is not read: the vector body only
+    //      runs with sixty four offsets of room, and the groups stay inside that. The byte loop under this took
+    //      2.8 ticks a byte, 52 a hit in lines of 8 to 27 bytes, on a 9950X with the AVX-512 bodies turned off:
+    //      4096 bytes of such lines took 11,549 ticks and take 860 (3.9 a hit; the AVX-512 body is 1.3).
+    //      It is also where the AVX-512 body goes with less than sixty four offsets of room, which it handed to
+    //      the byte loop: a window of 4096 bytes and 256 offsets spent the last kilobyte of every call there.
+    //
+    ".Lmemory_offsets_x64_avx2:\n   cmpb $0, cpu_has_avx2(%rip)\n   je .Lmemory_offsets_x64_narrow\n   push %rbx\n"
+    "vmovd %ecx, %xmm1\n   vpbroadcastb %xmm1, %ymm1\n   movzbl %r8b, %r8d\n   vmovd %r8d, %xmm2\n   vpbroadcastb %xmm2, %ymm2\n"
+    ".balign 16\n.Lmemory_offsets_x64_a2_block:\n"
+    "cmp %r9, %rax\n   jae .Lmemory_offsets_x64_a2_full\n   mov %rdx, %r11\n   sub %r10, %r11\n   cmp $64, %r11\n   jb .Lmemory_offsets_x64_a2_tail\n"
+    "vmovdqu (%rsi,%r10), %ymm0\n   vmovdqu 32(%rsi,%r10), %ymm3\n"
+    "vpcmpeqb %ymm1, %ymm0, %ymm4\n   vpcmpeqb %ymm2, %ymm0, %ymm5\n   vpcmpeqb %ymm1, %ymm3, %ymm6\n   vpcmpeqb %ymm2, %ymm3, %ymm7\n"
+    "vpor %ymm5, %ymm4, %ymm4\n   vpor %ymm7, %ymm6, %ymm6\n   vpmovmskb %ymm4, %ecx\n   vpmovmskb %ymm6, %r8d\n   shl $32, %r8\n   or %r8, %rcx\n   jz .Lmemory_offsets_x64_a2_next\n"
+    "mov %r9, %rbx\n   sub %rax, %rbx\n   cmp $64, %rbx\n   jb .Lmemory_offsets_x64_a2_slow\n   popcnt %rcx, %r11\n   lea (%rdi,%rax,4), %r8\n   add %r11, %rax\n"
+    "bsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, (%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 4(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 8(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 12(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 16(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 20(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 24(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 28(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\n"
+    "cmp $8, %r11\n   jbe .Lmemory_offsets_x64_a2_next\n"
+    "bsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 32(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 36(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 40(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 44(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 48(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 52(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 56(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 60(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\n"
+    "cmp $16, %r11\n   jbe .Lmemory_offsets_x64_a2_next\n   add $64, %r8\n"
+    ".Lmemory_offsets_x64_a2_more:\n   bsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, (%r8)\n   lea -1(%rcx), %rbx\n   add $4, %r8\n   and %rbx, %rcx\n   jnz .Lmemory_offsets_x64_a2_more\n"
+    ".Lmemory_offsets_x64_a2_next:\n   add $64, %r10\n   jmp .Lmemory_offsets_x64_a2_block\n"
+    //      Less than sixty four offsets of room: one at a time, and out as soon as the array is full.
+    ".Lmemory_offsets_x64_a2_slow:\n   cmp %r9, %rax\n   jae .Lmemory_offsets_x64_a2_full\n"
+    "bsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, (%rdi,%rax,4)\n   inc %rax\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\n   jnz .Lmemory_offsets_x64_a2_slow\n   jmp .Lmemory_offsets_x64_a2_next\n"
+    ".Lmemory_offsets_x64_a2_full:\n   vzeroupper\n   jmp .Lmemory_offsets_x64_leave\n"
+    //      Fewer than sixty four bytes left: the byte loop, with the two bytes it compares with back in place.
+    ".Lmemory_offsets_x64_a2_tail:\n   vmovd %xmm1, %ecx\n   vmovd %xmm2, %r8d\n   vzeroupper\n   jmp .Lmemory_offsets_x64_one\n"
 #endif
     ".Lmemory_offsets_x64_narrow:\n   push %rbx\n"
     ".balign 16\n.Lmemory_offsets_x64_one:\n"
@@ -11309,7 +11341,7 @@ __asm__(
     "xor %eax, %eax\n   xor %r10d, %r10d\n   test %r9, %r9\n   jz .Lmemory_offsets_range_x64_leave\n"
 #ifndef KERNEL_MODE
     "cmp $64, %rdx\n   jb .Lmemory_offsets_range_x64_one\n"
-    ASM_NARROW("cpu_has_avx512", ".Lmemory_offsets_range_x64_one")
+    ASM_NARROW("cpu_has_avx512", ".Lmemory_offsets_range_x64_avx2")
     "vpbroadcastb %ecx, %zmm1\n   vpbroadcastb %r8d, %zmm2\n"
     // With VBMI2 the block's hits are packed as byte offsets with
     // vpcompressb and widened sixteen at a time, so a sparse block is one
@@ -11345,11 +11377,39 @@ __asm__(
     "kshiftrq $16, %k1, %k1\n   vpaddd %zmm5, %zmm4, %zmm4\n"
     "vpcompressd %zmm4, %zmm6{%k1}{z}\n   vmovdqu32 %zmm6, (%rdi,%rax,4)\n   kmovw %k1, %r11d\n   popcnt %r11d, %r11d\n   add %r11, %rax\n"
     ".Lmemory_offsets_range_x64_next:\n   add $64, %r10\n   jmp .Lmemory_offsets_range_x64_wide\n"
-    ".Lmemory_offsets_range_x64_wide_end:\n   vzeroupper\n"
+    ".Lmemory_offsets_range_x64_wide_end:\n   vzeroupper\n   jmp .Lmemory_offsets_range_x64_avx2\n"
     ".pushsection .rodata\n   .balign 64\n"
     ".Lmemory_offsets_range_x64_iota:\n   .long 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15\n"
     ".Lmemory_offsets_range_x64_bytes:\n   .byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63\n"
     ".popsection\n"
+    //
+    //      The 256-bit body, as memory_offsets_of_either has it: sixty four bytes a turn, the offsets written
+    //      eight at a go by the bit walk, one at a time with less than sixty four offsets of room. It is also
+    //      where the AVX-512 body goes when it has run out of room or of whole blocks, which it gave to the byte
+    //      loop. The outside flag becomes all ones or nothing for the length of it. 4096 bytes with a hit every
+    //      8 to 27 bytes, ticks on a 9950X with the AVX-512 bodies off: 7,360 for the byte loop, 870 for this;
+    //      a hit every 250 to 749 bytes 9,843 and 229. With AVX-512 and 256 offsets of room for 4096 bytes, hits
+    //      every 8 to 27: 1,175 before, 441 now that the last kilobyte is not the byte loop's.
+    //
+    ".Lmemory_offsets_range_x64_avx2:\n   cmpb $0, cpu_has_avx2(%rip)\n   je .Lmemory_offsets_range_x64_one\n"
+    "vmovd %ecx, %xmm1\n   vpbroadcastb %xmm1, %ymm1\n   vmovd %r8d, %xmm2\n   vpbroadcastb %xmm2, %ymm2\n   neg %r12\n"
+    ".balign 16\n.Lmemory_offsets_range_x64_a2_block:\n"
+    "cmp %r9, %rax\n   jae .Lmemory_offsets_range_x64_a2_full\n   mov %rdx, %r11\n   sub %r10, %r11\n   cmp $64, %r11\n   jb .Lmemory_offsets_range_x64_a2_tail\n"
+    "vmovdqu (%rsi,%r10), %ymm0\n   vmovdqu 32(%rsi,%r10), %ymm3\n"
+    "vpsubb %ymm1, %ymm0, %ymm0\n   vpsubb %ymm1, %ymm3, %ymm3\n   vpminub %ymm2, %ymm0, %ymm4\n   vpminub %ymm2, %ymm3, %ymm5\n"
+    "vpcmpeqb %ymm4, %ymm0, %ymm0\n   vpcmpeqb %ymm5, %ymm3, %ymm3\n   vpmovmskb %ymm0, %ecx\n   vpmovmskb %ymm3, %r8d\n"
+    "shl $32, %r8\n   or %r8, %rcx\n   xor %r12, %rcx\n   jz .Lmemory_offsets_range_x64_a2_next\n"
+    "mov %r9, %rbx\n   sub %rax, %rbx\n   cmp $64, %rbx\n   jb .Lmemory_offsets_range_x64_a2_slow\n   popcnt %rcx, %r11\n   lea (%rdi,%rax,4), %r8\n   add %r11, %rax\n"
+    "bsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, (%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 4(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 8(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 12(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 16(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 20(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 24(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 28(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\n"
+    "cmp $8, %r11\n   jbe .Lmemory_offsets_range_x64_a2_next\n"
+    "bsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 32(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 36(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 40(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 44(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 48(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 52(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 56(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 60(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\n"
+    "cmp $16, %r11\n   jbe .Lmemory_offsets_range_x64_a2_next\n   add $64, %r8\n"
+    ".Lmemory_offsets_range_x64_a2_more:\n   bsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, (%r8)\n   lea -1(%rcx), %rbx\n   add $4, %r8\n   and %rbx, %rcx\n   jnz .Lmemory_offsets_range_x64_a2_more\n"
+    ".Lmemory_offsets_range_x64_a2_next:\n   add $64, %r10\n   jmp .Lmemory_offsets_range_x64_a2_block\n"
+    ".Lmemory_offsets_range_x64_a2_slow:\n   cmp %r9, %rax\n   jae .Lmemory_offsets_range_x64_a2_full\n"
+    "bsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, (%rdi,%rax,4)\n   inc %rax\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\n   jnz .Lmemory_offsets_range_x64_a2_slow\n   jmp .Lmemory_offsets_range_x64_a2_next\n"
+    ".Lmemory_offsets_range_x64_a2_full:\n   vzeroupper\n   jmp .Lmemory_offsets_range_x64_leave\n"
+    ".Lmemory_offsets_range_x64_a2_tail:\n   vmovd %xmm1, %ecx\n   movzbl %cl, %ecx\n   vmovd %xmm2, %r8d\n   movzbl %r8b, %r8d\n   neg %r12\n   vzeroupper\n   jmp .Lmemory_offsets_range_x64_one\n"
 #endif
     ".balign 16\n.Lmemory_offsets_range_x64_one:\n"
     "cmp %rdx, %r10\n   jae .Lmemory_offsets_range_x64_leave\n   cmp %r9, %rax\n   jae .Lmemory_offsets_range_x64_leave\n"
@@ -18947,7 +19007,30 @@ __asm__(
     ASM_FUNC(memory_offsets_of_either)
     "and w3, w3, #255\n   and w4, w4, #255\n   mov x6, xzr\n   mov x7, xzr\n   cbz x5, .Lmemory_offsets_arm64_done\n"
 #ifndef KERNEL_MODE
-    "dup v1.16b, w3\n   dup v2.16b, w4\n   mov x13, #0x8888888888888888\n"
+    "dup v1.16b, w3\n   dup v2.16b, w4\n   mov x13, #0x8888888888888888\n   movz x14, #0x0201\n   movk x14, #0x0804, lsl #16\n   movk x14, #0x2010, lsl #32\n   movk x14, #0x8040, lsl #48\n   dup v5.2d, x14\n"
+    //
+    //       Sixty four bytes a turn while there are sixty four offsets of room, as the x86-64 AVX2 body does: the
+    //       flags of four vectors reduced to one 64-bit mask by anding each with the bit its lane stands for and
+    //       adding pairs, the offsets written out of it by the bit walk eight at a go whether there are eight or
+    //       not (a branch on how many hits a block has is a branch on a different number every time), and the
+    //       walk's exit made once, on the count, rather than once a vector. Lines of 8 to 27 bytes in 4 KiB on an
+    //       M2 Pro, the best of seven runs alternated with the code before: 775 ns before and 308 after; newline
+    //       every 2 to 4 bytes 1350 and 683, every 60 to 179 402 and 318, every 250 to 749 224 and 199.
+    //
+    ".Lmemory_offsets_arm64_big:  sub x8, x2, x7\n   cmp x8, #64\n   b.lo .Lmemory_offsets_arm64_wide\n   sub x8, x5, x6\n   cmp x8, #64\n   b.lo .Lmemory_offsets_arm64_wide\n"
+    "add x15, x1, x7\n   ldp q16, q17, [x15]\n   ldp q18, q19, [x15, #32]\n   cmeq v20.16b, v16.16b, v1.16b\n   cmeq v21.16b, v16.16b, v2.16b\n   orr v20.16b, v20.16b, v21.16b\n"
+    "cmeq v21.16b, v17.16b, v1.16b\n   cmeq v22.16b, v17.16b, v2.16b\n   orr v21.16b, v21.16b, v22.16b\n"
+    "cmeq v22.16b, v18.16b, v1.16b\n   cmeq v23.16b, v18.16b, v2.16b\n   orr v22.16b, v22.16b, v23.16b\n"
+    "cmeq v23.16b, v19.16b, v1.16b\n   cmeq v24.16b, v19.16b, v2.16b\n   orr v23.16b, v23.16b, v24.16b\n"
+    "and v20.16b, v20.16b, v5.16b\n   and v21.16b, v21.16b, v5.16b\n   and v22.16b, v22.16b, v5.16b\n   and v23.16b, v23.16b, v5.16b\n"
+    "addp v20.16b, v20.16b, v21.16b\n   addp v22.16b, v22.16b, v23.16b\n   addp v20.16b, v20.16b, v22.16b\n   addp v20.16b, v20.16b, v20.16b\n"
+    "fmov x9, d20\n   cbz x9, .Lmemory_offsets_arm64_big_next\n   cnt v21.8b, v20.8b\n   addv b21, v21.8b\n   umov w11, v21.b[0]\n   add x14, x0, x6, lsl #2\n   add x6, x6, x11\n"
+    "rbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x12, x9, #1\n   and x9, x9, x12\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x12, x9, #1\n   and x9, x9, x12\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x12, x9, #1\n   and x9, x9, x12\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x12, x9, #1\n   and x9, x9, x12\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x12, x9, #1\n   and x9, x9, x12\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x12, x9, #1\n   and x9, x9, x12\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x12, x9, #1\n   and x9, x9, x12\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x12, x9, #1\n   and x9, x9, x12\n"
+    "cmp w11, #8\n   b.ls .Lmemory_offsets_arm64_big_next\n"
+    "rbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x12, x9, #1\n   and x9, x9, x12\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x12, x9, #1\n   and x9, x9, x12\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x12, x9, #1\n   and x9, x9, x12\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x12, x9, #1\n   and x9, x9, x12\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x12, x9, #1\n   and x9, x9, x12\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x12, x9, #1\n   and x9, x9, x12\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x12, x9, #1\n   and x9, x9, x12\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x12, x9, #1\n   and x9, x9, x12\n"
+    "cmp w11, #16\n   b.ls .Lmemory_offsets_arm64_big_next\n"
+    ".Lmemory_offsets_arm64_big_more:\n   rbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x12, x9, #1\n   and x9, x9, x12\n   cbnz x9, .Lmemory_offsets_arm64_big_more\n"
+    ".Lmemory_offsets_arm64_big_next:\n   add x7, x7, #64\n   b .Lmemory_offsets_arm64_big\n"
     ".Lmemory_offsets_arm64_wide:  sub x8, x2, x7\n   cmp x8, #16\n   b.lo .Lmemory_offsets_arm64_one\n   sub x8, x5, x6\n   cmp x8, #16\n   b.lo .Lmemory_offsets_arm64_one\n"
     "ldr q0, [x1, x7]\n   cmeq v3.16b, v0.16b, v1.16b\n   cmeq v4.16b, v0.16b, v2.16b\n   orr v3.16b, v3.16b, v4.16b\n   shrn v3.8b, v3.8h, #4\n   fmov x9, d3\n   and x9, x9, x13\n"
     "cbz x9, .Lmemory_offsets_arm64_next\n"
@@ -18972,7 +19055,24 @@ __asm__(
     ".Lmemory_offsets_range_arm64:  and w3, w3, #255\n   and w4, w4, #255\n   sub w4, w4, w3\n   and w4, w4, #255\n"
     "mov x6, xzr\n   mov x7, xzr\n   cbz x5, .Lmemory_offsets_range_arm64_done\n"
 #ifndef KERNEL_MODE
-    "dup v1.16b, w3\n   dup v2.16b, w4\n   mov x13, #0x8888888888888888\n"
+    "dup v1.16b, w3\n   dup v2.16b, w4\n   mov x13, #0x8888888888888888\n   movz x14, #0x0201\n   movk x14, #0x0804, lsl #16\n   movk x14, #0x2010, lsl #32\n   movk x14, #0x8040, lsl #48\n   dup v5.2d, x14\n"
+    //      Sixty four bytes a turn while there are sixty four offsets of room, read off as memory_offsets_of_either does.
+    //      4 KiB with a hit every 8 to 27 bytes on an M2 Pro, best of seven alternated: 822 ns before, 308 after;
+    //      every 2 to 4 bytes 1350 and 679, every 60 to 179 456 and 356, every 250 to 749 292 and 186.
+    ".Lmemory_offsets_range_arm64_big:  sub x8, x2, x7\n   cmp x8, #64\n   b.lo .Lmemory_offsets_range_arm64_wide\n   sub x8, x5, x6\n   cmp x8, #64\n   b.lo .Lmemory_offsets_range_arm64_wide\n"
+    "add x16, x1, x7\n   ldp q16, q17, [x16]\n   ldp q18, q19, [x16, #32]\n"
+    "sub v16.16b, v16.16b, v1.16b\n   sub v17.16b, v17.16b, v1.16b\n   sub v18.16b, v18.16b, v1.16b\n   sub v19.16b, v19.16b, v1.16b\n"
+    "cmhs v20.16b, v2.16b, v16.16b\n   cmhs v21.16b, v2.16b, v17.16b\n   cmhs v22.16b, v2.16b, v18.16b\n   cmhs v23.16b, v2.16b, v19.16b\n"
+    "cbz x12, 2f\n   mvn v20.16b, v20.16b\n   mvn v21.16b, v21.16b\n   mvn v22.16b, v22.16b\n   mvn v23.16b, v23.16b\n"
+    "2:  and v20.16b, v20.16b, v5.16b\n   and v21.16b, v21.16b, v5.16b\n   and v22.16b, v22.16b, v5.16b\n   and v23.16b, v23.16b, v5.16b\n"
+    "addp v20.16b, v20.16b, v21.16b\n   addp v22.16b, v22.16b, v23.16b\n   addp v20.16b, v20.16b, v22.16b\n   addp v20.16b, v20.16b, v20.16b\n"
+    "fmov x9, d20\n   cbz x9, .Lmemory_offsets_range_arm64_big_next\n   cnt v21.8b, v20.8b\n   addv b21, v21.8b\n   umov w11, v21.b[0]\n   add x14, x0, x6, lsl #2\n   add x6, x6, x11\n"
+    "rbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x15, x9, #1\n   and x9, x9, x15\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x15, x9, #1\n   and x9, x9, x15\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x15, x9, #1\n   and x9, x9, x15\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x15, x9, #1\n   and x9, x9, x15\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x15, x9, #1\n   and x9, x9, x15\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x15, x9, #1\n   and x9, x9, x15\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x15, x9, #1\n   and x9, x9, x15\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x15, x9, #1\n   and x9, x9, x15\n"
+    "cmp w11, #8\n   b.ls .Lmemory_offsets_range_arm64_big_next\n"
+    "rbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x15, x9, #1\n   and x9, x9, x15\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x15, x9, #1\n   and x9, x9, x15\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x15, x9, #1\n   and x9, x9, x15\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x15, x9, #1\n   and x9, x9, x15\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x15, x9, #1\n   and x9, x9, x15\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x15, x9, #1\n   and x9, x9, x15\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x15, x9, #1\n   and x9, x9, x15\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x15, x9, #1\n   and x9, x9, x15\n"
+    "cmp w11, #16\n   b.ls .Lmemory_offsets_range_arm64_big_next\n"
+    ".Lmemory_offsets_range_arm64_big_more:\n   rbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x15, x9, #1\n   and x9, x9, x15\n   cbnz x9, .Lmemory_offsets_range_arm64_big_more\n"
+    ".Lmemory_offsets_range_arm64_big_next:\n   add x7, x7, #64\n   b .Lmemory_offsets_range_arm64_big\n"
     ".Lmemory_offsets_range_arm64_wide:  sub x8, x2, x7\n   cmp x8, #16\n   b.lo .Lmemory_offsets_range_arm64_one\n"
     "sub x8, x5, x6\n   cmp x8, #16\n   b.lo .Lmemory_offsets_range_arm64_one\n   ldr q0, [x1, x7]\n   sub v0.16b, v0.16b, v1.16b\n   cmhs v3.16b, v2.16b, v0.16b\n"
     "cbz x12, 1f\n   mvn v3.16b, v3.16b\n"

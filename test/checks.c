@@ -14883,6 +14883,14 @@ fn check_offsets_of_either()
                                                 // Walk the whole block limit at a time, as a caller does.
                                                 for (;;)
                                                 {
+                                                        // The bodies that write offsets eight or sixteen at a go write
+                                                        // past the last hit, and must stay inside the limit they were
+                                                        // given: whatever lies beyond it is the caller's.
+                                                        bool fenced = limit + 80 <= array_count(got);
+                                                        if (fenced)
+                                                                for (positive i = 0; i < 80; i++)
+                                                                        got[limit + i] = 0xdeadbeefu;
+
                                                         positive answer = (memory_offsets_of_either)(
                                                             got, bytes + offset + from, size - from,
                                                             first, second, limit);
@@ -14891,6 +14899,10 @@ fn check_offsets_of_either()
                                                                 ok = false;
                                                                 break;
                                                         }
+                                                        if (fenced)
+                                                                for (positive i = 0; i < 80; i++)
+                                                                        if (got[limit + i] != 0xdeadbeefu)
+                                                                                ok = false;
                                                         for (positive i = 0; i < answer; i++)
                                                                 if (have + i >= count ||
                                                                     got[i] + from != want[have + i])
