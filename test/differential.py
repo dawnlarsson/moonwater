@@ -31038,6 +31038,10 @@ def harness_native_extract(argv):
 
         line = re.sub(r'\b(bl|b) ([a-z_][a-z0-9_]*)\b', r'\1 _\2', line)
         line = re.sub(r'\badrp (x[0-9]+), ([a-z_][a-z0-9_]*)\b', r'adrp \1, _\2@PAGE', line)
+        # A table the routine carries in its own text is a local label (.L became L above), reached
+        # the same way but with no underscore.
+        line = re.sub(r'\badrp (x[0-9]+), (L[A-Za-z0-9_]+)\b', r'adrp \1, \2@PAGE', line)
+        line = re.sub(r':lo12:(L[A-Za-z0-9_]+)\b', r'\1@PAGEOFF', line)
         line = re.sub(r':lo12:([a-z_][a-z0-9_]*)\b', r'_\1@PAGEOFF', line)
 
         # Labels defined by the extracted inline assembly need the same Mach-O
