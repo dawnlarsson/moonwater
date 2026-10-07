@@ -63,6 +63,53 @@ never a pass.
   kept apart from the handshake up (`tls_conn.fault`, `TLS_UNTRUSTED` to
   `TLS_MISMATCH`, `HTTP_UNTRUSTED` to `HTTP_MISMATCH`), and a name that
   fails is named before the dates.
+- **A secret on a command line (`wifi add SSID PASSWORD`, `link group NAME
+  SECRET`)** is in `ps` while the command lives and in the shell's history for
+  good. The standard-input forms (`wifi add SSID -`, `link group NAME -`; a
+  no-echo prompt at a terminal) keep it out of both, and are what a machine
+  script uses (`... - < /root/secret`). The shell's history refuses the two
+  argument forms (`history_secret_line`) after assignments and a list of
+  wrappers (`sudo`, `env`, `nice`, `timeout`), in the first twelve words: a
+  best-effort denylist, not a boundary. It does not see `sudo -u root`, `env -u
+  NAME`, `bash -c`, `ssh HOST moonwater`, a function, an alias, a variable or a
+  substitution, or the verb after twelve words, and a secret on such a line is
+  kept like any other word. A pairing code (`link NAME abc-def`) is left in the
+  history on purpose: it works once, for five minutes, and is read off the other
+  machine's screen; a link key is public. The tight tier refuses both argument
+  forms; a terminal user at the default tier is told to use `-`.
+- **OUT-D1, boot takes an install without asking** only when it is the disk
+  the session started from (the settings an image boots with and the image on
+  the disk carry the same random medium), or the only disk with this build and
+  on a bus nothing is plugged into. Every copy of a public release says the same
+  build, so a stick somebody pushed in said it too, and its
+  `/root/main.moonwater.sh` ran as root. More than one disk with the build
+  asks unless one is the session's own; one that is USB, Thunderbolt,
+  `removable`, behind a `removable` PCI port, or cannot be told is asked about
+  (`host_disk_external`, fail closed); the tight tier asks about every disk but
+  the session's own. Default **not decided by the owner**: a lone USB stick of
+  this build on a machine with no install of its own is asked about (the safe
+  side), and `host_lone_taken` is the one line that flips it. The census
+  holds the disk it found, so a second disk with copied partition identities
+  cannot be mounted in its place.
+- **Kernel defaults** the network watcher writes with the network's: the four
+  `fs.protected_*` switches, `kptr_restrict`, `dmesg_restrict`,
+  `io_uring_disabled` (what Debian and Arch ship; the tight tier raises
+  fifos, regular, `kptr_restrict` and `io_uring_disabled` to 2; the reference
+  tier keeps the kernel's own). `protected_regular` and `protected_fifos` bind
+  root as well: its `>file` onto a file another user made in a sticky `/tmp`
+  fails, which is the attack they close; the boot, install and desktop lanes
+  run with them on. `kptr_restrict` 1 and `dmesg_restrict` 1 leave root's
+  kallsyms, perf and dmesg (`CAP_SYSLOG`) alone.
+- **OUT-D2, the data partition is mounted without `nodev` and `nosuid`:** it
+  holds `/root`, `/home` and the bowls; a bowl's `sudo` and `su` need setuid,
+  and a device node on it can only have been made by root. Whose disk boot
+  takes without asking is the control (OUT-D1).
+- **OUT-D3, unprivileged user namespaces stay as the kernel has them:** bowls
+  need them, no tool here creates one otherwise, and `user.max_user_namespaces`
+  0 would take them from the test harnesses on the same kernel; a kiosk tier
+  that wants them off sets it. `unprivileged_bpf_disabled` has no knob: the
+  image has no `bpf(2)` (the classic socket filters the DHCP client uses are
+  separate).
 - **Root is not a wall:** hardening against a hostile root is out of scope.
 - **Ring 0:** no `crypto_`, `tls_` or X.509 code is in the include graph of
   `src/moonwater/core.c`; `net.c` is userspace only.
@@ -100,6 +147,8 @@ ARM64 and RISC-V mandatory with UBSan trapping.
 | Wi-Fi | RSN, EAPOL-Key, replay counters, source address, scan parsing; the strongest 64 names kept and the associated row never evicted; one BSS donates every field of a row; `wifi_scan_fuzz`, `wifi_eapol_fuzz`, `wifi_air` | management-frame protection and WPA3 (separate branch); a forger outranking every retained row |
 | Waterlink | Noise handshake, cookie, replay window, grants, revocation; mDNS reads Internet class only, RCODE zero, TTL nonzero, an SRV with a non-root target and a nonzero port, and exposes only a PTR and SRV intersection; the reply and answer budgets move only after a successful send; `IP_MULTICAST_IF` failure refuses the send; a source holds at most `LINK_GREET_SOURCE` of the 16 greeting slots; legacy verifier migration is all-write plus `fsync`, and until it succeeds the listener stays off while commands keep the groups (their save is the scrub); every elapsed time is ordered first; `sh test/run waterlink link`, `waterlink_sanitized`, `waterlink_fuzz` (MSan with `MOONWATER_MSAN=1`) | handshake flood under netem; address rotation reaches the global greeting ceiling |
 | Saved state | wifi and bluetooth lists written beside themselves and renamed, opened nonblocking, regular files only; no hash of a group secret on disk; `sh test/run cli link` | |
+| Secrets, boot choice | `history_secret_line` rows including what the denylist does not see (`CHECK_bowl`); `link group NAME -` and `wifi add` at a terminal (`moonwater_cli`, `link`); the tight tier's refusal of both argument forms (`CHECK_bowl` again at `MOONWATER_STRICT` 2); `host_link_external`, `host_disk_external` failing closed and `host_lone_taken` (`CHECK_bowl`); a fixed NVMe install still taken and another build still asked about (`install` lane) | a USB install in a guest (found only when it enumerates before the census, racy in QEMU); the `removable` files of a real PCI port need hardware |
+| Terminal, JSON reader | `term_fuzz` (grid, write cuts, resizes, keys, pointer between writes; the cursor stays on the grid; it fails on a planted clamp bug) and `bowl_json_fuzz`, ASan/UBSan, smoke in `term` and `bowl` | KERNEL_MODE emulator build, MSan |
 | Shell, OS boundary | generated Bash and Dash differential; private edit files; `edit` draws a file's controls, DEL and invalid UTF-8 as `?` and drops C1 controls spelled in UTF-8, in rows and status line (`edit` lane, `hostile`); PTY setup; tar pinned parents; hostile environment and privilege matrices; `pathname_race`; effect-based coreutils (`sh test/run shell builtins files tar`) | |
 | Faults, resources | seccomp entropy failure; partial I/O, EINTR, ENOSPC, deadline and clock-jump faults; descriptor and mmap exhaustion; once-armed `memory_reserve`, writev and socket faults mid-path; namespaces with netem (`sh test/run netem`) | SNTP allocation faults |
 | Kernel (ring 0) | `core_state`, `pane_pages`, `shared_page`, `console_queue`, `term_streams` (kit lane); `ring0_hostile` on KASAN, UBSAN, lockdep or KCSAN images (`MOONWATER_IMAGE=dist/bootx64.efi sh test/run ring0`); image defaults for redirects, router advertisements, RFC 1337, SYN cookies (`sh test/run boot`, `net_sysctl`) | |
@@ -161,10 +210,7 @@ architecture gate above. CI is parked (`workflow_dispatch` only).
 - **Separate branches:** NTS and a clock floor (`feature/clock-floor`,
   `feature/nts`); WPA3 and 802.11w (`feature/wpa3-pmf-sae`); DNS over TLS
   (`feature/dns-over-tls`); DHCP over a raw socket (`feature/dhcp-packet-socket-acd`);
-  wget and curl parity of defaults (`feature/wget-curl-parity`); a secret in
-  shell history, boot taking the first install,
-  `fs.protected_*`, `kptr_restrict`, `dmesg_restrict`, `io_uring_disabled`
-  (`hardening/outside-network`).
+  wget and curl parity of defaults (`feature/wget-curl-parity`).
 - **No change planned:** plain SNTP is accepted anywhere the build and clock
   window allow; a forged clock step before the SNTP window is undone only by
   authenticated time; HEAD is not exercised; a response cut inside its status
