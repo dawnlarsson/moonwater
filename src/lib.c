@@ -19720,7 +19720,16 @@ __asm__(
     "add x9, x8, w9, uxtw #2\n   ldr w15, [x9]\n   add w15, w15, #1\n   str w15, [x9]\n   add x10, x10, x11\n   add x12, x12, x16\n   add x13, x13, #1\n   b .Ldt_arm64_c_next\n"
     ".Ldt_arm64_c_end:  str x10, [x0, #72]\n" ASM_RET
     ASM_END(deflate_tokens_count)
+    // deflate_tokens_encode, arm64: a block of 64 or more pairs takes the wide path, which makes
+    // the x86-64 BMI2 body's tables on the stack (a word of code and extra bits and a count for
+    // each of the 256 lengths; code, code length, extra-bit count and extra-bit mask for each of
+    // the 30 distance symbols) and runs matches with no literal between them without leaving the
+    // pair loop; a shorter block runs the loop below it. M2 Pro, native, ns a pair with the
+    // literals between pairs, output byte for byte the same: text 3.26 to 1.60 (-51 percent),
+    // source tar 4.46 to 3.59 (-20), binary tar 7.53 to 7.29 (-3: nine literals a pair there, and
+    // the literal path is as it was).
     ASM_FUNC(deflate_tokens_encode)
+    "ldr x9, [x0, #40]\n   cmp x9, #64\n   b.hs .Ldt_arm64_wide\n"
     "stp x19, x20, [sp, #-32]!\n   stp x21, x22, [sp, #16]\n   str x23, [sp, #-16]!\n   adrp x23, deflate_symbol_tab\n   add x23, x23, :lo12:deflate_symbol_tab\n   ldp x1, x2, [x0]\n"
     "ldp x3, x4, [x0, #16]\n   ldp x5, x6, [x0, #32]\n   ldp x7, x8, [x0, #48]\n   ldp x9, x10, [x0, #64]\n   ldr x11, [x0, #80]\n   mov x12, #0\n   mov x13, #0\n   str x10, [x9]\n"
     "add x9, x9, x11, lsr #3\n   and x15, x11, #56\n   lsr x10, x10, x15\n   and x11, x11, #7\n"
@@ -19744,6 +19753,33 @@ __asm__(
     ".Ldt_arm64_end:  ldr w15, [x7, #1024]\n   and x16, x15, #0xffff\n   lsl x16, x16, x11\n   orr x10, x10, x16\n   add x11, x11, x15, lsr #16\n   str x10, [x9]\n"
     "add x9, x9, x11, lsr #3\n   and x15, x11, #56\n   lsr x10, x10, x15\n   and x11, x11, #7\n   stp x9, x10, [x0, #64]\n   str x11, [x0, #80]\n   ldr x23, [sp], #16\n"
     "ldp x21, x22, [sp, #16]\n   ldp x19, x20, [sp], #32\n" ASM_RET
+    ".Ldt_arm64_wide:  sub sp, sp, #1728\n   stp x19, x20, [sp]\n   stp x21, x22, [sp, #16]\n   stp x23, x24, [sp, #32]\n   stp x25, x26, [sp, #48]\n   stp x27, x28, [sp, #64]\n"
+    "add x14, sp, #128\n   add x15, sp, #1152\n   add x16, sp, #1408\n   add x17, sp, #1536\n   add x19, sp, #1568\n   add x20, sp, #1600\n   adrp x24, deflate_symbol_tab\n   add x24, x24, :lo12:deflate_symbol_tab\n"
+    "ldp x1, x2, [x0]\n   ldp x3, x4, [x0, #16]\n   ldp x5, x6, [x0, #32]\n   ldp x7, x8, [x0, #48]\n   ldp x9, x10, [x0, #64]\n   ldr x11, [x0, #80]\n   mov x22, #0\n"
+    ".Ldt_arm64_w_len:  ldrb w23, [x24, x22]\n   add x25, x7, x23, lsl #2\n   ldr w25, [x25, #1028]\n   and w26, w25, #0xffff\n   lsr w25, w25, #16\n   add x27, x24, x23, lsl #1\n   ldrh w27, [x27, #832]\n   sub w27, w22, w27\n"
+    "lsl w27, w27, w25\n   orr w26, w26, w27\n   add x27, x24, x23\n   ldrb w27, [x27, #768]\n   add w27, w27, w25\n   str w26, [x14, x22, lsl #2]\n   strb w27, [x15, x22]\n   add x22, x22, #1\n   cmp x22, #256\n   b.lo .Ldt_arm64_w_len\n"
+    "mov x22, #0\n"
+    ".Ldt_arm64_w_dist:  ldr w25, [x8, x22, lsl #2]\n   and w26, w25, #0xffff\n   lsr w25, w25, #16\n   str w26, [x16, x22, lsl #2]\n   strb w25, [x17, x22]\n   add x23, x24, x22\n   ldrb w27, [x23, #800]\n   strb w27, [x19, x22]\n"
+    "mov w23, #1\n   lsl w23, w23, w27\n   sub w23, w23, #1\n   str w23, [x20, x22, lsl #2]\n   add x22, x22, #1\n   cmp x22, #30\n   b.lo .Ldt_arm64_w_dist\n"
+    "add x21, x24, #256\n   mov x12, #0\n   mov x13, #0\n   str x10, [x9]\n   add x9, x9, x11, lsr #3\n   and x22, x11, #56\n   lsr x10, x10, x22\n   and x11, x11, #7\n"
+    ".Ldt_arm64_w_next:  mov x22, x5\n   cmp x13, x6\n   b.hs .Ldt_arm64_w_lits\n   ldr w22, [x2, x13, lsl #2]\n   cmp x22, x5\n   csel x22, x22, x5, lo\n"
+    ".Ldt_arm64_w_lits:  cmp x12, x22\n   b.hs .Ldt_arm64_w_pair\n"
+    ".Ldt_arm64_w_three:  add x23, x12, #3\n   cmp x23, x22\n   b.hi .Ldt_arm64_w_one\n   add x25, x1, x12\n   ldrb w26, [x25]\n   ldrb w27, [x25, #1]\n   ldrb w28, [x25, #2]\n"
+    "ldr w26, [x7, x26, lsl #2]\n   ldr w27, [x7, x27, lsl #2]\n   ldr w28, [x7, x28, lsl #2]\n   and x25, x26, #0xffff\n   lsr w26, w26, #16\n   and x23, x27, #0xffff\n   lsl x23, x23, x26\n   orr x25, x25, x23\n"
+    "add w26, w26, w27, lsr #16\n   and x23, x28, #0xffff\n   lsl x23, x23, x26\n   orr x25, x25, x23\n   add w26, w26, w28, lsr #16\n   lsl x25, x25, x11\n   orr x10, x10, x25\n   add x11, x11, x26\n   add x12, x12, #3\n"
+    "str x10, [x9]\n   add x9, x9, x11, lsr #3\n   and x25, x11, #56\n   lsr x10, x10, x25\n   and x11, x11, #7\n   b .Ldt_arm64_w_three\n"
+    ".Ldt_arm64_w_one:  cmp x12, x22\n   b.hs .Ldt_arm64_w_pair\n   ldrb w25, [x1, x12]\n   ldr w25, [x7, x25, lsl #2]\n   and x26, x25, #0xffff\n   lsl x26, x26, x11\n   orr x10, x10, x26\n   add x11, x11, x25, lsr #16\n   add x12, x12, #1\n   b .Ldt_arm64_w_one\n"
+    ".Ldt_arm64_w_pair:  str x10, [x9]\n   add x9, x9, x11, lsr #3\n   and x25, x11, #56\n   lsr x10, x10, x25\n   and x11, x11, #7\n   cmp x13, x6\n   b.hs .Ldt_arm64_w_end\n"
+    ".Ldt_arm64_w_hot:  cmp x12, x5\n   b.hs .Ldt_arm64_w_end\n   ldrh w22, [x3, x13, lsl #1]\n   ldrh w23, [x4, x13, lsl #1]\n   add x12, x12, x22\n   add x13, x13, #1\n"
+    "sub w25, w22, #3\n   ldr w26, [x14, x25, lsl #2]\n   ldrb w27, [x15, x25]\n   lsl x26, x26, x11\n   orr x10, x10, x26\n   add x11, x11, x27\n"
+    "sub w23, w23, #1\n   lsr w25, w23, #7\n   add w25, w25, #256\n   cmp w23, #256\n   csel w25, w23, w25, lo\n   ldrb w25, [x21, x25]\n"
+    "ldr w26, [x16, x25, lsl #2]\n   ldrb w27, [x17, x25]\n   ldrb w28, [x19, x25]\n   ldr w22, [x20, x25, lsl #2]\n   and w22, w22, w23\n   lsl x22, x22, x27\n   orr x26, x26, x22\n   add w27, w27, w28\n"
+    "lsl x26, x26, x11\n   orr x10, x10, x26\n   add x11, x11, x27\n"
+    "str x10, [x9]\n   add x9, x9, x11, lsr #3\n   and x25, x11, #56\n   lsr x10, x10, x25\n   and x11, x11, #7\n"
+    "cmp x13, x6\n   b.hs .Ldt_arm64_w_next\n   ldr w22, [x2, x13, lsl #2]\n   cmp x22, x12\n   b.eq .Ldt_arm64_w_hot\n   b .Ldt_arm64_w_next\n"
+    ".Ldt_arm64_w_end:  ldr w25, [x7, #1024]\n   and x26, x25, #0xffff\n   lsl x26, x26, x11\n   orr x10, x10, x26\n   add x11, x11, x25, lsr #16\n   str x10, [x9]\n"
+    "add x9, x9, x11, lsr #3\n   and x25, x11, #56\n   lsr x10, x10, x25\n   and x11, x11, #7\n   stp x9, x10, [x0, #64]\n   str x11, [x0, #80]\n"
+    "ldp x19, x20, [sp]\n   ldp x21, x22, [sp, #16]\n   ldp x23, x24, [sp, #32]\n   ldp x25, x26, [sp, #48]\n   ldp x27, x28, [sp, #64]\n   add sp, sp, #1728\n" ASM_RET
     ASM_END(deflate_tokens_encode)
     // deflate_parse_fast (the job and the walk are described with the x86-64 body). The two
     // candidates are compared sixteen bytes at a time in general registers with no branch: an
@@ -26434,7 +26470,13 @@ __asm__(
     "ld t1, 56(a0)\n   slli t4, t4, 2\n   add t4, t1, t4\n   lw t1, 0(t4)\n   addiw t1, t1, 1\n   sw t1, 0(t4)\n   add a4, a4, t5\n   addi a7, a7, 1\n   j .Ldt_rv_c_next\n"
     ".Ldt_rv_c_end:  sd a4, 72(a0)\n   ret\n"
     ASM_END(deflate_tokens_count)
+    // deflate_tokens_encode, riscv64: a block of 64 or more pairs takes the wide path (the tables
+    // of the arm64 and x86-64 bodies) and writes the output four bytes at a time when 32 bits have
+    // gathered, where the loop below it flushed a byte at a time with a branch each; base RV64I
+    // does not promise a misaligned sw, so the four bytes are four sb. Guest instructions under
+    // qemu-user for a pair with its 1.5 literals: 152 to 105 (-31 percent); cycles unmeasured.
     ASM_FUNC(deflate_tokens_encode)
+    "ld t0, 40(a0)\n   li t1, 64\n   bgeu t0, t1, .Ldt_rv_wide\n"
     "ld a1, 0(a0)\n   ld a2, 48(a0)\n   ld a3, 64(a0)\n   ld a4, 72(a0)\n   ld a5, 80(a0)\n   li a6, 0\n   li a7, 0\n   jal t6, .Ldt_rv_flush\n"
     ".Ldt_rv_next:  ld t0, 32(a0)\n   ld t1, 40(a0)\n   bgeu a7, t1, .Ldt_rv_e_stopped\n   ld t1, 8(a0)\n   slli t2, a7, 2\n   add t1, t1, t2\n   lwu t1, 0(t1)\n"
     "bgeu t1, t0, .Ldt_rv_e_stopped\n   mv t0, t1\n"
@@ -26453,6 +26495,24 @@ __asm__(
     "sd a3, 64(a0)\n   sd a4, 72(a0)\n   sd a5, 80(a0)\n   ret\n"
     ".Ldt_rv_flush:  li t5, 8\n   bltu a5, t5, .Ldt_rv_flushed\n   sb a4, 0(a3)\n   addi a3, a3, 1\n   srli a4, a4, 8\n   addi a5, a5, -8\n   j .Ldt_rv_flush\n"
     ".Ldt_rv_flushed:  jr t6\n"
+    ".Ldt_rv_wide:  addi sp, sp, -1728\n   sd s1, 0(sp)\n   sd s2, 8(sp)\n   sd s3, 16(sp)\n   sd s4, 24(sp)\n   sd s5, 32(sp)\n   sd s6, 40(sp)\n   sd s7, 48(sp)\n   sd s8, 56(sp)\n   addi s8, sp, 128\n"
+    "ld a1, 0(a0)\n   ld a2, 48(a0)\n   ld a3, 64(a0)\n   ld a4, 72(a0)\n   ld a5, 80(a0)\n   ld s1, 8(a0)\n   ld s2, 16(a0)\n   ld s3, 24(a0)\n   ld s4, 32(a0)\n   ld s5, 40(a0)\n   ld t6, 56(a0)\n   lla s7, deflate_symbol_tab\n   li a6, 0\n   li a7, 0\n"
+    "li t0, 0\n"
+    ".Ldt_rv_w_len:  add t1, s7, t0\n   lbu t1, 0(t1)\n   slli t2, t1, 2\n   add t2, a2, t2\n   lwu t2, 1028(t2)\n   slli t3, t2, 48\n   srli t3, t3, 48\n   srli t2, t2, 16\n   slli t4, t1, 1\n   add t4, s7, t4\n   lhu t4, 832(t4)\n   sub t4, t0, t4\n   sll t4, t4, t2\n   or t3, t3, t4\n   add t4, s7, t1\n   lbu t4, 768(t4)\n   add t4, t4, t2\n   slli t5, t0, 2\n   add t5, s8, t5\n   sw t3, 0(t5)\n   add t5, s8, t0\n   sb t4, 1024(t5)\n   addi t0, t0, 1\n   li t1, 256\n   bltu t0, t1, .Ldt_rv_w_len\n"
+    "li t0, 0\n"
+    ".Ldt_rv_w_dist:  slli t1, t0, 2\n   add t2, t6, t1\n   lwu t2, 0(t2)\n   slli t3, t2, 48\n   srli t3, t3, 48\n   srli t2, t2, 16\n   add t1, s8, t1\n   sw t3, 1280(t1)\n   add t1, s8, t0\n   sb t2, 1408(t1)\n   add t2, s7, t0\n   lbu t2, 800(t2)\n   sb t2, 1440(t1)\n   li t3, 1\n   sll t3, t3, t2\n   addi t3, t3, -1\n   slli t1, t0, 2\n   add t1, s8, t1\n   sw t3, 1472(t1)\n   addi t0, t0, 1\n   li t1, 30\n   bltu t0, t1, .Ldt_rv_w_dist\n"
+    "addi s7, s7, 256\n   mv s6, s1\n"
+    ".Ldt_rv_w_next:  mv t0, s4\n   bgeu a7, s5, .Ldt_rv_w_lits\n   slli t1, a7, 2\n   add t1, s1, t1\n   lwu t1, 0(t1)\n   bgeu t1, t0, .Ldt_rv_w_lits\n   mv t0, t1\n"
+    ".Ldt_rv_w_lits:  bgeu a6, t0, .Ldt_rv_w_pair\n"
+    ".Ldt_rv_w_one:  add t1, a1, a6\n   lbu t1, 0(t1)\n   slli t1, t1, 2\n   add t1, a2, t1\n   lwu t1, 0(t1)\n   slli t2, t1, 48\n   srli t2, t2, 48\n   sll t2, t2, a5\n   or a4, a4, t2\n   srli t1, t1, 16\n   add a5, a5, t1\n   addi a6, a6, 1\n   andi t5, a5, 32\n   beqz t5, .Ldt_rv_w_f1\n   sb a4, 0(a3)\n   srli t5, a4, 8\n   sb t5, 1(a3)\n   srli t5, a4, 16\n   sb t5, 2(a3)\n   srli t5, a4, 24\n   sb t5, 3(a3)\n   addi a3, a3, 4\n   srli a4, a4, 32\n   addi a5, a5, -32\n.Ldt_rv_w_f1:\n   bltu a6, t0, .Ldt_rv_w_one\n"
+    ".Ldt_rv_w_pair:  bgeu a7, s5, .Ldt_rv_w_end\n"
+    ".Ldt_rv_w_hot:  bgeu a6, s4, .Ldt_rv_w_end\n   slli t1, a7, 1\n   add t2, s2, t1\n   lhu t2, 0(t2)\n   add t3, s3, t1\n   lhu t3, 0(t3)\n   add a6, a6, t2\n   addi a7, a7, 1\n"
+    "addi t2, t2, -3\n   slli t4, t2, 2\n   add t4, s8, t4\n   lwu t4, 0(t4)\n   add t5, s8, t2\n   lbu t5, 1024(t5)\n   sll t4, t4, a5\n   or a4, a4, t4\n   add a5, a5, t5\n   andi t5, a5, 32\n   beqz t5, .Ldt_rv_w_f2\n   sb a4, 0(a3)\n   srli t5, a4, 8\n   sb t5, 1(a3)\n   srli t5, a4, 16\n   sb t5, 2(a3)\n   srli t5, a4, 24\n   sb t5, 3(a3)\n   addi a3, a3, 4\n   srli a4, a4, 32\n   addi a5, a5, -32\n.Ldt_rv_w_f2:\n"
+    "addi t3, t3, -1\n   srli t4, t3, 7\n   addi t4, t4, 256\n   li t5, 256\n   bgeu t3, t5, .Ldt_rv_w_far\n   mv t4, t3\n.Ldt_rv_w_far:  add t4, s7, t4\n   lbu t4, 0(t4)\n   slli t5, t4, 2\n   add t5, s8, t5\n   lwu t6, 1280(t5)\n   lwu t2, 1472(t5)\n   and t2, t2, t3\n   add t5, s8, t4\n   lbu t3, 1408(t5)\n   lbu t5, 1440(t5)\n   sll t2, t2, t3\n   or t6, t6, t2\n   add t3, t3, t5\n   sll t6, t6, a5\n   or a4, a4, t6\n   add a5, a5, t3\n   andi t5, a5, 32\n   beqz t5, .Ldt_rv_w_f3\n   sb a4, 0(a3)\n   srli t5, a4, 8\n   sb t5, 1(a3)\n   srli t5, a4, 16\n   sb t5, 2(a3)\n   srli t5, a4, 24\n   sb t5, 3(a3)\n   addi a3, a3, 4\n   srli a4, a4, 32\n   addi a5, a5, -32\n.Ldt_rv_w_f3:\n"
+    "bgeu a7, s5, .Ldt_rv_w_next\n   slli t1, a7, 2\n   add t1, s1, t1\n   lwu t1, 0(t1)\n   beq t1, a6, .Ldt_rv_w_hot\n   j .Ldt_rv_w_next\n"
+    ".Ldt_rv_w_end:  lwu t1, 1024(a2)\n   slli t2, t1, 48\n   srli t2, t2, 48\n   sll t2, t2, a5\n   or a4, a4, t2\n   srli t1, t1, 16\n   add a5, a5, t1\n"
+    ".Ldt_rv_w_tail:  li t5, 8\n   bltu a5, t5, .Ldt_rv_w_done\n   sb a4, 0(a3)\n   addi a3, a3, 1\n   srli a4, a4, 8\n   addi a5, a5, -8\n   j .Ldt_rv_w_tail\n"
+    ".Ldt_rv_w_done:  sd a3, 64(a0)\n   sd a4, 72(a0)\n   sd a5, 80(a0)\n   ld s1, 0(sp)\n   ld s2, 8(sp)\n   ld s3, 16(sp)\n   ld s4, 24(sp)\n   ld s5, 32(sp)\n   ld s6, 40(sp)\n   ld s7, 48(sp)\n   ld s8, 56(sp)\n   addi sp, sp, 1728\n" ASM_RET
     ASM_END(deflate_tokens_encode)
     // deflate_parse_fast (the job and the walk are described with the x86-64 body). Base RV64I does
     // not promise a misaligned ld, so every wider-than-byte read of the input is made from the two
