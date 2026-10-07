@@ -114191,6 +114191,301 @@ static fn floor_zstd_huffman_codes(void)
         check("zstd Huffman codes in zstd's order", same);
 }
 
+/* zstd_sequences_encode against a bit at a time model: random sequences
+   (every code, base and extra width, up to the longest of each) over random
+   tables of any log and the all-zero table of a one-symbol stream, every
+   pending width on entry, the output ending at a protected page. A call
+   given 16 bytes a sequence and 8 over must finish; one given less may
+   answer that the room ran out, and when it does not it must have written
+   exactly what the model did. */
+typedef struct
+{
+        p32 lit, match, off;
+        p8 ll, ml, of, spare;
+} floor_zseq;
+
+typedef struct
+{
+        p16 state[512];
+        p32 delta_nb[53];
+        bipolar delta_find[53];
+        p8 log;
+} floor_zct;
+
+typedef struct
+{
+        const floor_zseq address_to seqs;
+        positive count;
+        floor_zct address_to of;
+        floor_zct address_to ml;
+        floor_zct address_to ll;
+        positive of_state;
+        positive ml_state;
+        positive ll_state;
+        p64 acc;
+        positive bits;
+        p8 address_to out;
+        p8 address_to limit;
+} floor_zjob;
+
+static const p8 floor_zll_extra[36] = {
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        1, 1, 1, 1, 2, 2, 3, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+static const p32 floor_zll_base[36] = {
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+        16, 18, 20, 22, 24, 28, 32, 40, 48, 64, 128, 256, 512, 1024, 2048, 4096,
+        0x2000, 16384, 32768, 65536};
+static const p8 floor_zml_extra[53] = {
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        1, 1, 1, 1, 2, 2, 3, 3, 4, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+static const p32 floor_zml_base[53] = {
+        3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
+        19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34,
+        35, 37, 39, 41, 43, 47, 51, 59, 67, 83, 99, 131, 259, 515, 1027, 2051,
+        4099, 8195, 16387, 32771, 65539};
+
+/* A table of 1 << log states over the symbols that are used, each at least
+   once and the rest dealt out at random, spread at random: the layout of
+   zstd_ctable_build, so every state a step can reach is in the table. */
+static fn floor_zstd_table(floor_zct address_to ct, const p8 address_to used, positive symbols,
+                           positive log, p32 address_to random)
+{
+#define FLOOR_RANDOM() (*random ^= *random << 13, *random ^= *random >> 17, *random ^= *random << 5, *random)
+        positive size = (positive)1 << log;
+        p16 count[53] = {0}, cumul[54];
+        p8 symbol[512];
+        positive left = size, total = 0, at = 0;
+
+        for (positive s = 0; s < symbols; s++)
+                if (used[s])
+                {
+                        count[s] = 1;
+                        left--;
+                }
+        while (left)
+        {
+                positive s = FLOOR_RANDOM() % symbols;
+                if (used[s])
+                {
+                        count[s]++;
+                        left--;
+                }
+        }
+        cumul[0] = 0;
+        for (positive s = 0; s < symbols; s++)
+                cumul[s + 1] = (p16)(cumul[s] + count[s]);
+        for (positive s = 0; s < symbols; s++)
+                for (positive k = 0; k < count[s]; k++)
+                        symbol[at++] = (p8)s;
+        for (positive u = size; u > 1; u--)
+        {
+                positive v = FLOOR_RANDOM() % u;
+                p8 swap = symbol[u - 1];
+                symbol[u - 1] = symbol[v];
+                symbol[v] = swap;
+        }
+        for (positive u = 0; u < size; u++)
+                ct->state[cumul[symbol[u]]++] = (p16)(size + u);
+        memory_fill(ct->delta_nb, 0, sizeof(ct->delta_nb));
+        memory_fill(ct->delta_find, 0, sizeof(ct->delta_find));
+        for (positive s = 0; s < symbols; s++)
+        {
+                positive n = count[s];
+
+                if (!n)
+                        continue;
+                if (n == 1)
+                {
+                        ct->delta_nb[s] = ((p32)log << 16) - ((p32)1 << log);
+                        ct->delta_find[s] = (bipolar)total - 1;
+                }
+                else
+                {
+                        positive top = 0;
+                        positive max_bits;
+
+                        while (((positive)1 << (top + 1)) <= n - 1)
+                                top++;
+                        max_bits = log - top;
+                        ct->delta_nb[s] = (p32)((max_bits << 16) - (n << max_bits));
+                        ct->delta_find[s] = (bipolar)total - (bipolar)n;
+                }
+                total += n;
+        }
+        ct->log = (p8)log;
+#undef FLOOR_RANDOM
+}
+
+static fn floor_zstd_put(p8 address_to out, positive address_to at, p64 value, positive n)
+{
+        for (positive i = 0; i < n; i++, (*at)++)
+                out[*at / 8] = (p8)((out[*at / 8] & ~(1u << (*at % 8))) | (((value >> i) & 1) << (*at % 8)));
+}
+
+static fn floor_zstd_sequences_encode_run(void)
+{
+        static floor_zseq seqs[320];
+        static floor_zct tables[3], zero;
+        static p8 want[8192];
+        p8 address_to pages = floor_pages(4);
+        p32 random = 0x3c6ef372u;
+        bool same = true, finished = true, short_ok = true;
+        positive ran = 0, refused = 0;
+
+        check("sequence encoder protected mappings", pages != null);
+        if (!pages)
+                return;
+        for (positive trial = 0; trial < 4000; trial++)
+        {
+#define FLOOR_RANDOM() (random ^= random << 13, random ^= random >> 17, random ^= random << 5, random)
+                positive count = 1 + FLOOR_RANDOM() % (trial % 7 ? 40 : 320);
+                positive wild = FLOOR_RANDOM() % 4;
+                p8 used[3][53] = {{0}};
+                const positive symbols[3] = {32, 53, 36};
+                const positive limits[3] = {8, 9, 9};
+                floor_zct address_to ct[3];
+                p64 begin[3];
+                p64 finish[3];
+                bool rle[3];
+                positive bit = 0, held = FLOOR_RANDOM() % 8;
+                p64 pending = FLOOR_RANDOM() & (((p64)1 << held) - 1);
+
+                for (positive i = 0; i < count; i++)
+                {
+                        positive ll = wild == 0 ? FLOOR_RANDOM() % 36
+                                                : (FLOOR_RANDOM() % 5 ? FLOOR_RANDOM() % 20 : 20 + FLOOR_RANDOM() % 16);
+                        positive ml = wild == 0 ? FLOOR_RANDOM() % 53
+                                                : (FLOOR_RANDOM() % 5 ? FLOOR_RANDOM() % 36 : 36 + FLOOR_RANDOM() % 17);
+                        positive of = wild == 0 ? FLOOR_RANDOM() % 32
+                                                : (FLOOR_RANDOM() % 5 ? FLOOR_RANDOM() % 20 : 20 + FLOOR_RANDOM() % 12);
+
+                        if (wild == 3 && !(i % 5))
+                                ll = 35, ml = 52, of = 31;
+                        seqs[i].ll = (p8)ll;
+                        seqs[i].ml = (p8)ml;
+                        seqs[i].of = (p8)of;
+                        seqs[i].lit = floor_zll_base[ll] + (FLOOR_RANDOM() & (((p32)1 << floor_zll_extra[ll]) - 1));
+                        seqs[i].match = floor_zml_base[ml] + (FLOOR_RANDOM() & (((p32)1 << floor_zml_extra[ml]) - 1));
+                        seqs[i].off = ((p32)1 << of) + (of ? (FLOOR_RANDOM() & (((p32)1 << of) - 1)) : 0);
+                        used[0][of] = used[1][ml] = used[2][ll] = 1;
+                }
+                for (positive k = 0; k < 3; k++)
+                {
+                        positive kinds = 0, log = 1;
+
+                        for (positive s = 0; s < symbols[k]; s++)
+                                kinds += used[k][s];
+                        rle[k] = FLOOR_RANDOM() % 6 == 0;
+                        if (rle[k])
+                        {
+                                memory_fill(address_of zero, 0, sizeof(zero));
+                                ct[k] = address_of zero;
+                                begin[k] = 0;
+                                continue;
+                        }
+                        while (((positive)1 << log) < kinds)
+                                log++;
+                        log += FLOOR_RANDOM() % (limits[k] - log + 1);
+                        ct[k] = tables + k;
+                        floor_zstd_table(ct[k], used[k], symbols[k], log, address_of random);
+                        begin[k] = ((p64)1 << log) + FLOOR_RANDOM() % ((positive)1 << log);
+                }
+                //      The model: the sequences last to first, a bit at a time.
+                memory_fill(want, 0xa5, sizeof(want));
+                floor_zstd_put(want, address_of bit, pending, held);
+                for (positive k = 0; k < 3; k++)
+                        finish[k] = begin[k];
+                for (positive i = count; i--;)
+                {
+                        const p8 code[3] = {seqs[i].of, seqs[i].ml, seqs[i].ll};
+
+                        for (positive k = 0; k < 3; k++)
+                        {
+                                positive nb = (positive)((finish[k] + ct[k]->delta_nb[code[k]]) >> 16);
+
+                                floor_zstd_put(want, address_of bit, finish[k], nb);
+                                finish[k] = ct[k]->state[(bipolar)(finish[k] >> nb) + ct[k]->delta_find[code[k]]];
+                        }
+                        floor_zstd_put(want, address_of bit, seqs[i].lit - floor_zll_base[seqs[i].ll],
+                                       floor_zll_extra[seqs[i].ll]);
+                        floor_zstd_put(want, address_of bit, seqs[i].match - floor_zml_base[seqs[i].ml],
+                                       floor_zml_extra[seqs[i].ml]);
+                        floor_zstd_put(want, address_of bit, seqs[i].off - ((p32)1 << seqs[i].of), seqs[i].of);
+                }
+                //      Room: enough for the call to finish, or anything less.
+                {
+                        positive const enough = 16 * count + 8;
+                        positive const room = trial % 3 ? enough + FLOOR_RANDOM() % 24
+                                                        : FLOOR_RANDOM() % (enough + 24);
+                        p8 address_to const limit = pages + 3 * FLOOR_PAGE;
+                        p8 address_to const start = limit - room;
+                        floor_zjob job = {seqs, count, ct[0], ct[1], ct[2], begin[0], begin[1], begin[2],
+                                          pending, held, start, limit};
+                        bipolar result;
+
+                        memory_fill(start, 0xa5, room);
+                        result = zstd_sequences_encode(address_of job);
+                        if (room >= enough)
+                        {
+                                finished = finished && result == 0;
+                                ran++;
+                        }
+                        else if (result)
+                        {
+                                short_ok = short_ok && result == 1;
+                                refused++;
+                                continue;
+                        }
+                        if (!result)
+                        {
+                                positive whole = bit / 8;
+
+                                same = same && (positive)(job.out - start) == whole && job.bits == bit % 8 &&
+                                       job.count == 0 &&
+                                       !memory_compare(start, want, whole) &&
+                                       job.acc == (bit % 8 ? want[whole] & ((1u << (bit % 8)) - 1) : 0) &&
+                                       job.of_state == finish[0] && job.ml_state == finish[1] &&
+                                       job.ll_state == finish[2];
+                        }
+                }
+#undef FLOOR_RANDOM
+        }
+        check("zstd sequences written bit-exact from any pending width", same);
+        check("zstd sequences finish when given 16 bytes a sequence and 8", finished && ran > 1000);
+        check("zstd sequences answer 1 and nothing else when the room runs out", short_ok && refused > 100);
+        {
+                //      A limit before out is no room, and nothing is written.
+                floor_zjob job = {seqs, 1, address_of zero, address_of zero, address_of zero, 0, 0, 0, 0, 0,
+                                  pages + FLOOR_PAGE + 64, pages + FLOOR_PAGE + 32};
+
+                seqs[0].lit = 0;
+                seqs[0].match = 3;
+                seqs[0].off = 1;
+                seqs[0].ll = seqs[0].ml = seqs[0].of = 0;
+                memory_fill(address_of zero, 0, sizeof(zero));
+                check("zstd sequences answer 1 when the limit is before out", zstd_sequences_encode(address_of job) == 1);
+        }
+        memory_free(pages, 4 * FLOOR_PAGE);
+}
+
+static fn floor_zstd_sequences_encode(void)
+{
+#if X64
+        p8 const probed = cpu_hash_probed;
+        p8 const mulx = cpu_has_mulx;
+
+        //      The body without BMI2 is what the kernel and older processors
+        //      run and a processor with it never would, so it is walked to.
+        cpu_hash_probed = 1;
+        cpu_has_mulx = 0;
+        floor_zstd_sequences_encode_run();
+        cpu_hash_probed = probed;
+        cpu_has_mulx = mulx;
+#endif
+        floor_zstd_sequences_encode_run();
+}
+
 #ifdef CHECK_compression_floor
 b32 main(void)
 {
@@ -114208,6 +114503,7 @@ b32 main(void)
         floor_huffman_codes();
         floor_zstd_fse_cells();
         floor_zstd_huffman_codes();
+        floor_zstd_sequences_encode();
         return test_report(null);
 }
 #endif

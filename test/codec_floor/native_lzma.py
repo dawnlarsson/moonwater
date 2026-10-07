@@ -43,6 +43,8 @@ extern void memory_copy_match(void*,positive,positive);
 extern const p32 hash_crc32_tab[2048];
 extern const p64 hash_crc64_tab[2048];
 p8 cpu_has_pclmul;
+p8 cpu_has_crc32 = 1, cpu_hash_probed = 1;
+void cpu_hash_detect(void) {}
 void *floor_copy(void *d,void *s,positive n) __asm__("_memory_copy_apart");
 void *floor_copy(void *d,void *s,positive n) { return memcpy(d,s,n); }
 void *floor_fill(void *d,p8 v,positive n) __asm__("_memory_fill");
@@ -55,6 +57,12 @@ typedef const char *string_address;
 #define address_any void *
 #define bits_leading_zeros(x) __builtin_clzll(x)
 #define bits_trailing_zeros(x) __builtin_ctzll(x)
+#define return_if(condition, ...) do { if (condition) return __VA_ARGS__; } while (0)
+static inline INLINE p32 top_bit_known(positive value) { return 63 - (p32)__builtin_clzll(value); }
+static inline INLINE p32 bottom_bit_known(positive value) { return (p32)__builtin_ctzll(value); }
+#define XORSHIFT32(state) ((state) ^= (state) << 13, (state) ^= (state) >> 17, (state) ^= (state) << 5)
+extern positive memory_span_byte(void*,p8,positive);
+extern void network_store_16(void*,p16);
 /* The parallel runtime, serial: native checks run on one thread. */
 #define PARALLEL_SPREAD ((positive)-1)
 typedef struct { p8 *bytes; positive room; positive used; } parallel_output;
@@ -140,6 +148,9 @@ extern void zstd_fse_cells(void *cells, const p8 *symbol, positive size, positiv
 extern void zstd_huffman_codes(p32 *table, const p8 *weight, positive count, positive max_bits);
 extern void deflate_tokens_count(void *job);
 extern void deflate_tokens_encode(void *job);
+extern void deflate_parse_fast(void *job);
+extern const p8 deflate_symbol_tab[960];
+extern long zstd_sequences_encode(void *job);
 static bipolar system_read_retry(positive fd,void *p,positive n) { return read((int)fd,p,n); }
 static bipolar system_write_all(positive fd,void *p,positive n) { return write((int)fd,p,n); }
 
@@ -168,17 +179,17 @@ static inline void digest_close(digest_state *d, p8 *out) { (void)d; (void)out; 
 '''
 head+='#define XZ_CORE_ONLY\n'+xz+'\n'
 a=lib.index('#define ASM_CRC_BASIS(bit)');b=lib.index('__asm__(',a);head+=lib[a:b]
-for name in ('hash_crc32_tab','hash_crc64_tab','deflate_symbol_tab'):
+for name in ('hash_crc32_tab','hash_crc64_tab','deflate_symbol_tab','zstd_sequence_tab'):
  a=lib.index('ASM_RODATA_OBJECT_BEGIN('+name);a=lib.index('\n',a)+1;b=lib.index('    ASM_OBJECT_END('+name,a)
  head+='__asm__(".section __TEXT,__const\\n.globl _'+name+'\\n.p2align 4\\n_'+name+':\\n"\n'+lib[a:b]+'".text\\n");\n'
-head+=subprocess.check_output(['python3','test/differential.py','--harness','native_extract','src/lib.c','hash_crc32','hash_crc64','lzma_range_shift','lzma_range_encode','lzma_range_decode','huffman_encode_back','huffman_lengths','huffman_codes','zstd_huffman_cells','zstd_fse_cells','zstd_huffman_codes','deflate_tokens_count','deflate_tokens_encode','deflate_decode_span','lzma_decode_span','memory_common_prefix','memory_copy_match'],text=True)
+head+=subprocess.check_output(['python3','test/differential.py','--harness','native_extract','src/lib.c','hash_crc32','hash_crc64','lzma_range_shift','lzma_range_encode','lzma_range_decode','huffman_encode_back','huffman_lengths','huffman_codes','zstd_huffman_cells','zstd_fse_cells','zstd_huffman_codes','deflate_tokens_count','deflate_tokens_encode','deflate_parse_fast','zstd_sequences_encode','memory_span_byte','network_store_16','deflate_decode_span','lzma_decode_span','memory_common_prefix','memory_copy_match'],text=True)
 a=checks.index('static p64 floor_crc(');b=checks.index('#endif\n#ifdef BENCH_compression_floor',a)
 body=checks[a:b].replace('#ifdef CHECK_compression_floor','')
 # Darwin pages are 16 KiB; the LZMA span check sizes its guards by FLOOR_PAGE.
 head+='#define FLOOR_PAGE ((positive)getpagesize())\n#define FLOOR_PAGE_STATIC 16384\n'
 a=body.index('static p8 address_to floor_pages(');b=body.index('static fn floor_checksums',a)
 body=body[:a]+body[a:b].replace('4096','(positive)getpagesize()')+body[b:]
-body=body.replace('[8192]', '[8 * 1024]')
+body=body.replace('[8192]', '[8 * 1024]').replace('[8192 + 16]', '[32768 + 16]')
 body=body.replace('p[4096 + i]','p[getpagesize() + i]').replace('8192','(2 * (positive)getpagesize())')
 body=body.replace(': 4096)',': (positive)getpagesize())')
 body=body.replace('input + 4096, 0, 4096','input + getpagesize(), 0, getpagesize()')

@@ -504,6 +504,12 @@ cover('correctness_only', 'test/checks.c#CHECK_compression_floor', 'deflate_pars
       'end-to-end gzip -1 timing on three corpora, and the native arm64 row '
       'against gcc and clang builds of the C it replaces',
       anchors={'deflate_parse_fast': 'floor_deflate_parse'})
+cover('correctness_only', 'test/checks.c#CHECK_compression_floor', 'zstd_sequences_encode',
+      'bit-exact against a bit-at-a-time model over random tables, every code '
+      'and pending width, the output ending at a protected page, and the room '
+      'rule; end-to-end zstd -1 timing, and the native arm64 row against the C '
+      'reference in test/codec_floor/reference/zstd_sequences_encode.c',
+      anchors={'zstd_sequences_encode': 'floor_zstd_sequences_encode'})
 cover('correctness_only', 'test/checks.c#CHECK_compression_floor', 'deflate_decode_span',
       'all length/distance combinations with guard pages; end-to-end gzip '
       'timing is available, but there is no isolated token-loop timing row',

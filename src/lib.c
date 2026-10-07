@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        383 routines (362 public, 21 local), 375 of them on all three and 8 local to one.
+        384 routines (363 public, 21 local), 376 of them on all three and 8 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -451,6 +451,7 @@
           zstd_huffman_cells             public  yes     yes     yes
           zstd_huffman_codes             public  yes     yes     yes
           zstd_huffman_stream            public  yes     yes     yes
+          zstd_sequences_encode          public  yes     yes     yes
           zstd_sequences_run             public  yes     yes     yes
 
         Private to one machine, by choice:
@@ -2145,6 +2146,66 @@ __asm__(
     ".short 0, 1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192\n"
     ".short 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 12288, 16384, 24576, 0, 0\n"
     ASM_OBJECT_END(deflate_symbol_tab)
+);
+
+/* zstd_sequence_tab: what zstd_sequences_encode indexes by code, and what
+   the decoder's sequence tables are built from. At 0 the literal length
+   codes' base values (36 of them, u32), at 144 the match length codes' (53),
+   at 356 and 392 their extra bit counts (u8). At 448 the masks (1 << n) - 1
+   for n up to 16 (u32). At 576, 640 and 704 for a count n of pending bits
+   below 64 the whole bytes n >> 3, the bits they take n & 56 and the bits
+   left n & 7 (u8). At 768 the powers 1 << n up to 31 (u32), the base of an
+   offset code's extra bits. */
+typedef struct
+{
+    p32 ll_base[36];
+    p32 ml_base[53];
+    p8 ll_extra[36];
+    p8 ml_extra[53];
+    p8 spare0[3];
+    p32 mask[17];
+    p8 spare1[60];
+    p8 bytes[64];
+    p8 bits[64];
+    p8 rest[64];
+    p32 power[32];
+} zstd_sequence_codes;
+extern const zstd_sequence_codes zstd_sequence_tab;
+__asm__(
+    ASM_RODATA_OBJECT_BEGIN(zstd_sequence_tab, 64)
+    ".long 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11\n"
+    ".long 12, 13, 14, 15, 16, 18, 20, 22, 24, 28, 32, 40\n"
+    ".long 48, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536\n"
+    ".long 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14\n"
+    ".long 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26\n"
+    ".long 27, 28, 29, 30, 31, 32, 33, 34, 35, 37, 39, 41\n"
+    ".long 43, 47, 51, 59, 67, 83, 99, 131, 259, 515, 1027, 2051\n"
+    ".long 4099, 8195, 16387, 32771, 65539\n"
+    ".byte 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1\n"
+    ".byte 1, 1, 2, 2, 3, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16\n"
+    ".byte 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0\n"
+    ".byte 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1\n"
+    ".byte 2, 2, 3, 3, 4, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16\n"
+    ".byte 0, 0, 0\n"
+    ".long 0, 1, 3, 7, 15, 31, 63, 127, 255, 511, 1023, 2047, 4095, 8191, 16383, 32767, 65535\n"
+    ".zero 60\n"
+    ".byte 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1\n"
+    ".byte 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3\n"
+    ".byte 4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5\n"
+    ".byte 6, 6, 6, 6, 6, 6, 6, 6, 7, 7, 7, 7, 7, 7, 7, 7\n"
+    ".byte 0, 0, 0, 0, 0, 0, 0, 0, 8, 8, 8, 8, 8, 8, 8, 8\n"
+    ".byte 16, 16, 16, 16, 16, 16, 16, 16, 24, 24, 24, 24, 24, 24, 24, 24\n"
+    ".byte 32, 32, 32, 32, 32, 32, 32, 32, 40, 40, 40, 40, 40, 40, 40, 40\n"
+    ".byte 48, 48, 48, 48, 48, 48, 48, 48, 56, 56, 56, 56, 56, 56, 56, 56\n"
+    ".byte 0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7\n"
+    ".byte 0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7\n"
+    ".byte 0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7\n"
+    ".byte 0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7\n"
+    ".long 1, 2, 4, 8, 16, 32, 64, 128\n"
+    ".long 256, 512, 1024, 2048, 4096, 8192, 16384, 32768\n"
+    ".long 65536, 131072, 262144, 524288, 1048576, 2097152, 4194304, 8388608\n"
+    ".long 16777216, 33554432, 67108864, 134217728, 268435456, 536870912, 1073741824, 2147483648\n"
+    ASM_OBJECT_END(zstd_sequence_tab)
 );
 
 /* POSIX cksum's CRC-32 (poly 0x04C11DB7, most significant bit first) for
@@ -13262,6 +13323,111 @@ __asm__(
 #undef ZSTD_SEQ_X64_SLOW
 #undef ZSTD_SEQ_X64_SPILL
 #undef ZSTD_SEQ_X64_UNSPILL
+    /* zstd_sequences_encode(job): the backward loop of zstd's sequence
+       bitstream. It writes seqs[count - 1] down to seqs[0]: for each, the
+       low bits of the offset, match length and literal length states, the
+       states' next values by the code tables, then the literal length, match
+       length and offset extra bits (the value less its code's base, taken
+       from zstd_sequence_tab; the offset's less 1 << code). The 96-byte job:
+       seqs (16-byte records: lit, match, off as u32, then the literal
+       length, match length and offset codes as u8, at 0, 4, 8, 12, 13, 14),
+       count, the offset, match length and literal length tables
+       (zstd_ctable: u16 state[512], u32 delta_nb[53] at 1024, i64
+       delta_find[53] at 1240; all zero it is an RLE stream, which adds no
+       bits and keeps the state 0), then their three states, acc, bits
+       (acc < 1 << bits, bits < 8), out and limit, at 0, 8, 16, 24, 32, 40, 48,
+       56, 64, 72, 80 and 88. A state step reads (state + delta_nb) >> 16
+       bits and moves to state[(state >> bits) + delta_find]. Count, the
+       states, acc, bits and out are updated. Returns 0, or 1 when the room
+       runs out first, in which case nothing is promised of the stream.
+
+       Eight bytes are stored at out after every sequence and out advances
+       by the whole bytes. A sequence moves out by at most 12, so each run is
+       cut to (limit - out - 8) / 16 sequences and the room is looked at again
+       between runs. The pending bits start under 8, the three states add at
+       most 26 (tables of 9, 8 and 9 bits at most) and the extras at most
+       16, 16 and 31, which does not fit 64 bits: a sequence whose literal,
+       match length and offset codes pass 24, 42 or 21, which keep the extras
+       to 30, is flushed after its literal length bits as well. The guard is
+       one add of 0x6a5567 on the three code bytes and a test for the bit
+       7 of each. With BMI2 and ADX (cpu_has_mulx, asked as the hashes ask
+       it) the fields go in by bzhi and shlx and the state by shrx; without,
+       by a mask table and cl shifts, and the kernel keeps only that. A
+       code table for the bytes written (576) and the offset's base (768)
+       take the place of shifts, which are what Zen's pipes are short of.
+       test/codec_floor/reference/zstd_sequences_encode.c is the reference.
+       Measured on the 9950X over 128 KiB blocks of text at level 1: 25.3
+       ticks a sequence for the C it replaces, 9.5 with BMI2 and 10.0
+       without. */
+    ASM_FUNC(zstd_sequences_encode)
+#ifndef KERNEL_MODE
+    "cmpb $0, cpu_hash_probed(%rip)\n   jne .Lzstd_seq_enc_x64_probed\n   call cpu_hash_detect\n"
+    ".Lzstd_seq_enc_x64_probed:  cmpb $0, cpu_has_mulx(%rip)\n   jne .Lzstd_seq_enc_x64_bmi\n"
+#endif
+    "push %rbx\n   push %rbp\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n   push %rdi\n   push %rax\n   mov 16(%rdi),%r13\n   mov 24(%rdi),%r14\n"
+    "mov 32(%rdi),%r15\n   mov 40(%rdi),%ebx\n   mov 48(%rdi),%ebp\n   mov 56(%rdi),%r12d\n   mov 64(%rdi),%r8\n   mov 72(%rdi),%r9\n   mov 80(%rdi),%rdi\n"
+    "lea zstd_sequence_tab(%rip),%r11\n"
+    //      A run of sequences that the room left to the section can hold: at most (end - out - 8) / 16, the last 8 bytes being the store's overhang.
+    ".Lzstd_seq_enc_x64_outer:\n   mov 8(%rsp),%rax\n   mov 8(%rax),%rcx\n   test %rcx,%rcx\n   jz .Lzstd_seq_enc_x64_done\n   mov 88(%rax),%rdx\n   sub %rdi,%rdx\n"
+    "jb .Lzstd_seq_enc_x64_room\n   sub $8,%rdx\n   jb .Lzstd_seq_enc_x64_room\n   shr $4,%rdx\n   jz .Lzstd_seq_enc_x64_room\n   cmp %rdx,%rcx\n   cmova %rdx,%rcx\n"
+    "mov 8(%rax),%rdx\n   sub %rcx,%rdx\n   mov %rdx,8(%rax)\n   shl $4,%rdx\n   add (%rax),%rdx\n   mov %rdx,(%rsp)\n   lea -1(%rcx),%rsi\n   shl $4,%rsi\n"
+    "add %rdx,%rsi\n   .balign 16\n"
+    ".Lzstd_seq_enc_x64_loop:\n"
+    //      Offset, match length, literal length: each state's low bits out, then its next state.
+    "movzbl 14(%rsi),%eax\n   mov 1024(%r13,%rax,4),%r10d\n   add %ebx,%r10d\n   shr $16,%r10d\n   mov 448(%r11,%r10,4),%edx\n   and %ebx,%edx\n   mov %r9d,%ecx\n"
+    "shl %cl,%rdx\n   or %rdx,%r8\n   mov %r10d,%ecx\n   add %ecx,%r9d\n   shr %cl,%ebx\n   add 1240(%r13,%rax,8),%ebx\n   movzwl (%r13,%rbx,2),%ebx\n"
+    "movzbl 13(%rsi),%eax\n   mov 1024(%r14,%rax,4),%r10d\n   add %ebp,%r10d\n   shr $16,%r10d\n   mov 448(%r11,%r10,4),%edx\n   and %ebp,%edx\n   mov %r9d,%ecx\n"
+    "shl %cl,%rdx\n   or %rdx,%r8\n   mov %r10d,%ecx\n   add %ecx,%r9d\n   shr %cl,%ebp\n   add 1240(%r14,%rax,8),%ebp\n   movzwl (%r14,%rbp,2),%ebp\n"
+    "movzbl 12(%rsi),%eax\n   mov 1024(%r15,%rax,4),%r10d\n   add %r12d,%r10d\n   shr $16,%r10d\n   mov 448(%r11,%r10,4),%edx\n   and %r12d,%edx\n   mov %r9d,%ecx\n"
+    "shl %cl,%rdx\n   or %rdx,%r8\n   mov %r10d,%ecx\n   add %ecx,%r9d\n   shr %cl,%r12d\n   add 1240(%r15,%rax,8),%r12d\n   movzwl (%r15,%r12,2),%r12d\n"
+    //      The literal length's extra bits, then the guard: with a code over 24, 42 and 21 (literal, match, offset) the three extras could carry the pending bits past 63, so those take a flush of their own before the match length.
+    "mov (%rsi),%edx\n   sub (%r11,%rax,4),%edx\n   movzbl 356(%r11,%rax),%r10d\n   mov %r9d,%ecx\n   shl %cl,%rdx\n   or %rdx,%r8\n   add %r10d,%r9d\n"
+    "mov 12(%rsi),%edx\n   add $0x6a5567,%edx\n   test $0x808080,%edx\n   jnz .Lzstd_seq_enc_x64_wide\n"
+    ".Lzstd_seq_enc_x64_cont:\n   movzbl 13(%rsi),%eax\n   mov 4(%rsi),%edx\n   sub 144(%r11,%rax,4),%edx\n   movzbl 392(%r11,%rax),%r10d\n   mov %r9d,%ecx\n"
+    "shl %cl,%rdx\n   or %rdx,%r8\n   add %r10d,%r9d\n   movzbl 14(%rsi),%eax\n   mov 8(%rsi),%edx\n   sub 768(%r11,%rax,4),%edx\n   mov %r9d,%ecx\n   shl %cl,%rdx\n"
+    "or %rdx,%r8\n   add %eax,%r9d\n"
+    //      Eight bytes stored, the whole ones counted, the rest kept.
+    "mov %r8,(%rdi)\n   movzbl 576(%r11,%r9),%edx\n   movzbl 640(%r11,%r9),%ecx\n   movzbl 704(%r11,%r9),%r9d\n   shr %cl,%r8\n   add %rdx,%rdi\n   sub $16,%rsi\n"
+    "cmp (%rsp),%rsi\n   jae .Lzstd_seq_enc_x64_loop\n   jmp .Lzstd_seq_enc_x64_outer\n"
+    ".Lzstd_seq_enc_x64_wide:\n   mov %r8,(%rdi)\n   movzbl 576(%r11,%r9),%edx\n   movzbl 640(%r11,%r9),%ecx\n   movzbl 704(%r11,%r9),%r9d\n   shr %cl,%r8\n"
+    "add %rdx,%rdi\n   jmp .Lzstd_seq_enc_x64_cont\n"
+    ".Lzstd_seq_enc_x64_done:\n   mov 8(%rsp),%rax\n   mov %rbx,40(%rax)\n   mov %rbp,48(%rax)\n   mov %r12,56(%rax)\n   mov %r8,64(%rax)\n   mov %r9,72(%rax)\n"
+    "mov %rdi,80(%rax)\n   xor %eax,%eax\n   jmp .Lzstd_seq_enc_x64_out\n"
+    ".Lzstd_seq_enc_x64_room:\n   mov $1,%eax\n"
+    ".Lzstd_seq_enc_x64_out:\n   add $16,%rsp\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n" ASM_RET
+#ifndef KERNEL_MODE
+    ".Lzstd_seq_enc_x64_bmi:\n   push %rbx\n   push %rbp\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n   push %rdi\n   push %rax\n   mov 16(%rdi),%r13\n"
+    "mov 24(%rdi),%r14\n   mov 32(%rdi),%r15\n   mov 40(%rdi),%ebx\n   mov 48(%rdi),%ebp\n   mov 56(%rdi),%r12d\n   mov 64(%rdi),%r8\n   mov 72(%rdi),%r9\n"
+    "mov 80(%rdi),%rdi\n   lea zstd_sequence_tab(%rip),%r11\n"
+    //      A run of sequences that the room left to the section can hold: at most (end - out - 8) / 16, the last 8 bytes being the store's overhang.
+    ".Lzstd_seq_enc_x64_bmi_outer:\n   mov 8(%rsp),%rax\n   mov 8(%rax),%rcx\n   test %rcx,%rcx\n   jz .Lzstd_seq_enc_x64_bmi_done\n   mov 88(%rax),%rdx\n   sub %rdi,%rdx\n"
+    "jb .Lzstd_seq_enc_x64_bmi_room\n   sub $8,%rdx\n   jb .Lzstd_seq_enc_x64_bmi_room\n   shr $4,%rdx\n   jz .Lzstd_seq_enc_x64_bmi_room\n   cmp %rdx,%rcx\n"
+    "cmova %rdx,%rcx\n   mov 8(%rax),%rdx\n   sub %rcx,%rdx\n   mov %rdx,8(%rax)\n   shl $4,%rdx\n   add (%rax),%rdx\n   mov %rdx,(%rsp)\n   lea -1(%rcx),%rsi\n"
+    "shl $4,%rsi\n   add %rdx,%rsi\n   .balign 16\n"
+    ".Lzstd_seq_enc_x64_bmi_loop:\n"
+    //      Offset, match length, literal length: each state's low bits out, then its next state.
+    "movzbl 14(%rsi),%eax\n   mov 1024(%r13,%rax,4),%edx\n   add %ebx,%edx\n   shr $16,%edx\n   bzhi %edx,%ebx,%ecx\n   shlx %r9,%rcx,%rcx\n   or %rcx,%r8\n"
+    "add %edx,%r9d\n   shrx %edx,%ebx,%ebx\n   add 1240(%r13,%rax,8),%ebx\n   movzwl (%r13,%rbx,2),%ebx\n   movzbl 13(%rsi),%r10d\n   mov 1024(%r14,%r10,4),%edx\n"
+    "add %ebp,%edx\n   shr $16,%edx\n   bzhi %edx,%ebp,%ecx\n   shlx %r9,%rcx,%rcx\n   or %rcx,%r8\n   add %edx,%r9d\n   shrx %edx,%ebp,%ebp\n"
+    "add 1240(%r14,%r10,8),%ebp\n   movzwl (%r14,%rbp,2),%ebp\n   movzbl 12(%rsi),%eax\n   mov 1024(%r15,%rax,4),%edx\n   add %r12d,%edx\n   shr $16,%edx\n"
+    "bzhi %edx,%r12d,%ecx\n   shlx %r9,%rcx,%rcx\n   or %rcx,%r8\n   add %edx,%r9d\n   shrx %edx,%r12d,%r12d\n   add 1240(%r15,%rax,8),%r12d\n"
+    "movzwl (%r15,%r12,2),%r12d\n"
+    //      The literal length's extra bits, then the guard: with a code over 24, 42 and 21 (literal, match, offset) the three extras could carry the pending bits past 63, so those take a flush of their own before the match length.
+    "mov (%rsi),%ecx\n   sub (%r11,%rax,4),%ecx\n   movzbl 356(%r11,%rax),%edx\n   shlx %r9,%rcx,%rcx\n   or %rcx,%r8\n   add %edx,%r9d\n   mov 12(%rsi),%edx\n"
+    "add $0x6a5567,%edx\n   test $0x808080,%edx\n   jnz .Lzstd_seq_enc_x64_bmi_wide\n"
+    ".Lzstd_seq_enc_x64_bmi_cont:\n   mov 4(%rsi),%ecx\n   sub 144(%r11,%r10,4),%ecx\n   movzbl 392(%r11,%r10),%edx\n   shlx %r9,%rcx,%rcx\n   or %rcx,%r8\n"
+    "add %edx,%r9d\n   movzbl 14(%rsi),%eax\n   mov 8(%rsi),%ecx\n   sub 768(%r11,%rax,4),%ecx\n   shlx %r9,%rcx,%rcx\n   or %rcx,%r8\n   add %eax,%r9d\n"
+    //      Eight bytes stored, the whole ones counted, the rest kept.
+    "mov %r8,(%rdi)\n   movzbl 576(%r11,%r9),%edx\n   movzbl 640(%r11,%r9),%ecx\n   movzbl 704(%r11,%r9),%r9d\n   shrx %rcx,%r8,%r8\n   add %rdx,%rdi\n   sub $16,%rsi\n"
+    "cmp (%rsp),%rsi\n   jae .Lzstd_seq_enc_x64_bmi_loop\n   jmp .Lzstd_seq_enc_x64_bmi_outer\n"
+    ".Lzstd_seq_enc_x64_bmi_wide:\n   mov %r8,(%rdi)\n   movzbl 576(%r11,%r9),%edx\n   movzbl 640(%r11,%r9),%ecx\n   movzbl 704(%r11,%r9),%r9d\n   shrx %rcx,%r8,%r8\n"
+    "add %rdx,%rdi\n   jmp .Lzstd_seq_enc_x64_bmi_cont\n"
+    ".Lzstd_seq_enc_x64_bmi_done:\n   mov 8(%rsp),%rax\n   mov %rbx,40(%rax)\n   mov %rbp,48(%rax)\n   mov %r12,56(%rax)\n   mov %r8,64(%rax)\n   mov %r9,72(%rax)\n"
+    "mov %rdi,80(%rax)\n   xor %eax,%eax\n   jmp .Lzstd_seq_enc_x64_bmi_out\n"
+    ".Lzstd_seq_enc_x64_bmi_room:\n   mov $1,%eax\n"
+    ".Lzstd_seq_enc_x64_bmi_out:\n   add $16,%rsp\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n" ASM_RET
+#endif
+    ASM_END(zstd_sequences_encode)
     // Exact memmove semantics, followed by one terminator, with the end handed
     // back. The copy core stays single-sourced: keeping dst+n on the stack is
     // enough to survive its caller-saved register use. A real call is required
@@ -20731,6 +20897,41 @@ __asm__(
 #undef ZSTD_SEQ_ARM64_UNSPILL
 #undef ZSTD_SEQ_ARM64_RELOAD
 #undef ZSTD_SEQ_ARM64_SLOW
+    // zstd_sequences_encode: see the x86_64 block for the contract. Fields go
+    // in by a mask table, lsl and orr; the flush is a store, the whole bytes
+    // taken by an add of bits >> 3 and the pending bits by a shift.
+    ASM_FUNC(zstd_sequences_encode)
+    "stp x29, x30, [sp, #-96]!\n   stp x19, x20, [sp, #16]\n   stp x21, x22, [sp, #32]\n   stp x23, x24, [sp, #48]\n   stp x25, x26, [sp, #64]\n"
+    "stp x27, x28, [sp, #80]\n   ldp x8, x9, [x0, #16]\n   ldr x10, [x0, #32]\n   ldr w5, [x0, #40]\n   ldr w6, [x0, #48]\n   ldr w7, [x0, #56]\n"
+    "ldp x2, x3, [x0, #64]\n   ldr x4, [x0, #80]\n   add x11, x8, #1024\n   add x12, x8, #1240\n   add x13, x9, #1024\n   add x14, x9, #1240\n   add x15, x10, #1024\n"
+    "add x16, x10, #1240\n   adrp x17, zstd_sequence_tab\n   add x17, x17, :lo12:zstd_sequence_tab\n   add x19, x17, #144\n   add x20, x17, #356\n"
+    "add x21, x17, #392\n   add x22, x17, #448\n   add x23, x17, #768\n   movz w24, #0x5567\n   movk w24, #0x6a, lsl #16\n   movz w25, #0x8080\n"
+    "movk w25, #0x80, lsl #16\n"
+    ".Lzstd_seq_enc_arm64_outer:\n   ldr x26, [x0, #8]\n   cbz x26, .Lzstd_seq_enc_arm64_done\n   ldr x27, [x0, #88]\n   subs x27, x27, x4\n"
+    "b.lo .Lzstd_seq_enc_arm64_room\n   subs x27, x27, #8\n   b.lo .Lzstd_seq_enc_arm64_room\n   lsr x27, x27, #4\n   cbz x27, .Lzstd_seq_enc_arm64_room\n"
+    "cmp x26, x27\n   csel x27, x26, x27, ls\n   sub x26, x26, x27\n   str x26, [x0, #8]\n   ldr x28, [x0]\n   add x26, x28, x26, lsl #4\n   sub x27, x27, #1\n"
+    "add x1, x26, x27, lsl #4\n   mov x27, x26\n   .balign 16\n"
+    ".Lzstd_seq_enc_arm64_loop:\n"
+    // offset
+    "ldrb w28, [x1, #14]\n   ldr w26, [x11, x28, lsl #2]\n   add w26, w26, w5\n   lsr w26, w26, #16\n   ldr w30, [x22, x26, lsl #2]\n   and w30, w30, w5\n"
+    "lsl x30, x30, x3\n   orr x2, x2, x30\n   add x3, x3, x26\n   lsr w5, w5, w26\n   ldr x30, [x12, x28, lsl #3]\n   add x30, x8, x30, lsl #1\n"
+    "ldrh w5, [x30, x5, lsl #1]\n   ldrb w29, [x1, #13]\n   ldr w26, [x13, x29, lsl #2]\n   add w26, w26, w6\n   lsr w26, w26, #16\n   ldr w30, [x22, x26, lsl #2]\n"
+    "and w30, w30, w6\n   lsl x30, x30, x3\n   orr x2, x2, x30\n   add x3, x3, x26\n   lsr w6, w6, w26\n   ldr x30, [x14, x29, lsl #3]\n   add x30, x9, x30, lsl #1\n"
+    "ldrh w6, [x30, x6, lsl #1]\n   ldrb w28, [x1, #12]\n   ldr w26, [x15, x28, lsl #2]\n   add w26, w26, w7\n   lsr w26, w26, #16\n   ldr w30, [x22, x26, lsl #2]\n"
+    "and w30, w30, w7\n   lsl x30, x30, x3\n   orr x2, x2, x30\n   add x3, x3, x26\n   lsr w7, w7, w26\n   ldr x30, [x16, x28, lsl #3]\n   add x30, x10, x30, lsl #1\n"
+    "ldrh w7, [x30, x7, lsl #1]\n   ldr w26, [x1]\n   ldr w30, [x17, x28, lsl #2]\n   sub w26, w26, w30\n   ldrb w30, [x20, x28]\n   lsl x26, x26, x3\n"
+    "orr x2, x2, x26\n   add x3, x3, x30\n   ldr w26, [x1, #12]\n   add w26, w26, w24\n   tst w26, w25\n   b.ne .Lzstd_seq_enc_arm64_wide\n"
+    ".Lzstd_seq_enc_arm64_cont:\n   ldr w26, [x1, #4]\n   ldr w30, [x19, x29, lsl #2]\n   sub w26, w26, w30\n   ldrb w30, [x21, x29]\n   lsl x26, x26, x3\n"
+    "orr x2, x2, x26\n   add x3, x3, x30\n   ldrb w28, [x1, #14]\n   ldr w26, [x1, #8]\n   ldr w30, [x23, x28, lsl #2]\n   sub w26, w26, w30\n   lsl x26, x26, x3\n"
+    "orr x2, x2, x26\n   add x3, x3, x28\n   str x2, [x4]\n   and x26, x3, #0x38\n   add x4, x4, x3, lsr #3\n   lsr x2, x2, x26\n   and x3, x3, #7\n   sub x1, x1, #16\n"
+    "cmp x1, x27\n   b.hs .Lzstd_seq_enc_arm64_loop\n   b .Lzstd_seq_enc_arm64_outer\n"
+    ".Lzstd_seq_enc_arm64_wide:\n   str x2, [x4]\n   and x26, x3, #0x38\n   add x4, x4, x3, lsr #3\n   lsr x2, x2, x26\n   and x3, x3, #7\n   b .Lzstd_seq_enc_arm64_cont\n"
+    ".Lzstd_seq_enc_arm64_done:\n   str w5, [x0, #40]\n   str w6, [x0, #48]\n   str w7, [x0, #56]\n   stp x2, x3, [x0, #64]\n   str x4, [x0, #80]\n   mov x0, #0\n"
+    "b .Lzstd_seq_enc_arm64_out\n"
+    ".Lzstd_seq_enc_arm64_room:\n   mov x0, #1\n"
+    ".Lzstd_seq_enc_arm64_out:\n   ldp x19, x20, [sp, #16]\n   ldp x21, x22, [sp, #32]\n   ldp x23, x24, [sp, #48]\n   ldp x25, x26, [sp, #64]\n   ldp x27, x28, [sp, #80]\n"
+    "ldp x29, x30, [sp], #96\n" ASM_RET
+    ASM_END(zstd_sequences_encode)
     ASM_FUNC(memory_copy_end)
     "add x3, x0, x2\n   stp x3, x30, [sp,  #-16]!\n   bl memory_copy\n   ldp x0, x30, [sp], #16\n   strb wzr, [x0]\n" ASM_RET
     ASM_END(memory_copy_end)
@@ -27362,6 +27563,46 @@ __asm__(
 #undef ZSTD_SEQ_RV_UNSPILL
 #undef ZSTD_SEQ_RV_RELOAD
 #undef ZSTD_SEQ_RV_SLOW
+    // zstd_sequences_encode: see the x86_64 block for the contract. RISC-V
+    // stores bytes, never a misaligned word: four of them every sequence and
+    // four more when more than 32 bits are pending.
+    ASM_FUNC(zstd_sequences_encode)
+    "addi sp, sp, -112\n   sd s0, 0(sp)\n   sd s1, 8(sp)\n   sd s2, 16(sp)\n   sd s3, 24(sp)\n   sd s4, 32(sp)\n   sd s5, 40(sp)\n   sd s6, 48(sp)\n   sd s7, 56(sp)\n"
+    "sd s8, 64(sp)\n   ld s0, 16(a0)\n   ld s1, 24(a0)\n   ld s2, 32(a0)\n   lwu a5, 40(a0)\n   lwu a6, 48(a0)\n   lwu a7, 56(a0)\n   ld a2, 64(a0)\n   ld a3, 72(a0)\n"
+    "ld a4, 80(a0)\n   lla s3, zstd_sequence_tab\n   li s5, 0x6a5567\n   li s6, 0x808080\n   li s7, -1\n"
+    ".Lzstd_seq_enc_rv_outer:\n   ld t0, 8(a0)\n   beqz t0, .Lzstd_seq_enc_rv_done\n   ld t1, 88(a0)\n   sub t1, t1, a4\n   addi t1, t1, -8\n"
+    "bltz t1, .Lzstd_seq_enc_rv_room\n   srli t1, t1, 4\n   beqz t1, .Lzstd_seq_enc_rv_room\n   mv t2, t0\n   bgeu t1, t0, .Lzstd_seq_enc_rv_k\n   mv t2, t1\n"
+    ".Lzstd_seq_enc_rv_k:\n   sub t0, t0, t2\n   sd t0, 8(a0)\n   ld t3, 0(a0)\n   slli t0, t0, 4\n   add s4, t3, t0\n   addi t2, t2, -1\n   slli t2, t2, 4\n"
+    "add a1, s4, t2\n"
+    ".Lzstd_seq_enc_rv_loop:\n   lbu t0, 14(a1)\n   slli t1, t0, 2\n   add t1, s0, t1\n   lw t2, 1024(t1)\n   addw t2, t2, a5\n   srliw t2, t2, 16\n   sll t3, s7, t2\n"
+    "not t3, t3\n   and t3, t3, a5\n   sll t3, t3, a3\n   or a2, a2, t3\n   add a3, a3, t2\n   srl a5, a5, t2\n   slli t1, t0, 3\n   add t1, s0, t1\n   ld t4, 1240(t1)\n"
+    "add t4, t4, a5\n   slli t4, t4, 1\n   add t4, s0, t4\n   lhu a5, 0(t4)\n   lbu t5, 13(a1)\n   slli t1, t5, 2\n   add t1, s1, t1\n   lw t2, 1024(t1)\n"
+    "addw t2, t2, a6\n   srliw t2, t2, 16\n   sll t3, s7, t2\n   not t3, t3\n   and t3, t3, a6\n   sll t3, t3, a3\n   or a2, a2, t3\n   add a3, a3, t2\n   srl a6, a6, t2\n"
+    "slli t1, t5, 3\n   add t1, s1, t1\n   ld t4, 1240(t1)\n   add t4, t4, a6\n   slli t4, t4, 1\n   add t4, s1, t4\n   lhu a6, 0(t4)\n   lbu t0, 12(a1)\n"
+    "slli t1, t0, 2\n   add t1, s2, t1\n   lw t2, 1024(t1)\n   addw t2, t2, a7\n   srliw t2, t2, 16\n   sll t3, s7, t2\n   not t3, t3\n   and t3, t3, a7\n"
+    "sll t3, t3, a3\n   or a2, a2, t3\n   add a3, a3, t2\n   srl a7, a7, t2\n   slli t1, t0, 3\n   add t1, s2, t1\n   ld t4, 1240(t1)\n   add t4, t4, a7\n"
+    "slli t4, t4, 1\n   add t4, s2, t4\n   lhu a7, 0(t4)\n   lw t1, 0(a1)\n   slli t2, t0, 2\n   add t2, s3, t2\n   lw t2, 0(t2)\n   subw t1, t1, t2\n   add t2, s3, t0\n"
+    "lbu t2, 356(t2)\n   sll t1, t1, a3\n   or a2, a2, t1\n   add a3, a3, t2\n   lw t1, 12(a1)\n   addw t1, t1, s5\n   and t1, t1, s6\n"
+    "bnez t1, .Lzstd_seq_enc_rv_wide\n"
+    ".Lzstd_seq_enc_rv_cont:\n   lw t1, 4(a1)\n   slli t2, t5, 2\n   add t2, s3, t2\n   lw t2, 144(t2)\n   subw t1, t1, t2\n   add t2, s3, t5\n   lbu t2, 392(t2)\n"
+    "sll t1, t1, a3\n   or a2, a2, t1\n   add a3, a3, t2\n   lbu t0, 14(a1)\n   lw t1, 8(a1)\n   slli t2, t0, 2\n   add t2, s3, t2\n   lw t2, 768(t2)\n   subw t1, t1, t2\n"
+    "sll t1, t1, a3\n   or a2, a2, t1\n   add a3, a3, t0\n   sb a2, 0(a4)\n   srli t0, a2, 8\n   sb t0, 1(a4)\n   srli t0, a2, 16\n   sb t0, 2(a4)\n   srli t0, a2, 24\n"
+    "sb t0, 3(a4)\n   srli t0, a3, 5\n   bnez t0, .Lzstd_seq_enc_rv_more1\n"
+    ".Lzstd_seq_enc_rv_fl1:\n   srli t0, a3, 3\n   add a4, a4, t0\n   andi t0, a3, 0x38\n   srl a2, a2, t0\n   andi a3, a3, 7\n   addi a1, a1, -16\n"
+    "bgeu a1, s4, .Lzstd_seq_enc_rv_loop\n   j .Lzstd_seq_enc_rv_outer\n"
+    ".Lzstd_seq_enc_rv_more1:\n   srli t0, a2, 32\n   sb t0, 4(a4)\n   srli t0, a2, 40\n   sb t0, 5(a4)\n   srli t0, a2, 48\n   sb t0, 6(a4)\n   srli t0, a2, 56\n"
+    "sb t0, 7(a4)\n   j .Lzstd_seq_enc_rv_fl1\n"
+    ".Lzstd_seq_enc_rv_wide:\n   sb a2, 0(a4)\n   srli t0, a2, 8\n   sb t0, 1(a4)\n   srli t0, a2, 16\n   sb t0, 2(a4)\n   srli t0, a2, 24\n   sb t0, 3(a4)\n"
+    "srli t0, a3, 5\n   bnez t0, .Lzstd_seq_enc_rv_more2\n"
+    ".Lzstd_seq_enc_rv_fl2:\n   srli t0, a3, 3\n   add a4, a4, t0\n   andi t0, a3, 0x38\n   srl a2, a2, t0\n   andi a3, a3, 7\n   j .Lzstd_seq_enc_rv_cont\n"
+    ".Lzstd_seq_enc_rv_more2:\n   srli t0, a2, 32\n   sb t0, 4(a4)\n   srli t0, a2, 40\n   sb t0, 5(a4)\n   srli t0, a2, 48\n   sb t0, 6(a4)\n   srli t0, a2, 56\n"
+    "sb t0, 7(a4)\n   j .Lzstd_seq_enc_rv_fl2\n"
+    ".Lzstd_seq_enc_rv_done:\n   sd a5, 40(a0)\n   sd a6, 48(a0)\n   sd a7, 56(a0)\n   sd a2, 64(a0)\n   sd a3, 72(a0)\n   sd a4, 80(a0)\n   li a0, 0\n"
+    "j .Lzstd_seq_enc_rv_out\n"
+    ".Lzstd_seq_enc_rv_room:\n   li a0, 1\n"
+    ".Lzstd_seq_enc_rv_out:\n   ld s0, 0(sp)\n   ld s1, 8(sp)\n   ld s2, 16(sp)\n   ld s3, 24(sp)\n   ld s4, 32(sp)\n   ld s5, 40(sp)\n   ld s6, 48(sp)\n   ld s7, 56(sp)\n"
+    "ld s8, 64(sp)\n   addi sp, sp, 112\n" ASM_RET
+    ASM_END(zstd_sequences_encode)
     // memory_copy_end: exact overlap-aware copy, one terminator, and dst+n.
     // The x86_64 block carries the contract; the only state across the shared
     // core is the end pointer and the caller's return address.
@@ -32072,6 +32313,9 @@ bipolar zstd_huffman_4x(address_any dest, positive need, address_any src,
    FSE cell[i] is at table+8, eight bytes: next, extra, nbits, base.
    Writes no byte at or beyond output_end and updates pos. */
 WRITES(1) bipolar zstd_sequences_run(address_any job);
+/* The backward loop of a zstd sequence bitstream; 96-byte job, see the
+   x86_64 assembly. 0, or 1 when the room ran out. */
+READS_WRITES(1) bipolar zstd_sequences_encode(address_any job);
 PURE positive2 string_hash_33_length(string_address source);
 PURE positive memory_span_byte(address_any block, p8 value, positive size);
 PURE positive memory_span_byte_reverse(address_any block, p8 value,

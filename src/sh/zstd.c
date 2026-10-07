@@ -320,24 +320,12 @@ static bool zstd_fse_build(zstd_fse address_to table, const bipolar address_to n
         return true;
 }
 
-static const p8 zstd_ll_extra[36] = {
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        1, 1, 1, 1, 2, 2, 3, 3, 4, 6, 7, 8, 9, 10, 11, 12,
-        13, 14, 15, 16};
-static const p8 zstd_ml_extra[53] = {
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        1, 1, 1, 1, 2, 2, 3, 3, 4, 4, 5, 7, 8, 9, 10, 11,
-        12, 13, 14, 15, 16};
-static const p32 zstd_ll_base[36] = {
-        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
-        16, 18, 20, 22, 24, 28, 32, 40, 48, 64, 128, 256, 512, 1024, 2048, 4096,
-        8192, 16384, 32768, 65536};
-static const p32 zstd_ml_base[53] = {
-        3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
-        19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34,
-        35, 37, 39, 41, 43, 47, 51, 59, 67, 83, 99, 131, 259, 515, 1027, 2051,
-        4099, 8195, 16387, 32771, 65539};
+/* The literal length and match length codes' bases and extra bit counts are
+   lib.c's zstd_sequence_tab, which the sequence encoder indexes too. */
+#define zstd_ll_extra (zstd_sequence_tab.ll_extra)
+#define zstd_ml_extra (zstd_sequence_tab.ml_extra)
+#define zstd_ll_base (zstd_sequence_tab.ll_base)
+#define zstd_ml_base (zstd_sequence_tab.ml_base)
 
 /*
         Fold the sequence baselines into the FSE cells. The walker then
@@ -2104,6 +2092,15 @@ typedef struct
         p8 of_code;
 } zstd_enc_seq;
 
+/* How many sequences use each literal length, offset and match length
+   code: counted as zstd_store makes them, for the tables of the block. */
+typedef struct
+{
+        p32 ll[36];
+        p32 of[32];
+        p32 ml[53];
+} zstd_seq_freq;
+
 typedef struct
 {
         p64 acc;
@@ -2222,6 +2219,7 @@ typedef struct
         p32 rep[3];
         positive nseq;
         positive nlit;
+        zstd_seq_freq freq;
         /* The literal table the last compressed literals sent. */
         p32 huf_table[256];
         p8 huf_length[256];
@@ -3154,20 +3152,18 @@ static p8 zstd_choose_table(const zstd_fse_prior address_to prior,
 
 /*
         The sequence bitstream's writer, shaped like libzstd's: a field goes
-        into a 64-bit container with no check, the container is stored whole
-        (eight bytes) and advanced by its full bytes twice a sequence, and the
-        pointer stops eight bytes before the buffer's end, where close sees
-        the overflow once.  A sequence adds at most 27 bits of states and 16
-        of literal length before the first store and 47 of match length and
-        offset before the second, so the container never passes 64 bits.
+        into a 64-bit container with no check and the container is stored
+        whole (eight bytes) and advanced by its full bytes.  The first and
+        last sequences are written here; lib.c's zstd_sequences_encode writes
+        the rest, and sees to the room.  The first adds at most 16 bits of
+        literal length before its first store and 47 of match length and
+        offset before its second, so the container never passes 64 bits.
 */
 typedef struct
 {
         p64 acc;
         positive bits;
         p8 address_to at;
-        p8 address_to stop;
-        p8 address_to start;
 } zstd_bw;
 
 static __attribute__((always_inline)) inline fn
@@ -3185,27 +3181,53 @@ static __attribute__((always_inline)) inline fn zstd_bw_flush(zstd_bw address_to
         w->at += bytes;
         w->acc = bytes == 8 ? 0 : w->acc >> (bytes * 8);
         w->bits &= 7;
-        if (w->at > w->stop)
-                w->at = w->stop;
 }
 
-/* One state step for symbol: its bits out, then the next state; the tables
-   are the encoder's own, so the index needs no check. */
-static __attribute__((always_inline)) inline fn
-zstd_bw_state(zstd_bw address_to w, zstd_cstate address_to st, p8 symbol)
+/* lib.c's zstd_sequences_encode job: the sequences from seqs[count - 1]
+   down, the offset, match length and literal length tables (an all-zero
+   table for a stream of one symbol, which sends no bits), their states, the
+   pending bits and where the next byte goes, and where the room ends. */
+typedef struct
 {
-        p32 const nb = (st->value + st->ct->delta_nb[symbol]) >> 16;
+        const zstd_enc_seq address_to seqs;
+        positive count;
+        zstd_ctable address_to of;
+        zstd_ctable address_to ml;
+        zstd_ctable address_to ll;
+        positive of_state;
+        positive ml_state;
+        positive ll_state;
+        p64 acc;
+        positive bits;
+        p8 address_to out;
+        p8 address_to limit;
+} zstd_seq_encode;
 
-        zstd_bw_add(w, st->value, nb);
-        st->value = st->ct->state[(bipolar)(st->value >> nb) + st->ct->delta_find[symbol]];
-}
+_Static_assert(sizeof(zstd_enc_seq) == 16 &&
+               __builtin_offsetof(zstd_enc_seq, lit) == 0 &&
+               __builtin_offsetof(zstd_enc_seq, match) == 4 &&
+               __builtin_offsetof(zstd_enc_seq, off) == 8 &&
+               __builtin_offsetof(zstd_enc_seq, ll_code) == 12 &&
+               __builtin_offsetof(zstd_enc_seq, ml_code) == 13 &&
+               __builtin_offsetof(zstd_enc_seq, of_code) == 14 &&
+               __builtin_offsetof(zstd_ctable, delta_nb) == 1024 &&
+               __builtin_offsetof(zstd_ctable, delta_find) == 1240 &&
+               sizeof(zstd_seq_encode) == 96 &&
+               sizeof(zstd_sequence_codes) == 896,
+               "the layouts lib.c's zstd_sequences_encode reads");
+
+/* The table of a stream of one symbol: no bits, and the state stays 0. */
+static zstd_ctable zstd_ct_zero;
 
 /* One compressed block from nseq sequences and their nlit literals, of the
    n source bytes they cover, into block (three bytes of header, then the
    sections; room for a whole block): 1 with its size, or 0 when it would be
    no smaller than raw.  Nothing is committed: the state it would leave is
-   in *state. */
+   in *state.  counted is the code counts of these sequences when the parse
+   kept them, null when they are a part of a block's, which are counted
+   here. */
 static b32 zstd_entropy_chunk(zstd_encoder address_to e, const zstd_enc_seq address_to seqs,
+                              const zstd_seq_freq address_to counted,
                               positive const nseq, p8 address_to lits, positive const nlit,
                               positive n, bool last, p8 address_to block,
                               positive address_to size, zstd_entropy_state address_to state)
@@ -3256,7 +3278,8 @@ static b32 zstd_entropy_chunk(zstd_encoder address_to e, const zstd_enc_seq addr
         }
         if (nseq)
         {
-                p32 ll_freq[36] = {0}, of_freq[32] = {0}, ml_freq[53] = {0};
+                zstd_seq_freq own;
+                const zstd_seq_freq address_to freq = counted;
                 p8 address_to const modes = at++;
                 positive described = 0;
                 zstd_ctable address_to lt;
@@ -3264,25 +3287,31 @@ static b32 zstd_entropy_chunk(zstd_encoder address_to e, const zstd_enc_seq addr
                 zstd_ctable address_to mt;
                 zstd_bw bits;
                 zstd_cstate ls = {0}, os = {0}, ms = {0};
+                zstd_seq_encode job;
                 zstd_enc_seq address_to s;
                 p8 ll_mode, of_mode, ml_mode;
 
-                for (positive i = 0; i < nseq; i++)
+                if (!freq)
                 {
-                        ll_freq[seqs[i].ll_code]++;
-                        of_freq[seqs[i].of_code]++;
-                        ml_freq[seqs[i].ml_code]++;
+                        memory_fill(address_of own, 0, sizeof(own));
+                        for (positive i = 0; i < nseq; i++)
+                        {
+                                own.ll[seqs[i].ll_code]++;
+                                own.of[seqs[i].of_code]++;
+                                own.ml[seqs[i].ml_code]++;
+                        }
+                        freq = address_of own;
                 }
                 ll_mode = zstd_choose_table(address_of e->prior[0], address_of pending[0],
-                                            ll_freq, nseq, 35, 9, zstd_ll_default, 35,
+                                            freq->ll, nseq, 35, 9, zstd_ll_default, 35,
                                             address_of zstd_ct_ll, at, address_of described,
                                             seqs[nseq - 1].ll_code);
                 of_mode = zstd_choose_table(address_of e->prior[1], address_of pending[1],
-                                            of_freq, nseq, 31, 8, zstd_of_default, 28,
+                                            freq->of, nseq, 31, 8, zstd_of_default, 28,
                                             address_of zstd_ct_of, at, address_of described,
                                             seqs[nseq - 1].of_code);
                 ml_mode = zstd_choose_table(address_of e->prior[2], address_of pending[2],
-                                            ml_freq, nseq, 52, 9, zstd_ml_default, 52,
+                                            freq->ml, nseq, 52, 9, zstd_ml_default, 52,
                                             address_of zstd_ct_ml, at, address_of described,
                                             seqs[nseq - 1].ml_code);
                 if ((ll_mode | of_mode | ml_mode) > 3)
@@ -3292,18 +3321,18 @@ static b32 zstd_entropy_chunk(zstd_encoder address_to e, const zstd_enc_seq addr
                 /* An RLE stream sends no state, and neither does a repeat of
                    one: the table a repeat names is the RLE cell the decoder
                    kept, not the last table this encoder built. */
-                lt = pending[0].mode == 1 ? null : address_of pending[0].table;
-                ot = pending[1].mode == 1 ? null : address_of pending[1].table;
-                mt = pending[2].mode == 1 ? null : address_of pending[2].table;
+                lt = pending[0].mode == 1 ? address_of zstd_ct_zero : address_of pending[0].table;
+                ot = pending[1].mode == 1 ? address_of zstd_ct_zero : address_of pending[1].table;
+                mt = pending[2].mode == 1 ? address_of zstd_ct_zero : address_of pending[2].table;
+                if (lt->log > 9 || ot->log > 8 || mt->log > 9)
+                        return 0;
                 bits.acc = 0;
                 bits.bits = 0;
-                bits.start = at;
                 bits.at = at;
-                bits.stop = block + ZSTD_BLOCK_MAX + 2048 - 8;
                 s = seqs + nseq - 1;
-                if ((lt && !zstd_cstate_init2(address_of ls, lt, s->ll_code)) ||
-                    (ot && !zstd_cstate_init2(address_of os, ot, s->of_code)) ||
-                    (mt && !zstd_cstate_init2(address_of ms, mt, s->ml_code)))
+                if (!zstd_cstate_init2(address_of ls, lt, s->ll_code) ||
+                    !zstd_cstate_init2(address_of os, ot, s->of_code) ||
+                    !zstd_cstate_init2(address_of ms, mt, s->ml_code))
                         return 0;
                 zstd_bw_add(address_of bits, s->lit - zstd_ll_base[s->ll_code],
                             zstd_ll_extra[s->ll_code]);
@@ -3312,35 +3341,35 @@ static b32 zstd_entropy_chunk(zstd_encoder address_to e, const zstd_enc_seq addr
                             zstd_ml_extra[s->ml_code]);
                 zstd_bw_add(address_of bits, s->off - ((p32)1 << s->of_code), s->of_code);
                 zstd_bw_flush(address_of bits);
-                for (positive i = nseq - 1; i--;)
-                {
-                        s = seqs + i;
-                        if (ot)
-                                zstd_bw_state(address_of bits, address_of os, s->of_code);
-                        if (mt)
-                                zstd_bw_state(address_of bits, address_of ms, s->ml_code);
-                        if (lt)
-                                zstd_bw_state(address_of bits, address_of ls, s->ll_code);
-                        zstd_bw_add(address_of bits, s->lit - zstd_ll_base[s->ll_code],
-                                    zstd_ll_extra[s->ll_code]);
-                        zstd_bw_flush(address_of bits);
-                        zstd_bw_add(address_of bits, s->match - zstd_ml_base[s->ml_code],
-                                    zstd_ml_extra[s->ml_code]);
-                        zstd_bw_add(address_of bits, s->off - ((p32)1 << s->of_code),
-                                    s->of_code);
-                        zstd_bw_flush(address_of bits);
-                }
-                if (mt)
-                        zstd_bw_add(address_of bits, ms.value, mt->log);
-                if (ot)
-                        zstd_bw_add(address_of bits, os.value, ot->log);
+                /* Past out + n the block is no smaller than raw whatever
+                   follows, so that is where the room ends, with slack for the
+                   stores that overhang it. */
+                job.seqs = seqs;
+                job.count = nseq - 1;
+                job.of = ot;
+                job.ml = mt;
+                job.ll = lt;
+                job.of_state = os.value;
+                job.ml_state = ms.value;
+                job.ll_state = ls.value;
+                job.acc = bits.acc;
+                job.bits = bits.bits;
+                job.out = bits.at;
+                job.limit = out + n + 24;
+                if (zstd_sequences_encode(address_of job))
+                        return 0;
+                os.value = (p32)job.of_state;
+                ms.value = (p32)job.ml_state;
+                ls.value = (p32)job.ll_state;
+                bits.acc = job.acc;
+                bits.bits = job.bits;
+                bits.at = job.out;
+                zstd_bw_add(address_of bits, ms.value, mt->log);
+                zstd_bw_add(address_of bits, os.value, ot->log);
                 zstd_bw_flush(address_of bits);
-                if (lt)
-                        zstd_bw_add(address_of bits, ls.value, lt->log);
+                zstd_bw_add(address_of bits, ls.value, lt->log);
                 zstd_bw_add(address_of bits, 1, 1);
                 zstd_bw_flush(address_of bits);
-                if (bits.at >= bits.stop)
-                        return 0;
                 at = bits.at + (bits.bits ? 1 : 0);
                 if ((positive)(at - out) >= n)
                         return 0;
@@ -3373,7 +3402,7 @@ static b32 zstd_entropy_block(zstd_encoder address_to e, positive n, bool last)
 {
         positive size;
 
-        if (!zstd_entropy_chunk(e, e->seqs, e->nseq, e->lits, e->nlit, n, last,
+        if (!zstd_entropy_chunk(e, e->seqs, address_of e->freq, e->nseq, e->lits, e->nlit, n, last,
                                 e->block_out, address_of size, address_of e->split_state))
                 return 0;
         if (!zstd_enc_emit(e, e->block_out, size))
@@ -3405,7 +3434,7 @@ static positive zstd_split_cost(zstd_encoder address_to e, positive first, posit
         positive const source = (stop == nseq ? n : e->cum_src[stop]) - e->cum_src[first];
         positive size;
 
-        if (!zstd_entropy_chunk(e, e->seqs + first, stop - first, e->lits + lit_from,
+        if (!zstd_entropy_chunk(e, e->seqs + first, null, stop - first, e->lits + lit_from,
                                 lit_to - lit_from, source, false, e->trial_out,
                                 address_of size, address_of e->split_state))
         {
@@ -3503,7 +3532,7 @@ static b32 zstd_split_sequences(zstd_encoder address_to e, positive n, bool last
                 positive const source = (stop == nseq ? n : e->cum_src[stop]) - e->cum_src[first];
                 positive size;
 
-                if (!zstd_entropy_chunk(e, e->seqs + first, stop - first, e->lits + lit_from,
+                if (!zstd_entropy_chunk(e, e->seqs + first, null, stop - first, e->lits + lit_from,
                                         lit_to - lit_from, source, last && stop == nseq,
                                         e->split_out + at, address_of size,
                                         address_of e->split_state))
@@ -3570,6 +3599,9 @@ zstd_store(zstd_encoder address_to e, p8 address_to literals, positive run,
         s->ml_code = match < 131 ? zstd_ml_codes[match]
                                  : (p8)(36 + zstd_highbit32((p32)match - 3));
         s->of_code = zstd_highbit32(value);
+        e->freq.ll[s->ll_code]++;
+        e->freq.of[s->of_code]++;
+        e->freq.ml[s->ml_code]++;
 }
 
 /* How far a and b agree, up to room. Most matches end within sixteen bytes
@@ -3580,7 +3612,12 @@ zstd_store(zstd_encoder address_to e, p8 address_to literals, positive run,
    branch on its result cost more in mispredicts than the call it saved
    (zstd -1 on text: 2.5M more branch misses, no fewer cycles), and a call
    costs a fifth of a fast level's cycles when matches average seven bytes.
-   The other machines call the library. */
+   On arm64 it is two eight-byte compares, each a branch: moving a NEON
+   compare's answer to a register costs more than the call did (an M2 Pro,
+   matches of seven bytes on average, each answer deciding the next: the
+   library 5.55 ns, the NEON compare 8.00, a branch-free pair of words
+   5.85, two words and two branches 5.03). The other machines call the
+   library. */
 #if X64
 typedef char zstd_v16 __attribute__((vector_size(16), aligned(1), may_alias));
 #endif
@@ -3595,6 +3632,18 @@ static inline INLINE positive zstd_common(p8 address_to a, p8 address_to b, posi
 
                 if (n < 16)
                         return n;
+                return 16 + memory_common_prefix(a + 16, b + 16, room - 16);
+        }
+#elif ARM64
+        if (room >= 16)
+        {
+                p64 x = memory_load_unaligned(p64, a) ^ memory_load_unaligned(p64, b);
+
+                if (x)
+                        return bottom_bit_known(x) >> 3;
+                x = memory_load_unaligned(p64, a + 8) ^ memory_load_unaligned(p64, b + 8);
+                if (x)
+                        return 8 + (bottom_bit_known(x) >> 3);
                 return 16 + memory_common_prefix(a + 16, b + 16, room - 16);
         }
 #endif
@@ -5612,6 +5661,7 @@ static bool zstd_encode_block(zstd_encoder address_to e, positive n, bool last)
 
                 e->nseq = 0;
                 e->nlit = 0;
+                memory_fill(address_of e->freq, 0, sizeof(e->freq));
                 /* btultra2 parses a frame's first block twice: the first
                    pass only counts, then its bytes take new indices past
                    the tables, so the second pass starts with no history
@@ -5623,6 +5673,7 @@ static bool zstd_encode_block(zstd_encoder address_to e, positive n, bool last)
                         memory_copy_apart(e->rep, saved, sizeof(saved));
                         e->nseq = 0;
                         e->nlit = 0;
+                        memory_fill(address_of e->freq, 0, sizeof(e->freq));
                         e->base -= n;
                         e->start += (p32)n;
                         e->block += (p32)n;
