@@ -3313,6 +3313,49 @@ __asm__(
 #endif
 
 //
+//
+//      A set of bytes, given as a table of 256 whose nonzero entries are in it, as two tables of sixteen indexed
+//      by a byte's low nibble: bit h of the first (the second) says whether the byte with high nibble h (h + 8)
+//      and that low nibble is in the set. A vpshufb of each by the low nibble, one more to turn the high nibble
+//      into its bit, a blend on whether the high nibble is past seven, and the byte is in the set if the two
+//      meet. NIBBLE_SETUP builds the tables from the 256 bytes at T once a call (sixteen rows of compare with
+//      zero, keep a bit, shift it to its place), leaving them in ymm9 and ymm10 with the constants the
+//      classification wants in ymm8, ymm11, ymm12 and ymm13; TMP is a register it may spend. NIBBLE_CLASSIFY
+//      turns the 32 bytes in X into 0xff where they are not in the set and 0 where they are, and spends X,
+//      ymm2 to ymm5.
+//
+#define NIBBLE_ROW(T, OFF, SH, ACC) \
+    "vpcmpeqb " OFF "(" T "), %xmm12, %xmm4\n   vpandn %xmm14, %xmm4, %xmm4\n   " SH "vpor %xmm4, " ACC ", " ACC "\n"
+#define NIBBLE_SETUP(T, TMP, TMPD)                                                                           \
+    "vpxor %xmm12, %xmm12, %xmm12\n   vpxor %xmm9, %xmm9, %xmm9\n   vpxor %xmm10, %xmm10, %xmm10\n" \
+    "mov $0x01010101, " TMPD "\n   vmovd " TMPD ", %xmm14\n   vpbroadcastd %xmm14, %xmm14\n"                   \
+    NIBBLE_ROW(T, "0", "", "%xmm9")                                                                          \
+    NIBBLE_ROW(T, "16", "vpsllw $1, %xmm4, %xmm4\n   ", "%xmm9")                                             \
+    NIBBLE_ROW(T, "32", "vpsllw $2, %xmm4, %xmm4\n   ", "%xmm9")                                             \
+    NIBBLE_ROW(T, "48", "vpsllw $3, %xmm4, %xmm4\n   ", "%xmm9")                                             \
+    NIBBLE_ROW(T, "64", "vpsllw $4, %xmm4, %xmm4\n   ", "%xmm9")                                             \
+    NIBBLE_ROW(T, "80", "vpsllw $5, %xmm4, %xmm4\n   ", "%xmm9")                                             \
+    NIBBLE_ROW(T, "96", "vpsllw $6, %xmm4, %xmm4\n   ", "%xmm9")                                             \
+    NIBBLE_ROW(T, "112", "vpsllw $7, %xmm4, %xmm4\n   ", "%xmm9")                                            \
+    NIBBLE_ROW(T, "128", "", "%xmm10")                                                                       \
+    NIBBLE_ROW(T, "144", "vpsllw $1, %xmm4, %xmm4\n   ", "%xmm10")                                           \
+    NIBBLE_ROW(T, "160", "vpsllw $2, %xmm4, %xmm4\n   ", "%xmm10")                                           \
+    NIBBLE_ROW(T, "176", "vpsllw $3, %xmm4, %xmm4\n   ", "%xmm10")                                           \
+    NIBBLE_ROW(T, "192", "vpsllw $4, %xmm4, %xmm4\n   ", "%xmm10")                                           \
+    NIBBLE_ROW(T, "208", "vpsllw $5, %xmm4, %xmm4\n   ", "%xmm10")                                           \
+    NIBBLE_ROW(T, "224", "vpsllw $6, %xmm4, %xmm4\n   ", "%xmm10")                                           \
+    NIBBLE_ROW(T, "240", "vpsllw $7, %xmm4, %xmm4\n   ", "%xmm10")                                           \
+    "vinserti128 $1, %xmm9, %ymm9, %ymm9\n   vinserti128 $1, %xmm10, %ymm10, %ymm10\n" \
+    "mov $0x0f0f0f0f, " TMPD "\n   vmovd " TMPD ", %xmm8\n   vpbroadcastd %xmm8, %ymm8\n"                     \
+    "mov $0x07070707, " TMPD "\n   vmovd " TMPD ", %xmm13\n   vpbroadcastd %xmm13, %ymm13\n"                  \
+    "movabs $0x8040201008040201, " TMP "\n   vmovq " TMP ", %xmm11\n   vpunpcklqdq %xmm11, %xmm11, %xmm11\n"   \
+    "vinserti128 $1, %xmm11, %ymm11, %ymm11\n"
+#define NIBBLE_CLASSIFY(X)                                                                                   \
+    "vpsrlw $4, " X ", %ymm2\n   vpand %ymm8, %ymm2, %ymm2\n   vpand %ymm8, " X ", " X "\n"                   \
+    "vpshufb " X ", %ymm9, %ymm3\n   vpshufb " X ", %ymm10, %ymm4\n   vpshufb %ymm2, %ymm11, %ymm5\n"         \
+    "vpcmpgtb %ymm13, %ymm2, %ymm2\n   vpblendvb %ymm2, %ymm4, %ymm3, %ymm3\n   vpand %ymm5, %ymm3, %ymm3\n" \
+    "vpcmpeqb %ymm12, %ymm3, %ymm3\n"
+
 //      The masked window: every size up to sixty four bytes in one mask.
 //
 //      The ladders under these routines choose a rung by the size, and a size
@@ -11063,18 +11106,57 @@ __asm__(
 #ifndef KERNEL_MODE
     ".Lmemory_translate_x64_dispatch:\n"
     ASM_NARROW("cpu_has_avx2", ".Lmemory_translate_x64_four")
-    ASM_NARROW("cpu_has_avx512", ".Lmemory_translate_x64_four")
-    ASM_NARROW("cpu_has_avx512_vbmi", ".Lmemory_translate_x64_four")
     // Overlap retains the existing four-byte-group load/store order.
     // Subtractions test the two intervals without overflowing an end pointer.
     "mov %rdi, %r8\n   sub %rdx, %r8\n   jae .Lmemory_translate_x64_block_after\n   mov %rdx, %r8\n   sub %rdi, %r8\n   cmp %rsi, %r8\n"
     "jb .Lmemory_translate_x64_four\n   jmp .Lmemory_translate_x64_wide_start\n"
     ".Lmemory_translate_x64_block_after:\n   cmp $256, %r8\n   jb .Lmemory_translate_x64_four\n"
-    ".Lmemory_translate_x64_wide_start:  vmovdqu64 (%rdx), %zmm4\n   vmovdqu64 64(%rdx), %zmm5\n   vmovdqu64 128(%rdx), %zmm6\n   vmovdqu64 192(%rdx), %zmm7\n"
+    ".Lmemory_translate_x64_wide_start:\n"
+    ASM_NARROW("cpu_has_avx512", ".Lmemory_translate_x64_avx2")
+    ASM_NARROW("cpu_has_avx512_vbmi", ".Lmemory_translate_x64_avx2")
+    "vmovdqu64 (%rdx), %zmm4\n   vmovdqu64 64(%rdx), %zmm5\n   vmovdqu64 128(%rdx), %zmm6\n   vmovdqu64 192(%rdx), %zmm7\n"
     ".balign 16\n.Lmemory_translate_x64_wide:\n"
     "vmovdqu64 (%rdi), %zmm0\n   vmovdqa64 %zmm4, %zmm1\n   vpermt2b %zmm5, %zmm0, %zmm1\n   vmovdqa64 %zmm6, %zmm2\n   vpermt2b %zmm7, %zmm0, %zmm2\n   vpmovb2m %zmm0, %k1\n"
     "vmovdqu8 %zmm2, %zmm1{%k1}\n   vmovdqu64 %zmm1, (%rdi)\n   add $64, %rdi\n   sub $64, %rsi\n   cmp $64, %rsi\n   jae .Lmemory_translate_x64_wide\n   vzeroupper\n"
     "cmp $4, %rsi\n   jb .Lmemory_translate_x64_tail\n   jmp .Lmemory_translate_x64_four\n"
+    //
+    //      Without AVX-512 VBMI, which is what looks a byte up in 256 at once: the table is sixteen rows of
+    //      sixteen, a row is one vpshufb by the low nibble of a byte, and the row a byte belongs to is its
+    //      high nibble. Most tables change a few rows -- tr a-z A-Z two of the sixteen -- so the rows that
+    //      are the identity are found once at the top of the call (eight 32-byte compares against the
+    //      identity table) and left out of the loop: a block is its own bytes, and each row that is not
+    //      the identity replaces the bytes whose high nibble it is. Under 1024 bytes the top of the call
+    //      costs more than the bytes do, and they go to the four-byte groups. tr a-z A-Z over 4.9 MB took
+    //      4.7 million cycles on a 9950X with AVX-512 off and 0.49 million with it. Bytes a tick, data in cache,
+    //      AVX-512 off, a-z to A-Z: 1.0 for the four-byte groups and 4.9 to 5.4 for this; 24 with VBMI.
+    //
+    ".Lmemory_translate_x64_avx2:\n   cmp $1024, %rsi\n   jb .Lmemory_translate_x64_four\n   cmpb $0, cpu_has_avx2(%rip)\n   je .Lmemory_translate_x64_four\n"
+    "lea .Lmemory_translate_x64_identity(%rip), %r8\n   xor %r9d, %r9d\n"
+    ".irp half,0,1,2,3,4,5,6,7\n"
+    "vmovdqu 32*\\half(%rdx), %ymm0\n   vpcmpeqb 32*\\half(%r8), %ymm0, %ymm0\n   vpmovmskb %ymm0, %ecx\n"
+    "mov %ecx, %r10d\n   shr $16, %r10d\n   cmp $0xffff, %r10d\n   setne %r10b\n   movzbl %r10b, %r10d\n   shl $(2*\\half+1), %r10d\n   or %r10d, %r9d\n"
+    "movzwl %cx, %ecx\n   cmp $0xffff, %ecx\n   setne %cl\n   movzbl %cl, %ecx\n   shl $(2*\\half), %ecx\n   or %ecx, %r9d\n"
+    ".endr\n"
+    "test %r9d, %r9d\n   jz .Lmemory_translate_x64_avx2_done\n"
+    //      The rows that differ, as sixteen bytes on the stack, and how many.
+    "sub $24, %rsp\n   xor %r10d, %r10d\n"
+    ".Lmemory_translate_x64_avx2_list:\n   bsf %r9d, %ecx\n   mov %cl, (%rsp,%r10)\n   inc %r10d\n   lea -1(%r9), %ecx\n   and %ecx, %r9d\n   jnz .Lmemory_translate_x64_avx2_list\n"
+    //      Each row that differs costs about 2.2 ticks a 32 bytes and the four-byte groups 31 for the same
+    //      32, so past ten rows (a permutation of the alphabet is sixteen) the groups are the quicker.
+    "cmp $10, %r10d\n   ja .Lmemory_translate_x64_avx2_dense\n   lea (%rsp,%r10), %r11\n   lea .Lmemory_translate_x64_nibbles(%rip), %r10\n"
+    "mov $0x0f0f0f0f, %ecx\n   vmovd %ecx, %xmm15\n   vpbroadcastd %xmm15, %ymm15\n"
+    ".balign 16\n.Lmemory_translate_x64_avx2_block:\n"
+    "vmovdqu (%rdi), %ymm0\n   vpsrlw $4, %ymm0, %ymm1\n   vpand %ymm15, %ymm1, %ymm1\n   vpand %ymm15, %ymm0, %ymm2\n   mov %rsp, %r8\n"
+    ".Lmemory_translate_x64_avx2_row:\n   movzbl (%r8), %r9d\n   mov %r9d, %ecx\n   shl $4, %ecx\n   vbroadcasti128 (%rdx,%rcx), %ymm4\n   vpshufb %ymm2, %ymm4, %ymm4\n"
+    "shl $5, %r9d\n   vpcmpeqb (%r10,%r9), %ymm1, %ymm5\n   vpblendvb %ymm5, %ymm4, %ymm0, %ymm0\n   inc %r8\n   cmp %r11, %r8\n   jb .Lmemory_translate_x64_avx2_row\n"
+    "vmovdqu %ymm0, (%rdi)\n   add $32, %rdi\n   sub $32, %rsi\n   cmp $32, %rsi\n   jae .Lmemory_translate_x64_avx2_block\n"
+    "add $24, %rsp\n   vzeroupper\n   cmp $4, %rsi\n   jb .Lmemory_translate_x64_tail\n   jmp .Lmemory_translate_x64_four\n"
+    ".Lmemory_translate_x64_avx2_dense:\n   add $24, %rsp\n   vzeroupper\n   jmp .Lmemory_translate_x64_four\n"
+    ".Lmemory_translate_x64_avx2_done:\n   vzeroupper\n" ASM_RET
+    ".pushsection .rodata\n   .balign 32\n"
+    ".Lmemory_translate_x64_identity:\n   .set tr_i, 0\n   .rept 256\n   .byte tr_i\n   .set tr_i, tr_i + 1\n   .endr\n"
+    ".Lmemory_translate_x64_nibbles:\n   .irp h,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15\n   .fill 32, 1, \\h\n   .endr\n"
+    ".popsection\n"
 #endif
     ASM_END(memory_translate)
 
@@ -11117,13 +11199,13 @@ __asm__(
     ".Lmemory_delete_x64_done:\n   sub %r11, %rax\n" ASM_RET
 #ifndef KERNEL_MODE
     ".Lmemory_delete_x64_dispatch:\n"
-    ASM_NARROW("cpu_has_avx512", ".Lmemory_delete_x64_four")
-    ASM_NARROW("cpu_has_avx512_vbmi", ".Lmemory_delete_x64_four")
-    "movzbl cpu_has_avx512_vbmi2(%rip), %ecx\n   cmp $1, %ecx\n   je .Lmemory_delete_x64_four\n   ja .Lmemory_delete_x64_wide_start\n"
+    ASM_NARROW("cpu_has_avx512", ".Lmemory_delete_x64_avx2")
+    ASM_NARROW("cpu_has_avx512_vbmi", ".Lmemory_delete_x64_avx2")
+    "movzbl cpu_has_avx512_vbmi2(%rip), %ecx\n   cmp $1, %ecx\n   je .Lmemory_delete_x64_avx2\n   ja .Lmemory_delete_x64_wide_start\n"
     // First wide call: leaf 7, ECX bit 6. cpuid writes eax, ebx, ecx and edx,
     // and rax is the write cursor, which still equals the block here.
     "push %rbx\n   mov %rdx, %r8\n   mov $7, %eax\n   xor %ecx, %ecx\n   cpuid\n   mov %r8, %rdx\n   pop %rbx\n   mov %rdi, %rax\n   shr $6, %ecx\n   and $1, %ecx\n   inc %ecx\n"
-    "mov %cl, cpu_has_avx512_vbmi2(%rip)\n   cmp $1, %ecx\n   je .Lmemory_delete_x64_four\n"
+    "mov %cl, cpu_has_avx512_vbmi2(%rip)\n   cmp $1, %ecx\n   je .Lmemory_delete_x64_avx2\n"
     ".Lmemory_delete_x64_wide_start:  vmovdqu64 (%rdx), %zmm4\n   vmovdqu64 64(%rdx), %zmm5\n   vmovdqu64 128(%rdx), %zmm6\n   vmovdqu64 192(%rdx), %zmm7\n"
     "vptestmb %zmm4, %zmm4, %k1\n   vpmovm2b %k1, %zmm4\n   vptestmb %zmm5, %zmm5, %k1\n   vpmovm2b %k1, %zmm5\n   vptestmb %zmm6, %zmm6, %k1\n   vpmovm2b %k1, %zmm6\n"
     "vptestmb %zmm7, %zmm7, %k1\n   vpmovm2b %k1, %zmm7\n"
@@ -11132,6 +11214,35 @@ __asm__(
     "vmovdqu8 %zmm2, %zmm1{%k1}\n   vpmovb2m %zmm1, %k2\n   knotq %k2, %k2\n   vpcompressb %zmm0, %zmm3{%k2}{z}\n   vmovdqu64 %zmm3, (%rax)\n   kmovq %k2, %rcx\n"
     "popcnt %rcx, %rcx\n   add %rcx, %rax\n   add $64, %rdi\n   sub $64, %rsi\n   cmp $64, %rsi\n   jae .Lmemory_delete_x64_wide\n   vzeroupper\n"
     "cmp $4, %rsi\n   jb .Lmemory_delete_x64_tail\n   jmp .Lmemory_delete_x64_four\n"
+    //
+    //      Without AVX-512 VBMI2, which is what compresses bytes in a register: 32 bytes a turn. The set is
+    //      the table's nonzero entries as the nibble tables NIBBLE_SETUP builds, the keep mask is a vpmovmskb
+    //      of the bytes NIBBLE_CLASSIFY says are not in it, and each of its four bytes is a row of a table of
+    //      256 shuffle controls (the positions of its set bits, in order, padded with 0x80 which a vpshufb
+    //      turns into zero): one load, one vpshufb, an eight-byte store at the cursor, and the cursor moves on
+    //      by the population count. The store stays inside the block as the VBMI2 body's does -- the cursor is
+    //      never past the chunk being read, and the 32 bytes are in a register before the first store. The
+    //      four-byte groups under it did 1.05 ticks a byte whatever the set. Bytes a tick, data in cache, AVX-512
+    //      off, on a 9950X: 0.77 for them and 3.05 for this, aeiou or half the bytes alike; 12.7 with VBMI2.
+    //      Below 256 bytes the top of the call costs more than the bytes.
+    //
+    ".Lmemory_delete_x64_avx2:\n   cmp $256, %rsi\n   jb .Lmemory_delete_x64_four\n   cmpb $0, cpu_has_avx2(%rip)\n   je .Lmemory_delete_x64_four\n"
+    NIBBLE_SETUP("%rdx", "%r10", "%r10d")
+    "lea .Lmemory_delete_x64_shuffles(%rip), %r9\n"
+    ".balign 16\n.Lmemory_delete_x64_avx2_block:\n"
+    "vmovdqu (%rdi), %ymm0\n   vmovdqa %ymm0, %ymm1\n"
+    NIBBLE_CLASSIFY("%ymm1")
+    "vpmovmskb %ymm3, %r10d\n   vextracti128 $1, %ymm0, %xmm7\n"
+    "movzbl %r10b, %ecx\n   vmovq (%r9,%rcx,8), %xmm4\n   vpshufb %xmm4, %xmm0, %xmm5\n   vmovq %xmm5, (%rax)\n   popcnt %ecx, %ecx\n   add %rcx, %rax\n"
+    "shr $8, %r10d\n   movzbl %r10b, %ecx\n   vpsrldq $8, %xmm0, %xmm6\n   vmovq (%r9,%rcx,8), %xmm4\n   vpshufb %xmm4, %xmm6, %xmm5\n   vmovq %xmm5, (%rax)\n   popcnt %ecx, %ecx\n   add %rcx, %rax\n"
+    "shr $8, %r10d\n   movzbl %r10b, %ecx\n   vmovq (%r9,%rcx,8), %xmm4\n   vpshufb %xmm4, %xmm7, %xmm5\n   vmovq %xmm5, (%rax)\n   popcnt %ecx, %ecx\n   add %rcx, %rax\n"
+    "shr $8, %r10d\n   movzbl %r10b, %ecx\n   vpsrldq $8, %xmm7, %xmm6\n   vmovq (%r9,%rcx,8), %xmm4\n   vpshufb %xmm4, %xmm6, %xmm5\n   vmovq %xmm5, (%rax)\n   popcnt %ecx, %ecx\n   add %rcx, %rax\n"
+    "add $32, %rdi\n   sub $32, %rsi\n   cmp $32, %rsi\n   jae .Lmemory_delete_x64_avx2_block\n"
+    "vzeroupper\n   cmp $4, %rsi\n   jb .Lmemory_delete_x64_tail\n   jmp .Lmemory_delete_x64_four\n"
+    ".pushsection .rodata\n   .balign 8\n"
+    ".Lmemory_delete_x64_shuffles:\n   .set del_m, 0\n   .rept 256\n   .set del_n, 0\n   .set del_b, 0\n   .rept 8\n   .if (del_m >> del_b) & 1\n   .byte del_b\n   .set del_n, del_n + 1\n   .endif\n   .set del_b, del_b + 1\n   .endr\n"
+    "   .rept 8 - del_n\n   .byte 0x80\n   .endr\n   .set del_m, del_m + 1\n   .endr\n"
+    ".popsection\n"
 #endif
     ASM_END(memory_delete_bytes)
 
@@ -11165,12 +11276,12 @@ __asm__(
     ".Lmemory_squeeze_x64_done:\n   sub %r11, %rax\n" ASM_RET
 #ifndef KERNEL_MODE
     ".Lmemory_squeeze_x64_dispatch:\n"
-    ASM_NARROW("cpu_has_avx512", ".Lmemory_squeeze_x64_one")
-    ASM_NARROW("cpu_has_avx512_vbmi", ".Lmemory_squeeze_x64_one")
-    "movzbl cpu_has_avx512_vbmi2(%rip), %ecx\n   cmp $1, %ecx\n   je .Lmemory_squeeze_x64_one\n   ja .Lmemory_squeeze_x64_wide_start\n"
+    ASM_NARROW("cpu_has_avx512", ".Lmemory_squeeze_x64_avx2")
+    ASM_NARROW("cpu_has_avx512_vbmi", ".Lmemory_squeeze_x64_avx2")
+    "movzbl cpu_has_avx512_vbmi2(%rip), %ecx\n   cmp $1, %ecx\n   je .Lmemory_squeeze_x64_avx2\n   ja .Lmemory_squeeze_x64_wide_start\n"
     // First wide call anywhere: memory_delete_bytes' question, asked here.
     "push %rbx\n   mov %rdx, %r8\n   mov $7, %eax\n   xor %ecx, %ecx\n   cpuid\n   mov %r8, %rdx\n   pop %rbx\n   mov %rdi, %rax\n   shr $6, %ecx\n   and $1, %ecx\n   inc %ecx\n"
-    "mov %cl, cpu_has_avx512_vbmi2(%rip)\n   cmp $1, %ecx\n   je .Lmemory_squeeze_x64_one\n"
+    "mov %cl, cpu_has_avx512_vbmi2(%rip)\n   cmp $1, %ecx\n   je .Lmemory_squeeze_x64_avx2\n"
     ".Lmemory_squeeze_x64_wide_start:\n"
     // No byte before the block: one that is not its first byte.
     "cmp $255, %r9\n   jbe 1f\n   movzbl (%rdi), %r9d\n   xor $1, %r9d\n"
@@ -11185,6 +11296,32 @@ __asm__(
     // The block's last byte, from the register: the store above may have
     // left something else in memory where it was.
     "vextracti32x4 $3, %zmm8, %xmm8\n   vpextrb $15, %xmm8, %r9d\n   vzeroupper\n   test %rsi, %rsi\n   jz .Lmemory_squeeze_x64_done\n   jmp .Lmemory_squeeze_x64_one\n"
+    //
+    //      Without AVX-512 VBMI2: 32 bytes a turn as memory_delete_bytes does them (its comment has the
+    //      reasons), the keep mask being a byte's not being both marked and the same as the byte before it.
+    //      The byte before is lane i - 1 of the block, and lane 0's is the last byte of the block before, which
+    //      the previous block's register still holds: a vperm2i128 puts that register's top lane under this
+    //      one's bottom and a vpalignr by fifteen takes the byte from the seam.
+    //
+    ".Lmemory_squeeze_x64_avx2:\n   cmp $256, %rsi\n   jb .Lmemory_squeeze_x64_one\n   cmpb $0, cpu_has_avx2(%rip)\n   je .Lmemory_squeeze_x64_one\n"
+    "cmp $255, %r9\n   jbe 1f\n   movzbl (%rdi), %r9d\n   xor $1, %r9d\n"
+    "1:  vmovd %r9d, %xmm0\n   vpbroadcastb %xmm0, %ymm15\n"
+    NIBBLE_SETUP("%rdx", "%r10", "%r10d")
+    "lea .Lmemory_delete_x64_shuffles(%rip), %r9\n"
+    ".balign 16\n.Lmemory_squeeze_x64_avx2_block:\n"
+    "vmovdqu (%rdi), %ymm0\n   vperm2i128 $0x21, %ymm0, %ymm15, %ymm6\n   vpalignr $15, %ymm6, %ymm0, %ymm6\n   vpcmpeqb %ymm6, %ymm0, %ymm6\n"
+    "vmovdqa %ymm0, %ymm15\n   vmovdqa %ymm0, %ymm1\n"
+    NIBBLE_CLASSIFY("%ymm1")
+    //      ymm3 is 0xff where a byte is not marked and ymm6 where it repeats: dropped is repeating and marked.
+    "vpandn %ymm6, %ymm3, %ymm3\n   vpmovmskb %ymm3, %r10d\n   not %r10d\n   vextracti128 $1, %ymm0, %xmm7\n"
+    "movzbl %r10b, %ecx\n   vmovq (%r9,%rcx,8), %xmm4\n   vpshufb %xmm4, %xmm0, %xmm5\n   vmovq %xmm5, (%rax)\n   popcnt %ecx, %ecx\n   add %rcx, %rax\n"
+    "shr $8, %r10d\n   movzbl %r10b, %ecx\n   vpsrldq $8, %xmm0, %xmm6\n   vmovq (%r9,%rcx,8), %xmm4\n   vpshufb %xmm4, %xmm6, %xmm5\n   vmovq %xmm5, (%rax)\n   popcnt %ecx, %ecx\n   add %rcx, %rax\n"
+    "shr $8, %r10d\n   movzbl %r10b, %ecx\n   vmovq (%r9,%rcx,8), %xmm4\n   vpshufb %xmm4, %xmm7, %xmm5\n   vmovq %xmm5, (%rax)\n   popcnt %ecx, %ecx\n   add %rcx, %rax\n"
+    "shr $8, %r10d\n   movzbl %r10b, %ecx\n   vpsrldq $8, %xmm7, %xmm6\n   vmovq (%r9,%rcx,8), %xmm4\n   vpshufb %xmm4, %xmm6, %xmm5\n   vmovq %xmm5, (%rax)\n   popcnt %ecx, %ecx\n   add %rcx, %rax\n"
+    "add $32, %rdi\n   sub $32, %rsi\n   cmp $32, %rsi\n   jae .Lmemory_squeeze_x64_avx2_block\n"
+    //      The block's last byte, from the register, for the byte loop that finishes: the stores above may have
+    //      left something else in memory where it was.
+    "vextracti128 $1, %ymm15, %xmm15\n   vpextrb $15, %xmm15, %r9d\n   vzeroupper\n   test %rsi, %rsi\n   jz .Lmemory_squeeze_x64_done\n   jmp .Lmemory_squeeze_x64_one\n"
     ".pushsection .rodata\n   .balign 64\n"
     // Lane 0 takes the previous vector's last byte, lane i this one's i - 1.
     ".Lmemory_squeeze_x64_previous:\n   .byte 127,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62\n"
@@ -11468,19 +11605,12 @@ __asm__(
     //      every 250 to 749 bytes 6,265 and 351.
     //
     ".Lmemory_offsets_set_x64_avx2:\n   cmpb $0, cpu_has_avx2(%rip)\n   je .Lmemory_offsets_set_x64_one\n   push %rbx\n   push %r12\n"
-    "vpxor %xmm12, %xmm12, %xmm12\n   vpxor %xmm9, %xmm9, %xmm9\n   vpxor %xmm10, %xmm10, %xmm10\n   mov $0x01010101, %r11d\n   vmovd %r11d, %xmm14\n   vpbroadcastd %xmm14, %xmm14\n"
-    "vpcmpeqb 0(%rcx), %xmm12, %xmm4\n   vpandn %xmm14, %xmm4, %xmm4\n   vpor %xmm4, %xmm9, %xmm9\nvpcmpeqb 16(%rcx), %xmm12, %xmm4\n   vpandn %xmm14, %xmm4, %xmm4\n   vpsllw $1, %xmm4, %xmm4\n   vpor %xmm4, %xmm9, %xmm9\nvpcmpeqb 32(%rcx), %xmm12, %xmm4\n   vpandn %xmm14, %xmm4, %xmm4\n   vpsllw $2, %xmm4, %xmm4\n   vpor %xmm4, %xmm9, %xmm9\nvpcmpeqb 48(%rcx), %xmm12, %xmm4\n   vpandn %xmm14, %xmm4, %xmm4\n   vpsllw $3, %xmm4, %xmm4\n   vpor %xmm4, %xmm9, %xmm9\nvpcmpeqb 64(%rcx), %xmm12, %xmm4\n   vpandn %xmm14, %xmm4, %xmm4\n   vpsllw $4, %xmm4, %xmm4\n   vpor %xmm4, %xmm9, %xmm9\nvpcmpeqb 80(%rcx), %xmm12, %xmm4\n   vpandn %xmm14, %xmm4, %xmm4\n   vpsllw $5, %xmm4, %xmm4\n   vpor %xmm4, %xmm9, %xmm9\nvpcmpeqb 96(%rcx), %xmm12, %xmm4\n   vpandn %xmm14, %xmm4, %xmm4\n   vpsllw $6, %xmm4, %xmm4\n   vpor %xmm4, %xmm9, %xmm9\nvpcmpeqb 112(%rcx), %xmm12, %xmm4\n   vpandn %xmm14, %xmm4, %xmm4\n   vpsllw $7, %xmm4, %xmm4\n   vpor %xmm4, %xmm9, %xmm9\nvpcmpeqb 128(%rcx), %xmm12, %xmm4\n   vpandn %xmm14, %xmm4, %xmm4\n   vpor %xmm4, %xmm10, %xmm10\nvpcmpeqb 144(%rcx), %xmm12, %xmm4\n   vpandn %xmm14, %xmm4, %xmm4\n   vpsllw $1, %xmm4, %xmm4\n   vpor %xmm4, %xmm10, %xmm10\nvpcmpeqb 160(%rcx), %xmm12, %xmm4\n   vpandn %xmm14, %xmm4, %xmm4\n   vpsllw $2, %xmm4, %xmm4\n   vpor %xmm4, %xmm10, %xmm10\nvpcmpeqb 176(%rcx), %xmm12, %xmm4\n   vpandn %xmm14, %xmm4, %xmm4\n   vpsllw $3, %xmm4, %xmm4\n   vpor %xmm4, %xmm10, %xmm10\nvpcmpeqb 192(%rcx), %xmm12, %xmm4\n   vpandn %xmm14, %xmm4, %xmm4\n   vpsllw $4, %xmm4, %xmm4\n   vpor %xmm4, %xmm10, %xmm10\nvpcmpeqb 208(%rcx), %xmm12, %xmm4\n   vpandn %xmm14, %xmm4, %xmm4\n   vpsllw $5, %xmm4, %xmm4\n   vpor %xmm4, %xmm10, %xmm10\nvpcmpeqb 224(%rcx), %xmm12, %xmm4\n   vpandn %xmm14, %xmm4, %xmm4\n   vpsllw $6, %xmm4, %xmm4\n   vpor %xmm4, %xmm10, %xmm10\nvpcmpeqb 240(%rcx), %xmm12, %xmm4\n   vpandn %xmm14, %xmm4, %xmm4\n   vpsllw $7, %xmm4, %xmm4\n   vpor %xmm4, %xmm10, %xmm10\n"
-    "vinserti128 $1, %xmm9, %ymm9, %ymm9\n   vinserti128 $1, %xmm10, %ymm10, %ymm10\n   mov $0x0f0f0f0f, %r11d\n   vmovd %r11d, %xmm8\n   vpbroadcastd %xmm8, %ymm8\n"
-    "mov $0x07070707, %r11d\n   vmovd %r11d, %xmm13\n   vpbroadcastd %xmm13, %ymm13\n"
-    "movabs $0x8040201008040201, %r11\n   vmovq %r11, %xmm11\n   vpunpcklqdq %xmm11, %xmm11, %xmm11\n   vinserti128 $1, %xmm11, %ymm11, %ymm11\n"
+    NIBBLE_SETUP("%rcx", "%r11", "%r11d")
     ".balign 16\n.Lmemory_offsets_set_x64_a2_block:\n"
     "cmp %r8, %rax\n   jae .Lmemory_offsets_set_x64_a2_full\n   mov %rdx, %r12\n   sub %r10, %r12\n   cmp $64, %r12\n   jb .Lmemory_offsets_set_x64_a2_tail\n"
-    "vmovdqu (%rsi,%r10), %ymm0\n   vmovdqu 32(%rsi,%r10), %ymm1\n   vpsrlw $4, %ymm0, %ymm2\n   vpand %ymm8, %ymm2, %ymm2\n   vpand %ymm8, %ymm0, %ymm0\n"
-    "vpshufb %ymm0, %ymm9, %ymm3\n   vpshufb %ymm0, %ymm10, %ymm4\n   vpshufb %ymm2, %ymm11, %ymm5\n   vpcmpgtb %ymm13, %ymm2, %ymm2\n"
-    "vpblendvb %ymm2, %ymm4, %ymm3, %ymm3\n   vpand %ymm5, %ymm3, %ymm3\n   vpcmpeqb %ymm12, %ymm3, %ymm3\n   vpmovmskb %ymm3, %r11d\n"
-    "vpsrlw $4, %ymm1, %ymm2\n   vpand %ymm8, %ymm2, %ymm2\n   vpand %ymm8, %ymm1, %ymm1\n"
-    "vpshufb %ymm1, %ymm9, %ymm3\n   vpshufb %ymm1, %ymm10, %ymm4\n   vpshufb %ymm2, %ymm11, %ymm5\n   vpcmpgtb %ymm13, %ymm2, %ymm2\n"
-    "vpblendvb %ymm2, %ymm4, %ymm3, %ymm3\n   vpand %ymm5, %ymm3, %ymm3\n   vpcmpeqb %ymm12, %ymm3, %ymm3\n   vpmovmskb %ymm3, %r12d\n"
+    "vmovdqu (%rsi,%r10), %ymm0\n   vmovdqu 32(%rsi,%r10), %ymm1\n"
+    NIBBLE_CLASSIFY("%ymm0") "vpmovmskb %ymm3, %r11d\n"
+    NIBBLE_CLASSIFY("%ymm1") "vpmovmskb %ymm3, %r12d\n"
     "shl $32, %r12\n   or %r12, %r11\n   not %r11\n   test %r11, %r11\n   jz .Lmemory_offsets_set_x64_a2_next\n"
     "mov %r8, %rbx\n   sub %rax, %rbx\n   cmp $64, %rbx\n   jb .Lmemory_offsets_set_x64_a2_slow\n   popcnt %r11, %r12\n   lea (%rdi,%rax,4), %r9\n   add %r12, %rax\n"
     "bsf %r11, %rbx\n   add %r10, %rbx\n   mov %ebx, (%r9)\n   lea -1(%r11), %rbx\n   and %rbx, %r11\nbsf %r11, %rbx\n   add %r10, %rbx\n   mov %ebx, 4(%r9)\n   lea -1(%r11), %rbx\n   and %rbx, %r11\nbsf %r11, %rbx\n   add %r10, %rbx\n   mov %ebx, 8(%r9)\n   lea -1(%r11), %rbx\n   and %rbx, %r11\nbsf %r11, %rbx\n   add %r10, %rbx\n   mov %ebx, 12(%r9)\n   lea -1(%r11), %rbx\n   and %rbx, %r11\nbsf %r11, %rbx\n   add %r10, %rbx\n   mov %ebx, 16(%r9)\n   lea -1(%r11), %rbx\n   and %rbx, %r11\nbsf %r11, %rbx\n   add %r10, %rbx\n   mov %ebx, 20(%r9)\n   lea -1(%r11), %rbx\n   and %rbx, %r11\nbsf %r11, %rbx\n   add %r10, %rbx\n   mov %ebx, 24(%r9)\n   lea -1(%r11), %rbx\n   and %rbx, %r11\nbsf %r11, %rbx\n   add %r10, %rbx\n   mov %ebx, 28(%r9)\n   lea -1(%r11), %rbx\n   and %rbx, %r11\n"
@@ -30113,8 +30243,8 @@ __asm__(
        permutes and one high-bit merge translate 64 arbitrary bytes, so the
        same mapper serves all five bit widths without ASCII policy copies. */
     ASM_NARROW("cpu_has_avx2", ".Lcodec_decode_x64_scalar")
-    ASM_NARROW("cpu_has_avx512", ".Lcodec_decode_x64_scalar")
-    ASM_NARROW("cpu_has_avx512_vbmi", ".Lcodec_decode_x64_scalar")
+    ASM_NARROW("cpu_has_avx512", ".Lcodec_decode_x64_avx2")
+    ASM_NARROW("cpu_has_avx512_vbmi", ".Lcodec_decode_x64_avx2")
     "mov $8, %r10d\n   cmp $1, %r8\n   je .Lcodec_decode_x64_wide_start\n   cmp $9, %r8\n   je .Lcodec_decode_x64_wide_start\n   cmp $5, %r8\n   je .Lcodec_decode_x64_wide_start\n"
     "mov $32, %r10d\n   cmp $4, %r8\n   je .Lcodec_decode_x64_wide_start\n   mov $16, %r10d\n   cmp $6, %r8\n   jne .Lcodec_decode_x64_done\n"
     ".Lcodec_decode_x64_wide_start:\n   cmp %r10, %rdx\n   jb .Lcodec_decode_x64_scalar\n   vmovdqu64 (%rcx), %zmm4\n   vmovdqu64 64(%rcx), %zmm5\n"
@@ -30135,8 +30265,55 @@ __asm__(
     ".Lcodec_decode_x64_binary:\n   cmp $9, %r8\n   je 3f\n   vpshufb %zmm12, %zmm1, %zmm1\n"
     "3:  vpsllw $7, %zmm1, %zmm1\n   vpmovb2m %zmm1, %k1\n   kmovq %k1, (%rdi)\n   add $8, %rdi\n"
     ".Lcodec_decode_x64_wide_next:  add $64, %rsi\n   add %r10, %r9\n   sub %r10, %rdx\n   cmp %r10, %rdx\n   jae .Lcodec_decode_x64_wide\n"
-    ".Lcodec_decode_x64_wide_tail:\n   vzeroupper\n   test %rdx, %rdx\n   jz .Lcodec_decode_x64_done\n"
+    ".Lcodec_decode_x64_wide_tail:\n   vzeroupper\n   test %rdx, %rdx\n   jz .Lcodec_decode_x64_done\n   jmp .Lcodec_decode_x64_scalar\n"
 #endif
+    ASM_USERSPACE_WIDE(
+    //
+    //      Without AVX-512 VBMI, which looks a byte up in 256 at once: 32 symbols a turn for the 6-bit and the
+    //      4-bit codecs (base64 and its url form, hexadecimal), the rest to the loops below. The table is sixteen
+    //      rows of sixteen as memory_translate has it, with 0xff for what is not in the alphabet in place of the
+    //      identity: the rows that hold anything else are found once at the top of the call, and a symbol is
+    //      its row looked up by its low nibble, for each of those rows, where its high nibble is the row's.
+    //      Any symbol that came out with its top bit set is not in the alphabet, and the turn is left to the
+    //      loops below before anything of it is stored, so the quantum they stop before is theirs to find.
+    //      The 6-bit turn packs with vpmaddubsw and vpmaddwd to 24-bit groups and writes its 24 bytes exactly,
+    //      sixteen and eight, because the last turn may be the last thing the caller owns. 12 KiB of base64 with
+    //      AVX-512 off, ticks on a 9950X: 27,398 for the loops and 7,639 for this (0.44 and 1.6 bytes a tick;
+    //      7.3 to 8 with VBMI). Under 32 quanta the top of the call, which finds the rows, costs more than the
+    //      symbols, and base64 -d decodes one wrapped line of 19 at a time, so it is the long unwrapped input
+    //      that this is for.
+    //
+    ".Lcodec_decode_x64_avx2:\n   cmp $6, %r8\n   je 2f\n   cmp $4, %r8\n   jne .Lcodec_decode_x64_scalar\n"
+    "2:  cmp $32, %rdx\n   jb .Lcodec_decode_x64_scalar\n   cmpb $0, cpu_has_avx2(%rip)\n   je .Lcodec_decode_x64_scalar\n   push %rbx\n   push %r12\n"
+    "vpcmpeqb %ymm14, %ymm14, %ymm14\n   xor %ebx, %ebx\n"
+    ".irp half,0,1,2,3,4,5,6,7\n"
+    "vmovdqu 32*\\half(%rcx), %ymm0\n   vpcmpeqb %ymm14, %ymm0, %ymm0\n   vpmovmskb %ymm0, %eax\n"
+    "mov %eax, %r10d\n   shr $16, %r10d\n   cmp $0xffff, %r10d\n   setne %r10b\n   movzbl %r10b, %r10d\n   shl $(2*\\half+1), %r10d\n   or %r10d, %ebx\n"
+    "movzwl %ax, %eax\n   cmp $0xffff, %eax\n   setne %al\n   movzbl %al, %eax\n   shl $(2*\\half), %eax\n   or %eax, %ebx\n"
+    ".endr\n"
+    "test %ebx, %ebx\n   jz .Lcodec_decode_x64_avx2_bail\n   sub $24, %rsp\n   xor %r12d, %r12d\n"
+    ".Lcodec_decode_x64_avx2_list:\n   bsf %ebx, %eax\n   shl $4, %eax\n   mov %al, (%rsp,%r12)\n   inc %r12d\n   mov %ebx, %eax\n   lea -1(%rax), %ebx\n   and %eax, %ebx\n   jnz .Lcodec_decode_x64_avx2_list\n"
+    "lea (%rsp,%r12), %r11\n   lea .Lmemory_translate_x64_nibbles(%rip), %r10\n   mov $0x0f0f0f0f, %eax\n   vmovd %eax, %xmm15\n   vpbroadcastd %xmm15, %ymm15\n"
+    "mov $8, %r12d\n   cmp $6, %r8\n   je 3f\n   mov $16, %r12d\n"
+    "3:  vpbroadcastd .Lcodec_decode_x64_mul_a(%rip), %ymm10\n   vpbroadcastd .Lcodec_decode_x64_mul_b(%rip), %ymm11\n   vbroadcasti128 .Lcodec_decode_x64_shuffle6(%rip), %ymm12\n"
+    "vmovdqu .Lcodec_decode_x64_permute6(%rip), %ymm13\n   cmp $4, %r8\n   jne 4f\n   vpbroadcastd .Lcodec_decode_x64_mul_hex(%rip), %ymm10\n"
+    ".balign 16\n4:  cmp %r12, %rdx\n   jb .Lcodec_decode_x64_avx2_end\n"
+    "vmovdqu (%rsi), %ymm0\n   vpsrlw $4, %ymm0, %ymm1\n   vpand %ymm15, %ymm1, %ymm1\n   vpand %ymm15, %ymm0, %ymm2\n   vmovdqa %ymm14, %ymm3\n   mov %rsp, %rbx\n"
+    "5:  movzbl (%rbx), %eax\n   vbroadcasti128 (%rcx,%rax), %ymm4\n   vpshufb %ymm2, %ymm4, %ymm4\n   vpcmpeqb (%r10,%rax,2), %ymm1, %ymm5\n   vpblendvb %ymm5, %ymm4, %ymm3, %ymm3\n"
+    "inc %rbx\n   cmp %r11, %rbx\n   jb 5b\n   vpmovmskb %ymm3, %eax\n   test %eax, %eax\n   jnz .Lcodec_decode_x64_avx2_end\n   vpmaddubsw %ymm10, %ymm3, %ymm3\n   cmp $4, %r8\n   je 6f\n"
+    "vpmaddwd %ymm11, %ymm3, %ymm3\n   vpshufb %ymm12, %ymm3, %ymm3\n   vpermd %ymm3, %ymm13, %ymm3\n   vmovdqu %xmm3, (%rdi)\n   vextracti128 $1, %ymm3, %xmm4\n   vmovq %xmm4, 16(%rdi)\n   add $24, %rdi\n   jmp 7f\n"
+    "6:  vpackuswb %ymm3, %ymm3, %ymm3\n   vpermq $0x08, %ymm3, %ymm3\n   vmovdqu %xmm3, (%rdi)\n   add $16, %rdi\n"
+    "7:  add $32, %rsi\n   add %r12, %r9\n   sub %r12, %rdx\n   jmp 4b\n"
+    ".Lcodec_decode_x64_avx2_end:\n   add $24, %rsp\n"
+    ".Lcodec_decode_x64_avx2_bail:\n   vzeroupper\n   pop %r12\n   pop %rbx\n   test %rdx, %rdx\n   jz .Lcodec_decode_x64_done\n   jmp .Lcodec_decode_x64_scalar\n"
+    ".pushsection .rodata\n   .balign 32\n"
+    ".Lcodec_decode_x64_mul_a:\n   .long 0x01400140\n"
+    ".Lcodec_decode_x64_mul_b:\n   .long 0x00011000\n"
+    ".Lcodec_decode_x64_mul_hex:\n   .long 0x01100110\n"
+    ".Lcodec_decode_x64_shuffle6:\n   .byte 2,1,0,6,5,4,10,9,8,14,13,12,128,128,128,128\n"
+    ".balign 32\n.Lcodec_decode_x64_permute6:\n   .long 0,1,2,4,5,6,7,7\n"
+    ".popsection\n"
+    )
     ".Lcodec_decode_x64_scalar:  cmp $6, %r8\n   je .Lcodec_decode_x64_6\n   cmp $5, %r8\n   je .Lcodec_decode_x64_5\n   cmp $4, %r8\n   je .Lcodec_decode_x64_4\n"
     "cmp $1, %r8\n   je .Lcodec_decode_x64_1\n   cmp $9, %r8\n   je .Lcodec_decode_x64_9\n   jmp .Lcodec_decode_x64_done\n"
     ".balign 16\n.Lcodec_decode_x64_6:\nxor %eax, %eax\nxor %r11d, %r11d\n"
