@@ -24548,6 +24548,96 @@ fn check_huge_bounds()
         memory_free(pages, 7 * 4096);
 }
 
+/*
+        Sizes past four gigabytes, which a length held in thirty two bits
+        gets wrong without anything near it failing. Two anonymous mappings
+        of 4 GiB and a little more, never written except for the bytes the
+        checks plant, so the pages read are the kernel's one zero page and the
+        scans cost time and no memory. Each routine has its answer at the far
+        end, or at the near end for the ones that look backwards, so the whole
+        span is read to get to it.
+*/
+#define HUGE_SIZE ((4ull << 30) + 4096 + 77)
+
+fn check_huge_sizes()
+{
+        p8 address_to one = memory(HUGE_SIZE);
+        p8 address_to two = memory(HUGE_SIZE);
+        p8 had_avx2 = 0;
+        p8 had_avx512 = 0;
+
+        if (!((bipolar)(positive)one > 0) || !((bipolar)(positive)two > 0))
+        {
+                // a machine that will not map this much says so and does not fail
+                string_format(log, "  NOTE huge sizes: no 4 GiB mapping here, so none were tried\n");
+                return;
+        }
+#if X64
+        had_avx2 = cpu_has_avx2;
+        had_avx512 = cpu_has_avx512;
+#endif
+        for (positive pass = 0; pass < BULK_TIERS; pass++)
+        {
+                bulk_tier(pass, had_avx2, had_avx512);
+
+                one[HUGE_SIZE - 1] = 'z';
+                one[HUGE_SIZE - 40] = 'z';
+                one[5] = 'y';
+                same("memory_first_of", "past 4 GiB", (positive)memory_first_of(one, 'z', HUGE_SIZE),
+                     (positive)(one + HUGE_SIZE - 40));
+                same("memory_last_of", "past 4 GiB", (positive)memory_last_of(one, 'y', HUGE_SIZE),
+                     (positive)(one + 5));
+                same("memory_count", "past 4 GiB", memory_count(one, HUGE_SIZE, 'z'), 2);
+                same("memory_span_byte", "past 4 GiB", memory_span_byte(one, 0, HUGE_SIZE), 5);
+                one[5] = 0;
+                same("memory_span_byte", "past 4 GiB, far end", memory_span_byte(one, 0, HUGE_SIZE),
+                     HUGE_SIZE - 40);
+                same("memory_compare", "past 4 GiB, differs at the end",
+                     libc_sign(memory_compare(one, two, HUGE_SIZE)), 1);
+                same("memory_common_prefix", "past 4 GiB", memory_common_prefix(one, two, HUGE_SIZE),
+                     HUGE_SIZE - 40);
+                two[HUGE_SIZE - 40] = 'z';
+                two[HUGE_SIZE - 1] = 'z';
+                same("memory_compare", "past 4 GiB, equal", memory_compare(one, two, HUGE_SIZE), 0);
+                same("memory_common_prefix", "past 4 GiB, equal", memory_common_prefix(one, two, HUGE_SIZE),
+                     HUGE_SIZE);
+                same("memory_sum_bytes", "past 4 GiB", memory_sum_bytes(one, HUGE_SIZE), 2 * 'z');
+                one[HUGE_SIZE - 1] = 'Z';
+                same("memory_first_of_ascii_case", "past 4 GiB",
+                     (positive)memory_first_of_ascii_case(one, 'z', HUGE_SIZE), (positive)(one + HUGE_SIZE - 40));
+                same("memory_last_of_either", "past 4 GiB, from the far end",
+                     (positive)memory_last_of_either(one, 'y', 'Z', HUGE_SIZE), (positive)(one + HUGE_SIZE - 1));
+                two[HUGE_SIZE - 1] = 'z';
+                same("memory_compare_ascii_case", "past 4 GiB, folded equal",
+                     memory_compare_ascii_case(one, two, HUGE_SIZE), 0);
+                two[HUGE_SIZE - 1] = 'x';
+                same("memory_compare_ascii_case", "past 4 GiB, differs at the end",
+                     libc_sign(memory_compare_ascii_case(one, two, HUGE_SIZE)), 1);
+                one[HUGE_SIZE - 1] = 'z';
+                {
+                        positive2 span = memory_utf8_span(two + 8, HUGE_SIZE - 8 - 40, ~0ull);
+
+                        same("memory_utf8_span", "past 4 GiB, bytes", span.x, HUGE_SIZE - 8 - 40);
+                        same("memory_utf8_span", "past 4 GiB, characters", span.y, HUGE_SIZE - 8 - 40);
+                }
+                one[HUGE_SIZE - 3] = 'q';
+                one[HUGE_SIZE - 2] = 'r';
+                one[HUGE_SIZE - 1] = 's';
+                same("memory_search", "past 4 GiB", (positive)memory_search(one, HUGE_SIZE, "qrs", 3),
+                     (positive)(one + HUGE_SIZE - 3));
+                one[HUGE_SIZE - 3] = 0;
+                one[HUGE_SIZE - 2] = 0;
+                one[HUGE_SIZE - 1] = 0;
+                one[HUGE_SIZE - 40] = 0;
+                two[HUGE_SIZE - 1] = 0;
+                two[HUGE_SIZE - 40] = 0;
+        }
+
+        bulk_tier(0, had_avx2, had_avx512);
+        memory_free(one, HUGE_SIZE);
+        memory_free(two, HUGE_SIZE);
+}
+
 fn check_bulk_moves()
 {
         p8 wide = 0;
@@ -28753,6 +28843,7 @@ b32 main()
         check_library_names();
         check_null_zero();
         check_huge_bounds();
+        check_huge_sizes();
         check_bulk_wide_strings();
 #endif
 
