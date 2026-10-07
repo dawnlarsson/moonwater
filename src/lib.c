@@ -1173,6 +1173,23 @@ typedef typeof(sizeof(0)) sized;
 #define ASM(name) asm_riscv64_##name
 #endif
 
+/* The arm64 and riscv64 pieces of the compression walks' shared macros; the contract of each is written
+   with the x86-64 ones (LZ_CAND16_X64) where the walks' pieces are described. */
+#define LZ_CAND16_A64(BASE, POS, FLOOR, HERE, LO, HI, P, A, B, C, D)                                          \
+    "sub x" P ", x" POS ", #1\n   add x" P ", x" BASE ", x" P "\n   cmp w" POS ", w" FLOOR "\n"                \
+    "csel x" P ", x" HERE ", x" P ", lo\n   ldp x" A ", x" B ", [x" P "]\n   eor x" A ", x" A ", x" LO "\n"    \
+    "eor x" B ", x" B ", x" HI "\n   rbit x" C ", x" A "\n   clz x" C ", x" C "\n   rbit x" D ", x" B "\n"      \
+    "clz x" D ", x" D "\n   lsr w" C ", w" C ", #3\n   lsr w" D ", w" D ", #3\n   cmp x" A ", #0\n"            \
+    "csel w" D ", w" D ", wzr, eq\n   add w" C ", w" C ", w" D "\n   cmp w" POS ", w" FLOOR "\n"               \
+    "csel w" C ", wzr, w" C ", lo\n"
+#define RV_LOAD64U(P, D, T0, T1, T2)                                                                          \
+    "andi " T0 ", " P ", 7\n   sub " T1 ", " P ", " T0 "\n   ld " D ", 0(" T1 ")\n   ld " T2 ", 8(" T1 ")\n"      \
+    "slli " T0 ", " T0 ", 3\n   srl " D ", " D ", " T0 "\n   xori " T0 ", " T0 ", 63\n   slli " T2 ", " T2 ", 1\n" \
+    "sll " T2 ", " T2 ", " T0 "\n   or " D ", " D ", " T2 "\n"
+#define RV_CTZBYTE(D, S, T, K80, K01)                                                                         \
+    "neg " T ", " S "\n   and " T ", " T ", " S "\n   addi " T ", " T ", -1\n   and " T ", " T ", " K80 "\n"       \
+    "srli " T ", " T ", 7\n   mul " T ", " T ", " K01 "\n   srli " D ", " T ", 56\n"
+
 #define asm_x64_add "add"
 #define asm_x64_sub "sub"
 #define asm_x64_copy "mov"
@@ -3381,6 +3398,44 @@ __asm__(
     "vpshufb " X ", %ymm9, %ymm3\n   vpshufb " X ", %ymm10, %ymm4\n   vpshufb %ymm2, %ymm11, %ymm5\n"         \
     "vpcmpgtb %ymm13, %ymm2, %ymm2\n   vpblendvb %ymm2, %ymm4, %ymm3, %ymm3\n   vpand %ymm5, %ymm3, %ymm3\n" \
     "vpcmpeqb %ymm12, %ymm3, %ymm3\n"
+
+/*
+        Pieces the compression walks share (deflate_parse_fast, and the zstd
+        and xz walks that follow it), one per machine, expanded in place so a
+        walk pays no call for them. A position's candidate is compared with
+        the bytes at the position itself sixteen at a time and with no
+        branch; the answer is how many of the sixteen agree, 0 to 16 (16 is
+        all of them), and 0 for a candidate before the window. Registers are
+        passed by name on x86-64 and by number on arm64 ("19" is x19/w19).
+
+        LZ_CAND16_X64(BASE, POS32, POS64, FLOOR32, HERE, XHERE, XT, TMP64,
+                      N32, INV32): candidate position POS (one more than its
+                      index, zero for none) against the sixteen bytes at HERE
+                      held in XHERE; reads from BASE + POS - 1, or from HERE
+                      itself when POS < FLOOR; the answer in N32, which may be
+                      the low half of TMP64; INV32 is scratch, and the flags
+                      afterwards are not promised.
+        LZ_HASH_X64(MEM, MULT, SHIFT, DST32): (four bytes at MEM * MULT) >>
+                      SHIFT, the hash gzip, zstd and xz each take their table
+                      index from with their own constants.
+        LZ_CAND16_A64(BASE, POS, FLOOR, HERE, LO, HI, P, A, B, C, D): the
+                      same on arm64 with HERE's sixteen bytes already in
+                      x(LO) and x(HI); the answer in w(C); the flags left are
+                      the comparison of w(POS) with w(FLOOR).
+        RV_LOAD64U(P, D, T0, T1, T2): the eight bytes at the address in P
+                      without a misaligned ld (base RV64I does not promise
+                      one): the two doublewords they lie across, shifted. P is
+                      kept; reads up to seven bytes past the eight.
+        RV_CTZBYTE(D, S, T, K80, K01): the index of the lowest nonzero byte
+                      of S (nonzero) without ctz, K80 and K01 holding
+                      0x8080808080808080 and 0x0101010101010101.
+*/
+#define LZ_CAND16_X64(BASE, POS32, POS64, FLOOR32, HERE, XHERE, XT, TMP64, N32, INV32)                        \
+    "cmp " FLOOR32 ", " POS32 "\n   lea -1(" BASE "," POS64 "), " TMP64 "\n   cmovb " HERE ", " TMP64 "\n"       \
+    "movdqu (" TMP64 "), " XT "\n   pcmpeqb " XHERE ", " XT "\n   pmovmskb " XT ", " N32 "\n"                    \
+    "sbb " INV32 ", " INV32 "\n   not " N32 "\n   or " INV32 ", " N32 "\n   bsf " N32 ", " N32 "\n"
+#define LZ_HASH_X64(MEM, MULT, SHIFT, DST32) \
+    "imul $" MULT ", " MEM ", " DST32 "\n   shr $" SHIFT ", " DST32 "\n"
 
 //      The masked window: every size up to sixty four bytes in one mask.
 //
@@ -12139,17 +12194,17 @@ __asm__(
     ".balign 16\n"
     ".Ldpf_x64_top:  cmp %r12, %r10\n   jae .Ldpf_x64_done\n   mov 56(%rdi), %rax\n   cmp 112(%rdi), %rax\n   jae .Ldpf_x64_done\n"
     "lea (%r8,%r10), %rsi\n   lea 1(%r10), %ecx\n   mov (%r9,%r11,8), %rdx\n   mov %rdx, %rax\n   shl $32, %rax\n   or %rcx, %rax\n   mov %rax, (%r9,%r11,8)\n"
-    "imul $0x1e35a7bd, 1(%rsi), %r15d\n   shr $17, %r15d\n   prefetcht0 (%r9,%r15,8)\n   lea -32768(%rcx), %eax\n   mov $1, %ebp\n   cmp $32768, %ecx\n   cmova %eax, %ebp\n"
+    LZ_HASH_X64("1(%rsi)", "0x1e35a7bd", "17", "%r15d") "prefetcht0 (%r9,%r15,8)\n   lea -32768(%rcx), %eax\n   mov $1, %ebp\n   cmp $32768, %ecx\n   cmova %eax, %ebp\n"
     "mov %rdx, %r13\n   shr $32, %r13\n   mov %edx, %edx\n   movdqu (%rsi), %xmm0\n"
-    "cmp %ebp, %edx\n   lea -1(%r8,%rdx), %rax\n   cmovb %rsi, %rax\n   movdqu (%rax), %xmm1\n   pcmpeqb %xmm0, %xmm1\n   pmovmskb %xmm1, %eax\n   sbb %ebx, %ebx\n   not %eax\n   or %ebx, %eax\n   bsf %eax, %eax\n"
-    "cmp %ebp, %r13d\n   lea -1(%r8,%r13), %rbx\n   cmovb %rsi, %rbx\n   movdqu (%rbx), %xmm2\n   pcmpeqb %xmm0, %xmm2\n   pmovmskb %xmm2, %ebx\n   sbb %ebp, %ebp\n   not %ebx\n   or %ebp, %ebx\n   bsf %ebx, %ebx\n"
+    LZ_CAND16_X64("%r8", "%edx", "%rdx", "%ebp", "%rsi", "%xmm0", "%xmm1", "%rax", "%eax", "%ebx")
+    LZ_CAND16_X64("%r8", "%r13d", "%r13", "%ebp", "%rsi", "%xmm0", "%xmm2", "%rbx", "%ebx", "%ebp")
     "movd %eax, %xmm3\n   cmp %eax, %ebx\n   cmova %ebx, %eax\n   mov %edx, %ebp\n   cmova %r13d, %ebp\n   cmp $4, %eax\n   jb .Ldpf_x64_literal\n   cmp $16, %eax\n   jae .Ldpf_x64_slow\n   mov %ecx, %edx\n   sub %ebp, %edx\n"
     ".Ldpf_x64_match:  mov 56(%rdi), %rbx\n   lea 1(%rbx), %rbp\n   mov %rbp, 56(%rdi)\n   mov 64(%rdi), %rbp\n   mov %r10d, %r13d\n   sub 24(%rdi), %r13d\n   mov %r13d, (%rbp,%rbx,4)\n"
     "mov 72(%rdi), %rbp\n   mov %ax, (%rbp,%rbx,2)\n   mov 80(%rdi), %rbp\n   mov %dx, (%rbp,%rbx,2)\n   lea deflate_symbol_tab(%rip), %rbp\n   lea -3(%rax), %r13d\n   movzbl (%rbp,%r13), %r13d\n   incl 1028(%r14,%r13,4)\n"
     "lea -1(%rdx), %r13d\n   mov %r13d, %ebx\n   shr $7, %ebx\n   add $256, %ebx\n   cmp $256, %r13d\n   cmovb %r13d, %ebx\n   movzbl 256(%rbp,%rbx), %ebx\n   mov 96(%rdi), %r13\n   incl (%r13,%rbx,4)\n"
     "lea 2(%r10), %rbx\n   lea -1(%rax,%rbx), %rdx\n"
     ".balign 16\n"
-    ".Ldpf_x64_ins:  mov (%r9,%r15,8), %rbp\n   shl $32, %rbp\n   or %rbx, %rbp\n   mov %rbp, (%r9,%r15,8)\n   imul $0x1e35a7bd, (%r8,%rbx), %r15d\n   shr $17, %r15d\n   inc %rbx\n   cmp %rdx, %rbx\n   jne .Ldpf_x64_ins\n"
+    ".Ldpf_x64_ins:  mov (%r9,%r15,8), %rbp\n   shl $32, %rbp\n   or %rbx, %rbp\n   mov %rbp, (%r9,%r15,8)\n   " LZ_HASH_X64("(%r8,%rbx)", "0x1e35a7bd", "17", "%r15d") "   inc %rbx\n   cmp %rdx, %rbx\n   jne .Ldpf_x64_ins\n"
     "prefetcht0 (%r9,%r15,8)\n   add %rax, %r10\n   mov %r15d, %r11d\n   jmp .Ldpf_x64_top\n"
     ".Ldpf_x64_literal:  movzbl (%rsi), %eax\n   incl (%r14,%rax,4)\n   inc %r10\n   mov %r15d, %r11d\n   jmp .Ldpf_x64_top\n"
     ".Ldpf_x64_slow:  push %r12\n   push %r14\n   movd %xmm3, %eax\n   mov %ebx, %ebp\n   cmp $16, %eax\n   jne .Ldpf_x64_only2\n   mov %ecx, %r14d\n   sub %edx, %r14d\n   lea -1(%r8,%rdx), %rax\n   call .Ldpf_x64_ext\n   mov %eax, %r12d\n"
@@ -19806,8 +19861,8 @@ __asm__(
     "add x9, x1, x3\n   add w10, w3, #1\n   ldr x11, [x2, x4, lsl #3]\n   orr x17, x10, x11, lsl #32\n   str x17, [x2, x4, lsl #3]\n   ldr w12, [x9, #1]\n   mul w12, w12, w7\n   lsr w12, w12, #17\n"
     "add x17, x2, x12, lsl #3\n   prfm pstl1keep, [x17]\n   sub w13, w10, #8, lsl #12\n   mov w17, #1\n   cmp w10, #8, lsl #12\n   csel w13, w13, w17, hi\n   mov w14, w11\n   lsr x15, x11, #32\n"
     "ldp x16, x17, [x9]\n"
-    "sub x19, x14, #1\n   add x19, x1, x19\n   cmp w14, w13\n   csel x19, x9, x19, lo\n   ldp x20, x21, [x19]\n   eor x20, x20, x16\n   eor x21, x21, x17\n   rbit x22, x20\n   clz x22, x22\n   rbit x23, x21\n   clz x23, x23\n   lsr w22, w22, #3\n   lsr w23, w23, #3\n   cmp x20, #0\n   csel w23, w23, wzr, eq\n   add w22, w22, w23\n   cmp w14, w13\n   csel w22, wzr, w22, lo\n"
-    "sub x19, x15, #1\n   add x19, x1, x19\n   cmp w15, w13\n   csel x19, x9, x19, lo\n   ldp x20, x21, [x19]\n   eor x20, x20, x16\n   eor x21, x21, x17\n   rbit x23, x20\n   clz x23, x23\n   rbit x24, x21\n   clz x24, x24\n   lsr w23, w23, #3\n   lsr w24, w24, #3\n   cmp x20, #0\n   csel w24, w24, wzr, eq\n   add w23, w23, w24\n   cmp w15, w13\n   csel w23, wzr, w23, lo\n"
+    LZ_CAND16_A64("1", "14", "13", "9", "16", "17", "19", "20", "21", "22", "23")
+    LZ_CAND16_A64("1", "15", "13", "9", "16", "17", "19", "20", "21", "23", "24")
     "cmp w23, w22\n   csel w16, w23, w22, hi\n   csel w19, w15, w14, hi\n   cmp w16, #4\n   b.lo .Ldpf_arm64_literal\n   cmp w16, #16\n   b.hs .Ldpf_arm64_slow\n   sub w17, w10, w19\n"
     ".Ldpf_arm64_match:  mov x11, x25\n   add x25, x25, #1\n   ldr x14, [x0, #24]\n   sub w14, w3, w14\n   str w14, [x27, x11, lsl #2]\n"
     "strh w16, [x28, x11, lsl #1]\n   ldr x13, [x0, #80]\n   strh w17, [x13, x11, lsl #1]\n   sub w13, w16, #3\n   ldrb w13, [x8, x13]\n   add x13, x6, x13, lsl #2\n   ldr w14, [x13, #1028]\n"
@@ -26527,40 +26582,40 @@ __asm__(
     "ld a1, 0(a0)\n   ld a2, 8(a0)\n   ld a3, 32(a0)\n   lwu a4, 104(a0)\n   ld a6, 88(a0)\n   lla a7, deflate_symbol_tab\n   li s1, 0x1e35a7bd\n   li s2, 0x8080808080808080\n   li s3, 0x0101010101010101\n"
     "ld t0, 16(a0)\n   li t1, 299\n   bltu t0, t1, .Ldpf_rv_nolim\n   addi t0, t0, -299\n   j .Ldpf_rv_lim\n.Ldpf_rv_nolim:  li t0, 0\n.Ldpf_rv_lim:  ld a5, 40(a0)\n   bleu a5, t0, .Ldpf_rv_limok\n   mv a5, t0\n.Ldpf_rv_limok:  ld t0, 48(a0)\n   li t1, 16\n   bltu t0, t1, .Ldpf_rv_done\n"
     ".Ldpf_rv_top:  bgeu a3, a5, .Ldpf_rv_done\n   ld t0, 56(a0)\n   ld t1, 112(a0)\n   bgeu t0, t1, .Ldpf_rv_done\n   add s4, a1, a3\n"
-    "andi t0, s4, 7\n   sub t1, s4, t0\n   ld s5, 0(t1)\n   ld t2, 8(t1)\n   slli t0, t0, 3\n   srl s5, s5, t0\nxori t0, t0, 63\n   slli t2, t2, 1\n   sll t2, t2, t0\n   or s5, s5, t2\n"
+    RV_LOAD64U("s4", "s5", "t0", "t1", "t2")
     "addi s6, a3, 1\n   slli t0, a4, 3\n   add t0, a2, t0\n   ld t1, 0(t0)\n   slli t2, t1, 32\n   or t2, t2, s6\n   sd t2, 0(t0)\n   slli s8, t1, 32\n   srli s8, s8, 32\n   srli s9, t1, 32\n"
     "srli t0, s5, 8\n   mulw s7, t0, s1\n   srliw s7, s7, 17\n   li t0, 32768\n   li s10, 1\n   bleu s6, t0, .Ldpf_rv_fl\n   sub s10, s6, t0\n.Ldpf_rv_fl:  li s11, 0\n   bltu s8, s10, .Ldpf_rv_c1done\n   addi t0, s8, -1\n   add t0, a1, t0\n"
-    "andi t4, t0, 7\n   sub t5, t0, t4\n   ld t3, 0(t5)\n   ld t6, 8(t5)\n   slli t4, t4, 3\n   srl t3, t3, t4\nxori t4, t4, 63\n   slli t6, t6, 1\n   sll t6, t6, t4\n   or t3, t3, t6\n"
-    "xor t3, t3, s5\n   beqz t3, .Ldpf_rv_c1eq\nneg t4, t3\n   and t4, t4, t3\n   addi t4, t4, -1\n   and t4, t4, s2\n   srli t4, t4, 7\n   mul t4, t4, s3\n   srli s11, t4, 56\n   j .Ldpf_rv_c1done\n.Ldpf_rv_c1eq:  li s11, 8\n.Ldpf_rv_c1done:  li s0, 0\n   bltu s9, s10, .Ldpf_rv_c2done\n   addi t0, s9, -1\n   add t0, a1, t0\n"
-    "andi t4, t0, 7\n   sub t5, t0, t4\n   ld t3, 0(t5)\n   ld t6, 8(t5)\n   slli t4, t4, 3\n   srl t3, t3, t4\nxori t4, t4, 63\n   slli t6, t6, 1\n   sll t6, t6, t4\n   or t3, t3, t6\n"
-    "xor t3, t3, s5\n   beqz t3, .Ldpf_rv_c2eq\nneg t4, t3\n   and t4, t4, t3\n   addi t4, t4, -1\n   and t4, t4, s2\n   srli t4, t4, 7\n   mul t4, t4, s3\n   srli s0, t4, 56\n   j .Ldpf_rv_c2done\n.Ldpf_rv_c2eq:  li s0, 8\n.Ldpf_rv_c2done:  li t0, 8\n   beq s11, t0, .Ldpf_rv_slow\n   beq s0, t0, .Ldpf_rv_slow\n"
+    RV_LOAD64U("t0", "t3", "t4", "t5", "t6")
+    "xor t3, t3, s5\n   beqz t3, .Ldpf_rv_c1eq\n" RV_CTZBYTE("s11", "t3", "t4", "s2", "s3") "   j .Ldpf_rv_c1done\n.Ldpf_rv_c1eq:  li s11, 8\n.Ldpf_rv_c1done:  li s0, 0\n   bltu s9, s10, .Ldpf_rv_c2done\n   addi t0, s9, -1\n   add t0, a1, t0\n"
+    RV_LOAD64U("t0", "t3", "t4", "t5", "t6")
+    "xor t3, t3, s5\n   beqz t3, .Ldpf_rv_c2eq\n" RV_CTZBYTE("s0", "t3", "t4", "s2", "s3") "   j .Ldpf_rv_c2done\n.Ldpf_rv_c2eq:  li s0, 8\n.Ldpf_rv_c2done:  li t0, 8\n   beq s11, t0, .Ldpf_rv_slow\n   beq s0, t0, .Ldpf_rv_slow\n"
     "mv t1, s8\n   mv t2, s11\n   bleu s0, s11, .Ldpf_rv_sel\n   mv t1, s9\n   mv t2, s0\n.Ldpf_rv_sel:  li t0, 4\n   bltu t2, t0, .Ldpf_rv_literal\n   sub t1, s6, t1\n"
     ".Ldpf_rv_match:  ld t3, 56(a0)\n   addi t4, t3, 1\n   sd t4, 56(a0)\n   ld t4, 64(a0)\n   ld t5, 24(a0)\n   sub t5, a3, t5\n   slli t6, t3, 2\n   add t6, t4, t6\n   sw t5, 0(t6)\n"
     "ld t4, 72(a0)\n   slli t6, t3, 1\n   add t5, t4, t6\n   sh t2, 0(t5)\n   ld t4, 80(a0)\n   add t5, t4, t6\n   sh t1, 0(t5)\n"
     "addi t4, t2, -3\n   add t4, a7, t4\n   lbu t4, 0(t4)\n   slli t4, t4, 2\n   add t4, a6, t4\n   lw t5, 1028(t4)\n   addi t5, t5, 1\n   sw t5, 1028(t4)\n"
     "addi t4, t1, -1\n   srli t5, t4, 7\n   addi t5, t5, 256\n   li t6, 256\n   bgeu t4, t6, .Ldpf_rv_dc\n   mv t5, t4\n.Ldpf_rv_dc:  add t5, a7, t5\n   lbu t5, 256(t5)\n   ld t6, 96(a0)\n   slli t5, t5, 2\n   add t6, t6, t5\n   lw t4, 0(t6)\n   addi t4, t4, 1\n   sw t4, 0(t6)\n"
     "addi t3, a3, 2\n   add t4, t3, t2\n   addi t4, t4, -1\n   add t0, a1, t3\n"
-    "andi t1, t0, 7\n   sub t5, t0, t1\n   ld s5, 0(t5)\n   ld t6, 8(t5)\n   slli t1, t1, 3\n   srl s5, s5, t1\nxori t1, t1, 63\n   slli t6, t6, 1\n   sll t6, t6, t1\n   or s5, s5, t6\n"
+    RV_LOAD64U("t0", "s5", "t1", "t5", "t6")
     ".Ldpf_rv_ins:  slli t5, s7, 3\n   add t5, a2, t5\n   ld t6, 0(t5)\n   slli t6, t6, 32\n   or t6, t6, t3\n   sd t6, 0(t5)\n   mulw s7, s5, s1\n   srliw s7, s7, 17\n   srli s5, s5, 8\n   lbu t5, 8(t0)\n   slli t5, t5, 56\n   or s5, s5, t5\n   addi t3, t3, 1\n   addi t0, t0, 1\n   bne t3, t4, .Ldpf_rv_ins\n"
     "add a3, a3, t2\n   mv a4, s7\n   j .Ldpf_rv_top\n"
     ".Ldpf_rv_literal:  lbu t0, 0(s4)\n   slli t0, t0, 2\n   add t0, a6, t0\n   lw t1, 0(t0)\n   addi t1, t1, 1\n   sw t1, 0(t0)\n   addi a3, a3, 1\n   mv a4, s7\n   j .Ldpf_rv_top\n"
     ".Ldpf_rv_slow:  li s11, 0\n   li s0, 0\n   bltu s8, s10, .Ldpf_rv_s2\n   addi t0, s8, -1\n   add t0, a1, t0\n"
-    "andi t4, t0, 7\n   sub t5, t0, t4\n   ld t3, 0(t5)\n   ld t6, 8(t5)\n   slli t4, t4, 3\n   srl t3, t3, t4\nxori t4, t4, 63\n   slli t6, t6, 1\n   sll t6, t6, t4\n   or t3, t3, t6\n"
+    RV_LOAD64U("t0", "t3", "t4", "t5", "t6")
     "xor t3, t3, s5\n   slli t3, t3, 32\n   bnez t3, .Ldpf_rv_s2\n   sub s0, s6, s8\n   addi t0, s8, -1\n   add t0, a1, t0\n   jal t6, .Ldpf_rv_ext\n   mv s11, t0\n   ld t1, 48(a0)\n   bgeu s11, t1, .Ldpf_rv_sdone\n   li t1, 258\n   bgeu s11, t1, .Ldpf_rv_sdone\n   bltu s9, s10, .Ldpf_rv_sdone\n   addi t0, s9, -1\n   add t0, a1, t0\n"
     "mv t1, t0\n"
-    "andi t4, t1, 7\n   sub t5, t1, t4\n   ld t3, 0(t5)\n   ld t6, 8(t5)\n   slli t4, t4, 3\n   srl t3, t3, t4\nxori t4, t4, 63\n   slli t6, t6, 1\n   sll t6, t6, t4\n   or t3, t3, t6\n"
+    RV_LOAD64U("t1", "t3", "t4", "t5", "t6")
     "xor t3, t3, s5\n   slli t3, t3, 32\n   bnez t3, .Ldpf_rv_sdone\n   jal t6, .Ldpf_rv_ext\n   bleu t0, s11, .Ldpf_rv_sdone\n   mv s11, t0\n   sub s0, s6, s9\n   j .Ldpf_rv_sdone\n"
     ".Ldpf_rv_s2:  bltu s9, s10, .Ldpf_rv_sdone\n   addi t0, s9, -1\n   add t0, a1, t0\n   mv t1, t0\n"
-    "andi t4, t1, 7\n   sub t5, t1, t4\n   ld t3, 0(t5)\n   ld t6, 8(t5)\n   slli t4, t4, 3\n   srl t3, t3, t4\nxori t4, t4, 63\n   slli t6, t6, 1\n   sll t6, t6, t4\n   or t3, t3, t6\n"
+    RV_LOAD64U("t1", "t3", "t4", "t5", "t6")
     "xor t3, t3, s5\n   slli t3, t3, 32\n   bnez t3, .Ldpf_rv_sdone\n   sub s0, s6, s9\n   jal t6, .Ldpf_rv_ext\n   mv s11, t0\n"
     ".Ldpf_rv_sdone:  li s1, 0x1e35a7bd\n   li s2, 0x8080808080808080\n   li s3, 0x0101010101010101\n   mv t2, s11\n   mv t1, s0\n   j .Ldpf_rv_match\n"
     ".Ldpf_rv_ext:  li t1, 4\n"
     ".Ldpf_rv_ext8:  add t2, s4, t1\n   add t3, t0, t1\n"
-    "andi s1, t2, 7\n   sub s2, t2, s1\n   ld t4, 0(s2)\n   ld s3, 8(s2)\n   slli s1, s1, 3\n   srl t4, t4, s1\nxori s1, s1, 63\n   slli s3, s3, 1\n   sll s3, s3, s1\n   or t4, t4, s3\n"
-    "andi s1, t3, 7\n   sub s2, t3, s1\n   ld t5, 0(s2)\n   ld s3, 8(s2)\n   slli s1, s1, 3\n   srl t5, t5, s1\nxori s1, s1, 63\n   slli s3, s3, 1\n   sll s3, s3, s1\n   or t5, t5, s3\n"
+    RV_LOAD64U("t2", "t4", "s1", "s2", "s3")
+    RV_LOAD64U("t3", "t5", "s1", "s2", "s3")
     "xor t4, t4, t5\n   bnez t4, .Ldpf_rv_extx\n   addi t1, t1, 8\n   li t2, 250\n   bleu t1, t2, .Ldpf_rv_ext8\n"
     ".Ldpf_rv_extb:  li t2, 258\n   bgeu t1, t2, .Ldpf_rv_extd\n   add t3, s4, t1\n   lbu t4, 0(t3)\n   add t3, t0, t1\n   lbu t5, 0(t3)\n   bne t4, t5, .Ldpf_rv_extd\n   addi t1, t1, 1\n   j .Ldpf_rv_extb\n"
-    ".Ldpf_rv_extx:  li s2, 0x8080808080808080\n   li s3, 0x0101010101010101\nneg t5, t4\n   and t5, t5, t4\n   addi t5, t5, -1\n   and t5, t5, s2\n   srli t5, t5, 7\n   mul t5, t5, s3\n   srli t3, t5, 56\n   add t1, t1, t3\n"
+    ".Ldpf_rv_extx:  li s2, 0x8080808080808080\n   li s3, 0x0101010101010101\n" RV_CTZBYTE("t3", "t4", "t5", "s2", "s3") "   add t1, t1, t3\n"
     ".Ldpf_rv_extd:  mv t0, t1\n   jr t6\n"
     ".Ldpf_rv_done:  sd a3, 32(a0)\n   sw a4, 104(a0)\n   ld s0, 0(sp)\n   ld s1, 8(sp)\n   ld s2, 16(sp)\n   ld s3, 24(sp)\n   ld s4, 32(sp)\n   ld s5, 40(sp)\n   ld s6, 48(sp)\n   ld s7, 56(sp)\n   ld s8, 64(sp)\n   ld s9, 72(sp)\n   ld s10, 80(sp)\n   ld s11, 88(sp)\n   addi sp, sp, 96\n" ASM_RET
     ASM_END(deflate_parse_fast)
