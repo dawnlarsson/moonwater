@@ -46793,6 +46793,34 @@ def harness_tls_chains(argv):
                 checks(ours_ok == (fetched12.returncode == 0 and
                                    fetched12.stdout.startswith(b"truste")),
                        "%s: wget's TLS 1.2 verdict differs from its TLS 1.3 one" % name)
+                if not ours_ok:
+                    #   GNU wget's status for a certificate it cannot verify
+                    #   is 5 (4 is other network trouble), and its words say
+                    #   which way it failed: the line for the reason, then
+                    #   the way out. The same chain over TLS 1.2 says the same.
+                    said = fetched.stderr.decode(errors="replace")
+                    line = ("ERROR: The certificate of '127.0.0.1' has expired." if mutation == "leaf expired" else
+                            "ERROR: The certificate of '127.0.0.1' is not yet activated."
+                            if mutation == "leaf not yet valid" else
+                            "The certificate's owner does not match hostname '127.0.0.1'" if mutation in (
+                                "name is another address", "name is only a DNS name",
+                                "no subject alternative name",
+                                #   OpenSSL's extfile keeps one of the two, a DNS name.
+                                "duplicate subjectAltName leaf extension") else
+                            "ERROR: The certificate of '127.0.0.1' is not trusted.")
+                    checks(fetched.returncode == 5,
+                           "%s: wget refuses the certificate with status %d, not GNU wget's 5 (%s)" % (
+                               name, fetched.returncode, said.strip()[:200]))
+                    checks(said == line + "\nTo connect to 127.0.0.1 insecurely, use "
+                                   "`--no-check-certificate'.\n",
+                           "%s: wget says %r, not %r" % (name, said[:200], line))
+                    #   (A server whose own key usage forbids the ECDHE signature
+                    #   never sends the certificate over 1.2: that is 4.)
+                    checks((fetched12.returncode, fetched12.stderr) in (
+                               (fetched.returncode, fetched.stderr),
+                               (4, b"wget: TLS handshake with 127.0.0.1 failed\n")),
+                           "%s: wget over TLS 1.2 says %r with status %d, not what TLS 1.3 said" % (
+                               name, fetched12.stderr.decode(errors="replace")[:200], fetched12.returncode))
                 expected = mutation in MUST_ACCEPT
                 checks(openssl_ok == expected or mutation in DELIBERATE or
                        mutation in LOOSER_THAN_OPENSSL,
@@ -46816,6 +46844,34 @@ def harness_tls_chains(argv):
                            name, "accepts" if openssl_ok else "refuses",
                            "accepts" if ours_ok else "refuses",
                            fetched.stderr.decode(errors="replace").strip()[:200]))
+        #   A server that is no TLS server at all is a failed handshake, which
+        #   stays network trouble, 4, and says so, whatever else is refused above.
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        listener.settimeout(20)
+
+        def not_tls():
+            try:
+                raw, _ = listener.accept()
+                raw.settimeout(20)
+                raw.recv(4096)
+                raw.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\ntrusted")
+                raw.close()
+            except OSError:
+                pass
+
+        server = threading.Thread(target=not_tls, daemon=True)
+        server.start()
+        fetched = subprocess.run(
+            [str(work / "wget"), "-q", "-O", "-", "https://127.0.0.1:%d/" % listener.getsockname()[1]],
+            capture_output=True, timeout=30, env={"PATH": "/usr/bin:/bin", "HOME": str(work)})
+        server.join(25)
+        listener.close()
+        checks(fetched.returncode == 4 and b"TLS handshake with" in fetched.stderr and
+               b"certificate" not in fetched.stderr,
+               "a server that is not TLS: wget says %r with status %d, not the handshake line with 4" % (
+                   fetched.stderr.decode(errors="replace")[:200], fetched.returncode))
         files.shutdown()
     if go_rows:
         differ = [row for row in go_rows if row[1] != row[2]]
@@ -48332,6 +48388,10 @@ typedef struct { positive began; positive budget; } network_deadline;
 #define TLS_AGAIN (-2)
 #define TLS_OK 0
 #define TLS_FAIL (-1)
+#define TLS_UNTRUSTED (-2)
+#define TLS_EXPIRED (-3)
+#define TLS_NOT_YET (-4)
+#define TLS_MISMATCH (-5)
 #define ENOSPC 28
 #define syscall(name) 0
 static bipolar tls_borrow(void *a, positive b, p8 **c, positive *d,
@@ -49398,6 +49458,10 @@ static bipolar network_stream_read_some_for(bipolar h, p8 *into, positive room,
 #define TLS_OK 0
 #define TLS_FAIL (-1)
 #define TLS_AGAIN (-2)
+#define TLS_UNTRUSTED (-2)
+#define TLS_EXPIRED (-3)
+#define TLS_NOT_YET (-4)
+#define TLS_MISMATCH (-5)
 typedef struct
 {
         p8 *receive;
@@ -53251,7 +53315,8 @@ static fn fuzz_connection(const p8 *data, positive length)
                 /* Only a checked Certificate can be the reason. */
                 if (tls->handle != -1 ||
                     (status != TLS_FAIL &&
-                     (status != TLS_UNTRUSTED || !(flags & 2))))
+                     ((status != TLS_UNTRUSTED && status != TLS_EXPIRED &&
+                       status != TLS_NOT_YET && status != TLS_MISMATCH) || !(flags & 2))))
                         abort();
                 free(tls);
                 return;
@@ -53378,6 +53443,9 @@ def tls_verify_chain_lift(net, now=None, aia=None):
             "static COLD bool tls_cert_current(")
     return (r"""
 #define array_count(a) (sizeof(a) / sizeof((a)[0]))
+#define TLS_FAULT_EARLY 1
+#define TLS_FAULT_LATE 2
+#define TLS_FAULT_NAME 3
 typedef struct
 {
         bool check_cert;
@@ -53387,6 +53455,7 @@ typedef struct
         positive leaf_n_length;
         p64 leaf_e;
         p8 leaf_curve;
+        p8 fault;
 } tls_conn;
 """ + anchor_types + (HARNESS_ROOT / "src/net/anchors.inc").read_text() + anchor_code + date +
             "static COLD positive tls_aia_fetch(const p8 address_to url, positive length,\n"

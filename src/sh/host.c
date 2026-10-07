@@ -13492,6 +13492,10 @@ static string_address locale_auto_reason(bipolar status)
         case HTTP_NO_ROUTE:
                 return (string_address) "no route to it";
         case HTTP_TLS:
+        case HTTP_UNTRUSTED:
+        case HTTP_EXPIRED:
+        case HTTP_NOT_YET:
+        case HTTP_MISMATCH:
                 return (string_address) "TLS failed -- is the clock right?";
         case HTTP_STATUS:
                 return (string_address) "it answered with an error";
