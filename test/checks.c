@@ -100670,7 +100670,8 @@ static p8 one[1 << 22] __attribute__((aligned(64)));
 static p8 two[1 << 22] __attribute__((aligned(64)));
 static p8 out[1 << 22] __attribute__((aligned(64)));
 
-static positive sizes[] = {8, 16, 32, 64, 256, 4096, 65536, 1048576};
+static positive sizes[] = {3,   8,   15,  16,  17,  31,  32,   33,  63,  64,  65,
+                           127, 128, 129, 255, 256, 257, 512,  1024, 2048, 4096, 65536, 1048576};
 
 /*
         The floor, in assembly, for the same reason the routines are.
@@ -100715,7 +100716,7 @@ __asm__(
     "add $256, %rdi\n   sub $256, %rsi\n   jmp 7b\n"
     "4:  vzeroupper\n"
     "5:  test %rsi, %rsi\n   jz 9f\n"
-    "6:  add (%rdi), %rax\n   add $8, %rdi\n   sub $8, %rsi\n   cmp $8, %rsi\n   jae 6b\n"
+    "6:  add (%rdi), %rax\n   add $8, %rdi\n   sub $8, %rsi\n   jg 6b\n"
     "9:  \n"
 #elif ARM64
     "mov x2, #0\n   cbz x1, 9f\n"
@@ -100762,7 +100763,7 @@ __asm__(
     "5:  test %rdx, %rdx\n   jz 9f\n"
     "6:  add (%rdi), %rax\n   add (%rsi), %rax\n"
     "add $8, %rdi\n   add $8, %rsi\n   sub $8, %rdx\n"
-    "cmp $8, %rdx\n   jae 6b\n"
+    "jg 6b\n"
     "9:  \n"
 #elif ARM64
     "mov x3, #0\n   cbz x2, 9f\n"
@@ -100785,7 +100786,7 @@ __asm__(
     "5:  beqz a2, 9f\n"
     "6:  ld a4, 0(a0)\n   ld a5, 0(a1)\n"
     "add a3, a3, a4\n   add a3, a3, a5\n"
-    "addi a0, a0, 8\n   addi a1, a1, 8\n   addi a2, a2, -8\n   bnez a2, 6b\n"
+    "addi a0, a0, 8\n   addi a1, a1, 8\n   addi a2, a2, -8\n   bgtz a2, 6b\n"
     "9:  mv a0, a3\n"
 #endif
     ASM_RET
@@ -100811,7 +100812,7 @@ __asm__(
     "5:  test %rdx, %rdx\n   jz 9f\n"
     "6:  mov (%rsi), %rax\n   mov %rax, (%rdi)\n"
     "add $8, %rdi\n   add $8, %rsi\n   sub $8, %rdx\n"
-    "cmp $8, %rdx\n   jae 6b\n"
+    "jg 6b\n"
     "9:  \n"
 #elif ARM64
     "cbz x2, 9f\n"
@@ -100832,7 +100833,7 @@ __asm__(
     "addi a0, a0, 32\n   addi a1, a1, 32\n   addi a2, a2, -32\n   j 1b\n"
     "5:  beqz a2, 9f\n"
     "6:  ld a3, 0(a1)\n   sd a3, 0(a0)\n"
-    "addi a0, a0, 8\n   addi a1, a1, 8\n   addi a2, a2, -8\n   bnez a2, 6b\n"
+    "addi a0, a0, 8\n   addi a1, a1, 8\n   addi a2, a2, -8\n   bgtz a2, 6b\n"
     "9:  li a0, 0\n"
 #endif
     ASM_RET
@@ -100855,7 +100856,7 @@ __asm__(
     "4:  vzeroupper\n"
     "5:  test %rsi, %rsi\n   jz 9f\n"
     "6:  mov %rax, (%rdi)\n   add $8, %rdi\n   sub $8, %rsi\n"
-    "cmp $8, %rsi\n   jae 6b\n"
+    "jg 6b\n"
     "9:  \n"
 #elif ARM64
     "movi v0.16b, #0\n   cbz x1, 9f\n"
@@ -100873,7 +100874,7 @@ __asm__(
     "addi a0, a0, 32\n   addi a1, a1, -32\n   j 1b\n"
     "5:  beqz a1, 9f\n"
     "6:  sd zero, 0(a0)\n   addi a0, a0, 8\n"
-    "addi a1, a1, -8\n   bnez a1, 6b\n"
+    "addi a1, a1, -8\n   bgtz a1, 6b\n"
     "9:  li a0, 0\n"
 #endif
     ASM_RET
@@ -100894,13 +100895,57 @@ static positive floor_two(p8 address_to a, p8 address_to b, positive n)
         return floor_read_two(a, b, n);
 }
 
-static volatile positive sink;
+static volatile positive sink_global;
 
+/*
+        The bodies add what the routine answered into a variable called sink,
+        and each timed run declares its own: a register, not the volatile it
+        used to be. A volatile read-modify-write per call is a store and a
+        reload that the next call waits on, about five cycles on a 9950X, and
+        it sat under every row: a call that returned at once measured 4.0
+        ticks and the whole of a sixteen byte copy 5.0, so the small sizes
+        could not show a difference smaller than that. The empty asm with a
+        memory clobber after each call is what stops the compiler from
+        hoisting a call whose arguments do not change out of the loop; it
+        costs nothing at run time.
+*/
 #define TIMED_ONCE(rounds, body)                                              \
         ({                                                                    \
+                positive sink = 0;                                            \
                 p64 s = floor_ticks();                                        \
-                for (b32 k = 0; k < (rounds); k++) { body; }                  \
-                floor_ticks() - s;                                            \
+                for (b32 k = 0; k < (rounds); k++)                            \
+                {                                                             \
+                        body;                                                 \
+                        __asm__ volatile("" ::: "memory");                    \
+                }                                                             \
+                p64 e = floor_ticks();                                        \
+                sink_global += sink;                                          \
+                e - s;                                                        \
+        })
+
+/*
+        The same, with a size that changes every call. A routine that picks a
+        rung by the size is fast at a size that stays put because the branch
+        is learned, and a program that copies names and lines does not stay
+        put: a copy of one to sixty four bytes at random was 21 ticks against
+        4 at one size before the masked window tier. N_ is this call's size,
+        lo plus the bits of a generator the predictor cannot follow.
+*/
+#define MIXED_ONCE(rounds, lo, mask, body)                                    \
+        ({                                                                    \
+                positive sink = 0;                                            \
+                positive x_ = 0x9e3779b97f4a7c15ull;                          \
+                p64 s = floor_ticks();                                        \
+                for (b32 k = 0; k < (rounds); k++)                            \
+                {                                                             \
+                        x_ = x_ * 6364136223846793005ull + 1442695040888963407ull; \
+                        positive N_ = (lo) + ((x_ >> 40) & (mask));           \
+                        body;                                                 \
+                        __asm__ volatile("" ::: "memory");                    \
+                }                                                             \
+                p64 e = floor_ticks();                                        \
+                sink_global += sink;                                          \
+                e - s;                                                        \
         })
 
 static fn row(string_address name, positive size, positive ratio)
@@ -100920,6 +100965,24 @@ static fn row(string_address name, positive size, positive ratio)
                 string_format(log, "%p.%p%% slower\n", over / 100,
                               over % 100);
 }
+
+#define PAIRED_MIXED(name, lo, mask, floor_body, candidate_body)              \
+        do {                                                                  \
+                positive ratios[5];                                           \
+                for (positive trial = 0; trial < 5; trial++)                  \
+                {                                                             \
+                        p64 floor_time;                                        \
+                        p64 candidate_time;                                    \
+                        BENCH_ALTERNATE(trial, floor_time,                    \
+                                        MIXED_ONCE(1 << 20, lo, mask, floor_body), \
+                                        candidate_time,                       \
+                                        MIXED_ONCE(1 << 20, lo, mask, candidate_body)); \
+                        ratios[trial] = (positive)(candidate_time * 10000 /   \
+                                                   (floor_time ? floor_time : 1)); \
+                }                                                             \
+                order(ratios, 5);                                             \
+                row(name, (lo) + (mask) / 2, ratios[2]);                      \
+        } while (0)
 
 #define PAIRED_ROW(name, size, rounds, floor_body, candidate_body)            \
         do {                                                                  \
@@ -101063,6 +101126,98 @@ b32 main(void)
                 two[1] = one[1];
 
                 string_format(log, "\n");
+        }
+
+        /*
+                Sizes drawn at random. The size column is the middle of the
+                range. The strings come from a pool of 256, one picked at
+                random a call, each of a length of its own.
+        */
+        static const struct { positive lo; positive mask; } spans[] = {
+            {1, 15}, {1, 63}, {16, 127}, {64, 511}};
+        static p8 pool[256 * 64] __attribute__((aligned(64)));
+        static p8 pool_length[256];
+
+        string_format(log, "\n  sizes at random, a new one every call\n");
+        for (positive i = 0; i < sizeof(one); i++) { one[i] = (p8)(i % 251 + 1); two[i] = one[i]; }
+        for (positive z = 0; z < sizeof(spans) / sizeof(spans[0]); z++)
+        {
+                positive lo = spans[z].lo;
+                positive mask = spans[z].mask;
+
+                PAIRED_MIXED("memory_fill mixed", lo, mask,
+                             sink += floor_fill(out, N_), memory_fill(out, 7, N_));
+                PAIRED_MIXED("memory_copy mixed", lo, mask,
+                             sink += floor_copy(out, one, N_), memory_copy(out, one, N_));
+                PAIRED_MIXED("memory_copy_apart mixed", lo, mask,
+                             sink += floor_copy(out, one, N_), memory_copy_apart(out, one, N_));
+                PAIRED_MIXED("memory_compare mixed", lo, mask,
+                             sink += floor_two(one, two, N_),
+                             sink += (positive)memory_compare(one, two, N_));
+                PAIRED_MIXED("memory_first_of mixed", lo, mask,
+                             sink += floor_one(one, N_),
+                             sink += (positive)memory_first_of(one, 0, N_));
+                PAIRED_MIXED("memory_last_of mixed", lo, mask,
+                             sink += floor_one(one, N_),
+                             sink += (positive)memory_last_of(one, 0, N_));
+                PAIRED_MIXED("memory_count mixed", lo, mask,
+                             sink += floor_one(one, N_),
+                             sink += memory_count(one, N_, 7));
+                PAIRED_MIXED("memory_common_prefix mixed", lo, mask,
+                             sink += floor_two(one, two, N_),
+                             sink += memory_common_prefix(one, two, N_));
+                PAIRED_MIXED("memory_sum_bytes mixed", lo, mask,
+                             sink += floor_one(one, N_),
+                             sink += memory_sum_bytes(one, N_));
+                PAIRED_MIXED("memory_hash_33 mixed", lo, mask,
+                             sink += floor_one(one, N_),
+                             sink += memory_hash_33(one, N_));
+                PAIRED_MIXED("hash_xxh64 mixed", lo, mask,
+                             sink += floor_one(one, N_),
+                             sink += (positive)hash_xxh64(one, N_, 0));
+                PAIRED_MIXED("hash_crc32 mixed", lo, mask,
+                             sink += floor_one(one, N_),
+                             sink += hash_crc32(0, one, N_));
+                PAIRED_MIXED("memory_to_lower_ascii mixed", lo, mask,
+                             sink += floor_copy(out, one, N_),
+                             memory_to_lower_ascii(out, N_));
+                PAIRED_MIXED("memory_into_hex mixed", lo, mask,
+                             sink += floor_copy(out, one, N_),
+                             sink += memory_into_hex(out, one, N_));
+        }
+        for (positive z = 0; z < 3; z++)
+        {
+                positive longest = z == 0 ? 15 : z == 1 ? 31 : 62;
+                positive state = 88172645463325252ull + z;
+                string_address labels[] = {"1-16", "1-32", "1-62"};
+
+                for (positive i = 0; i < 256; i++)
+                {
+                        XORSHIFT64(state);
+                        positive length = 1 + state % longest;
+
+                        for (positive j = 0; j < length; j++)
+                                pool[i * 64 + j] = (p8)((i + j) % 251 + 1);
+                        pool[i * 64 + length] = end;
+                        pool_length[i] = (p8)length;
+                }
+                string_format(log, "  strings of %s bytes from a pool of 256\n", labels[z]);
+#define POOL_AT(x) (pool + 64 * ((x >> 33) & 255))
+#define POOL_LENGTH(x) (pool_length[(x >> 33) & 255] + 1)
+                PAIRED_MIXED("string_length mixed", 1, 0,
+                             sink += floor_one(POOL_AT(x_), POOL_LENGTH(x_)),
+                             sink += string_length(POOL_AT(x_)));
+                PAIRED_MIXED("string_copy mixed", 1, 0,
+                             sink += floor_copy(out, POOL_AT(x_), POOL_LENGTH(x_)),
+                             string_copy(out, POOL_AT(x_)));
+                PAIRED_MIXED("string_compare mixed", 1, 0,
+                             sink += floor_two(POOL_AT(x_), POOL_AT(x_), POOL_LENGTH(x_)),
+                             sink += (positive)string_compare(POOL_AT(x_), POOL_AT(x_)));
+                PAIRED_MIXED("string_first_of mixed", 1, 0,
+                             sink += floor_one(POOL_AT(x_), POOL_LENGTH(x_)),
+                             sink += (positive)string_first_of(POOL_AT(x_), 'z'));
+#undef POOL_AT
+#undef POOL_LENGTH
         }
 
         log_flush();
