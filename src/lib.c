@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        382 routines (361 public, 21 local), 374 of them on all three and 8 local to one.
+        383 routines (362 public, 21 local), 375 of them on all three and 8 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -139,6 +139,7 @@
           decimal_truncated              public  yes     yes     yes
           decimal_with_sign              public  yes     yes     yes
           deflate_decode_span            public  yes     yes     yes
+          deflate_parse_fast             public  yes     yes     yes
           deflate_tokens_count           public  yes     yes     yes
           deflate_tokens_encode          public  yes     yes     yes
           deflate_tokens_encode_bmi2     local   yes     --      --
@@ -12096,6 +12097,74 @@ __asm__(
     "mov %r15, 64(%rdi)\n   mov %rax, 72(%rdi)\n   mov %r12, 80(%rdi)\n   add $1544, %rsp\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n" ASM_RET
     ASM_LOCAL_END(deflate_tokens_encode_bmi2)
 #endif
+    /* deflate_parse_fast walks gzip's fast level over the bytes [pos, limit)
+       of a block: at each position the two newest earlier positions with the
+       same hash of the next four bytes are looked up (the bucket is two 32-bit
+       absolute positions plus one, zero for none) and the position goes in;
+       the longer match of at least four bytes, the nearer on a tie, becomes a
+       (length, distance) pair and every position inside it goes into the
+       table, and a byte that matches nothing is a literal. The job, 120
+       bytes, with * what the routine changes: base 0 (bytes, history before
+       the block), fast 8 (u32 buckets, 2 << 15), total 16, start 24 (the
+       block's first position, mpos is relative to it), *pos 32, limit 40,
+       nice 48, *pairs 56, mpos 64 (u32), mlen 72 (u16), mdist 80 (u16),
+       lit_freq 88 and dist_freq 96 (u32 counts the pairs and literals
+       are added to), *hash 104 (of the byte at pos, the table's index),
+       pairs_max 112. It stops, with pos and hash current, at limit, at
+       pairs_max pairs, or when fewer than 300 bytes remain before total,
+       so that a match is never cut by the end of the input and sixteen byte
+       reads stay inside it; the caller takes the last bytes. A nice under
+       16 returns at once. The two candidates are compared sixteen bytes at a
+       time with no branch (pcmpeqb, pmovmskb, bsf of the inverted mask) and
+       the longer taken with a cmov; only a match of sixteen or more bytes
+       leaves that path, and there the exact rule (the second candidate is not
+       looked at once the first reaches nice) is applied, and it reuses the
+       two lengths already known: one candidate full is the winner, both full
+       goes on by eight bytes a turn. The hash is (four bytes * 0x1e35a7bd)
+       >> 17 as gzip.c's gzip_hash. Measured, user cycles from perf stat on a
+       9950X with the walk in C as the shipped build had it, level 1, builds
+       alternated: text -10.5 percent, source tar -10.1, binary tar -21.0,
+       libdeflate -1 beaten by 5, 1 and 10 percent. Tried and not kept on
+       x86-64: the insert loop as groups of eight with the last slots kept by
+       cmov (branch misses fall from 10.3M to 2.0M on text but the
+       instructions rise by a fifth: no change in cycles), a sixteen-bit
+       table (a C experiment: 2 to 5 percent slower), a bucket read as one
+       qword inside C (no change). The arm64 and riscv64 bodies follow. */
+    ASM_FUNC(deflate_parse_fast)
+#ifdef KERNEL_MODE
+    ASM_RET
+#else
+    "push %rbx\n   push %rbp\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n   mov (%rdi), %r8\n   mov 8(%rdi), %r9\n   mov 32(%rdi), %r10\n   mov 104(%rdi), %r11d\n   mov 88(%rdi), %r14\n"
+    "mov 16(%rdi), %rax\n   xor %ecx, %ecx\n   sub $299, %rax\n   cmovb %rcx, %rax\n   mov 40(%rdi), %r12\n   cmp %rax, %r12\n   cmova %rax, %r12\n   cmpq $16, 48(%rdi)\n   jb .Ldpf_x64_done\n"
+    ".balign 16\n"
+    ".Ldpf_x64_top:  cmp %r12, %r10\n   jae .Ldpf_x64_done\n   mov 56(%rdi), %rax\n   cmp 112(%rdi), %rax\n   jae .Ldpf_x64_done\n"
+    "lea (%r8,%r10), %rsi\n   lea 1(%r10), %ecx\n   mov (%r9,%r11,8), %rdx\n   mov %rdx, %rax\n   shl $32, %rax\n   or %rcx, %rax\n   mov %rax, (%r9,%r11,8)\n"
+    "imul $0x1e35a7bd, 1(%rsi), %r15d\n   shr $17, %r15d\n   prefetcht0 (%r9,%r15,8)\n   lea -32768(%rcx), %eax\n   mov $1, %ebp\n   cmp $32768, %ecx\n   cmova %eax, %ebp\n"
+    "mov %rdx, %r13\n   shr $32, %r13\n   mov %edx, %edx\n   movdqu (%rsi), %xmm0\n"
+    "cmp %ebp, %edx\n   lea -1(%r8,%rdx), %rax\n   cmovb %rsi, %rax\n   movdqu (%rax), %xmm1\n   pcmpeqb %xmm0, %xmm1\n   pmovmskb %xmm1, %eax\n   sbb %ebx, %ebx\n   not %eax\n   or %ebx, %eax\n   bsf %eax, %eax\n"
+    "cmp %ebp, %r13d\n   lea -1(%r8,%r13), %rbx\n   cmovb %rsi, %rbx\n   movdqu (%rbx), %xmm2\n   pcmpeqb %xmm0, %xmm2\n   pmovmskb %xmm2, %ebx\n   sbb %ebp, %ebp\n   not %ebx\n   or %ebp, %ebx\n   bsf %ebx, %ebx\n"
+    "movd %eax, %xmm3\n   cmp %eax, %ebx\n   cmova %ebx, %eax\n   mov %edx, %ebp\n   cmova %r13d, %ebp\n   cmp $4, %eax\n   jb .Ldpf_x64_literal\n   cmp $16, %eax\n   jae .Ldpf_x64_slow\n   mov %ecx, %edx\n   sub %ebp, %edx\n"
+    ".Ldpf_x64_match:  mov 56(%rdi), %rbx\n   lea 1(%rbx), %rbp\n   mov %rbp, 56(%rdi)\n   mov 64(%rdi), %rbp\n   mov %r10d, %r13d\n   sub 24(%rdi), %r13d\n   mov %r13d, (%rbp,%rbx,4)\n"
+    "mov 72(%rdi), %rbp\n   mov %ax, (%rbp,%rbx,2)\n   mov 80(%rdi), %rbp\n   mov %dx, (%rbp,%rbx,2)\n   lea deflate_symbol_tab(%rip), %rbp\n   lea -3(%rax), %r13d\n   movzbl (%rbp,%r13), %r13d\n   incl 1028(%r14,%r13,4)\n"
+    "lea -1(%rdx), %r13d\n   mov %r13d, %ebx\n   shr $7, %ebx\n   add $256, %ebx\n   cmp $256, %r13d\n   cmovb %r13d, %ebx\n   movzbl 256(%rbp,%rbx), %ebx\n   mov 96(%rdi), %r13\n   incl (%r13,%rbx,4)\n"
+    "lea 2(%r10), %rbx\n   lea -1(%rax,%rbx), %rdx\n"
+    ".balign 16\n"
+    ".Ldpf_x64_ins:  mov (%r9,%r15,8), %rbp\n   shl $32, %rbp\n   or %rbx, %rbp\n   mov %rbp, (%r9,%r15,8)\n   imul $0x1e35a7bd, (%r8,%rbx), %r15d\n   shr $17, %r15d\n   inc %rbx\n   cmp %rdx, %rbx\n   jne .Ldpf_x64_ins\n"
+    "prefetcht0 (%r9,%r15,8)\n   add %rax, %r10\n   mov %r15d, %r11d\n   jmp .Ldpf_x64_top\n"
+    ".Ldpf_x64_literal:  movzbl (%rsi), %eax\n   incl (%r14,%rax,4)\n   inc %r10\n   mov %r15d, %r11d\n   jmp .Ldpf_x64_top\n"
+    ".Ldpf_x64_slow:  push %r12\n   push %r14\n   movd %xmm3, %eax\n   mov %ebx, %ebp\n   cmp $16, %eax\n   jne .Ldpf_x64_only2\n   mov %ecx, %r14d\n   sub %edx, %r14d\n   lea -1(%r8,%rdx), %rax\n   call .Ldpf_x64_ext\n   mov %eax, %r12d\n"
+    "cmp $16, %ebp\n   jne .Ldpf_x64_sdone\n   cmp 48(%rdi), %r12\n   jae .Ldpf_x64_sdone\n   cmp $258, %r12d\n   jae .Ldpf_x64_sdone\n   lea -1(%r8,%r13), %rax\n   call .Ldpf_x64_ext\n   cmp %r12d, %eax\n   jbe .Ldpf_x64_sdone\n"
+    "mov %eax, %r12d\n   mov %ecx, %r14d\n   sub %r13d, %r14d\n   jmp .Ldpf_x64_sdone\n"
+    ".Ldpf_x64_only2:  mov %ecx, %r14d\n   sub %r13d, %r14d\n   lea -1(%r8,%r13), %rax\n   call .Ldpf_x64_ext\n   mov %eax, %r12d\n"
+    ".Ldpf_x64_sdone:  mov %r12d, %eax\n   mov %r14d, %edx\n   pop %r14\n   pop %r12\n   jmp .Ldpf_x64_match\n"
+    ".Ldpf_x64_ext:  mov $16, %ebx\n"
+    ".Ldpf_x64_ext8:  mov (%rsi,%rbx), %rdx\n   xor (%rax,%rbx), %rdx\n   jnz .Ldpf_x64_extx\n   add $8, %ebx\n   cmp $250, %ebx\n   jbe .Ldpf_x64_ext8\n"
+    ".Ldpf_x64_extb:  cmp $258, %ebx\n   jae .Ldpf_x64_extd\n   movzbl (%rsi,%rbx), %edx\n   cmp %dl, (%rax,%rbx)\n   jne .Ldpf_x64_extd\n   inc %ebx\n   jmp .Ldpf_x64_extb\n"
+    ".Ldpf_x64_extx:  bsf %rdx, %rdx\n   shr $3, %edx\n   add %edx, %ebx\n"
+    ".Ldpf_x64_extd:  mov %ebx, %eax\n   ret\n"
+    ".Ldpf_x64_done:  mov %r10, 32(%rdi)\n   mov %r11d, 104(%rdi)\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n" ASM_RET
+#endif
+    ASM_END(deflate_parse_fast)
     /* huffman_lengths(freq, n, length, limit): code lengths of at most
        limit (1..15) bits for n <= 288 counts summing below 2^22, 1 on
        success and 0 when the lengths cannot be limited. The symbols in use are sorted by count,
@@ -19676,6 +19745,63 @@ __asm__(
     "add x9, x9, x11, lsr #3\n   and x15, x11, #56\n   lsr x10, x10, x15\n   and x11, x11, #7\n   stp x9, x10, [x0, #64]\n   str x11, [x0, #80]\n   ldr x23, [sp], #16\n"
     "ldp x21, x22, [sp, #16]\n   ldp x19, x20, [sp], #32\n" ASM_RET
     ASM_END(deflate_tokens_encode)
+    // deflate_parse_fast (the job and the walk are described with the x86-64 body). The two
+    // candidates are compared sixteen bytes at a time in general registers with no branch: an
+    // ldp of each side, eor, rbit and clz of the two halves, the index of the first byte that
+    // differs from the first half or eight past the second's, and a csel to zero for a candidate
+    // before the window (pointed at the position itself so the read is safe); the longer is taken
+    // with csel. This was tried first on NEON (cmeq, shrn by four, fmov, mvn, rbit, clz): the move
+    // out of the vector unit and the mask arithmetic make the chain a third longer, and the walk
+    // is a dependent chain (the next position waits on the length), so it lost to gcc's C on text
+    // by 9 percent where the registers version wins by 8. A match of sixteen or more leaves for an
+    // exact rule that reuses the two lengths already known: one candidate full is the winner,
+    // both full goes on by eight bytes a turn and the second is not looked at once the first
+    // reaches nice. A match of nine or fewer bytes inserts its positions in one group of eight
+    // with the last ones kept as they were by csel (no loop to leave, which the predictor misses
+    // on every token); a longer one runs the loop. The pair count, the limits and the output
+    // arrays live in x25 to x28 for the whole walk. Registers: x1 base, x2 table, x3 pos, x4
+    // hash, x5 limit, x6 lit_freq, x7 the hash multiplier, x8 deflate_symbol_tab.
+    ASM_FUNC(deflate_parse_fast)
+    "stp x19, x20, [sp, #-112]!\n   stp x21, x22, [sp, #16]\n   stp x23, x24, [sp, #32]\n   stp x25, x26, [sp, #48]\n   stp x27, x28, [sp, #64]\n   str x30, [sp, #80]\n   ldr x1, [x0]\n   ldr x2, [x0, #8]\n   ldr x3, [x0, #32]\n   ldr w4, [x0, #104]\n   ldr x6, [x0, #88]\n"
+    "adrp x8, deflate_symbol_tab\n   add x8, x8, :lo12:deflate_symbol_tab\n   mov w7, #0xa7bd\n   movk w7, #0x1e35, lsl #16\n   ldr x9, [x0, #16]\n   subs x9, x9, #299\n   csel x9, xzr, x9, lo\n"
+    "ldr x5, [x0, #40]\n   cmp x5, x9\n   csel x5, x9, x5, hi\n   ldr x25, [x0, #56]\n   ldr x9, [x0, #48]\n   cmp x9, #16\n   b.lo .Ldpf_arm64_done\n   ldr x25, [x0, #56]\n   ldr x26, [x0, #112]\n   ldr x27, [x0, #64]\n   ldr x28, [x0, #72]\n"
+    ".balign 16\n"
+    ".Ldpf_arm64_top:  cmp x3, x5\n   b.hs .Ldpf_arm64_done\n   cmp x25, x26\n   b.hs .Ldpf_arm64_done\n"
+    "add x9, x1, x3\n   add w10, w3, #1\n   ldr x11, [x2, x4, lsl #3]\n   orr x17, x10, x11, lsl #32\n   str x17, [x2, x4, lsl #3]\n   ldr w12, [x9, #1]\n   mul w12, w12, w7\n   lsr w12, w12, #17\n"
+    "add x17, x2, x12, lsl #3\n   prfm pstl1keep, [x17]\n   sub w13, w10, #8, lsl #12\n   mov w17, #1\n   cmp w10, #8, lsl #12\n   csel w13, w13, w17, hi\n   mov w14, w11\n   lsr x15, x11, #32\n"
+    "ldp x16, x17, [x9]\n"
+    "sub x19, x14, #1\n   add x19, x1, x19\n   cmp w14, w13\n   csel x19, x9, x19, lo\n   ldp x20, x21, [x19]\n   eor x20, x20, x16\n   eor x21, x21, x17\n   rbit x22, x20\n   clz x22, x22\n   rbit x23, x21\n   clz x23, x23\n   lsr w22, w22, #3\n   lsr w23, w23, #3\n   cmp x20, #0\n   csel w23, w23, wzr, eq\n   add w22, w22, w23\n   cmp w14, w13\n   csel w22, wzr, w22, lo\n"
+    "sub x19, x15, #1\n   add x19, x1, x19\n   cmp w15, w13\n   csel x19, x9, x19, lo\n   ldp x20, x21, [x19]\n   eor x20, x20, x16\n   eor x21, x21, x17\n   rbit x23, x20\n   clz x23, x23\n   rbit x24, x21\n   clz x24, x24\n   lsr w23, w23, #3\n   lsr w24, w24, #3\n   cmp x20, #0\n   csel w24, w24, wzr, eq\n   add w23, w23, w24\n   cmp w15, w13\n   csel w23, wzr, w23, lo\n"
+    "cmp w23, w22\n   csel w16, w23, w22, hi\n   csel w19, w15, w14, hi\n   cmp w16, #4\n   b.lo .Ldpf_arm64_literal\n   cmp w16, #16\n   b.hs .Ldpf_arm64_slow\n   sub w17, w10, w19\n"
+    ".Ldpf_arm64_match:  mov x11, x25\n   add x25, x25, #1\n   ldr x14, [x0, #24]\n   sub w14, w3, w14\n   str w14, [x27, x11, lsl #2]\n"
+    "strh w16, [x28, x11, lsl #1]\n   ldr x13, [x0, #80]\n   strh w17, [x13, x11, lsl #1]\n   sub w13, w16, #3\n   ldrb w13, [x8, x13]\n   add x13, x6, x13, lsl #2\n   ldr w14, [x13, #1028]\n"
+    "add w14, w14, #1\n   str w14, [x13, #1028]\n   sub w13, w17, #1\n   lsr w14, w13, #7\n   add w14, w14, #256\n   cmp w13, #256\n   csel w13, w13, w14, lo\n   add x13, x8, x13\n   ldrb w13, [x13, #256]\n"
+    "ldr x14, [x0, #96]\n   ldr w15, [x14, x13, lsl #2]\n   add w15, w15, #1\n   str w15, [x14, x13, lsl #2]\n   cmp w16, #9\n   b.hi .Ldpf_arm64_long\n   add x10, x3, #2\n   sub w13, w16, #1\n   add x15, x1, x10\n   sub x15, x15, #1\n"
+    "ldr w12, [x15, #0]\n   mul w12, w12, w7\n   lsr w12, w12, #17\n   ldr x17, [x2, x12, lsl #3]\n   add x19, x10, #0\n   orr x20, x19, x17, lsl #32\n   cmp w13, #0\n   csel x20, x17, x20, le\n   str x20, [x2, x12, lsl #3]\n"
+    "ldr w12, [x15, #1]\n   mul w12, w12, w7\n   lsr w12, w12, #17\n   ldr x17, [x2, x12, lsl #3]\n   add x19, x10, #1\n   orr x20, x19, x17, lsl #32\n   cmp w13, #1\n   csel x20, x17, x20, le\n   str x20, [x2, x12, lsl #3]\n"
+    "ldr w12, [x15, #2]\n   mul w12, w12, w7\n   lsr w12, w12, #17\n   ldr x17, [x2, x12, lsl #3]\n   add x19, x10, #2\n   orr x20, x19, x17, lsl #32\n   cmp w13, #2\n   csel x20, x17, x20, le\n   str x20, [x2, x12, lsl #3]\n"
+    "ldr w12, [x15, #3]\n   mul w12, w12, w7\n   lsr w12, w12, #17\n   ldr x17, [x2, x12, lsl #3]\n   add x19, x10, #3\n   orr x20, x19, x17, lsl #32\n   cmp w13, #3\n   csel x20, x17, x20, le\n   str x20, [x2, x12, lsl #3]\n"
+    "ldr w12, [x15, #4]\n   mul w12, w12, w7\n   lsr w12, w12, #17\n   ldr x17, [x2, x12, lsl #3]\n   add x19, x10, #4\n   orr x20, x19, x17, lsl #32\n   cmp w13, #4\n   csel x20, x17, x20, le\n   str x20, [x2, x12, lsl #3]\n"
+    "ldr w12, [x15, #5]\n   mul w12, w12, w7\n   lsr w12, w12, #17\n   ldr x17, [x2, x12, lsl #3]\n   add x19, x10, #5\n   orr x20, x19, x17, lsl #32\n   cmp w13, #5\n   csel x20, x17, x20, le\n   str x20, [x2, x12, lsl #3]\n"
+    "ldr w12, [x15, #6]\n   mul w12, w12, w7\n   lsr w12, w12, #17\n   ldr x17, [x2, x12, lsl #3]\n   add x19, x10, #6\n   orr x20, x19, x17, lsl #32\n   cmp w13, #6\n   csel x20, x17, x20, le\n   str x20, [x2, x12, lsl #3]\n"
+    "ldr w12, [x15, #7]\n   mul w12, w12, w7\n   lsr w12, w12, #17\n   ldr x17, [x2, x12, lsl #3]\n   add x19, x10, #7\n   orr x20, x19, x17, lsl #32\n   cmp w13, #7\n   csel x20, x17, x20, le\n   str x20, [x2, x12, lsl #3]\n"
+    "add x14, x3, x16\n   ldr w12, [x1, x14]\n   mul w12, w12, w7\n   lsr w12, w12, #17\n   b .Ldpf_arm64_insdone\n"
+    ".Ldpf_arm64_long:  add x10, x3, #2\n   add x13, x10, x16\n   sub x13, x13, #1\n"
+    ".balign 16\n"
+    ".Ldpf_arm64_ins:  ldr x14, [x2, x12, lsl #3]\n   orr x14, x10, x14, lsl #32\n   str x14, [x2, x12, lsl #3]\n   ldr w12, [x1, x10]\n   mul w12, w12, w7\n   lsr w12, w12, #17\n   add x10, x10, #1\n   cmp x10, x13\n   b.ne .Ldpf_arm64_ins\n"
+    ".Ldpf_arm64_insdone:  add x17, x2, x12, lsl #3\n   prfm pstl1keep, [x17]\n   add x3, x3, x16\n   mov x4, x12\n   b .Ldpf_arm64_top\n"
+    ".Ldpf_arm64_literal:  ldrb w13, [x9]\n   add x13, x6, x13, lsl #2\n   ldr w14, [x13]\n   add w14, w14, #1\n   str w14, [x13]\n   add x3, x3, #1\n   mov x4, x12\n   b .Ldpf_arm64_top\n"
+    ".Ldpf_arm64_slow:  sub x13, x14, #1\n   add x13, x1, x13\n   cmp w22, #16\n   b.ne .Ldpf_arm64_only2\n   bl .Ldpf_arm64_ext\n   mov w19, w13\n   sub w20, w10, w14\n   cmp w23, #16\n   b.ne .Ldpf_arm64_sdone\n"
+    "ldr x16, [x0, #48]\n   cmp x19, x16\n   b.hs .Ldpf_arm64_sdone\n   cmp w19, #258\n   b.hs .Ldpf_arm64_sdone\n   sub x13, x15, #1\n   add x13, x1, x13\n   bl .Ldpf_arm64_ext\n   cmp w13, w19\n   b.ls .Ldpf_arm64_sdone\n   mov w19, w13\n   sub w20, w10, w15\n   b .Ldpf_arm64_sdone\n"
+    ".Ldpf_arm64_only2:  sub x13, x15, #1\n   add x13, x1, x13\n   bl .Ldpf_arm64_ext\n   mov w19, w13\n   sub w20, w10, w15\n"
+    ".Ldpf_arm64_sdone:  mov w16, w19\n   mov w17, w20\n   b .Ldpf_arm64_match\n"
+    ".Ldpf_arm64_ext:  mov x16, #16\n"
+    ".Ldpf_arm64_ext8:  ldr x17, [x9, x16]\n   ldr x21, [x13, x16]\n   eor x17, x17, x21\n   cbnz x17, .Ldpf_arm64_extx\n   add x16, x16, #8\n   cmp x16, #250\n   b.ls .Ldpf_arm64_ext8\n"
+    ".Ldpf_arm64_extb:  cmp x16, #258\n   b.hs .Ldpf_arm64_extd\n   ldrb w17, [x9, x16]\n   ldrb w21, [x13, x16]\n   cmp w17, w21\n   b.ne .Ldpf_arm64_extd\n   add x16, x16, #1\n   b .Ldpf_arm64_extb\n"
+    ".Ldpf_arm64_extx:  rbit x17, x17\n   clz x17, x17\n   lsr x17, x17, #3\n   add x16, x16, x17\n"
+    ".Ldpf_arm64_extd:  mov x13, x16\n   ret\n"
+    ".Ldpf_arm64_done:  str x25, [x0, #56]\n   str x3, [x0, #32]\n   str w4, [x0, #104]\n   ldr x30, [sp, #80]\n   ldp x27, x28, [sp, #64]\n   ldp x25, x26, [sp, #48]\n   ldp x23, x24, [sp, #32]\n   ldp x21, x22, [sp, #16]\n   ldp x19, x20, [sp], #112\n" ASM_RET
+    ASM_END(deflate_parse_fast)
     /* See the x86_64 huffman_lengths contract. */
     ASM_FUNC(huffman_lengths)
     "stp x29, x30, [sp, #-96]!\n   mov x29, sp\n   stp x19, x20, [sp, #16]\n   stp x21, x22, [sp, #32]\n   stp x23, x24, [sp, #48]\n   stp x25, x26, [sp, #64]\n   stp x27, x28, [sp, #80]\n"
@@ -26328,6 +26454,56 @@ __asm__(
     ".Ldt_rv_flush:  li t5, 8\n   bltu a5, t5, .Ldt_rv_flushed\n   sb a4, 0(a3)\n   addi a3, a3, 1\n   srli a4, a4, 8\n   addi a5, a5, -8\n   j .Ldt_rv_flush\n"
     ".Ldt_rv_flushed:  jr t6\n"
     ASM_END(deflate_tokens_encode)
+    // deflate_parse_fast (the job and the walk are described with the x86-64 body). Base RV64I does
+    // not promise a misaligned ld, so every wider-than-byte read of the input is made from the two
+    // aligned doublewords it lies across, shifted (ten instructions); the window of the next hash
+    // is the same doubleword shifted down a byte, and inside a match it slides a byte a turn
+    // (srli, one lbu, slli, or) instead of being read again. The first differing byte of a
+    // comparison is found with the multiply the file's other riscv64 scans use for the missing
+    // ctz: the lowest set bit, its mask, the high bits of the whole bytes under it, summed by
+    // 0x0101..01. A candidate that matches eight bytes goes to the exact rule.
+    ASM_FUNC(deflate_parse_fast)
+    "addi sp, sp, -96\n   sd s0, 0(sp)\n   sd s1, 8(sp)\n   sd s2, 16(sp)\n   sd s3, 24(sp)\n   sd s4, 32(sp)\n   sd s5, 40(sp)\n   sd s6, 48(sp)\n   sd s7, 56(sp)\n   sd s8, 64(sp)\n   sd s9, 72(sp)\n   sd s10, 80(sp)\n   sd s11, 88(sp)\n"
+    "ld a1, 0(a0)\n   ld a2, 8(a0)\n   ld a3, 32(a0)\n   lwu a4, 104(a0)\n   ld a6, 88(a0)\n   lla a7, deflate_symbol_tab\n   li s1, 0x1e35a7bd\n   li s2, 0x8080808080808080\n   li s3, 0x0101010101010101\n"
+    "ld t0, 16(a0)\n   li t1, 299\n   bltu t0, t1, .Ldpf_rv_nolim\n   addi t0, t0, -299\n   j .Ldpf_rv_lim\n.Ldpf_rv_nolim:  li t0, 0\n.Ldpf_rv_lim:  ld a5, 40(a0)\n   bleu a5, t0, .Ldpf_rv_limok\n   mv a5, t0\n.Ldpf_rv_limok:  ld t0, 48(a0)\n   li t1, 16\n   bltu t0, t1, .Ldpf_rv_done\n"
+    ".Ldpf_rv_top:  bgeu a3, a5, .Ldpf_rv_done\n   ld t0, 56(a0)\n   ld t1, 112(a0)\n   bgeu t0, t1, .Ldpf_rv_done\n   add s4, a1, a3\n"
+    "andi t0, s4, 7\n   sub t1, s4, t0\n   ld s5, 0(t1)\n   ld t2, 8(t1)\n   slli t0, t0, 3\n   srl s5, s5, t0\nxori t0, t0, 63\n   slli t2, t2, 1\n   sll t2, t2, t0\n   or s5, s5, t2\n"
+    "addi s6, a3, 1\n   slli t0, a4, 3\n   add t0, a2, t0\n   ld t1, 0(t0)\n   slli t2, t1, 32\n   or t2, t2, s6\n   sd t2, 0(t0)\n   slli s8, t1, 32\n   srli s8, s8, 32\n   srli s9, t1, 32\n"
+    "srli t0, s5, 8\n   mulw s7, t0, s1\n   srliw s7, s7, 17\n   li t0, 32768\n   li s10, 1\n   bleu s6, t0, .Ldpf_rv_fl\n   sub s10, s6, t0\n.Ldpf_rv_fl:  li s11, 0\n   bltu s8, s10, .Ldpf_rv_c1done\n   addi t0, s8, -1\n   add t0, a1, t0\n"
+    "andi t4, t0, 7\n   sub t5, t0, t4\n   ld t3, 0(t5)\n   ld t6, 8(t5)\n   slli t4, t4, 3\n   srl t3, t3, t4\nxori t4, t4, 63\n   slli t6, t6, 1\n   sll t6, t6, t4\n   or t3, t3, t6\n"
+    "xor t3, t3, s5\n   beqz t3, .Ldpf_rv_c1eq\nneg t4, t3\n   and t4, t4, t3\n   addi t4, t4, -1\n   and t4, t4, s2\n   srli t4, t4, 7\n   mul t4, t4, s3\n   srli s11, t4, 56\n   j .Ldpf_rv_c1done\n.Ldpf_rv_c1eq:  li s11, 8\n.Ldpf_rv_c1done:  li s0, 0\n   bltu s9, s10, .Ldpf_rv_c2done\n   addi t0, s9, -1\n   add t0, a1, t0\n"
+    "andi t4, t0, 7\n   sub t5, t0, t4\n   ld t3, 0(t5)\n   ld t6, 8(t5)\n   slli t4, t4, 3\n   srl t3, t3, t4\nxori t4, t4, 63\n   slli t6, t6, 1\n   sll t6, t6, t4\n   or t3, t3, t6\n"
+    "xor t3, t3, s5\n   beqz t3, .Ldpf_rv_c2eq\nneg t4, t3\n   and t4, t4, t3\n   addi t4, t4, -1\n   and t4, t4, s2\n   srli t4, t4, 7\n   mul t4, t4, s3\n   srli s0, t4, 56\n   j .Ldpf_rv_c2done\n.Ldpf_rv_c2eq:  li s0, 8\n.Ldpf_rv_c2done:  li t0, 8\n   beq s11, t0, .Ldpf_rv_slow\n   beq s0, t0, .Ldpf_rv_slow\n"
+    "mv t1, s8\n   mv t2, s11\n   bleu s0, s11, .Ldpf_rv_sel\n   mv t1, s9\n   mv t2, s0\n.Ldpf_rv_sel:  li t0, 4\n   bltu t2, t0, .Ldpf_rv_literal\n   sub t1, s6, t1\n"
+    ".Ldpf_rv_match:  ld t3, 56(a0)\n   addi t4, t3, 1\n   sd t4, 56(a0)\n   ld t4, 64(a0)\n   ld t5, 24(a0)\n   sub t5, a3, t5\n   slli t6, t3, 2\n   add t6, t4, t6\n   sw t5, 0(t6)\n"
+    "ld t4, 72(a0)\n   slli t6, t3, 1\n   add t5, t4, t6\n   sh t2, 0(t5)\n   ld t4, 80(a0)\n   add t5, t4, t6\n   sh t1, 0(t5)\n"
+    "addi t4, t2, -3\n   add t4, a7, t4\n   lbu t4, 0(t4)\n   slli t4, t4, 2\n   add t4, a6, t4\n   lw t5, 1028(t4)\n   addi t5, t5, 1\n   sw t5, 1028(t4)\n"
+    "addi t4, t1, -1\n   srli t5, t4, 7\n   addi t5, t5, 256\n   li t6, 256\n   bgeu t4, t6, .Ldpf_rv_dc\n   mv t5, t4\n.Ldpf_rv_dc:  add t5, a7, t5\n   lbu t5, 256(t5)\n   ld t6, 96(a0)\n   slli t5, t5, 2\n   add t6, t6, t5\n   lw t4, 0(t6)\n   addi t4, t4, 1\n   sw t4, 0(t6)\n"
+    "addi t3, a3, 2\n   add t4, t3, t2\n   addi t4, t4, -1\n   add t0, a1, t3\n"
+    "andi t1, t0, 7\n   sub t5, t0, t1\n   ld s5, 0(t5)\n   ld t6, 8(t5)\n   slli t1, t1, 3\n   srl s5, s5, t1\nxori t1, t1, 63\n   slli t6, t6, 1\n   sll t6, t6, t1\n   or s5, s5, t6\n"
+    ".Ldpf_rv_ins:  slli t5, s7, 3\n   add t5, a2, t5\n   ld t6, 0(t5)\n   slli t6, t6, 32\n   or t6, t6, t3\n   sd t6, 0(t5)\n   mulw s7, s5, s1\n   srliw s7, s7, 17\n   srli s5, s5, 8\n   lbu t5, 8(t0)\n   slli t5, t5, 56\n   or s5, s5, t5\n   addi t3, t3, 1\n   addi t0, t0, 1\n   bne t3, t4, .Ldpf_rv_ins\n"
+    "add a3, a3, t2\n   mv a4, s7\n   j .Ldpf_rv_top\n"
+    ".Ldpf_rv_literal:  lbu t0, 0(s4)\n   slli t0, t0, 2\n   add t0, a6, t0\n   lw t1, 0(t0)\n   addi t1, t1, 1\n   sw t1, 0(t0)\n   addi a3, a3, 1\n   mv a4, s7\n   j .Ldpf_rv_top\n"
+    ".Ldpf_rv_slow:  li s11, 0\n   li s0, 0\n   bltu s8, s10, .Ldpf_rv_s2\n   addi t0, s8, -1\n   add t0, a1, t0\n"
+    "andi t4, t0, 7\n   sub t5, t0, t4\n   ld t3, 0(t5)\n   ld t6, 8(t5)\n   slli t4, t4, 3\n   srl t3, t3, t4\nxori t4, t4, 63\n   slli t6, t6, 1\n   sll t6, t6, t4\n   or t3, t3, t6\n"
+    "xor t3, t3, s5\n   slli t3, t3, 32\n   bnez t3, .Ldpf_rv_s2\n   sub s0, s6, s8\n   addi t0, s8, -1\n   add t0, a1, t0\n   jal t6, .Ldpf_rv_ext\n   mv s11, t0\n   ld t1, 48(a0)\n   bgeu s11, t1, .Ldpf_rv_sdone\n   li t1, 258\n   bgeu s11, t1, .Ldpf_rv_sdone\n   bltu s9, s10, .Ldpf_rv_sdone\n   addi t0, s9, -1\n   add t0, a1, t0\n"
+    "mv t1, t0\n"
+    "andi t4, t1, 7\n   sub t5, t1, t4\n   ld t3, 0(t5)\n   ld t6, 8(t5)\n   slli t4, t4, 3\n   srl t3, t3, t4\nxori t4, t4, 63\n   slli t6, t6, 1\n   sll t6, t6, t4\n   or t3, t3, t6\n"
+    "xor t3, t3, s5\n   slli t3, t3, 32\n   bnez t3, .Ldpf_rv_sdone\n   jal t6, .Ldpf_rv_ext\n   bleu t0, s11, .Ldpf_rv_sdone\n   mv s11, t0\n   sub s0, s6, s9\n   j .Ldpf_rv_sdone\n"
+    ".Ldpf_rv_s2:  bltu s9, s10, .Ldpf_rv_sdone\n   addi t0, s9, -1\n   add t0, a1, t0\n   mv t1, t0\n"
+    "andi t4, t1, 7\n   sub t5, t1, t4\n   ld t3, 0(t5)\n   ld t6, 8(t5)\n   slli t4, t4, 3\n   srl t3, t3, t4\nxori t4, t4, 63\n   slli t6, t6, 1\n   sll t6, t6, t4\n   or t3, t3, t6\n"
+    "xor t3, t3, s5\n   slli t3, t3, 32\n   bnez t3, .Ldpf_rv_sdone\n   sub s0, s6, s9\n   jal t6, .Ldpf_rv_ext\n   mv s11, t0\n"
+    ".Ldpf_rv_sdone:  li s1, 0x1e35a7bd\n   li s2, 0x8080808080808080\n   li s3, 0x0101010101010101\n   mv t2, s11\n   mv t1, s0\n   j .Ldpf_rv_match\n"
+    ".Ldpf_rv_ext:  li t1, 4\n"
+    ".Ldpf_rv_ext8:  add t2, s4, t1\n   add t3, t0, t1\n"
+    "andi s1, t2, 7\n   sub s2, t2, s1\n   ld t4, 0(s2)\n   ld s3, 8(s2)\n   slli s1, s1, 3\n   srl t4, t4, s1\nxori s1, s1, 63\n   slli s3, s3, 1\n   sll s3, s3, s1\n   or t4, t4, s3\n"
+    "andi s1, t3, 7\n   sub s2, t3, s1\n   ld t5, 0(s2)\n   ld s3, 8(s2)\n   slli s1, s1, 3\n   srl t5, t5, s1\nxori s1, s1, 63\n   slli s3, s3, 1\n   sll s3, s3, s1\n   or t5, t5, s3\n"
+    "xor t4, t4, t5\n   bnez t4, .Ldpf_rv_extx\n   addi t1, t1, 8\n   li t2, 250\n   bleu t1, t2, .Ldpf_rv_ext8\n"
+    ".Ldpf_rv_extb:  li t2, 258\n   bgeu t1, t2, .Ldpf_rv_extd\n   add t3, s4, t1\n   lbu t4, 0(t3)\n   add t3, t0, t1\n   lbu t5, 0(t3)\n   bne t4, t5, .Ldpf_rv_extd\n   addi t1, t1, 1\n   j .Ldpf_rv_extb\n"
+    ".Ldpf_rv_extx:  li s2, 0x8080808080808080\n   li s3, 0x0101010101010101\nneg t5, t4\n   and t5, t5, t4\n   addi t5, t5, -1\n   and t5, t5, s2\n   srli t5, t5, 7\n   mul t5, t5, s3\n   srli t3, t5, 56\n   add t1, t1, t3\n"
+    ".Ldpf_rv_extd:  mv t0, t1\n   jr t6\n"
+    ".Ldpf_rv_done:  sd a3, 32(a0)\n   sw a4, 104(a0)\n   ld s0, 0(sp)\n   ld s1, 8(sp)\n   ld s2, 16(sp)\n   ld s3, 24(sp)\n   ld s4, 32(sp)\n   ld s5, 40(sp)\n   ld s6, 48(sp)\n   ld s7, 56(sp)\n   ld s8, 64(sp)\n   ld s9, 72(sp)\n   ld s10, 80(sp)\n   ld s11, 88(sp)\n   addi sp, sp, 96\n" ASM_RET
+    ASM_END(deflate_parse_fast)
     /* See the x86_64 huffman_lengths contract. */
     ASM_FUNC(huffman_lengths)
     "li t0, 10816\n   sub sp, sp, t0\n   li t0, 10736\n   add t0, sp, t0\n   sd s0, 0(t0)\n   sd s1, 8(t0)\n   sd s2, 16(t0)\n   sd s3, 24(t0)\n   sd s4, 32(t0)\n   sd s5, 40(t0)\n"
@@ -31745,6 +31921,7 @@ positive huffman_encode_back(address_any dest, address_any src, positive n,
    see the x86_64 assembly for the layout. */
 READS_WRITES(1) fn deflate_tokens_count(address_any job);
 READS_WRITES(1) fn deflate_tokens_encode(address_any job);
+READS_WRITES(1) fn deflate_parse_fast(address_any job);
 /* Code lengths of at most limit bits for n <= 288 counts summing below
    2^22; 0 when they cannot be limited. */
 READS(1) WRITES(3) bool huffman_lengths(const p32 address_to freq, positive n,

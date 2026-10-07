@@ -2350,6 +2350,47 @@ static inline INLINE fn gzip_fast_skip(gzip_encoder address_to e, positive pos,
 #define GZIP_FAST_BLOCK 65535
 #define GZIP_FAST_PAIRS 8192
 
+/* deflate_parse_fast's job (lib.c documents each field). */
+typedef struct
+{
+        p8 address_to base;
+        p32 address_to fast;
+        positive total;
+        positive start;
+        positive pos;
+        positive limit;
+        positive nice;
+        positive pairs;
+        p32 address_to mpos;
+        p16 address_to mlen;
+        p16 address_to mdist;
+        p32 address_to lit_freq;
+        p32 address_to dist_freq;
+        positive hash;
+        positive pairs_max;
+} gzip_fast_job;
+
+/* The offsets deflate_parse_fast reads, and the table's alignment it needs
+   for its eight-byte buckets. */
+_Static_assert(__builtin_offsetof(gzip_fast_job, base) == 0 &&
+                       __builtin_offsetof(gzip_fast_job, fast) == 8 &&
+                       __builtin_offsetof(gzip_fast_job, total) == 16 &&
+                       __builtin_offsetof(gzip_fast_job, start) == 24 &&
+                       __builtin_offsetof(gzip_fast_job, pos) == 32 &&
+                       __builtin_offsetof(gzip_fast_job, limit) == 40 &&
+                       __builtin_offsetof(gzip_fast_job, nice) == 48 &&
+                       __builtin_offsetof(gzip_fast_job, pairs) == 56 &&
+                       __builtin_offsetof(gzip_fast_job, mpos) == 64 &&
+                       __builtin_offsetof(gzip_fast_job, mlen) == 72 &&
+                       __builtin_offsetof(gzip_fast_job, mdist) == 80 &&
+                       __builtin_offsetof(gzip_fast_job, lit_freq) == 88 &&
+                       __builtin_offsetof(gzip_fast_job, dist_freq) == 96 &&
+                       __builtin_offsetof(gzip_fast_job, hash) == 104 &&
+                       __builtin_offsetof(gzip_fast_job, pairs_max) == 112,
+               "deflate_parse_fast's job layout");
+_Static_assert(__builtin_offsetof(gzip_encoder, fast) % 8 == 0,
+               "the fast finder's buckets are read as eight bytes");
+
 static __attribute__((noinline)) positive gzip_parse_fast(gzip_encoder address_to e,
                                                           positive start, positive pos,
                                                           positive limit, positive nice)
@@ -2361,6 +2402,19 @@ static __attribute__((noinline)) positive gzip_parse_fast(gzip_encoder address_t
 
         if (limit - start >= GZIP_FAST_BLOCK + GZIP_SPLIT_LEAST)
                 limit = start + GZIP_FAST_BLOCK;
+        /* The library takes the positions that have a whole match's worth
+           of input after them; the loop below takes the last few hundred. */
+        {
+                gzip_fast_job job = {base,      fast,         total,        start,
+                                     pos,       limit,        nice,         e->pairs,
+                                     e->mpos,   e->mlen,      e->mdist,     e->lit_freq,
+                                     e->dist_freq, h,         GZIP_FAST_PAIRS};
+
+                deflate_parse_fast(address_of job);
+                pos = job.pos;
+                e->pairs = job.pairs;
+                h = (p32)job.hash;
+        }
         while (pos < limit && e->pairs < GZIP_FAST_PAIRS)
         {
                 positive most = total - pos;

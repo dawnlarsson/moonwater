@@ -113784,6 +113784,226 @@ static fn floor_deflate_tokens(void)
         check("deflate tokens counted into both alphabets with their extra bits", counted);
 }
 
+/* deflate_parse_fast against gzip's level 1 walk written out a position at
+   a time: the same pairs, literals, counts, table and stopping place from
+   blocks of random bytes, of a few symbols, of copies of earlier bytes, of
+   runs and of short periods, started anywhere from the first byte to past
+   the first window, with a pair limit that bites, and with a nice the
+   routine leaves to the caller. */
+typedef struct
+{
+        p8 address_to base;
+        p32 address_to fast;
+        positive total, start, pos, limit, nice, pairs;
+        p32 address_to mpos;
+        p16 address_to mlen;
+        p16 address_to mdist;
+        p32 address_to lit_freq;
+        p32 address_to dist_freq;
+        positive hash, pairs_max;
+} floor_fast_job;
+
+static positive floor_fast_extend(p8 address_to a, p8 address_to b, positive limit)
+{
+        positive at = 4;
+
+        while (at < limit && a[at] == b[at])
+                at++;
+        return at;
+}
+
+static fn floor_deflate_parse_model(floor_fast_job address_to j)
+{
+        positive pos = j->pos;
+        positive lim = j->total >= 299 ? j->total - 299 : 0;
+        p32 h = (p32)j->hash;
+
+        if (j->limit < lim)
+                lim = j->limit;
+        if (j->nice < 16)
+                return;
+        while (pos < lim && j->pairs < j->pairs_max)
+        {
+                p8 address_to here = j->base + pos;
+                p32 seq = memory_load_unaligned(p32, here);
+                p32 low = pos + 1 > 32768 ? (p32)(pos + 1 - 32768) : 1;
+                p32 first = j->fast[2 * h];
+                p32 second = j->fast[2 * h + 1];
+                positive best = 0, dist = 0;
+
+                j->fast[2 * h] = (p32)(pos + 1);
+                j->fast[2 * h + 1] = first;
+                h = (memory_load_unaligned(p32, here + 1) * 0x1e35a7bdu) >> 17;
+                if (first >= low && memory_load_unaligned(p32, j->base + first - 1) == seq)
+                {
+                        best = floor_fast_extend(here, j->base + first - 1, 258);
+                        dist = pos + 1 - first;
+                        if (best < j->nice && best < 258 && second >= low &&
+                            memory_load_unaligned(p32, j->base + second - 1) == seq &&
+                            memory_load_unaligned(p32, j->base + second - 1 + best - 3) ==
+                                    memory_load_unaligned(p32, here + best - 3))
+                        {
+                                positive length = floor_fast_extend(here, j->base + second - 1, 258);
+
+                                if (length > best)
+                                {
+                                        best = length;
+                                        dist = pos + 1 - second;
+                                }
+                        }
+                }
+                else if (second >= low && memory_load_unaligned(p32, j->base + second - 1) == seq)
+                {
+                        best = floor_fast_extend(here, j->base + second - 1, 258);
+                        dist = pos + 1 - second;
+                }
+                if (!best)
+                {
+                        j->lit_freq[*here]++;
+                        pos++;
+                        continue;
+                }
+                {
+                        positive k = j->pairs++;
+
+                        j->mpos[k] = (p32)(pos - j->start);
+                        j->mlen[k] = (p16)best;
+                        j->mdist[k] = (p16)dist;
+                        j->lit_freq[257 + deflate_symbol_tab[best - 3]]++;
+                        j->dist_freq[dist <= 256 ? deflate_symbol_tab[256 + dist - 1]
+                                                 : deflate_symbol_tab[512 + ((dist - 1) >> 7)]]++;
+                }
+                for (positive c = best - 1, p = pos + 1; c; c--, p++)
+                {
+                        j->fast[2 * h + 1] = j->fast[2 * h];
+                        j->fast[2 * h] = (p32)(p + 1);
+                        h = (memory_load_unaligned(p32, j->base + p + 1) * 0x1e35a7bdu) >> 17;
+                }
+                pos += best;
+        }
+        j->pos = pos;
+        j->hash = h;
+}
+
+static fn floor_deflate_parse(void)
+{
+        static p8 data[70000 + 1024];
+        static p32 fast_got[2u << 15], fast_want[2u << 15];
+        static p32 mpos_got[8192 + 16], mpos_want[8192 + 16];
+        static p16 mlen_got[8192 + 16], mlen_want[8192 + 16], mdist_got[8192 + 16], mdist_want[8192 + 16];
+        p32 lit_got[288], lit_want[288], dist_got[32], dist_want[32];
+        p32 random = 0x7a3c91d5u;
+        bool same = true, anything = false;
+
+#define FLOOR_RANDOM() (random ^= random << 13, random ^= random >> 17, random ^= random << 5, random)
+        for (positive trial = 0; trial < 180; trial++)
+        {
+                positive shape = trial % 6, total = 70000 + FLOOR_RANDOM() % 900, at = 0;
+                static const positive starts[5] = {0, 3, 4096, 33000, 41000};
+                positive pos = starts[trial % 5], start, limit;
+                floor_fast_job got, want;
+
+                memory_fill(data, 0, sizeof(data));
+                while (at < total)
+                {
+                        positive run, take;
+
+                        if (shape == 0)
+                                data[at++] = (p8)FLOOR_RANDOM();
+                        else if (shape == 1)
+                                data[at++] = (p8)(FLOOR_RANDOM() % 4);
+                        else if (shape == 2 || shape == 5)
+                        {
+                                run = FLOOR_RANDOM() % (shape == 5 ? 3 : 12);
+                                while (run-- && at < total)
+                                        data[at++] = (p8)FLOOR_RANDOM();
+                                take = 4 + FLOOR_RANDOM() % (FLOOR_RANDOM() % 8 ? 20 : 300);
+                                if (at > 8)
+                                {
+                                        positive from = 1 + FLOOR_RANDOM() % (at > 32768 ? 32768 : at);
+
+                                        while (take-- && at < total)
+                                        {
+                                                data[at] = data[at - from];
+                                                at++;
+                                        }
+                                }
+                        }
+                        else if (shape == 3)
+                        {
+                                run = 1 + FLOOR_RANDOM() % 700;
+                                p8 value = (p8)FLOOR_RANDOM();
+
+                                while (run-- && at < total)
+                                        data[at++] = value;
+                        }
+                        else
+                        {
+                                positive period = 3 + FLOOR_RANDOM() % 5;
+
+                                data[at] = at >= period && FLOOR_RANDOM() % 50 ? data[at - period] : (p8)FLOOR_RANDOM();
+                                at++;
+                        }
+                }
+                start = pos - FLOOR_RANDOM() % (pos + 1) % 5000;
+                limit = pos + 1 + FLOOR_RANDOM() % 65535;
+                if (limit > total)
+                        limit = total;
+                memory_fill(fast_got, 0, sizeof(fast_got));
+                for (positive p = 0; p < pos && p + 5 <= total; p++)
+                {
+                        p32 h = (memory_load_unaligned(p32, data + p) * 0x1e35a7bdu) >> 17;
+
+                        fast_got[2 * h + 1] = fast_got[2 * h];
+                        fast_got[2 * h] = (p32)(p + 1);
+                }
+                memory_copy(fast_want, fast_got, sizeof(fast_got));
+                memory_fill(mpos_got, 0xa5, sizeof(mpos_got));
+                memory_fill(mlen_got, 0xa5, sizeof(mlen_got));
+                memory_fill(mdist_got, 0xa5, sizeof(mdist_got));
+                memory_copy(mpos_want, mpos_got, sizeof(mpos_got));
+                memory_copy(mlen_want, mlen_got, sizeof(mlen_got));
+                memory_copy(mdist_want, mdist_got, sizeof(mdist_got));
+                for (positive i = 0; i < 288; i++)
+                        lit_got[i] = lit_want[i] = (p32)(FLOOR_RANDOM() % 5);
+                for (positive i = 0; i < 32; i++)
+                        dist_got[i] = dist_want[i] = (p32)(FLOOR_RANDOM() % 5);
+                got.base = want.base = data;
+                got.total = want.total = total;
+                got.start = want.start = start;
+                got.pos = want.pos = pos;
+                got.limit = want.limit = limit;
+                got.nice = want.nice = trial % 7 == 0 ? 8 : trial % 11 == 0 ? 16 : 32;
+                got.pairs = want.pairs = trial % 13 == 0 ? 4090 : 0;
+                got.pairs_max = want.pairs_max = trial % 5 == 0 ? got.pairs + 1 + FLOOR_RANDOM() % 40 : 8192;
+                got.hash = want.hash = (memory_load_unaligned(p32, data + pos) * 0x1e35a7bdu) >> 17;
+                got.fast = fast_got;
+                want.fast = fast_want;
+                got.mpos = mpos_got;
+                want.mpos = mpos_want;
+                got.mlen = mlen_got;
+                want.mlen = mlen_want;
+                got.mdist = mdist_got;
+                want.mdist = mdist_want;
+                got.lit_freq = lit_got;
+                want.lit_freq = lit_want;
+                got.dist_freq = dist_got;
+                want.dist_freq = dist_want;
+                floor_deflate_parse_model(address_of want);
+                deflate_parse_fast(address_of got);
+                anything = anything || want.pairs > 0;
+                same = same && got.pos == want.pos && got.pairs == want.pairs && (p32)got.hash == (p32)want.hash &&
+                       !memory_compare(fast_got, fast_want, sizeof(fast_got)) &&
+                       !memory_compare(mpos_got, mpos_want, sizeof(mpos_got)) &&
+                       !memory_compare(mlen_got, mlen_want, sizeof(mlen_got)) &&
+                       !memory_compare(mdist_got, mdist_want, sizeof(mdist_got)) &&
+                       !memory_compare(lit_got, lit_want, sizeof(lit_got)) &&
+                       !memory_compare(dist_got, dist_want, sizeof(dist_got));
+        }
+#undef FLOOR_RANDOM
+        check("deflate parse fast agrees with the position at a time walk: pairs, counts, table, stopping place", same && anything);
+}
+
 /* zstd_huffman_cells against a cell at a time: complete codes from
    huffman_lengths over random counts, as weights, into a guarded table. */
 static fn floor_zstd_huffman_cells(void)
@@ -113982,6 +114202,7 @@ b32 main(void)
         floor_deflate();
         floor_deflate_codes();
         floor_deflate_tokens();
+        floor_deflate_parse();
         floor_huffman_lengths();
         floor_zstd_huffman_cells();
         floor_huffman_codes();

@@ -495,6 +495,15 @@ cover('correctness_only', 'test/checks.c#CHECK_compression_floor',
       anchors={'deflate_tokens_count': 'floor_deflate_tokens',
                'deflate_tokens_encode': 'floor_deflate_tokens',
                'deflate_tokens_encode_bmi2': 'floor_deflate_tokens'})
+cover('correctness_only', 'test/checks.c#CHECK_compression_floor', 'deflate_parse_fast',
+      'the pairs, literal and pair counts, bucket table, hash and stopping '
+      'place of 180 blocks (random bytes, four symbols, copies of earlier '
+      'bytes, runs, short periods) against gzip level 1 written out a '
+      'position at a time, started from the first byte to past the first '
+      'window, with a pair cap that bites and a nice it leaves to the caller; '
+      'end-to-end gzip -1 timing on three corpora, and the native arm64 row '
+      'against gcc and clang builds of the C it replaces',
+      anchors={'deflate_parse_fast': 'floor_deflate_parse'})
 cover('correctness_only', 'test/checks.c#CHECK_compression_floor', 'deflate_decode_span',
       'all length/distance combinations with guard pages; end-to-end gzip '
       'timing is available, but there is no isolated token-loop timing row',
