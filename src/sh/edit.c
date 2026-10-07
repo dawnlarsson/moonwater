@@ -1323,6 +1323,50 @@ static COLD ARM64_ERRATUM_ALIGN bool edit_step_move(bool backward)
         outside ASCII is several bytes and one column. Every routine below that
         has "column" in its name means the screen; everything else means bytes.
 */
+/*
+        The scalar that begins text: how many bytes it took and its value, or
+        false for a sequence that is not UTF-8 (at least one byte is used
+        either way, and a byte that interrupted a sequence is not one of them).
+*/
+static bool edit_scalar(const p8 address_to text, positive length,
+                        positive address_to used, p32 address_to value)
+{
+        memory_utf8_state state = {0, 0, 0};
+        positive at = 0;
+
+        while (at < length)
+        {
+                b32 result = memory_utf8_feed(address_of state, text[at++]);
+
+                if (result > 0)
+                {
+                        address_to used = at;
+                        address_to value = state.value;
+                        return true;
+                }
+                if (result < 0)
+                {
+                        if (at > 1 && (text[at - 1] & 0xc0) != 0x80)
+                                at--;
+                        address_to used = at;
+                        address_to value = 0;
+                        return false;
+                }
+        }
+
+        address_to used = at ? at : 1;
+        address_to value = 0;
+        return false;
+}
+
+/*
+        What is sent to the terminal for a character of the file. The file is
+        the program's input and not the terminal's: an escape, a C0 control, a
+        DEL, and a sequence that is not UTF-8 (a lone 0x9b is a CSI to some
+        terminals) are drawn as a question mark, which is one cell, and a C1
+        control spelled in UTF-8 is not drawn at all, having no cell. What the
+        file holds is not changed, and is saved as it was.
+*/
 static CONST bool edit_is_continuation(p8 character)
 {
         return (character & 0xc0) == 0x80;
@@ -1349,6 +1393,11 @@ static PURE positive edit_cells_at(positive line, positive column)
 
         for (positive at = column; at < next && !result; at++)
                 result = memory_utf8_feed(address_of state, text->text[at]);
+
+        // A control or a DEL is drawn as one question mark
+        // (edit_row_put_character), which is one cell.
+        if (result == 1 && (state.value < 0x20 || state.value == 0x7f))
+                return 1;
 
         // A C1 control spelled in UTF-8 is dropped by the terminal and takes
         // no cell there, whatever width the table gives it.
@@ -1592,6 +1641,23 @@ static fn edit_row_put(address_any text, positive length)
         byte_store_append_exact(address_of edit_row_output, text, length);
 }
 
+static fn edit_row_put_character(string_address text, positive length)
+{
+        positive used;
+        p32 value;
+
+        //      Only the first complete scalar is sent: bytes stuck to it that
+        //      are not part of it (a stray continuation byte, which the step
+        //      over a character takes along) are dropped, and they have no
+        //      cell of their own.
+        if (!edit_scalar((const p8 address_to)text, length, address_of used,
+                         address_of value) ||
+            value < 0x20 || value == 0x7f)
+                edit_row_put((string_address)"?", 1);
+        else if (value < 0x80 || value >= 0xa0)
+                edit_row_put(text, used);
+}
+
 #define edit_row_put_literal(literal) \
         edit_row_put((string_address)(literal), sizeof(literal) - 1)
 
@@ -1717,12 +1783,13 @@ static fn edit_row_build(positive screen_row)
                         if (!cells)
                         {
                                 if (drawn && display > edit_left)
-                                        edit_row_put(edit_lines[line].text + at,
-                                                     next - at);
+                                        edit_row_put_character(edit_lines[line].text + at,
+                                                               next - at);
                         }
                         else if (display >= edit_left && drawn + cells <= width)
                         {
-                                edit_row_put(edit_lines[line].text + at, next - at);
+                                edit_row_put_character(edit_lines[line].text + at,
+                                                       next - at);
                                 drawn += cells;
                         }
                         else
@@ -1750,8 +1817,8 @@ static fn edit_row_build(positive screen_row)
                                 edit_row_put((string_address)" ", 1);
                         else
                         {
-                                edit_row_put(edit_lines[line].text + at,
-                                             edit_step_forward(line, at) - at);
+                                edit_row_put_character(edit_lines[line].text + at,
+                                                       edit_step_forward(line, at) - at);
                         }
 
                         drawn++;
@@ -1784,12 +1851,28 @@ static positive edit_status_cells;
 static fn edit_status_put(address_any data, positive length)
 {
         p8 address_to text = data;
-        if (!byte_store_append_exact(address_of edit_status_output, text, length))
-                return;
 
-        for (positive at = 0; at < length; at++)
-                if (!edit_is_continuation((p8)text[at]))
-                        edit_status_cells++;
+        //      The name of the file and what a command says of it are the
+        //      file's and the user's bytes: a control, a DEL, a C1 control (in
+        //      UTF-8 or alone) and what is not UTF-8 are one question mark
+        //      each here as they are in the rows.
+        for (positive at = 0; at < length;)
+        {
+                positive used;
+                p32 value;
+                bool safe = edit_scalar(text + at, length - at, address_of used,
+                                        address_of value) &&
+                            value >= 0x20 && value != 0x7f &&
+                            (value < 0x80 || value >= 0xa0);
+
+                if (!byte_store_append_exact(address_of edit_status_output,
+                                             safe ? (address_any)(text + at)
+                                                  : (address_any)"?",
+                                             safe ? used : 1))
+                        return;
+                edit_status_cells++;
+                at += used;
+        }
 }
 
 static fn edit_status_put_text(string_address text)

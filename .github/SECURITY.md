@@ -93,7 +93,7 @@ ARM64 and RISC-V mandatory with UBSan trapping.
 | Wi-Fi | RSN, EAPOL-Key, replay counters, source address, scan parsing; the strongest 64 names kept and the associated row never evicted; one BSS donates every field of a row; `wifi_scan_fuzz`, `wifi_eapol_fuzz`, `wifi_air` | management-frame protection and WPA3 (separate branch); a forger outranking every retained row |
 | Waterlink | Noise handshake, cookie, replay window, grants, revocation; mDNS reads Internet class only, RCODE zero, TTL nonzero, an SRV with a non-root target and a nonzero port, and exposes only a PTR and SRV intersection; the reply and answer budgets move only after a successful send; `IP_MULTICAST_IF` failure refuses the send; a source holds at most `LINK_GREET_SOURCE` of the 16 greeting slots; legacy verifier migration is all-write plus `fsync`, and until it succeeds the listener stays off while commands keep the groups (their save is the scrub); every elapsed time is ordered first; `sh test/run waterlink link`, `waterlink_sanitized`, `waterlink_fuzz` (MSan with `MOONWATER_MSAN=1`) | handshake flood under netem; address rotation reaches the global greeting ceiling |
 | Saved state | wifi and bluetooth lists written beside themselves and renamed, opened nonblocking, regular files only; no hash of a group secret on disk; `sh test/run cli link` | |
-| Shell, OS boundary | generated Bash and Dash differential; private edit files; PTY setup; tar pinned parents; hostile environment and privilege matrices; `pathname_race`; effect-based coreutils (`sh test/run shell builtins files tar`) | |
+| Shell, OS boundary | generated Bash and Dash differential; private edit files; `edit` draws a file's controls, DEL and invalid UTF-8 as `?` and drops C1 controls spelled in UTF-8, in rows and status line (`edit` lane, `hostile`); PTY setup; tar pinned parents; hostile environment and privilege matrices; `pathname_race`; effect-based coreutils (`sh test/run shell builtins files tar`) | |
 | Faults, resources | seccomp entropy failure; partial I/O, EINTR, ENOSPC, deadline and clock-jump faults; descriptor and mmap exhaustion; once-armed `memory_reserve`, writev and socket faults mid-path; namespaces with netem (`sh test/run netem`) | SNTP allocation faults |
 | Kernel (ring 0) | `core_state`, `pane_pages`, `shared_page`, `console_queue`, `term_streams` (kit lane); `ring0_hostile` on KASAN, UBSAN, lockdep or KCSAN images (`MOONWATER_IMAGE=dist/bootx64.efi sh test/run ring0`); image defaults for redirects, router advertisements, RFC 1337, SYN cookies (`sh test/run boot`, `net_sysctl`) | |
 | Supply chain | bowl bootstraps pinned by digest or signing key, refusal on any mismatch; a download held to a kernel size ceiling (2 x the measured size + 64 MiB, `RLIMIT_FSIZE`); the signature reader under `bowl_sig_fuzz`; `sh test/run bowl` | |
@@ -154,8 +154,8 @@ architecture gate above. CI is parked (`workflow_dispatch` only).
 - **Separate branches:** NTS and a clock floor (`feature/clock-floor`,
   `feature/nts`); WPA3 and 802.11w (`feature/wpa3-pmf-sae`); DNS over TLS
   (`feature/dns-over-tls`); DHCP over a raw socket (`feature/dhcp-packet-socket-acd`);
-  wget and curl parity of defaults (`feature/wget-curl-parity`); `edit` raw
-  output, a secret in shell history, boot taking the first install,
+  wget and curl parity of defaults (`feature/wget-curl-parity`); a secret in
+  shell history, boot taking the first install,
   `fs.protected_*`, `kptr_restrict`, `dmesg_restrict`, `io_uring_disabled`
   (`hardening/outside-network`).
 - **No change planned:** plain SNTP is accepted anywhere the build and clock
