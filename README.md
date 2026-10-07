@@ -163,10 +163,12 @@ TZif footer (`src/build/zones.py` regenerates them), which is right from the
 zone's last change on.
 
 **Kiosks.** `moonwater wipe yes` empties `/home` and `/root` except the settings
-above and the machine script overlay; `/bowls` survives. A kiosk is a machine
-script whose `moonwater_init` wipes and then starts Chromium, Weston or any
-bowl program -- the builtin script has this commented out. Start it in the
-background: events wait until `moonwater_init` returns.
+above and the machine script overlay; `/bowls` survives. A file system mounted
+below `/home` or `/root` is left as it is, and a `/home` or `/root` that is a
+symlink is refused. A kiosk is a machine script whose `moonwater_init` wipes
+and then starts Chromium, Weston or any bowl program -- the builtin script has
+this commented out. Start it in the background: events wait until
+`moonwater_init` returns.
 
 ## Link
 

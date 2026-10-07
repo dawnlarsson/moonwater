@@ -14479,6 +14479,10 @@ printf 'unasked-%s\n' $(( $? + 40 ))
 printf 'asked-%s\n' $(( $(grep -c 'nothing here can be asked' /tmp/unasked) * 7 ))
 moonwater setup install sda yes > /tmp/removable 2>&1
 printf 'removable-%s\n' $(( $? + 40 ))
+moonwater setup install sda1 yes > /tmp/r2 2>&1
+printf 'partition-%s\n' $(( $(grep -c 'sda1 is a partition' /tmp/r2) * 7 ))
+moonwater setup install ../etc yes > /tmp/r3 2>&1
+printf 'dotdot-%s\n' $(( $(grep -c 'there is no disk called' /tmp/r3) * 7 ))
 moonwater setup install nvme0n1 yes > /tmp/install 2>&1
 printf 'installed-%s\n' $(( $? + 40 ))
 cat /tmp/install
@@ -14507,6 +14511,8 @@ says live 'the terminal was asked for the disk'"'"'s name' 'typed-7'
 says live 'a script with nothing to ask is refused' 'unasked-41'
 says live 'and told the word that goes with it' 'asked-7'
 says live 'removable media is refused'  'removable-41'
+says live 'a partition is refused for the disk it is on' 'partition-7'
+says live 'a name that climbs out of /dev is no disk' 'dotdot-7'
 says live 'the install succeeds'        'installed-40'
 says live 'the session keeps the disk'  'verdict-1n0emvn ksid'
 says live 'live files went along'       'bound-emoh'

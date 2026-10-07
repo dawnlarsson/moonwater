@@ -43669,21 +43669,28 @@ def harness_moonwater_cli(argv):
                  "exit", "mount", "internet", "wired", "wifi", "+", "-", "+99:99", "-0",
                  "UTC+14", "UTC-14", "<+0530>-5:30", "Europe/", "../../etc/passwd", "x" * 300,
                  "\x1b[31m", "tab\there", "sv", "SE", "\u00e5\u00e4\u00f6", "0", "18446744073709551616",
-                 "power", "canvas on", "--", "-h", "status", "scale", "modes", "largest", "preferred", "1", "4", "5"]
+                 "power", "canvas on", "--", "-h", "status", "scale", "modes", "largest", "preferred", "1", "4", "5",
+                 " ", "ON", "on ", "-1", "+1", "99999999999999999999", "%s", "%n", "%%", "$(id)",
+                 "a\nb", "\x1b]0;x\x07", "RAW\\377\\376", "RAW\\300\\200", "RAW\\355\\240\\200",
+                 "/etc/passwd", "x" * 63, "x" * 64, "x" * 65, "x" * 4096, "help", "setup"]
         #       Neither "reboot" nor "bios" carries a reboot into these words: bios
         #       reboot sets a bit in the firmware, and a run as real root would
         #       leave it set on the machine that ran the lane.
         verbs = ["", "status", "timezone", "time", "ntp", "keyboard", "name", "canvas", "bind",
                  "wifi", "wired", "bluetooth", "priority", "brightness", "power", "cpu",
-                 "charge", "airplane", "-h"]
+                 "charge", "airplane", "-h", "help", "setup", "link"]
         fuzzed = []
         for number in range(300):
             argv = [rng.choice(verbs)] + [rng.choice(words) for _ in range(rng.randint(0, 4))]
-            fuzzed.append(" ".join(shlex.quote(word.encode().decode("unicode_escape"))
+            #       RAW words are bytes the shell makes with printf: not UTF-8, an
+            #       overlong NUL and a surrogate.
+            fuzzed.append(" ".join('"$(printf ' + shlex.quote(word[3:]) + ')"' if word.startswith("RAW")
+                                   else shlex.quote(word.encode().decode("unicode_escape"))
                                    for word in argv))
-        script += "".join(say(command) for command in walk)
-        script += "".join(f"echo '@@ fuzz{number}'; timeout 20 /tmp/moonwater {command} 2>&1; "
-                          f"echo \"@@status $?\"\n" for number, command in enumerate(fuzzed))
+        vectors = "".join(say(command) for command in walk)
+        vectors += "".join(f"echo '@@ fuzz{number}'; timeout 20 /tmp/moonwater {command} 2>&1; "
+                           f"echo \"@@status $?\"\n" for number, command in enumerate(fuzzed))
+        script += vectors
         lines, finished = session(script)
         walked = answers(lines)
         check(finished, "the walk of every verb finished", "")
@@ -43699,11 +43706,48 @@ def harness_moonwater_cli(argv):
             check(got is not None and status is not None and status in wanted_status,
                   f"moonwater {shown} answers {'0, 1 or 2' if command.startswith('fuzz') else wanted_status[0]}",
                   repr(got)[:300])
+        #       No answer carries a control byte other than a line's own: what a
+        #       refusal says back of what was typed (an escape, a title, a bell)
+        #       is written out.
+        controls = [line for line in lines if re.search(r"[\x00-\x08\x0b-\x1f\x7f]", line)]
+        check(not controls, "no answer to the walk or the fuzz carries an escape or another control byte",
+              [line[:80] for line in controls][:3])
+        #       The same fuzz from somebody who is not root, with /root out of reach.
+        user_walked = answers(session(vectors, nobody=True)[0])
+        for number, command in enumerate(fuzzed):
+            got = user_walked.get(f"fuzz{number}")
+            check(got is not None and got["status"] in (0, 1, 2),
+                  f"moonwater {command} answers 0, 1 or 2 for an ordinary user", repr(got)[:300])
         joined = "\n".join(lines)
         check("auto" in joined.split("@@ timezone", 2)[1].split("@@status")[0],
                      "neither zone file is auto", joined[:400])
         check("(manual)" in joined.split("@@ timezone", 3)[2].split("@@status")[0],
                      "a zone with no mode beside it is manual", joined[:400])
+
+        # The words of the settings the verbs above do not reach are read as
+        # state too: a FIFO planted at the name of one does not hold the verb
+        # that reads it, nor the clock library, which reads the zone for every
+        # tool that prints a local time (`date` here is the shell's applet).
+        shutil.copy(args.shell, sandbox / "tmp/date")
+        reading = (("timezone", ("timezone", "time", "status", "date")),
+                   ("timezone.mode", ("timezone",)), ("keyboard", ("keyboard",)),
+                   ("ntp", ("ntp", "ntp sampling")), ("ntp.sampling", ("ntp sampling",)))
+        script = ""
+        for word, verbs_read in reading:
+            #       What was there is put aside and back, for the tests after this one.
+            script += f"mv /root/{word} /tmp/{word}.kept 2>/dev/null; mkfifo /root/{word}\n"
+            for verb in verbs_read:
+                program = "/tmp/date" if verb == "date" else f"/tmp/moonwater {verb}"
+                script += (f"timeout 5 {program} >/dev/null 2>&1; "
+                           f"echo \"@@fifo {word} {verb}: $?\"\n")
+            script += f"rm -f /root/{word}; mv /tmp/{word}.kept /root/{word} 2>/dev/null\n"
+        lines, finished = session(script)
+        check(finished, "the FIFO state words session finished", "")
+        for word, verbs_read in reading:
+            for verb in verbs_read:
+                got = [line for line in lines if line.startswith(f"@@fifo {word} {verb}: ")]
+                check(got and got[0].rsplit(" ", 1)[1] in ("0", "1", "2"),
+                      f"{verb} is not held by a FIFO at /root/{word}", got)
 
         # A saved network on a machine with no wireless interface is not
         # waited for: boot and `wifi on` come back at once, where they once
@@ -44489,6 +44533,21 @@ while True:
                    "none" if "no server answered" in answer else answer)
             want = "taken" if taken else "rated" if rated else "denied" if denied else "none"
             check(got == want, f"time sync against {spec} is {want}", got)
+
+        # Zones set at once leave a zone and its mode that go together, and
+        # every writer says it took.
+        script = ("echo '@@ race'\nfor n in 1 2 3 4 5 6 7 8; do\n"
+                  "  (/tmp/moonwater timezone Europe/Paris >/dev/null 2>&1; echo \"@@r $?\") &\n"
+                  "  (/tmp/moonwater timezone Asia/Tokyo >/dev/null 2>&1; echo \"@@r $?\") &\n"
+                  "done\nwait\necho \"@@final $(cat /root/timezone) $(cat /root/timezone.mode)\"\n")
+        lines, finished = session(script)
+        check(finished, "the timezone race session finished", "\n".join(lines)[-300:])
+        rs = [line for line in lines if line.startswith("@@r ")]
+        final = [line for line in lines if line.startswith("@@final ")]
+        check(len(rs) == 16 and all(line == "@@r 0" for line in rs),
+              "sixteen timezones at once all say they took it", repr(rs))
+        check(final and final[0].endswith(" manual") and final[0].split()[1] in ("Europe/Paris", "Asia/Tokyo"),
+              "and leave a zone with its mode", repr(final))
 
         # The machine's name: two lists of words with nothing wrong in them, a
         # roll the first time it is asked for, one kept until it is changed,
@@ -45386,6 +45445,14 @@ while True:
         check(block("saved-eof") == [], "and leaves no network on the list", repr(block("saved-eof")))
         check(block("saved") == ["opennet", "", "pwnet", "hunter2hunter"],
               "an empty line saves an open network, a line a password", repr(block("saved")))
+
+        # bowl says a wrong word the way moonwater does: usage on stderr, 2.
+        shutil.copy(args.shell, sandbox / "tmp/bowl")
+        lines, finished = session(
+            "for c in '' '--bogus' '--fast' 'profile a b c d'; do /tmp/bowl $c >/tmp/o 2>/tmp/e; "
+            "echo \"@@bowl $? $(wc -c < /tmp/o) $(test -s /tmp/e && echo err)\"; done\n")
+        check(finished and [l for l in lines if l.startswith("@@bowl ")] == ["@@bowl 2 0 err"] * 4,
+              "bowl with a wrong word prints usage on stderr and exits 2", lines[-5:])
 
         # The usage is one table: a description starts in one column for every
         # row whose command leaves room (the longer ones start it on the line
