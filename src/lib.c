@@ -6306,6 +6306,27 @@ __asm__(
     ASM_USERSPACE_WIDE(
     ASM_NARROW("cpu_has_avx2", ".Lmemory_prefix_x64_words")
     "cmp $32, %rdx\n   jb .Lmemory_prefix_x64_words\n"
+    //
+    //       A hundred and twenty eight bytes a turn once there are that many,
+    //       the four compares anded into one mask. The single vector turn
+    //       below spends ten instructions on thirty two bytes (a compare, a
+    //       mask, a test, three pointer moves and the count), forty for what
+    //       this does in sixteen, and at 256 and 4096 bytes it measured 101%
+    //       and 187% over the traffic floor of BENCH_floor. The offset is the
+    //       answer so far and the only thing that moves; a block that is not
+    //       all equal is left unspent and handed to the single vector turn,
+    //       which finds the byte in it.
+    //
+    "cmp $128, %rdx\n   jb .Lmemory_prefix_x64_vector\n   .balign 16\n.Lmemory_prefix_x64_quad:\n"
+    "vmovdqu (%rdi,%rax), %ymm0\n   vpcmpeqb (%rsi,%rax), %ymm0, %ymm0\n"
+    "vmovdqu 32(%rdi,%rax), %ymm1\n   vpcmpeqb 32(%rsi,%rax), %ymm1, %ymm1\n"
+    "vmovdqu 64(%rdi,%rax), %ymm2\n   vpcmpeqb 64(%rsi,%rax), %ymm2, %ymm2\n"
+    "vmovdqu 96(%rdi,%rax), %ymm3\n   vpcmpeqb 96(%rsi,%rax), %ymm3, %ymm3\n"
+    "vpand %ymm1, %ymm0, %ymm0\n   vpand %ymm3, %ymm2, %ymm2\n   vpand %ymm2, %ymm0, %ymm0\n"
+    "vpmovmskb %ymm0, %ecx\n   cmp $-1, %ecx\n   jne .Lmemory_prefix_x64_quad_out\n"
+    "add $128, %rax\n   sub $128, %rdx\n   cmp $128, %rdx\n   jae .Lmemory_prefix_x64_quad\n"
+    ".Lmemory_prefix_x64_quad_out:\n   add %rax, %rdi\n   add %rax, %rsi\n"
+    "cmp $32, %rdx\n   jae .Lmemory_prefix_x64_vector\n   vzeroupper\n   jmp .Lmemory_prefix_x64_words\n"
     ".Lmemory_prefix_x64_vector:\n   vmovdqu (%rdi), %ymm0\n"
     "vpcmpeqb (%rsi), %ymm0, %ymm0\n   vpmovmskb %ymm0, %ecx\n"
     "cmp $-1, %ecx\n   jne .Lmemory_prefix_x64_vector_diff\n"
@@ -6315,7 +6336,7 @@ __asm__(
     ".Lmemory_prefix_x64_vector_diff:\n   not %ecx\n   bsf %ecx, %ecx\n"
     "add %rcx, %rax\n   vzeroupper\n" ASM_RET
     )
-    ".Lmemory_prefix_x64_words:\n   cmp $8, %rdx\n   jb .Lmemory_prefix_x64_bytes\n"
+    ".balign 16\n.Lmemory_prefix_x64_words:\n   cmp $8, %rdx\n   jb .Lmemory_prefix_x64_bytes\n"
     ".Lmemory_prefix_x64_word:\n   mov (%rdi), %r8\n   xor (%rsi), %r8\n"
     "jnz .Lmemory_prefix_x64_word_diff\n   add $8, %rdi\n   add $8, %rsi\n"
     "add $8, %rax\n   sub $8, %rdx\n   cmp $8, %rdx\n"
@@ -13698,6 +13719,24 @@ __asm__(
     ASM_RET
     ".Lmemory_exchange_apart_x64_bulk:\n"
 #ifndef KERNEL_MODE
+    //
+    //       Sixty four bytes a turn with the 256-bit registers where the
+    //       processor has them: four loads, then four stores, per turn, where
+    //       the 128-bit turn below spends the same instructions on half the
+    //       bytes. A qsort over records of a few hundred bytes or a few
+    //       kilobytes is all of this; the rows of BENCH_floor measured the
+    //       former body 213% and 496% over its traffic floor at 256 and 4096.
+    //
+    ASM_USERSPACE_WIDE(
+    "cmp $64, %rdx\n   jb .Lmemory_exchange_apart_x64_xmm\n"
+    ASM_NARROW("cpu_has_avx2", ".Lmemory_exchange_apart_x64_xmm")
+    ".balign 16\n.Lmemory_exchange_apart_x64_64:\n"
+    "vmovdqu 0(%rdi), %ymm0\n   vmovdqu 32(%rdi), %ymm1\n   vmovdqu 0(%rsi), %ymm2\n   vmovdqu 32(%rsi), %ymm3\n"
+    "vmovdqu %ymm2, 0(%rdi)\n   vmovdqu %ymm3, 32(%rdi)\n   vmovdqu %ymm0, 0(%rsi)\n   vmovdqu %ymm1, 32(%rsi)\n"
+    "add $64, %rdi\n   add $64, %rsi\n   sub $64, %rdx\n   cmp $64, %rdx\n   jae .Lmemory_exchange_apart_x64_64\n"
+    "vzeroupper\n   test %rdx, %rdx\n   jz .Lmemory_exchange_apart_x64_done\n"
+    )
+    ".Lmemory_exchange_apart_x64_xmm:\n"
     "cmp $32, %rdx\n   jb .Lmemory_exchange_apart_x64_16\n"
     ".balign 16\n.Lmemory_exchange_apart_x64_32:\n"
     "movdqu 0(%rdi), %xmm0\n   movdqu 16(%rdi), %xmm1\n"

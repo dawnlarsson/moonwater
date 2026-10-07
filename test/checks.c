@@ -14134,7 +14134,8 @@ static fn exchange_case(positive left, positive right, positive size,
 fn check_exchange()
 {
         static const positive large_widths[] = {
-            129, 255, 256, 257, 511, 512, 513, 1000, 2048,
+            129, 191, 192, 193, 255, 256, 257, 319, 320, 321, 511, 512, 513, 1000,
+            1024, 1025, 2048,
         };
 
         memory_exchange_apart(null, null, 0);
@@ -24177,6 +24178,21 @@ static void library_names_one(positive length, positive slack_a, positive slack_
                 same_bytes("bcopy", "backwards", b, libc_model_b, length + gap);
         }
 
+        // memory_exchange_apart between two guarded spans
+        {
+                p8 address_to a = libc_place(libc_b, length, slack_a, anchor & 2);
+                p8 address_to b = libc_place(libc_c, length, slack_b, anchor & 4);
+
+                for (positive i = 0; i < length; i++)
+                {
+                        a[i] = libc_model[i] = libc_byte(1);
+                        b[i] = libc_model_b[i] = libc_byte(1);
+                }
+                memory_exchange_apart(a, b, length);
+                same_bytes("memory_exchange_apart", "left gets right", a, libc_model_b, length);
+                same_bytes("memory_exchange_apart", "right gets left", b, libc_model, length);
+        }
+
         // strsep and strtok_r over the string, split at up to three delimiters
         {
                 p8 delimiters[4];
@@ -28627,10 +28643,12 @@ b32 main()
                 check_memory_search_ascii_case();
                 check_frob();
                 check_checksums();
+                check_exchange();
                 cpu_has_avx2 = had_avx2;
                 cpu_has_avx512 = 0;
                 check_frob();
                 check_checksums();
+                check_exchange();
                 cpu_has_avx512 = had_avx512;
         }
 #endif
