@@ -6044,6 +6044,15 @@ struct bowl_profile
         (the script is the session), no NetworkManager applet, no Bluetooth
         or print stack, and no kernel, shell or coreutils, which the bowl's
         own would only shadow.
+
+        The GPU is Mesa's: mesa-dri-gallium holds every OpenGL driver
+        (radeonsi, iris, nouveau, virtio, and the software ones for a
+        machine whose kernel has no render node), what KWin and Qt Quick
+        draw with. Vulkan is a driver of its own per vendor, which Plasma
+        never asks for and every game does: the Radeon and Intel ones are
+        listed, and NVK is not, because the kernel side of it is not in the
+        image. systemsettings is the panel's own favourite and where every
+        setting of the session is changed.
 */
 static string_address bowl_desktop_alpine[] = {
     "plasma-desktop", "plasma-workspace", "kwin", "kscreen", "plasma-pa",
@@ -6051,12 +6060,13 @@ static string_address bowl_desktop_alpine[] = {
     "breeze-icons", "kde-gtk-config", "xdg-desktop-portal-kde",
     "qt6-qtwayland", "xwayland", "dbus", "elogind", "polkit-elogind",
     "pipewire", "pipewire-pulse", "wireplumber", "mesa-dri-gallium",
-    "mesa-egl", "mesa-gbm", "font-noto", "font-dejavu", "xdg-user-dirs",
-    null};
+    "mesa-egl", "mesa-gbm", "mesa-vulkan-ati", "mesa-vulkan-intel",
+    "systemsettings", "font-noto", "font-dejavu", "xdg-user-dirs", null};
 
-/* 1963 MiB in 628 packages, x86-64 Alpine 3.24 on 2026-10-01. */
+/* 2024 MiB in 631 packages: 1963 MiB in 628 measured on x86-64 Alpine 3.24
+   on 2026-10-01, and the three added since by their own sizes (apk add -s). */
 #if X64
-#define BOWL_DESKTOP_ALPINE_BYTES ((p64)1963 * 1024 * 1024)
+#define BOWL_DESKTOP_ALPINE_BYTES ((p64)2024 * 1024 * 1024)
 #else
 #define BOWL_DESKTOP_ALPINE_BYTES 0
 #endif
