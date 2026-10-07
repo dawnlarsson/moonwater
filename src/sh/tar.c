@@ -160,6 +160,15 @@ static bool tar_field_value(p8 address_to field, positive width,
         if (width >= sizeof(digits))
                 return false;
 
+        //      A field that begins with a NUL is empty, and so is none:
+        //      archives that do not write a device number leave its two
+        //      fields as NULs, and every member asks for them.
+        if (width && !field[0])
+        {
+                address_to value = 0;
+                return true;
+        }
+
         memory_copy(digits, field, width);
         digits[width] = end;
 
@@ -324,6 +333,14 @@ static bool tar_join_name(p8 address_to prefix, p8 address_to name,
 
         if (!room)
                 return false;
+
+        //      No prefix, which is every name that fits in a hundred bytes:
+        //      the name field is the name, read once into place.
+        if (!prefix[0])
+        {
+                tar_field_text(name, TAR_NAME, into, room);
+                return into[0] != end;
+        }
 
         tar_field_text(name, TAR_NAME, leaf, sizeof(leaf));
         tar_field_text(prefix, TAR_PREFIX, head, sizeof(head));
@@ -917,6 +934,14 @@ static bool tar_member_link(p8 address_to block, p8 address_to into,
                 return true;
         }
 
+        //      Most members link to nothing, and the field says so by being
+        //      empty from its first byte.
+        if (!block[157])
+        {
+                into[0] = end;
+                return true;
+        }
+
         tar_field_text(block + 157, TAR_NAME, into, TAR_PATH);
         return true;
 }
@@ -1139,8 +1164,20 @@ static positive tar_seen_fill;
    ASCII, and the backslash doubled, so no name can drive the terminal. */
 static fn tar_quoted(writer output, string_address name)
 {
-        writer_spelled(output, (address_any)name, string_length(name),
-                       spelling_c(0));
+        positive length = string_length(name);
+
+        if (!length)
+                return;
+        //      A name of printable ASCII with no backslash in it, which is
+        //      nearly every name, is its own spelling: one scan for the
+        //      bytes the table would change, and the name goes out whole.
+        if (memory_escape_index(name, length,
+                                HEX_CONTROL | HEX_TAB | HEX_SLASH | HEX_HIGH) == length)
+        {
+                output(name, length);
+                return;
+        }
+        writer_spelled(output, (address_any)name, length, spelling_c(0));
 }
 
 static fn tar_name_line(writer output, string_address name)
@@ -1179,6 +1216,8 @@ static positive tar_header_word(p8 address_to into, p8 address_to field,
         if (!length)
                 length = positive_into(into, (positive)number);
 #if MOONWATER_STRICT_TEXT >= STRICT_SAFE
+        else if (memory_escape_index(field, length, HEX_CONTROL | HEX_TAB | HEX_HIGH) == length)
+                memory_copy(into, field, length);
         else
         {
                 /*      Text past ASCII stays as it is when it is UTF-8 and
@@ -1242,10 +1281,12 @@ static fn tar_long_line(p8 address_to block, p8 type, p64 mode, p64 size,
                 letters[0] = 'C';
 
         //      A pax uname or gname stands in for the header's own field.
-        widths = tar_header_word(owner, user_name ? (p8 address_to)user_name : block + 265,
-                                 user_name ? 63 : 32, user, numeric) +
-                 tar_header_word(grouped, group_name ? (p8 address_to)group_name : block + 297,
-                                 group_name ? 63 : 32, group, numeric);
+        positive owner_length = tar_header_word(owner, user_name ? (p8 address_to)user_name : block + 265,
+                                                user_name ? 63 : 32, user, numeric);
+        positive group_length = tar_header_word(grouped, group_name ? (p8 address_to)group_name : block + 297,
+                                                group_name ? 63 : 32, group, numeric);
+
+        widths = owner_length + group_length;
 
         if (type == '3' || type == '4')
         {
@@ -1265,10 +1306,28 @@ static fn tar_long_line(p8 address_to block, p8 type, p64 mode, p64 size,
                           address_of month, address_of day, address_of hour,
                           address_of minute, address_of second);
 
-        string_format(tar_listing, "%s %s/%s ", (string_address)letters,
-                      (string_address)owner, (string_address)grouped);
-        for (positive pad = widths; pad < tar_listing_width; pad++)
-                tar_listing(" ", 1);
+        /*      The line up to the name is one write: the mode, owner and group,
+                the column the size is right-aligned in, the size and the
+                date. The owner and group are at most 252 bytes each, the
+                widest column is the two of them and a size or a device
+                pair of 41, and the date fills a field of 40. */
+        p8 head[1280];
+        positive at = 0;
+
+        memory_copy_apart(head, letters, 10);
+        at = 10;
+        head[at++] = ' ';
+        memory_copy_apart(head + at, owner, owner_length);
+        at += owner_length;
+        head[at++] = '/';
+        memory_copy_apart(head + at, grouped, group_length);
+        at += group_length;
+        head[at++] = ' ';
+        if (tar_listing_width > widths)
+        {
+                memory_fill(head + at, ' ', tar_listing_width - widths);
+                at += tar_listing_width - widths;
+        }
         {
                 /*      The year with its sign, and room for every digit a
                         stamp can make it. A pax mtime may be negative and
@@ -1279,32 +1338,37 @@ static fn tar_long_line(p8 address_to block, p8 type, p64 mode, p64 size,
                         this prints it too rather than the wrap.
                 */
                 p8 when[40];
-                positive at = 0;
+                positive used = 0;
                 positive parts[4] = {month, day, hour, minute};
 
                 if (year < 0)
                 {
-                        when[at++] = '-';
-                        at += positive_into(when + at,
-                                            (positive)0 - (positive)year);
+                        when[used++] = '-';
+                        used += positive_into(when + used,
+                                              (positive)0 - (positive)year);
                 }
                 else
-                        at += positive_into(when + at, (positive)year);
+                        used += positive_into(when + used, (positive)year);
 
                 for (positive part = 0; part < 4; part++)
                 {
-                        when[at++] = part == 0 || part == 1 ? '-' : part == 2 ? ' ' : ':';
-                        when[at++] = (p8)('0' + parts[part] / 10);
-                        when[at++] = (p8)('0' + parts[part] % 10);
+                        when[used++] = part == 0 || part == 1 ? '-' : part == 2 ? ' ' : ':';
+                        when[used++] = (p8)('0' + parts[part] / 10);
+                        when[used++] = (p8)('0' + parts[part] % 10);
                 }
                 /*      Left in a column as wide as the widest date so far,
                         the way the size is right in one: GNU's datewidth. */
-                if (at > tar_listing_date_width)
-                        tar_listing_date_width = at;
-                memory_fill(when + at, ' ', tar_listing_date_width - at);
-                at = tar_listing_date_width;
-                when[at] = end;
-                string_format(tar_listing, "%s %s ", (string_address)amount, (string_address)when);
+                if (used > tar_listing_date_width)
+                        tar_listing_date_width = used;
+                memory_fill(when + used, ' ', tar_listing_date_width - used);
+                used = tar_listing_date_width;
+                memory_copy_apart(head + at, amount, length);
+                at += length;
+                head[at++] = ' ';
+                memory_copy_apart(head + at, when, used);
+                at += used;
+                head[at++] = ' ';
+                tar_listing(head, at);
         }
         tar_quoted(tar_listing, name);
         if (type == '1' || type == '2')

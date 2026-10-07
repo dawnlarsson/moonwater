@@ -434,25 +434,35 @@ static inline INLINE CONST p64 file_device_key(p32 major, p32 minor)
         return ((p64)major << 32) | minor;
 }
 
+/*      The three letters a class of permissions is, and the end of the string
+        after them, as the 32 bits that make one store: a mode is three
+        stores, in order, each laid over the byte the one before it ended in,
+        and the last one writes the terminator. Nothing is decided by a
+        branch but the three special bits, which a plain file does not have. */
+static const p32 file_mode_triplets[8] = {
+    '-' | '-' << 8 | '-' << 16, '-' | '-' << 8 | 'x' << 16,
+    '-' | 'w' << 8 | '-' << 16, '-' | 'w' << 8 | 'x' << 16,
+    'r' | '-' << 8 | '-' << 16, 'r' | '-' << 8 | 'x' << 16,
+    'r' | 'w' << 8 | '-' << 16, 'r' | 'w' << 8 | 'x' << 16};
+
 fn file_mode_letters(p8 address_to into, positive mode)
 {
-        p8 pattern[10] = "rwxrwxrwx";
-
         into[0] = file_kind_letter(mode);
+        memory_store_unaligned(p32, into + 1, file_mode_triplets[(mode >> 6) & 7]);
+        memory_store_unaligned(p32, into + 4, file_mode_triplets[(mode >> 3) & 7]);
+        memory_store_unaligned(p32, into + 7, file_mode_triplets[mode & 7]);
 
-        for (positive i = 0; i < 9; i++)
-                into[1 + i] = (mode & ((positive)1 << (8 - i))) ? pattern[i] : '-';
+        if (mode & (MODE_SET_USER | MODE_SET_GROUP | MODE_STICKY))
+        {
+                if (mode & MODE_SET_USER)
+                        into[3] = (mode & 0100) ? 's' : 'S';
 
-        if (mode & MODE_SET_USER)
-                into[3] = (mode & 0100) ? 's' : 'S';
+                if (mode & MODE_SET_GROUP)
+                        into[6] = (mode & 0010) ? 's' : 'S';
 
-        if (mode & MODE_SET_GROUP)
-                into[6] = (mode & 0010) ? 's' : 'S';
-
-        if (mode & MODE_STICKY)
-                into[9] = (mode & 0001) ? 't' : 'T';
-
-        into[10] = end;
+                if (mode & MODE_STICKY)
+                        into[9] = (mode & 0001) ? 't' : 'T';
+        }
 }
 
 /*
@@ -2133,6 +2143,7 @@ typedef struct
         p8 text[FILE_ACCOUNTS_MAX];
         p8 seen_name[FILE_NAME_MAX];
         positive seen;
+        positive seen_length;
         bool read;
         bool seen_set;
         bool seen_known;
@@ -2326,6 +2337,7 @@ static bool file_account_cached_name(positive which, positive id,
                 cache->seen_known = file_account_name(
                     file_account_text(which), id, 2, cache->seen_name,
                     FILE_NAME_MAX);
+                cache->seen_length = cache->seen_known ? string_length(cache->seen_name) : 0;
         }
 
         if (!cache->seen_known)
@@ -2334,6 +2346,29 @@ static bool file_account_cached_name(positive which, positive id,
         string_copy_max_end(into, cache->seen_name, limit - 1);
 
         return true;
+}
+
+// How long file_account_label's answer is, without making it: a column is
+// measured for every entry before any is written, and the name is the same
+// one nearly every time.
+static positive file_account_label_width(positive id, bool group, bool named)
+{
+        if (named)
+        {
+                file_account_cache address_to cache =
+                    file_accounts + (group ? FILE_ACCOUNT_GROUP : FILE_ACCOUNT_USER);
+                p8 scratch[FILE_NAME_MAX];
+
+                if ((!cache->seen_set || id != cache->seen) &&
+                    !file_account_cached_name(group ? FILE_ACCOUNT_GROUP : FILE_ACCOUNT_USER, id,
+                                              scratch, FILE_NAME_MAX))
+                        return positive_digits(id);
+                if (cache->seen_known)
+                        return cache->seen_length < FILE_NAME_MAX ? cache->seen_length
+                                                                  : FILE_NAME_MAX - 1;
+        }
+
+        return positive_digits(id);
 }
 
 #define file_user_name(id, into, limit)                                      \
@@ -2388,6 +2423,29 @@ static bool file_account_label(positive id, bool group, bool named,
         positive_into_string(into, id);
 
         return false;
+}
+
+// The same, and how many bytes it is: the cache knows, and the name is not
+// measured again behind the copy that has just been made.
+static positive file_account_label_text(positive id, bool group, bool named,
+                                        p8 address_to into)
+{
+        positive length = file_account_label_width(id, group, named);
+
+        if (named)
+        {
+                file_account_cache address_to cache =
+                    file_accounts + (group ? FILE_ACCOUNT_GROUP : FILE_ACCOUNT_USER);
+
+                if (cache->seen_set && cache->seen == id && cache->seen_known)
+                {
+                        memory_copy_apart(into, cache->seen_name, length);
+                        into[length] = end;
+                        return length;
+                }
+        }
+
+        return positive_into_string(into, id);
 }
 
 // Time ------------------------------------------------------
@@ -2469,17 +2527,8 @@ static const string_address file_month_names[12] = {
     "january", "february", "march",     "april",   "may",      "june",
     "july",    "august",   "september", "october", "november", "december"};
 
-// The three-letter form the listings print, spelt with a capital the way
-// the reference ls and ps spell it, taken from the one table rather than
-// kept as a second one in every printer.
-static fn file_month_short(writer write, positive month)
-{
-        string_address full = file_month_names[month - 1];
-        p8 name[3] = {(p8)(full[0] - ('a' - 'A')), full[1], full[2]};
-
-        write(name, 3);
-}
-
+// The three-letter form the listings print is the first three letters of
+// this table's word with a capital, the way the reference ls spells it.
 /*
         The date a listing puts beside a name, which is two different dates.
         Anything within the last half year gets a time of day, because that is
@@ -2490,28 +2539,32 @@ static fn file_month_short(writer write, positive month)
         The half year is 15778476 seconds, a Gregorian year divided in two,
         which is the same span the system's own ls draws the line at.
 */
-fn file_stamp_short(writer write, b64 seconds, b64 now)
+fn file_stamp_short(writer write, const tm address_to broken, b64 seconds, b64 now)
 {
-        b64 year;
-        positive month, day, hour, minute, second;
+        //      The instant's wall clock is the caller's, from the localtime it
+        //      asked to know the instant could be shown at all, and the
+        //      stamp is put together here and written once.
+        p8 text[40];
+        p8 address_to out = text;
+        string_address month = file_month_names[broken->tm_mon];
+        positive day = (positive)broken->tm_mday;
 
-        file_split_moment(seconds + clock_local_east(seconds), address_of year,
-                          address_of month, address_of day, address_of hour,
-                          address_of minute, address_of second);
+        *out++ = (p8)(month[0] - ('a' - 'A'));
+        *out++ = month[1];
+        *out++ = month[2];
+        *out++ = ' ';
+        out += positive_into_padded(out, day, 2, ' ');
+        *out++ = ' ';
 
-        file_month_short(write, month);
-        write(" ", 1);
-        positive_to_padded(write, day, 2, ' ', 0);
-        write(" ", 1);
-
-        bool recent = seconds <= now + 3600 && seconds > now - 15778476;
-
-        if (!recent)
-                return positive_to_padded(write, (positive)year, 5, ' ', 0);
-
-        file_two(write, hour);
-        write(":", 1);
-        file_two(write, minute);
+        if (!(seconds <= now + 3600 && seconds > now - 15778476))
+                out += positive_into_padded(out, (positive)((bipolar)broken->tm_year + 1900), 5, ' ');
+        else
+        {
+                out = clock_plain_two(out, broken->tm_hour);
+                *out++ = ':';
+                out = clock_plain_two(out, broken->tm_min);
+        }
+        write(text, (positive)(out - text));
 }
 
 // A day written down has to be a day the month has; a day arrived at by
@@ -11361,20 +11414,18 @@ static fn ls_time_say(ls_entry address_to entry)
                 right-aligned in the width the style's stamps take, as GNU's
                 ls writes it when localtime refuses.
         */
+        time_t stamp = (time_t)seconds;
+        tm broken;
+
+        if (!localtime_r(address_of stamp, address_of broken))
         {
-                time_t stamp = (time_t)seconds;
-                tm broken;
+                p8 text[32];
+                positive length = bipolar_into_string(text, seconds);
+                positive width = ls_time_stamp_width();
 
-                if (!localtime_r(address_of stamp, address_of broken))
-                {
-                        p8 text[32];
-                        positive length = bipolar_into_string(text, seconds);
-                        positive width = ls_time_stamp_width();
-
-                        writer_fill(ls_out, width > length ? width - length : 0, ' ');
-                        ls_out(text, length);
-                        return;
-                }
+                writer_fill(ls_out, width > length ? width - length : 0, ' ');
+                ls_out(text, length);
+                return;
         }
 
         switch (ls_time_style)
@@ -11387,7 +11438,7 @@ static fn ls_time_say(ls_entry address_to entry)
                 return;
         }
 
-        file_stamp_short(ls_out, seconds, ls_now);
+        file_stamp_short(ls_out, address_of broken, seconds, ls_now);
 }
 
 // ---- The listing ---------------------------------------------------------
@@ -11588,13 +11639,10 @@ static fn ls_print_long(string_address directory)
                                          ls_scaled_width(entry->size, ls_size_unit, ls_size_human,
                                                          ls_size_si, ls_size_suffix));
 
-                p8 name[FILE_NAME_MAX];
-
-                file_account_label(entry->owner, false, !ls_numeric, name);
-                owner_width = max(owner_width, string_length(name));
-
-                file_account_label(entry->group, true, !ls_numeric, name);
-                group_width = max(group_width, string_length(name));
+                owner_width = max(owner_width,
+                                  file_account_label_width(entry->owner, false, !ls_numeric));
+                group_width = max(group_width,
+                                  file_account_label_width(entry->group, true, !ls_numeric));
         }
 
         // The device column is "major, minor", and the size column is wide
@@ -11692,22 +11740,25 @@ static fn ls_print_long(string_address directory)
 
                         if (ls_owner_shown)
                         {
-                                file_account_label(entry->owner, false, !ls_numeric, who);
-                                string_to_field_bulk(ls_out, who, owner_width, ' ', true);
+                                positive length = file_account_label_text(entry->owner, false, !ls_numeric, who);
+
+                                writer_field_bulk(ls_out, who, length, owner_width, ' ', true);
                                 ls_out(" ", 1);
                         }
 
                         if (ls_group_shown)
                         {
-                                file_account_label(entry->group, true, !ls_numeric, who);
-                                string_to_field_bulk(ls_out, who, group_width, ' ', true);
+                                positive length = file_account_label_text(entry->group, true, !ls_numeric, who);
+
+                                writer_field_bulk(ls_out, who, length, group_width, ' ', true);
                                 ls_out(" ", 1);
                         }
 
                         if (ls_author)
                         {
-                                file_account_label(entry->owner, false, !ls_numeric, who);
-                                string_to_field_bulk(ls_out, who, owner_width, ' ', true);
+                                positive length = file_account_label_text(entry->owner, false, !ls_numeric, who);
+
+                                writer_field_bulk(ls_out, who, length, owner_width, ' ', true);
                                 ls_out(" ", 1);
                         }
 
