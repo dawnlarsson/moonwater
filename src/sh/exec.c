@@ -4983,6 +4983,153 @@ no_room:
 }
 
 /*
+        Whether a line carries a secret on its command line, for the two
+        moonwater forms that took one there: wifi add SSID PASSWORD and link
+        group NAME SECRET. The history is the one place a tool's own care
+        cannot reach (the tool runs in a child, and the line is kept before
+        it starts), so the line is judged here and never kept. Words are cut
+        as the shell cuts them, quotes and a backslash holding a blank in a
+        word, and a command ends at ; & | or a newline. "-" (standard input)
+        is not a secret, and neither is "allow" after a group name, nor is
+        the name in link group leave NAME. A pairing code (link NAME
+        abc-def) is not judged: it works once, for five minutes, and is read
+        off the other machine's screen to be typed.
+
+        This is a denylist and does what it says and no more. It sees a
+        moonwater by that name, or by a path ending in /moonwater, after
+        assignments (NAME=value) and the wrappers named below with their
+        options and numbers (sudo, env, nice, timeout ...), in the first
+        twelve words of a command, each read to 48 bytes. It does not see a
+        wrapper's option that takes a name (sudo -u root moonwater, env -u
+        NAME moonwater), a moonwater run by bash -c, ssh or xargs, through a
+        function, an alias, a variable or a substitution, or one after twelve
+        words. A secret on a line it misses is in the history like any other
+        word: the forms that keep it out of the line altogether are the ones
+        with "-", and the tight tier refuses the others.
+*/
+#define HISTORY_SECRET_WORDS 12
+#define HISTORY_SECRET_ROOM 48
+
+// Words that run the next word: the moonwater behind them is what is asked.
+static bool history_secret_wrapper(const p8 address_to word)
+{
+        static const string_address wrappers[] = {
+            "sudo", "doas", "env", "command", "exec", "nohup", "time",
+            "builtin", "nice", "ionice", "setsid", "chrt", "taskset",
+            "stdbuf", "timeout", "unbuffer", "xargs", "busybox", "strace"};
+
+        for (positive at = 0; at < array_count(wrappers); at++)
+                if (string_equals((string_address)word, wrappers[at]))
+                        return true;
+        return false;
+}
+
+// NAME=value, which a command line may begin with.
+static bool history_secret_assignment(const p8 address_to word)
+{
+        positive at = 0;
+
+        if (!(byte_is_alpha(word[0]) || word[0] == '_'))
+                return false;
+        while (word[at] && (byte_is_alnum(word[at]) || word[at] == '_'))
+                at++;
+        return word[at] == '=';
+}
+
+static bool history_secret_words(p8 word[][HISTORY_SECRET_ROOM], positive count)
+{
+        positive first = 0;
+
+        if (count > HISTORY_SECRET_WORDS)
+                count = HISTORY_SECRET_WORDS;
+
+        //      Assignments, wrappers and their options come first: sudo
+        //      moonwater wifi add h pass is the same line.
+        while (first < count &&
+               (history_secret_assignment(word[first]) ||
+                history_secret_wrapper(word[first]) ||
+                (first && (word[first][0] == '-' ||
+                           (word[first][0] >= '0' && word[first][0] <= '9')))))
+                first++;
+
+        if (first >= count || count - first < 5)
+                return false;
+
+        if (!string_equals((string_address)word[first], "moonwater") &&
+            !memory_has_suffix(word[first],
+                               string_length((string_address)word[first]),
+                               "/moonwater"))
+                return false;
+
+        return !string_equals((string_address)word[first + 4], "-") &&
+               ((string_equals((string_address)word[first + 1], "wifi") &&
+                 string_equals((string_address)word[first + 2], "add")) ||
+                (string_equals((string_address)word[first + 1], "link") &&
+                 string_equals((string_address)word[first + 2], "group") &&
+                 !string_equals((string_address)word[first + 3], "leave") &&
+                 !string_equals((string_address)word[first + 4], "allow")));
+}
+
+static bool history_secret_line(string_address text, positive length)
+{
+        p8 word[HISTORY_SECRET_WORDS][HISTORY_SECRET_ROOM];
+        positive count = 0;
+        positive at = 0;
+
+        for (;;)
+        {
+                positive used = 0;
+                p8 mark = 0;
+
+                while (at < length && (text[at] == ' ' || text[at] == '\t'))
+                        at++;
+
+                if (at >= length || text[at] == ';' || text[at] == '&' ||
+                    text[at] == '|' || text[at] == '\n')
+                {
+                        if (history_secret_words(word, count))
+                                return true;
+                        if (at >= length)
+                                return false;
+                        count = 0;
+                        at++;
+                        continue;
+                }
+
+                for (; at < length; at++)
+                {
+                        p8 byte = (p8)text[at];
+
+                        if (mark)
+                        {
+                                if (byte == mark)
+                                {
+                                        mark = 0;
+                                        continue;
+                                }
+                        }
+                        else if (byte == '\'' || byte == '"')
+                        {
+                                mark = byte;
+                                continue;
+                        }
+                        else if (byte == '\\' && at + 1 < length)
+                                byte = (p8)text[++at];
+                        else if (byte == ' ' || byte == '\t' || byte == ';' ||
+                                 byte == '&' || byte == '|' || byte == '\n')
+                                break;
+
+                        if (count < HISTORY_SECRET_WORDS &&
+                            used + 1 < HISTORY_SECRET_ROOM)
+                                word[count][used++] = byte;
+                }
+                if (count < HISTORY_SECRET_WORDS)
+                        word[count][used] = end;
+                count++;
+        }
+}
+
+/*
         Whether a line is worth remembering, which is not the shell's opinion.
 
         HISTCONTROL and HISTIGNORE are how a person says what their own
@@ -4999,7 +5146,7 @@ static bool history_wanted(string_address text, positive length)
         bool dedupe = false;
         bool erase = false;
 
-        if (!length)
+        if (!length || history_secret_line(text, length))
                 return false;
 
         for (string_address at = control; at && string_get(at);)

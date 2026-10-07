@@ -44662,6 +44662,41 @@ while True:
                              "power and charge ones too), the link's key and switch, and the bowls",
                              line)
 
+        # A group's secret is read from standard input with "-", and never
+        # taken for the word "-" itself; a password or a secret on the line
+        # is told to a person at a terminal and not to a script, whose
+        # output stays what it was.
+        lines, finished = session(
+            "rm -f /root/link.groups\n"
+            "echo '@@ empty'; /tmp/moonwater link group grp - < /dev/null 2>&1; echo \"@@status $?\"\n"
+            "echo '@@ short'; echo abc | /tmp/moonwater link group grp - 2>&1; echo \"@@status $?\"\n"
+            "echo '@@ piped'; printf 'a long enough secret for a group\\n' | "
+            "/tmp/moonwater link group grp - 2>&1; echo \"@@status $?\"\n"
+            "echo '@@ script'; /tmp/moonwater wifi add scriptnet passpass1 2>&1; echo \"@@status $?\"\n"
+            "echo '@@ terminal'; script -qec '/tmp/moonwater wifi add ttynet passpass1' /dev/null 2>&1; echo \"@@status $?\"\n")
+        seen = answers(lines)
+        check(finished and seen.get("empty", {}).get("status") == 1 and
+              any("nothing saved" in line for line in seen["empty"]["out"]),
+              "link group NAME - with nothing on standard input saves nothing", repr(seen.get("empty")))
+        check(seen.get("short", {}).get("status") == 1 and
+              any("at least 8" in line for line in seen["short"]["out"]),
+              "link group NAME - holds a short secret to the same length as one on the line",
+              repr(seen.get("short")))
+        check(seen.get("piped", {}).get("status") == 0 and
+              any(" in group grp" in line for line in seen["piped"]["out"]) and
+              not any("guessed" in line for line in seen["piped"]["out"]),
+              "link group NAME - takes the secret from standard input, not the word -",
+              repr(seen.get("piped")))
+        check("script" in seen and not any("seen by ps" in line for line in seen["script"]["out"]),
+              "a password on the line says nothing about ps to a script", repr(seen.get("script")))
+        #       script(1) needs a pty of its own, which the sandbox may not offer.
+        if not any("pseudo-terminal" in line for line in seen.get("terminal", {}).get("out", ["pseudo-terminal"])) and \
+                seen.get("terminal", {}).get("status") != 127:
+            check(any("seen by ps" in line and "- reads it" in line
+                      for line in seen.get("terminal", {}).get("out", [])),
+                  "a password on the line is told to a person at a terminal to use -",
+                  repr(seen.get("terminal")))
+
         # The clock's verbs and what they say. A TZ in the caller's environment
         # is the caller's and not the machine's zone (sudo's env_keep and ssh's
         # AcceptEnv carry one in); a caller who cannot read /root is told so
@@ -64388,9 +64423,18 @@ status, out, err = on("a", moon + " link group lab")
 say(status == 0, "a group file with the old check still joins (%r)" % (err[-200:],))
 say(not any(open(top + "/a/root/link.groups", "rb").read()[64:96]),
     "and the file written after it has no check")
+#       The secret on standard input: never in argv, and the same key as when
+#       it was typed there.
+before_key = open(top + "/a/root/link.groups", "rb").read()[32:64]
+status, out, err = on("a", moon + " link group lab -", stdin=(secret + "\n").encode())
+say(status == 0 and open(top + "/a/root/link.groups", "rb").read()[32:64] == before_key,
+    "a secret on standard input makes the same key as one in argv (%r)" % (err[-200:],))
+status, out, err = on("a", moon + " link group lab -", stdin=b"")
+say(status != 0 and b"nothing saved" in (out + err),
+    "and no line on standard input is refused, not taken for an empty secret")
 status, out, err = on("a", moon + " link group fresh-lab allow run")
-say(status == 0 and b"link group fresh-lab " in out,
-    "a made secret is told with the join command that takes it (%r)" % (out[-200:],))
+say(status == 0 and b"link group fresh-lab -" in out,
+    "a made secret is told with the form that keeps it out of argv (%r)" % (out[-200:],))
 on("a", moon + " link group leave fresh-lab")
 
 names = {}

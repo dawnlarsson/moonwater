@@ -80427,6 +80427,118 @@ static fn download_ceiling(void)
         system_remove_at(AT_FDCWD, said, 0);
 }
 
+/*
+        A secret on a command line is not kept in the history: the two
+        moonwater forms that took one there (wifi add SSID PASSWORD, link
+        group NAME SECRET) are judged by history_wanted before the line is
+        copied. The same verbs with "-", with no word, with allow after the
+        group, a pairing code (good once, for five minutes) and other
+        commands entirely are kept. The last rows are what the denylist does
+        not see and says so: a wrapper's option that takes a name, bash -c,
+        ssh, a verb after twelve words.
+*/
+static fn secret_lines(void)
+{
+        static const struct { string_address line; bool secret; } lines[] = {
+            {"moonwater wifi add home hunter2hunter2", true},
+            {"moonwater wifi add 'my home' 'pass phrase here'", true},
+            {"moonwater wifi add \"my home\" pass\\ phrase", true},
+            {"  /usr/bin/moonwater wifi add home hunter2hunter2", true},
+            {"ls; moonwater wifi add home hunter2hunter2", true},
+            {"ls && moonwater link group lab s3cr3tsecret allow run", true},
+            {"moonwater link group lab s3cr3tsecret", true},
+            {"sudo moonwater wifi add home hunter2hunter2", true},
+            {"sudo -E /usr/bin/moonwater wifi add home hunter2hunter2", true},
+            {"LC_ALL=C moonwater link group lab s3cr3tsecret", true},
+            {"HOME=/root PATH=/bin env -i moonwater wifi add home hunter2hunter2", true},
+            {"command moonwater wifi add home hunter2hunter2", true},
+            {"nohup moonwater link group lab s3cr3tsecret allow run", true},
+            {"time exec moonwater wifi add home hunter2hunter2", true},
+            {"timeout 5 moonwater wifi add home hunter2hunter2", true},
+            {"nice -n 5 moonwater link group lab s3cr3tsecret", true},
+            {"sudo moonwater wifi add home -", false},
+            {"sudo moonwater wifi add home", false},
+            {"sudo ls wifi add home hunter2hunter2", false},
+            {"X=1 echo moonwater wifi add home hunter2hunter2", false},
+            {"moonwater wifi add home -", false},
+            {"moonwater wifi add home", false},
+            {"moonwater wifi add 'my home'", false},
+            {"moonwater link group lab -", false},
+            {"moonwater link group lab - allow run", false},
+            {"moonwater link group lab", false},
+            {"moonwater link group lab allow run", false},
+            {"moonwater link group leave lab", false},
+            {"moonwater link group leave lab forget", false},
+            {"moonwater link group", false},
+            {"moonwater link office abc-def", false},
+            {"moonwater link pair office AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", false},
+            {"moonwater link join lab s3cr3tsecret", false},
+            {"moonwater wifi remove home", false},
+            {"moonwater wifi", false},
+            {"echo moonwater wifi add home hunter2hunter2 | cat", false},
+            {"echo hi", false},
+            {"", false},
+            // What the denylist does not see.
+            {"sudo -u root moonwater wifi add home hunter2hunter2", false},
+            {"env -u TERM moonwater wifi add home hunter2hunter2", false},
+            {"bash -c 'moonwater wifi add home hunter2hunter2'", false},
+            {"ssh box moonwater wifi add home hunter2hunter2", false},
+            {"sudo sudo sudo sudo sudo sudo sudo sudo sudo sudo sudo sudo moonwater wifi add home hunter2hunter2", false},
+        };
+
+        for (positive at = 0; at < array_count(lines); at++)
+        {
+                bool said = history_secret_line(lines[at].line,
+                                                string_length(lines[at].line));
+
+                if (said != lines[at].secret)
+                        string_format(log, "  FAIL the line: %s\n", lines[at].line);
+                check("A line with a secret on it is kept out of the history",
+                      said == lines[at].secret);
+        }
+        check("history_wanted refuses a line with a secret on it",
+              !history_wanted("moonwater wifi add home hunter2hunter2", 38) &&
+                  history_wanted("moonwater wifi add home -", 25));
+}
+
+#if MOONWATER_STRICT >= STRICT_TIGHT
+/*
+        The tight tier refuses the argument forms (host.c's wifi add and
+        waterlink's link group) before they touch anything, and says why: the
+        message is read back from standard error. The forms with "-" are not
+        in question here, they read the terminal.
+*/
+static bool secret_refused(string_address what, bool group)
+{
+        static string_address wifi[] = {"moonwater", "wifi", "add", "home", "hunter2hunter2"};
+        static string_address link[] = {"lab", "s3cr3tsecret"};
+        p8 said[256];
+        bipolar kept = (bipolar)system_call_1(syscall(dup), 2);
+        bipolar file = system_open_at_mode(AT_FDCWD, "/tmp/moonwater-secret-said",
+                                           O_RDWR | O_CREAT | O_TRUNC, 0600);
+        b32 answer;
+        bipolar got;
+
+        system_call_2(syscall(dup2), (positive)file, 2);
+        answer = group ? link_group_join(link, 2) : host_wifi(wifi, 5);
+        system_call_2(syscall(dup2), (positive)kept, 2);
+        system_close((positive)kept);
+        system_close((positive)file);
+        got = file_read_once_at(AT_FDCWD, "/tmp/moonwater-secret-said", said, sizeof said - 1);
+        system_remove_at(AT_FDCWD, "/tmp/moonwater-secret-said", 0);
+        said[got > 0 ? got : 0] = end;
+        return answer != 0 && got > 0 && string_find((string_address)said, what);
+}
+
+static fn secret_arguments(void)
+{
+        check("The tight tier refuses a password on the command line, and says so",
+              secret_refused("password on the command line is refused", false));
+        check("The tight tier refuses a group secret on the command line, and says so",
+              secret_refused("secret on the command line is refused", true));
+}
+#endif
+
 b32 main(void)
 {
         names();
@@ -80443,6 +80555,10 @@ b32 main(void)
         profiles();
         downloads();
         download_ceiling();
+        secret_lines();
+#if MOONWATER_STRICT >= STRICT_TIGHT
+        secret_arguments();
+#endif
         json();
         oci();
         nix();

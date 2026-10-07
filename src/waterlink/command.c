@@ -83,7 +83,8 @@ static fn link_ago(p64 then, p8 address_to text)
 */
 /*
         Whether the machine script joins a namespace with a secret on the
-        line: "link group NAME" followed by a word that is not "allow".
+        line: "link group NAME" followed by a word that is not "allow" and
+        not "-" (the secret on standard input, which is not in the script).
 */
 static bool link_script_names_secret(string_address script,
                                      string_address namespace)
@@ -103,7 +104,8 @@ static bool link_script_names_secret(string_address script,
                 word += length;
                 word += string_span_of_set(word, " ");
                 if (*word && *word != '\n' && *word != ';' && *word != '#' &&
-                    !string_has_prefix(word, "allow"))
+                    !string_has_prefix(word, "allow") &&
+                    !(*word == '-' && (!word[1] || string_first_of(" \n;#<", word[1]))))
                         return true;
         }
         return false;
@@ -211,8 +213,9 @@ static b32 link_status(void)
                                               "    the machine script holds "
                                               "its secret, which any user can "
                                               "read through /dev/spark: run "
-                                              "moonwater link group %s SECRET "
-                                              "once and keep only the name "
+                                              "moonwater link group %s - "
+                                              "once, the secret on standard "
+                                              "input, and keep only the name "
                                               "there\n",
                                               (string_address)groups.record[g].namespace);
                 }
@@ -586,7 +589,13 @@ static p32 link_grants_of(string_address address_to words, positive count,
 }
 
 /*
-        group NAMESPACE [SECRET] [allow GRANT...]
+        group NAMESPACE [SECRET|-] [allow GRANT...]
+
+        "-" reads the secret from standard input, which keeps it out of argv
+        and of the shell's history: one line, or a no-echo prompt at a
+        terminal. A machine script that joins every boot reads it from a
+        file, group NAME - < /root/secret. Given on the line it still works,
+        and the tight tier refuses it.
 
         With a secret, this machine is in the group from now on and across
         boots, install and wipe; the secret itself is never kept, only what
@@ -606,6 +615,7 @@ static b32 link_group_join(string_address address_to words, positive count)
         link_groups groups;
         struct link_group_record address_to record = null;
         p8 made[256];
+        p8 typed[sizeof made + 1];
         bool generated = false;
         bool granted = false;
         bool good;
@@ -613,6 +623,8 @@ static b32 link_group_join(string_address address_to words, positive count)
         positive at = 1;
         p8 grants[96];
         bipolar lock;
+
+        scope_exit(crypto_forget(typed, sizeof typed));
 
         if (!link_name_good(namespace) ||
             string_length(namespace) >= WATERLINK_NAMESPACE_MAX)
@@ -622,6 +634,20 @@ static b32 link_group_join(string_address address_to words, positive count)
                                    namespace);
         if (at < count && !string_equals(words[at], "allow"))
                 secret = words[at++];
+        if (secret && string_equals(secret, "-"))
+        {
+                //      One line, which the length check below judges; the
+                //      end of input with nothing before it is no answer.
+                return_if(radio_password_read(typed, sizeof typed, namespace,
+                                              false, true) < 0,
+                          host_refuse("nothing saved\n"));
+                secret = (string_address)typed;
+        }
+        else
+                return_if(secret && MOONWATER_STRICT >= STRICT_TIGHT,
+                          host_refuse("a secret on the command line is "
+                                      "refused: give it on standard input "
+                                      "with -\n"));
         if (at < count)
         {
                 return_if(!string_equals(words[at], "allow") || at + 1 == count, host_usage());
@@ -737,10 +763,10 @@ static b32 link_group_join(string_address address_to words, positive count)
                 if (generated)
                         string_format(log,
                                       host_label "the secret is %s -- on each other "
-                                                 "machine: moonwater link group "
-                                                 "%s %s\n",
-                                      (string_address)made, namespace,
-                                      (string_address)made);
+                                                 "machine, with it on standard "
+                                                 "input: moonwater link group "
+                                                 "%s -\n",
+                                      (string_address)made, namespace);
                 else if (secret && string_length(secret) < 20)
                         string_format(log, host_label "a secret this short can be "
                                                       "guessed offline by anyone on "

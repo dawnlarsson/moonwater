@@ -8770,7 +8770,8 @@ static bool radio_join_waiting(void)
 #define RADIO_TERMINAL_SET 0x5402
 
 static bipolar radio_password_read(p8 address_to into, positive room,
-                                   string_address ssid, bool only_asked)
+                                   string_address ssid, bool only_asked,
+                                   bool group)
 {
         p8 saved[64];
         p8 quiet[64];
@@ -8794,8 +8795,11 @@ static bipolar radio_password_read(p8 address_to into, positive room,
                 quiet[17 + 6] = 1; // VMIN
                 quiet[17 + 5] = 0; // VTIME
                 radio_display(shown, sizeof(shown), ssid, string_length(ssid));
-                host_say(log_error, host_label "password for %s (empty for an open network): ",
-                         shown);
+                if (group)
+                        host_say(log_error, host_label "secret for %s: ", shown);
+                else
+                        host_say(log_error, host_label "password for %s (empty for an open network): ",
+                                 shown);
                 system_call_3(syscall(ioctl), 0, RADIO_TERMINAL_SET, (positive)quiet);
         }
 
@@ -9811,6 +9815,15 @@ static b32 host_wifi(string_address address_to arguments, positive count)
                 p8 pass[256];
                 positive length;
 
+                //      A password in the argument is in ps and in the
+                //      history of any shell that does not know this verb;
+                //      the tight tier refuses the form, and anywhere it is
+                //      taken a person at a terminal is told the other.
+                return_if(MOONWATER_STRICT >= STRICT_TIGHT && count == 5 &&
+                              !string_equals(arguments[4], (string_address) "-"),
+                          host_refuse("a password on the command line is "
+                                      "refused: give it on standard input "
+                                      "with -\n"));
                 host_need_root();
                 scope_exit(crypto_forget(pass, sizeof(pass)));
 
@@ -9821,11 +9834,15 @@ static b32 host_wifi(string_address address_to arguments, positive count)
                 if (count == 4 || string_equals(arguments[4], (string_address) "-"))
                 {
                         if (radio_password_read(pass, sizeof(pass), arguments[3],
-                                                count == 4) < 0)
+                                                count == 4, false) < 0)
                                 return host_refuse("nothing saved\n");
                 }
                 else
                 {
+                        if (stream_is_terminal(2))
+                                host_say(log_error, host_label "a password on the "
+                                         "command line is seen by ps: - reads it "
+                                         "without that\n");
                         length = string_length(arguments[4]);
                         if (length >= sizeof(pass))
                                 return host_refuse("that password is too long\n");
@@ -16076,7 +16093,7 @@ static const host_row host_rows[] = {
     {null, "link add NAME KEY [HOST[:PORT]]", "link by key, with no code", 'f'},
     {null, "link remove NAME", "stop knowing it", 'f'},
     {null, "link allow|deny NAME GRANT...", "shell run log files (any file but the link's own)", 'f'},
-    {null, "link group [NAME [SECRET] [allow GRANT...]]", "machines on one network that link themselves", 'f'},
+    {null, "link group [NAME [SECRET|-] [allow GRANT...]]", "machines on one network that link themselves", 'f'},
     {null, "link group leave NAME [forget]", "stop, and forget the group's key", 'f'},
     {null, "link on|off", "the listener, kept across boots [off]", 'f'},
     {null, "link port [N|auto]", "the udp port it takes, and `link add` assumes [22348]", 'f'},

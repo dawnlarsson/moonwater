@@ -86,7 +86,7 @@ moonwater link log NAME                follow NAME's kernel log
 moonwater link add NAME KEY [HOST[:PORT]]  link by key, with no code
 moonwater link remove NAME             stop knowing it
 moonwater link allow|deny NAME GRANT...  shell run log files (any file but the link's own)
-moonwater link group [NAME [SECRET] [allow GRANT...]]  machines on one network that link themselves
+moonwater link group [NAME [SECRET|-] [allow GRANT...]]  machines on one network that link themselves
 moonwater link group leave NAME [forget]  stop, and forget the group's key
 moonwater link on|off                  the listener, kept across boots [off]
 moonwater link port [N|auto]           the udp port it takes, and `link add` assumes [22348]
@@ -205,8 +205,16 @@ another, read when it starts; `link add NAME KEY HOST` means that port too, and
 
 For machines nobody stands in front of, join a group instead:
 `moonwater link group office` makes a 160-bit secret and prints the line to run
-on the others; one of your own is eight characters or more, and under twenty is
-said to be guessable. Members on the same local network find each other over mDNS
+on the others (`link group office -`, which takes the secret from standard
+input or asks for it with the echo off); one of your own is eight characters or
+more, and under twenty is said to be guessable. A secret given on the line is
+in `ps` while the command lives, and the shell does not keep that line in its
+history (`wifi add SSID PASSWORD` is not kept either; a pairing code is, it is
+good once and for five minutes). The history rule is a denylist for a
+`moonwater` named as such, behind `sudo`, `env` and the like: not `sudo -u root`,
+`bash -c`, `ssh HOST moonwater`, a function or an alias, or a verb after twelve
+words. `MOONWATER_STRICT` tight refuses both argument forms.
+Members on the same local network find each other over mDNS
 (`_waterlink._udp`) and link themselves, under the grants their group line
 gave. Machines announce only a port, under random labels; only the secret's
 600,000-round PBKDF2 result is stored. Join on the live stick before
@@ -293,8 +301,9 @@ end), and `ask`.
 **Secrets stay out of the script.** The machine script is readable through
 `/dev/spark`, and a command line is in `ps`. `moonwater wifi add SSID - <
 /root/office.pass` reads the password from a file through standard input, and
-`moonwater link group NAME` with no secret joins the group this machine
-already has: give it the secret once, as root, before the install. A `link
+`moonwater link group NAME - < /root/office.secret` reads a group's secret the
+same way, and `moonwater link group NAME` with no secret joins the group this
+machine already has: give it the secret once, as root, before the install. A `link
 group` that finds no group by the name makes a new one with a secret of its
 own and prints it. `wifi add SSID` with no password and no terminal saves an
 open network, as it always did (and is refused, with the network saved, if the
