@@ -15140,8 +15140,12 @@ static bool name_valid(string_address name)
 
 static bipolar name_apply(string_address name)
 {
-        return system_call_2(syscall(sethostname), (positive)name,
-                             string_length(name));
+        bipolar applied = system_call_2(syscall(sethostname), (positive)name,
+                                        string_length(name));
+
+        if (applied >= 0)
+                bowl_hosts_write(name);
+        return applied;
 }
 
 /* The name /root keeps, when what it keeps is one. */

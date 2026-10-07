@@ -1572,28 +1572,21 @@ static b32 bowl_write_bytes(string_address path, string_address text,
         installer leaves them. Without /etc/hosts glibc answers localhost
         with ::1 alone, and a program that asks for the machine's own name
         (sudo, X, CUPS, a Java or MPI program, a mail agent) is told it does
-        not exist and waits for a resolver to say otherwise.
+        not exist and waits for a resolver to say otherwise. Written when
+        the machine takes its name (name_apply) and, where nothing has yet,
+        by the first launch from the name the kernel has.
 */
-static fn bowl_session_hosts(void)
+static fn bowl_hosts_write(string_address name)
 {
         static const p8 fixed[] = "127.0.0.1 localhost\n"
                                   "::1 localhost ip6-localhost ip6-loopback\n";
         p8 text[sizeof(fixed) + 80];
-        p8 name[66];
-        bipolar got;
         positive used = sizeof(fixed) - 1;
-        positive length = 0;
-
-        if (system_access_at(AT_FDCWD, "/etc/hosts", 0) >= 0)
-                return;
+        positive length = string_length(name);
 
         memory_copy(text, fixed, used);
-        got = file_slurp("/proc/sys/kernel/hostname", name, sizeof(name) - 1);
-        while (got > 0 && length < (positive)got && name[length] != '\n' &&
-               (string_first_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-.",
-                                name[length]) != null))
-                length++;
-        if (length && length == (positive)got - (name[got - 1] == '\n'))
+        if (length && length <= 64 &&
+            string_span_of_set(name, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-.") == length)
         {
                 memory_copy(text + used, "127.0.1.1 ", 10);
                 used += 10;
@@ -1604,6 +1597,21 @@ static fn bowl_session_hosts(void)
         bowl_quiet = true;
         bowl_write_bytes("/etc/hosts", text, used);
         bowl_quiet = false;
+}
+
+static fn bowl_session_hosts(void)
+{
+        p8 name[66];
+        bipolar got;
+
+        if (system_access_at(AT_FDCWD, "/etc/hosts", 0) >= 0)
+                return;
+
+        got = file_slurp("/proc/sys/kernel/hostname", name, sizeof(name) - 1);
+        if (got > 0 && name[got - 1] == '\n')
+                got--;
+        name[got > 0 ? got : 0] = end;
+        bowl_hosts_write(name);
 }
 
 static fn bowl_session_identity(void)
