@@ -65492,6 +65492,7 @@ typedef struct
 #define NL80211_KEYTYPE_GROUP 0
 #define NL80211_KEYTYPE_PAIRWISE 1
 #define WIFI_EAPOL_HDR 99
+#define PACKET_HOST 0
 
 static const p8 *fz_at;
 static positive fz_left;
@@ -65996,13 +65997,15 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                 else if (op == 8)       /* a message 1 from a sender of the input's choosing */
                 {
                         p8 how = fz_byte();
+                        p8 kind = fz_byte() % 6;        /* the kernel's pkttype: host, broadcast, multicast, other host, outgoing, loopback */
                         p8 nonce[32];
                         p64 counter = fz_replay;
                         socket_address_packet from;
                         p32 from_size = sizeof from;
-                        bool ap = (how & 7) < 2;
+                        bool ap = (how & 7) < 2 && kind == PACKET_HOST;
 
                         memset(&from, 0, sizeof from);
+                        from.pkttype = kind;
                         from.family = AF_PACKET;
                         from.protocol = network_order_16(ETH_P_PAE);
                         from.index = 7;
@@ -66333,15 +66336,19 @@ def wifi_eapol_fuzz_seeds():
                              op(2, draw(16)) + op(3) + op(4))
     # Message 1 in the access point's name, with another ANonce, its own,
     # and the last replay counter there is; then from every other sender.
-    seeds["forged_m1.bin"] = (start + handshake() + op(8, b"\x00", draw(32)) + op(2, draw(16)) +
-                              op(3) + op(8, b"\xf9") + op(2, draw(16)) +
+    seeds["forged_m1.bin"] = (start + handshake() + op(8, b"\x00\x00", draw(32)) + op(2, draw(16)) +
+                              op(3) + op(8, b"\xf9\x00") + op(2, draw(16)) +
                               op(0, draw(32), draw(32)) + op(1))
-    seeds["forged_m1_midway.bin"] = (start + op(0, draw(32), draw(32)) + op(8, b"\x01", draw(32)) +
+    seeds["forged_m1_midway.bin"] = (start + op(0, draw(32), draw(32)) + op(8, b"\x01\x00", draw(32)) +
                                      op(1) + op(0, draw(32)) + op(1))
-    seeds["senders.bin"] = (start + handshake() + op(8, b"\x02\x0d", draw(32)) +
-                            op(8, b"\x03", draw(32)) + op(8, b"\x04", draw(32)) +
-                            op(8, b"\x05\x05", draw(32)) + op(8, b"\x06\x05", draw(32)) +
-                            op(8, b"\x07", draw(32)) + op(2, draw(16)))
+    seeds["senders.bin"] = (start + handshake() + op(8, b"\x02\x00\x0d", draw(32)) +
+                            op(8, b"\x03\x00", draw(32)) + op(8, b"\x04\x00", draw(32)) +
+                            op(8, b"\x05\x00\x05", draw(32)) + op(8, b"\x06\x00\x05", draw(32)) +
+                            op(8, b"\x07\x00", draw(32)) +
+                            op(8, b"\x00\x01", draw(32)) + op(8, b"\x01\x02", draw(32)) +
+                            op(8, b"\x00\x03", draw(32)) + op(8, b"\x00\x04", draw(32)) +
+                            op(8, b"\x01\x05", draw(32)) + op(8, b"\x08\x00", draw(32)) +
+                            op(2, draw(16)))
 
     def gtk(kind, key_id, *more):
         return bytes((kind, key_id)) + draw(16) + b"".join(more)
