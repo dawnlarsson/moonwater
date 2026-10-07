@@ -88835,6 +88835,171 @@ static fn format_places(void)
         }
 }
 
+/* One partition as the census is handed it. */
+static fn census_one(host_census address_to census, string_address path,
+                     string_address label, string_address uuid)
+{
+        storage_identity identity;
+
+        memory_zero(address_of identity, sizeof(identity));
+        identity.path = path;
+        string_copy(identity.partlabel, label);
+        identity.partlabel_length = string_length(label);
+        string_copy(identity.partuuid, uuid);
+        identity.partuuid_length = string_length(uuid);
+        host_census_visit(address_of identity, census);
+}
+
+/*
+        What the census makes of the partitions a hostile bus offers: nine
+        disks where it has room for eight, two partitions of one label, a
+        label with no identity, and names at and past the room for one.
+*/
+static fn install_census(void)
+{
+        static host_census census;
+        p8 path[HOST_NAME_ROOM + 16];
+        p8 name[HOST_NAME_ROOM + 2];
+        bool held = true;
+
+        memory_zero(address_of census, sizeof(census));
+        for (positive at = 0; at < 9; at++)
+        {
+                p8 disk[8] = {'z', 'd', (p8)('0' + at), 0};
+
+                string_copy(path, "/dev/");
+                string_append_bounded(path, (string_address)disk, sizeof(path));
+                census_one(address_of census, path, "moonwater-boot", "aaaa");
+                census_one(address_of census, path, "moonwater-data", "bbbb");
+        }
+        check("eight installs are taken and a ninth is counted, not taken in",
+              census.count == HOST_INSTALLS && census.dropped > 0);
+
+        memory_zero(address_of census, sizeof(census));
+        census_one(address_of census, "/dev/ze1", "moonwater-boot", "");
+        census_one(address_of census, "/dev/ze2", "something-else", "cccc");
+        check("a label without an identity, and one that is not ours, make no install",
+              census.count == 0);
+
+        census_one(address_of census, "/dev/ze3", "moonwater-boot", "1111");
+        census_one(address_of census, "/dev/ze3", "moonwater-boot", "2222");
+        census_one(address_of census, "/dev/ze3", "moonwater-data", "3333");
+        held &= census.count == 1 && string_equals(census.found[0].system_partuuid, "2222") &&
+                string_equals(census.found[0].data_partuuid, "3333");
+        check("two partitions of one label on a disk are one install, the last named", held);
+
+        memory_zero(address_of census, sizeof(census));
+        memory_copy_apart(name, "/dev/", 5);
+        memory_fill(name + 5, 'a', HOST_NAME_ROOM - 1);
+        name[5 + HOST_NAME_ROOM - 1] = end;
+        census_one(address_of census, name, "moonwater-boot", "dddd");
+        held = census.count == 1;
+        memory_zero(address_of census, sizeof(census));
+        name[5 + HOST_NAME_ROOM] = end;
+        name[5 + HOST_NAME_ROOM - 1] = 'a';
+        census_one(address_of census, name, "moonwater-boot", "dddd");
+        check("a device name of 63 bytes is an install's and one of 64 is not",
+              held && census.count == 0);
+}
+
+/* Two lines of text as standard input: the answer to the first, and the
+   second read after it into next. */
+static bipolar install_line(string_address text, p8 address_to into,
+                            p8 address_to next)
+{
+        p32 ends[2];
+        bipolar kept = system_duplicate(0, 100, 0);
+        bipolar got;
+
+        if (system_pipe(ends, 0) < 0)
+                return -9;
+        system_write_all((positive)ends[1], (const address_any)text, string_length(text));
+        system_close(ends[1]);
+        system_duplicate(ends[0], 0, 0);
+        got = host_read_line(into, 64);
+        next[0] = end;
+        host_read_line(next, 32);
+        if (kept >= 0)
+        {
+                system_duplicate(kept, 0, 0);
+                system_close(kept);
+        }
+        system_close(ends[0]);
+        return got;
+}
+
+/*
+        What the install and the boot say about names, lines and files, one
+        small question each.
+*/
+static fn install_helpers(void)
+{
+        bool swapped_same = true;
+        bool names = true;
+        p32 seed = 12345;
+        p8 text[64];
+        p8 next[32];
+        p8 name[80];
+
+        //      A GPT GUID in disk order, as the PARTUUID spelling the kernel
+        //      publishes: the first three fields byte-swapped.
+        for (positive round = 0; round < 256; round++)
+        {
+                p8 guid[16];
+                p8 swapped[16];
+                p8 want[40];
+                p8 got[40];
+
+                for (positive at = 0; at < 16; at++)
+                {
+                        seed = seed * 1103515245u + 12345u;
+                        guid[at] = (p8)(seed >> 16);
+                }
+                swapped[0] = guid[3];
+                swapped[1] = guid[2];
+                swapped[2] = guid[1];
+                swapped[3] = guid[0];
+                swapped[4] = guid[5];
+                swapped[5] = guid[4];
+                swapped[6] = guid[7];
+                swapped[7] = guid[6];
+                memory_copy_apart(swapped + 8, guid + 8, 8);
+                storage_uuid_bytes(want, swapped);
+                host_partuuid(got, guid);
+                swapped_same &= string_equals(want, got);
+        }
+        check("a GPT GUID reads as the PARTUUID the kernel publishes", swapped_same);
+
+        for (positive byte = 1; byte < 256; byte++)
+        {
+                p8 probe[4] = {'a', (p8)byte, 'b', 0};
+
+                names &= host_name_valid(probe) ==
+                         (byte < 0x80 && (byte_is_alnum(byte) || byte == '-' || byte == '_'));
+        }
+        memory_fill(name, 'a', 64);
+        name[63] = end;
+        names &= host_name_valid(name);
+        name[63] = 'a';
+        name[64] = end;
+        names &= !host_name_valid(name) && !host_name_valid("");
+        check("a block device name is letters, digits, - and _ and under 64 bytes", names);
+
+        //      A confirmation is a whole line: one that does not fit is not
+        //      the short one its start spells, and the next line is still there.
+        memory_fill(name, ' ', 70);
+        memory_copy_apart(name, "loop2", 5);
+        memory_copy_apart(name + 66, "x\nok\n", 6);
+        check("a line too long for the room is refused, not cut",
+              install_line((string_address)name, text, next) == HOST_LINE_LONG);
+        check("and the line after it is still there to read",
+              string_equals(next, "ok"));
+        check("a line that fits is read, its trailing spaces and return dropped",
+              install_line("nvme0n1  \r\nok\n", text, next) == 7 &&
+                  string_equals(text, "nvme0n1") && string_equals(next, "ok"));
+        check("the end of input is -1", install_line("", text, next) == -1);
+}
+
 static bipolar format_image(string_address directory, string_address name,
                             p64 bytes, p8 stamp)
 {
@@ -89380,9 +89545,40 @@ static fn settings_commands(void)
         check("what the commands leave behind checks", spark_settings_check(slot) == 1);
 }
 
+static p8 settings_image[0x10000];
+
+/* A PE image whose section table names one section at raw with size, in a
+   settings_image; the settings slots are empty ones, the second only when asked. */
+static fn settings_build(string_address name, p32 raw, p32 size, bool second)
+{
+        p8 address_to image = settings_image;
+        p8 address_to table = image + 0x80 + 24 + 0xf0;
+
+        memory_zero(image, sizeof(settings_image));
+        image[0] = 'M';
+        image[1] = 'Z';
+        storage_put32(image + 0x3c, 0x80);
+        memory_copy_apart(image + 0x80, "PE\0\0", 4);
+        storage_put16(image + 0x86, 3);
+        storage_put16(image + 0x94, 0xf0);
+        memory_copy_apart(table, ".text\0\0\0", 8);
+        storage_put32(table + 16, 0x1000);
+        storage_put32(table + 20, 0x1000);
+        memory_copy_apart(table + 40, name, 8);
+        storage_put32(table + 56, size);
+        storage_put32(table + 60, raw);
+        memory_copy_apart(table + 80, ".data\0\0\0", 8);
+        storage_put32(table + 96, 0x1000);
+        storage_put32(table + 100, 0xa000);
+
+        host_settings_empty(address_of settings_slot);
+        memory_copy_apart(image + 0x2000, address_of settings_slot, 64);
+        if (second)
+                memory_copy_apart(image + 0x6000, address_of settings_slot, 64);
+}
+
 static fn settings_sections(void)
 {
-        static p8 image[0x10000];
         static const struct
         {
                 string_address name;
@@ -89403,7 +89599,6 @@ static fn settings_sections(void)
         {
                 bipolar handle = system_call_2(syscall(memfd_create),
                                                (positive)(string_address)"settings", 0);
-                p8 address_to table = image + 0x80 + 24 + 0xf0;
                 p64 offset = 0;
 
                 if (handle < 0)
@@ -89412,29 +89607,10 @@ static fn settings_sections(void)
                         break;
                 }
 
-                memory_zero(image, sizeof(image));
-                image[0] = 'M';
-                image[1] = 'Z';
-                storage_put32(image + 0x3c, 0x80);
-                memory_copy_apart(image + 0x80, "PE\0\0", 4);
-                storage_put16(image + 0x86, 3);
-                storage_put16(image + 0x94, 0xf0);
-                memory_copy_apart(table, ".text\0\0\0", 8);
-                storage_put32(table + 16, 0x1000);
-                storage_put32(table + 20, 0x1000);
-                memory_copy_apart(table + 40, cases[at].name, 8);
-                storage_put32(table + 56, cases[at].size);
-                storage_put32(table + 60, cases[at].raw);
-                memory_copy_apart(table + 80, ".data\0\0\0", 8);
-                storage_put32(table + 96, 0x1000);
-                storage_put32(table + 100, 0xa000);
+                settings_build(cases[at].name, cases[at].raw, cases[at].size, cases[at].second);
 
-                host_settings_empty(address_of settings_slot);
-                memory_copy_apart(image + 0x2000, address_of settings_slot, 64);
-                if (cases[at].second)
-                        memory_copy_apart(image + 0x6000, address_of settings_slot, 64);
-
-                held &= storage_write(handle, image, sizeof(image), 0) == (bipolar)sizeof(image) &&
+                held &= storage_write(handle, settings_image, sizeof(settings_image), 0) ==
+                            (bipolar)sizeof(settings_image) &&
                         host_settings_section(handle) == cases[at].found &&
                         host_settings_slots(handle, settings_pair, address_of offset) ==
                             (cases[at].found != 0) &&
@@ -89547,6 +89723,212 @@ static fn image_builds(void)
         check("an image with no whole version names no build", refused);
 }
 
+/*
+        An image that is not what its header says, in every way a stranger's
+        disk could make one: the section table is read from the first page of
+        a file somebody else wrote, so every number in it is a guess about how
+        far to go.
+*/
+static fn settings_hostile(void)
+{
+        static const struct
+        {
+                positive at;
+                positive width;
+                p64 value;
+                p64 found;
+        } cases[] = {
+            {0x94, 2, 0xffff, 0},      // an optional header the page cannot hold
+            {0x86, 2, 0xffff, 0},      // more sections than the page can hold
+            {0x86, 2, 1, 0},           // fewer than the one that matters
+            {0x3c, 4, 0xffc, 0},       // the PE header at the end of the page
+            {0x3c, 4, 0xff8, 0},
+            {0x3c, 4, 0xffffffff, 0},
+            {0x3c, 4, 0x4000, 0},
+            {0, 1, 'Z', 0},            // not MZ
+            {0x80, 1, 'Q', 0},         // not PE
+            {0x80 + 24 + 0xf0 + 40 + 20, 4, 0x20000, 0}, // its raw data past the end of the file
+            {0x80 + 24 + 0xf0 + 40 + 20, 4, 0xfffff000, 0},
+            {0x80 + 24 + 0xf0 + 40 + 20, 4, 0, 0},
+            {0x80 + 24 + 0xf0 + 40 + 16, 4, 0, 0}, // a section with no size
+            {0x80 + 24 + 0xf0 + 40 + 16, 4, 0xffffffff, 0x2000},
+        };
+        bool held = true;
+        bool second = true;
+
+        for (positive at = 0; at < array_count(cases); at++)
+        {
+                bipolar handle = system_call_2(syscall(memfd_create),
+                                               (positive)(string_address)"hostile", 0);
+
+                if (handle < 0)
+                        break;
+
+                settings_build(".mwset\0\0", 0x2000, 0x8000, true);
+                if (cases[at].width == 1)
+                        settings_image[cases[at].at] = (p8)cases[at].value;
+                else if (cases[at].width == 2)
+                        storage_put16(settings_image + cases[at].at, (p16)cases[at].value);
+                else
+                        storage_put32(settings_image + cases[at].at, (p32)cases[at].value);
+
+                held &= storage_write(handle, settings_image, sizeof(settings_image), 0) ==
+                            (bipolar)sizeof(settings_image) &&
+                        host_settings_section(handle) == cases[at].found;
+                system_close(handle);
+        }
+
+        //      A second section of the name does not outrank the first.
+        {
+                bipolar handle = system_call_2(syscall(memfd_create),
+                                               (positive)(string_address)"twice", 0);
+                p8 address_to table = settings_image + 0x80 + 24 + 0xf0;
+
+                settings_build(".mwset\0\0", 0x2000, 0x8000, true);
+                memory_copy_apart(table + 80, ".mwset\0\0", 8);
+                storage_put32(table + 96, 0x8000);
+                storage_put32(table + 100, 0x6000);
+                second = handle >= 0 &&
+                         storage_write(handle, settings_image, sizeof(settings_image), 0) ==
+                             (bipolar)sizeof(settings_image) &&
+                         host_settings_section(handle) == 0x2000;
+                if (handle >= 0)
+                        system_close(handle);
+        }
+
+        check("a hostile section table finds no settings it should not, and never reads past its page",
+              held);
+        check("a second section of the settings name is not the first", second);
+}
+
+#if X64
+/* The version field of an x86 setup header, with every field wrong in turn. */
+static fn image_hostile(void)
+{
+        static p8 image[0x4000];
+        static const struct
+        {
+                positive at;
+                positive width;
+                p64 value;
+        } cases[] = {
+            {0x20e, 2, 0xffff}, // a version string past the end of the file
+            {0x20e, 2, 0},      // none
+            {0x206, 2, 0x1ff},  // a protocol that has none
+            {0x202, 1, 'X'},    // not a setup header
+            {0, 1, 'Z'},        // not MZ
+        };
+        bool refused = true;
+        p8 got[256];
+
+        for (positive at = 0; at < array_count(cases) + 2; at++)
+        {
+                bipolar handle = system_call_2(syscall(memfd_create),
+                                               (positive)(string_address)"version", 0);
+                positive length = at == array_count(cases) + 1 ? 0x100 : sizeof(image);
+
+                memory_zero(image, sizeof(image));
+                image[0] = 'M';
+                image[1] = 'Z';
+                memory_copy_apart(image + 0x202, "HdrS", 4);
+                storage_put16(image + 0x206, 0x020f);
+                storage_put16(image + 0x20e, 0x1000);
+                memory_copy_apart(image + 0x1200, "7.2.6 (a@b) #1 x", 17);
+
+                if (at < array_count(cases))
+                {
+                        if (cases[at].width == 1)
+                                image[cases[at].at] = (p8)cases[at].value;
+                        else
+                                storage_put16(image + cases[at].at, (p16)cases[at].value);
+                }
+                else if (at == array_count(cases))
+                        memory_fill(image + 0x1200, 'v', 0x2000); // no end to it
+
+                if (handle < 0 || storage_write(handle, image, length, 0) != (bipolar)length)
+                        refused = false;
+                else
+                        refused &= !host_image_version(handle, got, sizeof(got));
+                if (handle >= 0)
+                        system_close(handle);
+        }
+
+        check("an image whose setup header lies names no build", refused);
+}
+#endif
+
+/* The answers a settings image gives and takes: what is in it, damaged, or not
+   there at all, and what stamping it did. */
+static fn settings_codes(void)
+{
+        static p8 back[sizeof(settings_image)];
+        host_settings address_to slot = address_of settings_slot;
+        host_settings address_to into = address_of settings_next;
+        p8 path[64];
+        bipolar handle = system_call_2(syscall(memfd_create),
+                                       (positive)(string_address)"codes", 0);
+        bool held = handle >= 0;
+        b32 kinds[4] = {0, 0, 0, 0};
+        bipolar stamps[4] = {0, 0, 0, 0};
+        bool whole = true;
+
+        if (handle < 0)
+                return;
+
+        memory_copy(path, "/proc/self/fd/", 14);
+        positive_into_string(path + 14, (positive)handle);
+
+        //      An image with a block, both slots never written.
+        settings_build(".mwset\0\0", 0x2000, 0x8000, true);
+        host_settings_empty(slot);
+        slot->generation = 4;
+        host_settings_add(slot, SPARK_SETTINGS_INIT, SPARK_SETTINGS_COMMAND, "sync", 4, null);
+        held &= storage_write(handle, settings_image, sizeof(settings_image), 0) ==
+                (bipolar)sizeof(settings_image);
+        kinds[0] = host_settings_image(path, into);
+        stamps[0] = host_settings_stamp(path, slot);
+        held &= host_settings_image(path, into) == 1 && into->generation == 4 &&
+                settings_same(into, slot);
+
+        //      Both slots torn: a block is there and cannot be read.
+        settings_build(".mwset\0\0", 0x2000, 0x8000, true);
+        host_settings_empty(slot);
+        slot->generation = 5;
+        slot->sum = 1;
+        memory_copy_apart(settings_image + 0x2000, slot, SPARK_SETTINGS_HEADER);
+        memory_copy_apart(settings_image + 0x6000, slot, SPARK_SETTINGS_HEADER);
+        held &= storage_write(handle, settings_image, sizeof(settings_image), 0) ==
+                (bipolar)sizeof(settings_image);
+        kinds[1] = host_settings_image(path, into);
+
+        //      An image built without one, which stamping leaves exactly as it was.
+        settings_build(".mwsex\0\0", 0x2000, 0x8000, true);
+        held &= storage_write(handle, settings_image, sizeof(settings_image), 0) ==
+                (bipolar)sizeof(settings_image);
+        kinds[2] = host_settings_image(path, into);
+        host_settings_empty(slot);
+        slot->generation = 6;
+        stamps[2] = host_settings_stamp(path, slot);
+        whole = file_transfer_exact(syscall(pread64), handle, back, sizeof(back), 0) ==
+                    (bipolar)sizeof(back) &&
+                !memory_compare(back, settings_image, sizeof(back));
+
+        kinds[3] = host_settings_image("/proc/self/fd/none/image", into);
+        stamps[3] = host_settings_stamp("/proc/self/fd/none/image", slot);
+        system_close(handle);
+
+        check("an image with a block gives its settings, and stamping puts new ones in both slots",
+              held && kinds[0] == 1 && stamps[0] == 0);
+        check("an image whose slots are both torn is the defaults, and is said to be",
+              kinds[1] == 0);
+        //      Main answers -1 for both: an image with no usable block, and a file
+        //      that cannot be read, so these two are only known to be refused.
+        check("an image built without a block, and one that cannot be read, give no settings",
+              kinds[2] < 0 && kinds[3] < 0);
+        check("and stamping it writes nothing and says it carries no settings",
+              stamps[2] == 1 && whole && stamps[3] < 0);
+}
+
 b32 main(void)
 {
         settings_format();
@@ -89554,11 +89936,18 @@ b32 main(void)
         settings_torn();
         settings_commands();
         settings_sections();
+        settings_hostile();
         image_builds();
+#if X64
+        image_hostile();
+#endif
+        settings_codes();
         format_sums();
         format_spans();
         format_places();
         format_layouts();
+        install_census();
+        install_helpers();
 
         if (program_argument_count() > 1)
                 format_images(program_argument_list()[1]);
