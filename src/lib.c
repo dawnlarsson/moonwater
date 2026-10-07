@@ -3313,6 +3313,57 @@ __asm__(
 #endif
 
 //
+//      The masked window: every size up to sixty four bytes in one mask.
+//
+//      The ladders under these routines choose a rung by the size, and a size
+//      that changes from one call to the next is a branch the predictor cannot
+//      learn: a copy of one to sixty four bytes with the size drawn at random
+//      costs about twenty one ticks on a 9950X where the same copy at a size
+//      that stays put costs four. BENCH_floor times the second, and a program
+//      that copies names, words and lines is the first. With AVX-512 there is
+//      no rung to choose: one vector, a mask of the first n lanes made with
+//      bzhi, a masked load or store that touches those lanes and no others,
+//      and the answer from the mask. The same four routines, sizes at random
+//      from one to sixty four, ticks a call before and after: memory_fill 20.5
+//      to 23.6 and 5.0, memory_copy_apart 21.7 to 25.3 and 5.0, memory_compare
+//      22.3 to 27.1 and 4.9, memory_first_of 20.6 to 30.5 and 5.0, against 3.2
+//      for a call that returns at once. A size that does stay put is 3.3 to 4.2
+//      with the ladder and 4.2 to 5.0 with the mask, which is what the mask
+//      costs the call that was already predictable.
+//
+//      A lane the mask leaves out does not fault, and that is the whole of
+//      why this is safe at the end of a buffer. It is not free when the page
+//      it would have touched is not there: a masked load with 56 lanes in a
+//      PROT_NONE page took 254 ticks and a masked store 290, against 0.8 and
+//      1.1 on a page that is mapped. So the window is taken only when the
+//      pointer is not in the last sixty four bytes of its page, bits six to
+//      eleven not all ones, which is all but one call in sixty four; that one
+//      goes on to the ladder, correct everywhere and no slower than it was.
+//      The test is on the pointer and not the size because the lanes past n
+//      are the ones that matter, and they are at most sixty three.
+//
+//      Where the tier sits is measured too. A taken branch costs a cycle or
+//      two on a call that is five ticks long: a test for the size ahead of the
+//      ladder, jumping over the tier, made memory_fill at 65 to 128 bytes 1.8
+//      ticks slower. So the routines that had no feature test in front of
+//      their short sizes ask for AVX-512 first, jump once to a body of their
+//      own on a machine that has it, and keep the old order for one that has
+//      not at the cost of that one compare; the sizes above the tier then
+//      fall through from it with no branch, which is fewer than the old
+//      dispatch took to reach the same rungs. cpu_has_avx512 means F, BW and
+//      VL with the state saved, and every part with those has BMI2, which is
+//      what bzhi is.
+//
+//      The page test spends %ecx and not %eax, because the ladders it falls
+//      back to were entered with %eax clear and return it as the answer for
+//      two spans that agree.
+//
+#define TINY_PAGE_EDGE(reg, out) \
+    "mov %" reg ", %ecx\n   not %ecx\n   test $0xfc0, %ecx\n   jz " out "\n"
+#define TINY_MASK(n) \
+    "mov $-1, %rax\n   bzhi " n ", %rax, %rax\n   kmovq %rax, %k1\n"
+
+//
 //      Which body to run. AVX-512 is asked about first because a processor
 //      that has it has AVX2 as well. Label 6 is the wide body for it and
 //      label 5 is the word at a time one, in every routine that has all
@@ -5425,6 +5476,14 @@ __asm__(
     //      known to be alike.
     //
     "movzbl (%rdi), %eax\n   movzbl (%rsi), %ecx\n   sub %ecx, %eax\n   jnz 4f\n   test %ecx, %ecx\n   jz 4f  # both ended here, and eax is zero\n"
+    //
+    //      Sixty four bytes of each in one compare when the processor has AVX-512 and neither pointer is in
+    //      the last sixty four of its page, which TINY_PAGE_EDGE explains: what differs and what ends in one
+    //      mask, and the lowest flag in it is the byte to answer with. Strings of one to sixty two bytes
+    //      drawn at random from a pool, ticks a call: 32.4 to 44.9 before and 10.8 to 11.3 after. Two strings
+    //      that agree through all sixty four go on from there with the generic body.
+    //
+    ASM_USERSPACE_WIDE("cmpb $0, cpu_has_avx512(%rip)\n   jne .Lcompare_zmm\n.Lstrcmp_generic:\n")
     "movabs $0x0101010101010101, %r10\n   movabs $0x8080808080808080, %r11\n"
     "1:  #\n"
     //      Would either read cross a page? 0xfe0 is the last offset at which
@@ -5501,6 +5560,14 @@ __asm__(
     "2:  movzbl (%rdi), %eax\n   movzbl (%rsi), %ecx\n   sub %ecx, %eax\n   jnz 4f\n   test %ecx, %ecx\n   jz 3f\n   inc %rdi\n   inc %rsi\n   jmp 1b\n"
     "3:  xor %eax, %eax\n"
     "4:  #\n" ASM_RET
+    ASM_USERSPACE_WIDE(
+    ".Lcompare_zmm:\n"
+    TINY_PAGE_EDGE("edi", ".Lstrcmp_generic") TINY_PAGE_EDGE("esi", ".Lstrcmp_generic")
+    "vmovdqu8 (%rdi), %zmm0\n   vpcmpneqb (%rsi), %zmm0, %k0\n   vptestnmb %zmm0, %zmm0, %k1\n   korq %k1, %k0, %k0\n   kmovq %k0, %rcx\n   test %rcx, %rcx\n   jz .Lstrcmp_long\n"
+    "tzcnt %rcx, %rcx\n   movzbl (%rdi,%rcx), %eax\n   movzbl (%rsi,%rcx), %ecx\n   sub %ecx, %eax\n   vzeroupper\n" ASM_RET
+    //      Equal for sixty four bytes and nothing ended: the rest is the same question asked of what follows.
+    ".Lstrcmp_long:\n   vzeroupper\n   add $64, %rdi\n   add $64, %rsi\n   jmp .Lstrcmp_generic\n"
+    )
     ASM_END(string_compare)
     //
     //       string_first_of and memory_first_of -- sixty four bytes at a time,
@@ -5535,7 +5602,17 @@ __asm__(
         WIDE_FIRST_OF(AVX2_WIDTH, AVX2_BROADCAST, AVX2_ZEROED, AVX2_EITHER_AT,
                       AVX2_EITHER_QUAD, AVX2_EITHER_QUAD_WHICH, AVX2_LEAVE,
                       WIDE_FIRST_TAIL)
-        "6:  " WIDE_FIRST_OF(AVX512_WIDTH, AVX512_BROADCAST, "",
+        //
+        //      The first sixty four bytes in one window when the pointer is not in the last sixty four of its
+        //      page: the byte and the terminator in one mask, and the address is the lowest flag if it is the
+        //      byte asked for and nothing if it is the terminator, chosen without a branch. The aligned
+        //      hunt below is for the strings that outlast it and for the pointers it will not take.
+        //
+        "6:\n"
+        TINY_PAGE_EDGE("edi", ".Lfirst_string_long")
+        "vpbroadcastb %esi, %zmm1\n   vmovdqu8 (%rdi), %zmm0\n   vpcmpeqb %zmm1, %zmm0, %k0\n   vptestnmb %zmm0, %zmm0, %k1\n   korq %k1, %k0, %k0\n   kmovq %k0, %rcx\n"
+        "test %rcx, %rcx\n   jz .Lfirst_string_long\n   tzcnt %rcx, %rcx\n   lea (%rdi,%rcx), %rdx\n   xor %eax, %eax\n   cmp %sil, (%rdx)\n   cmove %rdx, %rax\n   vzeroupper\n" ASM_RET
+        ".Lfirst_string_long:  " WIDE_FIRST_OF(AVX512_WIDTH, AVX512_BROADCAST, "",
                              AVX512_EITHER_AT, AVX512_EITHER_QUAD,
                              AVX512_EITHER_QUAD_WHICH, AVX512_LEAVE,
                              WIDE_FIRST_TAIL)
@@ -5572,11 +5649,16 @@ __asm__(
     // Kernel builds reach that entry directly and never read feature bytes.
     "xor %eax, %eax\n"
     ASM_USERSPACE_WIDE(
-        "cmp $32, %rdx\n   jb 5f\n"
         WIDE_PICK_MAX
+        "cmp $64, %rdx\n   jbe .Lfirst_tiny\n"
         WIDE_MEMORY(AVX512_WIDTH, AVX512_BROADCAST, "", AVX512_HUNT,
                     AVX512_HUNT_QUAD, AVX512_HUNT_QUAD_WHICH, AVX512_LEAVE, "7f")
-        "7:\n" ASM_NARROW("cpu_has_avx2", "5f")
+        ".Lfirst_tiny:\n"
+        TINY_PAGE_EDGE("edi", "7f") TINY_MASK("%rdx")
+        "vpbroadcastb %esi, %zmm0\n   vpcmpeqb (%rdi), %zmm0, %k0{%k1}\n   kmovq %k0, %rcx\n   xor %eax, %eax\n   test %rcx, %rcx\n   jz .Lfirst_tiny_done\n"
+        "tzcnt %rcx, %rcx\n   lea (%rdi,%rcx), %rax\n"
+        ".Lfirst_tiny_done:\n   vzeroupper\n" ASM_RET
+        "7:\n   cmp $32, %rdx\n   jb 5f\n" ASM_NARROW("cpu_has_avx2", "5f")
         WIDE_MEMORY(AVX2_WIDTH, AVX2_BROADCAST, AVX2_ZEROED, AVX2_HUNT,
                     AVX2_HUNT_QUAD, AVX2_HUNT_QUAD_WHICH, AVX2_LEAVE, "5f")
     )
@@ -5902,7 +5984,7 @@ __asm__(
     //       sixty four is handed forward to the ymm body, which hands one
     //       under thirty two forward to the words.
     //
-    "cmp $64, %rdx\n   jb 7f\n   cmp $256, %rdx\n   jb 13f\n"
+    "cmp $64, %rdx\n   jbe .Lcompare_tiny\n   cmp $256, %rdx\n   jb 13f\n"
     ".balign 32\n"
     "11: vmovdqu64 (%rdi), %zmm0\n   vmovdqu64 64(%rdi), %zmm1\n   vmovdqu64 128(%rdi), %zmm2\n   vmovdqu64 192(%rdi), %zmm3\n"
     "vpxorq (%rsi), %zmm0, %zmm0\n   vpxorq 64(%rsi), %zmm1, %zmm1\n   vpxorq 128(%rsi), %zmm2, %zmm2\n   vpxorq 192(%rsi), %zmm3, %zmm3\n"
@@ -5917,6 +5999,11 @@ __asm__(
     "14: test %rdx, %rdx\n   jz 16f\n   lea -64(%rdi,%rdx), %rdi\n   lea -64(%rsi,%rdx), %rsi\n   vmovdqu64 (%rdi), %zmm0\n   vpcmpneqb (%rsi), %zmm0, %k0\n   kortestq %k0, %k0\n   jz 16f\n"
     "18: kmovq %k0, %rcx\n   bsf %rcx, %rcx\n   vzeroupper\n   movzbl (%rdi,%rcx), %eax\n   movzbl (%rsi,%rcx), %ecx\n   sub %ecx, %eax\n" ASM_RET
     "16: vzeroupper\n   xor %eax, %eax\n" ASM_RET
+    ".Lcompare_tiny:\n"
+    TINY_PAGE_EDGE("edi", "7f") TINY_PAGE_EDGE("esi", "7f") TINY_MASK("%rdx")
+    "vmovdqu8 (%rdi), %zmm0{%k1}{z}\n   vpcmpneqb (%rsi), %zmm0, %k0{%k1}\n   kortestq %k0, %k0\n   jnz .Lcompare_tiny_diff\n   vzeroupper\n   xor %eax, %eax\n" ASM_RET
+    ".Lcompare_tiny_diff:\n   kmovq %k0, %rcx\n   tzcnt %rcx, %rcx\n   movzbl (%rdi,%rcx), %eax\n   movzbl (%rsi,%rcx), %ecx\n   sub %ecx, %eax\n   vzeroupper\n" ASM_RET
+    ".balign 32\n"
     "7:\n" ASM_NARROW("cpu_has_avx2", "5f")
     "cmp $32, %rdx\n   jb 5f\n"
     //
@@ -6954,6 +7041,7 @@ __asm__(
     // eight bytes at a time out of a plain loop is cheaper.
     ASM_FUNC(memory_fill)
     KERNEL_BULK_FILL
+    ASM_USERSPACE_WIDE("cmpb $0, cpu_has_avx512(%rip)\n   jne .Lfill_zmm\n.Lfill_generic:\n")
     "mov %rdi, %rax\n   movzbl %sil, %ecx\n   movabs $0x0101010101010101, %r8\n   imul %r8, %rcx  # the byte, eight times over\n"
     "cmp $16, %rdx\n   jae 6f\n   cmp $8, %rdx\n   jae 7f\n   cmp $4, %rdx\n   jae 8f\n   test %rdx, %rdx\n   jz 9f\n"
     // one to three: first, last, and the middle, which between them cover all three
@@ -6994,6 +7082,11 @@ __asm__(
     //       one iteration past the end before the rung was added.
     //
     "5:  vpbroadcastb %ecx, %zmm0\n   cmp $64, %rdx\n   ja 4f\n   vmovdqu %ymm0, (%rdi)\n   vmovdqu %ymm0, -32(%rdi,%rdx)\n   vzeroupper\n" ASM_RET
+    //      A machine with AVX-512 comes in here from the top, and falls through to the rungs with no branch.
+    ".Lfill_zmm:\n   cmp $64, %rdx\n   ja .Lfill_mid\n"
+    TINY_PAGE_EDGE("edi", ".Lfill_generic") TINY_MASK("%rdx")
+    "vpbroadcastb %esi, %zmm0\n   vmovdqu8 %zmm0, (%rdi){%k1}\n   mov %rdi, %rax\n   vzeroupper\n" ASM_RET
+    ".Lfill_mid:\n   mov %rdi, %rax\n   vpbroadcastb %esi, %zmm0\n"
     "4:  cmp $128, %rdx\n   ja 1f\n   vmovdqu64 %zmm0, (%rdi)\n   vmovdqu64 %zmm0, -64(%rdi,%rdx)\n   vzeroupper\n" ASM_RET
     "1:  cmp $256, %rdx\n   ja 0f\n   vmovdqu64 %zmm0, (%rdi)\n   vmovdqu64 %zmm0, 64(%rdi)\n   vmovdqu64 %zmm0, -128(%rdi,%rdx)\n   vmovdqu64 %zmm0, -64(%rdi,%rdx)\n   vzeroupper\n" ASM_RET
     "0:  cmp $512, %rdx\n   ja 0f\n   vmovdqu64 %zmm0, (%rdi)\n   vmovdqu64 %zmm0, 64(%rdi)\n"
@@ -7337,13 +7430,33 @@ __asm__(
     ASM_FUNC(memory_into_hex_case)
     "lea (%rdx,%rdx), %rax\n   lea .Lmemory_hex_x64_digits(%rip), %r8\n   lea .Lmemory_hex_x64_upper(%rip), %r9\n   test %rcx, %rcx\n   cmovne %r9, %r8\n"
 #ifndef KERNEL_MODE
-    "cmp $16, %rdx\n   jb .Lmemory_hex_x64_tail\n   movdqa .Lmemory_hex_x64_mask(%rip), %xmm2\n   movdqa .Lmemory_hex_x64_nine(%rip), %xmm3\n   movdqa .Lmemory_hex_x64_zero(%rip), %xmm4\n"
+    //
+    //      Four bytes and up go through the vector, whatever their number. What does not fill sixteen is read
+    //      as two windows that overlap, the first and the last eight (or four), joined in one register, and
+    //      written as two stores that overlap the same way: the bytes they share are the same characters. A
+    //      span of sixteen and over ends with one more block over its last sixteen bytes, on the same terms,
+    //      where it ended with a loop of a table lookup a byte; seven to thirty one bytes measured 11.6 to
+    //      31.4 ticks that way and 4.3 to 8.7 this way.
+    //
+    "cmp $4, %rdx\n   jb .Lmemory_hex_x64_tail\n   movdqa .Lmemory_hex_x64_mask(%rip), %xmm2\n   movdqa .Lmemory_hex_x64_nine(%rip), %xmm3\n   movdqa .Lmemory_hex_x64_zero(%rip), %xmm4\n"
     "test %rcx, %rcx\n   mov $39, %r9d\n   mov $7, %ecx\n   cmovne %ecx, %r9d\n   movd %r9d, %xmm5\n   punpcklbw %xmm5, %xmm5\n   punpcklwd %xmm5, %xmm5\n   pshufd $0, %xmm5, %xmm5\n"
+    "cmp $16, %rdx\n   jb .Lmemory_hex_x64_small\n"
     ".balign 16\n.Lmemory_hex_x64_16:\n"
     "movdqu (%rsi), %xmm0\n   movdqa %xmm0, %xmm1\n   psrlw $4, %xmm0\n   pand %xmm2, %xmm0\n   pand %xmm2, %xmm1\n   movdqa %xmm0, %xmm6\n   movdqa %xmm1, %xmm7\n"
     "pcmpgtb %xmm3, %xmm6\n   pcmpgtb %xmm3, %xmm7\n   pand %xmm5, %xmm6\n   pand %xmm5, %xmm7\n   paddb %xmm4, %xmm0\n   paddb %xmm4, %xmm1\n   paddb %xmm6, %xmm0\n   paddb %xmm7, %xmm1\n"
     "movdqa %xmm0, %xmm6\n   punpcklbw %xmm1, %xmm0\n   punpckhbw %xmm1, %xmm6\n   movdqu %xmm0, (%rdi)\n   movdqu %xmm6, 16(%rdi)\n   add $16, %rsi\n   add $32, %rdi\n"
     "sub $16, %rdx\n   cmp $16, %rdx\n   jae .Lmemory_hex_x64_16\n"
+    "test %rdx, %rdx\n   jz .Lmemory_hex_x64_done\n   lea -16(%rsi,%rdx), %rsi\n   lea -32(%rdi,%rdx,2), %rdi\n   mov $16, %edx\n   jmp .Lmemory_hex_x64_16\n"
+    ".Lmemory_hex_x64_small:\n   cmp $8, %rdx\n   jb .Lmemory_hex_x64_four\n   movq (%rsi), %xmm0\n   movq -8(%rsi,%rdx), %xmm1\n   punpcklqdq %xmm1, %xmm0\n"
+    "movdqa %xmm0, %xmm1\n   psrlw $4, %xmm0\n   pand %xmm2, %xmm0\n   pand %xmm2, %xmm1\n   movdqa %xmm0, %xmm6\n   movdqa %xmm1, %xmm7\n"
+    "pcmpgtb %xmm3, %xmm6\n   pcmpgtb %xmm3, %xmm7\n   pand %xmm5, %xmm6\n   pand %xmm5, %xmm7\n   paddb %xmm4, %xmm0\n   paddb %xmm4, %xmm1\n   paddb %xmm6, %xmm0\n   paddb %xmm7, %xmm1\n"
+    "movdqa %xmm0, %xmm6\n   punpcklbw %xmm1, %xmm0\n   punpckhbw %xmm1, %xmm6\n"
+    "movdqu %xmm0, (%rdi)\n   movdqu %xmm6, -16(%rdi,%rax)\n" ASM_RET
+    ".Lmemory_hex_x64_four:\n   movd (%rsi), %xmm0\n   movd -4(%rsi,%rdx), %xmm1\n   punpckldq %xmm1, %xmm0\n"
+    "movdqa %xmm0, %xmm1\n   psrlw $4, %xmm0\n   pand %xmm2, %xmm0\n   pand %xmm2, %xmm1\n   movdqa %xmm0, %xmm6\n   movdqa %xmm1, %xmm7\n"
+    "pcmpgtb %xmm3, %xmm6\n   pcmpgtb %xmm3, %xmm7\n   pand %xmm5, %xmm6\n   pand %xmm5, %xmm7\n   paddb %xmm4, %xmm0\n   paddb %xmm4, %xmm1\n   paddb %xmm6, %xmm0\n   paddb %xmm7, %xmm1\n"
+    "movdqa %xmm0, %xmm6\n   punpcklbw %xmm1, %xmm0\n   punpckhbw %xmm1, %xmm6\n"
+    "movq %xmm0, (%rdi)\n   movhps %xmm0, -8(%rdi,%rax)\n" ASM_RET
 #endif
     ".Lmemory_hex_x64_tail:\n   test %rdx, %rdx\n   jz .Lmemory_hex_x64_done\n"
     ".Lmemory_hex_x64_one:\n   movzbl (%rsi), %ecx\n   mov %ecx, %r9d\n   shr $4, %ecx\n   and $15, %r9d\n   movzbl (%r8,%rcx), %ecx\n   movzbl (%r8,%r9), %r9d\n"
@@ -11193,6 +11306,7 @@ __asm__(
     ".balign 32\n"
     ASM_FUNC(memory_copy_apart)
     KERNEL_BULK_COPY
+    ASM_USERSPACE_WIDE("cmpb $0, cpu_has_avx512(%rip)\n   jne .Lcopy_zmm\n.Lcopy_generic:\n")
     "mov %rdi, %rax\n   cmp $32, %rdx\n   ja 6f\n   cmp $16, %rdx\n   jb 7f\n"
     //
     //       movdqu, not vmovdqu. Naming an xmm register does not make an
@@ -11263,6 +11377,11 @@ __asm__(
     "vmovdqu %ymm4, -128(%r8)\n   vmovdqu %ymm5, -96(%r8)\n   vmovdqu %ymm6, -64(%r8)\n   vmovdqu %ymm7, -32(%r8)\n   vmovdqu %ymm8, (%rax)\n   vzeroupper\n" ASM_RET
     //       The zmm ladder, one rung longer for the reason memory_fill gives.
     "5:  cmp $64, %rdx\n   ja 4f\n   vmovdqu (%rsi), %ymm0\n   vmovdqu -32(%rsi,%rdx), %ymm1\n   vmovdqu %ymm0, (%rdi)\n   vmovdqu %ymm1, -32(%rdi,%rdx)\n   vzeroupper\n" ASM_RET
+    //      A machine with AVX-512 comes in here from the top, and falls through to the rungs with no branch.
+    ".Lcopy_zmm:\n   cmp $64, %rdx\n   ja .Lcopy_mid\n"
+    TINY_PAGE_EDGE("edi", ".Lcopy_generic") TINY_PAGE_EDGE("esi", ".Lcopy_generic") TINY_MASK("%rdx")
+    "vmovdqu8 (%rsi), %zmm0{%k1}{z}\n   vmovdqu8 %zmm0, (%rdi){%k1}\n   mov %rdi, %rax\n   vzeroupper\n" ASM_RET
+    ".Lcopy_mid:\n   mov %rdi, %rax\n"
     "4:  cmp $128, %rdx\n   ja 1f\n   vmovdqu64 (%rsi), %zmm0\n   vmovdqu64 -64(%rsi,%rdx), %zmm1\n   vmovdqu64 %zmm0, (%rdi)\n   vmovdqu64 %zmm1, -64(%rdi,%rdx)\n   vzeroupper\n" ASM_RET
     "1:  cmp $256, %rdx\n   ja 0f\n   vmovdqu64 (%rsi), %zmm0\n   vmovdqu64 64(%rsi), %zmm1\n"
     "vmovdqu64 -128(%rsi,%rdx), %zmm2\n   vmovdqu64 -64(%rsi,%rdx), %zmm3\n   vmovdqu64 %zmm0, (%rdi)\n"
@@ -11299,6 +11418,10 @@ __asm__(
     // rather than the direction flag: the kernel requires it clear on every
     // path out, and one that faults mid-copy would not have cleared it.
     ASM_FUNC(memory_copy)
+    //      Up to 512 bytes on a machine with AVX-512 the rungs of memory_copy_apart are the whole answer, and
+    //      they are right for spans that overlap: every one of them has read all it will move before it writes
+    //      any. That is what lets this skip the direction test, and what must stay true of them.
+    ASM_USERSPACE_WIDE("cmp $512, %rdx\n   ja .Lmove_generic\n   cmpb $0, cpu_has_avx512(%rip)\n   je .Lmove_generic\n   jmp memory_copy_apart\n.Lmove_generic:\n")
     "mov %rdi, %rax\n   cmp %rsi, %rdi\n   jbe 1f\n   mov %rsi, %r8\n   add %rdx, %r8\n   cmp %r8, %rdi\n   jb 2f\n"
     "1:  jmp memory_copy_apart\n"
     "2:\n"
@@ -12628,6 +12751,14 @@ __asm__(
     //       the destination waits.
     //
     ASM_FUNC(string_copy)
+    //
+    //      A string shorter than sixty four bytes with AVX-512 is one window: the terminator found in a
+    //      mask, the mask up to and including it kept by blsmsk, one masked load and one masked store. At
+    //      random lengths from one to sixty two, ticks a call, 38.3 to 47.2 before and 10.2 to 10.6 after.
+    //      The source and the destination are both held off the last sixty four bytes of a page, and a
+    //      string that does not end in its first sixty four goes through the generic body from the start.
+    //
+    ASM_USERSPACE_WIDE("cmpb $0, cpu_has_avx512(%rip)\n   jne .Lcopy_string_zmm\n.Lstrcpy_generic:\n")
     "mov %rdi, %r9  # the destination, where the scan will not look\n   mov %rsi, %rdi\n"
     ASM_USERSPACE_WIDE(
         ASM_NARROW("cpu_has_avx2", "5f")
@@ -12645,6 +12776,12 @@ __asm__(
     "1:  add $8, %rdi\n   mov (%rdi), %rdx\n   lea (%rdx,%r10), %rax\n   not %rdx\n   and %rdx, %rax\n   and %r11, %rax\n   jz 1b\n"
     "2:  bsf %rax, %rax\n   shr $3, %rax\n   add %rdi, %rax\n   sub %r8, %rax\n"
     STRING_COPY_TAIL
+    ASM_USERSPACE_WIDE(
+    ".Lcopy_string_zmm:\n"
+    TINY_PAGE_EDGE("edi", ".Lstrcpy_generic") TINY_PAGE_EDGE("esi", ".Lstrcpy_generic")
+    "vpxord %xmm0, %xmm0, %xmm0\n   vpcmpeqb (%rsi), %zmm0, %k0\n   kmovq %k0, %rax\n   test %rax, %rax\n   jz .Lstrcpy_generic\n"
+    "blsmsk %rax, %rax\n   kmovq %rax, %k1\n   vmovdqu8 (%rsi), %zmm1{%k1}{z}\n   vmovdqu8 %zmm1, (%rdi){%k1}\n   mov %rdi, %rax\n   vzeroupper\n" ASM_RET
+    )
     ASM_END(string_copy)
     ASM_SECTION
     //
