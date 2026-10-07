@@ -11432,11 +11432,11 @@ __asm__(
     "xor %eax, %eax\n   xor %r10d, %r10d\n   test %r8, %r8\n   jz .Lmemory_offsets_set_x64_done\n"
 #ifndef KERNEL_MODE
     "cmp $64, %rdx\n   jb .Lmemory_offsets_set_x64_one\n"
-    ASM_NARROW("cpu_has_avx512", ".Lmemory_offsets_set_x64_one")
-    ASM_NARROW("cpu_has_avx512_vbmi", ".Lmemory_offsets_set_x64_one")
+    ASM_NARROW("cpu_has_avx512", ".Lmemory_offsets_set_x64_avx2")
+    ASM_NARROW("cpu_has_avx512_vbmi", ".Lmemory_offsets_set_x64_avx2")
     "movzbl cpu_has_avx512_vbmi2(%rip), %r11d\n   test %r11d, %r11d\n   jnz 2f\n   push %rbx\n   push %rcx\n   push %rdx\n   mov $7, %eax\n   xor %ecx, %ecx\n   cpuid\n"
     "shr $6, %ecx\n   and $1, %ecx\n   inc %ecx\n   mov %cl, cpu_has_avx512_vbmi2(%rip)\n   mov %ecx, %r11d\n   pop %rdx\n   pop %rcx\n   pop %rbx\n   xor %eax, %eax\n"
-    "2:  cmp $2, %r11d\n   jne .Lmemory_offsets_set_x64_one\n   vmovdqu64 (%rcx), %zmm10\n   vmovdqu64 64(%rcx), %zmm11\n   vmovdqu64 128(%rcx), %zmm12\n   vmovdqu64 192(%rcx), %zmm13\n"
+    "2:  cmp $2, %r11d\n   jne .Lmemory_offsets_set_x64_avx2\n   vmovdqu64 (%rcx), %zmm10\n   vmovdqu64 64(%rcx), %zmm11\n   vmovdqu64 128(%rcx), %zmm12\n   vmovdqu64 192(%rcx), %zmm13\n"
     "vmovdqu64 .Lmemory_offsets_set_x64_bytes(%rip), %zmm3\n"
     ".balign 16\n.Lmemory_offsets_set_x64_wide:\n"
     "mov %rdx, %r11\n   sub %r10, %r11\n   cmp $64, %r11\n   jb .Lmemory_offsets_set_x64_wide_end\n"
@@ -11451,10 +11451,48 @@ __asm__(
     "vextracti32x4 $3, %zmm7, %xmm9\n   vpmovzxbd %xmm9, %zmm8\n   vpaddd %zmm4, %zmm8, %zmm8\n   vmovdqu32 %zmm8, 192(%rdi,%rax,4)\n"
     ".Lmemory_offsets_set_x64_packed:\n   add %r11, %rax\n"
     ".Lmemory_offsets_set_x64_next:\n   add $64, %r10\n   jmp .Lmemory_offsets_set_x64_wide\n"
-    ".Lmemory_offsets_set_x64_wide_end:\n   vzeroupper\n"
+    ".Lmemory_offsets_set_x64_wide_end:\n   vzeroupper\n   jmp .Lmemory_offsets_set_x64_avx2\n"
     ".pushsection .rodata\n   .balign 64\n"
     ".Lmemory_offsets_set_x64_bytes:\n   .byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63\n"
     ".popsection\n"
+    //
+    //      The 256-bit body, for a machine without AVX-512 and for one with it and without VBMI, which cannot
+    //      look a byte up in a table of 256 and went to the byte loop. The set is turned into two tables of
+    //      sixteen at the top of the call, indexed by the low nibble of a byte: which of the first eight high
+    //      nibbles, and which of the last eight, go with it in the set. A vpshufb for each, one more to turn
+    //      the high nibble into its bit, and a byte is in the set if its high nibble's bit is in the table
+    //      entry for its low one. The offsets are then written as memory_offsets_of_either writes them (that
+    //      routine has the reasons). It is also where the VBMI body goes when it has run out of room or whole
+    //      blocks. fold and cat -n spent 59 and 68 percent of their cycles in the byte loop without AVX-512.
+    //      4096 bytes with a hit every 8 to 27 bytes, ticks on a 9950X with AVX-512 off: 6,288 before, 1,030 after;
+    //      every 250 to 749 bytes 6,265 and 351.
+    //
+    ".Lmemory_offsets_set_x64_avx2:\n   cmpb $0, cpu_has_avx2(%rip)\n   je .Lmemory_offsets_set_x64_one\n   push %rbx\n   push %r12\n"
+    "vpxor %xmm12, %xmm12, %xmm12\n   vpxor %xmm9, %xmm9, %xmm9\n   vpxor %xmm10, %xmm10, %xmm10\n   mov $0x01010101, %r11d\n   vmovd %r11d, %xmm14\n   vpbroadcastd %xmm14, %xmm14\n"
+    "vpcmpeqb 0(%rcx), %xmm12, %xmm4\n   vpandn %xmm14, %xmm4, %xmm4\n   vpor %xmm4, %xmm9, %xmm9\nvpcmpeqb 16(%rcx), %xmm12, %xmm4\n   vpandn %xmm14, %xmm4, %xmm4\n   vpsllw $1, %xmm4, %xmm4\n   vpor %xmm4, %xmm9, %xmm9\nvpcmpeqb 32(%rcx), %xmm12, %xmm4\n   vpandn %xmm14, %xmm4, %xmm4\n   vpsllw $2, %xmm4, %xmm4\n   vpor %xmm4, %xmm9, %xmm9\nvpcmpeqb 48(%rcx), %xmm12, %xmm4\n   vpandn %xmm14, %xmm4, %xmm4\n   vpsllw $3, %xmm4, %xmm4\n   vpor %xmm4, %xmm9, %xmm9\nvpcmpeqb 64(%rcx), %xmm12, %xmm4\n   vpandn %xmm14, %xmm4, %xmm4\n   vpsllw $4, %xmm4, %xmm4\n   vpor %xmm4, %xmm9, %xmm9\nvpcmpeqb 80(%rcx), %xmm12, %xmm4\n   vpandn %xmm14, %xmm4, %xmm4\n   vpsllw $5, %xmm4, %xmm4\n   vpor %xmm4, %xmm9, %xmm9\nvpcmpeqb 96(%rcx), %xmm12, %xmm4\n   vpandn %xmm14, %xmm4, %xmm4\n   vpsllw $6, %xmm4, %xmm4\n   vpor %xmm4, %xmm9, %xmm9\nvpcmpeqb 112(%rcx), %xmm12, %xmm4\n   vpandn %xmm14, %xmm4, %xmm4\n   vpsllw $7, %xmm4, %xmm4\n   vpor %xmm4, %xmm9, %xmm9\nvpcmpeqb 128(%rcx), %xmm12, %xmm4\n   vpandn %xmm14, %xmm4, %xmm4\n   vpor %xmm4, %xmm10, %xmm10\nvpcmpeqb 144(%rcx), %xmm12, %xmm4\n   vpandn %xmm14, %xmm4, %xmm4\n   vpsllw $1, %xmm4, %xmm4\n   vpor %xmm4, %xmm10, %xmm10\nvpcmpeqb 160(%rcx), %xmm12, %xmm4\n   vpandn %xmm14, %xmm4, %xmm4\n   vpsllw $2, %xmm4, %xmm4\n   vpor %xmm4, %xmm10, %xmm10\nvpcmpeqb 176(%rcx), %xmm12, %xmm4\n   vpandn %xmm14, %xmm4, %xmm4\n   vpsllw $3, %xmm4, %xmm4\n   vpor %xmm4, %xmm10, %xmm10\nvpcmpeqb 192(%rcx), %xmm12, %xmm4\n   vpandn %xmm14, %xmm4, %xmm4\n   vpsllw $4, %xmm4, %xmm4\n   vpor %xmm4, %xmm10, %xmm10\nvpcmpeqb 208(%rcx), %xmm12, %xmm4\n   vpandn %xmm14, %xmm4, %xmm4\n   vpsllw $5, %xmm4, %xmm4\n   vpor %xmm4, %xmm10, %xmm10\nvpcmpeqb 224(%rcx), %xmm12, %xmm4\n   vpandn %xmm14, %xmm4, %xmm4\n   vpsllw $6, %xmm4, %xmm4\n   vpor %xmm4, %xmm10, %xmm10\nvpcmpeqb 240(%rcx), %xmm12, %xmm4\n   vpandn %xmm14, %xmm4, %xmm4\n   vpsllw $7, %xmm4, %xmm4\n   vpor %xmm4, %xmm10, %xmm10\n"
+    "vinserti128 $1, %xmm9, %ymm9, %ymm9\n   vinserti128 $1, %xmm10, %ymm10, %ymm10\n   mov $0x0f0f0f0f, %r11d\n   vmovd %r11d, %xmm8\n   vpbroadcastd %xmm8, %ymm8\n"
+    "mov $0x07070707, %r11d\n   vmovd %r11d, %xmm13\n   vpbroadcastd %xmm13, %ymm13\n"
+    "movabs $0x8040201008040201, %r11\n   vmovq %r11, %xmm11\n   vpunpcklqdq %xmm11, %xmm11, %xmm11\n   vinserti128 $1, %xmm11, %ymm11, %ymm11\n"
+    ".balign 16\n.Lmemory_offsets_set_x64_a2_block:\n"
+    "cmp %r8, %rax\n   jae .Lmemory_offsets_set_x64_a2_full\n   mov %rdx, %r12\n   sub %r10, %r12\n   cmp $64, %r12\n   jb .Lmemory_offsets_set_x64_a2_tail\n"
+    "vmovdqu (%rsi,%r10), %ymm0\n   vmovdqu 32(%rsi,%r10), %ymm1\n   vpsrlw $4, %ymm0, %ymm2\n   vpand %ymm8, %ymm2, %ymm2\n   vpand %ymm8, %ymm0, %ymm0\n"
+    "vpshufb %ymm0, %ymm9, %ymm3\n   vpshufb %ymm0, %ymm10, %ymm4\n   vpshufb %ymm2, %ymm11, %ymm5\n   vpcmpgtb %ymm13, %ymm2, %ymm2\n"
+    "vpblendvb %ymm2, %ymm4, %ymm3, %ymm3\n   vpand %ymm5, %ymm3, %ymm3\n   vpcmpeqb %ymm12, %ymm3, %ymm3\n   vpmovmskb %ymm3, %r11d\n"
+    "vpsrlw $4, %ymm1, %ymm2\n   vpand %ymm8, %ymm2, %ymm2\n   vpand %ymm8, %ymm1, %ymm1\n"
+    "vpshufb %ymm1, %ymm9, %ymm3\n   vpshufb %ymm1, %ymm10, %ymm4\n   vpshufb %ymm2, %ymm11, %ymm5\n   vpcmpgtb %ymm13, %ymm2, %ymm2\n"
+    "vpblendvb %ymm2, %ymm4, %ymm3, %ymm3\n   vpand %ymm5, %ymm3, %ymm3\n   vpcmpeqb %ymm12, %ymm3, %ymm3\n   vpmovmskb %ymm3, %r12d\n"
+    "shl $32, %r12\n   or %r12, %r11\n   not %r11\n   test %r11, %r11\n   jz .Lmemory_offsets_set_x64_a2_next\n"
+    "mov %r8, %rbx\n   sub %rax, %rbx\n   cmp $64, %rbx\n   jb .Lmemory_offsets_set_x64_a2_slow\n   popcnt %r11, %r12\n   lea (%rdi,%rax,4), %r9\n   add %r12, %rax\n"
+    "bsf %r11, %rbx\n   add %r10, %rbx\n   mov %ebx, (%r9)\n   lea -1(%r11), %rbx\n   and %rbx, %r11\nbsf %r11, %rbx\n   add %r10, %rbx\n   mov %ebx, 4(%r9)\n   lea -1(%r11), %rbx\n   and %rbx, %r11\nbsf %r11, %rbx\n   add %r10, %rbx\n   mov %ebx, 8(%r9)\n   lea -1(%r11), %rbx\n   and %rbx, %r11\nbsf %r11, %rbx\n   add %r10, %rbx\n   mov %ebx, 12(%r9)\n   lea -1(%r11), %rbx\n   and %rbx, %r11\nbsf %r11, %rbx\n   add %r10, %rbx\n   mov %ebx, 16(%r9)\n   lea -1(%r11), %rbx\n   and %rbx, %r11\nbsf %r11, %rbx\n   add %r10, %rbx\n   mov %ebx, 20(%r9)\n   lea -1(%r11), %rbx\n   and %rbx, %r11\nbsf %r11, %rbx\n   add %r10, %rbx\n   mov %ebx, 24(%r9)\n   lea -1(%r11), %rbx\n   and %rbx, %r11\nbsf %r11, %rbx\n   add %r10, %rbx\n   mov %ebx, 28(%r9)\n   lea -1(%r11), %rbx\n   and %rbx, %r11\n"
+    "cmp $8, %r12\n   jbe .Lmemory_offsets_set_x64_a2_next\n"
+    "bsf %r11, %rbx\n   add %r10, %rbx\n   mov %ebx, 32(%r9)\n   lea -1(%r11), %rbx\n   and %rbx, %r11\nbsf %r11, %rbx\n   add %r10, %rbx\n   mov %ebx, 36(%r9)\n   lea -1(%r11), %rbx\n   and %rbx, %r11\nbsf %r11, %rbx\n   add %r10, %rbx\n   mov %ebx, 40(%r9)\n   lea -1(%r11), %rbx\n   and %rbx, %r11\nbsf %r11, %rbx\n   add %r10, %rbx\n   mov %ebx, 44(%r9)\n   lea -1(%r11), %rbx\n   and %rbx, %r11\nbsf %r11, %rbx\n   add %r10, %rbx\n   mov %ebx, 48(%r9)\n   lea -1(%r11), %rbx\n   and %rbx, %r11\nbsf %r11, %rbx\n   add %r10, %rbx\n   mov %ebx, 52(%r9)\n   lea -1(%r11), %rbx\n   and %rbx, %r11\nbsf %r11, %rbx\n   add %r10, %rbx\n   mov %ebx, 56(%r9)\n   lea -1(%r11), %rbx\n   and %rbx, %r11\nbsf %r11, %rbx\n   add %r10, %rbx\n   mov %ebx, 60(%r9)\n   lea -1(%r11), %rbx\n   and %rbx, %r11\n"
+    "cmp $16, %r12\n   jbe .Lmemory_offsets_set_x64_a2_next\n   add $64, %r9\n"
+    ".Lmemory_offsets_set_x64_a2_more:\n   bsf %r11, %rbx\n   add %r10, %rbx\n   mov %ebx, (%r9)\n   lea -1(%r11), %rbx\n   add $4, %r9\n   and %rbx, %r11\n   jnz .Lmemory_offsets_set_x64_a2_more\n"
+    ".Lmemory_offsets_set_x64_a2_next:\n   add $64, %r10\n   jmp .Lmemory_offsets_set_x64_a2_block\n"
+    ".Lmemory_offsets_set_x64_a2_slow:\n   cmp %r8, %rax\n   jae .Lmemory_offsets_set_x64_a2_full\n"
+    "bsf %r11, %rbx\n   add %r10, %rbx\n   mov %ebx, (%rdi,%rax,4)\n   inc %rax\n   lea -1(%r11), %rbx\n   and %rbx, %r11\n   jnz .Lmemory_offsets_set_x64_a2_slow\n   jmp .Lmemory_offsets_set_x64_a2_next\n"
+    ".Lmemory_offsets_set_x64_a2_full:\n   vzeroupper\n   pop %r12\n   pop %rbx\n   jmp .Lmemory_offsets_set_x64_done\n"
+    ".Lmemory_offsets_set_x64_a2_tail:\n   vzeroupper\n   pop %r12\n   pop %rbx\n   jmp .Lmemory_offsets_set_x64_one\n"
 #endif
     ".balign 16\n.Lmemory_offsets_set_x64_one:\n"
     "cmp %rdx, %r10\n   jae .Lmemory_offsets_set_x64_done\n   cmp %r8, %rax\n   jae .Lmemory_offsets_set_x64_done\n"
@@ -13889,8 +13927,7 @@ ASM_FUNC(positive_to_string)
     //
     "neg %rsi\n   mov %rsi, %r12\n   movb $45, (%rsp)\n   mov %rsp, %rdi\n   mov $1, %esi\n"
     ASM_CALL("rbx")
-    "mov %rbx, %rdi\n   mov %r12, %rsi\n"
-    "add $24, %rsp\n   pop %r12\n   pop %rbx\n   jmp positive_to_string\n"
+    "mov %rbx, %rdi\n   mov %r12, %rsi\n   add $24, %rsp\n   pop %r12\n   pop %rbx\n   jmp positive_to_string\n"
     ASM_END(bipolar_to_string)
     //
     //
@@ -19096,7 +19133,20 @@ __asm__(
     "mov x6, xzr\n   mov x7, xzr\n   cbz x4, .Lmemory_offsets_set_arm64_done\n"
 #ifndef KERNEL_MODE
     "ld1 {v16.16b-v19.16b}, [x3], #64\n   ld1 {v20.16b-v23.16b}, [x3], #64\n   ld1 {v24.16b-v27.16b}, [x3], #64\n   ld1 {v28.16b-v31.16b}, [x3]\n   sub x3, x3, #192\n"
-    "movi v5.16b, #64\n   mov x13, #0x8888888888888888\n"
+    "movi v5.16b, #64\n   mov x13, #0x8888888888888888\n   movz x14, #0x0201\n   movk x14, #0x0804, lsl #16\n   movk x14, #0x2010, lsl #32\n   movk x14, #0x8040, lsl #48\n   dup v6.2d, x14\n"
+    //      Sixty four bytes a turn while there are sixty four offsets of room, read off as memory_offsets_of_either
+    //      does; the table is in v16 to v31, so the four classifications are folded into the mask as they come.
+    //      4 KiB with a hit every 8 to 27 bytes on an M2 Pro, best of five alternated: 1334 ns before, 516 after;
+    //      every 2 to 4 bytes 1781 and 903, every 60 to 179 792 and 666, every 250 to 749 533 and 561.
+    ".Lmemory_offsets_set_arm64_big:  sub x8, x2, x7\n   cmp x8, #64\n   b.lo .Lmemory_offsets_set_arm64_wide\n   sub x8, x4, x6\n   cmp x8, #64\n   b.lo .Lmemory_offsets_set_arm64_wide\n"
+    "add x15, x1, x7\n   ldr q0, [x15, #0]\n   tbl v3.16b, {v16.16b-v19.16b}, v0.16b\n   sub v0.16b, v0.16b, v5.16b\ntbl v4.16b, {v20.16b-v23.16b}, v0.16b\n   sub v0.16b, v0.16b, v5.16b\n   orr v3.16b, v3.16b, v4.16b\ntbl v4.16b, {v24.16b-v27.16b}, v0.16b\n   sub v0.16b, v0.16b, v5.16b\n   orr v3.16b, v3.16b, v4.16b\ntbl v4.16b, {v28.16b-v31.16b}, v0.16b\n   orr v3.16b, v3.16b, v4.16b\n   cmtst v3.16b, v3.16b, v3.16b\n   and v1.16b, v3.16b, v6.16b\nldr q0, [x15, #16]\n   tbl v3.16b, {v16.16b-v19.16b}, v0.16b\n   sub v0.16b, v0.16b, v5.16b\ntbl v4.16b, {v20.16b-v23.16b}, v0.16b\n   sub v0.16b, v0.16b, v5.16b\n   orr v3.16b, v3.16b, v4.16b\ntbl v4.16b, {v24.16b-v27.16b}, v0.16b\n   sub v0.16b, v0.16b, v5.16b\n   orr v3.16b, v3.16b, v4.16b\ntbl v4.16b, {v28.16b-v31.16b}, v0.16b\n   orr v3.16b, v3.16b, v4.16b\n   cmtst v3.16b, v3.16b, v3.16b\n   and v2.16b, v3.16b, v6.16b\naddp v1.16b, v1.16b, v2.16b\n   ldr q0, [x15, #32]\n   tbl v3.16b, {v16.16b-v19.16b}, v0.16b\n   sub v0.16b, v0.16b, v5.16b\ntbl v4.16b, {v20.16b-v23.16b}, v0.16b\n   sub v0.16b, v0.16b, v5.16b\n   orr v3.16b, v3.16b, v4.16b\ntbl v4.16b, {v24.16b-v27.16b}, v0.16b\n   sub v0.16b, v0.16b, v5.16b\n   orr v3.16b, v3.16b, v4.16b\ntbl v4.16b, {v28.16b-v31.16b}, v0.16b\n   orr v3.16b, v3.16b, v4.16b\n   cmtst v3.16b, v3.16b, v3.16b\n   and v2.16b, v3.16b, v6.16b\nldr q0, [x15, #48]\n   tbl v3.16b, {v16.16b-v19.16b}, v0.16b\n   sub v0.16b, v0.16b, v5.16b\ntbl v4.16b, {v20.16b-v23.16b}, v0.16b\n   sub v0.16b, v0.16b, v5.16b\n   orr v3.16b, v3.16b, v4.16b\ntbl v4.16b, {v24.16b-v27.16b}, v0.16b\n   sub v0.16b, v0.16b, v5.16b\n   orr v3.16b, v3.16b, v4.16b\ntbl v4.16b, {v28.16b-v31.16b}, v0.16b\n   orr v3.16b, v3.16b, v4.16b\n   cmtst v3.16b, v3.16b, v3.16b\n   and v7.16b, v3.16b, v6.16b\naddp v2.16b, v2.16b, v7.16b\n   addp v1.16b, v1.16b, v2.16b\n   addp v1.16b, v1.16b, v1.16b\n"
+    "fmov x9, d1\n   cbz x9, .Lmemory_offsets_set_arm64_big_next\n   cnt v2.8b, v1.8b\n   addv b2, v2.8b\n   umov w11, v2.b[0]\n   add x14, x0, x6, lsl #2\n   add x6, x6, x11\n"
+    "rbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x12, x9, #1\n   and x9, x9, x12\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x12, x9, #1\n   and x9, x9, x12\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x12, x9, #1\n   and x9, x9, x12\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x12, x9, #1\n   and x9, x9, x12\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x12, x9, #1\n   and x9, x9, x12\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x12, x9, #1\n   and x9, x9, x12\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x12, x9, #1\n   and x9, x9, x12\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x12, x9, #1\n   and x9, x9, x12\n"
+    "cmp w11, #8\n   b.ls .Lmemory_offsets_set_arm64_big_next\n"
+    "rbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x12, x9, #1\n   and x9, x9, x12\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x12, x9, #1\n   and x9, x9, x12\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x12, x9, #1\n   and x9, x9, x12\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x12, x9, #1\n   and x9, x9, x12\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x12, x9, #1\n   and x9, x9, x12\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x12, x9, #1\n   and x9, x9, x12\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x12, x9, #1\n   and x9, x9, x12\nrbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x12, x9, #1\n   and x9, x9, x12\n"
+    "cmp w11, #16\n   b.ls .Lmemory_offsets_set_arm64_big_next\n"
+    ".Lmemory_offsets_set_arm64_big_more:\n   rbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x12, x9, #1\n   and x9, x9, x12\n   cbnz x9, .Lmemory_offsets_set_arm64_big_more\n"
+    ".Lmemory_offsets_set_arm64_big_next:\n   add x7, x7, #64\n   b .Lmemory_offsets_set_arm64_big\n"
     ".Lmemory_offsets_set_arm64_wide:  sub x8, x2, x7\n   cmp x8, #16\n   b.lo .Lmemory_offsets_set_arm64_one\n   sub x8, x4, x6\n   cmp x8, #16\n   b.lo .Lmemory_offsets_set_arm64_one\n"
     "ldr q0, [x1, x7]\n   tbl v3.16b, {v16.16b-v19.16b}, v0.16b\n   sub v0.16b, v0.16b, v5.16b\n"
     "tbl v4.16b, {v20.16b-v23.16b}, v0.16b\n   sub v0.16b, v0.16b, v5.16b\n   orr v3.16b, v3.16b, v4.16b\n"
