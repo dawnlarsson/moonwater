@@ -12714,6 +12714,7 @@ w=0; while [ $w -lt 60 ]; do [ $n -gt 0 ] && [ "$(stat -c %i /etc/resolv.conf)" 
 [ $n -gt 0 ] && [ "$(stat -c %i /etc/resolv.conf)" != "$before" ] && again=yes || again=no
 printf 'watch-killed-%s-back-%s\n' $again "$(ip addr show eth0 2>/dev/null | grep -c 'inet ')"
 printf 'route-%s\n' "$(ip route 2>/dev/null | grep -c default)"
+printf 'loopback-%s-%s-%s\n' "$(cat /sys/class/net/lo/flags)" "$(ip addr show lo 2>/dev/null | grep -c 'inet 127.0.0.1/8')" "$(grep -c '^00000000000000000000000000000001 01 ' /proc/net/if_inet6)"
 #
 #       The kernel network settings the default tier asks of the network
 #       watcher when it starts, before the first lease: no redirects, no
@@ -13139,6 +13140,7 @@ says transcript '/dev/fd and /dev/stderr are there before any package manager ha
 says transcript 'root replaces a name in another user'"'"'s directory' 'replaced-0-a'
 says transcript 'the watcher came back with an address' 'watch-killed-yes-back-1'
 says transcript 'and a route' 'route-1'
+says transcript 'the loopback is up with 127.0.0.1 and ::1, which nothing else raises' 'loopback-0x9-1-1'
 
 #
 #       Nothing the kernel felt the need to warn about.

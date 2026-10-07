@@ -348,13 +348,17 @@ static PURE COLD string_address net_name_of(p32 index)
         return null;
 }
 
+//      The one interface `ip link show NAME` and `ip addr show [dev] NAME`
+//      are asked about, as its index; 0 is every interface.
+static p32 net_show_only;
+
 static COLD bool net_link_line(netlink_header address_to header, address_any context)
 {
         netlink_link address_to link;
         string_address name = netlink_link_name(header, address_of link);
         (void)context;
 
-        if (!name)
+        if (!name || (net_show_only && link->index != net_show_only))
                 return true;
 
         string_format(net_out, "%p: %w: ", (positive)link->index, writer_terminal_name, name);
@@ -389,7 +393,8 @@ static COLD bool net_address_line(netlink_header address_to header, address_any 
         if (!label_size || !label || !memory_first_of(label, 0, label_size))
                 label = null;
 
-        if (!held || size != 4 || body->family != AF_INET)
+        if (!held || size != 4 || body->family != AF_INET ||
+            (net_show_only && body->index != net_show_only))
                 return true;
 
         host = network_order_32(address_to((p32 address_to)held));
@@ -2686,6 +2691,24 @@ static COLD fn net_kernel_defaults(void)
 
 #define NET_RESUME_LOOK_SECONDS 60
 
+/*
+        The loopback interface, which the kernel leaves down: nothing at
+        boot raises it, so a machine had no 127.0.0.1 and no ::1 (the kernel
+        gives lo its addresses when it comes up) and a program that talked
+        to itself over TCP or resolved localhost found the network
+        unreachable. Interface 1 is lo in the first network namespace, the
+        one the machine runs in.
+*/
+static COLD fn net_loopback_up(void)
+{
+        bipolar route = netlink_open_groups(0);
+
+        if (route < 0)
+                return;
+        netlink_link_up((b32)route, 1);
+        socket_close((b32)route);
+}
+
 static COLD b32 net_watch(void)
 {
         netlink_buffer message = {0};
@@ -2725,6 +2748,7 @@ static COLD b32 net_watch(void)
 #if MOONWATER_STRICT >= STRICT_SAFE
         net_kernel_defaults();
 #endif
+        net_loopback_up();
         wake = net_wake_listen();
         net_wake_watch = wake;
         net_events_watch = events;
@@ -3003,6 +3027,31 @@ static COLD b32 net_show(b32 handle, p16 type, positive body, p8 family,
         return shown < 0 ? net_refused((string_address)doing, shown) : 0;
 }
 
+//      The interface a show names, after an optional "dev": none names
+//      all of them, and one that is not there is an error and not a table
+//      of every other.
+static COLD b32 net_show_device(b32 handle)
+{
+        string_address name = net_words() > 3 ? net_word(3) : null;
+        bipolar index;
+
+        net_show_only = 0;
+        if (name && net_word_is(name, "dev", 3))
+                name = net_words() > 4 ? net_word(4) : null;
+        if (!name)
+                return 0;
+        index = net_index_of(handle, name);
+        if (index < 0)
+        {
+                string_format(net_out, "ip: Device \"%w\" does not exist.\n",
+                              writer_terminal_quoted_name, name);
+                net_flush();
+                return 1;
+        }
+        net_show_only = (p32)index;
+        return 0;
+}
+
 static COLD b32 net_ip(void)
 {
         bipolar handle;
@@ -3045,8 +3094,9 @@ static COLD b32 net_ip(void)
         else if (net_word_is(object, "link", 1))
         {
                 if (show)
-                        status = net_show((b32)handle, RTM_GETLINK, sizeof(netlink_link),
-                                          AF_UNSPEC, net_link_line, "link show");
+                        status = net_show_device((b32)handle) ? 1
+                                 : net_show((b32)handle, RTM_GETLINK, sizeof(netlink_link),
+                                            AF_UNSPEC, net_link_line, "link show");
                 else if (net_word_is(verb, "set", 3) && net_words() == 5 &&
                          net_word_is(net_word(4), "up", 2))
                 {
@@ -3063,8 +3113,9 @@ static COLD b32 net_ip(void)
         else if (net_word_is(object, "addr", 1) || net_word_is(object, "address", 1))
         {
                 if (show)
-                        status = net_show((b32)handle, RTM_GETADDR, sizeof(netlink_address),
-                                          AF_INET, net_address_line, "addr show");
+                        status = net_show_device((b32)handle) ? 1
+                                 : net_show((b32)handle, RTM_GETADDR, sizeof(netlink_address),
+                                            AF_INET, net_address_line, "addr show");
                 else if (net_word_is(verb, "add", 1) && net_words() == 6 &&
                          net_word_is(net_word(4), "dev", 3))
                 {
