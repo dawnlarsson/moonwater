@@ -80399,7 +80399,7 @@ static bool unpack_says(string_address base, string_address rest,
                         string_address want)
 {
         p8 path[256];
-        p8 text[64];
+        p8 text[128];
 
         string_copy_bounded(path, base, sizeof path);
         string_append_bounded(path, rest, sizeof path);
@@ -80804,9 +80804,10 @@ static fn profiles(void)
               bowl_profile_script(address_of planted) == 0);
         check("The planted link's target was not written to",
               unpack_says(decoy, "", "decoy\n"));
-        check("The script is a new executable file with the profile's lines",
+        check("The script is a new executable file that runs the session the bowl holds",
               unpack_says("", BOWL_EXPOSE_DIRECTORY "/profplant",
-                          "#!/bin/sh\n# bowl profile profplant\nexec true\n") &&
+                          "#!/bin/sh\n# bowl profile profplant\n"
+                          "exec bowl profile profplant session \"$@\"\n") &&
                   (unpack_mode("", BOWL_EXPOSE_DIRECTORY "/profplant") & 0111));
 
         system_remove_at(AT_FDCWD, link, 0);

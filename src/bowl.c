@@ -6333,16 +6333,24 @@ static b32 bowl_profile_script(const struct bowl_profile address_to profile)
             !bowl_profile_header(text, sizeof(text), profile->name))
                 return bowl_refuse("session path is too long\n");
 
+        //      The script is a name for the session this bowl binary holds, so
+        //      a machine whose bowl was updated after the profile was
+        //      installed runs the session that update carries, and not the
+        //      one written the day the packages were.
         used = string_length(text);
-        for (positive at = 0; profile->session[at]; at++)
         {
-                positive length = string_length(profile->session[at]);
+                static const p8 run[] = "exec bowl profile ";
+                static const p8 rest[] = " session \"$@\"\n";
+                positive length = string_length(profile->name);
 
-                if (used + length + 2 > sizeof(text))
+                if (used + sizeof(run) + length + sizeof(rest) > sizeof(text))
                         return bowl_refuse("session script is too long\n");
-                memory_copy(text + used, profile->session[at], length);
+                memory_copy(text + used, run, sizeof(run) - 1);
+                used += sizeof(run) - 1;
+                memory_copy(text + used, profile->name, length);
                 used += length;
-                text[used++] = '\n';
+                memory_copy(text + used, rest, sizeof(rest) - 1);
+                used += sizeof(rest) - 1;
         }
 
         // Removed first and made O_EXCL, so a link planted at the name is
@@ -6360,6 +6368,41 @@ static b32 bowl_profile_script(const struct bowl_profile address_to profile)
         }
         system_close(handle);
         return 0;
+}
+
+/* `bowl profile NAME session [argument...]`: the profile's session, lines of
+   a shell script, run by /bin/sh with the arguments as its own. What the
+   launcher the profile exposes under its name does. */
+static b32 __attribute__((__noinline__))
+bowl_profile_session(const struct bowl_profile address_to profile,
+                     positive count, string_address address_to arguments)
+{
+        p8 text[BOWL_SHEBANG_LIMIT * 8];
+        string_address argv[BOWL_PROFILE_ARGV];
+        positive used = 0;
+        positive at = 0;
+
+        for (positive line = 0; profile->session[line]; line++)
+        {
+                positive length = string_length(profile->session[line]);
+
+                if (used + length + 2 > sizeof(text))
+                        return bowl_refuse("session script is too long\n");
+                memory_copy(text + used, profile->session[line], length);
+                used += length;
+                text[used++] = '\n';
+        }
+        text[used] = end;
+
+        argv[at++] = "/bin/sh";
+        argv[at++] = "-c";
+        argv[at++] = text;
+        argv[at++] = profile->name;
+        for (positive word = 0; word < count && at + 1 < BOWL_PROFILE_ARGV; word++)
+                argv[at++] = arguments[word];
+        argv[at] = null;
+        system_execute("/bin/sh", argv, file_environment_all());
+        return bowl_refuse("cannot start /bin/sh\n");
 }
 
 static b32 bowl_profile_install(const struct bowl_profile address_to profile)
@@ -6638,6 +6681,13 @@ bowl_profile_main(positive count, string_address address_to arguments)
 
         if (count == 2)
                 return bowl_profile_list();
+
+        if (count >= 4 && string_equals(arguments[3], "session"))
+        {
+                profile = bowl_find_profile(arguments[2]);
+                return_if(!profile, bowl_refuse("known profiles: desktop\n"));
+                return bowl_profile_session(profile, count - 4, arguments + 4);
+        }
 
         words = bowl_profile_words(count, arguments, address_of profile,
                                    address_of remove);
