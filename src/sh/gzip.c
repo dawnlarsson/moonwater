@@ -1653,9 +1653,28 @@ static inline INLINE p32 gzip_hash(p32 bytes, p32 bits)
 }
 
 /* How far here and there agree, from at up to limit. */
+#if X64
+typedef char gzip_v16 __attribute__((vector_size(16), aligned(1), may_alias));
+#endif
 static inline INLINE positive gzip_extend(p8 address_to here, p8 address_to there,
                                           positive at, positive limit)
 {
+#if X64
+        /* Most matches end within sixteen bytes of where they were last
+           checked: one vector compare whose answer is a count of trailing
+           zeros, no loop to leave and no branch taken until a match runs
+           past sixteen. */
+        if (limit - at >= 16)
+        {
+                p32 equal = (p32)__builtin_ia32_pmovmskb128(
+                        __builtin_ia32_pcmpeqb128(*(gzip_v16 *)(here + at), *(gzip_v16 *)(there + at)));
+                positive n = bottom_bit_known(~equal | 0x10000u);
+
+                if (n < 16)
+                        return at + n;
+                at += 16;
+        }
+#endif
         while (at + 8 <= limit)
         {
                 p64 x = memory_load_unaligned(p64, here + at) ^

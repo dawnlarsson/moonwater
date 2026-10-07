@@ -3572,6 +3572,35 @@ zstd_store(zstd_encoder address_to e, p8 address_to literals, positive run,
         s->of_code = zstd_highbit32(value);
 }
 
+/* How far a and b agree, up to room. Most matches end within sixteen bytes
+   of where they were last checked, so on x86-64 the first sixteen are
+   compared here by one vector compare whose answer is a count of trailing
+   zeros: no loop to leave and no branch taken until a match runs past
+   sixteen, where the library takes over. An eight-byte compare with a
+   branch on its result cost more in mispredicts than the call it saved
+   (zstd -1 on text: 2.5M more branch misses, no fewer cycles), and a call
+   costs a fifth of a fast level's cycles when matches average seven bytes.
+   The other machines call the library. */
+#if X64
+typedef char zstd_v16 __attribute__((vector_size(16), aligned(1), may_alias));
+#endif
+static inline INLINE positive zstd_common(p8 address_to a, p8 address_to b, positive room)
+{
+#if X64
+        if (room >= 16)
+        {
+                p32 equal = (p32)__builtin_ia32_pmovmskb128(
+                        __builtin_ia32_pcmpeqb128(*(zstd_v16 *)a, *(zstd_v16 *)b));
+                positive n = bottom_bit_known(~equal | 0x10000u);
+
+                if (n < 16)
+                        return n;
+                return 16 + memory_common_prefix(a + 16, b + 16, room - 16);
+        }
+#endif
+        return memory_common_prefix(a, b, room);
+}
+
 /* Matches at the last repeat offset right where the last one ended, each a
    sequence with no literals, as long as they keep coming.  Answers the new
    position; hash, when present, takes each position a match starts at. */
@@ -3589,7 +3618,7 @@ zstd_repeat_run(zstd_encoder address_to e, p8 address_to ip,
                 if (!other || other > now - low ||
                     memory_load_unaligned(p32, ip - other) != memory_load_unaligned(p32, ip))
                         break;
-                match = 4 + memory_common_prefix(ip + 4, ip + 4 - other,
+                match = 4 + zstd_common(ip + 4, ip + 4 - other,
                                                  (positive)(iend - ip - 4));
                 if (hash)
                         hash[zstd_hash_bytes(ip, hlog, mls)] = now;
@@ -3708,7 +3737,7 @@ static p8 address_to zstd_parse_fast(zstd_encoder address_to e, p32 from,
                 while (ip0 > anchor && match0 > lowest && ip0[-1] == match0[-1])
                         ip0--, match0--, length++;
         matched:
-                length += memory_common_prefix(ip0 + length, match0 + length,
+                length += zstd_common(ip0 + length, match0 + length,
                                                (positive)(iend - ip0 - length));
                 zstd_store(e, anchor, (positive)(ip0 - anchor), distance, length);
                 ip0 += length;
@@ -3780,7 +3809,7 @@ static p8 address_to zstd_parse_dfast(zstd_encoder address_to e, p32 from,
                         if (rep && memory_load_unaligned(p32, ip + 1 - rep) ==
                                        memory_load_unaligned(p32, ip + 1))
                         {
-                                match = 4 + memory_common_prefix(ip + 5, ip + 5 - rep,
+                                match = 4 + zstd_common(ip + 5, ip + 5 - rep,
                                                                  (positive)(iend - ip - 5));
                                 ip++;
                                 zstd_store(e, anchor, (positive)(ip - anchor), rep, match);
@@ -3791,7 +3820,7 @@ static p8 address_to zstd_parse_dfast(zstd_encoder address_to e, p32 from,
                             memory_load_unaligned(p64, base + idxl0) == memory_load_unaligned(p64, ip))
                         {
                                 there = base + idxl0;
-                                match = 8 + memory_common_prefix(ip + 8, there + 8,
+                                match = 8 + zstd_common(ip + 8, there + 8,
                                                                  (positive)(iend - ip - 8));
                                 distance = (positive)(ip - there);
                                 while (ip > anchor && there > lowest && ip[-1] == there[-1])
@@ -3803,7 +3832,7 @@ static p8 address_to zstd_parse_dfast(zstd_encoder address_to e, p32 from,
                             memory_load_unaligned(p32, base + idxs0) == memory_load_unaligned(p32, ip))
                         {
                                 there = base + idxs0;
-                                match = 4 + memory_common_prefix(ip + 4, there + 4,
+                                match = 4 + zstd_common(ip + 4, there + 4,
                                                                  (positive)(iend - ip - 4));
                                 distance = (positive)(ip - there);
                                 if (idxl1 > low &&
@@ -3811,7 +3840,7 @@ static p8 address_to zstd_parse_dfast(zstd_encoder address_to e, p32 from,
                                         memory_load_unaligned(p64, ip1))
                                 {
                                         positive const length =
-                                            8 + memory_common_prefix(ip1 + 8, base + idxl1 + 8,
+                                            8 + zstd_common(ip1 + 8, base + idxl1 + 8,
                                                                      (positive)(iend - ip1 - 8));
 
                                         if (length > match)
@@ -3861,7 +3890,7 @@ static p8 address_to zstd_parse_dfast(zstd_encoder address_to e, p32 from,
                                    memory_load_unaligned(p32, ip - e->rep[1]))
                         {
                                 positive const length =
-                                    4 + memory_common_prefix(ip + 4, ip + 4 - e->rep[1],
+                                    4 + zstd_common(ip + 4, ip + 4 - e->rep[1],
                                                              (positive)(iend - ip - 4));
 
                                 shorter[zstd_hash_bytes(ip, slog, mls)] = (p32)(ip - base);
@@ -4050,7 +4079,7 @@ zstd_row_find(zstd_encoder address_to e, p8 address_to ip, p8 address_to iend,
                 if (memory_load_unaligned(p32, there + best - 3) ==
                     memory_load_unaligned(p32, ip + best - 3))
                 {
-                        positive const length = memory_common_prefix(ip, there, room);
+                        positive const length = zstd_common(ip, there, room);
 
                         if (length > best)
                         {
@@ -4118,7 +4147,7 @@ static p32 zstd_bt_insert(zstd_encoder address_to e, p8 address_to ip,
                 positive length = common_smaller < common_larger ? common_smaller
                                                                  : common_larger;
 
-                length += memory_common_prefix(ip + length, match + length, room - length);
+                length += zstd_common(ip + length, match + length, room - length);
                 if (length > best)
                 {
                         best = length;
@@ -4212,7 +4241,7 @@ static positive zstd_opt_matches(zstd_encoder address_to e, p8 address_to ip,
                 if (offset - 1 < cur - e->start && cur - offset >= low &&
                     zstd_same_start(ip, ip - offset, min_match))
                         length = min_match +
-                                 memory_common_prefix(ip + min_match, ip + min_match - offset,
+                                 zstd_common(ip + min_match, ip + min_match - offset,
                                                       room - min_match);
                 if (length > best)
                 {
@@ -4235,7 +4264,7 @@ static positive zstd_opt_matches(zstd_encoder address_to e, p8 address_to ip,
                 found = e->hash3[zstd_hash3(ip, e->hash3_log)];
                 if (found >= low && found < cur && cur - found < ((p32)1 << 18))
                 {
-                        positive const length = memory_common_prefix(ip, base + found, room);
+                        positive const length = zstd_common(ip, base + found, room);
 
                         if (length >= 3)
                         {
@@ -4266,7 +4295,7 @@ static positive zstd_opt_matches(zstd_encoder address_to e, p8 address_to ip,
                 positive length = common_smaller < common_larger ? common_smaller
                                                                  : common_larger;
 
-                length += memory_common_prefix(ip + length, match + length, room - length);
+                length += zstd_common(ip + length, match + length, room - length);
                 if (length > best)
                 {
                         if (length > match_end - candidate)
@@ -4341,7 +4370,7 @@ static fn zstd_dubt_sort(zstd_encoder address_to e, p32 cur, p8 address_to iend,
                 positive length = common_smaller < common_larger ? common_smaller
                                                                  : common_larger;
 
-                length += memory_common_prefix(ip + length, match + length, room - length);
+                length += zstd_common(ip + length, match + length, room - length);
                 if (length == room)
                         break;
                 if (match[length] < ip[length])
@@ -4451,7 +4480,7 @@ static positive zstd_bt_best(zstd_encoder address_to e, p8 address_to ip,
                 positive length = common_smaller < common_larger ? common_smaller
                                                                  : common_larger;
 
-                length += memory_common_prefix(ip + length, match + length, room - length);
+                length += zstd_common(ip + length, match + length, room - length);
                 if (length > best)
                 {
                         if (length > match_end - candidate)
@@ -5026,7 +5055,7 @@ zstd_parse_lazy_body(zstd_encoder address_to e, p32 from, p32 to, p32 low,
                 if (rep && rep <= cur + 1 - low &&
                     memory_load_unaligned(p32, ip + 1) == memory_load_unaligned(p32, ip + 1 - rep))
                 {
-                        match = 4 + memory_common_prefix(ip + 5, ip + 5 - rep,
+                        match = 4 + zstd_common(ip + 5, ip + 5 - rep,
                                                          (positive)(iend - ip - 5));
                         distance = rep;
                         if (!depth)
@@ -5059,7 +5088,7 @@ zstd_parse_lazy_body(zstd_encoder address_to e, p32 from, p32 to, p32 low,
                         if (rep && rep <= cur - low &&
                             memory_load_unaligned(p32, ip) == memory_load_unaligned(p32, ip - rep))
                         {
-                                length = 4 + memory_common_prefix(ip + 4, ip + 4 - rep,
+                                length = 4 + zstd_common(ip + 4, ip + 4 - rep,
                                                                   (positive)(iend - ip - 4));
                                 if ((bipolar)length * 3 >
                                     (bipolar)match * 3 - zstd_offset_cost(e, distance) + 1)
@@ -5089,7 +5118,7 @@ zstd_parse_lazy_body(zstd_encoder address_to e, p32 from, p32 to, p32 low,
                                 if (rep && rep <= cur - low &&
                                     memory_load_unaligned(p32, ip) == memory_load_unaligned(p32, ip - rep))
                                 {
-                                        length = 4 + memory_common_prefix(ip + 4, ip + 4 - rep,
+                                        length = 4 + zstd_common(ip + 4, ip + 4 - rep,
                                                                           (positive)(iend - ip - 4));
                                         if ((bipolar)length * 4 >
                                             (bipolar)match * 4 - zstd_offset_cost(e, distance) + 1)
