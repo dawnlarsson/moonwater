@@ -1219,6 +1219,262 @@ static bipolar bowl_fast_layer(string_address root, string_address layer)
 }
 
 /*
+        The accounts of a bowl, for the programs a service of it runs as.
+        Moonwater's /etc/passwd and /etc/group are the top layer of every
+        view and hide the bowl's own, so a daemon that drops to the account
+        its distribution made for it (polkitd, avahi, colord) finds none and
+        ends. A program a session starts has no use for them and sees the
+        machine's two accounts; the service a bus starts sees the machine's
+        with the bowl's added where the name is not the machine's and the id
+        is neither root's nor the user's. The merged files are made for one
+        launch, bound over the two in the view and removed.
+*/
+#define BOWL_ACCOUNTS_DIRECTORY "/run/bowl-accounts"
+#define BOWL_ACCOUNTS_ROOM 16384
+#define BOWL_HOST_ETC "/run/bowl-etc"
+
+static b32 bowl_write_bytes(string_address path, string_address text,
+                            positive length);
+
+static const struct { string_address path; string_address name; } bowl_accounts[] = {
+    {"/etc/passwd", "passwd"}, {"/etc/group", "group"}};
+static p8 bowl_accounts_made;
+
+static bool bowl_accounts_path(p8 address_to into, positive room,
+                               string_address name)
+{
+        p8 leaf[48];
+        positive length = positive_into_string(
+            leaf, (positive)system_call(syscall(getpid)));
+
+        leaf[length++] = '.';
+        memory_copy(leaf + length, name, string_length(name) + 1);
+        return path_join(into, room, BOWL_ACCOUNTS_DIRECTORY, leaf);
+}
+
+/* Where field number index of a line starts and how long it is. */
+static bool bowl_accounts_field(string_address line, positive length,
+                                positive index, positive address_to start,
+                                positive address_to size)
+{
+        positive from = 0;
+        positive to;
+
+        for (positive seen = 0; seen < index; seen++)
+        {
+                while (from < length && line[from] != ':')
+                        from++;
+                if (from >= length)
+                        return false;
+                from++;
+        }
+        for (to = from; to < length && line[to] != ':'; to++)
+                ;
+        address_to start = from;
+        address_to size = to - from;
+        return true;
+}
+
+static bool bowl_accounts_has(string_address text, positive length,
+                              string_address name, positive size)
+{
+        for (positive at = 0; at < length;)
+        {
+                if (at + size < length &&
+                    !string_compare_max(text + at, name, size) &&
+                    text[at + size] == ':')
+                        return true;
+                while (at < length && text[at++] != '\n')
+                        ;
+        }
+        return false;
+}
+
+/* Whether a line of the text has this id in its third field. */
+static bool bowl_accounts_has_id(string_address text, positive length,
+                                 string_address id, positive size)
+{
+        for (positive at = 0; at < length;)
+        {
+                positive stop = at;
+                positive start;
+                positive found;
+
+                while (stop < length && text[stop] != '\n')
+                        stop++;
+                if (bowl_accounts_field(text + at, stop - at, 2, address_of start,
+                                        address_of found) &&
+                    found == size &&
+                    !string_compare_max(text + at + start, id, size))
+                        return true;
+                at = stop + 1;
+        }
+        return false;
+}
+
+/*
+        The lines of from that the text does not have, added to it: its new
+        length. A name the text has with another id is a bowl's own account of
+        that name (polkitd is 101 in one distribution and 991 in the next):
+        where an alias is given it is added as name.alias, so that the id is
+        one the bus can name.
+*/
+static positive bowl_accounts_add(p8 address_to text, positive used,
+                                  positive room, string_address from,
+                                  positive length, string_address alias)
+{
+        positive alias_size = alias ? string_length(alias) + 1 : 0;
+
+        if (used && text[used - 1] != '\n' && used < room)
+                text[used++] = '\n';
+
+        for (positive at = 0; at < length;)
+        {
+                positive stop = at;
+                positive size;
+                positive id;
+                positive id_size;
+                bool named;
+
+                while (stop < length && from[stop] != '\n')
+                        stop++;
+                if (bowl_accounts_field(from + at, stop - at, 0, address_of id,
+                                        address_of size) &&
+                    size &&
+                    bowl_accounts_field(from + at, stop - at, 2, address_of id,
+                                        address_of id_size) &&
+                    !(id_size == 1 && from[at + id] == '0') &&
+                    !(id_size == 4 &&
+                      !string_compare_max(from + at + id, "1000", 4)) &&
+                    used + (stop - at) + alias_size + 1 <= room)
+                {
+                        named = bowl_accounts_has(text, used, from + at, size);
+                        if (!named)
+                        {
+                                memory_copy(text + used, from + at, stop - at);
+                                used += stop - at;
+                                text[used++] = '\n';
+                        }
+                        else if (alias &&
+                                 !bowl_accounts_has_id(text, used,
+                                                       from + at + id, id_size))
+                        {
+                                memory_copy(text + used, from + at, size);
+                                used += size;
+                                text[used++] = '.';
+                                memory_copy(text + used, alias, alias_size - 1);
+                                used += alias_size - 1;
+                                memory_copy(text + used, from + at + size,
+                                            stop - at - size);
+                                used += stop - at - size;
+                                text[used++] = '\n';
+                        }
+                }
+                at = stop + 1;
+        }
+        return used;
+}
+
+static b32 bowl_read_in_root(string_address root, string_address path,
+                             p8 address_to into, positive capacity)
+{
+        bipolar handle = bowl_open_in_root(root, path, FILE_READ | O_CLOEXEC);
+        bipolar got;
+
+        if (handle < 0)
+                return 0;
+        got = system_read_retry((positive)handle, into, capacity);
+        system_close(handle);
+        return got > 0 ? (b32)got : 0;
+}
+
+/*
+        The files for the launch that is about to be of this bowl's program,
+        or of the bus, which a service of any bowl connects to as the account
+        its bowl made and which refuses an id it has no name for: that one
+        has every bowl's, the bowl asked for first.
+*/
+static fn bowl_accounts_prepare(string_address root, bool every)
+{
+        p8 text[BOWL_ACCOUNTS_ROOM * 2];
+        p8 other[BOWL_ACCOUNTS_ROOM];
+        p8 path[BOWL_PATH_LIMIT];
+
+        bowl_quiet = true;
+        bowl_mkdir(BOWL_ACCOUNTS_DIRECTORY);
+        for (positive at = 0; at < array_count(bowl_accounts); at++)
+        {
+                p8 host[BOWL_PATH_LIMIT];
+                bipolar got;
+                positive used;
+                file_walk walk;
+                p8 next[BOWL_PATH_LIMIT];
+                bool walking = false;
+
+                /* A launch inside a view finds the machine's own file under
+                   the one that view bound over it. */
+                got = path_join(host, sizeof(host), BOWL_HOST_ETC,
+                                bowl_accounts[at].name)
+                          ? file_read_once_at(AT_FDCWD, host, text,
+                                              BOWL_ACCOUNTS_ROOM)
+                          : -1;
+                if (got < 0)
+                        got = file_read_once_at(AT_FDCWD, bowl_accounts[at].path,
+                                                text, BOWL_ACCOUNTS_ROOM);
+                if (got < 0)
+                        continue;
+                used = (positive)got;
+
+                for (string_address from = root;;)
+                {
+                        b32 more = bowl_read_in_root(from, bowl_accounts[at].path,
+                                                     other, sizeof(other));
+
+                        if (more)
+                                used = bowl_accounts_add(text, used,
+                                                         sizeof(text),
+                                                         (string_address)other,
+                                                         more,
+                                                         every ? from + sizeof(BOWL_ROOT_PREFIX) - 1
+                                                               : null);
+                        if (!every)
+                                break;
+                        if (!walking)
+                                walking = file_walk_open(address_of walk,
+                                                         AT_FDCWD,
+                                                         BOWL_ROOT_DIRECTORY);
+                        if (!walking || !bowl_next_root(address_of walk, next))
+                                break;
+                        from = next;
+                }
+                if (walking)
+                        file_walk_close(address_of walk);
+
+                if (used != (positive)got &&
+                    bowl_accounts_path(path, sizeof(path),
+                                       bowl_accounts[at].name) &&
+                    !bowl_write_bytes(path, (string_address)text, used))
+                        bowl_accounts_made |= (p8)(1 << at);
+        }
+        bowl_quiet = false;
+}
+
+static fn bowl_accounts_bind(void)
+{
+        p8 path[BOWL_PATH_LIMIT];
+
+        for (positive at = 0; at < array_count(bowl_accounts); at++)
+        {
+                if (!(bowl_accounts_made & (1 << at)) ||
+                    !bowl_accounts_path(path, sizeof(path),
+                                        bowl_accounts[at].name))
+                        continue;
+                system_mount(path, bowl_accounts[at].path, 0, MS_BIND, 0);
+                system_remove_at(AT_FDCWD, path, 0);
+        }
+}
+
+/*
         The bowl's /etc under Moonwater's, one mount: Moonwater's directory is
         the top layer, so a name both have is Moonwater's.
 
@@ -1254,7 +1510,10 @@ static bipolar bowl_fast_etc(string_address root)
 
         memory_copy(options, lower, length);
         bowl_doing("overlay /etc from", options + length);
-        return system_mount("overlay", "/etc", "overlay", MS_RDONLY, options);
+        failed = system_mount("overlay", "/etc", "overlay", MS_RDONLY, options);
+        if (!failed && bowl_accounts_made)
+                bowl_accounts_bind();
+        return failed;
 }
 
 /*
@@ -2403,6 +2662,7 @@ static bool bowl_keep_capabilities(void)
 
 static bool bowl_is_root(void);
 static fn bowl_reconcile(string_address root);
+static fn bowl_bus_refresh(string_address root);
 
 /*  The launch is run as the user. A refusal of the namespace itself is the
     machine's to make and is not an error; a namespace that was made and could
@@ -6105,17 +6365,45 @@ static b32 bowl_udev(positive count)
         "Unknown username" and "Could not get UID and GID for username
         messagebus".
 
-        So the bowl that has a dbus-daemon runs it, as the user like the rest
-        of a session (a bus is told who a client is by the id the client says
-        and the id the kernel says, and a client that is the user and a daemon
-        that is not would disagree) with a configuration of this machine's:
-        one user, so a policy that lets every connection own and talk to
-        everything, and the socket where every client looks.
+        So the bowl that provides the most services and has a dbus-daemon runs
+        it, as the machine's root (the daemons that open a device, udisks and
+        the others, are refused it by the kernel as the user in a namespace,
+        and a service that asks "is the caller root" is asking this bus) with
+        a configuration of this machine's: one user, so a policy that lets
+        every connection own and talk to everything. The bus has the
+        services of every bowl, the files of /usr/share/dbus-1/system-services
+        written again into one directory with the line that starts them made
+        to start them in their own bowl's view (bowl bus run), as the machine's
+        root, with the accounts of that bowl added to the machine's
+        (bowl_accounts_prepare): a distribution's polkitd drops to polkitd.
+
+        The programs of a session are the user in a namespace, and say so to
+        a bus: Qt's library, Chrome's and every other that sends its own id
+        names 1000 when the kernel says root, and a bus that asks the two to
+        agree refuses them. So the socket the clients open is not the bus's.
+        It is a process of the machine that takes each connection, tells the
+        bus the client is root, and carries the bytes (bowl_bus_relay), and
+        every client of this machine, a daemon or a program of the session,
+        is then the one id the machine has for all of them. Passing a file
+        descriptor is not carried: a client that asks for it is told no, as
+        a bus without it would.
+
+        And the one answer the machine gives that no daemon can: polkit asks
+        who may do what, and this machine has one user who may do anything,
+        so the rule says so, as passwd and group are written.
 */
 #define BOWL_BUS_DIRECTORY "/run/dbus"
 #define BOWL_BUS_SOCKET BOWL_BUS_DIRECTORY "/system_bus_socket"
+#define BOWL_BUS_UPSTREAM BOWL_BUS_DIRECTORY "/root_bus_socket"
 #define BOWL_BUS_PIDFILE BOWL_BUS_DIRECTORY "/pid"
+#define BOWL_BUS_RELAY BOWL_BUS_DIRECTORY "/relay.pid"
+#define BOWL_BUS_LOG BOWL_BUS_DIRECTORY "/services.log"
 #define BOWL_BUS_CONFIG BOWL_BUS_DIRECTORY "/bowl-system.conf"
+#define BOWL_BUS_SERVICES BOWL_BUS_DIRECTORY "/system-services"
+#define BOWL_BUS_REQUEST 4096
+#define BOWL_BUS_LINE 1024
+#define BOWL_POLKIT_DIRECTORY "/etc/polkit-1/rules.d"
+#define BOWL_POLKIT_RULE BOWL_POLKIT_DIRECTORY "/49-moonwater.rules"
 
 static const p8 bowl_bus_config[] =
     "<!DOCTYPE busconfig PUBLIC \"-//freedesktop//DTD D-Bus Bus Configuration "
@@ -6125,7 +6413,8 @@ static const p8 bowl_bus_config[] =
     "  <type>system</type>\n"
     "  <fork/>\n"
     "  <pidfile>" BOWL_BUS_PIDFILE "</pidfile>\n"
-    "  <listen>unix:path=" BOWL_BUS_SOCKET "</listen>\n"
+    "  <listen>unix:path=" BOWL_BUS_UPSTREAM "</listen>\n"
+    "  <servicedir>" BOWL_BUS_SERVICES "</servicedir>\n"
     "  <auth>EXTERNAL</auth>\n"
     "  <policy context=\"default\">\n"
     "    <allow user=\"*\"/>\n"
@@ -6141,8 +6430,19 @@ static const p8 bowl_bus_config[] =
     "  </policy>\n"
     "</busconfig>\n";
 
+static const p8 bowl_polkit_rule[] =
+    "polkit.addRule(function(action, subject) {\n"
+    "    if (subject.user == \"root\" || subject.user == \"user\")\n"
+    "        return polkit.Result.YES;\n"
+    "});\n";
+
 static string_address bowl_bus_daemons[] = {"/usr/bin/dbus-daemon",
                                             "/bin/dbus-daemon", null};
+
+static string_address bowl_bus_service_directories[] = {
+    "/usr/share/dbus-1/system-services",
+    "/usr/local/share/dbus-1/system-services",
+    "/run/current-system/sw/share/dbus-1/system-services", null};
 
 static bool bowl_bus_running(void)
 {
@@ -6165,11 +6465,11 @@ static bool bowl_bus_running(void)
         return system_access_at(AT_FDCWD, path, 0) >= 0;
 }
 
-/* The daemon the pidfile names, asked to finish, and the pidfile with it. */
-static fn bowl_bus_stop(void)
+/* The process a pidfile names, asked to finish, and the pidfile with it. */
+static fn bowl_bus_kill(string_address pidfile)
 {
         p8 text[32];
-        bipolar got = file_read_once_at(AT_FDCWD, BOWL_BUS_PIDFILE, text,
+        bipolar got = file_read_once_at(AT_FDCWD, pidfile, text,
                                         sizeof(text) - 1);
         positive taken;
         positive pid;
@@ -6181,27 +6481,492 @@ static fn bowl_bus_stop(void)
                 if (taken && pid > 1)
                         system_call_2(syscall(kill), pid, SIGTERM);
         }
-        system_remove_at(AT_FDCWD, BOWL_BUS_PIDFILE, 0);
+        system_remove_at(AT_FDCWD, pidfile, 0);
+}
+
+static fn bowl_bus_stop(void)
+{
+        bowl_bus_kill(BOWL_BUS_PIDFILE);
+        bowl_bus_kill(BOWL_BUS_RELAY);
+        system_remove_at(AT_FDCWD, BOWL_BUS_UPSTREAM, 0);
         system_remove_at(AT_FDCWD, BOWL_BUS_SOCKET, 0);
 }
 
-static b32 bowl_bus(positive count)
+static bool bowl_bus_is_service(string_address name)
+{
+        positive length = string_length(name);
+
+        return length > sizeof(".service") - 1 &&
+               string_equals(name + length - (sizeof(".service") - 1),
+                             ".service");
+}
+
+/* How many services a bowl has. */
+static positive bowl_bus_count(string_address root)
+{
+        positive count = 0;
+
+        for (positive at = 0; bowl_bus_service_directories[at]; at++)
+        {
+                bipolar handle = bowl_open_in_root(
+                    root, bowl_bus_service_directories[at],
+                    FILE_READ | O_DIRECTORY | O_CLOEXEC);
+                file_walk walk;
+                struct linux_dirent64 address_to entry;
+
+                if (handle < 0)
+                        continue;
+                if (file_walk_open(address_of walk, handle, "."))
+                {
+                        while ((entry = file_walk_next(address_of walk)))
+                                count += bowl_bus_is_service(entry->d_name);
+                        file_walk_close(address_of walk);
+                }
+                system_close(handle);
+        }
+        return count;
+}
+
+/*
+        One service file of a bowl, as the bus has it: the same file with the
+        line that starts the service asking the machine to start it in this
+        bowl. A file without a program of the bowl's own to run is left out,
+        and so is one a name is already served by: the systemd stub that
+        runs /bin/false for a name a bowl with elogind in it can serve.
+*/
+static fn bowl_bus_service(string_address root, bipolar directory,
+                           string_address name)
+{
+        static const p8 ask[] = "Exec=/bowl bus run ";
+        p8 text[BOWL_BUS_REQUEST];
+        p8 out[BOWL_BUS_REQUEST + BOWL_PATH_LIMIT + sizeof(ask) + 4];
+        p8 program[BOWL_PATH_LIMIT];
+        p8 path[BOWL_PATH_LIMIT];
+        positive exec_at = 0;
+        positive exec_size = 0;
+        positive used = 0;
+        positive root_size = string_length(root);
+        bipolar handle;
+        bipolar got;
+
+        if (!path_join(path, sizeof(path), BOWL_BUS_SERVICES, name) ||
+            system_access_at(AT_FDCWD, path, 0) >= 0)
+                return;
+
+        handle = system_open_at(directory, name,
+                                FILE_READ | O_NOFOLLOW | O_CLOEXEC);
+        if (handle < 0)
+                return;
+        got = system_read_retry((positive)handle, text, sizeof(text));
+        system_close(handle);
+        if (got <= 0 || (positive)got >= sizeof(text))
+                return;
+
+        for (positive at = 0; at < (positive)got;)
+        {
+                positive stop = at;
+
+                while (stop < (positive)got && text[stop] != '\n')
+                        stop++;
+                if (stop - at > 5 && !string_compare_max(text + at, "Exec=", 5))
+                {
+                        exec_at = at + 5;
+                        exec_size = stop - at - 5;
+                }
+                at = stop + 1;
+        }
+
+        if (!exec_size || text[exec_at] != '/' ||
+            root_size + exec_size + sizeof(ask) + 4 > sizeof(out))
+                return;
+        {
+                positive word = 0;
+
+                while (word < exec_size && text[exec_at + word] != ' ' &&
+                       text[exec_at + word] != '\t' &&
+                       word + 1 < sizeof(program))
+                {
+                        program[word] = text[exec_at + word];
+                        word++;
+                }
+                program[word] = end;
+        }
+        if (string_equals(program, "/bin/false") ||
+            string_equals(program, "/usr/bin/false") ||
+            bowl_executable_in_root(root, program) < 0)
+                return;
+
+        for (positive at = 0; at < (positive)got;)
+        {
+                positive stop = at;
+
+                while (stop < (positive)got && text[stop] != '\n')
+                        stop++;
+                if (at == exec_at - 5)
+                {
+                        memory_copy(out + used, ask, sizeof(ask) - 1);
+                        used += sizeof(ask) - 1;
+                        memory_copy(out + used, root, root_size);
+                        used += root_size;
+                        out[used++] = ' ';
+                        memory_copy(out + used, text + exec_at, exec_size);
+                        used += exec_size;
+                        out[used++] = '\n';
+                }
+                else if (stop - at < 15 ||
+                         string_compare_max(text + at, "SystemdService=", 15))
+                {
+                        memory_copy(out + used, text + at, stop - at);
+                        used += stop - at;
+                        out[used++] = '\n';
+                }
+                at = stop + 1;
+        }
+
+        bowl_quiet = true;
+        bowl_write_bytes(path, (string_address)out, used);
+        bowl_quiet = false;
+}
+
+static fn bowl_bus_services(string_address root)
+{
+        for (positive at = 0; bowl_bus_service_directories[at]; at++)
+        {
+                bipolar handle = bowl_open_in_root(
+                    root, bowl_bus_service_directories[at],
+                    FILE_READ | O_DIRECTORY | O_CLOEXEC);
+                file_walk walk;
+                struct linux_dirent64 address_to entry;
+
+                if (handle < 0)
+                        continue;
+                if (file_walk_open(address_of walk, handle, "."))
+                {
+                        while ((entry = file_walk_next(address_of walk)))
+                                if (bowl_bus_is_service(entry->d_name))
+                                        bowl_bus_service(root, handle,
+                                                         entry->d_name);
+                        file_walk_close(address_of walk);
+                }
+                system_close(handle);
+        }
+}
+
+/* A package added to a bowl whose bus is running: its services are served. */
+static fn bowl_bus_refresh(string_address root)
+{
+        if (bowl_bus_running())
+                bowl_bus_services(root);
+}
+
+/* A directory emptied of its files, for the next run of the bus to fill. */
+static fn bowl_bus_clear(string_address directory)
+{
+        file_walk walk;
+        struct linux_dirent64 address_to entry;
+        p8 path[BOWL_PATH_LIMIT];
+
+        if (!file_walk_open(address_of walk, AT_FDCWD, directory))
+                return;
+        while ((entry = file_walk_next(address_of walk)))
+                if (bowl_bus_is_service(entry->d_name) &&
+                    path_join(path, sizeof(path), directory, entry->d_name))
+                        system_remove_at(AT_FDCWD, path, 0);
+        file_walk_close(address_of walk);
+}
+
+/* bowl bus run ROOT PROGRAM [ARGUMENT...]: what the line in a service says. */
+static b32 bowl_bus_run(positive count, string_address address_to arguments)
+{
+        bipolar sink;
+
+        return_if(count < 5 || !bowl_named_root(arguments[3]), bowl_usage());
+        return_if(!bowl_is_root(), bowl_refuse("a service starts as root\n"));
+
+        /* A bus gives a service no output; what it says is kept. */
+        sink = system_open_at_mode(AT_FDCWD, BOWL_BUS_LOG,
+                                   FILE_APPEND | O_CLOEXEC, 0600);
+        if (sink >= 0)
+        {
+                system_duplicate(sink, 1, 0);
+                system_duplicate(sink, 2, 0);
+                system_close(sink);
+        }
+        bowl_as_root = true;
+        bowl_accounts_prepare(arguments[3], false);
+        return bowl_launch(arguments[3], arguments[4], arguments + 4, false);
+}
+
+typedef struct
+{
+        p16 family;
+        p8 path[108];
+} bowl_bus_address;
+
+static bipolar bowl_bus_open(string_address path, bool listen)
+{
+        bowl_bus_address where = {.family = AF_UNIX};
+        positive length = string_length(path);
+        bipolar handle;
+        bipolar failed;
+
+        if (length >= sizeof(where.path))
+                return -ERROR_INVALID;
+        memory_copy(where.path, path, length + 1);
+        handle = socket_new(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        if (handle < 0)
+                return handle;
+
+        if (listen)
+        {
+                system_remove_at(AT_FDCWD, path, 0);
+                failed = socket_bind((b32)handle, address_of where, sizeof(where));
+                /* A service that has dropped to its own account connects too. */
+                if (!failed)
+                        failed = system_change_mode_at(AT_FDCWD, path, 0666);
+                if (!failed)
+                        failed = socket_listen((b32)handle, 64);
+        }
+        else
+                failed = socket_connect((b32)handle, address_of where,
+                                        sizeof(where));
+        if (failed < 0)
+        {
+                socket_close((b32)handle);
+                return failed;
+        }
+        return handle;
+}
+
+/*
+        One line a client sent before it began, passed on to the bus as the
+        machine's root said it: the id the client names is the user's in its
+        namespace, and the bus asks the kernel, which says root. A client
+        that asks to pass file descriptors is told the bus does not.
+*/
+static bool bowl_bus_say(bipolar client, bipolar upstream,
+                         const p8 address_to line, positive length,
+                         bool address_to begun, bool address_to owed,
+                         bool address_to waiting)
+{
+        static const p8 as_root[] = "30\r\n";
+        positive skip = 0;
+        positive keep = 0;
+
+        while (skip < length && !line[skip])
+                skip++;
+        if (length - skip >= 5 && !string_compare_max(line + skip, "BEGIN", 5))
+                address_to begun = true;
+
+        if (length - skip >= 17 &&
+            !string_compare_max(line + skip, "NEGOTIATE_UNIX_FD", 17))
+        {
+                if (address_to waiting)
+                        address_to owed = true;
+                else
+                        return system_write_all((positive)client, "ERROR\r\n",
+                                                7) == 7;
+                return true;
+        }
+
+        if (length - skip > 14 &&
+            !string_compare_max(line + skip, "AUTH EXTERNAL ", 14))
+                keep = skip + 14;
+        else if (length - skip > 5 && !string_compare_max(line + skip, "DATA ", 5))
+                keep = skip + 5;
+
+        if (length - skip >= 4 && (!string_compare_max(line + skip, "AUTH", 4) ||
+                                   !string_compare_max(line + skip, "DATA", 4)))
+                address_to waiting = true;
+
+        if (keep && line[keep] != '\r' && line[keep] != '\n')
+        {
+                return system_write_all((positive)upstream, line, keep) == keep &&
+                       system_write_all((positive)upstream, as_root,
+                                        sizeof(as_root) - 1) == sizeof(as_root) - 1;
+        }
+        return system_write_all((positive)upstream, line, length) == length;
+}
+
+/* A client and the bus, until either is gone. */
+static fn bowl_bus_relay(bipolar client, bipolar upstream)
+{
+        p8 held[BOWL_BUS_LINE];
+        p8 chunk[8192];
+        positive kept = 0;
+        bool begun = false;
+        bool owed = false;
+        bool waiting = false;
+
+        for (;;)
+        {
+                system_poll_descriptor wait[2] = {
+                    {(b32)client, SYSTEM_POLL_READ, 0},
+                    {(b32)upstream, SYSTEM_POLL_READ, 0}};
+                bipolar got;
+
+                if (system_poll_wait(wait, 2, null, null) < 0)
+                        continue;
+
+                if (wait[1].returned)
+                {
+                        got = system_read_retry((positive)upstream, chunk,
+                                                sizeof(chunk));
+                        if (got <= 0)
+                                return;
+                        waiting = false;
+                        /* The answer to the line it was not told of comes
+                           after the answer before it. */
+                        positive cut = 0;
+
+                        if (owed)
+                        {
+                                positive from = 0;
+
+                                /* After the line that says OK. */
+                                while (from < (positive)got && !cut)
+                                {
+                                        positive stop = from;
+
+                                        while (stop < (positive)got &&
+                                               chunk[stop] != '\n')
+                                                stop++;
+                                        if (stop < (positive)got &&
+                                            !string_compare_max(chunk + from,
+                                                                "OK ", 3))
+                                                cut = stop + 1;
+                                        from = stop + 1;
+                                }
+                        }
+                        if (cut)
+                        {
+                                owed = false;
+                                if (system_write_all((positive)client, chunk,
+                                                     cut) != cut ||
+                                    system_write_all((positive)client,
+                                                     "ERROR\r\n", 7) != 7)
+                                        return;
+                        }
+                        if (system_write_all((positive)client, chunk + cut,
+                                             (positive)got - cut) !=
+                            (positive)got - cut)
+                                return;
+                }
+                if (!wait[0].returned)
+                        continue;
+
+                got = system_read_retry((positive)client, chunk, sizeof(chunk));
+                if (got <= 0)
+                        return;
+                if (begun)
+                {
+                        if (system_write_all((positive)upstream, chunk,
+                                             (positive)got) != (positive)got)
+                                return;
+                        continue;
+                }
+
+                for (positive at = 0; at < (positive)got; at++)
+                {
+                        if (kept == sizeof(held))
+                                return;
+                        held[kept++] = chunk[at];
+                        if (chunk[at] != '\n')
+                                continue;
+                        if (!bowl_bus_say(client, upstream, held, kept, &begun, &owed,
+                                          &waiting))
+                                return;
+                        kept = 0;
+                        if (begun)
+                        {
+                                positive rest = (positive)got - at - 1;
+
+                                if (rest && system_write_all((positive)upstream,
+                                                             chunk + at + 1,
+                                                             rest) != rest)
+                                        return;
+                                break;
+                        }
+                }
+        }
+}
+
+/* The socket the clients open, for as long as the machine is up. */
+static DEAD_END fn bowl_bus_accept(bipolar listener)
+{
+        system_call(syscall(setsid));
+
+        for (;;)
+        {
+                bipolar client = socket_accept((b32)listener, null, null,
+                                               SOCK_CLOEXEC);
+                bipolar child;
+
+                if (client < 0)
+                {
+                        process_nap_ns(BOWL_UDEV_POLL_NS);
+                        continue;
+                }
+                child = system_fork();
+                if (child == 0)
+                {
+                        if (system_fork() == 0)
+                        {
+                                bipolar upstream = bowl_bus_open(BOWL_BUS_UPSTREAM,
+                                                                 false);
+
+                                socket_close((b32)listener);
+                                if (upstream >= 0)
+                                        bowl_bus_relay(client, upstream);
+                        }
+                        exit(0);
+                }
+                socket_close((b32)client);
+                if (child > 0)
+                {
+                        positive status = 0;
+
+                        system_wait4_retry(child, address_of status, 0, null);
+                }
+        }
+}
+
+static b32 bowl_bus(positive count, string_address address_to arguments)
 {
         file_walk walk;
         p8 root[BOWL_PATH_LIMIT];
+        p8 chosen[BOWL_PATH_LIMIT];
         string_address daemon = null;
+        string_address candidate;
+        positive best = 0;
         string_address start[] = {null, "--config-file=" BOWL_BUS_CONFIG, null};
+        p8 pid_text[32];
+        bipolar listener;
         bipolar child;
         b32 failed;
 
+        if (count > 2 && string_equals(arguments[2], "run"))
+                return bowl_bus_run(count, arguments);
         return_if(count != 2, bowl_usage());
         return_if(bowl_bus_running(), 0);
         return_if(!bowl_is_root(), bowl_refuse("the system bus starts as root\n"));
 
         if (!file_walk_open(address_of walk, AT_FDCWD, BOWL_ROOT_DIRECTORY))
                 return bowl_refuse("there is no bowl to start the bus from\n");
-        while (!daemon && bowl_next_root(address_of walk, root))
-                daemon = bowl_udev_find(root, bowl_bus_daemons);
+        while (bowl_next_root(address_of walk, root))
+        {
+                positive services;
+
+                candidate = bowl_udev_find(root, bowl_bus_daemons);
+                if (!candidate)
+                        continue;
+                services = bowl_bus_count(root);
+                if (daemon && services <= best)
+                        continue;
+                daemon = candidate;
+                best = services;
+                memory_copy(chosen, root, string_length(root) + 1);
+        }
         file_walk_close(address_of walk);
 
         if (!daemon)
@@ -6209,26 +6974,50 @@ static b32 bowl_bus(positive count)
                                    "desktop adds one, or add dbus to the "
                                    "bowl\n");
 
-        /* A socket and a pidfile left by a daemon that is gone are in the way
-           of the next: dbus-daemon refuses to start beside a pidfile. */
+        /* Sockets and a pidfile left by a daemon that are gone are in the way
+           of the next (dbus-daemon refuses to start beside a pidfile), and so
+           is the process that carried them. */
+        bowl_bus_kill(BOWL_BUS_RELAY);
+        system_remove_at(AT_FDCWD, BOWL_BUS_UPSTREAM, 0);
         system_remove_at(AT_FDCWD, BOWL_BUS_SOCKET, 0);
         system_remove_at(AT_FDCWD, BOWL_BUS_PIDFILE, 0);
-        failed = bowl_mkdir(BOWL_BUS_DIRECTORY);
-        if (failed || bowl_write_bytes(BOWL_BUS_CONFIG, bowl_bus_config,
+        failed = bowl_mkdir(BOWL_BUS_DIRECTORY) ||
+                 bowl_mkdir(BOWL_BUS_SERVICES);
+        if (failed || bowl_write_bytes(BOWL_BUS_CONFIG,
+                                       (string_address)bowl_bus_config,
                                        sizeof(bowl_bus_config) - 1))
                 return bowl_refuse("cannot write the system bus's configuration\n");
+
+        bowl_bus_clear(BOWL_BUS_SERVICES);
+        bowl_bus_services(chosen);
+        if (file_walk_open(address_of walk, AT_FDCWD, BOWL_ROOT_DIRECTORY))
+        {
+                while (bowl_next_root(address_of walk, root))
+                        if (!string_equals(root, chosen))
+                                bowl_bus_services(root);
+                file_walk_close(address_of walk);
+        }
+
+        bowl_quiet = true;
+        if (bowl_mkdir_parents(BOWL_POLKIT_DIRECTORY) >= 0)
+                bowl_write_bytes(BOWL_POLKIT_RULE,
+                                 (string_address)bowl_polkit_rule,
+                                 sizeof(bowl_polkit_rule) - 1);
+        bowl_quiet = false;
 
         start[0] = daemon;
         child = system_fork();
         if (child == 0)
         {
-                bowl_launch(root, daemon, start, false);
+                bowl_as_root = true;
+                bowl_accounts_prepare(chosen, true);
+                bowl_launch(chosen, daemon, start, false);
                 exit(127);
         }
         failed = bowl_wait_applet(child, "the system bus did not start\n");
 
         for (positive waited = 0;
-             !failed && system_access_at(AT_FDCWD, BOWL_BUS_SOCKET, 0) < 0;
+             !failed && system_access_at(AT_FDCWD, BOWL_BUS_UPSTREAM, 0) < 0;
              waited += BOWL_UDEV_POLL_NS)
         {
                 if (waited >= BOWL_UDEV_WAIT_NS)
@@ -6242,8 +7031,30 @@ static b32 bowl_bus(positive count)
         }
         return_if(failed, failed);
 
+        /* A service started by the bus is told to use this socket, as the
+           account it dropped to. */
+        system_change_mode_at(AT_FDCWD, BOWL_BUS_UPSTREAM, 0666);
+
+        listener = bowl_bus_open(BOWL_BUS_SOCKET, true);
+        if (listener < 0)
+        {
+                bowl_bus_stop();
+                return bowl_fail(BOWL_BUS_SOCKET, listener);
+        }
+        child = system_fork();
+        if (child == 0)
+                bowl_bus_accept(listener);
+        socket_close((b32)listener);
+        if (child > 0)
+        {
+                pid_text[positive_into_string(pid_text, (positive)child)] = end;
+                bowl_quiet = true;
+                bowl_write_bytes(BOWL_BUS_RELAY, pid_text, string_length(pid_text));
+                bowl_quiet = false;
+        }
+
         string_format(log, bowl_label "the system bus is running, from %s\n",
-                      root);
+                      chosen);
         log_flush();
         return 0;
 }
@@ -6534,6 +7345,7 @@ static fn bowl_reconcile(string_address root)
         for (positive at = 0; bowl_profile_bins[at]; at++)
                 made += bowl_profile_expose_dir(root, bowl_profile_bins[at], -1);
         bowl_quiet = false;
+        bowl_bus_refresh(root);
 
         if (made)
         {
@@ -7006,7 +7818,7 @@ static b32 bowl_main()
                 return bowl_udev(count);
 
         if (string_equals(arguments[1], "bus"))
-                return bowl_bus(count);
+                return bowl_bus(count, arguments);
 
         if (string_equals(arguments[1], "--isolated"))
         {
