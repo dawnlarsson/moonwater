@@ -11098,10 +11098,86 @@ def files_tar_short_archive(farm):
     return won, total, notes
 
 
+def files_find_write_error(farm):
+    """find whose output cannot be written says why, and answers 1.
+
+    The reference prints "find: write error" after the reason it had for the
+    failed write; a find that stays silent exits 1 with nothing said, and the
+    word "write error" is what must be there.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    reference = shutil.which("find", path=os.defpath)
+    candidate = Path(farm) / "find"
+    if not reference or not candidate.exists() or not Path("/dev/full").exists():
+        return 0, 1, ["find write-error check needs find on both sides and /dev/full"]
+
+    won = total = 0
+    notes = []
+    with tempfile.TemporaryDirectory(prefix="find-full-") as work:
+        Path(work, "entry").write_bytes(b"")
+        for label, extra in (("plain", []), ("-ls", ["-ls"]), ("-printf", ["-printf", "%p\\n"])):
+            results = []
+            for program in (reference, str(candidate)):
+                with open("/dev/full", "wb") as full:
+                    results.append(subprocess.run([program, work, "-maxdepth", "1"] + extra,
+                                                  stdout=full, stderr=subprocess.PIPE,
+                                                  timeout=60))
+            want, got = results
+            total += 1
+            if got.returncode == want.returncode and \
+                    ("write error" in got.stderr.decode()) == ("write error" in want.stderr.decode()):
+                won += 1
+            else:
+                notes.append(f"find {label} > /dev/full: reference {want.returncode} "
+                             f"{want.stderr.decode()[:60]!r}, candidate {got.returncode} "
+                             f"{got.stderr.decode()[:60]!r}")
+    return won, total, notes
+
+
+def files_ls_address_cap(farm):
+    """ls -R under a 16 MB address-space cap does not call a memory limit a count.
+
+    A directory of 20,000 entries lists under the reference, and under ours the
+    tables that cannot grow must be a memory refusal: "too many entries" is the
+    count limit's text, and must not be what a cap answers.
+    """
+    import shutil
+    import subprocess
+    import sys
+    import tempfile
+
+    if not sys.platform.startswith("linux"):
+        return 0, 0, []
+    import resource
+
+    candidate = Path(farm) / "ls"
+    if not candidate.exists():
+        return 0, 1, ["ls address-cap check needs ls in the farm"]
+
+    def capped():
+        limit = 16 * 1024 * 1024
+        resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+
+    with tempfile.TemporaryDirectory(prefix="ls-cap-") as work:
+        top = Path(work) / "many"
+        top.mkdir()
+        for index in range(20000):
+            os.close(os.open(top / ("f%d" % index), os.O_CREAT | os.O_WRONLY, 0o644))
+        got = subprocess.run([str(candidate), "-R", str(top)], capture_output=True,
+                             timeout=120, preexec_fn=capped)
+        said = got.stderr.decode("utf-8", "replace")
+        if "too many entries" not in said:
+            return 1, 1, []
+        return 0, 1, [f"ls -R under 16 MB: status {got.returncode}, {said.splitlines()[:1]!r}"]
+
+
 FILES_CHECKS = (files_uname_identity, files_cp_into_self, files_locale_names, files_collation_ls, files_large_inputs, files_column_layout, files_xargs_parallel, files_zones, files_tar,
                 files_tar_formats,
                 files_find_terminal, files_zone_names, files_hostname_set, files_move_across,
-                files_address_cap, files_kill_bash_word, files_tar_short_archive)
+                files_address_cap, files_kill_bash_word, files_tar_short_archive, files_find_write_error, files_ls_address_cap)
 
 # ---- domain: misc (from spec_misc.py) ----
 

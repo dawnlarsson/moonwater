@@ -12303,7 +12303,7 @@ static fn ls_print(string_address directory)
         //      The column search reads a width for one column even of an
         //      empty listing.
         if (!ls_room_for(ls_count))
-                return ls_limit((string_address) "directory has too many entries");
+                return ls_limit((string_address) "memory exhausted");
 
         ls_some_quoted = false;
         ls_inode_width = 1;
@@ -12444,9 +12444,17 @@ static bool file_has_attributes(bipolar directory, string_address path)
 static bool ls_add(bipolar directory, string_address path, string_address shown,
                    p8 type, string_address under, file_facts address_to given)
 {
-        if (ls_count >= LS_MAX_ENTRIES || !ls_room_for(ls_count + 1))
+        //      The count limit and the memory limit are two refusals: a
+        //      table that cannot grow under an address-space cap is not too
+        //      many entries, and says so.
+        if (ls_count >= LS_MAX_ENTRIES)
         {
                 ls_limit((string_address) "directory has too many entries");
+                return false;
+        }
+        if (!ls_room_for(ls_count + 1))
+        {
+                ls_limit((string_address) "memory exhausted");
                 return false;
         }
 
@@ -18227,6 +18235,11 @@ static b32 file_find()
                 find_batch_run(i);
 
         log_flush();
+
+        // Output that could not be written is said, as GNU's close_stdout
+        // says it, and the answer is 1 whatever the walk found.
+        if (!file_output_told((string_address)"find"))
+                find_status = 1;
 
         return find_status;
 }
