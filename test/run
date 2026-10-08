@@ -91,7 +91,7 @@ export TEST_TALLY
 #       kernel/profile/sec_sanitize.
 asked_lanes="wifi fuzz msan ring0 tier scale desktop chrome"
 
-lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex slurp wait writer native probe stack checksum storage_io storage_format machine sensors cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep"
+lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep"
 
 describe()
 {
@@ -158,6 +158,7 @@ describe()
         storage_io) echo "positional-read retries, exact bounds, zero padding and ELF table handoff" ;;
         storage_format) echo "GPT, FAT32 and ext4 as an install writes them, checked by sfdisk and e2fsck" ;;
         machine) echo "the machine script: hooks, functions, case arms, overlay lines and file policy" ;;
+        snapshot) echo "process records, truncated tails and sentinel bounds on three machines" ;;
         sensors) echo "monitor's clocks, temperatures, fans, power and battery against generated sysfs trees" ;;
         cli)      echo "the moonwater command in a namespace: every verb, every zone it names, what it writes" ;;
         script)   echo "every verb as the machine script runs it, with no terminal and nothing on its input: bounded, asking nothing, and the same twice" ;;
@@ -3000,6 +3001,7 @@ lane_storage_format()
 }
 
 lane_machine() { freestanding_checks_lane machine machine; }
+lane_snapshot() { freestanding_checks_lane snapshot snapshot; }
 
 #
 #       monitor's clocks, temperatures, fans and power, read from sysfs trees
@@ -4202,7 +4204,12 @@ lane_net()
 #       MOONWATER_FUZZ_REPORT=artifacts/fuzz-report.txt makes it the release
 #       attach instead: lane_net's budget unless the knobs are set, and a JSON
 #       report of toolchain, seeds, budget and exits written there.
-lane_fuzz() { python3 test/differential.py --harness tls_fuzz; }
+lane_fuzz()
+{
+        python3 -m unittest discover -s test -p test_network_cases.py || return 1
+        MOONWATER_FUZZ_BOUNDARIES=${MOONWATER_FUZZ_BOUNDARIES:-1} \
+                python3 test/differential.py --harness tls_fuzz
+}
 #       MemorySanitizer over hosted lifts of the net wire parsers, pad and
 #       uninit proves, and short tls_der_fuzz / tls_hs_fuzz / dns_fuzz /
 #       netlink_fuzz runs. Needs Linux clang's -fsanitize=memory; NOT RUN
@@ -18456,7 +18463,7 @@ python3 test/differential.py --harness scale "$@"
 #       absolute number that is not. A Linux host target runs directly.
 #
 
-benchmarks="floor baseline numbers bases hex escape spelled codec fixed table padded input-bases fields human human-nearest hash-33 span-byte utf8-valid net-parsers cells-ascii fill-u32 fill-u64 paths reverse writer-field writer-text text-hot prefix-known translate delete squeeze offsets record-scans ascii-case ascii-case-fold line-break bounded-fold ascii-convert ascii-search grep-search grep-count last-of words clock scan-literal random allocator lock pool ordered tree reserve storage-read compare-max string-copy stream-get stream-write format-bounds startup montgomery limbs shell tools grep-sets awk find boot-time engines compression compression-floor cksum-crc cksum-digests unicode-width link"
+benchmarks="floor baseline numbers bases hex escape spelled codec fixed table padded input-bases fields human human-nearest hash-33 span-byte utf8-valid net-parsers net-hot cells-ascii fill-u32 fill-u64 paths reverse writer-field writer-text text-hot prefix-known translate delete squeeze offsets record-scans ascii-case ascii-case-fold line-break bounded-fold ascii-convert ascii-search grep-search grep-count last-of words clock scan-literal random allocator lock pool ordered tree reserve storage-read compare-max string-copy stream-get stream-write format-bounds startup montgomery limbs shell tools grep-sets awk find boot-time engines compression compression-floor cksum-crc cksum-digests unicode-width link"
 
 #       One benchmark's section and one line about it. A name with no section
 #       is one of the drivers below, which time a whole binary against the
@@ -18503,6 +18510,8 @@ bench_about()
                  bench_line="bounded equal-byte prefix and suffix: scalar caller loops against the assembly" ;;
         net-parsers) bench_section=BENCH_net_parsers
                  bench_line="network parser byte loops against the lib.c routines, at their callers" ;;
+        net-hot) bench_section=BENCH_net_hot
+                 bench_line="production HTTP fields, DHCP padding and queued datagram reception" ;;
         utf8-valid) bench_section=BENCH_utf8_valid
                  bench_line="well-formed UTF-8 prefix: grep's former C check against the assembly" ;;
         cells-ascii) bench_section=BENCH_cells_ascii

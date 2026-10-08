@@ -188,7 +188,10 @@ positive waterlink_mdns_announce(p8 address_to packet, positive room,
         p8 address_to instance;
         p8 address_to host;
 
-        if (room < 12 + question_length + 160)
+        /* Subtract only after proving the fixed reserve fits: the caller's
+           question length must not wrap the capacity check before the copy. */
+        if (room < 12 + 160 || question_length > room - (12 + 160) ||
+            (!question && question_length) || (question && !question_length))
                 return 0;
         at = waterlink_dns_head(packet, id, 0x8400, question ? 1 : 0,
                                 3 + (address ? 1 : 0));

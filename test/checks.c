@@ -53870,6 +53870,9 @@ static bool net_send_short_hit;
 static bool net_send_error_sticky;
 static positive net_send_arm_after;
 static positive net_send_calls;
+static p8 address_to net_send_capture;
+static positive net_send_capture_room;
+static positive net_send_capture_length;
 
 static bipolar net_recv_error;
 static bool net_recv_error_hit;
@@ -53878,6 +53881,11 @@ static bool net_recv_eintr_hit;
 static positive net_recv_short_limit;
 static bool net_recv_short_hit;
 static bool net_recv_eintr_sticky;
+static positive net_recv_interruptions;
+static positive net_recv_calls;
+static positive net_recv_eagain_count;
+static bool net_recv_require_nonblocking;
+static positive net_recv_blocking_calls;
 static positive net_recv_arm_after;
 static positive net_recv_fill_length;
 static p8 net_recv_fill[64];
@@ -53958,6 +53966,11 @@ static bipolar net_test_socket_send(b32 handle, address_any data, positive size,
                                     b32 flags, address_any to, positive to_size)
 {
         net_send_calls++;
+        if (net_send_capture)
+        {
+                net_send_capture_length = min(size, net_send_capture_room);
+                memory_copy(net_send_capture, data, net_send_capture_length);
+        }
         if (net_send_arm_after)
         {
                 net_send_arm_after--;
@@ -54002,6 +54015,23 @@ static bipolar net_test_socket_receive(b32 handle, address_any data,
                                        positive size, b32 flags,
                                        address_any from, address_any from_size)
 {
+        net_recv_calls++;
+        if (net_recv_require_nonblocking && !(flags & MSG_DONTWAIT))
+        {
+                net_recv_blocking_calls++;
+                return -EIO;
+        }
+        if (net_recv_eagain_count)
+        {
+                net_recv_eagain_count--;
+                return -EAGAIN;
+        }
+        if (net_recv_interruptions)
+        {
+                net_recv_interruptions--;
+                net_recv_eintr_hit = true;
+                return -EINTR;
+        }
         if (net_recv_arm_after)
         {
                 net_recv_arm_after--;
@@ -54058,11 +54088,64 @@ static bipolar net_test_socket_receive(b32 handle, address_any data,
                              (positive)from_size);
 }
 
+static positive net_poll_calls;
+
+static bipolar net_test_poll_wait(system_poll_descriptor address_to descriptors,
+                                  positive count, timespec address_to limit,
+                                  positive address_to signal_mask)
+{
+        net_poll_calls++;
+        return system_poll_wait(descriptors, count, limit, signal_mask);
+}
+
+static positive net_slurp_calls;
+static positive net_search_bytes;
+static positive net_name_calls;
+static positive net_text_span_calls;
+static fn net_io_faults_clear(void);
+
+static positive net_test_memory_text_span(address_any bytes, positive size)
+{
+        net_text_span_calls++;
+        return memory_text_span(bytes, size);
+}
+
+static bipolar net_test_socket_name(b32 handle, address_any address,
+                                    p32 address_to length)
+{
+        net_name_calls++;
+        return socket_name(handle, address, length);
+}
+
+static bipolar net_test_file_slurp(string_address path, p8 address_to into,
+                                   positive capacity)
+{
+        net_slurp_calls++;
+        return file_slurp(path, into, capacity);
+}
+
+static address_any net_test_memory_search(address_any block, positive size,
+                                          address_any needle, positive length)
+{
+        net_search_bytes += size;
+        return memory_search(block, size, needle, length);
+}
+
+#define file_slurp net_test_file_slurp
+#define memory_search net_test_memory_search
+#define memory_text_span net_test_memory_text_span
+#define socket_name net_test_socket_name
+#define system_poll_wait net_test_poll_wait
 #define system_call_3(...) http_net_call3(__VA_ARGS__)
 #define socket_send(...) net_test_socket_send(__VA_ARGS__)
 #define socket_receive(...) net_test_socket_receive(__VA_ARGS__)
 #define memory_reserve(...) net_test_memory_reserve(__VA_ARGS__)
 #include "../src/net/net.c"
+#undef file_slurp
+#undef memory_search
+#undef memory_text_span
+#undef socket_name
+#undef system_poll_wait
 #undef memory_reserve
 #undef socket_receive
 #undef socket_send
@@ -54290,6 +54373,89 @@ static fn building(void)
         check("forgetting gives the room back", request.bytes == null);
 }
 
+/* Address and route builders normally need CAP_NET_ADMIN before these paths
+   can be observed. Capture the request at socket_send and refuse it there:
+   production builds every byte, but nothing reaches a kernel socket. */
+static fn address_route_builders(void)
+{
+        p64 captured_words[32];
+        p8 address_to captured = (p8 address_to)captured_words;
+        netlink_header address_to header = (netlink_header address_to)captured;
+        positive size;
+        p8 address_to value;
+
+        net_send_capture = captured;
+        net_send_capture_room = sizeof captured_words;
+        net_send_error = -EIO;
+        net_send_error_sticky = true;
+
+        check("a leased address request reaches the send boundary",
+              netlink_address_lease(-1, 7, 0x0a010203, 23,
+                                    0xffffffffu, true) == -EIO);
+        check("the leased address request is whole",
+              net_send_capture_length == header->length &&
+                  header->type == RTM_NEWADDR &&
+                  header->flags == (NLM_REQUEST | NLM_ACK | NLM_CREATE |
+                                    NLM_EXCLUSIVE));
+        netlink_address address_to address =
+            (netlink_address address_to)(captured + NETLINK_HEADER);
+        check("a lease keeps its interface, prefix and universal scope",
+              address->family == AF_INET && address->prefix == 23 &&
+                  address->scope == RT_SCOPE_UNIVERSE && address->index == 7);
+        value = netlink_find(header, sizeof *address, IFA_LOCAL, address_of size);
+        check("a lease carries its local address in network order",
+              value && size == 4 && value[0] == 10 && value[1] == 1 &&
+                  value[2] == 2 && value[3] == 3);
+        value = netlink_find(header, sizeof *address, IFA_CACHEINFO, address_of size);
+        check("a lease carries exact preferred and valid lifetimes",
+              value && size == 16 && address_to((p32 address_to)value) == 0xffffffffu &&
+                  address_to((p32 address_to)(value + 4)) == 0xffffffffu &&
+                  !address_to((p32 address_to)(value + 8)) &&
+                  !address_to((p32 address_to)(value + 12)));
+        value = netlink_find(header, sizeof *address, IFA_PROTO, address_of size);
+        check("a lease identifies DHCP ownership", value && size == 1 &&
+              value[0] == IFA_PROTO_DHCP);
+
+        check("a default route request reaches the send boundary",
+              netlink_route_change(-1, RTM_NEWROUTE,
+                                   NLM_REQUEST | NLM_ACK | NLM_CREATE |
+                                       NLM_REPLACE,
+                                   0, 0, 0x0a010201, 7,
+                                   NETLINK_ROUTE_ONLINK) == -EIO);
+        netlink_route address_to route =
+            (netlink_route address_to)(captured + NETLINK_HEADER);
+        check("a default route omits a destination and keeps its policy fields",
+              header->type == RTM_NEWROUTE && route->family == AF_INET &&
+                  !route->destination_bits && route->table == RT_TABLE_MAIN &&
+                  route->protocol == RTPROT_BOOT &&
+                  route->scope == RT_SCOPE_UNIVERSE && route->kind == RTN_UNICAST &&
+                  route->flags == NETLINK_ROUTE_ONLINK &&
+                  !netlink_find(header, sizeof *route, RTA_DST, null));
+        value = netlink_find(header, sizeof *route, RTA_GATEWAY, address_of size);
+        check("a default route carries its gateway in network order",
+              value && size == 4 && value[0] == 10 && value[1] == 1 &&
+                  value[2] == 2 && value[3] == 1);
+        value = netlink_find(header, sizeof *route, RTA_OIF, address_of size);
+        check("a default route carries its output interface",
+              value && size == 4 && address_to((p32 address_to)value) == 7);
+
+        check("a direct route request reaches the send boundary",
+              netlink_route_change(-1, RTM_DELROUTE, NLM_REQUEST | NLM_ACK,
+                                   0xc0000200, 24, 0, 7, 0) == -EIO);
+        route = (netlink_route address_to)(captured + NETLINK_HEADER);
+        value = netlink_find(header, sizeof *route, RTA_DST, address_of size);
+        check("a direct route has link scope and its destination",
+              header->type == RTM_DELROUTE && route->destination_bits == 24 &&
+                  route->scope == RT_SCOPE_LINK && value && size == 4 &&
+                  value[0] == 192 && value[1] == 0 && value[2] == 2 && !value[3] &&
+                  !netlink_find(header, sizeof *route, RTA_GATEWAY, null));
+
+        net_send_capture = null;
+        net_send_capture_room = net_send_capture_length = 0;
+        net_send_error = 0;
+        net_send_error_sticky = false;
+}
+
 //      An attribute whose payload is not a multiple of four: the length is the
 //      true one, the cursor moves by the padded one, and the pad is zero.
 static fn padding(void)
@@ -54458,6 +54624,106 @@ done:
                 socket_close((b32)sender);
         if (receiver >= 0)
                 socket_close((b32)receiver);
+}
+
+static bool netlink_stop_after_first(netlink_header address_to header,
+                                      address_any context)
+{
+        (void)header;
+        (*(positive address_to)context)++;
+        return false;
+}
+
+static fn netlink_multipart_identity(void)
+{
+        const positive packets[] = {1, 2, 8, 64};
+
+        for (positive row = 0; row < array_count(packets); row++)
+        {
+                b32 pair[2];
+                netlink_buffer request = {0}, reply = {0};
+                netlink_header frame = {.length = NETLINK_HEADER,
+                    .type = RTM_NEWLINK, .flags = 2, .sequence = 77};
+                positive visited = 0;
+                bipolar opened = system_call_4(syscall(socketpair), AF_UNIX,
+                                               SOCK_DGRAM, 0, (positive)pair);
+
+                check("multipart identity socket fixture opens", opened == 0);
+                if (opened)
+                        continue;
+                bool queued = true;
+                for (positive at = 0; at < packets[row]; at++)
+                        queued &= socket_send(pair[1], address_of frame,
+                            sizeof frame, 0, null, 0) == sizeof frame;
+                frame.type = NLMSG_IS_DONE;
+                queued &= socket_send(pair[1], address_of frame, sizeof frame,
+                                      0, null, 0) == sizeof frame;
+                check("multipart identity replies queue", queued);
+                bool ready = netlink_begin(address_of request, RTM_GETLINK,
+                                            NLM_REQUEST, 77, 0);
+
+                net_name_calls = 0;
+                net_poll_calls = 0;
+                check("multipart dump drains after its visitor stops",
+                      ready && netlink_walk(pair[0], address_of request, 77,
+                          address_of reply, netlink_stop_after_first,
+                          address_of visited) == 0 && visited == 1);
+                check("multipart dump looks up socket identity once",
+                      net_name_calls == 1);
+                check("queued multipart replies need no readiness polls",
+                      net_poll_calls == 0);
+                check("multipart dump leaves no unread reply",
+                      socket_receive(pair[0], address_of frame, sizeof frame,
+                          MSG_DONTWAIT, null, null) == -EAGAIN);
+                netlink_forget(address_of request);
+                netlink_forget(address_of reply);
+                socket_close(pair[0]);
+                socket_close(pair[1]);
+        }
+}
+
+static fn netlink_nonblocking_retries(void)
+{
+        const bipolar faults[] = {-EAGAIN, -EINTR};
+
+        for (positive phase = 0; phase < 2; phase++)
+                for (positive row = 0; row < array_count(faults); row++)
+                {
+                        b32 pair[2];
+                        netlink_buffer request = {0}, reply = {0};
+                        netlink_header done = {.length = NETLINK_HEADER,
+                            .type = NLMSG_IS_DONE, .sequence = 89};
+                        bipolar opened = system_call_4(syscall(socketpair),
+                            AF_UNIX, SOCK_DGRAM, 0, (positive)pair);
+
+                        check("nonblocking netlink retry fixture opens", opened == 0);
+                        if (opened)
+                                continue;
+                        net_io_faults_clear();
+                        net_recv_require_nonblocking = true;
+                        check("empty netlink receive returns without a blocking syscall",
+                              netlink_receive_one(pair[0], address_of reply, false) == -EAGAIN &&
+                                  !net_recv_blocking_calls);
+                        net_io_faults_clear();
+                        check("nonblocking netlink retry reply queues",
+                              socket_send(pair[1], address_of done, sizeof done,
+                                          0, null, 0) == sizeof done);
+                        bool built = netlink_begin(address_of request,
+                            RTM_GETLINK, NLM_REQUEST, 89, 0);
+
+                        net_recv_require_nonblocking = true;
+                        net_recv_error = faults[row];
+                        net_recv_arm_after = phase;
+                        check("netlink peek and fill interruptions retry without blocking",
+                              built && netlink_walk(pair[0], address_of request,
+                                  89, address_of reply, null, null) == 0 &&
+                                      net_recv_error_hit && !net_recv_blocking_calls);
+                        net_io_faults_clear();
+                        netlink_forget(address_of request);
+                        netlink_forget(address_of reply);
+                        socket_close(pair[0]);
+                        socket_close(pair[1]);
+                }
 }
 
 static fn error_frames(void)
@@ -55517,10 +55783,13 @@ static fn resolving_truncated(void)
         p32 found = 0;
         positive elapsed = 0;
 
+        net_send_calls = 0;
         check("an oversized truncated UDP reply completes through split TCP framing",
               dns_tcp_loopback_case(DNS_TCP_SPLIT, address_of found, null) ==
                       DNS_OK &&
                   found == 0xc0000207);
+        check("DNS sends its UDP query then one whole framed TCP query",
+              net_send_calls == 2);
         check("an oversized TCP DNS frame is refused",
               dns_tcp_loopback_case(DNS_TCP_OVERSIZED, null, null) ==
                   DNS_MALFORMED);
@@ -55974,10 +56243,13 @@ static positive dns_servers_asked(const char address_to text, positive length)
                 net_send_error_sticky = true;
                 net_send_error = -ENETUNREACH;
                 net_send_calls = 0;
+                net_slurp_calls = 0;
                 (void)dns_resolve_any((string_address)path,
                                       (string_address)"servers.example",
                                       address_of found, 1);
                 asked = net_send_calls;
+                check("a resolver failover lookup reads its configuration once",
+                      net_slurp_calls == 1);
                 net_io_faults_clear();
         }
         system_close((positive)file);
@@ -56002,6 +56274,43 @@ static fn resolving_servers(void)
         memory_copy(cut + 4075, cut_line, sizeof cut_line - 1);
         check("a resolv.conf cut by the read does not name its cut address",
               dns_servers_asked((const char address_to)cut, sizeof cut) == 1);
+
+        for (positive count = 1; count <= 5; count++)
+        {
+                p8 config[512];
+                positive used = 0;
+
+                for (positive at = 0; at < count; at++)
+                {
+                        static const char line[] =
+                            "nameserver\t127.0.0.2 # first\n"
+                            "nameserver invalid\n# comment\n";
+
+                        memory_copy(config + used, line, sizeof line - 1);
+                        used += sizeof line - 1;
+                }
+                check("resolver snapshot preserves the server limit",
+                      dns_servers_asked((const char address_to)config, used) ==
+                          min(count, (positive)DNS_SERVERS_MAX));
+        }
+        {
+                bipolar file = (bipolar)system_call_2(syscall(memfd_create),
+                                                      (positive)"empty-resolv", 0);
+                p8 path[40];
+                p32 server = 0x12345678;
+
+                check("empty resolver snapshot fixture opens", file >= 0);
+                if (file >= 0)
+                {
+                        memory_copy(path, "/proc/self/fd/", 14);
+                        path[14 + positive_into(path + 14, (positive)file)] = end;
+                        net_slurp_calls = 0;
+                        check("empty resolver snapshot reads once and names no server",
+                              dns_servers(path, address_of server, 1) == 0 &&
+                                  server == 0x12345678 && net_slurp_calls == 1);
+                        system_close((positive)file);
+                }
+        }
 }
 
 /* Modes match harness_http_response_framing CASES in differential.py. */
@@ -57569,6 +57878,243 @@ static fn network_trickle_and_exit(b32 handle, p8 address_to bytes,
         system_call_1(syscall(exit_group), 0);
 }
 
+static bool net_token_reference(p8 byte)
+{
+        return (byte >= '0' && byte <= '9') ||
+               (byte >= 'A' && byte <= 'Z') ||
+               (byte >= 'a' && byte <= 'z') ||
+               byte == '!' || byte == '#' || byte == '$' || byte == '%' ||
+               byte == '&' || byte == '\'' || byte == '*' || byte == '+' ||
+               byte == '-' || byte == '.' || byte == '^' || byte == '_' ||
+               byte == '`' || byte == '|' || byte == '~';
+}
+
+static fn network_text_spans(void)
+{
+        const positive sizes[] = {0, 1, 2, 3, 7, 15, 16, 17, 31, 32, 33,
+                                  63, 64, 65, 127, 255, 257, 4096};
+        p8 bytes[4096 + 32];
+        p8 line[] = {'X', 'X', ':', ' ', 'a'};
+
+        check("empty text spans do not dereference null",
+              memory_text_span(null, 0) == 0);
+        for (positive byte = 0; byte < 256; byte++)
+        {
+                line[0] = (p8)byte;
+                check("prepared token bytes match the HTTP grammar for every byte",
+                      (string_set_http_token[byte] != 0) == net_token_reference((p8)byte));
+                check("field names preserve the token policy for every byte",
+                      http_line_valid(line, sizeof line, true) ==
+                          net_token_reference((p8)byte));
+        }
+        for (positive align = 0; align < 8; align++)
+        for (positive row = 0; row < array_count(sizes); row++)
+        {
+                positive size = sizes[row];
+                p8 address_to span = bytes + align;
+
+                memory_fill(span, 'A', size);
+                check("text spans accept the whole bounded ordinary run",
+                      memory_text_span(span, size) == size);
+                if (!size)
+                        continue;
+                positive positions[] = {0, size / 2, size - 1};
+
+                for (positive byte = 0; byte < 256; byte++)
+                for (positive where = 0; where < array_count(positions); where++)
+                {
+                        positive at = positions[where];
+                        bool text = byte == 9 || (byte >= 32 && byte != 127);
+
+                        span[at] = (p8)byte;
+                        check("text spans locate every control, tab, DEL and high byte",
+                              memory_text_span(span, size) == (text ? size : at));
+                        span[at] = 'A';
+                }
+        }
+
+        p8 address_to pages = (p8 address_to)system_call_6(
+            syscall(mmap), 0, 12288, 3, 0x22, (positive)-1, 0);
+
+        check("text-span guard pages allocate", !system_failed(pages) && pages);
+        if (system_failed(pages) || !pages)
+                return;
+        bool guarded =
+            !system_call_3(syscall(mprotect), (positive)pages, 4096, 0) &&
+            !system_call_3(syscall(mprotect), (positive)(pages + 8192), 4096, 0);
+
+        check("text-span guard pages protect", guarded);
+        if (guarded)
+        for (positive edge = 0; edge < 2; edge++)
+        for (positive row = 0; row < array_count(sizes); row++)
+        {
+                positive size = sizes[row];
+                p8 address_to span = pages + 4096 + (edge ? 4096 - size : 0);
+
+                memory_fill(span, 0xa5, size);
+                check("text scans stay within either guarded edge and accept high bytes",
+                      memory_text_span(span, size) == size);
+                memory_fill(span, '\t', size);
+                check("text scans accept tabs at either guarded edge",
+                      memory_text_span(span, size) == size);
+                if (size)
+                {
+                        span[size - 1] = 0;
+                        check("text scans stop on the final guarded NUL",
+                              memory_text_span(span, size) == size - 1);
+                }
+        }
+        system_call_2(syscall(munmap), (positive)pages, 12288);
+}
+
+static fn http_header_field_collection(void)
+{
+        const char *parts[] = {"X-Unused:\tallowed \r\n",
+                              "cOnTeNt-LeNgTh:\t17 \t\r\n",
+                              "lOcAtIoN:\t/new?x=1 \t\r\n",
+                              "Another: allowed\r\n"};
+        p8 bytes[512];
+
+        for (positive code = 0; code < 2; code++)
+        for (positive first = 0; first < 4; first++)
+        for (positive second = 0; second < 4; second++)
+        for (positive third = 0; third < 4; third++)
+        for (positive fourth = 0; fourth < 4; fourth++)
+        {
+                if (first == second || first == third || first == fourth ||
+                    second == third || second == fourth || third == fourth)
+                        continue;
+                positive permutation[] = {first, second, third, fourth};
+                const char *status = code ? "HTTP/1.1 302 Found\r\n"
+                                          : "HTTP/1.1 200 OK\r\n";
+                positive used = string_length(status);
+                positive head = 0;
+                http_response response;
+
+                memory_copy(bytes, status, used);
+                for (positive at = 0; at < 4; at++)
+                {
+                        positive count = string_length(parts[permutation[at]]);
+
+                        memory_copy(bytes + used, parts[permutation[at]], count);
+                        used += count;
+                }
+                memory_copy(bytes + used, "\r\nbody", 6);
+                used += 2;
+                net_text_span_calls = 0;
+                check("one-pass response fields accept every ordering with unknown fields",
+                      http_response_framing(bytes, used + 4, address_of head,
+                                            address_of response) == HTTP_OK &&
+                          head == used && response.code == (code ? 302 : 200) &&
+                          response.body_kind == HTTP_BODY_LENGTH &&
+                          response.body_length == 17);
+                check("one-pass fields retain redirect-only Location and trim both ends",
+                      code ? response.location && response.location_length == 8 &&
+                                 !memory_compare(response.location, "/new?x=1", 8)
+                           : !response.location && !response.location_length);
+                check("each response line is validated exactly once",
+                      net_text_span_calls == 5);
+        }
+
+        static const struct { const char *wire; bipolar expected; } cases[] = {
+            {"HTTP/1.1 302 Found\r\nLocation:\r\nlocation: /next\r\n\r\n", HTTP_MALFORMED},
+            {"HTTP/1.1 200 OK\r\nLocation:\r\nlocation: /next\r\n\r\n", HTTP_OK},
+            {"HTTP/1.1 200 OK\r\nContent-Length:\r\ncontent-length: 0\r\n\r\n", HTTP_MALFORMED},
+            {"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n", HTTP_MALFORMED},
+            {"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nBad Name: x\r\n\r\n", HTTP_MALFORMED},
+            {"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n folded\r\n\r\n", HTTP_MALFORMED},
+            {"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nX: a\rb\r\n\r\n", HTTP_MALFORMED},
+        };
+        for (positive at = 0; at < array_count(cases); at++)
+        {
+                positive head = 0;
+                http_response response;
+
+                check("one-pass collection retains duplicate and unknown-field rejection",
+                      http_response_framing((p8 address_to)cases[at].wire,
+                          string_length(cases[at].wire), address_of head,
+                          address_of response) == cases[at].expected);
+        }
+}
+
+/* Compare every growing fragment with the complete-buffer parser, and bound
+   the search spans independently of the number of receive fragments. */
+static fn http_header_fragment_scanning(void)
+{
+        static const char *wires[] = {
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
+            "HTTP/1.1 200 OK\nContent-Length: 0\n\n",
+            "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 103 Early Hints\n\n"
+                "HTTP/1.1 302 Found\r\nLocation: /next\r\n\r\nbody",
+            "HTTP/1.1 200 OK\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\n",
+            "HTTP/1.1 101 Switching Protocols\r\n\r\n",
+            "HTTP/1.1 200 OK\r\nBad Name: x\r\n\r\n",
+        };
+        const positive strides[] = {1, 2, 3, 4, 7, 13, 64, 512};
+        p8 large[HTTP_HEAD_MAX + 1];
+
+        memory_fill(large, 'a', sizeof large);
+        memory_copy(large, "HTTP/1.1 200 OK\r\nX:", 19);
+        memory_copy(large + HTTP_HEAD_MAX - 4, "\r\n\r\n", 4);
+        for (positive row = 0; row < array_count(wires) + 3; row++)
+        {
+                p8 address_to wire = row < array_count(wires)
+                    ? (p8 address_to)wires[row] : large;
+                positive length = row < array_count(wires)
+                    ? string_length(wire) : HTTP_HEAD_MAX;
+
+                /* Valid at the exact cap, incomplete at the cap, and a
+                   terminator ending one byte beyond the cap. */
+                if (row == array_count(wires) + 1)
+                        memory_fill(large + HTTP_HEAD_MAX - 4, 'a', 5);
+                if (row == array_count(wires) + 2)
+                {
+                        memory_copy(large + HTTP_HEAD_MAX - 3, "\r\n\r\n", 4);
+                        length++;
+                }
+                for (positive column = 0; column < array_count(strides); column++)
+                {
+                        positive resume = 0, searched = 0, reference_resume = 0;
+                        positive used = 0, searched_bytes = 0;
+                        bool agreed = true;
+
+                        while (used < length)
+                        {
+                                positive header = 0, reference_header = 0;
+                                http_response response, reference;
+
+                                used += min(strides[column], length - used);
+                                net_search_bytes = 0;
+                                bipolar status = http_response_framing_scan(
+                                    wire, used, address_of resume,
+                                    address_of searched, address_of header,
+                                    address_of response);
+                                searched_bytes += net_search_bytes;
+                                bipolar expected = http_response_framing_from(
+                                    wire, used, address_of reference_resume,
+                                    address_of reference_header,
+                                    address_of reference);
+                                agreed = agreed && status == expected &&
+                                    resume == reference_resume;
+                                if (status == HTTP_OK)
+                                        agreed = agreed &&
+                                            header == reference_header &&
+                                            response.code == reference.code &&
+                                            response.body_kind == reference.body_kind &&
+                                            response.body_length == reference.body_length &&
+                                            response.location == reference.location &&
+                                            response.location_length == reference.location_length;
+                                if (status != HTTP_NO_REPLY)
+                                        break;
+                        }
+                        check("fragmented HTTP header decisions match whole-buffer parsing",
+                              agreed);
+                        check("fragmented HTTP header search work stays linear",
+                              searched_bytes > 0 && searched_bytes <= 12 * length);
+                }
+        }
+}
+
 static fn http_header_deadlines(void)
 {
         static p8 plain[] = "HTTP/1.1 200 OK\r\n\r\n";
@@ -57737,6 +58283,83 @@ static fn http_body_write_failure(void)
                       HTTP_WRITE &&
                   http_write_failure == -ENOSPC);
         system_close(full);
+}
+
+/* The real TCP connection retains its timeouts while consecutive framed
+   writes can leave without waiting for an ACK of the first. */
+static fn http_tcp_latency_policy(void)
+{
+        const positive seconds[] = {1, 5, 30};
+        socket_address_internet where = {.family = AF_INET,
+            .host = network_order_32(0x7f000001)};
+        p32 size = sizeof where;
+        bipolar listener = socket_new(AF_INET,
+            SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+        bool ready = listener >= 0 &&
+            socket_bind((b32)listener, address_of where, sizeof where) == 0 &&
+            socket_listen((b32)listener, 8) == 0 &&
+            socket_name((b32)listener, address_of where, address_of size) == 0;
+
+        check("HTTP low-latency TCP fixture listens", ready);
+        if (!ready)
+        {
+                if (listener >= 0) socket_close((b32)listener);
+                return;
+        }
+        for (positive row = 0; row < array_count(seconds); row++)
+        {
+                bipolar handle = http_stream_open(0x7f000001,
+                    network_order_16(where.port), seconds[row]);
+
+                check("HTTP low-latency client connects", handle >= 0);
+                if (handle < 0)
+                        continue;
+                b32 enabled = 0;
+                p32 room = sizeof enabled;
+                timeval receive = {0}, send = {0};
+                p32 receive_room = sizeof receive, send_room = sizeof send;
+
+                check("HTTP sockets disable Nagle before their first request",
+                      socket_option_get((b32)handle, IPPROTO_TCP, TCP_NODELAY,
+                          address_of enabled, address_of room) == 0 &&
+                          room == sizeof enabled && enabled == 1);
+                bipolar receive_status = socket_option_get((b32)handle,
+                    SOL_SOCKET, SO_RCVTIMEO, address_of receive,
+                    address_of receive_room);
+                bipolar send_status = socket_option_get((b32)handle,
+                    SOL_SOCKET, SO_SNDTIMEO, address_of send,
+                    address_of send_room);
+
+                if (net_as_emulated() && !receive_status && !send_status &&
+                    !receive_room && !send_room)
+                {
+                        if (!row)
+                                log_direct(str("net: HTTP TCP timeout option inspection NOT RUN -- qemu-user returns empty values\n"));
+                }
+                else
+                        check("low-latency HTTP sockets retain both I/O timeout budgets",
+                              !receive_status && !send_status &&
+                                  receive_room == sizeof receive &&
+                                  send_room == sizeof send &&
+                                  receive.tv_sec == seconds[row] && !receive.tv_usec &&
+                                  send.tv_sec == seconds[row] && !send.tv_usec);
+                bipolar peer = socket_accept((b32)listener, null, null,
+                                               SOCK_CLOEXEC | SOCK_NONBLOCK);
+                p8 bytes[2];
+                network_deadline deadline;
+                bool sent = network_stream_send_all(handle, (p8 address_to)"F", 1) &&
+                            network_stream_send_all(handle, (p8 address_to)"R", 1);
+
+                check("consecutive small TCP writes retain exact stream bytes",
+                      peer >= 0 && sent &&
+                          network_deadline_begin(address_of deadline, 1, 0) &&
+                          network_stream_read_all(peer, bytes, sizeof bytes,
+                                                  address_of deadline) &&
+                          !memory_compare(bytes, "FR", 2));
+                if (peer >= 0) socket_close((b32)peer);
+                socket_close((b32)handle);
+        }
+        socket_close((b32)listener);
 }
 
 /*
@@ -58426,9 +59049,283 @@ static fn net_io_faults_clear(void)
         net_recv_short_limit = 0;
         net_recv_short_hit = false;
         net_recv_eintr_sticky = false;
+        net_recv_interruptions = 0;
+        net_recv_calls = 0;
+        net_recv_eagain_count = 0;
+        net_recv_require_nonblocking = false;
+        net_recv_blocking_calls = 0;
         net_recv_arm_after = 0;
         net_recv_fill_length = 0;
         memory_fill(net_recv_fill, 0, sizeof net_recv_fill);
+}
+
+/* Procedural interruption counts and deadline budgets exercise both recovery
+   and starvation while a real stream socket remains readable. */
+static fn network_stream_interruption_deadlines(void)
+{
+        b32 pair[2];
+        p8 byte = 0;
+        const positive interruptions[] = {0, 1, 2, 8, 64};
+        network_deadline deadline;
+        bipolar opened = system_call_4(syscall(socketpair), AF_UNIX,
+                                        SOCK_STREAM, 0, (positive)pair);
+
+        check("interrupted stream fixture opens", opened == 0);
+        if (opened)
+                return;
+        for (positive row = 0; row < array_count(interruptions); row++)
+        {
+                net_io_faults_clear();
+                check("interrupted stream control queues its byte",
+                      socket_send(pair[1], "x", 1, 0, null, 0) == 1);
+                net_recv_interruptions = interruptions[row];
+                net_poll_calls = 0;
+                check("interrupted stream control deadline begins",
+                      network_deadline_begin(address_of deadline, 1, 0));
+                check("finite interruptions resume without losing queued data",
+                      network_stream_read_some_until(pair[0], address_of byte,
+                          1, address_of deadline) == 1 && byte == 'x' &&
+                              !net_recv_interruptions &&
+                              net_recv_calls == interruptions[row] + 1);
+                check("queued stream data and EINTR retries need no readiness polls",
+                      net_poll_calls == 0);
+        }
+        for (positive row = 0; row < 3; row++)
+        {
+                net_io_faults_clear();
+                check("interruption storm queues a readable byte",
+                      socket_send(pair[1], "x", 1, 0, null, 0) == 1);
+                /* A finite storm guards the old implementation against an
+                   endless test run. It must expire before exhausting it. */
+                net_recv_interruptions = 10000000;
+                check("interruption storm deadline begins",
+                      network_deadline_begin(address_of deadline, 0,
+                                             (row + 1) * 1000000));
+                check("repeated EINTR cannot escape a stream read deadline",
+                      network_stream_read_some_until(pair[0], address_of byte,
+                          1, address_of deadline) == -1 &&
+                              net_recv_interruptions && net_recv_eintr_hit);
+                net_io_faults_clear();
+                check("a timed-out interrupted read leaves data for recovery",
+                      network_stream_read_now(pair[0], address_of byte, 1) == 1 &&
+                              byte == 'x');
+        }
+        net_io_faults_clear();
+        check("stream EAGAIN recovery queues its byte",
+              socket_send(pair[1], "x", 1, 0, null, 0) == 1);
+        net_recv_error = -EAGAIN;
+        net_poll_calls = 0;
+        network_deadline_begin(address_of deadline, 1, 0);
+        check("stream EAGAIN waits once then resumes queued data",
+              network_stream_read_some_until(pair[0], address_of byte, 1,
+                  address_of deadline) == 1 && byte == 'x' &&
+                      net_poll_calls == 1 && net_recv_error_hit);
+        net_io_faults_clear();
+        for (positive row = 0; row < 3; row++)
+        {
+                tls_conn tls = {.handle = pair[0]};
+
+                check("TLS interruption storm queues its byte",
+                      socket_send(pair[1], "t", 1, 0, null, 0) == 1);
+                net_recv_interruptions = 10000000;
+                network_deadline_begin(address_of deadline, 0,
+                                       (row + 1) * 1000000);
+                check("TLS receive honors its deadline during EINTR storms",
+                      !tls_receive(address_of tls, address_of deadline) &&
+                          net_recv_interruptions && !tls.receive_end);
+                net_io_faults_clear();
+                network_deadline_begin(address_of deadline, 1, 0);
+                net_poll_calls = 0;
+                check("TLS resumes queued data without a readiness poll",
+                      tls_receive(address_of tls, address_of deadline) &&
+                          tls.receive_end == 1 && tls.receive[0] == 't' &&
+                          !net_poll_calls);
+        }
+        net_io_faults_clear();
+        socket_close(pair[0]);
+        socket_close(pair[1]);
+}
+
+static fn network_relative_read_deadlines(void)
+{
+        const positive interruptions[] = {0, 1, 2, 8, 64};
+        b32 pair[2];
+        p8 byte = 0;
+        bipolar opened = system_call_4(syscall(socketpair), AF_UNIX,
+                                        SOCK_STREAM, 0, (positive)pair);
+
+        check("relative stream deadline fixture opens", opened == 0);
+        if (opened)
+                return;
+        for (positive row = 0; row < array_count(interruptions); row++)
+        {
+                net_io_faults_clear();
+                check("relative stream recovery byte queues",
+                      socket_send(pair[1], "r", 1, 0, null, 0) == 1);
+                net_recv_interruptions = interruptions[row];
+                net_poll_calls = 0;
+                check("relative stream retries finite interruptions without polling",
+                      network_stream_read_some_for(pair[0], address_of byte,
+                          1, 1, 0) == 1 && byte == 'r' &&
+                              net_recv_calls == interruptions[row] + 1 &&
+                              !net_poll_calls);
+        }
+        for (positive row = 0; row < 3; row++)
+        {
+                positive got = 99;
+                http_link link = {.handle = pair[0]};
+                http_body body = {.link = address_of link,
+                    .read_nanoseconds = (row + 1) * 1000000};
+
+                net_io_faults_clear();
+                check("HTTP interrupted body byte queues",
+                      socket_send(pair[1], "b", 1, 0, null, 0) == 1);
+                net_recv_interruptions = 10000000;
+                check("HTTP body interruption storm cannot escape its read budget",
+                      http_body_read(address_of body, address_of byte, 1,
+                          address_of got) == HTTP_NO_REPLY &&
+                              net_recv_interruptions && net_recv_eintr_hit);
+                net_io_faults_clear();
+                check("HTTP interrupted body retains its byte for recovery",
+                      http_body_read(address_of body, address_of byte, 1,
+                          address_of got) == HTTP_OK && got == 1 && byte == 'b');
+        }
+        net_io_faults_clear();
+        check("relative stream EAGAIN recovery byte queues",
+              socket_send(pair[1], "e", 1, 0, null, 0) == 1);
+        net_recv_eagain_count = 1;
+        net_poll_calls = 0;
+        check("relative stream waits after EAGAIN without another speculative receive",
+              network_stream_read_some_for(pair[0], address_of byte, 1, 1, 0) == 1 &&
+                  byte == 'e' && net_recv_calls == 2 && net_poll_calls == 1);
+        net_io_faults_clear();
+        socket_close(pair[0]);
+        socket_close(pair[1]);
+}
+
+static fn network_datagram_readiness_races(void)
+{
+        const positive races[] = {0, 1, 2, 8, 64};
+        const positive sizes[] = {0, 1, 16, 32};
+        b32 pair[2];
+        p8 payload[32], into[16];
+        network_deadline deadline;
+        bipolar opened = system_call_4(syscall(socketpair), AF_UNIX,
+                                        SOCK_DGRAM, 0, (positive)pair);
+
+        check("datagram readiness fixture opens", opened == 0);
+        if (opened)
+                return;
+        memory_fill(payload, 'd', sizeof payload);
+        for (positive row = 0; row < array_count(races); row++)
+                for (positive column = 0; column < array_count(sizes); column++)
+                {
+                        net_io_faults_clear();
+                        check("readiness race datagram queues",
+                              socket_send(pair[1], payload, sizes[column],
+                                          0, null, 0) == (bipolar)sizes[column]);
+                        net_recv_require_nonblocking = true;
+                        net_recv_eagain_count = races[row];
+                        network_deadline_begin(address_of deadline, 1, 0);
+                        memory_zero(into, sizeof into);
+                        net_poll_calls = 0;
+                        bipolar got = network_receive_next(pair[0], into,
+                            sizeof into, null, null, address_of deadline);
+
+                        check("datagram readiness races retry and retain truncation length",
+                              got == (bipolar)sizes[column] &&
+                                  !net_recv_eagain_count &&
+                                  net_recv_calls == races[row] + 1 &&
+                                  !net_recv_blocking_calls &&
+                                  (!sizes[column] || into[0] == 'd'));
+                        check("queued datagrams poll only after actual EAGAIN",
+                              net_poll_calls == races[row]);
+                }
+        for (positive row = 0; row < 3; row++)
+        {
+                net_io_faults_clear();
+                check("datagram readiness storm queues",
+                      socket_send(pair[1], payload, 1, 0, null, 0) == 1);
+                net_recv_require_nonblocking = true;
+                net_recv_eagain_count = 10000000;
+                network_deadline_begin(address_of deadline, 0,
+                                       (row + 1) * 1000000);
+                check("repeated vanished datagram readiness retains the deadline",
+                      network_receive_next(pair[0], into, sizeof into,
+                          null, null, address_of deadline) == NETWORK_SILENT &&
+                              net_recv_eagain_count && !net_recv_blocking_calls);
+                net_io_faults_clear();
+                check("datagram readiness timeout leaves its payload for recovery",
+                      socket_receive(pair[0], into, sizeof into, MSG_DONTWAIT,
+                                     null, null) == 1 && into[0] == 'd');
+        }
+        net_io_faults_clear();
+        socket_close(pair[0]);
+        socket_close(pair[1]);
+}
+
+static fn network_datagram_queued_progress(void)
+{
+        const positive packets[] = {1, 2, 8, 64};
+        const positive sizes[] = {0, 1, 16, 32};
+        const positive interruptions[] = {0, 1, 8};
+        b32 pair[2];
+        p8 payload[32], into[16];
+        network_deadline deadline;
+        bipolar opened = system_call_4(syscall(socketpair), AF_UNIX,
+                                       SOCK_DGRAM, 0, (positive)pair);
+
+        check("queued datagram fixture opens", opened == 0);
+        if (opened)
+                return;
+        for (positive count = 0; count < array_count(packets); count++)
+        for (positive size = 0; size < array_count(sizes); size++)
+        for (positive signal = 0; signal < array_count(interruptions); signal++)
+        {
+                bool queued = true;
+
+                net_io_faults_clear();
+                for (positive at = 0; at < packets[count]; at++)
+                {
+                        memory_fill(payload, (p8)at, sizeof payload);
+                        queued &= socket_send(pair[1], payload, sizes[size],
+                                              0, null, 0) == (bipolar)sizes[size];
+                }
+                check("the datagram burst queues", queued);
+                net_recv_interruptions = interruptions[signal];
+                net_recv_require_nonblocking = true;
+                net_poll_calls = 0;
+                bool read = network_deadline_begin(address_of deadline, 1, 0);
+
+                for (positive at = 0; at < packets[count]; at++)
+                {
+                        bipolar got = network_receive_next(pair[0], into,
+                            sizeof into, null, null, address_of deadline);
+
+                        read &= got == (bipolar)sizes[size] &&
+                                (!sizes[size] || into[0] == (p8)at);
+                }
+                check("queued datagram bursts retain order, empty messages and truncation",
+                      read && !net_recv_interruptions && !net_recv_blocking_calls);
+                check("queued bursts and finite interruptions have no readiness polls",
+                      !net_poll_calls && net_recv_calls ==
+                          packets[count] + interruptions[signal]);
+        }
+        net_io_faults_clear();
+        check("expired datagram budget fixture queues",
+              socket_send(pair[1], "q", 1, 0, null, 0) == 1);
+        deadline = (network_deadline){.began = 1, .budget = 1};
+        net_poll_calls = 0;
+        check("expired budgets perform no receive or readiness poll",
+              network_receive_next(pair[0], into, sizeof into, null, null,
+                                   address_of deadline) == NETWORK_SILENT &&
+                  !net_poll_calls && !net_recv_calls);
+        check("expired fast receive leaves queued data untouched",
+              socket_receive(pair[0], into, sizeof into, MSG_DONTWAIT,
+                             null, null) == 1 && into[0] == 'q');
+        net_io_faults_clear();
+        socket_close(pair[0]);
+        socket_close(pair[1]);
 }
 
 /* Loopback UDP peer: answer one query with a short junk datagram so the
@@ -58559,12 +59456,14 @@ static fn dns_dhcp_midpath_faults(void)
                   net_recv_error_hit && !net_recv_error);
         net_io_faults_clear();
 
-        /* --- DNS UDP: EAGAIN is fail-closed (not a retry) --- */
+        /* A vanished readiness indication is retried under the same budget;
+           the junk peer still supplies no answer that may be accepted. */
         net_recv_error = -EAGAIN;
         found = 0;
         status = dns_midpath_loopback(1, address_of found, null);
-        check("DNS UDP recv EAGAIN fails closed mid-path",
-              status == DNS_NO_SERVER && !found && net_recv_error_hit);
+        check("DNS UDP recv EAGAIN retries but never accepts the junk reply",
+              status == DNS_NO_REPLY && !found && net_recv_error_hit &&
+                  net_recv_calls >= 2);
         net_io_faults_clear();
 
         /* --- DNS UDP: synthetic short junk then ENOSPC (past MSG_TRUNC) --- */
@@ -58759,12 +59658,12 @@ static fn dns_dhcp_midpath_faults(void)
         net_recv_error = -EAGAIN;
         check("DHCP mid-path deadline starts for EAGAIN",
               network_deadline_begin(address_of deadline, 0, 200000000));
-        check("DHCP recv EAGAIN fails closed mid-path",
-              !dhcp_receive(receiver, received, sizeof received, 123, hardware,
+        check("DHCP recv EAGAIN resumes its queued matching offer",
+              dhcp_receive(receiver, received, sizeof received, 123, hardware,
                             address_of lease, address_of kind,
                             address_of any_sender, true, null,
                             address_of deadline) &&
-                  net_recv_error_hit);
+                  net_recv_error_hit && net_recv_calls == 2 && kind == DHCP_OFFER);
         net_io_faults_clear();
         while (socket_receive((b32)receiver, received, sizeof received,
                               MSG_DONTWAIT, null, null) > 0)
@@ -59792,6 +60691,51 @@ static fn tls_seal_in_receive(tls_conn address_to tls, positive content)
         room took the first read and the rest a second.
 */
 static tls_conn tls_receive_conn;
+
+static fn tls_failed_send_state(void)
+{
+        static p8 payload[] = "an interrupted record cannot be restarted";
+        const positive prefixes[] = {0, 1, 5, 17};
+        p8 raw[16] = {0};
+
+        for (positive version = 0; version < 2; version++)
+                for (positive row = 0; row < array_count(prefixes); row++)
+                {
+                        tls_conn tls = {.tls12 = version != 0};
+                        b32 pair[2];
+                        p8 received[128];
+                        bipolar opened = system_call_4(syscall(socketpair), AF_UNIX,
+                            SOCK_STREAM, 0, (positive)pair);
+
+                        check("failed TLS send socket fixture opens", opened == 0);
+                        if (opened)
+                                continue;
+                        tls.handle = pair[0];
+                        crypto_aesgcm_prepare(address_of tls.c_gcm, raw);
+                        net_io_faults_clear();
+                        net_send_short_limit = prefixes[row];
+                        net_send_error = -EIO;
+                        check("failed TLS sends make the write key permanently unusable",
+                              tls_send_enc(address_of tls, TLS_CT_APP, payload,
+                                  sizeof payload - 1) == TLS_FAIL &&
+                                      tls.seq_write == TLS_AES_GCM_RECORD_LIMIT &&
+                                      net_send_error_hit);
+                        net_io_faults_clear();
+                        net_send_calls = 0;
+                        check("no later TLS record is sent after a failed partial send",
+                              tls_send_enc(address_of tls, TLS_CT_APP, payload,
+                                  sizeof payload - 1) == TLS_FAIL && !net_send_calls);
+                        bipolar got = socket_receive(pair[1], received,
+                            sizeof received, MSG_DONTWAIT, null, null);
+
+                        check("TLS send failure emits only its original partial prefix",
+                              prefixes[row] ? got == (bipolar)prefixes[row]
+                                            : got == -EAGAIN);
+                        socket_close(pair[0]);
+                        socket_close(pair[1]);
+                        tls_forget(address_of tls);
+                }
+}
 
 static fn tls_receive_whole_room(void)
 {
@@ -64187,6 +65131,12 @@ static p64 hash_residue_rotate64(p64 x, positive n)
         return x >> n | x << (64 - n);
 }
 
+#if X64
+fn hash_saved_slots(address_any body, address_any state,
+                    const p8 address_to block, p64 address_to sampled,
+                    p32 address_to stack);
+#endif
+
 static positive hash_residue(positive which, p8 address_to block)
 {
         p64 state[11];
@@ -64241,9 +65191,94 @@ static positive hash_residue(positive which, p8 address_to block)
                         words[count++] = (p32)(wide[t] >> 32);
                 }
         }
+#if X64
+        address_any bodies[] = {(address_any)sha1_blocks, (address_any)sha256_blocks,
+                                (address_any)sha512_blocks, (address_any)blake2b_blocks};
+        p64 saved[12];
+        p32 sampled[512];
+        positive found = 0;
+
+        hash_saved_slots(bodies[which], state, block, saved, sampled);
+        for (positive i = 0; i < array_count(sampled); i++)
+                for (positive j = 0; j < count; j++)
+                        found += sampled[i] == words[j];
+        return found;
+#else
         hash_residue_call(which, state, block);
         return hash_residue_scan(words, count);
+#endif
 }
+
+#if X64
+/* Capture the core's saved-register slots in assembly immediately on return.
+   Unlike the historical stack scan, this initializes every sampled byte and
+   never reads an uninitialized C object. Also check the preserved registers
+   themselves, so erasure cannot hide a broken calling convention. */
+__asm__(
+    ASM_FUNC(hash_saved_slots)
+    "push %rbx\n push %rbp\n push %r12\n push %r13\n push %r14\n push %r15\n sub $24, %rsp\n"
+    "mov %rdi, 0(%rsp)\n mov %rcx, 8(%rsp)\n mov %r8, 16(%rsp)\n mov %rsi, %rdi\n mov %rdx, %rsi\n"
+    // Clear the sampled region so earlier reference-builder spills cannot
+    // be mistaken for copies made by this core. Reserve it while writing.
+    "sub $2056, %rsp\n xor %eax, %eax\n xor %r10d, %r10d\n"
+    ".Lhash_saved_clear: mov %rax, (%rsp,%r10,8)\n inc %r10\n cmp $256, %r10\n jb .Lhash_saved_clear\n"
+    "add $2056, %rsp\n"
+    "movabs $0x6b8d24a7e3195fc1, %rbx\n mov %rbx, %rbp\n mov %rbx, %r12\n"
+    "mov %rbx, %r13\n mov %rbx, %r14\n mov %rbx, %r15\n"
+    "mov $1, %edx\n mov $128, %ecx\n call *0(%rsp)\n mov 8(%rsp), %rax\n"
+    "mov -16(%rsp), %rdx\n mov %rdx, 0(%rax)\n mov -24(%rsp), %rdx\n mov %rdx, 8(%rax)\n"
+    "mov -32(%rsp), %rdx\n mov %rdx, 16(%rax)\n mov -40(%rsp), %rdx\n mov %rdx, 24(%rax)\n"
+    "mov -48(%rsp), %rdx\n mov %rdx, 32(%rax)\n mov -56(%rsp), %rdx\n mov %rdx, 40(%rax)\n"
+    "mov %rbx, 48(%rax)\n mov %rbp, 56(%rax)\n mov %r12, 64(%rax)\n"
+    "mov %r13, 72(%rax)\n mov %r14, 80(%rax)\n mov %r15, 88(%rax)\n"
+    "mov 16(%rsp), %rdi\n lea -2056(%rsp), %rsi\n mov $256, %ecx\n rep movsq\n"
+    "add $24, %rsp\n pop %r15\n pop %r14\n pop %r13\n pop %r12\n pop %rbp\n pop %rbx\n"
+    ASM_RET ASM_END(hash_saved_slots)
+);
+
+static fn crypto_hash_saved_slots(void)
+{
+        address_any bodies[] = {(address_any)sha1_blocks, (address_any)sha256_blocks,
+                                (address_any)sha512_blocks, (address_any)blake2b_blocks};
+        p8 block[128];
+        p8 sha = cpu_has_sha, avx2 = cpu_has_avx2;
+        p8 probed = cpu_hash_probed, mulx = cpu_has_mulx, sse42 = cpu_has_sse42;
+        positive residue = 0, changed = 0;
+
+        for (positive at = 0; at < sizeof block; at++)
+                block[at] = (p8)(at * 167 + 29);
+        for (positive pass = 0; pass < 3; pass++)
+        {
+                cpu_has_sha = pass ? sha : 0;
+                cpu_has_avx2 = pass ? avx2 : 0;
+                for (positive which = 0; which < array_count(bodies); which++)
+                {
+                        p64 state[11] = {0}, sampled[12] = {0};
+                        p32 stack[512];
+
+                        if (pass == 2)
+                        {
+                                cpu_hash_probed = 0;
+                                cpu_has_sha = cpu_has_mulx = 0;
+                        }
+                        hash_saved_slots(bodies[which], state, block, sampled, stack);
+                        for (positive at = 0; at < 6; at++)
+                        {
+                                residue += sampled[at] == 0x6b8d24a7e3195fc1ull;
+                                changed += sampled[at + 6] != 0x6b8d24a7e3195fc1ull;
+                        }
+                }
+        }
+        cpu_has_sha = sha;
+        cpu_has_avx2 = avx2;
+        cpu_hash_probed = probed;
+        cpu_has_mulx = mulx;
+        cpu_has_sse42 = sse42;
+        check("hash floor, accelerated and cold cores erase saved caller-register copies",
+              residue == 0);
+        check("hash stack erasure preserves all six callee-saved registers", changed == 0);
+}
+#endif
 
 static fn crypto_floor_hash_residue(void)
 {
@@ -64258,19 +65293,31 @@ static fn crypto_floor_hash_residue(void)
         sha256_blocks(scratch, block, 1);
         p8 sha = cpu_has_sha;
         p8 sha512 = cpu_has_sha512;
+#if X64
+        p8 avx2 = cpu_has_avx2;
+#endif
 
         for (positive pass = 0; pass < 2; pass++)
         {
                 cpu_has_sha = pass ? sha : 0;
                 cpu_has_sha512 = pass ? sha512 : 0;
+#if X64
+                cpu_has_avx2 = pass ? avx2 : 0;
+#endif
                 for (positive which = 0; which < 4; which++)
                         found += hash_residue(which, block);
         }
         cpu_has_sha = sha;
         cpu_has_sha512 = sha512;
+#if X64
+        cpu_has_avx2 = avx2;
+#endif
         check("sha1, sha256, sha512 and blake2b cores leave no schedule word "
               "on the stack",
               found == 0);
+#if X64
+        crypto_hash_saved_slots();
+#endif
 }
 
 static fn crypto_floor_field(void)
@@ -68336,6 +69383,152 @@ static fn dhcp_reacquisition_state_matrix(void)
                                                       false));
 }
 
+/* Expected router sets are written as fixture data, independently of the
+   production validator. The held address is 10.0.2.15; /30 makes it broadcast,
+   /31 pairs it only with .14, and /32 permits off-link unicast routers. */
+static fn dhcp_ack_lease_integrity(void)
+{
+        const struct { p32 mask; p32 routers; } prefixes[] = {
+            {0, 7}, {0xffffff00, 7}, {0xffff0000, 15}, {0xff000000, 31},
+            {0xffffffff, 63}, {0xfffffffe, 5}, {0xfffffffc, 0},
+            {0x80000000, 0}, {0xe0000000, 0}, {0xff00ff00, 0},
+        };
+        const p32 routers[] = {
+            0, 0x0a000202, 0x0a00020e, 0x0a000301, 0x0a010001, 0xc0a80101,
+            0x0a00020f, 0x7f000001, 0xe0000001, 0xf0000001, 0xffffffff, 1,
+        };
+        const p32 lifetimes[] = {0, 1, 600};
+        const dhcp_lease before = {
+            .address = 0x0a00020f, .mask = 0xffffff00,
+            .nameserver = 0x0a000201, .server = 0x0a000202, .seconds = 3600,
+            .renewal = 1800, .rebinding = 3150,
+        };
+
+        for (positive server = 0; server < 2; server++)
+        for (positive mask = 0; mask < array_count(prefixes); mask++)
+        for (positive router = 0; router < array_count(routers); router++)
+        for (positive life = 0; life < array_count(lifetimes); life++)
+        {
+                dhcp_lease held = before;
+                dhcp_lease answer = {
+                    .address = before.address, .mask = prefixes[mask].mask,
+                    .router = routers[router], .server = before.server + server,
+                    .seconds = lifetimes[life],
+                };
+                bool expected = ((prefixes[mask].routers >> router) & 1) &&
+                                (!server || lifetimes[life]);
+                bool taken = dhcp_lease_take(address_of held, address_of answer);
+
+                check("every merged DHCP ACK has a usable address, prefix, router and lifetime",
+                      taken == expected);
+                check("refused ACKs preserve the whole lease and accepted ACKs publish their own state",
+                      expected ? taken && held.address == before.address &&
+                          held.server == answer.server &&
+                          held.mask == (answer.mask ? answer.mask
+                                        : server ? 0 : before.mask) &&
+                          held.router == answer.router &&
+                          held.nameserver == (server ? 0 : before.nameserver) &&
+                          held.seconds == (answer.seconds ? answer.seconds : before.seconds) &&
+                          (held.seconds < 3 ? !held.renewal && !held.rebinding
+                                           : held.renewal < held.rebinding &&
+                                                 held.rebinding < held.seconds)
+                               : !memory_compare(address_of held, address_of before,
+                                                  sizeof held));
+        }
+        dhcp_lease held = before;
+        held.router = 0x0a000202;
+        const dhcp_lease old = held;
+        dhcp_lease answer = {.address = before.address, .mask = 0xfffffffe,
+                             .server = before.server, .seconds = 600};
+
+        check("a changed prefix cannot inherit an unreachable router",
+              !dhcp_lease_take(address_of held, address_of answer) &&
+                  !memory_compare(address_of held, address_of old, sizeof held));
+}
+
+static fn dhcp_ack_invalid_then_valid(void)
+{
+        const struct { p32 mask, router; } invalid[] = {
+            {0x80000000, 0}, {0xfffffffc, 0}, {0xfffffffe, 0x0a000202},
+            {0xffffff00, 0x7f000001}, {0xffffff00, 0xe0000001},
+            {0xffffff00, 0x0a000301},
+        };
+        p8 packet[300], received[300], hardware[6] = {1, 2, 3, 4, 5, 6};
+        socket_address_internet at = {.family = AF_INET,
+                                      .host = network_order_32(HOST_LOOPBACK)};
+        socket_address_internet from = at;
+        p32 size = sizeof at;
+        bipolar receiver = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+        bipolar sender = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+        bool opened = receiver >= 0 && sender >= 0 &&
+            socket_bind(receiver, address_of at, sizeof at) == 0 &&
+            socket_bind(sender, address_of from, sizeof from) == 0 &&
+            socket_name(receiver, address_of at, address_of size) == 0 &&
+            (size = sizeof from,
+             socket_name(sender, address_of from, address_of size) == 0);
+
+        check("DHCP invalid-then-valid ACK datagram fixture opens", opened);
+        if (!opened)
+                goto done;
+        for (positive rebinding = 0; rebinding < 2; rebinding++)
+        for (positive row = 0; row < array_count(invalid); row++)
+        {
+                dhcp_lease held = {.address = 0x0a00020f, .mask = 0xffffff00,
+                                   .router = 0x0a000202, .server = 0x0a000202,
+                                   .seconds = 3600};
+                const p32 server = held.server + rebinding;
+                const p8 fields[] = {DHCP_OPTION_MASK, DHCP_OPTION_ROUTER,
+                                     DHCP_OPTION_SERVER, DHCP_OPTION_LEASE};
+                bool queued = true;
+
+                for (positive valid = 0; valid < 2; valid++)
+                {
+                        const p32 values[] = {
+                            valid ? 0xffffff00 : invalid[row].mask,
+                            valid ? 0x0a00020e : invalid[row].router,
+                            server, 600,
+                        };
+                        positive used = DHCP_HEAD + 4;
+
+                        memory_zero(packet, sizeof packet);
+                        packet[0] = 2; packet[1] = 1; packet[2] = 6;
+                        network_store_32(packet + 4, 123);
+                        network_store_32(packet + 16, held.address);
+                        memory_copy(packet + 28, hardware, sizeof hardware);
+                        network_store_32(packet + DHCP_HEAD, DHCP_COOKIE);
+                        packet[used++] = DHCP_OPTION_TYPE;
+                        packet[used++] = 1;
+                        packet[used++] = DHCP_ACK;
+                        for (positive field = 0; field < array_count(fields); field++)
+                        {
+                                packet[used++] = fields[field];
+                                packet[used++] = 4;
+                                network_store_32(packet + used, values[field]);
+                                used += 4;
+                        }
+                        packet[used++] = DHCP_OPTION_END;
+                        queued &= socket_send(sender, packet, used, 0,
+                                               address_of at, sizeof at) == (bipolar)used;
+                }
+                network_deadline deadline;
+
+                check("malformed and valid ACKs queue in order", queued);
+                check("a malformed merged ACK cannot end acquisition, renewal or rebinding before a valid ACK",
+                      queued && network_deadline_begin(address_of deadline, 1, 0) &&
+                          dhcp_complete(receiver, received, sizeof received, 123,
+                              hardware, address_of held, address_of from,
+                              rebinding != 0, address_of deadline) == DHCP_OK &&
+                          held.mask == 0xffffff00 && held.router == 0x0a00020e &&
+                          held.server == server && held.seconds == 600);
+                while (socket_receive(receiver, received, sizeof received,
+                                       MSG_DONTWAIT, null, null) >= 0)
+                        ;
+        }
+done:
+        if (receiver >= 0) socket_close(receiver);
+        if (sender >= 0) socket_close(sender);
+}
+
 static fn leasing_datagrams(void)
 {
         p8 packet[301], received[300], hardware[6] = {1, 2, 3, 4, 5, 6};
@@ -68652,11 +69845,14 @@ b32 main(void)
 {
         net_group(arithmetic);
         net_group(building);
+        net_group(address_route_builders);
         net_group(padding);
         net_group(oversized);
         net_group(attribute_growth);
         net_group(userspace_source_progress);
         net_group(error_frames);
+        net_group(netlink_multipart_identity);
+        net_group(netlink_nonblocking_retries);
         net_group(link_candidates);
         net_group(talking);
         net_group(resolving);
@@ -68671,8 +69867,12 @@ b32 main(void)
         net_group(network_stream_timeouts);
         net_group(network_stream_send_timeout);
         net_group(http_header_deadlines);
+        net_group(network_text_spans);
+        net_group(http_header_field_collection);
+        net_group(http_header_fragment_scanning);
         net_group(http_body_deadline);
         net_group(http_body_write_failure);
+        net_group(http_tcp_latency_policy);
         net_group(http_tls_resource_exhaustion);
         net_group(dns_dhcp_netlink_resource_exhaustion);
         net_group(http_body_store_midpath_exhaustion);
@@ -68683,10 +69883,15 @@ b32 main(void)
         net_group(http_write_spans_partial);
         net_group(http_write_spans_midpath_fault);
         net_group(dns_dhcp_midpath_faults);
+        net_group(network_stream_interruption_deadlines);
+        net_group(network_relative_read_deadlines);
+        net_group(network_datagram_readiness_races);
+        net_group(network_datagram_queued_progress);
         net_group(network_stream_sigpipe);
         net_group(tls_closure_boundaries);
         net_group(tls_record_payload_ceiling);
         net_group(tls_receive_whole_room);
+        net_group(tls_failed_send_state);
         net_group(tls_sensitive_state_erasure);
         net_group(tls_certificate_dates);
         net_group(tls_certificate_identity_rules);
@@ -68725,6 +69930,8 @@ b32 main(void)
         net_group(leasing);
         net_group(dhcp_confinement);
         net_group(dhcp_reacquisition_state_matrix);
+        net_group(dhcp_ack_lease_integrity);
+        net_group(dhcp_ack_invalid_then_valid);
         net_group(leasing_datagrams);
         net_group(dhcp_transaction_randomness);
         net_group(userspace_route_source_in_namespace);
@@ -73196,11 +74403,18 @@ static fn handshake(void)
 
         {
                 p8 low_order[32] = {0};
+                p8 one = 0;
+                struct waterlink_noise bounded = {0};
 
                 check("sec: an initiator refuses a low-order peer key",
                       !waterlink_initiate(address_of starting,
                                           address_of alice, low_order, null, e1,
                                           hello, first));
+                check("sec: a wrapped Noise ciphertext length is refused before "
+                      "the input or transcript is touched",
+                      !waterlink_open_hash(address_of bounded, address_of one,
+                                           positive_max, address_of one) &&
+                              !bounded.nonce);
         }
 
         check("an initiation is made for a valid peer key",
@@ -73740,6 +74954,38 @@ static fn mdns_wire_exact(void)
         random_seeded(instance, 10, 7);
         question_length = waterlink_mdns_query(packet, sizeof packet) - 12;
         memory_copy(question, packet + 12, question_length);
+        /* Invalid writer contracts are refused before touching the output,
+           including lengths that would wrap an additive capacity check. */
+        const positive invalid_lengths[] = {
+            sizeof(packet), positive_max, positive_max - 171,
+        };
+        for (positive i = 0; i < array_count(invalid_lengths); i++)
+        {
+                memory_fill(packet, 0xa5, sizeof(packet));
+                check("mDNS writer refuses oversized question before writing",
+                      !waterlink_mdns_announce(packet, sizeof(packet), instance,
+                          host, 22348, 0, 120, 0, question, invalid_lengths[i]) &&
+                      memory_span_byte(packet, 0xa5, sizeof(packet)) == sizeof(packet));
+        }
+        memory_fill(packet, 0xa5, sizeof(packet));
+        check("mDNS writer refuses missing question bytes",
+              !waterlink_mdns_announce(packet, sizeof(packet), instance, host,
+                  22348, 0, 120, 0, null, question_length) &&
+              memory_span_byte(packet, 0xa5, sizeof(packet)) == sizeof(packet));
+        check("mDNS writer refuses empty declared question",
+              !waterlink_mdns_announce(packet, sizeof(packet), instance, host,
+                  22348, 0, 120, 0, question, 0) &&
+              memory_span_byte(packet, 0xa5, sizeof(packet)) == sizeof(packet));
+        check("mDNS writer refuses undersized fixed reserve",
+              !waterlink_mdns_announce(packet, 171, instance, host, 22348,
+                  0, 120, 0, null, 0) &&
+              memory_span_byte(packet, 0xa5, sizeof(packet)) == sizeof(packet));
+        check("mDNS writer accepts its fixed-reserve boundary",
+              waterlink_mdns_announce(packet, 172, instance, host, 22348,
+                  0, 120, 0, null, 0) > 0);
+        check("mDNS writer accepts its question-reserve boundary",
+              waterlink_mdns_announce(packet, 172 + question_length, instance,
+                  host, 22348, 0, 120, 0, question, question_length) > 0);
         for (positive shape = 0; shape < 8; shape++)
         {
                 p32 ttl = shape & 1 ? 0 : 120;
@@ -74350,19 +75596,65 @@ b32 main(void)
 
 static bool entropy_down;
 static positive entropy_draws;
+static positive entropy_fail_length;
+static fn (*entropy_before_fill)(void);
 
 static bipolar system_random_fill(address_any into, positive length,
                                   positive flags)
 {
         entropy_draws++;
-        if (entropy_down)
+        if (entropy_down ||
+            (entropy_fail_length && length == entropy_fail_length))
                 return -5;
+        if (entropy_before_fill)
+        {
+                fn (*before)(void) = entropy_before_fill;
+
+                entropy_before_fill = null;
+                before();
+        }
         return system_random_fill_kernel(into, length, flags);
 }
 
+static bool wls_open_capture;
+static positive wls_open_calls;
+static bipolar wls_reopen_error;
+
+static bipolar wls_call3(positive number, positive one, positive two,
+                         positive three)
+{
+        if (wls_open_capture && number == syscall(openat))
+                wls_open_calls++;
+        if (wls_reopen_error && number == syscall(openat) && two &&
+            !string_compare_max((string_address)two, "/proc/self/fd/", 14))
+                return wls_reopen_error;
+        return system_call_3(number, one, two, three);
+}
+
+static bool wls_wait_capture;
+static timespec wls_wait_limit;
+static positive wls_wait_calls;
+
+static bipolar wls_poll_wait(system_poll_descriptor address_to descriptors,
+                             positive count, timespec address_to limit,
+                             positive address_to signal_mask)
+{
+        if (wls_wait_capture)
+        {
+                wls_wait_limit = *limit;
+                wls_wait_calls++;
+                return 0;
+        }
+        return system_poll_wait(descriptors, count, limit, signal_mask);
+}
+
+#define system_poll_wait wls_poll_wait
+#define system_call_3(...) wls_call3(__VA_ARGS__)
 #include "../src/moonwater/spark.c"
 #define SHELL_UTILITY_PROGRAM
 #include "../src/sh/shell.c"
+#undef system_poll_wait
+#undef system_call_3
 #define SHARED_counted
 #include "checks.c"
 #undef SHARED_counted
@@ -74664,6 +75956,104 @@ static fn authorization_files(void)
         Staging: a fresh exclusive name beside the target, published only
         while the name is still the inode the transfer holds open.
 */
+static positive key_claim_kind;
+static p8 key_claim[33];
+static file_facts key_claim_facts;
+static bool key_claim_ready;
+
+/* Runs after link_secret has observed ENOENT and before its publication.
+   The competing initializer controls a real pathname, not a mocked stat. */
+static fn identity_key_claim(void)
+{
+        key_claim_ready = false;
+        if (key_claim_kind == 4)
+        {
+                key_claim_ready = wls_write("/root/other-key", key_claim, 32, 0600) &&
+                    system_symbolic_link_at("/root/other-key", AT_FDCWD,
+                                            LINK_KEY_PATH) >= 0;
+        }
+        else if (key_claim_kind == 5)
+                key_claim_ready = system_make_directory_at(AT_FDCWD,
+                                                           LINK_KEY_PATH, 0700) >= 0;
+        else
+        {
+                positive length = key_claim_kind == 2 ? 31
+                                  : key_claim_kind == 3 ? 0
+                                  : key_claim_kind == 6 ? 33 : 32;
+
+                key_claim_ready = wls_write(LINK_KEY_PATH, key_claim, length,
+                                            key_claim_kind == 1 ? 0644 : 0600);
+        }
+        key_claim_ready &= file_look(AT_FDCWD, LINK_KEY_PATH, AT_SYMLINK_NOFOLLOW,
+                                    address_of key_claim_facts);
+}
+
+static fn identity_creation_races(void)
+{
+        for (positive row = 0; row < 7; row++)
+        {
+                p8 secret[32], read[33];
+                file_facts after;
+
+                (void)system_remove_at(AT_FDCWD, LINK_KEY_PATH, 0);
+                key_claim_kind = row;
+                wls_seeded(key_claim, sizeof key_claim, (p8)(20 + row));
+                memory_fill(secret, 0xa5, sizeof secret);
+                entropy_before_fill = identity_key_claim;
+                bipolar status = link_secret(secret, true);
+
+                entropy_before_fill = null;
+                check("concurrent key claimant is installed after the initial lookup",
+                      key_claim_ready);
+                check("only a private whole concurrently created key is accepted",
+                      row ? status < 0
+                          : status == 0 && !memory_compare(secret, key_claim, 32));
+                check("first key creation never replaces a concurrent pathname",
+                      file_look(AT_FDCWD, LINK_KEY_PATH, AT_SYMLINK_NOFOLLOW,
+                                address_of after) &&
+                          file_same_identity(address_of after,
+                                              address_of key_claim_facts) &&
+                          after.mode == key_claim_facts.mode &&
+                          after.size == key_claim_facts.size);
+                if (row != 4 && row != 5)
+                {
+                        bipolar handle = system_open_at(AT_FDCWD, LINK_KEY_PATH,
+                                                         FILE_READ | O_CLOEXEC);
+                        bipolar got = handle < 0 ? handle
+                            : system_read_once(handle, read, sizeof read);
+
+                        if (handle >= 0) system_close(handle);
+                        check("a concurrent key's bytes never become the losing initializer's secret",
+                              got == (bipolar)key_claim_facts.size &&
+                                  !memory_compare(read, key_claim,
+                                                  key_claim_facts.size));
+                }
+                crypto_forget(secret, sizeof secret);
+                (void)system_remove_at(AT_FDCWD, LINK_KEY_PATH,
+                                       row == 5 ? AT_REMOVEDIR : 0);
+                (void)system_remove_at(AT_FDCWD, "/root/other-key", 0);
+        }
+        {
+                struct waterlink_identity first, again;
+
+                check("an uncontended first identity is created and reused",
+                      link_identity(address_of first, true) == 0 &&
+                          link_identity(address_of again, true) == 0 &&
+                          !memory_compare(first.public, again.public, 32));
+                crypto_forget(address_of first, sizeof first);
+                crypto_forget(address_of again, sizeof again);
+        }
+        (void)system_remove_at(AT_FDCWD, LINK_KEY_PATH, 0);
+        entropy_down = true;
+        p8 secret[32];
+        check("identity creation without entropy publishes no key",
+              link_secret(secret, true) == -EIO &&
+                  !file_look_at(LINK_KEY_PATH, address_of key_claim_facts));
+        entropy_down = false;
+        crypto_forget(secret, sizeof secret);
+        crypto_forget(key_claim, sizeof key_claim);
+}
+
 static fn staging(void)
 {
         p8 part[LINK_REQUEST_MAX + 32];
@@ -75112,6 +76502,125 @@ static positive wls_answer(struct link_session address_to s, p8 address_to into)
         (`link run b yes | head -c 10`) stops what fills it; and a push that
         failed leaves no staging file beside its target.
 */
+static fn missing_own_files(void)
+{
+        static const string_address own[] = {
+            LINK_KEY_PATH, LINK_GROUPS_PATH, LINK_STAMPS_PATH, LINK_STATE_PATH,
+            LINK_LOCK_PATH, HOST_MACHINE_SCRIPT};
+        p8 key[32];
+        struct link_session address_to s = link_self.session;
+
+        wls_seeded(key, sizeof key, 9);
+        wls_peers_with(key, WATERLINK_MAY_FILES);
+        host_state_ready();
+        (void)system_make_directory_at(AT_FDCWD, "/root/unrelated", 0700);
+        (void)system_symbolic_link_at("/root", AT_FDCWD, "/root/root-alias");
+        for (positive row = 0; row < array_count(own); row++)
+        {
+                p8 around[128], ordinary[128];
+                string_address leaf = own[row] + memory_after_last(
+                    own[row], '/', string_length(own[row]));
+                string_address parent = !string_compare_max(own[row], "/root/", 6)
+                    ? "/root/../root/" : HOST_STATE "/./";
+
+                (void)system_remove_at(AT_FDCWD, own[row], 0);
+                string_copy(around, parent);
+                string_append_bounded(around, leaf, sizeof around);
+                check("missing protected control paths remain reserved",
+                      link_path_is_own(own[row]) && link_path_is_own(around));
+                if (!string_compare_max(own[row], "/root/", 6))
+                {
+                        string_copy(around, "/root/root-alias/");
+                        string_append_bounded(around, leaf, sizeof around);
+                        check("directory symlinks cannot hide a missing protected path",
+                              link_path_is_own(around));
+                }
+                check("files-only peers cannot stage a missing control file",
+                      !wls_file_asked(s, LINK_ASK_PUSH, own[row]) &&
+                          s->exit_sent && s->writes[0].fd < 0);
+                link_session_close(s);
+                check("aliases of absent control paths cannot be staged",
+                      !wls_file_asked(s, LINK_ASK_PUSH, around) &&
+                          s->exit_sent && s->writes[0].fd < 0);
+                link_session_close(s);
+                string_copy(ordinary, "/root/unrelated/");
+                string_append_bounded(ordinary, leaf, sizeof ordinary);
+                check("a reserved basename in another directory is an ordinary file",
+                      !link_path_is_own(ordinary) &&
+                          wls_file_asked(s, LINK_ASK_PUSH, ordinary) &&
+                          s->writes[0].fd >= 0);
+                link_session_close(s);
+        }
+        (void)system_remove_at(AT_FDCWD, "/root/root-alias", 0);
+        (void)system_remove_at(AT_FDCWD, "/root/unrelated", 0x200);
+}
+
+static fn standard_stream_prepare_failures(void)
+{
+        const bipolar errors[] = {-EMFILE, -EACCES, -ENOENT, -ELOOP};
+
+        for (positive fd = 0; fd < 3; fd++)
+        {
+                b32 ends[2];
+                bipolar saved = system_call_3(syscall(fcntl), fd, 1030, 10);
+                bipolar opened = system_pipe(ends, O_CLOEXEC);
+
+                check("standard stream failure fixture opens", saved >= 0 && opened >= 0);
+                if (saved < 0 || opened < 0)
+                {
+                        if (saved >= 0) system_close(saved);
+                        if (opened >= 0) { system_close(ends[0]); system_close(ends[1]); }
+                        continue;
+                }
+                {
+                        struct link_stream stream;
+
+                        system_close(fd);
+                        link_stream_own(address_of stream, fd,
+                            fd ? LINK_KEY_OUTPUT : LINK_KEY_INPUT, 0,
+                            fd ? FILE_WRITE : FILE_READ);
+                        check("failed standard stream metadata disables the stream",
+                              stream.fd == -1 && stream.done && stream.error == -EIO);
+                }
+                bipolar installed = system_descriptor_install(ends[fd ? 1 : 0], fd);
+                check("standard stream pipe installs", installed >= 0);
+                if (installed >= 0)
+                {
+                        for (positive row = 0; row < array_count(errors); row++)
+                        {
+                                struct link_stream stream;
+
+                                wls_reopen_error = errors[row];
+                                link_stream_own(address_of stream, fd,
+                                    fd ? LINK_KEY_OUTPUT : LINK_KEY_INPUT, 0,
+                                    fd ? FILE_WRITE : FILE_READ);
+                                wls_reopen_error = 0;
+                                check("nonblocking preparation failures disable the stream",
+                                      stream.fd == -1 && stream.done &&
+                                          stream.error == errors[row]);
+                        }
+                        {
+                                struct link_stream stream;
+
+                                link_stream_own(address_of stream, fd,
+                                    fd ? LINK_KEY_OUTPUT : LINK_KEY_INPUT, 0,
+                                    fd ? FILE_WRITE : FILE_READ);
+                                check("successful preparation owns a nonblocking stream",
+                                      stream.fd > 2 && !stream.error &&
+                                          (system_call_3(syscall(fcntl), stream.fd,
+                                                         3, 0) & O_NONBLOCK));
+                                check("stream preparation preserves shared descriptor flags",
+                                      !(system_call_3(syscall(fcntl), fd, 3, 0) & O_NONBLOCK));
+                                if (stream.fd > 2) system_close(stream.fd);
+                        }
+                }
+                (void)system_descriptor_install(saved, fd);
+                system_close(saved);
+                system_close(ends[0]);
+                system_close(ends[1]);
+        }
+}
+
 static fn stream_failures(void)
 {
         struct link_session address_to s = link_self.session;
@@ -75891,6 +77400,49 @@ static fn client_cookie(bipolar listener, p16 port)
         memory_copy(s->address, wls_loopback, 16);
         s->port = port;
 
+        /* Pin every construction boundary separately.  These calls used to
+           copy mac1 from the stack even when no datagram had been built. */
+        entropy_fail_length = 32;
+        memory_fill(link_client.mac1, 0xa5, sizeof link_client.mac1);
+        check("sec: client initiation fails closed when ephemeral entropy "
+              "fails after its index was made",
+              !link_client_initiate(s, now - 4) && !link_client.ours &&
+                      memory_span_byte(link_client.mac1, 0,
+                                       sizeof link_client.mac1) ==
+                              sizeof link_client.mac1 &&
+                      wls_heard(listener, heard) <= 0);
+        entropy_fail_length = 0;
+        memory_zero(s->peer, 32);
+        memory_fill(link_client.mac1, 0xa5, sizeof link_client.mac1);
+        check("sec: client initiation retains no MAC when the peer key is "
+              "refused before a datagram is built",
+              !link_client_initiate(s, now - 3) && !link_client.ours &&
+                      memory_span_byte(link_client.mac1, 0,
+                                       sizeof link_client.mac1) ==
+                              sizeof link_client.mac1 &&
+                      wls_heard(listener, heard) <= 0);
+        memory_copy(s->peer, wls_server.public, 32);
+        {
+                p8 failed[WATERLINK_DATAGRAM] = {0};
+                p16 working_port = s->port;
+
+                s->port = 0;
+                check("sec: a locally refused initiation leaves no active "
+                      "index",
+                      !link_client_initiate(s, now - 2) && !link_client.ours);
+                memory_copy(failed + 16 + WATERLINK_INITIATE_BYTES - 16,
+                            link_client.mac1, sizeof link_client.mac1);
+                waterlink_cookie_reply(address_of wls_server, address_of table,
+                                       failed, wls_loopback, 0, nonce,
+                                       reply);
+                link_client.cookie_at = 0;
+                link_client_cookie(reply, sizeof reply, now - 1);
+                check("sec: a cookie after a locally refused initiation is "
+                      "ignored",
+                      !link_client.cookie_at);
+                s->port = working_port;
+        }
+
         check("the client's first initiation goes out without mac2",
               link_client_initiate(s, now) &&
                       wls_heard(listener, heard) == WATERLINK_DATAGRAM &&
@@ -76492,12 +78044,191 @@ static fn coalesced_runs(void)
         link_self.socket = outer;
 }
 
-/*
-        A turn asks a descriptor only when the wait heard it: a read that
-        came back short leaves its stream quiet, a quiet stream is not read
-        again, and the wait, when the descriptor has more, wakes at once and
-        makes it loud, so nothing written is left behind.
-*/
+/* Capture the actual wait budget after procedural amounts of turn work. */
+static fn wait_processing_latency(void)
+{
+        const p64 work[] = {2000, 20000, 200000, 1000000};
+        const p64 remaining[] = {0, 500, 2000, 20000};
+
+        wls_wait_capture = true;
+        for (positive row = 0; row < array_count(work); row++)
+                for (positive column = 0; column < array_count(remaining); column++)
+                {
+                        p64 current = link_now();
+                        p64 started = current > work[row] ? current - work[row] : 0;
+                        p64 wake = current + remaining[column];
+
+                        wls_wait_calls = 0;
+                        link_wait(null, null, 0, wake, started);
+                        p64 wait = (p64)wls_wait_limit.tv_sec * 1000000 +
+                                   (p64)wls_wait_limit.tv_nsec / 1000;
+                        check("processing time never renews a Waterlink timer",
+                              wls_wait_calls == 1 &&
+                                  wait <= remaining[column]);
+                }
+        {
+                p64 current = link_now();
+
+                link_wait(null, null, 0, current - 1, current);
+                check("already due Waterlink work polls without sleeping",
+                      !wls_wait_limit.tv_sec && !wls_wait_limit.tv_nsec);
+        }
+        wls_wait_capture = false;
+}
+
+/* File-open counts cover idle/finished slots and timely active revocation. */
+static fn idle_grant_refresh(void)
+{
+        const positive slots[] = {0, LINK_SESSIONS / 2, LINK_SESSIONS - 1};
+
+        for (positive row = 0; row < array_count(slots); row++)
+        {
+                struct link_session address_to s = link_self.session + slots[row];
+                p64 now = 2000000 + row * 10000000;
+                p64 outer_granted = link_self.granted;
+
+                link_self.granted = 0;
+                wls_open_capture = true;
+                wls_open_calls = 0;
+                link_sessions_granted(now);
+                check("idle grant refresh opens no authorization file",
+                      !wls_open_calls && !link_self.granted);
+                bool opened = link_session_open(s);
+
+                check("idle grant refresh session fixture opens", opened);
+                if (opened)
+                {
+                        s->finished = true;
+                        wls_open_calls = 0;
+                        link_sessions_granted(now + 1);
+                        check("finished sessions need no authorization file refresh",
+                              !wls_open_calls && !link_self.granted);
+                        s->finished = false;
+                        s->kind = LINK_KIND_RUN;
+                        wls_seeded(s->peer, sizeof s->peer, (p8)row);
+                        wls_peers_with(s->peer, WATERLINK_MAY_RUN);
+                        wls_open_calls = 0;
+                        link_sessions_granted(now + 2);
+                        check("first active session refreshes grants without an idle delay",
+                              wls_open_calls == 1 && !s->finished &&
+                                  link_self.granted == now + 2);
+                        wls_peers_with(s->peer, 0);
+                        wls_open_calls = 0;
+                        link_sessions_granted(now + 999999);
+                        check("active grant refresh retains its one-second rate limit",
+                              !wls_open_calls && !s->finished);
+                        link_sessions_granted(now + 1000002);
+                        check("revoked active grants still end their session on time",
+                              wls_open_calls == 1 && s->finished);
+                        link_session_close(s);
+                }
+                wls_open_capture = false;
+                link_self.granted = outer_granted;
+        }
+}
+
+static bool terminal_hold(address_any context,
+                           struct waterlink_frame address_to head,
+                           p8 address_to payload)
+{
+        (void)context; (void)head; (void)payload;
+        return false;
+}
+
+/* Real stream descriptors and a held DATA/END pair cover the last turn
+   after peer removal, grant revocation, close, silence and key exhaustion. */
+static fn terminal_sessions_never_stream(void)
+{
+        const positive slots[] = {0, LINK_SESSIONS / 2, LINK_SESSIONS - 1};
+        p8 send[16] = {0}, receive[16] = {0};
+        p8 body[] = {WATERLINK_FRAME_DURABLE, LINK_KEY_INPUT, 1, 2,
+                     LINK_DATA, '!',
+                     WATERLINK_FRAME_DURABLE | WATERLINK_FRAME_LAST,
+                     LINK_KEY_INPUT, 2, 1, LINK_END};
+        bool outer_server = link_self.server;
+        p64 outer_granted = link_self.granted;
+
+        for (positive slot = 0; slot < array_count(slots); slot++)
+        for (positive cause = 0; cause < 7; cause++)
+        {
+                struct link_session address_to s = link_self.session + slots[slot];
+                b32 ends[2];
+                p8 read[16], part[LINK_REQUEST_MAX + 32];
+                file_facts gone;
+                p64 now = 1000000000 + slot * 10000000 + cause * 1000000;
+                bool pushed = wls_write("/root/terminal-target", "before", 6, 0600) &&
+                              wls_push(s, "/root/terminal-target");
+
+                check("terminal-session staged upload fixture opens", pushed);
+                if (!pushed)
+                {
+                        if (s->used) link_session_close(s);
+                        continue;
+                }
+                wls_seeded(s->peer, 32, 17);
+                wls_peers_with(s->peer, WATERLINK_MAY_FILES);
+                link_keys_install(address_of s->now, send, receive, 123, 124);
+                s->now.made = s->heard = s->spoke = now;
+                string_copy(part, s->part);
+                bool piped = system_pipe(ends, O_CLOEXEC | O_NONBLOCK) >= 0;
+                bipolar observer = piped
+                    ? system_call_3(syscall(fcntl), ends[0], 1030, 10) : -1;
+
+                check("terminal-session queued output fixture opens", piped && observer >= 0);
+                if (!piped || observer < 0)
+                {
+                        if (piped) { system_close(ends[0]); system_close(ends[1]); }
+                        link_session_close(s);
+                        continue;
+                }
+                link_stream_set(s->reads, ends[0], LINK_KEY_OUTPUT,
+                                 WATERLINK_FRAME_DURABLE);
+                check("terminal-session output waits on its descriptor",
+                      system_write_once(ends[1], "pending", 7) == 7);
+                check("terminal-session input and end wait behind backpressure",
+                      waterlink_deliver(s->link, body, sizeof body, now,
+                                         terminal_hold, s) &&
+                          waterlink_paused(s->link, LINK_KEY_INPUT));
+                if (cause == 1)
+                        (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
+                else if (cause == 2)
+                        wls_peers_with(s->peer, 0);
+                else if (cause == 3)
+                        s->finished = true;
+                else if (cause == 4)
+                        s->heard = now - LINK_DEAD - 1;
+                else if (cause == 5)
+                        s->now.made = now - (p64)WATERLINK_REJECT_SECONDS * 1000000;
+                else if (cause == 6)
+                        s->now.counter = WATERLINK_REKEY_MESSAGES + (1ull << 20);
+                link_self.granted = 0;
+                link_self.server = true;
+                (void)link_sessions_turn(now);
+
+                check("terminal sessions close before any streams are resumed",
+                      cause ? !s->used : s->used);
+                bipolar got = system_read_once(observer, read, sizeof read);
+
+                check("terminal sessions leave unread descriptor bytes untouched",
+                      cause ? got == 7 && !memory_compare(read, "pending", 7)
+                            : got == -EAGAIN);
+                bipolar target = system_open_at(AT_FDCWD, "/root/terminal-target",
+                                                 FILE_READ | O_CLOEXEC);
+                got = target < 0 ? target : system_read_once(target, read, sizeof read);
+                if (target >= 0) system_close(target);
+                check("terminal sessions discard held upload ends without publishing",
+                      got == 6 && !memory_compare(read, cause ? "before" : "whole!", 6) &&
+                          !file_look_at(part, address_of gone));
+                if (s->used) link_session_close(s);
+                system_close(observer);
+                system_close(ends[1]);
+        }
+        link_self.server = outer_server;
+        link_self.granted = outer_granted;
+        (void)system_remove_at(AT_FDCWD, "/root/terminal-target", 0);
+}
+
+/* A short read stays quiet until readiness wakes it again. */
 static fn quiet_streams(void)
 {
         struct link_session address_to s = link_self.session;
@@ -79197,9 +80928,42 @@ static fn wifi_wait_checks(void)
               got == 0 && took >= 250000000 && took < 1500000000);
 
         network_deadline_begin(address_of brief, 0, 50000000);
+        began = clock_monotonic_nanoseconds();
         got = nl80211_join_wait(address_of session, address_of brief, true);
+        took = clock_monotonic_nanoseconds() - began;
         check("a slice that ends at the deadline or after it is the deadline, not time to ask",
               got == 0);
+        check("an asking slice cannot overshoot a shorter join deadline",
+              took < 150000000);
+        {
+                const positive budgets[] = {1, 1000000, 5000000};
+
+                for (positive row = 0; row < array_count(budgets); row++)
+                {
+                        check("join deadline storm queues unrelated news",
+                              socket_send(pair[1], address_of byte, 1, 0,
+                                          null, 0) == 1);
+                        check("join deadline storm starts its budget",
+                              network_deadline_begin(address_of brief, 0,
+                                                     budgets[row]));
+                        /* Leave the event unread: every slice remains ready.
+                           Bound the test itself if the old loop survives. */
+                        positive turns = 0;
+                        while (turns < 1000000 &&
+                               nl80211_join_wait(address_of session,
+                                                address_of brief, true) > 0)
+                                turns++;
+                        check("unrelated readable news cannot renew a join",
+                              turns < 1000000);
+                        for (positive again = 0; again < 8; again++)
+                                check("an expired join stays expired with news queued",
+                                      nl80211_join_wait(address_of session,
+                                                       address_of brief, true) == 0);
+                        check("expired join preserves news for the next operation",
+                              socket_receive(pair[0], address_of byte, 1,
+                                             MSG_DONTWAIT, null, 0) == 1);
+                }
+        }
         socket_close(pair[0]);
         socket_close(pair[1]);
 }
@@ -79627,6 +81391,18 @@ static fn indexes_and_commands(void)
         entropy_down = true;
         check("sec: with no entropy no session index is handed out",
               link_index_new() == 0);
+        {
+                struct link_session session = {0};
+
+                memory_fill(link_client.mac1, 0xa5, sizeof link_client.mac1);
+                check("sec: a client initiation with no entropy reads no "
+                      "uninitialized datagram and leaves no stale MAC",
+                      !link_client_initiate(address_of session, 1) &&
+                              !link_client.ours &&
+                              memory_span_byte(link_client.mac1, 0,
+                                               sizeof link_client.mac1) ==
+                                      sizeof link_client.mac1);
+        }
         entropy_down = false;
         check("and with it one is", link_index_new() != 0);
 
@@ -79691,6 +81467,15 @@ static fn indexes_and_commands(void)
                 check("sec: an oversized shell terminal name is malformed",
                       !link_request_well_formed(LINK_KIND_SHELL, request,
                                                 5 + 32));
+        }
+
+        {
+                p8 part[32];
+
+                check("sec: a wrapped staging-path length is refused before "
+                      "the target is copied",
+                      link_part_open("x", positive_max, part, sizeof part,
+                                     0600) == -ERROR_NAME_TOO_LONG);
         }
 
         {
@@ -80125,9 +81910,12 @@ b32 main(void)
         }
 
         authorization_files();
+        identity_creation_races();
         staging();
         publication();
         own_files();
+        missing_own_files();
+        standard_stream_prepare_failures();
         stream_failures();
         request_answers();
         names_and_words();
@@ -80146,6 +81934,9 @@ b32 main(void)
         segment_runs(listener, port);
         in_order_sends(listener, port);
         coalesced_runs();
+        wait_processing_latency();
+        idle_grant_refresh();
+        terminal_sessions_never_stream();
         quiet_streams();
         control_records_are_canonical();
         greetings(listener, port);
@@ -84505,6 +86296,45 @@ static fn members(void)
                0xffffffffffffffffull) == 0x995dc9bbdf1939faull);
 }
 
+static fn finder_tables(void)
+{
+        static gzip_encoder encoder;
+        p16 address_to tables[] = {encoder.head4, encoder.head3, encoder.prev};
+        const positive counts[] = {array_count(encoder.head4),
+            array_count(encoder.head3), array_count(encoder.prev)};
+        const p16 positions[] = {0, 1, GZIP_WINDOW - 1, GZIP_WINDOW,
+            GZIP_WINDOW + 1, 65535};
+        encoder.level = 6;
+        encoder.slid = 123;
+        encoder.mark = 456;
+        for (positive table = 0; table < array_count(tables); table++)
+                for (positive i = 0; i < counts[table]; i++)
+                        tables[table][i] = positions[i % array_count(positions)];
+        gzip_slide(&encoder);
+        for (positive table = 0; table < array_count(tables); table++)
+        {
+                bool same = true;
+                for (positive i = 0; i < counts[table]; i++)
+                {
+                        p16 before = positions[i % array_count(positions)];
+                        p16 expected = before > GZIP_WINDOW ? before - GZIP_WINDOW : 0;
+                        same &= tables[table][i] == expected;
+                }
+                check("gzip slides every finder table with saturating positions", same);
+        }
+        check("gzip slide updates origin once and preserves neighboring state",
+              encoder.slid == 123 + GZIP_WINDOW && encoder.level == 6 && encoder.mark == 456);
+        encoder.hash3 = encoder.hash4 = 99;
+        gzip_finder_open(&encoder);
+        for (positive table = 0; table < array_count(tables); table++)
+                check("gzip reset clears exactly each finder table",
+                      memory_span_byte(tables[table], 0, counts[table] * sizeof(p16)) ==
+                          counts[table] * sizeof(p16));
+        check("gzip reset clears hash state and preserves neighboring fields",
+              !encoder.slid && !encoder.hash3 && !encoder.hash4 &&
+              encoder.level == 6 && encoder.mark == 456);
+}
+
 static fn roundtrip(void)
 {
         p8 src[4096];
@@ -84902,6 +86732,7 @@ static fn gz_scan(void)
 b32 main(void)
 {
         members();
+        finder_tables();
         roundtrip();
         large_roundtrip();
         every_level();
@@ -93688,6 +95519,63 @@ b32 main(void)
         return test_report(null);
 }
 #endif /* CHECK_machine */
+
+#ifdef CHECK_snapshot
+#include "../src/lib.util.c"
+#include "../src/moonwater/spark.c"
+#include "../src/sh/shell.c"
+#define SHARED_counted
+#include "checks.c"
+#undef SHARED_counted
+
+b32 main(void)
+{
+        struct snapshot_process process;
+        static const string_address invalid[] = {
+            "", "7 worker", "7 (worker", "7 (worker)", "7 (worker) ",
+            "7 (worker) R", "7 (worker)R 1", "7 (worker)  1", "7 (worker) RR 1",
+        };
+        p8 address_to pages = memory(8192);
+        bool mapped = (bipolar)(positive)pages > 0;
+        check("snapshot guard mapping", mapped);
+        if (!mapped)
+                return test_report(null);
+        bool protected = system_call_3(syscall(mprotect),
+            (positive)(pages + 4096), 4096, 0) == 0;
+        check("snapshot sentinel guard page", protected);
+        if (!protected)
+        {
+                memory_free(pages, 8192);
+                return test_report(null);
+        }
+        for (positive i = 0; i < array_count(invalid); i++)
+        {
+                positive length = string_length(invalid[i]) + 1;
+                p8 address_to at = pages + 4096 - length;
+                memory_copy(at, invalid[i], length);
+                memory_fill(&process, 0xa5, sizeof(process));
+                check("snapshot rejects truncated or malformed state without crossing sentinel",
+                      !system_process_parse(at, 4096, &process) &&
+                      memory_span_byte(&process, 0xa5, sizeof(process)) == sizeof(process));
+        }
+        /* A command may contain ')'; the final one still closes its name. */
+        string_address valid = "7 (a)b) R 1 2 3 4 5 0 0 0 0 0 6 7 0 0 0 8 9 0 10 11 12";
+        positive length = string_length(valid) + 1;
+        p8 address_to at = pages + 4096 - length;
+        memory_copy(at, valid, length);
+        check("snapshot preserves valid process fields at the page edge",
+              system_process_parse(at, 4096, &process) && process.pid == 7 &&
+              string_equals(process.command, "a)b") && process.state == 'R' &&
+              process.ppid == 1 && process.pgrp == 2 && process.session == 3 &&
+              process.tty == 4 && process.tpgid == 5 && process.nice == 8 &&
+              process.threads == 9 && process.user_ns == 6 * SYSTEM_TICK_NS &&
+              process.system_ns == 7 * SYSTEM_TICK_NS &&
+              process.start_ns == 10 * SYSTEM_TICK_NS && process.virtual_bytes == 11 &&
+              process.resident_bytes == 12 * 4096);
+        memory_free(pages, 8192);
+        return test_report(null);
+}
+#endif /* CHECK_snapshot */
 
 #ifdef CHECK_sensors
 #include "../src/lib.util.c"
@@ -105296,6 +107184,154 @@ b32 main(void)
         return 0;
 }
 #endif /* BENCH_net_parsers */
+
+#ifdef BENCH_net_hot
+/* Production response parsing, DHCP padding and queued datagram reception.
+   The same harness builds against saved pre-change network sources, so the
+   comparison measures complete callers rather than isolated byte scans. */
+#include "../src/lib.util.c"
+#include "../src/net/net.c"
+#define SHARED_bench_measure
+#include "checks.c"
+#undef SHARED_bench_measure
+
+static volatile positive net_hot_sink;
+static p8 net_hot_bytes[HTTP_HEAD_MAX];
+static positive net_hot_size;
+static positive net_hot_rounds;
+static positive net_hot_kind;
+static b32 net_hot_pair[2];
+
+__attribute__((noipa)) static positive net_hot_response(void)
+{
+        positive head = 0;
+        http_response response;
+
+        if (http_response_framing(net_hot_bytes, net_hot_size, address_of head,
+                                   address_of response))
+                return 0;
+        return head + response.code + response.body_length;
+}
+
+__attribute__((noipa)) static positive net_hot_padding(void)
+{
+        dhcp_gathered gathered[256] = {0};
+        p8 overload = 0;
+
+        return dhcp_walk(net_hot_bytes, net_hot_size, gathered,
+                          address_of overload) == 0;
+}
+
+static fn net_hot_work(void)
+{
+        if (net_hot_kind == 2)
+        {
+                p8 bytes[32];
+
+                for (positive round = 0; round < net_hot_rounds; round++)
+                {
+                        network_deadline deadline;
+
+                        if (!network_deadline_begin(address_of deadline, 2, 0))
+                                system_call_1(syscall(exit_group), 2);
+                        for (positive at = 0; at < 64; at++)
+                                if (socket_send(net_hot_pair[1], "q", 1,
+                                                 MSG_DONTWAIT, null, 0) != 1)
+                                        system_call_1(syscall(exit_group), 2);
+                        for (positive at = 0; at < 64; at++)
+                        {
+                                bipolar got = network_receive_next(net_hot_pair[0],
+                                    bytes, sizeof bytes, null, null,
+                                    address_of deadline);
+
+                                if (got != 1 || bytes[0] != 'q')
+                                        system_call_1(syscall(exit_group), 2);
+                                net_hot_sink += (positive)got;
+                        }
+                }
+                return;
+        }
+        for (positive round = 0; round < net_hot_rounds; round++)
+                net_hot_sink += net_hot_kind ? net_hot_padding()
+                                            : net_hot_response();
+}
+
+static fn net_hot_row(string_address name)
+{
+        positive samples[9];
+        positive units = net_hot_rounds * (net_hot_kind == 2 ? 64 : 1);
+
+        net_hot_work();
+        for (positive trial = 0; trial < array_count(samples); trial++)
+        {
+                p64 started = get_cpu_time();
+
+                net_hot_work();
+                samples[trial] = (positive)((get_cpu_time() - started) * 100 / units);
+        }
+        order(samples, array_count(samples));
+        p8 fraction[3];
+        positive median = samples[array_count(samples) / 2];
+
+        positive_into_padded(fraction, median % 100, 2, '0');
+        fraction[2] = 0;
+        string_format(log, "  %s  %p.%s ticks/operation\n", name,
+                      median / 100, fraction);
+}
+
+static fn net_hot_head(string_address prefix, positive padding)
+{
+        net_hot_size = string_length(prefix);
+        memory_copy(net_hot_bytes, prefix, net_hot_size);
+        if (padding)
+        {
+                memory_copy(net_hot_bytes + net_hot_size, "X-Large: ", 9);
+                net_hot_size += 9;
+                memory_fill(net_hot_bytes + net_hot_size, 'a', padding);
+                net_hot_size += padding;
+                memory_copy(net_hot_bytes + net_hot_size, "\r\n", 2);
+                net_hot_size += 2;
+        }
+        memory_copy(net_hot_bytes + net_hot_size, "\r\n", 2);
+        net_hot_size += 2;
+        net_hot_rounds = max((positive)1024, (positive)(1 << 20) / net_hot_size);
+        if (!net_hot_response())
+                system_call_1(syscall(exit_group), 2);
+}
+
+b32 main(void)
+{
+        net_hot_head("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n", 0);
+        net_hot_row("HTTP short length head");
+        net_hot_head("HTTP/1.1 302 Found\r\nServer: moonwater\r\n"
+                     "Location: /new?x=1\r\nContent-Length: 17\r\n"
+                     "Cache-Control: no-cache\r\nX-Trace: abc123\r\n", 0);
+        net_hot_row("HTTP redirect with five fields");
+        net_hot_head("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n", 2048);
+        net_hot_row("HTTP 2 KiB unknown value");
+        net_hot_head("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n", 15000);
+        net_hot_row("HTTP 15000-byte unknown value");
+
+        net_hot_kind = 1;
+        net_hot_rounds = 100000;
+        net_hot_bytes[0] = DHCP_OPTION_END;
+        memory_zero(net_hot_bytes + 1, 1023);
+        net_hot_size = 27;
+        net_hot_row("DHCP END and 26 PAD bytes");
+        net_hot_size = 279;
+        net_hot_row("DHCP END and 278 PAD bytes");
+
+        if (system_call_4(syscall(socketpair), AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK,
+                          0, (positive)net_hot_pair))
+                return 2;
+        net_hot_kind = 2;
+        net_hot_rounds = 128;
+        net_hot_row("Queued 64-datagram burst, send and receive");
+        socket_close(net_hot_pair[0]);
+        socket_close(net_hot_pair[1]);
+        return 0;
+}
+#endif /* BENCH_net_hot */
 
 #ifdef BENCH_utf8_valid
 /*

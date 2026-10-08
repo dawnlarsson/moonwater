@@ -433,7 +433,8 @@ static COLD bipolar netlink_receive_one(b32 handle,
         /* With MSG_TRUNC a zero-length datagram read still returns its true
            length. Capture its sender at the same time: NETLINK_ROUTE replies
            and notifications are authoritative only from kernel port zero. */
-        size = socket_receive(handle, null, 0, MSG_PEEK | MSG_TRUNC,
+        size = socket_receive(handle, null, 0,
+                              MSG_PEEK | MSG_TRUNC | MSG_DONTWAIT,
                               address_of source, address_of source_length);
 
         if (size < 0)
@@ -447,9 +448,9 @@ static COLD bipolar netlink_receive_one(b32 handle,
                    for its kernel reply on the next call, while an event
                    socket returns to poll. One discard per call also bounds
                    the work a userspace sender can impose before that poll. */
-                socket_receive(handle, null, 0, 0, 0, 0);
+                got = socket_receive(handle, null, 0, MSG_DONTWAIT, 0, 0);
                 buffer->used = 0;
-                return 0;
+                return got < 0 ? got : 0;
         }
 
         if (!size || (positive)size > NETLINK_DATAGRAM_MAX)
@@ -460,7 +461,7 @@ static COLD bipolar netlink_receive_one(b32 handle,
 
         source_length = sizeof source;
         memory_fill(address_of source, 0, sizeof source);
-        got = socket_receive(handle, buffer->bytes, buffer->room, 0,
+        got = socket_receive(handle, buffer->bytes, buffer->room, MSG_DONTWAIT,
                              address_of source, address_of source_length);
 
         if (got < 0)
@@ -478,13 +479,13 @@ static COLD bipolar netlink_receive_one(b32 handle,
         return got;
 }
 
-static COLD bipolar netlink_receive(b32 handle, netlink_buffer address_to buffer,
-                               p32 address_to local_port)
+static COLD bipolar netlink_socket_identity(b32 handle,
+                                            bool address_to require_kernel,
+                                            p32 address_to local_port)
 {
         socket_address_netlink self_address;
         p32 local_length = sizeof self_address;
         bipolar got;
-        bool require_kernel;
 
         memory_fill(address_of self_address, 0, sizeof self_address);
         got = socket_name(handle, address_of self_address,
@@ -492,17 +493,29 @@ static COLD bipolar netlink_receive(b32 handle, netlink_buffer address_to buffer
         if (got < 0 || local_length < sizeof(self_address.family))
                 return got < 0 ? got : -1;
 
-        require_kernel = self_address.family == AF_NETLINK;
+        address_to require_kernel = self_address.family == AF_NETLINK;
         /* A netlink port is meaningful only when getsockname returned the
            complete netlink address.  Other datagram families remain usable
            by the protocol's byte-level test harness, without weakening the
            kernel-source requirement on a real routing socket. */
-        if (require_kernel && local_length < sizeof self_address)
+        if (address_to require_kernel && local_length < sizeof self_address)
                 return -1;
         if (local_port)
-                address_to local_port = require_kernel
+                address_to local_port = address_to require_kernel
                                             ? self_address.port : 0;
 
+        return 0;
+}
+
+static COLD bipolar netlink_receive(b32 handle, netlink_buffer address_to buffer,
+                               p32 address_to local_port)
+{
+        bool require_kernel;
+        bipolar got = netlink_socket_identity(handle, address_of require_kernel,
+                                              local_port);
+
+        if (got < 0)
+                return got;
         return netlink_receive_one(handle, buffer, require_kernel);
 }
 
@@ -661,6 +674,7 @@ static bipolar netlink_walk(b32 handle, netlink_buffer address_to request,
         network_deadline deadline;
         positive discarded = 0;
         bipolar sent;
+        bool require_kernel;
 
         if (request->failed)
                 return -1;
@@ -672,26 +686,41 @@ static bipolar netlink_walk(b32 handle, netlink_buffer address_to request,
         if (!network_deadline_begin(address_of deadline,
                                     NETLINK_TRANSACTION_SECONDS, 0))
                 return -1;
+        /* Sending may auto-bind an unbound netlink socket. Its local port
+           and family are then stable for the entire multipart transaction. */
+        sent = netlink_socket_identity(handle, address_of require_kernel,
+                                       address_of turn.port);
+        if (sent < 0)
+                return sent;
 
         for (;;)
         {
-                bipolar got = network_wait_readable_until(
-                    handle, address_of deadline);
+                positive seconds;
+                positive nanoseconds;
+                bipolar got;
 
-                if (got <= 0)
-                        return got < 0 ? got : -1;
+                if (!network_deadline_left(address_of deadline,
+                                           address_of seconds,
+                                           address_of nanoseconds))
+                        return -1;
 
-                turn.port = 0;
                 turn.matched = false;
-                got = netlink_receive(handle, reply, address_of turn.port);
+                got = netlink_receive_one(handle, reply, require_kernel);
 
-                /* A signal may land after ppoll reported the datagram but
-                   before either receive consumes it.  The packet remains
-                   queued, so retain the transaction's absolute deadline and
-                   wait for the same reply again instead of turning a caught
-                   signal into a failed routing operation. */
+                /* Readiness may vanish, or a signal may land before peek or
+                   fill. Both receives are nonblocking; retry through the
+                   same absolute deadline instead of stalling or failing a
+                   routing operation on a transient condition. */
                 if (got == NETWORK_INTERRUPTED)
                         continue;
+                if (got == NETWORK_TRY_AGAIN)
+                {
+                        got = network_wait_readable_until(
+                            handle, address_of deadline);
+                        if (got <= 0)
+                                return got < 0 ? got : -1;
+                        continue;
+                }
                 if (got < 0)
                         return got;
 
@@ -1865,25 +1894,29 @@ static COLD bipolar dns_retry_tcp(
     positive question_length, p32 address_to found,
     const network_deadline address_to deadline)
 {
-        p8 reply[DNS_MAX_MESSAGE];
-        p8 frame[2];
-        bipolar handle = dns_stream_connect_until(where, deadline);
+        p8 reply[2 + DNS_MAX_MESSAGE];
+        p8 address_to frame = reply;
+        bipolar handle;
         p16 length;
         bipolar result = DNS_NO_REPLY;
 
+        if (request_length > DNS_MAX_MESSAGE)
+                return DNS_MALFORMED;
+        handle = dns_stream_connect_until(where, deadline);
         if (handle < 0)
                 return DNS_NO_REPLY;
 
+        /* Prefix and query are one small TCP write: a separate two-byte
+           send adds a syscall and can leave the query behind Nagle. */
         network_store_16(frame, (p16)request_length);
-        if (!network_stream_send_all_until(handle, frame, sizeof frame,
+        memory_copy(frame + 2, request, request_length);
+        if (!network_stream_send_all_until(handle, frame, request_length + 2,
                                            deadline) ||
-            !network_stream_send_all_until(handle, request, request_length,
-                                           deadline) ||
-            !network_stream_read_all(handle, frame, sizeof frame, deadline))
+            !network_stream_read_all(handle, frame, 2, deadline))
                 goto done;
 
         length = network_load_16(frame);
-        if (length > sizeof reply)
+        if (length > DNS_MAX_MESSAGE)
         {
                 result = DNS_MALFORMED;
                 goto done;
@@ -1906,24 +1939,28 @@ done:
 
         Only "nameserver A.B.C.D" lines: the keyword, blanks, and the address
         up to the next blank, so a tab or a trailing comment does not hide a
-        server. The wanted-th of them is returned, so a caller walks 0, 1, 2
-        until this answers negatively. Options, search domains and IPv6
-        servers are read past rather than understood.
+        server. Addresses are collected from one snapshot. Options, search
+        domains and IPv6 servers are read past rather than understood.
 
         A file longer than the buffer is cut mid-line, and a cut
         "nameserver 10.0.0.12" reads as a complete "10.0.0.1": a server the
         file never named. So the last line of a full buffer is not a line.
 */
-static COLD bipolar dns_server_at(string_address path, positive wanted)
+static COLD positive dns_servers(string_address path, p32 address_to servers,
+                                 positive room)
 {
         p8 text[4096];
         bipolar got;
         positive at = 0;
+        positive count = 0;
+
+        if (!room)
+                return 0;
 
         got = file_slurp(path, text, sizeof text);
 
         if (got <= 0)
-                return DNS_NO_SERVER;
+                return 0;
 
         while (at < (positive)got)
         {
@@ -1954,11 +1991,15 @@ static COLD bipolar dns_server_at(string_address path, positive wanted)
 
                 string_copy_max_end(kept, text + from, length);
                 host = string_to_host(kept);
-                if (host >= 0 && !wanted--)
-                        return host;
+                if (host >= 0)
+                {
+                        servers[count++] = (p32)host;
+                        if (count == room)
+                                break;
+                }
         }
 
-        return DNS_NO_SERVER;
+        return count;
 }
 
 /*
@@ -2308,22 +2349,19 @@ static COLD bipolar dns_resolve_any(string_address path, string_address name,
                                p32 address_to found, positive seconds)
 {
         bipolar status = DNS_NO_SERVER;
-        bipolar server;
-        positive index = 0;
-        bool asked = false;
+        p32 servers[DNS_SERVERS_MAX];
+        positive count = dns_servers(path, servers, array_count(servers));
 
-        while (index < DNS_SERVERS_MAX &&
-               (server = dns_server_at(path, index++)) >= 0)
+        for (positive index = 0; index < count; index++)
         {
-                asked = true;
-                status = dns_resolve_at((p32)server, DNS_PORT, name, found,
+                status = dns_resolve_at(servers[index], DNS_PORT, name, found,
                                         seconds);
 
                 if (dns_answer_is_final(status))
                         return status;
         }
 
-        if (!asked)
+        if (!count)
                 return dns_resolve_at(DNS_FALLBACK, DNS_PORT, name, found,
                                       seconds);
 
@@ -5674,8 +5712,14 @@ static bipolar tls_send_enc(tls_conn address_to tls, p8 inner_type,
         p8 record[5 + TLS12_RECORD_MAX];
         positive sealed = tls_seal(tls, inner_type, body, length, record);
 
-        return sealed && network_stream_send_all(tls->handle, record, sealed)
-                   ? TLS_OK : TLS_FAIL;
+        if (!sealed || !network_stream_send_all(tls->handle, record, sealed))
+        {
+                /* A prefix may already be on the wire. No later record can
+                   safely continue that stream or undo the spent sequence. */
+                tls->seq_write = TLS_AES_GCM_RECORD_LIMIT;
+                return TLS_FAIL;
+        }
+        return TLS_OK;
 }
 
 /* Open a record where it lies. The inner type is its last nonzero byte;
@@ -5717,8 +5761,8 @@ static bipolar tls_decrypt_record(tls_conn address_to tls, p8 address_to payload
                 address_to inner_length = at;
                 return TLS_OK;
         }
-        while (at && payload[at - 1] == 0)
-                at--;
+        if (at && !payload[at - 1])
+                at -= memory_span_byte_reverse(payload, 0, at);
         if (!at)
                 return TLS_FAIL;
         address_to type = payload[at - 1];
@@ -5771,8 +5815,7 @@ static bool tls_receive(tls_conn address_to tls,
         room = sizeof(tls->receive) - have;
         if (!deadline)
                 got = system_read_retry((positive)tls->handle, into, room);
-        else if ((got = network_stream_read_now(tls->handle, into, room)) ==
-                 NETWORK_TRY_AGAIN)
+        else
                 got = network_stream_read_some_until(tls->handle, into, room,
                                                      deadline);
 
@@ -9632,21 +9675,22 @@ static bool http_token_byte(p8 byte)
    text with no control but tab; a field is a token, a colon, and a value
    held to the same.  The token also refuses obs-fold, whitespace before the
    colon, and an empty field name. */
+static bipolar http_field_name(p8 address_to line, positive stop)
+{
+        positive name = string_span_max((string_address)line, stop,
+                                         string_set_http_token);
+
+        if (!name || name == stop || line[name] != ':' ||
+            memory_text_span(line + name + 1, stop - name - 1) !=
+                stop - name - 1)
+                return -1;
+        return (bipolar)name;
+}
+
 static bool http_line_valid(p8 address_to line, positive stop, bool field)
 {
-        positive at = 0;
-
-        if (field)
-        {
-                while (at < stop && http_token_byte(line[at]))
-                        at++;
-                if (!at || at == stop || line[at++] != ':')
-                        return false;
-        }
-        for (; at < stop; at++)
-                if (byte_is_control(line[at]) && line[at] != '\t')
-                        return false;
-        return true;
+        return field ? http_field_name(line, stop) >= 0
+                     : memory_text_span(line, stop) == stop;
 }
 
 static bool http_header_block_valid(p8 address_to bytes, positive size)
@@ -9852,6 +9896,14 @@ typedef struct
         positive location_length;
 } http_response;
 
+typedef struct
+{
+        string_address transfer;
+        string_address length;
+        positive transfer_size;
+        positive length_size;
+} http_framing_fields;
+
 static bool http_response_is_redirect(b32 code)
 {
         return code == 300 || code == 301 || code == 302 || code == 303 ||
@@ -9863,11 +9915,87 @@ static bool http_response_is_success(b32 code)
         return code >= 200 && code < 300;
 }
 
+/* Validate each line and collect the framing fields in the same walk.
+   Unknown fields still undergo the full grammar and control-byte checks;
+   their names need no repeated comparison with fields of other lengths. */
+static bool http_response_fields(p8 address_to bytes, positive size,
+                                 http_response address_to response,
+                                 http_framing_fields address_to fields)
+{
+        positive at = 0;
+        bool status = true;
+        bool redirect = http_response_is_redirect(response->code);
+
+        memory_zero(fields, sizeof *fields);
+        while (at < size)
+        {
+                positive line = at;
+                positive stop = at + memory_span_without_byte(
+                    bytes + at, '\n', size - at);
+
+                if (stop == size)
+                        return false;
+                at = stop + 1;
+                if (stop > line && bytes[stop - 1] == '\r')
+                        stop--;
+                if (stop == line)
+                        return !status && at == size;
+                if (status)
+                {
+                        if (!http_line_valid(bytes + line, stop - line, false))
+                                return false;
+                        status = false;
+                        continue;
+                }
+
+                bipolar name = http_field_name(bytes + line, stop - line);
+                string_address address_to value = null;
+                positive address_to length = null;
+
+                if (name < 0)
+                        return false;
+                if (name == 17 && !memory_compare_ascii_case(
+                        bytes + line, "transfer-encoding", 17))
+                {
+                        value = address_of fields->transfer;
+                        length = address_of fields->transfer_size;
+                }
+                else if (name == 14 && !memory_compare_ascii_case(
+                        bytes + line, "content-length", 14))
+                {
+                        value = address_of fields->length;
+                        length = address_of fields->length_size;
+                }
+                else if (redirect && name == 8 && !memory_compare_ascii_case(
+                        bytes + line, "location", 8))
+                {
+                        value = address_of response->location;
+                        length = address_of response->location_length;
+                }
+                if (!value)
+                        continue;
+                if (*value)
+                        return false;
+
+                positive from = line + (positive)name + 1;
+
+                from += string_span_max((string_address)bytes + from,
+                                         stop - from, string_set_blanks);
+                while (stop > from &&
+                       (bytes[stop - 1] == ' ' || bytes[stop - 1] == '\t'))
+                        stop--;
+                *value = (string_address)bytes + from;
+                *length = stop - from;
+        }
+        return false;
+}
+
 /* Status and body framing have one interpretation in both clients.  This
    rejects duplicate or conflicting declarations before either the buffered
    or streaming body path acts on them. */
-static bipolar http_response_framing_from(p8 address_to bytes, positive size,
+static bipolar http_response_framing_scan(p8 address_to bytes, positive size,
                                           positive address_to resume,
+                                          positive address_to searched,
                                           positive address_to header_length,
                                           http_response address_to response)
 {
@@ -9881,12 +10009,7 @@ static bipolar http_response_framing_from(p8 address_to bytes, positive size,
 
         for (;;)
         {
-                bool transfer_repeated = false;
-                bool length_repeated = false;
-                positive value_length = 0;
-                positive content_length_size = 0;
-                string_address transfer;
-                string_address content_length;
+                http_framing_fields fields;
                 bipolar header;
 
                 memory_fill(response, 0, sizeof(*response));
@@ -9903,41 +10026,40 @@ static bipolar http_response_framing_from(p8 address_to bytes, positive size,
                 if (response->code < 100 || response->code > 599)
                         return HTTP_MALFORMED;
 
-                header = http_header_end(bytes + at, scan - at);
+                positive from = max(at, address_to searched);
+
+                header = http_header_end(bytes + from, scan - from);
                 if (header < 0)
+                {
+                        /* Only the last three bytes can begin a terminator
+                           completed by a later read. Keep them across reads. */
+                        address_to searched = max(at, scan > 3 ? scan - 3 : 0);
                         return scan == HTTP_HEAD_MAX ? HTTP_MALFORMED
                                                      : HTTP_NO_REPLY;
-                if (!http_header_block_valid(bytes + at, (positive)header))
+                }
+                header += (bipolar)(from - at);
+                if (!http_response_fields(bytes + at, (positive)header,
+                                           response, address_of fields))
+                        return HTTP_MALFORMED;
+                if (fields.transfer && fields.length)
                         return HTTP_MALFORMED;
 
-                transfer = http_header(
-                    bytes + at, (positive)header,
-                    (string_address)"transfer-encoding",
-                    address_of value_length, address_of transfer_repeated);
-                content_length = http_header(
-                    bytes + at, (positive)header,
-                    (string_address)"content-length",
-                    address_of content_length_size, address_of length_repeated);
-                if (transfer_repeated || length_repeated ||
-                    (transfer && content_length))
-                        return HTTP_MALFORMED;
-
-                if (transfer)
+                if (fields.transfer)
                 {
-                        if (value_length != 7 ||
-                            memory_compare_ascii_case(transfer, "chunked", 7))
+                        if (fields.transfer_size != 7 ||
+                            memory_compare_ascii_case(fields.transfer, "chunked", 7))
                                 return HTTP_MALFORMED;
                         response->body_kind = HTTP_BODY_CHUNKED;
                 }
-                else if (content_length)
+                else if (fields.length)
                 {
-                        string_address cursor = content_length;
+                        string_address cursor = fields.length;
 
                         if (!string_digits_checked(
                                 address_of cursor, 10,
                                 address_of response->body_length) ||
-                            (positive)(cursor - content_length) !=
-                                content_length_size)
+                            (positive)(cursor - fields.length) !=
+                                fields.length_size)
                                 return HTTP_MALFORMED;
                         response->body_kind = HTTP_BODY_LENGTH;
                 }
@@ -9982,27 +10104,26 @@ static bipolar http_response_framing_from(p8 address_to bytes, positive size,
                            mark anywhere else would skip the final response's
                            own start. */
                         address_to resume = at;
+                        address_to searched = at;
                         continue;
-                }
-
-                if (http_response_is_redirect(response->code))
-                {
-                        bool repeated = false;
-
-                        response->location = http_header(
-                            bytes + at, (positive)header,
-                            (string_address)"location",
-                            address_of response->location_length,
-                            address_of repeated);
-                        /* No control but tab reaches here, NUL included:
-                           http_header_block_valid refused the head. */
-                        if (repeated)
-                                return HTTP_MALFORMED;
                 }
 
                 address_to header_length = at + (positive)header;
                 return HTTP_OK;
         }
+}
+
+/* Stateless callers scan once; a stream carries searched across reads. */
+static bipolar http_response_framing_from(p8 address_to bytes, positive size,
+                                          positive address_to resume,
+                                          positive address_to header_length,
+                                          http_response address_to response)
+{
+        positive searched = address_to resume;
+
+        return http_response_framing_scan(bytes, size, resume,
+                                          address_of searched, header_length,
+                                          response);
 }
 
 /* One whole head in one buffer, for a caller with nothing to resume: the
@@ -10029,11 +10150,17 @@ static bipolar http_stream_open(p32 host, p16 port, positive seconds)
         socket_address_internet where = {
             .family = AF_INET, .port = network_order_16(port),
             .host = network_order_32(host)};
+        b32 one = 1;
         bipolar handle = socket_new(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
 
         if (handle < 0)
                 return HTTP_NO_ROUTE;
+        /* TLS Finished and the HTTP request are consecutive small writes.
+           Each is already framed into one send; waiting for an ACK to batch
+           the next would add Nagle/delayed-ACK latency to a ready request. */
         if (!network_stream_timeout(handle, seconds, 0) ||
+            socket_option_set((b32)handle, IPPROTO_TCP, TCP_NODELAY,
+                               address_of one, sizeof one) < 0 ||
             socket_connect((b32)handle, address_of where, sizeof where) < 0)
         {
                 socket_close((b32)handle);
@@ -10125,6 +10252,7 @@ static bipolar http_response_head(
            than from byte zero on every read, which is what a peer sending
            informational responses one byte at a time was buying. */
         positive resume = 0;
+        positive searched = 0;
 
         address_to used = 0;
         if (!network_deadline_begin(address_of deadline, seconds, nanoseconds))
@@ -10133,8 +10261,9 @@ static bipolar http_response_head(
         for (;;)
         {
                 positive got = 0;
-                bipolar status = http_response_framing_from(
-                    head, address_to used, address_of resume, header,
+                bipolar status = http_response_framing_scan(
+                    head, address_to used, address_of resume,
+                    address_of searched, header,
                     response);
 
                 if (status != HTTP_NO_REPLY)
@@ -11038,7 +11167,7 @@ static fn http_url_leaf(string_address path, p8 address_to into, positive room)
         no redirect followed, and a head that stops early is a lie about the
         framing, because a plaintext peer that meant to answer had no reason
         to hang up mid-sentence. wget is the streaming download: Wget over
-        HTTP/1.1, TLS, ten hops and never a step back down to plain, and a
+        HTTP/1.1, TLS, twenty redirects and never a step back down to plain, and a
         head that stops early is a peer that went away. The zone's question
         (locale_auto_ask in src/sh/host.c) is a third: Moonwater over HTTP/1.1
         and TLS, no redirect, a few seconds and a few kilobytes of anything a
@@ -11245,7 +11374,7 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                 goto done;
         }
 
-        //      Ten hops and the last one still pointed somewhere else.
+        //      The redirect budget ended with another destination to follow.
         status = HTTP_REDIRECTS;
 
 done:
@@ -11566,10 +11695,11 @@ static COLD bipolar dhcp_walk(p8 address_to region, positive size,
                            option stream. Require canonical PAD bytes so this
                            parser cannot disagree with a middlebox or another
                            client which keeps scanning after option 255. */
-                        while (byte_reader_left(&reader))
-                                if (byte_reader_u8(&reader) != DHCP_OPTION_PAD)
-                                        return -1;
-                        return 0;
+                        positive left = byte_reader_left(&reader);
+
+                        return memory_span_byte(byte_reader_take(&reader, left),
+                                                 DHCP_OPTION_PAD, left) == left
+                                   ? 0 : -1;
                 }
 
                 if (option == DHCP_OPTION_PAD)
@@ -11767,8 +11897,8 @@ static COLD bool dhcp_lease_acknowledge(dhcp_lease address_to lease,
         lease->renewal = 0;
         lease->rebinding = 0;
         dhcp_lease_merge(lease, answer);
-        //      Merging keeps a usable lease usable: only nonzero fields and a
-        //      mask dhcp_read already validated replace anything.
+        //      The caller must judge the merged address, prefix and router:
+        //      each nonzero field is legal syntax, not necessarily a lease.
         return dhcp_lease_timers(lease);
 }
 
@@ -11793,7 +11923,8 @@ static COLD bool dhcp_lease_take(dhcp_lease address_to lease,
                 next.nameserver = 0;
                 next.seconds = 0;
         }
-        if (!dhcp_lease_acknowledge(address_of next, answer))
+        if (!dhcp_lease_acknowledge(address_of next, answer) ||
+            !dhcp_lease_usable(address_of next))
                 return false;
         *lease = next;
         return true;

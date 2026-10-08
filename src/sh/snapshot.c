@@ -422,7 +422,10 @@ static HOT bool system_process_parse(
         string_address open = string_first_of_or_end(text, '(');
         string_address close = string_last_of(text, ')');
 
-        if (!string_get(open) || !close || close <= open)
+        /* The state is one character between spaces. Check its prefix in
+           order so a truncated record never advances beyond its sentinel. */
+        if (!string_get(open) || !close || close <= open ||
+            close[1] != ' ' || close[2] <= ' ' || close[3] != ' ')
                 return false;
 
         memory_fill(process, 0, sizeof(*process));

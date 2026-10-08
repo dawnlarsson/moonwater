@@ -339,7 +339,8 @@ static bipolar link_secret(p8 address_to secret, bool make)
                         return -EIO;
                 //      A name that is there already is a first use that got
                 //      here first, and is read.
-                made = file_publish_bytes(LINK_KEY_PATH, fresh, 32, 0600, true);
+                made = file_publish_with(LINK_KEY_PATH, fresh, 32, 0600, true,
+                                          FILE_STAGED_NO_REPLACE);
                 if (made < 0 && made != -ERROR_EXISTS)
                         return made;
 
@@ -356,12 +357,13 @@ static bipolar link_secret(p8 address_to secret, bool make)
 static bipolar link_identity(struct waterlink_identity address_to me, bool make)
 {
         p8 secret[32];
+
+        scope_exit(crypto_forget(secret, sizeof secret));
         bipolar got = link_secret(secret, make);
 
         if (got < 0)
                 return got;
         waterlink_identity_from(me, secret);
-        crypto_forget(secret, sizeof secret);
         return 0;
 }
 
@@ -809,8 +811,8 @@ static bool link_part_owned(bipolar handle, p8 address_to path)
         who else may be anything here, which no peer is to be handed by a
         grant for files, and what the listener writes is its own to write,
         or `moonwater link` would say what the listener did not. Looked at by inode, so a link, a second name or a
-        path spelled round one is the same file; a path that is not there is
-        not.
+        path spelled round one is the same file. Reserved names remain
+        protected before their files exist, by the parent directory's inode.
 */
 static bool link_path_is_own(string_address path)
 {
@@ -818,16 +820,38 @@ static bool link_path_is_own(string_address path)
             LINK_KEY_PATH, LINK_PEERS_PATH, LINK_GROUPS_PATH, LINK_STAMPS_PATH,
             LINK_STATE_PATH, LINK_LOCK_PATH, HOST_MACHINE_SCRIPT};
         file_facts target;
+        bool exists = file_look_at(path, address_of target);
+        positive leaf_at = memory_after_last(path, '/', string_length(path));
 
-        if (!file_look_at(path, address_of target))
-                return false;
         for (positive at = 0; at < array_count(own); at++)
         {
                 file_facts named;
 
-                if (file_look_at(own[at], address_of named) &&
+                if (exists && file_look_at(own[at], address_of named) &&
                     file_same_identity(address_of target, address_of named))
                         return true;
+                positive own_leaf = memory_after_last(own[at], '/',
+                                                       string_length(own[at]));
+                if (!string_compare(path + leaf_at, own[at] + own_leaf))
+                {
+                        p8 leaf[256];
+                        bipolar parent = system_open_parent_pinned(
+                            AT_FDCWD, path, leaf, sizeof leaf);
+                        bipolar reserved = system_open_parent_pinned(
+                            AT_FDCWD, own[at], leaf, sizeof leaf);
+                        file_facts here, there;
+                        bool protected = parent < 0 || reserved < 0 ||
+                            !file_look(parent, "", AT_EMPTY_PATH, address_of here) ||
+                            !file_look(reserved, "", AT_EMPTY_PATH, address_of there) ||
+                            file_same_identity(address_of here, address_of there);
+
+                        if (parent >= 0)
+                                system_close(parent);
+                        if (reserved >= 0)
+                                system_close(reserved);
+                        if (protected)
+                                return true;
+                }
         }
         return false;
 }
@@ -1156,6 +1180,13 @@ static fn link_batch_flush(void)
 */
 static fn link_session_flush(struct link_session address_to s, p64 now)
 {
+        /* Filling frames cannot move the session. Check a pending batch's
+           destination once, and copy this one's only when a new batch starts. */
+        if (link_self.batched &&
+            (memory_compare(link_self.batch_address, s->address, 16) ||
+             link_self.batch_port != s->port))
+                link_batch_flush();
+
         for (positive guard = 0; guard < 256; guard++)
         {
                 p8 address_to datagram;
@@ -1164,10 +1195,7 @@ static fn link_session_flush(struct link_session address_to s, p64 now)
                 positive used;
                 positive length;
 
-                if (link_self.batched == LINK_SEGMENTS ||
-                    (link_self.batched &&
-                     (memory_compare(link_self.batch_address, s->address, 16) ||
-                      link_self.batch_port != s->port)))
+                if (link_self.batched == LINK_SEGMENTS)
                         link_batch_flush();
 
                 datagram = link_self.batch + link_self.batched *
@@ -1197,8 +1225,11 @@ static fn link_session_flush(struct link_session address_to s, p64 now)
                         continue;
                 }
 
-                memory_copy(link_self.batch_address, s->address, 16);
-                link_self.batch_port = s->port;
+                if (!link_self.batched)
+                {
+                        memory_copy(link_self.batch_address, s->address, 16);
+                        link_self.batch_port = s->port;
+                }
                 link_self.batched++;
         }
         link_batch_flush();
@@ -1318,9 +1349,15 @@ static fn link_stream_own(struct link_stream address_to stream, bipolar fd,
         p32 format;
 
         link_stream_set(stream, fd, key, flags);
-        if (fd < 0 || fd > 2 ||
-            !file_look(fd, (string_address)"", AT_EMPTY_PATH, address_of facts))
+        if (fd < 0 || fd > 2)
                 return;
+        if (!file_look(fd, (string_address)"", AT_EMPTY_PATH, address_of facts))
+        {
+                stream->error = -EIO;
+                stream->fd = -1;
+                stream->done = true;
+                return;
+        }
         format = facts.mode & MODE_FORMAT;
         path[14] = (p8)('0' + fd);
         if (format == MODE_SOCKET)
@@ -1333,6 +1370,14 @@ static fn link_stream_own(struct link_stream address_to stream, bipolar fd,
 
                 if (own >= 0)
                         stream->fd = own;
+                else
+                {
+                        /* A blocking fallback would freeze the whole link
+                           on empty input or a full output pipe. */
+                        stream->error = own;
+                        stream->fd = -1;
+                        stream->done = true;
+                }
         }
 }
 
@@ -1567,7 +1612,10 @@ static bool link_start_command(struct link_session address_to s,
 static bipolar link_part_open(string_address target, positive length,
                               p8 address_to part, positive room, p32 mode)
 {
-        if (length + 28 > room)
+        /* Check by subtraction: `length` is normally a bounded request or
+           argv string, but this helper must not turn a wrapped length into a
+           gigantic copy if either boundary ever changes. */
+        if (room < 28 || length > room - 28)
                 return -ERROR_NAME_TOO_LONG;
 
         memory_copy(part, target, length);
@@ -1771,10 +1819,9 @@ static fn link_watch(system_poll_descriptor address_to watch,
 }
 
 /*
-        Until something is ready or wake comes, whichever is first. The
-        turn's clock stands for now: a wait shorter than the least a timer
-        means is timed from the clock read again, since there the turn's own
-        length would show.
+        Until something is ready or wake comes, whichever is first. Account
+        for the work since the turn began before sleeping: a busy turn must
+        not add its processing time to an already absolute timer.
 */
 static fn link_wait(system_poll_descriptor address_to watch,
                     bool address_to address_to quiet, positive count, p64 wake,
@@ -1782,7 +1829,7 @@ static fn link_wait(system_poll_descriptor address_to watch,
 {
         timespec limit;
 
-        if (wake > now && wake - now < WATERLINK_GRANULE)
+        if (wake > now)
                 now = link_now();
         if (wake < now)
                 wake = now;
@@ -1803,9 +1850,13 @@ static fn link_wait(system_poll_descriptor address_to watch,
 static fn link_stream_read(struct link_session address_to s,
                            struct link_stream address_to stream)
 {
-        while (!stream->done && !stream->quiet && link_room(s))
+        while (!stream->done && !stream->quiet)
         {
-                positive want = link_room(s) * LINK_CHUNK;
+                positive room = link_room(s);
+
+                if (!room)
+                        return;
+                positive want = room * LINK_CHUNK;
                 bipolar got = stream->socket
                                       ? socket_receive((b32)stream->fd,
                                                        link_read_buffer + 1,
@@ -2736,21 +2787,31 @@ static fn link_signals_take(bipolar handle, b32 address_to last)
 static fn link_sessions_granted(p64 now)
 {
         link_peers peers;
+        positive first = 0;
 
         if (link_age(now, link_self.granted) < 1000000)
                 return;
+        /* An idle listener has no grants to revoke. Keep the old refresh
+           time so its first active session need not wait for an idle tick. */
+        while (first < LINK_SESSIONS &&
+               (!link_self.session[first].used ||
+                link_self.session[first].finished))
+                first++;
+        if (first == LINK_SESSIONS)
+                return;
         link_self.granted = now;
         link_peers_load(address_of peers);
-        for (positive at = 0; at < LINK_SESSIONS; at++)
+        for (positive at = first; at < LINK_SESSIONS; at++)
         {
                 struct link_session address_to s = link_self.session + at;
+                if (!s->used || s->finished)
+                        continue;
                 struct waterlink_peer address_to peer =
                         link_peer_keyed(address_of peers, s->peer);
                 positive need = link_grant_asked(link_kind_asks[s->kind]);
 
-                if (s->used && !s->finished &&
-                    (!peer || (need < array_count(link_grants) &&
-                               !(peer->may & link_grants[need].bit))))
+                if (!peer || (need < array_count(link_grants) &&
+                              !(peer->may & link_grants[need].bit)))
                         link_session_end(s, true);
         }
 }
@@ -2769,9 +2830,10 @@ static p64 link_sessions_turn(p64 now)
 
                 if (!s->used)
                         continue;
-                if (s->now.live)
-                        link_session_streams(s, now);
 
+                /* Revoked, closed or expired sessions have no remaining
+                   authority over their descriptors. In particular, a held
+                   upload end must not publish its file after revocation. */
                 if (link_self.server)
                 {
                         if (s->exit_sent && waterlink_idle(s->link))
@@ -2790,6 +2852,8 @@ static p64 link_sessions_turn(p64 now)
                         }
                 }
 
+                if (s->now.live)
+                        link_session_streams(s, now);
                 if (s->now.live)
                 {
                         link_session_flush(s, now);
@@ -3008,6 +3072,10 @@ static bool link_client_initiate(struct link_session address_to s, p64 now)
         p64 wall = system_clock_ns(0);
         bool sent;
 
+        /* A failed index or entropy draw leaves no initiation.  Do not retain
+           an earlier MAC, and do not read the still-uninitialized datagram in
+           the failure path. */
+        memory_zero(link_client.mac1, sizeof link_client.mac1);
         link_client.ours = link_index_new();
         link_client.initiated = now;
         memory_zero(hello, sizeof hello);
@@ -3026,12 +3094,15 @@ static bool link_client_initiate(struct link_session address_to s, p64 now)
                 link_client.cookie_at &&
                 link_age(now, link_client.cookie_at) <
                         (p64)(WATERLINK_COOKIE_SECONDS - 5) * 1000000;
-        if (sent && link_client.cookied)
-                waterlink_mac2(link_client.cookie, datagram);
-        memory_copy(link_client.mac1,
-                    datagram + 16 + WATERLINK_INITIATE_BYTES - 16, 16);
-        sent = sent && link_send_to(datagram, WATERLINK_DATAGRAM, s->address,
+        if (sent)
+        {
+                if (link_client.cookied)
+                        waterlink_mac2(link_client.cookie, datagram);
+                memory_copy(link_client.mac1,
+                            datagram + 16 + WATERLINK_INITIATE_BYTES - 16, 16);
+                sent = link_send_to(datagram, WATERLINK_DATAGRAM, s->address,
                                     s->port) >= 0;
+        }
         crypto_forget(ephemeral, sizeof ephemeral);
         if (!sent)
         {

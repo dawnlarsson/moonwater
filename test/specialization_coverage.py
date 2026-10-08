@@ -444,6 +444,10 @@ cover('folds_already', 'size', 'memory_ascii_span',
       'every caller hands a read or line length known only at run time; the '
       'bytes decide the path, so a fixed size would remove no decision')
 
+cover('folds_already', 'size', 'memory_text_span',
+      'HTTP status and field values have runtime bounds; an expansion would '
+      'duplicate the bounded text scan without a constant production caller')
+
 cover('folds_already', 'size', 'memory_utf8_valid_span',
       'every caller hands a line or read length known only at run time; the '
       'bytes decide the path, so a fixed size would remove no decision')

@@ -64,12 +64,37 @@ def reconcile(rows, errors):
     return inventory
 
 
+def conditional_section(text, name):
+    """One named conditional, including shared #if defined(A) || defined(B)."""
+    start = None
+    depth = 0
+    defined = re.compile(r'\bdefined\s*(?:\(\s*' + re.escape(name) +
+                         r'\s*\)|' + re.escape(name) + r'\b)')
+    directives = re.finditer(r'^[ \t]*#[ \t]*(if|ifdef|ifndef|endif)\b([^\n]*)',
+                             text, re.MULTILINE)
+    for directive in directives:
+        kind, condition = directive.groups()
+        if start is None:
+            if ((kind == 'ifdef' and condition.strip() == name) or
+                    (kind == 'if' and defined.search(condition))):
+                start = directive.start()
+                depth = 1
+            continue
+        if kind == 'endif':
+            depth -= 1
+            if not depth:
+                return text[start:directive.start()]
+        else:
+            depth += 1
+    return None
+
+
 def anchor(row, cache, errors):
     """The row's evidence exists and carries the named token.
 
     Evidence is a file, or one section of test/checks.c spelled
-    test/checks.c#CHECK_<name>: the text between #ifdef CHECK_<name> and its
-    #endif is what has to carry the token, so a token another section
+    test/checks.c#CHECK_<name>: its conditional block is what has to carry
+    the token, including blocks shared by several names, so another section
     happens to use does not vouch for this one.
 
     Says whether the evidence was readable at all, so a caller can skip its
@@ -84,22 +109,11 @@ def anchor(row, cache, errors):
     if row.evidence not in cache:
         text = evidence_path.read_text(encoding='utf-8', errors='replace')
         if section:
-            # A section may share its body with its twins: #if defined(A) ||
-            # defined(B) ... #endif /* A || B */. It still opens and closes
-            # on its own name.
-            begin = text.find('#ifdef %s\n' % section)
-            end = text.find('#endif /* %s */\n' % section)
-            if begin < 0:
-                opened = re.search(r'^#if[^\n]*defined\(%s\)' % re.escape(section), text, re.M)
-                begin = opened.start() if opened else -1
-            if end < 0:
-                closed = re.search(r'^#endif /\* (?:\w+ \|\| )*%s(?: \|\| \w+)* \*/\n' % re.escape(section), text, re.M)
-                end = closed.start() if closed else -1
-            if begin < 0 or end < begin:
+            text = conditional_section(text, section)
+            if text is None:
                 errors.append('%s: no section %s in %s' %
                               (row.routine, section, file))
                 return False
-            text = text[begin:end]
         cache[row.evidence] = text
     if not token_present(cache[row.evidence], row.anchor):
         errors.append('%s: anchor %s absent from %s' %

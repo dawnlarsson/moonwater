@@ -317,6 +317,9 @@ cover('benchmark_context', 'test/checks.c#BENCH_writer_text', 'buffered_write_co
       {'buffered_write_core': 'buffered_write'})
 cover('direct_benchmark', 'test/checks.c#BENCH_utf8_valid', 'memory_ascii_span',
       'paired against the word loop and string_span_max that rev and wc asked for the ASCII run')
+cover('benchmark_context', 'test/checks.c#BENCH_net_hot', 'memory_text_span',
+      'bounded text classification inside production HTTP response parsing',
+      {'memory_text_span': 'http_response_framing'})
 cover('direct_benchmark', 'test/checks.c#BENCH_utf8_valid', 'memory_utf8_valid_span',
       'paired against grep_text_valid\'s former C over ASCII and mixed lines '
       'of grep\'s sizes, with and without the AVX2 body')

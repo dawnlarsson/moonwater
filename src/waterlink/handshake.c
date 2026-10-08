@@ -198,7 +198,9 @@ static bool waterlink_open_hash(struct waterlink_noise address_to noise,
         p8 sealed[64];
         bool good;
 
-        if (length + 16 > sizeof sealed)
+        /* Subtract before comparing so a hostile or corrupted span cannot
+           wrap the tag addition and reach the copy as an enormous length. */
+        if (length > sizeof sealed - 16)
                 return false;
 
         memory_copy(sealed, text, length + 16);

@@ -159,12 +159,13 @@ samples a query and keeps the one with the fastest round trip, RFC 5905's clock
 filter, so a queueing spike never sets the clock; it also asks three servers
 and believes the one with the least root distance among those whose answers
 agree, so one wrong server cannot set it either. A server named in
-`/root/ntp.server` is believed on its own. The timezone is auto until set
-by hand: on each new network the machine makes one HTTPS request to Cloudflare
-and takes the zone it reports, at most once every three minutes. There is no
-zoneinfo directory: each of tzdata's 420 zones maps to the POSIX rule in its
-TZif footer (`src/build/zones.py` regenerates them), which is right from the
-zone's last change on.
+`/root/ntp.server` is asked first, but a step past two seconds still needs a
+second server to agree when the clock already has a plausible wall time. The
+timezone is auto until set by hand: on each new network the machine makes one
+HTTPS request to Cloudflare and takes the zone it reports, at most once every
+three minutes. There is no zoneinfo directory: each of tzdata's 420 zones maps
+to the POSIX rule in its TZif footer (`src/build/zones.py` regenerates them),
+which is right from the zone's last change on.
 
 **Kiosks.** `moonwater wipe yes` empties `/home` and `/root` except the settings
 above and the machine script overlay; `/bowls` survives. A file system mounted
@@ -772,6 +773,60 @@ sh test/run bench               the benchmarks
 sh test/run bench --list        what there is to measure
 ```
 
+For a procedural network campaign with clang's libFuzzer, ASan and UBSan:
+
+```
+python3 test/network.py --output /tmp/moonwater-network --seeds 1 7 42 --runs 200000 --seconds 30
+python3 -m unittest discover -s test -p test_network_cases.py
+```
+
+The output directory must be new. Each seed runs all 14 existing targets:
+TLS DER, handshake and certificate verification; Waterlink authentication and
+transport state; DHCP, SNTP, Wi-Fi EAPOL and scan records, DNS, netlink,
+cryptography, bowl signatures, and HTTP in both tiers. Original fixtures stay
+as controls alongside generated truncations, trailing data, and integer
+boundaries. Generation rotates across fixtures and mutation classes, with
+at most 4,096 additional inputs and 64 MiB per target. Reports record cap
+exhaustion, actual executions, instrumented edges/features, sanitizer results,
+and retained logs and corpora. The run or time limit stops each target,
+whichever comes first; exit 2 means a required tool or target did not run.
+Increase both budgets for longer campaigns. These counters measure hosted
+production-code lifts; kernel, driver and live network integration still need
+the `net` and `waterlink` lanes and guest tests. Passing is bounded evidence,
+not a guarantee against compromise.
+`sh test/run fuzz` also enables these procedural boundaries by default;
+`MOONWATER_FUZZ_BOUNDARIES=0` keeps the original corpus for comparisons.
+
+The loopback TLS integration paths can be added to a trace-PC source-coverage
+record. This exercises the real shell client across the certificate-chain
+matrix, 500 seeded hostile flights, 60 fragmented or cut delivery schedules,
+and HTTPS downgrade cases, while retaining each exact binary and map:
+
+```
+python3 test/network_integration.py --output /tmp/moonwater-network-integration \
+  --baseline /tmp/moonwater-coverage --mutations 500 --schedules 60
+```
+
+`--against` names a saved `coverage_report` JSON when a block-by-block delta is
+wanted. The output directory must be new. The maps cover userspace in
+`src/net/`; kernel, driver, namespace and physical-network behavior remains in
+the `net`, `netem`, guest and hardware lanes. Exit 2 means one of the requested
+integration harnesses did not run.
+
+The DHCP and SNTP clients also have a hostile-server lane over namespace veth
+pairs. It covers forged, stale, duplicated, delayed, dropped and refused DHCP
+traffic, address conflicts, invalid SNTP origins, spoofed time, rate limiting
+and large clock steps:
+
+```
+python3 test/differential.py --harness net_netem --shell /path/to/shell
+```
+
+The default requires the kernel's `sch_netem` support and adds deterministic
+loss, reordering, duplication and jitter. `--plain-only` retains all protocol
+and namespace cases on kernels without that scheduler, and reports the reduced
+lane by its own name.
+
 A few environment variables exist for the tests alone, and each says so where
 it is read: `WATERLINK_PAIR_SECONDS` and `WATERLINK_REKEY_SECONDS` (shorten the
 pairing window and the rekey interval, never lengthen them),
@@ -784,8 +839,10 @@ command for any.
 The `boot` and `canvas` lanes need a built image (`MOONWATER_IMAGE=dist/bootx64.efi`)
 and say so rather than pass quietly.
 
-There are three files: `test/run`, `test/checks.c` (every C check and benchmark)
-and `test/differential.py`. Nobody writes cases. Each program is declared as a
+The main test runner is `test/run`, with C checks and benchmarks in
+`test/checks.c` and procedural and differential harnesses in
+`test/differential.py`. The network campaign adds `test/network.py` and its
+bounded generator, `test/network_cases.py`. Each program is declared as a
 grammar -- its options, values, operands and inputs -- and the engine runs the
 system's tool and ours on the same inputs, comparing status, output, effects on
 disk and diagnostics. Deliberate differences are pinned with a reason and fail
