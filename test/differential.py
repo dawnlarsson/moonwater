@@ -20325,6 +20325,20 @@ def shell_delivered(generator, ways=("command", "stdin", "file")):
     return delivered
 
 
+def shell_lang_wait_stopped_kill(rng):
+    """A job stopped and then killed: wait answers the death, not the stop."""
+    return ("wait-stopped-kill", shell_ALL, shell_program(
+        "exec 2>/dev/null",
+        "sleep 2 &",
+        "p=$!",
+        "sleep 0.3",
+        "kill -STOP $p",
+        "sleep 0.3",
+        "kill -9 $p",
+        "wait $p",
+        "echo \"st=$?\""))
+
+
 SHELL_FAMILIES = (
     shell_delivered(shell_lex_quotes),
     shell_delivered(shell_lex_substitution),
@@ -20534,6 +20548,7 @@ SHELL_FAMILIES = (
     shell_lang_onecmd_input,
     shell_lang_process_redirection,
     shell_lang_trap_in_pipeline,
+    shell_lang_wait_stopped_kill,
     shell_lang_errexit_functions,
     shell_lang_heredoc_expansion,
     shell_lang_arithmetic_edges,
