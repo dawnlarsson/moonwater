@@ -4462,7 +4462,7 @@ lifted lib string_first_of string_first_of_or_end string_first_of_max string_fin
 bulk lib memory_fill memory_exchange_apart memory_frob memory_copy_apart memory_copy string_copy string_copy_max string_cut string_replace_all
 reverse lib memory_reverse
 series lib memory_decimal_series
-squeeze lib memory_squeeze_bytes
+squeeze lib memory_delete_bytes memory_squeeze_bytes
 offsets lib memory_offsets_of_either memory_offsets_between memory_offsets_outside memory_offsets_in_set
 hash lib string_hash_33_length
 join text text_blank_field
