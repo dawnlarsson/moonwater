@@ -9518,9 +9518,11 @@ static bool ls_keep(string_address name, positive address_to where)
 {
         positive length = string_length(name);
 
+        //      Eight bytes more than the name, so a sort key can read a word at
+        //      the end of the last one.
         if (ls_used + length + 1 > LS_ARENA ||
             !memory_resize_reserve(address_of ls_arena_held, address_of ls_arena_room,
-                                   ls_used + length + 1, 65536))
+                                   ls_used + length + 1 + 8, 65536))
         {
                 ls_limit((string_address) "directory names too large");
                 return false;
@@ -10615,6 +10617,120 @@ static HOT bipolar ls_order(ls_entry address_to left, ls_entry address_to right)
 #define ls_index_order(left, right) \
         ls_order(ls_entries + (left), ls_entries + (right))
 
+/*
+        A sort by name moves a word of each name with its index. The names
+        of a directory share a beginning more often than not (IMG_, file0,
+        the same extension), so the word is the eight bytes after the
+        beginning they all share, in the order a byte compare gives them: a
+        compare of two entries is then one compare of two words, and only
+        names that agree for eight bytes more are compared as strings, from
+        where the words left off. The shared beginning is found by one pass
+        and is not part of any compare.
+*/
+typedef struct
+{
+        p64 key;
+        positive index;
+} ls_item;
+
+static ls_item (address_to ls_items_held)[LS_MAX_ENTRIES];
+static ls_item (address_to ls_items_spare_held)[LS_MAX_ENTRIES];
+#define ls_items (*ls_items_held)
+#define ls_items_spare (*ls_items_spare_held)
+static positive ls_items_room;
+static positive ls_items_spare_room;
+static positive ls_key_skip;
+
+/* Eight bytes of a name from where its shared beginning ends, first byte
+   most significant, zero from the end of the name on. The arena has eight
+   bytes of room past the last name. */
+static inline INLINE p64 ls_name_key(string_address name)
+{
+        p64 word = memory_load_unaligned(p64, name);
+        p64 ended = (word - 0x0101010101010101ull) & ~word & 0x8080808080808080ull;
+
+        if (ended)
+                word &= ((p64)1 << (bits_trailing_zeros(ended) & ~7u)) - 1;
+        return word_bytes_reversed(word);
+}
+
+static inline INLINE bipolar ls_item_compare(ls_item address_to left,
+                                              ls_item address_to right)
+{
+        bipolar answer;
+
+        if (left->key != right->key)
+                answer = left->key < right->key ? -1 : 1;
+        else if (ls_sorting == 'n')
+                answer = string_compare(
+                    (string_address)(ls_arena + ls_entries[left->index].name + ls_key_skip),
+                    (string_address)(ls_arena + ls_entries[right->index].name + ls_key_skip));
+        else
+                //      Equal times or sizes: the reference's own order of the
+                //      two, fractions and names and -r included.
+                return ls_order(ls_entries + left->index, ls_entries + right->index);
+
+        return ls_reversed ? -answer : answer;
+}
+
+#define ls_item_order(left, right) ls_item_compare(&(left), &(right))
+
+/* The keys of a sort by name, time or size. A time or a size is ordered
+   largest first, so its key is turned over. */
+static bool ls_sort_keyed()
+{
+        if (!memory_resize_reserve(address_of ls_items_held, address_of ls_items_room,
+                                   ls_count * sizeof(ls_item), 1024 * sizeof(ls_item)) ||
+            !memory_resize_reserve(address_of ls_items_spare_held,
+                                   address_of ls_items_spare_room,
+                                   ls_count * sizeof(ls_item), 1024 * sizeof(ls_item)))
+                return false;
+
+        if (ls_sorting == 'n')
+        {
+                string_address first = (string_address)(ls_arena + ls_entries[0].name);
+                positive shared = string_length(first);
+
+                for (positive i = 1; i < ls_count && shared; i++)
+                        shared = memory_common_prefix(first, ls_arena + ls_entries[i].name, shared);
+
+                ls_key_skip = shared;
+
+                for (positive i = 0; i < ls_count; i++)
+                {
+                        ls_items[i].key = ls_name_key((string_address)(ls_arena + ls_entries[i].name + shared));
+                        ls_items[i].index = i;
+                }
+        }
+        else if (ls_sorting == 't')
+        {
+                for (positive i = 0; i < ls_count; i++)
+                {
+                        b64 seconds;
+                        p32 fraction;
+
+                        ls_entry_time(ls_entries + i, address_of seconds, address_of fraction);
+                        ls_items[i].key = ~((p64)seconds ^ ((p64)1 << 63));
+                        ls_items[i].index = i;
+                }
+        }
+        else
+        {
+                for (positive i = 0; i < ls_count; i++)
+                {
+                        ls_items[i].key = ~ls_entries[i].size;
+                        ls_items[i].index = i;
+                }
+        }
+
+        ls_item address_to landed = array_merge_sort(
+            ls_items, ls_items_spare, ls_count, ls_item_order);
+
+        for (positive i = 0; i < ls_count; i++)
+                ls_sorted[i] = landed[i].index;
+        return true;
+}
+
 /* Bottom-up merge sort keeps comparison count at n log n on the full 8192
    entry surface. Only eight-byte indexes move. -U leaves the directory's
    own order, reversed by -r as the reference reverses it. */
@@ -10630,6 +10746,11 @@ static fn ls_sort()
         //      any comparison, so -r and --group-directories-first do
         //      nothing to it.
         if (ls_sorting == 'U')
+                return;
+
+        if (ls_count >= 16 && !ls_group_directories &&
+            ((ls_sorting == 'n' && !ls_collating) || ls_sorting == 't' || ls_sorting == 'S') &&
+            ls_sort_keyed())
                 return;
 
         positive address_to from = array_merge_sort(
@@ -11402,6 +11523,100 @@ static positive ls_time_stamp_width()
         return width;
 }
 
+/*
+        The columns in front of a long listing's name are assembled in one
+        buffer and written with one call: each of them was a write of its
+        own, a dozen and a half a line, every one through the output buffer's
+        copy. What the writers of the time and the size are given is
+        ls_row_put, which appends; the fixed columns are written where they
+        go.
+*/
+#define LS_ROW 2048
+static p8 ls_row[LS_ROW];
+static positive ls_row_used;
+
+static fn ls_row_flush()
+{
+        if (ls_row_used)
+        {
+                positive used = ls_row_used;
+
+                ls_row_used = 0;
+                ls_out(ls_row, used);
+        }
+}
+
+// Room for length bytes written in place, which the caller then counts.
+static inline INLINE p8 address_to ls_row_room(positive length)
+{
+        if (length > LS_ROW - ls_row_used)
+                ls_row_flush();
+        return ls_row + ls_row_used;
+}
+
+static fn ls_row_put(address_any text, positive length)
+{
+        if (!length)
+                length = string_length((string_address)text);
+
+        if (length > LS_ROW - ls_row_used)
+        {
+                ls_row_flush();
+                if (length > LS_ROW)
+                {
+                        ls_out(text, length);
+                        return;
+                }
+        }
+        memory_copy_apart(ls_row + ls_row_used, text, length);
+        ls_row_used += length;
+}
+
+// Where the line has got to, the bytes held back counted.
+static inline INLINE positive ls_row_position()
+{
+        return ls_out_bytes + ls_row_used;
+}
+
+// An owner, a group or an author, left-aligned in its column, and the blank
+// after it. The last of each kind is kept as it is written, since the lines
+// of a listing so often share one.
+typedef struct
+{
+        bool valid;
+        bool numeric;
+        positive id;
+        positive width;
+        positive total;
+        p8 text[FILE_NAME_MAX + 2];
+} ls_account_text;
+
+static ls_account_text ls_account_texts[2];
+
+static fn ls_row_account(positive id, bool group, positive width)
+{
+        ls_account_text address_to kept = ls_account_texts + group;
+
+        if (!kept->valid || kept->id != id || kept->width != width || kept->numeric != ls_numeric)
+        {
+                p8 who[FILE_NAME_MAX];
+                positive length = file_account_label_text(id, group, !ls_numeric, who);
+
+                kept->total = max(length, width) + 1;
+                memory_copy_apart(kept->text, who, length);
+                memory_fill(kept->text + length, ' ', kept->total - length);
+                kept->id = id;
+                kept->width = width;
+                kept->numeric = ls_numeric;
+                kept->valid = true;
+        }
+
+        p8 address_to out = ls_row_room(kept->total);
+
+        memory_copy_apart(out, kept->text, kept->total);
+        ls_row_used += kept->total;
+}
+
 static fn ls_time_say(ls_entry address_to entry)
 {
         b64 seconds;
@@ -11423,22 +11638,22 @@ static fn ls_time_say(ls_entry address_to entry)
                 positive length = bipolar_into_string(text, seconds);
                 positive width = ls_time_stamp_width();
 
-                writer_fill(ls_out, width > length ? width - length : 0, ' ');
-                ls_out(text, length);
+                writer_fill(ls_row_put, width > length ? width - length : 0, ' ');
+                ls_row_put(text, length);
                 return;
         }
 
         switch (ls_time_style)
         {
         case 'f':
-                return file_stamp(ls_out, seconds, fraction);
+                return file_stamp(ls_row_put, seconds, fraction);
         case '+':
-                date_shape(ls_out, seconds, 0,
+                date_shape(ls_row_put, seconds, 0,
                            ls_recent(seconds) ? ls_time_format_recent : ls_time_format_old);
                 return;
         }
 
-        file_stamp_short(ls_out, address_of broken, seconds, ls_now);
+        file_stamp_short(ls_row_put, address_of broken, seconds, ls_now);
 }
 
 // ---- The listing ---------------------------------------------------------
@@ -11618,6 +11833,16 @@ static fn ls_print_long(string_address directory)
         for (positive i = 0; i < ls_count; i++)
                 any_acl |= ls_entries[i].acl;
 
+        //      A size in whole bytes is as wide as its digits, and the widest
+        //      is the largest's: one count of digits, not one a line.
+        bool plain_size = ls_size_unit == 1 && !ls_size_human && !string_get(ls_size_suffix);
+        positive largest_links = 0;
+        positive largest_size = 0;
+        positive owner_seen = positive_max;
+        positive group_seen = positive_max;
+        positive owner_seen_width = 0;
+        positive group_seen_width = 0;
+
         // An entry the kernel would not describe is a "?" in every column,
         // which is one character wide and so counts for nothing here.
         for (positive i = 0; i < measured; i++)
@@ -11627,23 +11852,38 @@ static fn ls_print_long(string_address directory)
                 if (!entry->known)
                         continue;
 
-                link_width = max(link_width, positive_digits(entry->links));
+                largest_links = max(largest_links, entry->links);
 
                 if (ls_is_device(entry))
                 {
                         major_width = max(major_width, positive_digits(entry->rdev_major));
                         minor_width = max(minor_width, positive_digits(entry->rdev_minor));
                 }
+                else if (plain_size)
+                        largest_size = max(largest_size, entry->size);
                 else
                         size_width = max(size_width,
                                          ls_scaled_width(entry->size, ls_size_unit, ls_size_human,
                                                          ls_size_si, ls_size_suffix));
 
-                owner_width = max(owner_width,
-                                  file_account_label_width(entry->owner, false, !ls_numeric));
-                group_width = max(group_width,
-                                  file_account_label_width(entry->group, true, !ls_numeric));
+                //      Neighbours so often share an owner and a group that
+                //      the last one's width is the answer.
+                if (entry->owner != owner_seen)
+                {
+                        owner_seen = entry->owner;
+                        owner_seen_width = file_account_label_width(owner_seen, false, !ls_numeric);
+                }
+                if (entry->group != group_seen)
+                {
+                        group_seen = entry->group;
+                        group_seen_width = file_account_label_width(group_seen, true, !ls_numeric);
+                }
+                owner_width = max(owner_width, owner_seen_width);
+                group_width = max(group_width, group_seen_width);
         }
+        link_width = max(link_width, positive_digits(largest_links));
+        if (plain_size)
+                size_width = max(size_width, positive_digits(largest_size));
 
         // The device column is "major, minor", and the size column is wide
         // enough for whichever of the two spellings is the wider.
@@ -11729,56 +11969,51 @@ static fn ls_print_long(string_address directory)
                 {
                         /* An eleventh column once any entry has an access
                            list: + beside those that do, a space beside the
-                           rest, as GNU's filemodestring does. */
-                        file_mode_letters(letters, entry->mode);
-                        ls_out(letters, 10);
+                           rest, as GNU's filemodestring does. The columns
+                           up to the name are put together in ls_row and
+                           written at once. */
+                        p8 address_to out = ls_row_room(64);
+                        positive at = 10;
+
+                        file_mode_letters(out, entry->mode);
                         if (any_acl)
-                                ls_out(entry->acl ? "+" : " ", 1);
-                        ls_out(" ", 1);
-                        positive_to_padded(ls_out, entry->links, link_width, ' ', 0);
-                        ls_out(" ", 1);
+                                out[at++] = entry->acl ? '+' : ' ';
+                        out[at++] = ' ';
+                        at += positive_into_padded(out + at, entry->links, link_width, ' ');
+                        out[at++] = ' ';
+                        ls_row_used += at;
 
                         if (ls_owner_shown)
-                        {
-                                positive length = file_account_label_text(entry->owner, false, !ls_numeric, who);
-
-                                writer_field_bulk(ls_out, who, length, owner_width, ' ', true);
-                                ls_out(" ", 1);
-                        }
+                                ls_row_account(entry->owner, false, owner_width);
 
                         if (ls_group_shown)
-                        {
-                                positive length = file_account_label_text(entry->group, true, !ls_numeric, who);
-
-                                writer_field_bulk(ls_out, who, length, group_width, ' ', true);
-                                ls_out(" ", 1);
-                        }
+                                ls_row_account(entry->group, true, group_width);
 
                         if (ls_author)
-                        {
-                                positive length = file_account_label_text(entry->owner, false, !ls_numeric, who);
-
-                                writer_field_bulk(ls_out, who, length, owner_width, ' ', true);
-                                ls_out(" ", 1);
-                        }
+                                ls_row_account(entry->owner, false, owner_width);
 
                         if (ls_context)
-                                ls_out("? ", 2);
+                                ls_row_put("? ", 2);
 
                         if (ls_owner_shown || ls_group_shown || ls_author || ls_context)
-                                column_base = ls_out_bytes;
+                                column_base = ls_row_position();
 
                         if (ls_is_device(entry))
                         {
                                 // The major number takes whatever the size
                                 // column has over the device spelling, so
                                 // the comma lines up down the listing.
-                                positive_to_padded(ls_out, entry->rdev_major,
+                                positive_to_padded(ls_row_put, entry->rdev_major,
                                                    major_width + size_width - device_width,
                                                    ' ', 0);
-                                ls_out(", ", 2);
-                                positive_to_padded(ls_out, entry->rdev_minor, minor_width,
+                                ls_row_put(", ", 2);
+                                positive_to_padded(ls_row_put, entry->rdev_minor, minor_width,
                                                    ' ', 0);
+                        }
+                        else if (plain_size)
+                        {
+                                out = ls_row_room(40);
+                                ls_row_used += positive_into_padded(out, entry->size, size_width, ' ');
                         }
                         else
                         {
@@ -11786,14 +12021,17 @@ static fn ls_print_long(string_address directory)
                                                                 ls_size_human, ls_size_si,
                                                                 ls_size_suffix);
 
-                                writer_fill_bulk(ls_out, difference_or_zero(size_width, have), ' ');
-                                ls_scaled(ls_out, entry->size, ls_size_unit, ls_size_human,
+                                writer_fill_bulk(ls_row_put, difference_or_zero(size_width, have), ' ');
+                                ls_scaled(ls_row_put, entry->size, ls_size_unit, ls_size_human,
                                           ls_size_si, ls_size_suffix);
                         }
 
-                        ls_out(" ", 1);
+                        ls_row_room(1)[0] = ' ';
+                        ls_row_used++;
                         ls_time_say(entry);
-                        ls_out(" ", 1);
+                        ls_row_room(1)[0] = ' ';
+                        ls_row_used++;
+                        ls_row_flush();
                 }
 
                 positive name_column = ls_out_bytes - column_base;
