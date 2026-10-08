@@ -6053,6 +6053,41 @@ lane_misc()
         [ "$?" = 1 ] && grep -qx "scriptreplay: cannot open $work/no/such/timing: No such file or directory" "$work/replay-open.err"
         verdict scriptreplay-timing-open misc_failed 'scriptreplay did not say it cannot open its timing file'
 
+        #       A desktop boot waiting on a question hears the answer when it
+        #       is published. The wait was a 200 ms poll, and an answer landed
+        #       7 to 189 ms before the child ended (a mean near 100 ms); the
+        #       rename into /run/moonwater now wakes it. Five answers at five
+        #       phases, each measured from the publish to the child's end, in
+        #       a private /run; the worst must be under 100 ms.
+        if [ "$host_system" = Linux ] && unshare -Urpfm --mount-proc true 2> /dev/null; then
+                verdict_bin=$work/verdict-bin
+                mkdir -p "$verdict_bin" && ln -sf "$shell_binary" "$verdict_bin/moonwater"
+                cat > "$work/verdict-probe.sh" <<'VERDICT_PROBE'
+mount -t tmpfs tmpfs /run || exit 1
+mkdir -p /run/moonwater
+worst=0
+for pause in 0.020 0.071 0.139 0.197 0.251; do
+        rm -f /run/moonwater/verdict /run/moonwater/desktop.booted
+        printf 'ask x\n' > /run/moonwater/verdict
+        "$1" desktop boot > /dev/null 2>&1
+        left=2000
+        while [ $left -gt 0 ] && ! ps -eo args | grep -q 'moonwater desktop boot$'; do left=$((left - 1)); done
+        sleep "$pause"
+        start=$(date +%s%N)
+        printf 'live\n' > /run/moonwater/verdict.tmp && mv /run/moonwater/verdict.tmp /run/moonwater/verdict
+        left=2000
+        while [ $left -gt 0 ] && ps -eo args | grep -q 'moonwater desktop boot$'; do left=$((left - 1)); done
+        ms=$(( ($(date +%s%N) - start) / 1000000 ))
+        [ "$ms" -gt "$worst" ] && worst=$ms
+done
+echo "$worst"
+VERDICT_PROBE
+                verdict_worst=$(timeout 120 unshare -Urpfm --mount-proc sh "$work/verdict-probe.sh" "$verdict_bin/moonwater" 2> /dev/null)
+                [ -n "$verdict_worst" ] && [ "$verdict_worst" -lt 100 ]
+                verdict desktop-boot-answer-prompt misc_failed "a desktop boot heard its answer ${verdict_worst:-never} ms after it was published (poll: 200 ms)"
+        else
+                note "desktop-boot-answer-prompt NOT RUN: needs Linux with unprivileged namespaces and mount"
+        fi
 
         if "$work/hardened-bin/bash" -c 'script --version >/dev/null' \
                 > /dev/null 2>&1; then

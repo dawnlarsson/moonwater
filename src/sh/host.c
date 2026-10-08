@@ -126,8 +126,8 @@ static fn host_prefix(bool label)
 #define HOST_LOOKING_NS ((p64)700000000)
 /* How long names just resolved are still taken to be the disks' own. */
 #define HOST_FRESH_NS ((p64)2000000000)
-/*      How often a terminal looks for boot's verdict. It is one failed open,
-        and the first prompt waits on it. */
+/*      How often a terminal looks for boot's verdict where no watch on the
+        state directory can be made; with one, it waits for the publish itself. */
 #define HOST_VERDICT_POLL_NS ((p64)5000000)
 #define HOST_MEDIUM_FLOOR_NS ((p64)5000000000)
 
@@ -274,6 +274,75 @@ static bipolar host_onoff(string_address word)
 static fn host_pause(p64 nanoseconds)
 {
         process_nap_ns(nanoseconds);
+}
+
+/*
+        Boot publishes its verdict by a rename into the state directory, so a
+        wait for the verdict is a wait for that rename. inotify on the directory
+        says when it happens: the watch is made before the verdict is read, so a
+        publish that lands between the read and the wait is already queued and
+        the wait returns at once. Each wait ends on the first thing the
+        directory hears of (the verdict's own rename, or a temporary file on
+        the way to it), or at the boot time it is given. Where no watch can be
+        made, the wait is the poll it was.
+*/
+static fn host_state_ready(void);
+
+#define HOST_VERDICT_EVENTS (0x040 | 0x080 | 0x100 | 0x200)
+
+static bipolar host_verdict_watch(void)
+{
+        bipolar notify;
+
+        host_state_ready();
+        notify = system_call_1(syscall(inotify_init1), O_CLOEXEC | O_NONBLOCK);
+        if (notify < 0)
+                return -1;
+        if (system_call_3(syscall(inotify_add_watch), (positive)notify,
+                          (positive)HOST_STATE, HOST_VERDICT_EVENTS) < 0)
+        {
+                system_close((positive)notify);
+                return -1;
+        }
+        return notify;
+}
+
+static fn host_verdict_unwatch(bipolar notify)
+{
+        if (notify >= 0)
+                system_close((positive)notify);
+}
+
+/* Until the directory is heard of, or the boot clock reads until (0: for
+   ever); fallback is the poll used where there is no watch. What is queued
+   is read and dropped, so the next wait starts on the next event. */
+static fn host_verdict_pause(bipolar notify, p64 until, p64 fallback)
+{
+        p64 now = system_clock_ns(HOST_CLOCK_BOOTTIME);
+        timespec span;
+        timespec address_to limit = null;
+
+        if (notify < 0)
+        {
+                host_pause(until && until > now && until - now < fallback
+                               ? until - now : fallback);
+                return;
+        }
+        if (until)
+        {
+                if (until <= now)
+                        return;
+                span = (timespec){(until - now) / 1000000000,
+                                  (until - now) % 1000000000};
+                limit = address_of span;
+        }
+        if (descriptor_wait_readable(notify, limit, null) > 0)
+        {
+                p8 drained[256];
+
+                while (system_read_once((positive)notify, drained, sizeof(drained)) > 0)
+                        ;
+        }
 }
 
 /* The bytes of a word a file held, its newline and the blanks after it taken off
@@ -2448,13 +2517,17 @@ fn host_terminal_opening(void)
 {
         p8 verdict[HOST_NAME_ROOM + 16];
         bool said = false;
+        bipolar notify = host_verdict_watch();
 
         while (host_read_word(HOST_VERDICT, verdict, sizeof(verdict)) < 0)
         {
                 p64 uptime = system_clock_ns(HOST_CLOCK_BOOTTIME);
 
                 if (uptime >= HOST_VERDICT_WAIT_NS)
+                {
+                        host_verdict_unwatch(notify);
                         return;
+                }
 
                 if (!said && uptime >= HOST_LOOKING_NS)
                 {
@@ -2463,8 +2536,11 @@ fn host_terminal_opening(void)
                         said = true;
                 }
 
-                host_pause(HOST_VERDICT_POLL_NS);
+                host_verdict_pause(notify, said ? HOST_VERDICT_WAIT_NS
+                                                : HOST_LOOKING_NS,
+                                   HOST_VERDICT_POLL_NS);
         }
+        host_verdict_unwatch(notify);
 
         if (string_has_prefix(verdict, "ask ") &&
             system_rename_at(AT_FDCWD, HOST_QUESTION, AT_FDCWD, HOST_QUESTION_TAKEN,
@@ -4674,17 +4750,23 @@ static positive host_event_wait(bipolar child, p64 limit, bool address_to stoppe
 */
 static fn host_verdict_settled(void)
 {
+        bipolar notify = host_verdict_watch();
+
         for (;;)
         {
                 p8 verdict[HOST_NAME_ROOM + 16];
+                bool found = host_read_word(HOST_VERDICT, verdict, sizeof(verdict)) >= 0;
 
-                if (host_read_word(HOST_VERDICT, verdict, sizeof(verdict)) >= 0
-                        ? !string_has_prefix(verdict, "ask ")
-                        : system_clock_ns(HOST_CLOCK_BOOTTIME) >= HOST_VERDICT_WAIT_NS)
-                        return;
+                if (found ? !string_has_prefix(verdict, "ask ")
+                          : system_clock_ns(HOST_CLOCK_BOOTTIME) >= HOST_VERDICT_WAIT_NS)
+                        break;
 
-                host_pause(HOST_POLL_NS * 2);
+                //      A question stands until it is answered, for as long as
+                //      that takes; with no verdict at all, boot has until its time.
+                host_verdict_pause(notify, found ? 0 : HOST_VERDICT_WAIT_NS,
+                                   HOST_POLL_NS * 2);
         }
+        host_verdict_unwatch(notify);
 }
 
 static fn host_events_boot(host_settings address_to settings)
