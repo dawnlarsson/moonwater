@@ -163,9 +163,9 @@ typedef struct
         before: the line's tree grows up from the bottom, kept bodies down
         from the top.
 */
-#define PARSE_NODES (1 << 18)
-#define PARSE_WORDS (1 << 18)
-#define PARSE_REDIRECTS (1 << 16)
+#define PARSE_NODES (1 << 20)
+#define PARSE_WORDS (1 << 20)
+#define PARSE_REDIRECTS (1 << 18)
 #define PARSE_KEPT_TEXT (1 << 23)
 
 static parse_node address_to parse_nodes;
@@ -3743,10 +3743,11 @@ static struct
     {null, PARSE_REDIRECTS, PARSE_REDIRECTS}, {null, PARSE_KEPT_TEXT, PARSE_KEPT_TEXT},
 };
 
-/* Every array above, in one mapping the kernel fills a page at a time: 51
-   MiB of address space for 262,144 nodes and words, 65,536 redirections and
-   8 MiB of kept text, a list of some eighty thousand commands, where bash
-   and dash both run out of stack at a hundred thousand. MAP_NORESERVE keeps
+/* Every array above, in one mapping the kernel fills a page at a time: about
+   165 MiB of address space for 1,048,576 nodes and words, 262,144 redirections
+   and 8 MiB of kept text, a function of some two hundred thousand commands
+   (a function of eighty thousand was refused at 262,144 nodes, where dash
+   runs it and bash runs out of stack at forty thousand). MAP_NORESERVE keeps
    the address space from being charged as memory. */
 #define PARSE_MAP_NORESERVE 0x4000
 
