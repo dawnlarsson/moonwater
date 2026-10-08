@@ -28075,10 +28075,11 @@ static string_address grep_span_machine(const grep_plan address_to plan,
         return at;
 }
 
-// The graph has won a race of this run, and the file or the next will not
-// run it again: what a race costs is paid once, and the machine's win is
-// the file's own.
-static bool grep_graph_won;
+// A race of this run has been won by the graph, which the files after it
+// are not raced for again (what a race costs is paid once), or by the
+// machine, which the hunt of a file that has no span long enough to race
+// takes for the answer when its strings land close together.
+static bool grep_graph_won, grep_machine_won;
 
 /*
         Whether the machine reads these records in two thirds of the ticks
@@ -28195,7 +28196,8 @@ static fn grep_span(const grep_plan address_to plan, grep_state address_to state
                         that many, and has found the graph dear on this file
                         (machine_first) gives the rest of it to the machine.
                 */
-                if (hunting && ++candidates > GREP_HUNT_DENSE && state->machine_first &&
+                if (hunting && ++candidates > GREP_HUNT_DENSE &&
+                    (state->machine_first || grep_machine_won) &&
                     !plan->literal_proves && !plan->set_proves && plan->dfa &&
                     !plan->dfa->failed &&
                     (positive)(at - span) < candidates * GREP_HUNT_SPACING)
@@ -28276,17 +28278,22 @@ static fn grep_span(const grep_plan address_to plan, grep_state address_to state
 
                                 racing = timing = false;
 
+                                // A stretch the graph took few steps for
+                                // says nothing of the next one.
                                 if (raced_steps * GREP_RACE_STEPS > (positive)(at - raced_at) &&
-                                    raced_ticks > raced_selecting &&
-                                    grep_machine_beats(plan, raced_at, at,
-                                                       raced_ticks - raced_selecting))
+                                    raced_ticks > raced_selecting)
                                 {
-                                        state->dense = true;
-                                        hunting = false;
-                                        at = grep_span_machine(plan, state, at, past);
+                                        if (grep_machine_beats(plan, raced_at, at,
+                                                               raced_ticks - raced_selecting))
+                                        {
+                                                grep_machine_won = true;
+                                                state->dense = true;
+                                                hunting = false;
+                                                at = grep_span_machine(plan, state, at, past);
+                                        }
+                                        else
+                                                grep_graph_won = true;
                                 }
-                                else
-                                        grep_graph_won = true;
                         }
                 }
         }
@@ -30877,7 +30884,7 @@ static b32 text_grep_run()
 
         grep_literals.count = 0;
         grep_literals.used = 0;
-        grep_graph_won = false;
+        grep_graph_won = grep_machine_won = false;
 
         bool literal_set = !never && !many && !literal_proves && !literal->literal_length &&
                            (regex_current.flags & RX_BRANCHING) &&
