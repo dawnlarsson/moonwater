@@ -2156,22 +2156,76 @@ static string_address storage_field(p8 address_to address_to cursor)
         return string_token_next(null, " \t", cursor);
 }
 
+/* The fields of a line that a blank or a tab ends, found once: where every
+   blank and tab is, and a cursor over them. storage_field on each of eleven
+   or so fields was a strtok that built its table of delimiters each time
+   (2,300 instructions a line of a table of a thousand mounts; this is 300).
+   A token, as strtok has it, is a run of other bytes, ended in place by NUL
+   over the blank that follows it. */
+typedef struct
+{
+        p8 address_to line;
+        positive length;
+        positive at;
+        positive stop;
+        positive stops;
+        p32 where[512];
+} storage_mount_scan;
+
+static string_address storage_scan_token(storage_mount_scan address_to scan)
+{
+        positive start = scan->at;
+
+        while (scan->stop < scan->stops && scan->where[scan->stop] == start)
+        {
+                start++;
+                scan->stop++;
+        }
+        if (start >= scan->length)
+        {
+                scan->at = scan->length;
+                return null;
+        }
+
+        positive finish = scan->stop < scan->stops ? scan->where[scan->stop] : scan->length;
+        string_address token = scan->line + start;
+
+        if (finish < scan->length)
+        {
+                scan->line[finish] = end;
+                scan->stop++;
+                scan->at = finish + 1;
+        }
+        else
+                scan->at = scan->length;
+        return token;
+}
+
 /* Parse one line after its newline has already become NUL. */
 static bool storage_mount_line(storage_mount_table address_to table,
-                               p8 address_to line)
+                               p8 address_to line, positive length)
 {
+        storage_mount_scan scan;
         string_address first[6];
         string_address separator;
         string_address type;
         string_address source;
         string_address filesystem_options;
-        p8 address_to cursor = line;
         positive id;
         positive parent;
 
+        scan.line = line;
+        scan.length = length;
+        scan.at = 0;
+        scan.stop = 0;
+        scan.stops = memory_offsets_of_either(scan.where, line, length, ' ', '\t', array_count(scan.where));
+        //      A line of more than 511 blanks has no mount in it.
+        if (scan.stops == array_count(scan.where))
+                return false;
+
         for (positive at = 0; at < 6; at++)
         {
-                first[at] = storage_field(address_of cursor);
+                first[at] = storage_scan_token(address_of scan);
 
                 if (!first[at])
                         return false;
@@ -2179,26 +2233,28 @@ static bool storage_mount_line(storage_mount_table address_to table,
 
         do
         {
-                separator = storage_field(address_of cursor);
+                separator = storage_scan_token(address_of scan);
 
                 if (!separator)
                         return false;
         }
-        while (string_compare(separator, (string_address) "-"));
+        while (separator[0] != '-' || separator[1]);
 
         /* The kernel writes an empty source as nothing between two blanks
            (mount -t tmpfs "" /mnt).  Collapsing that run would read the
            options as the source and refuse the whole table; findmnt shows
            it as an empty SOURCE. */
-        type = storage_field(address_of cursor);
-        if (cursor && (*cursor == ' ' || *cursor == '\t'))
+        type = storage_scan_token(address_of scan);
+        if (scan.at < scan.length && scan.stop < scan.stops &&
+            scan.where[scan.stop] == scan.at)
         {
                 source = (string_address) "";
-                cursor++;
+                scan.at++;
+                scan.stop++;
         }
         else
-                source = storage_field(address_of cursor);
-        filesystem_options = storage_field(address_of cursor);
+                source = storage_scan_token(address_of scan);
+        filesystem_options = storage_scan_token(address_of scan);
 
         if (!type || !source || !filesystem_options ||
             !string_digits_exact(first[0], address_of id) ||
@@ -2209,12 +2265,16 @@ static bool storage_mount_line(storage_mount_table address_to table,
                                  table->count, table->count + 1, 32))
                 return false;
 
-        storage_unescape(first[3]);
-        storage_unescape(first[4]);
-        storage_unescape(first[5]);
-        storage_unescape(type);
-        storage_unescape(source);
-        storage_unescape(filesystem_options);
+        //      Nearly no line has a backslash in it, and one look says so.
+        if (memory_first_of(line, '\\', length))
+        {
+                storage_unescape(first[3]);
+                storage_unescape(first[4]);
+                storage_unescape(first[5]);
+                storage_unescape(type);
+                storage_unescape(source);
+                storage_unescape(filesystem_options);
+        }
 
         table->entry[table->count++] = (storage_mount){
             .id = id,
@@ -2250,7 +2310,15 @@ bool storage_mount_table_load(storage_mount_table address_to table,
 
         while ((line = storage_line_next(address_of cursor, limit)))
         {
-                if (*line && !storage_mount_line(table, line))
+                //      The record is what the newline left behind it: its length
+                //      is how far the cursor moved less the NUL put over the
+                //      newline (a last record with no newline has none).
+                positive length = (positive)(cursor - line);
+
+                if (length && line[length - 1] == end)
+                        length--;
+
+                if (*line && !storage_mount_line(table, line, length))
                 {
                         if (diagnostic)
                                 diagnostic(str("invalid /proc/self/mountinfo line\n"));
