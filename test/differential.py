@@ -20339,6 +20339,16 @@ def shell_lang_wait_stopped_kill(rng):
         "echo \"st=$?\""))
 
 
+def shell_lang_read_timed_wakeup(rng):
+    """A timed read on an idle descriptor times out with status 142 in bash."""
+    return ("read-timed-wakeup", shell_BASH, shell_program(
+        "mkfifo rw.fifo",
+        "exec 3<>rw.fifo",
+        "read -t 0.2 x <&3",
+        "echo \"st=$?\"",
+        "exec 3<&-"))
+
+
 SHELL_FAMILIES = (
     shell_delivered(shell_lex_quotes),
     shell_delivered(shell_lex_substitution),
@@ -20549,6 +20559,7 @@ SHELL_FAMILIES = (
     shell_lang_process_redirection,
     shell_lang_trap_in_pipeline,
     shell_lang_wait_stopped_kill,
+    shell_lang_read_timed_wakeup,
     shell_lang_errexit_functions,
     shell_lang_heredoc_expansion,
     shell_lang_arithmetic_edges,

@@ -14338,6 +14338,32 @@ static bool read_deadline(timespec span, timespec address_to deadline)
         return true;
 }
 
+/*
+        The kernel lets a timed sleep run up to the timer slack late, and the
+        default slack is 50 us: a 1 ms read -t came back 53 us late at the
+        median, which bash does too. The slack is lowered for the length of
+        one timed read and put back at its end, so a child started after it
+        keeps the default. Zero means the slack was not changed.
+*/
+#define READ_PR_GET_TIMERSLACK 30
+#define READ_PR_SET_TIMERSLACK 29
+static positive read_timer_slack_lower()
+{
+        bipolar before = system_call_1(syscall(prctl),
+                                       READ_PR_GET_TIMERSLACK);
+
+        if (before <= 0 || before == 1)
+                return 0;
+        system_call_2(syscall(prctl), READ_PR_SET_TIMERSLACK, 1);
+        return (positive)before;
+}
+
+static fn read_timer_slack_restore(positive before)
+{
+        if (before)
+                system_call_2(syscall(prctl), READ_PR_SET_TIMERSLACK, before);
+}
+
 /* Ready, expired, or a raw negative syscall error.  EINTR consumes none of
    the fixed budget, so recompute the remaining time and wait again. */
 static bipolar read_waited(b32 descriptor, timespec address_to deadline)
@@ -14667,6 +14693,8 @@ COLD fn shell_read(writer write, string_address input)
         if (timed && !read_deadline(timeout, address_of deadline))
                 return shell_answer(read_result(true, false, false));
 
+        positive slack_before = timed ? read_timer_slack_lower() : 0;
+
         if (hidden)
                 quieted = read_echo_off(descriptor, address_of quiet_held);
 
@@ -14721,6 +14749,7 @@ COLD fn shell_read(writer write, string_address input)
                         if (quieted)
                                 system_control(descriptor, PTY_TCSETS,
                                                address_of quiet_held);
+                        read_timer_slack_restore(slack_before);
 
                         return shell_answered(2, "%s: no room\n", "read");
                 }
@@ -14840,6 +14869,7 @@ COLD fn shell_read(writer write, string_address input)
 
         read_line[read_length] = end;
         read_literal[read_length] = 0;
+        read_timer_slack_restore(slack_before);
 
         // Put the terminal back before any name is assigned: every path out
         // of here from now on is a return.
