@@ -18490,7 +18490,7 @@ python3 test/differential.py --harness scale "$@"
 #       absolute number that is not. A Linux host target runs directly.
 #
 
-benchmarks="floor baseline numbers bases hex escape spelled codec fixed table padded input-bases fields human human-nearest hash-33 span-byte utf8-valid net-parsers net-hot cells-ascii fill-u32 fill-u64 paths reverse writer-field writer-text text-hot prefix-known translate delete squeeze offsets record-scans ascii-case ascii-case-fold line-break bounded-fold ascii-convert ascii-search grep-search grep-count last-of words clock scan-literal random allocator lock pool ordered tree reserve storage-read compare-max string-copy stream-get stream-write format-bounds startup montgomery limbs shell tools grep-sets awk find boot-time engines compression compression-floor cksum-crc cksum-digests unicode-width link"
+benchmarks="floor baseline numbers bases hex hex-decode escape spelled codec fixed table padded input-bases fields human human-nearest hash-33 span-byte utf8-valid net-parsers net-hot cells-ascii fill-u32 fill-u64 paths reverse writer-field writer-text text-hot prefix-known translate delete squeeze offsets record-scans ascii-case ascii-case-fold line-break bounded-fold ascii-convert ascii-search grep-search grep-count last-of words clock scan-literal random allocator lock pool ordered tree reserve storage-read compare-max string-copy stream-get stream-write format-bounds startup montgomery limbs shell tools grep-sets awk find boot-time engines compression compression-floor cksum-crc cksum-digests unicode-width link"
 
 #       One benchmark's section and one line about it. A name with no section
 #       is one of the drivers below, which time a whole binary against the

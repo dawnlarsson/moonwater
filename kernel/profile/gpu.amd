@@ -36,6 +36,10 @@
 #
 #       sudo sh build.sh arch/x64 debug_none limbo desktop wifi serial gpu.amd
 #
+# The firmware files are compressed; the loader has to read them without wifi.
+CONFIG_FW_LOADER_COMPRESS=y
+CONFIG_FW_LOADER_COMPRESS_ZSTD=y
+
 CONFIG_DRM_AMDGPU=y
 
 # Pre-GCN 1.2 parts. Off by default: they are old enough to fall outside what
