@@ -25981,14 +25981,6 @@ HOSTED_SPAN_BYTE = r"""static positive memory_span_byte(const void *block, p8 by
         while (i < size && at[i] == byte)
                 i++;
         return i;
-}
-static positive memory_span_byte_reverse(const void *block, p8 byte, positive size)
-{
-        const p8 *at = block;
-        positive i = 0;
-        while (i < size && at[size - 1 - i] == byte)
-                i++;
-        return i;
 }"""
 
 
