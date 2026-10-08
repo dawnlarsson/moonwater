@@ -21170,6 +21170,11 @@ _TEXT_ENGINE_PATTERNS = (
     r'[0-9]+ [0-9]+ "[a-z ]+(east|west)$', r'\.[0-9]+ - - \[1[0-9]/Sep',
     r'orders/[0-9]+ .*" 404', r'timeout [a-z ]+ refused', r'(orders|users)/[0-9]+ (HTTP|ftp)',
     r'"[a-z]+ (error|info)"?$', r'^$', r'x*', r'(a+)+b', r'[0-9]+.*[0-9]+.*"$',
+    #       A string in every line and a try at every run of digits, which the
+    #       graph spends a step a few bytes on and the machine reads at four
+    #       lines to the turn: after a stretch timed in each, the rest of the
+    #       file goes to the machine, and the answers are the same.
+    r'[0-9]+ [0-9]+ "[a-z]+ [a-z]+" ', r'(404|500) [0-9]+ ', r'[0-9]+/[A-Za-z]+/[0-9]+ HTTP',
 )
 _TEXT_ENGINE_MODES = (("-c",), ("-n",), ("-v", "-c"), (), ("-o",), ("-v",), ("-l",),
                       ("-w", "-c"), ("-x", "-c"), ("-i", "-c"), ("-ow",), ("-vn",))

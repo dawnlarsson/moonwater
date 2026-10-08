@@ -27358,6 +27358,9 @@ enum
         // after this many of them, are not filtering.
         GREP_HUNT_DENSE = 16,
         GREP_HUNT_SPACING = 256,
+        // A hunt's graph is raced against the machine when it spends a step
+        // for every this many bytes of the records it is given.
+        GREP_RACE_STEPS = 16,
         GREP_GRAPH_YIELD = 64,
         GREP_GRAPH_YIELD_BYTE = 1,
         GREP_MACHINE_PROBE = 64
@@ -28072,6 +28075,38 @@ static string_address grep_span_machine(const grep_plan address_to plan,
         return at;
 }
 
+// The graph has won a race of this run, and the file or the next will not
+// run it again: what a race costs is paid once, and the machine's win is
+// the file's own.
+static bool grep_graph_won;
+
+/*
+        Whether the machine reads these records in two thirds of the ticks
+        the graph took for them, which `graph` is. The third is the margin
+        for what the machine loses to a call over a few kilobytes against
+        the spans it gets in the file (measured: a tenth to a quarter), and
+        for the noise of a clock read twice. It reads them once to learn
+        the states they need and once more for the time, and counts and
+        selects nothing: a machine that gives up loses the race.
+*/
+static bool grep_machine_beats(const grep_plan address_to plan, string_address from,
+                               string_address to, positive graph)
+{
+        string_address block;
+
+        if (grep_machine_lanes(plan, from, to, null, &block) == positive_max)
+                return false;
+
+        positive began = get_cpu_time();
+
+        if (grep_machine_lanes(plan, from, to, null, &block) == positive_max)
+                return false;
+
+        positive best = get_cpu_time() - began;
+
+        return best * 3 < graph * 2;
+}
+
 static fn grep_span(const grep_plan address_to plan, grep_state address_to state,
                     string_address span, positive size)
 {
@@ -28120,6 +28155,29 @@ static fn grep_span(const grep_plan address_to plan, grep_state address_to state
         */
         bool hunting = (literal || plan->set) && !state->dense;
         positive candidates = 0;
+        /*
+                The graph that stays inside its budget can still cost more
+                than the machine: a string every line holds (a space, a
+                quote) sends every line to it, and a try at each digit run
+                of the line is a hundred steps where the machine reads the
+                line once, at four lines to the turn. Neither the steps
+                nor the bytes say which is cheaper, since a step is five
+                cycles in one pattern and twenty in another. So a hunt that
+                takes a step for every GREP_RACE_STEPS bytes lets the graph
+                warm itself on the first GREP_LANES_MIN bytes, is timed
+                over the next, and the machine is timed over those same
+                records: it has the rest of the file when it read them in
+                two thirds of the time or less. Once for the run, the first
+                time a span is long enough.
+        */
+        bool racing = hunting && !grep_graph_won && !state->machine_first &&
+                      !plan->literal_proves && !plan->set_proves && plan->dfa &&
+                      !plan->dfa->failed && plan->mode != GREP_SPAN_FIRST &&
+                      plan->limit == TEXT_UNSET &&
+                      size >= 3 * GREP_LANES_MIN;
+        bool timing = false;
+        positive raced_steps = 0, raced_from = 0, raced_selecting = 0;
+        string_address raced_at = at;
 
         if (!hunting)
                 at = grep_span_machine(plan, state, at, past);
@@ -28179,10 +28237,58 @@ static fn grep_span(const grep_plan address_to plan, grep_state address_to state
                     line, text_delimiter, (positive)(past - line));
                 positive length = (positive)(stop - line);
 
-                if (grep_line_matches(plan, state, line, length) != plan->invert)
+                bool selected = grep_line_matches(plan, state, line, length) != plan->invert;
+
+                if (timing)
+                        raced_steps += state->match->work_used;
+
+                /*
+                        What it takes to put a selected line out is paid
+                        the same in either, so a print is timed apart.
+                */
+                if (selected && timing && plan->mode == GREP_SPAN_PRINT)
+                {
+                        positive began = get_cpu_time();
+
+                        grep_line_selected(plan, state, line, length);
+                        raced_selecting += get_cpu_time() - began;
+                }
+                else if (selected)
                         grep_line_selected(plan, state, line, length);
 
                 at = stop + 1;
+
+                if (racing && !state->machine_first &&
+                    (positive)(at - raced_at) >= GREP_LANES_MIN)
+                {
+                        // The first stretch warms the caches and the
+                        // predictors the graph runs on, and the second is
+                        // timed.
+                        if (!timing)
+                        {
+                                timing = true;
+                                raced_at = at;
+                                raced_from = get_cpu_time();
+                        }
+                        else
+                        {
+                                positive raced_ticks = get_cpu_time() - raced_from;
+
+                                racing = timing = false;
+
+                                if (raced_steps * GREP_RACE_STEPS > (positive)(at - raced_at) &&
+                                    raced_ticks > raced_selecting &&
+                                    grep_machine_beats(plan, raced_at, at,
+                                                       raced_ticks - raced_selecting))
+                                {
+                                        state->dense = true;
+                                        hunting = false;
+                                        at = grep_span_machine(plan, state, at, past);
+                                }
+                                else
+                                        grep_graph_won = true;
+                        }
+                }
         }
 
         if (plan->numbered)
@@ -30771,6 +30877,7 @@ static b32 text_grep_run()
 
         grep_literals.count = 0;
         grep_literals.used = 0;
+        grep_graph_won = false;
 
         bool literal_set = !never && !many && !literal_proves && !literal->literal_length &&
                            (regex_current.flags & RX_BRANCHING) &&
