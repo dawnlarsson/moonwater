@@ -197,7 +197,6 @@ static parse_redirect address_to parse_redirects;
 #define PARSE_WORD_NEWLINE 16
 
 // What a case item's terminator was, kept in the item node's flags.
-#define CASE_STOP 0
 #define CASE_FALL_THROUGH 1
 #define CASE_TEST_ON 2
 

@@ -283,9 +283,11 @@ extern positive shell_options;
 /*
         What the last command substitution answered.
 
-        Bash (including --posix) exposes that number as $? for the rest of the
-        same word, so `echo $(exit 2)$?` prints 2. Dash keeps the status from
-        before the command until the command itself finishes.
+        Bash exposes that number as $? for the rest of the same word, so
+        `echo $(exit 2)$?` prints 2. Bash --posix and dash keep the status from
+        before the command until the command itself finishes: there it prints 0
+        after `echo $(exit 2)$?` at the start of a shell (the status of nothing
+        yet), and 1 after `false`.
 */
 b32 shell_substitution_status;
 positive shell_substitution_generation HOT_STATE;
@@ -4748,8 +4750,6 @@ static PURE string_address expand_bracket_end(string_address at, p8 open,
 
 #define expand_paren_end(at) \
         expand_bracket_end_mode((at), '(', ')', false, false)
-#define expand_brace_end(at) \
-        expand_bracket_end_mode((at), '{', '}', false, false)
 #define expand_parameter_end(at, posix_double) \
         expand_bracket_end_mode((at), '{', '}', (posix_double), true)
 
@@ -5132,7 +5132,7 @@ static fn expand_substitution_done(b32 status)
 {
         shell_substitution_status = status;
         shell_substitution_generation++;
-        if (shell_bash_compat)
+        if (shell_bash_compat && !shell_posix_on())
                 shell_status = status;
 }
 
