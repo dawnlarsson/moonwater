@@ -36528,8 +36528,65 @@ static fn hex_check(p8 address_to out, p8 address_to input, positive size)
         check("hex bytes", correct);
 }
 
+/* The hexadecimal decode against the C loop it replaced: every byte count
+   from nothing to seventy, valid and mixed text, a bad character or a NUL
+   planted at a random offset, and a sentinel past the stop. Both the result
+   and every byte written must agree. */
+static inline bool hex_decode_reference(address_any into, string_address text,
+                                        positive bytes)
+{
+        p8 *out = (p8 *)into;
+        for (positive at = 0; at < bytes; at++)
+        {
+                positive high = digit_known(string_get(text + at * 2), 16);
+                positive low;
+
+                if (high >= 16)
+                        return false;
+                low = digit_known(string_get(text + at * 2 + 1), 16);
+                if (low >= 16)
+                        return false;
+                out[at] = (p8)(high << 4 | low);
+        }
+        return true;
+}
+
+static fn hex_decode_suite(void)
+{
+        static const char mixed[] = "0123456789abcdefABCDEFgG xz";
+        static const char valid[] = "0123456789abcdefABCDEF";
+        static char text[160];
+        static p8 got[80], want[80];
+        positive bad = 0;
+        p64 seed = 0x2545F4914F6CDD1DULL;
+
+        for (positive round = 0; round < 2; round++)
+                for (positive bytes = 0; bytes <= 70; bytes++)
+                        for (positive trial = 0; trial < 300; trial++)
+                        {
+                                for (positive i = 0; i < bytes * 2 + 4; i++)
+                                {
+                                        seed = seed * 6364136223846793005ULL +
+                                               1442695040888963407ULL;
+                                        text[i] = round ? mixed[(seed >> 33) % 28] :
+                                                          valid[(seed >> 33) % 22];
+                                }
+                                if (trial % 3 == 0 && bytes)
+                                        text[(seed >> 40) % (bytes * 2)] =
+                                                (char)"\0\x20\xff"[trial % 3];
+                                for (positive i = 0; i < 80; i++)
+                                        got[i] = want[i] = 0xA5;
+                                bool a = hex_decode_reference(want, (string_address)text, bytes);
+                                bool b = memory_from_hex(got, (string_address)text, bytes);
+                                if (a != b || memory_compare(got, want, 80))
+                                        bad++;
+                        }
+        check("hex decode agrees with the C loop it replaced, every byte count", bad == 0);
+}
+
 static fn hex_suite(void)
 {
+        hex_decode_suite();
         p8 source[288], output[560];
         for (positive at = 0; at < 256; at++) source[at] = (p8)at;
         escape_check(source, 256);
@@ -103182,6 +103239,79 @@ b32 main(void)
         return 0;
 }
 #endif /* BENCH_hex */
+#ifdef BENCH_hex_decode
+/* Hexadecimal decode at digest lengths: the former C digit loop versus the
+   shared memory_from_hex_exact body, over valid digits, which is what a check
+   file holds. */
+#include "../src/lib.util.c"
+#define SHARED_bench_measure
+#include "checks.c"
+#undef SHARED_bench_measure
+
+#define TRIES 9
+#define HEX_CASES 4096
+
+static char text[HEX_CASES][129];
+static p8 former_out[HEX_CASES][64];
+static p8 assembly_out[HEX_CASES][64];
+static volatile positive sink;
+
+__attribute__((noinline, noclone)) static bool former_decode(
+    address_any into, string_address text, positive bytes)
+{
+        p8 *out = (p8 *)into;
+        for (positive at = 0; at < bytes; at++)
+        {
+                positive high = digit_known(string_get(text + at * 2), 16);
+                positive low;
+
+                if (high >= 16)
+                        return false;
+                low = digit_known(string_get(text + at * 2 + 1), 16);
+                if (low >= 16)
+                        return false;
+                out[at] = (p8)(high << 4 | low);
+        }
+        return true;
+}
+
+static p64 run(bool assembly, positive bytes, positive rounds)
+{
+        p64 start = get_cpu_time();
+        for (positive r = 0; r < rounds; r++)
+                for (positive c = 0; c < HEX_CASES; c++)
+                        sink += assembly ?
+                                memory_from_hex(assembly_out[c], (string_address)text[c], bytes) :
+                                former_decode(former_out[c], (string_address)text[c], bytes);
+        return get_cpu_time() - start;
+}
+
+b32 main(void)
+{
+        static const positive sizes[] = {16, 20, 32, 64};
+        static const char digits[] = "0123456789abcdefABCDEF";
+        p64 seed = 0x9e3779b97f4a7c15ULL;
+
+        for (positive c = 0; c < HEX_CASES; c++)
+                for (positive i = 0; i < 128; i++)
+                {
+                        seed = seed * 6364136223846793005ULL + 1442695040888963407ULL;
+                        text[c][i] = digits[(seed >> 33) % 22];
+                }
+        for (positive row = 0; row < sizeof(sizes) / sizeof(sizes[0]); row++)
+        {
+                positive bytes = sizes[row];
+                positive ratios[TRIES];
+                positive rounds = 2000;
+
+                BENCH_PAIRED_RUNS(ratios, former, assembly, bytes, rounds);
+                string_format(log, "memory_from_hex %p bytes: paired median C/ASM %p.%p\n",
+                              bytes, ratios[TRIES / 2] / 100, ratios[TRIES / 2] % 100);
+        }
+        log_flush();
+        return 0;
+}
+#endif /* BENCH_hex_decode */
 
 #ifdef BENCH_escape
 /* Shared escaping versus the former writer loops. Native timings only measure

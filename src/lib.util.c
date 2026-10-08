@@ -296,28 +296,37 @@ static inline INLINE positive digit_known(p8 character, positive base)
         return narrow <= (p32)base - 11 ? narrow + 10 : base;
 }
 
+/* The value of each byte as a hexadecimal digit, 255 for any other byte: the
+   table memory_from_hex_exact reads. Both cases, one row of sixteen each. */
+static const p8 memory_hex_nibbles[256] = {
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 255, 255, 255, 255, 255, 255,
+        255, 10, 11, 12, 13, 14, 15, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 10, 11, 12, 13, 14, 15, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+};
+
 /* The bytes hexadecimal text stands for, two digits to a byte in either case:
    false at the first character that is no digit, with the bytes before it
-   written and the rest not. The text is read no further than the byte it
-   fails in, so one that ends in a terminator is no overread. */
+   written and the rest not. The text is read as 2 * bytes characters, so
+   every caller must have that much readable text (each one checks its length
+   first). The digits are decoded by memory_from_hex_exact, an assembly routine
+   in lib.c on all three architectures. */
 static inline bool memory_from_hex(address_any into, string_address text,
                                    positive bytes)
 {
-        p8 address_to out = (p8 address_to)into;
-
-        for (positive at = 0; at < bytes; at++)
-        {
-                positive high = digit_known(string_get(text + at * 2), 16);
-                positive low;
-
-                if (high >= 16)
-                        return false;
-                low = digit_known(string_get(text + at * 2 + 1), 16);
-                if (low >= 16)
-                        return false;
-                out[at] = (p8)(high << 4 | low);
-        }
-        return true;
+        return memory_from_hex_exact(into, text, bytes, memory_hex_nibbles);
 }
 
 /* Checked base-2..36 digit runs: overflow or no digits leaves both outputs

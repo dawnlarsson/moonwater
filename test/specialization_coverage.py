@@ -455,6 +455,11 @@ cover('folds_already', 'size', 'memory_into_hex',
 cover('folds_already', 'size', 'memory_into_hex_case',
       'the case is selected once per span; production span lengths remain '
       'runtime and both cases share the existing hexadecimal core')
+cover('folds_already', 'bytes', 'memory_from_hex_exact',
+      'the hexadecimal decode is called with runtime lengths from check lines, '
+      'the uuid parser and the wifi key; the literal sizes at those sites (32 for '
+      'a wifi key, the uuid runs of 4, 2, 2, 2 and 6) share the one assembly body '
+      'and its nibble table, with no per-site expansion of the loop')
 cover('folds_already', 'groups', 'memory_encode_power2 memory_decode_power2',
       'production group counts and input bytes are runtime; shape selection '
       'happens once per batch, with no per-utility codec expansion')

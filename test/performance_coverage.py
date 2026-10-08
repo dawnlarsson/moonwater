@@ -83,6 +83,10 @@ cover('direct_benchmark', 'test/checks.c#BENCH_codec', '''
 memory_encode_power2 memory_decode_power2
 ''', 'bounded codec quanta against independent scalar bit loops; native timing required')
 
+cover('direct_benchmark', 'test/checks.c#BENCH_hex_decode', 'memory_from_hex_exact',
+      'paired former-C/assembly timing of the hexadecimal decode at digest lengths '
+      '16, 20, 32 and 64 bytes over valid digits; native timing required')
+
 cover('correctness_only', 'test/checks.c#CHECK_codec', 'memory_into_hex_case',
       'case-selectable entry shares the existing hexadecimal assembly core')
 

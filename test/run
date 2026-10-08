@@ -18394,6 +18394,8 @@ bench_about()
                  bench_line="buffer conversion in the non-decimal bases" ;;
         hex)     bench_section=BENCH_hex
                  bench_line="bulk hex output against the former checksum loop" ;;
+        hex-decode) bench_section=BENCH_hex_decode
+                 bench_line="hexadecimal decode at digest lengths against the C loop it replaced" ;;
         escape)  bench_section=BENCH_escape
                  bench_line="shared escaping against the former writer loops" ;;
         spelled) bench_section=BENCH_spelled

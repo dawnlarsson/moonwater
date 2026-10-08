@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        395 routines (372 public, 23 local), 385 of them on all three and 10 local to one.
+        396 routines (373 public, 23 local), 386 of them on all three and 10 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -235,6 +235,7 @@
           memory_first_of_ascii_case     public  yes     yes     yes
           memory_free                    public  yes     yes     yes
           memory_frob                    public  yes     yes     yes
+          memory_from_hex_exact          public  yes     yes     yes
           memory_get64                   public  yes     yes     yes
           memory_give                    public  yes     yes     yes
           memory_growth                  public  yes     yes     yes
@@ -34967,6 +34968,15 @@ positive memory_encode_power2(address_any destination, address_any source,
 positive memory_decode_power2(address_any destination, address_any source,
                               positive groups, address_any values,
                               positive bits);
+/* Exact hexadecimal decode of 2*bytes digits into bytes. nibbles is a 256-byte
+   table: 0 to 15 for each hexadecimal digit in either case, 255 for anything
+   else. Returns whether every digit was valid. The bytes before the first bad
+   digit are written and the rest are not. The text is read as exactly 2*bytes
+   characters, so the caller guarantees that much readable text. Bodies:
+   x86-64 and arm64 call memory_decode_power2 with bits 4; riscv64 is its own
+   nibble-table loop, which runs fewer instructions than the C it replaces. */
+bool memory_from_hex_exact(address_any into, string_address text,
+                           positive bytes, const p8 address_to nibbles);
 
 #if X64
 __asm__(
@@ -35188,6 +35198,11 @@ __asm__(
     ".byte 4,3,2,1,0,12,11,10,9,8,20,19,18,17,16,28,27,26,25,24,36,35,34,33,32,44,43,42,41,40,52,51,50,49,48,60,59,58,57,56,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0\n"
 #endif
     ASM_END(memory_decode_power2)
+#ifndef KERNEL_MODE
+    ASM_FUNC(memory_from_hex_exact)
+    "push %rdx\n   mov $4, %r8d\n   call memory_decode_power2\n   pop %rdx\n   xor %ecx, %ecx\n   cmp %rdx, %rax\n   sete %cl\n   mov %ecx, %eax\n" ASM_RET
+    ASM_END(memory_from_hex_exact)
+#endif
 );
 #elif ARM64
 __asm__(
@@ -35298,6 +35313,11 @@ __asm__(
     ".Lcodec_decode_arm64_neon_end:\n   ldp d8, d9, [sp], #16\n   cbz x2, .Lcodec_decode_arm64_done\n   cmp x4, #6\n   b.eq .Lcodec_decode_arm64_6\n   b .Lcodec_decode_arm64_4\n"
 #endif
     ASM_END(memory_decode_power2)
+#ifndef KERNEL_MODE
+    ASM_FUNC(memory_from_hex_exact)
+    "str x30, [sp, #-32]!\n   str x2, [sp, #16]\n   mov x4, #4\n   bl memory_decode_power2\n   ldr x2, [sp, #16]\n   cmp x0, x2\n   cset w0, eq\n   ldr x30, [sp], #32\n" ASM_RET
+    ASM_END(memory_from_hex_exact)
+#endif
 );
 #elif RISCV64
 __asm__(
@@ -35374,6 +35394,90 @@ __asm__(
     "addi a1, a1, 8\naddi a5, a5, 1\naddi a0, a0, 1\naddi a2, a2, -1\nbnez a2, .Lcodec_decode_rv_9\nj .Lcodec_decode_rv_done\n"
     ".Lcodec_decode_rv_done:\n" ASM_RET
     ASM_END(memory_decode_power2)
+#ifndef KERNEL_MODE
+    ASM_FUNC(memory_from_hex_exact)
+    "mv a5, a0\n"
+    "mv a6, a1\n"
+    "li a0, 1\n"
+    "li t4, 4\n"
+    ".Lhex_rv_block:\n"
+    "bltu a2, t4, .Lhex_rv_tail\n"
+    "lbu t1, 0(a6)\n"
+    "add t1, t1, a3\n"
+    "lbu t1, 0(t1)\n"
+    "lbu t2, 1(a6)\n"
+    "add t2, t2, a3\n"
+    "lbu t2, 0(t2)\n"
+    "or t3, t1, t2\n"
+    "andi t3, t3, 0xF0\n"
+    "bnez t3, .Lhex_rv_fail\n"
+    "slli t1, t1, 4\n"
+    "or t1, t1, t2\n"
+    "sb t1, 0(a5)\n"
+    "lbu t1, 2(a6)\n"
+    "add t1, t1, a3\n"
+    "lbu t1, 0(t1)\n"
+    "lbu t2, 3(a6)\n"
+    "add t2, t2, a3\n"
+    "lbu t2, 0(t2)\n"
+    "or t3, t1, t2\n"
+    "andi t3, t3, 0xF0\n"
+    "bnez t3, .Lhex_rv_fail\n"
+    "slli t1, t1, 4\n"
+    "or t1, t1, t2\n"
+    "sb t1, 1(a5)\n"
+    "lbu t1, 4(a6)\n"
+    "add t1, t1, a3\n"
+    "lbu t1, 0(t1)\n"
+    "lbu t2, 5(a6)\n"
+    "add t2, t2, a3\n"
+    "lbu t2, 0(t2)\n"
+    "or t3, t1, t2\n"
+    "andi t3, t3, 0xF0\n"
+    "bnez t3, .Lhex_rv_fail\n"
+    "slli t1, t1, 4\n"
+    "or t1, t1, t2\n"
+    "sb t1, 2(a5)\n"
+    "lbu t1, 6(a6)\n"
+    "add t1, t1, a3\n"
+    "lbu t1, 0(t1)\n"
+    "lbu t2, 7(a6)\n"
+    "add t2, t2, a3\n"
+    "lbu t2, 0(t2)\n"
+    "or t3, t1, t2\n"
+    "andi t3, t3, 0xF0\n"
+    "bnez t3, .Lhex_rv_fail\n"
+    "slli t1, t1, 4\n"
+    "or t1, t1, t2\n"
+    "sb t1, 3(a5)\n"
+    "addi a6, a6, 8\n"
+    "addi a5, a5, 4\n"
+    "addi a2, a2, -4\n"
+    "j .Lhex_rv_block\n"
+    ".Lhex_rv_tail:\n"
+    "beqz a2, .Lhex_rv_ok\n"
+    "lbu t1, 0(a6)\n"
+    "add t1, t1, a3\n"
+    "lbu t1, 0(t1)\n"
+    "lbu t2, 1(a6)\n"
+    "add t2, t2, a3\n"
+    "lbu t2, 0(t2)\n"
+    "or t3, t1, t2\n"
+    "andi t3, t3, 0xF0\n"
+    "bnez t3, .Lhex_rv_fail\n"
+    "slli t1, t1, 4\n"
+    "or t1, t1, t2\n"
+    "sb t1, 0(a5)\n"
+    "addi a6, a6, 2\n"
+    "addi a5, a5, 1\n"
+    "addi a2, a2, -1\n"
+    "j .Lhex_rv_tail\n"
+    ".Lhex_rv_fail:\n"
+    "li a0, 0\n"
+    ".Lhex_rv_ok:\n"
+    ASM_RET
+    ASM_END(memory_from_hex_exact)
+#endif
 );
 #endif
 
