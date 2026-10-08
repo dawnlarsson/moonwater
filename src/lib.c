@@ -1239,30 +1239,141 @@ typedef typeof(sizeof(0)) sized;
     "b.ne .Ldpc_arm64_w_" S "\n"                                                                               \
     ".Ldpc_arm64_r_" S ":\n"
 
+/* The chain finder at HERE (x3) for the parse loop. In: x3 HERE, w20 and w21
+   the hashes of HERE, w25 the length to beat, w26 the links; x0 the job, x1
+   head4, x2 the window base, x11 head3, x29 prev, w14 the hash multiplier.
+   Out: w25 the length, w20 and w21 the next position's hashes, the
+   distance at [sp, DIST] when a longer match was found. Clobbers x4 to x10,
+   x12, x13, w22 to w24, w27. */
+#define LZ_CHAIN_FIND_REC_A64(S, DIST)                                                                                   \
+    "sub x4, x3, x2\n   sub w23, w4, #8, lsl #12\n   ldr w22, [x3]\n"                                         \
+    "ldrh w24, [x1, x21, lsl #1]\n   ldrh w5, [x11, x20, lsl #1]\n"                                           \
+    "strh w4, [x11, x20, lsl #1]\n   strh w4, [x1, x21, lsl #1]\n   strh w24, [x29, x23, lsl #1]\n"           \
+    "ldr w6, [x3, #1]\n   mul w6, w6, w14\n   lsr w21, w6, #16\n   ubfx w20, w6, #9, #15\n"                   \
+    "add x7, x11, x20, lsl #1\n   prfm pstl1keep, [x7]\n   add x7, x1, x21, lsl #1\n   prfm pstl1keep, [x7]\n"                              \
+    "cmp w25, #4\n   b.lo .Ldpc_arm64_p1_" S "\n   ldr w6, [x0, #56]\n   cmp w25, w6\n   b.hs .Ldpc_arm64_r_" S "\n" \
+    "sub x12, x25, #3\n   ldr w27, [x3, x12]\n"                                                               \
+    "sub w5, w26, #64\n   cmp w5, #536\n   b.ls .Ldpc_arm64_wcs_" S "\n"                                                          \
+    ".Ldpc_arm64_w_" S ":  cmp w24, w23\n   b.ls .Ldpc_arm64_r_" S "\n   add x4, x2, x24\n   ldr w5, [x4, x12]\n" \
+    "cmp w5, w27\n   b.eq .Ldpc_arm64_t_" S "\n"                                                               \
+    ".Ldpc_arm64_n_" S ":  and w24, w24, #0x7fff\n   ldrh w24, [x29, x24, lsl #1]\n   subs w26, w26, #1\n"     \
+    "b.ne .Ldpc_arm64_w_" S "\n"                                                                               \
+    ".Ldpc_arm64_r_" S ":\n"
+
+
+/* The chain finder at HERE (x3) for the parse loop. In: x3 HERE, w20 and w21
+   the hashes of HERE, w25 the length to beat, w26 the links; x0 the job, x1
+   head4, x2 the window base, x11 head3, x29 prev, w14 the hash multiplier.
+   Out: w25 the length, w20 and w21 the next position's hashes, the
+   distance at [sp, DIST] when a longer match was found. Clobbers x4 to x10,
+   x12, x13, w22 to w24, w27. */
+#define LZ_CHAIN_FIND_USE_A64(S, DIST)                                                                                   \
+    "sub x4, x3, x2\n   sub w23, w4, #8, lsl #12\n   ldr w22, [x3]\n"                                         \
+    "ldrh w24, [x1, x21, lsl #1]\n   ldrh w5, [x11, x20, lsl #1]\n"                                           \
+    "strh w4, [x11, x20, lsl #1]\n   strh w4, [x1, x21, lsl #1]\n   strh w24, [x29, x23, lsl #1]\n"           \
+    "ldr w6, [x3, #1]\n   mul w6, w6, w14\n   lsr w21, w6, #16\n   ubfx w20, w6, #9, #15\n"                   \
+    "add x7, x11, x20, lsl #1\n   prfm pstl1keep, [x7]\n   add x7, x1, x21, lsl #1\n   prfm pstl1keep, [x7]\n"                              \
+    "cmp w25, #4\n   b.lo .Ldpc_arm64_p1_" S "\n   ldr w6, [x0, #56]\n   cmp w25, w6\n   b.hs .Ldpc_arm64_r_" S "\n" \
+    "sub x12, x25, #3\n   ldr w27, [x3, x12]\n"                                                               \
+    "ldp x5, x6, [sp, #152]\n   cmp x3, x5\n   b.eq .Ldpc_arm64_wbs_" S "\n   cmp x3, x6\n   b.eq .Ldpc_arm64_wcs2_" S "\n" \
+    ".Ldpc_arm64_w_" S ":  cmp w24, w23\n   b.ls .Ldpc_arm64_r_" S "\n   add x4, x2, x24\n   ldr w5, [x4, x12]\n" \
+    "cmp w5, w27\n   b.eq .Ldpc_arm64_t_" S "\n"                                                               \
+    ".Ldpc_arm64_n_" S ":  and w24, w24, #0x7fff\n   ldrh w24, [x29, x24, lsl #1]\n   subs w26, w26, #1\n"     \
+    "b.ne .Ldpc_arm64_w_" S "\n"                                                                               \
+    ".Ldpc_arm64_r_" S ":\n"
+
+
 /* The parts of LZ_CHAIN_FIND_A64 that are seldom reached, out of line. */
 #define LZ_CHAIN_FIND_COLD_A64(S, DIST)                                                                              \
     ".Ldpc_arm64_t_" S ":  ldr w5, [x4]\n   cmp w5, w22\n   b.ne .Ldpc_arm64_n_" S "\n"                         \
-    "ldur x5, [x3, #4]\n   ldur x6, [x3, #12]\n   ldur x7, [x4, #4]\n   ldur x8, [x4, #12]\n   eor x7, x7, x5\n   eor x8, x8, x6\n"                    \
-    "rbit x9, x7\n   clz x9, x9\n   rbit x10, x8\n   clz x10, x10\n   lsr w9, w9, #3\n   lsr w10, w10, #3\n"   \
-    "cmp x7, #0\n   csel w10, w10, wzr, eq\n   add w9, w9, w10\n   cmp w9, #16\n   b.hs .Ldpc_arm64_x_" S "\n"   \
-    "add w9, w9, #4\n"                                                                                        \
-    ".Ldpc_arm64_i_" S ":  cmp w9, w25\n   b.ls .Ldpc_arm64_n_" S "\n   mov w25, w9\n   sub x9, x3, x4\n"       \
-    "str w9, [sp, #" DIST "]\n   ldr w9, [x0, #56]\n   cmp w25, w9\n   b.hs .Ldpc_arm64_r_" S "\n"             \
+    LZ_CHAIN_MEASURE_A64                                                                                            \
+    "cmp w5, #16\n   b.hs .Ldpc_arm64_x_" S "\n   add w5, w5, #4\n"                                           \
+    ".Ldpc_arm64_i_" S ":  cmp w5, w25\n   b.ls .Ldpc_arm64_n_" S "\n   mov w25, w5\n   sub x6, x3, x4\n"       \
+    "str w6, [sp, #" DIST "]\n   ldr w6, [x0, #56]\n   cmp w25, w6\n   b.hs .Ldpc_arm64_r_" S "\n"             \
     "sub x12, x25, #3\n   ldr w27, [x3, x12]\n   b .Ldpc_arm64_n_" S "\n"                                      \
     ".Ldpc_arm64_x_" S ":  bl .Ldpc_arm64_ext\n   b .Ldpc_arm64_i_" S "\n"                                       \
+    LZ_CHAIN_P1_A64(S, DIST)
+
+/* How many of the sixteen bytes after the first four the candidate in x4 shares with the position, 0 to 16, in
+   w5; clobbers x5 to x8. */
+#define LZ_CHAIN_MEASURE_A64                                                                                         \
+    "ldur x5, [x3, #4]\n   ldur x6, [x3, #12]\n   ldur x7, [x4, #4]\n   ldur x8, [x4, #12]\n"                    \
+    "eor x7, x7, x5\n   eor x8, x8, x6\n   rbit x5, x7\n   clz x5, x5\n   rbit x6, x8\n   clz x6, x6\n"           \
+    "lsr w5, w5, #3\n   lsr w6, w6, #3\n   cmp x7, #0\n   csel w6, w6, wzr, eq\n   add w5, w5, w6\n"
+
+#define LZ_CHAIN_P1_A64(S, DIST)                                                                                   \
     ".Ldpc_arm64_p1_" S ":  cmp w5, w23\n   b.ls .Ldpc_arm64_r_" S "\n   cmp w25, #3\n   b.hs .Ldpc_arm64_pl_" S "\n" \
     "ldr w6, [x2, x5]\n   eor w6, w6, w22\n   tst w6, #0xffffff\n   b.ne .Ldpc_arm64_pl_" S "\n"                  \
     "mov w25, #3\n   sub x6, x3, x2\n   sub w6, w6, w5\n   str w6, [sp, #" DIST "]\n"                         \
     ".Ldpc_arm64_pl_" S ":  cmp w24, w23\n   b.ls .Ldpc_arm64_r_" S "\n   add x4, x2, x24\n   ldr w6, [x4]\n"     \
     "cmp w6, w22\n   b.eq .Ldpc_arm64_pf_" S "\n   and w24, w24, #0x7fff\n   ldrh w24, [x29, x24, lsl #1]\n"    \
     "subs w26, w26, #1\n   b.ne .Ldpc_arm64_pl_" S "\n   b .Ldpc_arm64_r_" S "\n"                               \
-    ".Ldpc_arm64_pf_" S ":  ldur x5, [x3, #4]\n   ldur x6, [x3, #12]\n   ldur x7, [x4, #4]\n   ldur x8, [x4, #12]\n   eor x7, x7, x5\n   eor x8, x8, x6\n" \
-    "rbit x9, x7\n   clz x9, x9\n   rbit x10, x8\n   clz x10, x10\n   lsr w9, w9, #3\n   lsr w10, w10, #3\n"   \
-    "cmp x7, #0\n   csel w10, w10, wzr, eq\n   add w9, w9, w10\n   cmp w9, #16\n   b.lo 1f\n   bl .Ldpc_arm64_ext\n" \
-    "b 2f\n1:  add w9, w9, #4\n"                                                                              \
-    "2:  mov w25, w9\n   sub x9, x3, x4\n   str w9, [sp, #" DIST "]\n   ldr w9, [x0, #56]\n   cmp w25, w9\n"     \
+    ".Ldpc_arm64_pf_" S ":\n" LZ_CHAIN_MEASURE_A64                                                                    \
+    "cmp w5, #16\n   b.lo 1f\n   bl .Ldpc_arm64_ext\n   b 2f\n1:  add w5, w5, #4\n"                            \
+    "2:  mov w25, w5\n   sub x6, x3, x4\n   str w6, [sp, #" DIST "]\n   ldr w6, [x0, #56]\n   cmp w25, w6\n"     \
     "b.hs .Ldpc_arm64_r_" S "\n   and w24, w24, #0x7fff\n   ldrh w24, [x29, x24, lsl #1]\n   subs w26, w26, #1\n" \
     "b.eq .Ldpc_arm64_r_" S "\n   sub x12, x25, #3\n   ldr w27, [x3, x12]\n   b .Ldpc_arm64_w_" S "\n"
+
+/* The walk that records the next positions' chains beside its own (x13 and x17 the cursors, x10 and x9 the bases
+   of the arrays), and the one that reads them. */
+#define LZ_CHAIN_REC_COLD_A64(S, DIST)                                                                               \
+    ".Ldpc_arm64_wcs_" S ":  ldr x5, [x0, #88]\n   cmp x5, #3\n   b.eq .Ldpc_arm64_wccs_" S "\n   cmp x5, #2\n   b.lo .Ldpc_arm64_w_" S "\n" \
+    "ldrh w13, [x1, x21, lsl #1]\n   add x10, sp, #208\n   strh w13, [x10, x26, lsl #1]\n   str x13, [sp, #184]\n"  \
+    "sub x10, x10, #2\n"                                                                                      \
+    ".Ldpc_arm64_w_" S "c:  cmp w24, w23\n   b.ls .Ldpc_arm64_r_" S "c\n   add x4, x2, x24\n   ldr w5, [x4, x12]\n" \
+    "cmp w5, w27\n   b.eq .Ldpc_arm64_t_" S "c\n"                                                              \
+    ".Ldpc_arm64_n_" S "c:  and w24, w24, #0x7fff\n   ldrh w24, [x29, x24, lsl #1]\n"                           \
+    "and w13, w13, #0x7fff\n   ldrh w13, [x29, x13, lsl #1]\n   strh w13, [x10, x26, lsl #1]\n"                \
+    "subs w26, w26, #1\n   b.ne .Ldpc_arm64_w_" S "c\n"                                                         \
+    ".Ldpc_arm64_r_" S "c:  strh wzr, [x10, x26, lsl #1]\n   add x5, x10, x26, lsl #1\n   str x5, [sp, #144]\n"    \
+    "add x5, x3, #1\n   stp x5, xzr, [sp, #152]\n   b .Ldpc_arm64_r_" S "\n"                                   \
+    ".Ldpc_arm64_t_" S "c:  ldr w5, [x4]\n   cmp w5, w22\n   b.ne .Ldpc_arm64_n_" S "c\n"                        \
+    LZ_CHAIN_MEASURE_A64                                                                                            \
+    "cmp w5, #16\n   b.hs .Ldpc_arm64_x_" S "c\n   add w5, w5, #4\n"                                          \
+    ".Ldpc_arm64_i_" S "c:  cmp w5, w25\n   b.ls .Ldpc_arm64_n_" S "c\n   mov w25, w5\n   sub x6, x3, x4\n"      \
+    "str w6, [sp, #" DIST "]\n   ldr w6, [x0, #56]\n   cmp w25, w6\n   b.hs .Ldpc_arm64_r_" S "c\n"            \
+    "sub x12, x25, #3\n   ldr w27, [x3, x12]\n   b .Ldpc_arm64_n_" S "c\n"                                     \
+    ".Ldpc_arm64_x_" S "c:  bl .Ldpc_arm64_ext\n   b .Ldpc_arm64_i_" S "c\n"                                      \
+    ".Ldpc_arm64_wccs_" S ":  ldrh w13, [x1, x21, lsl #1]\n   add x10, sp, #208\n   strh w13, [x10, x26, lsl #1]\n   str x13, [sp, #184]\n" \
+    "ldr w17, [x3, #2]\n   mul w17, w17, w14\n   lsr w17, w17, #16\n   ldrh w17, [x1, x17, lsl #1]\n"            \
+    "add x9, sp, #1416\n   strh w17, [x9, x26, lsl #1]\n   str x17, [sp, #192]\n   sub x10, x10, #2\n   sub x9, x9, #2\n" \
+    ".Ldpc_arm64_w_" S "cc:  cmp w24, w23\n   b.ls .Ldpc_arm64_r_" S "cc\n   add x4, x2, x24\n   ldr w5, [x4, x12]\n" \
+    "cmp w5, w27\n   b.eq .Ldpc_arm64_t_" S "cc\n"                                                             \
+    ".Ldpc_arm64_n_" S "cc:  and w24, w24, #0x7fff\n   ldrh w24, [x29, x24, lsl #1]\n"                          \
+    "and w13, w13, #0x7fff\n   ldrh w13, [x29, x13, lsl #1]\n   strh w13, [x10, x26, lsl #1]\n"                \
+    "and w17, w17, #0x7fff\n   ldrh w17, [x29, x17, lsl #1]\n   strh w17, [x9, x26, lsl #1]\n"                 \
+    "subs w26, w26, #1\n   b.ne .Ldpc_arm64_w_" S "cc\n"                                                        \
+    ".Ldpc_arm64_r_" S "cc:  strh wzr, [x10, x26, lsl #1]\n   strh wzr, [x9, x26, lsl #1]\n"                      \
+    "add x5, x10, x26, lsl #1\n   str x5, [sp, #144]\n   add x5, x9, x26, lsl #1\n   str x5, [sp, #168]\n"       \
+    "add x5, x3, #1\n   add x6, x3, #2\n   stp x5, x6, [sp, #152]\n   b .Ldpc_arm64_r_" S "\n"                  \
+    ".Ldpc_arm64_t_" S "cc:  ldr w5, [x4]\n   cmp w5, w22\n   b.ne .Ldpc_arm64_n_" S "cc\n"                      \
+    LZ_CHAIN_MEASURE_A64                                                                                            \
+    "cmp w5, #16\n   b.hs .Ldpc_arm64_x_" S "cc\n   add w5, w5, #4\n"                                         \
+    ".Ldpc_arm64_i_" S "cc:  cmp w5, w25\n   b.ls .Ldpc_arm64_n_" S "cc\n   mov w25, w5\n   sub x6, x3, x4\n"     \
+    "str w6, [sp, #" DIST "]\n   ldr w6, [x0, #56]\n   cmp w25, w6\n   b.hs .Ldpc_arm64_r_" S "cc\n"           \
+    "sub x12, x25, #3\n   ldr w27, [x3, x12]\n   b .Ldpc_arm64_n_" S "cc\n"                                    \
+    ".Ldpc_arm64_x_" S "cc:  bl .Ldpc_arm64_ext\n   b .Ldpc_arm64_i_" S "cc\n"
+
+#define LZ_CHAIN_USE_COLD_A64(S, DIST)                                                                               \
+    ".Ldpc_arm64_wbs_" S ":  ldr x5, [sp, #184]\n   cmp x24, x5\n   b.ne .Ldpc_arm64_w_" S "\n"                    \
+    "add x13, sp, #206\n   ldr w5, [x0, #64]\n   add x13, x13, x5, lsl #1\n   ldr x5, [sp, #144]\n"           \
+    "str x5, [sp, #176]\n   b .Ldpc_arm64_w_" S "b\n"                                                           \
+    ".Ldpc_arm64_wcs2_" S ":  ldr x5, [sp, #192]\n   cmp x24, x5\n   b.ne .Ldpc_arm64_w_" S "\n"                  \
+    "add x13, sp, #1414\n   ldr w5, [x0, #64]\n   add x13, x13, x5, lsl #1\n   ldr x5, [sp, #168]\n"           \
+    "str x5, [sp, #176]\n"                                                                                    \
+    ".Ldpc_arm64_w_" S "b:  cmp w24, w23\n   b.ls .Ldpc_arm64_xe_" S "b\n   add x4, x2, x24\n   ldr w5, [x4, x12]\n" \
+    "cmp w5, w27\n   b.eq .Ldpc_arm64_t_" S "b\n"                                                              \
+    ".Ldpc_arm64_n_" S "b:  ldrh w24, [x13], #-2\n   subs w26, w26, #1\n   b.ne .Ldpc_arm64_w_" S "b\n"          \
+    ".Ldpc_arm64_r_" S "b:  b .Ldpc_arm64_r_" S "\n"                                                             \
+    ".Ldpc_arm64_xe_" S "b:  add x5, x13, #2\n   ldr x6, [sp, #176]\n   cmp x5, x6\n   b.ne .Ldpc_arm64_r_" S "\n" \
+    "ldrh w24, [x13, #4]\n   and w24, w24, #0x7fff\n   ldrh w24, [x29, x24, lsl #1]\n   b .Ldpc_arm64_w_" S "\n"  \
+    ".Ldpc_arm64_t_" S "b:  ldr w5, [x4]\n   cmp w5, w22\n   b.ne .Ldpc_arm64_n_" S "b\n"                        \
+    LZ_CHAIN_MEASURE_A64                                                                                            \
+    "cmp w5, #16\n   b.hs .Ldpc_arm64_x_" S "b\n   add w5, w5, #4\n"                                          \
+    ".Ldpc_arm64_i_" S "b:  cmp w5, w25\n   b.ls .Ldpc_arm64_n_" S "b\n   mov w25, w5\n   sub x6, x3, x4\n"      \
+    "str w6, [sp, #" DIST "]\n   ldr w6, [x0, #56]\n   cmp w25, w6\n   b.hs .Ldpc_arm64_r_" S "b\n"            \
+    "sub x12, x25, #3\n   ldr w27, [x3, x12]\n   b .Ldpc_arm64_n_" S "b\n"                                     \
+    ".Ldpc_arm64_x_" S "b:  bl .Ldpc_arm64_ext\n   b .Ldpc_arm64_i_" S "b\n"
 
 /* The chain finder at HERE (s0) for the parse loop. In: s0 HERE, s6 and s7 the
    hashes of HERE, a4 the length to beat, a3 the links; a0 the job, s1 the
@@ -3640,6 +3751,38 @@ __asm__(
    ebp the links. Out: ebx the length, r10d and r11d the next position's
    hashes, DIST (a memory operand) the distance when a longer match was
    found. Clobbers rax rcx rdx rsi r8 r9 xmm0 xmm1. */
+#define LZ_CHAIN_FIND_REC_X64(S, DIST)                                                                                       \
+    "mov %r13, %rax\n   sub %r14, %rax\n   lea -32768(%rax), %edx\n   mov (%r13), %ecx\n"                       \
+    "movzwl 0x20000(%r15,%r10,2), %r8d\n   movzwl (%r15,%r11,2), %esi\n"                                      \
+    "mov %ax, 0x20000(%r15,%r10,2)\n   mov %ax, (%r15,%r11,2)\n   mov %si, 0x30000(%r15,%rdx,2)\n"            \
+    "mov 1(%r13), %r9d\n   imul $0x1e35a7bd, %r9d, %r11d\n   shr $16, %r11d\n   shl $8, %r9d\n"              \
+    "imul $0x1e35a7bd, %r9d, %r10d\n   shr $17, %r10d\n"                                                      \
+    "prefetcht0 0x20000(%r15,%r10,2)\n   prefetcht0 (%r15,%r11,2)\n"                                          \
+    "cmp $4, %ebx\n   jb .Ldpc_x64_p1_" S "\n   cmp 56(%rdi), %ebx\n   jae .Ldpc_x64_r_" S "\n"                         \
+    "mov -3(%r13,%rbx), %r8d\n"                                                                               \
+    "lea -64(%rbp), %eax\n   cmp $536, %eax\n   jbe .Ldpc_x64_wcs_" S "\n"                                                               \
+    ".Ldpc_x64_w_" S ":  cmp %edx, %esi\n   jbe .Ldpc_x64_r_" S "\n   lea (%r14,%rsi), %rax\n"                          \
+    "cmp %r8d, -3(%rax,%rbx)\n   je .Ldpc_x64_t_" S "\n"                                                           \
+    ".Ldpc_x64_n_" S ":  and $0x7fff, %esi\n   movzwl 0x30000(%r15,%rsi,2), %esi\n   dec %ebp\n   jnz .Ldpc_x64_w_" S "\n" \
+    ".Ldpc_x64_r_" S ":\n"
+
+
+#define LZ_CHAIN_FIND_USE_X64(S, DIST)                                                                                       \
+    "mov %r13, %rax\n   sub %r14, %rax\n   lea -32768(%rax), %edx\n   mov (%r13), %ecx\n"                       \
+    "movzwl 0x20000(%r15,%r10,2), %r8d\n   movzwl (%r15,%r11,2), %esi\n"                                      \
+    "mov %ax, 0x20000(%r15,%r10,2)\n   mov %ax, (%r15,%r11,2)\n   mov %si, 0x30000(%r15,%rdx,2)\n"            \
+    "mov 1(%r13), %r9d\n   imul $0x1e35a7bd, %r9d, %r11d\n   shr $16, %r11d\n   shl $8, %r9d\n"              \
+    "imul $0x1e35a7bd, %r9d, %r10d\n   shr $17, %r10d\n"                                                      \
+    "prefetcht0 0x20000(%r15,%r10,2)\n   prefetcht0 (%r15,%r11,2)\n"                                          \
+    "cmp $4, %ebx\n   jb .Ldpc_x64_p1_" S "\n   cmp 56(%rdi), %ebx\n   jae .Ldpc_x64_r_" S "\n"                         \
+    "mov -3(%r13,%rbx), %r8d\n"                                                                               \
+    "cmp 64(%rsp), %r13\n   je .Ldpc_x64_wbs_" S "\n   cmp 80(%rsp), %r13\n   je .Ldpc_x64_wcs2_" S "\n"      \
+    ".Ldpc_x64_w_" S ":  cmp %edx, %esi\n   jbe .Ldpc_x64_r_" S "\n   lea (%r14,%rsi), %rax\n"                          \
+    "cmp %r8d, -3(%rax,%rbx)\n   je .Ldpc_x64_t_" S "\n"                                                           \
+    ".Ldpc_x64_n_" S ":  and $0x7fff, %esi\n   movzwl 0x30000(%r15,%rsi,2), %esi\n   dec %ebp\n   jnz .Ldpc_x64_w_" S "\n" \
+    ".Ldpc_x64_r_" S ":\n"
+
+
 #define LZ_CHAIN_FIND_X64(S, DIST)                                                                                       \
     "mov %r13, %rax\n   sub %r14, %rax\n   lea -32768(%rax), %edx\n   mov (%r13), %ecx\n"                       \
     "movzwl 0x20000(%r15,%r10,2), %r8d\n   movzwl (%r15,%r11,2), %esi\n"                                      \
@@ -3653,6 +3796,70 @@ __asm__(
     "cmp %r8d, -3(%rax,%rbx)\n   je .Ldpc_x64_t_" S "\n"                                                           \
     ".Ldpc_x64_n_" S ":  and $0x7fff, %esi\n   movzwl 0x30000(%r15,%rsi,2), %esi\n   dec %ebp\n   jnz .Ldpc_x64_w_" S "\n" \
     ".Ldpc_x64_r_" S ":\n"
+
+
+/* The walk that records the next positions' chains beside its own: r12 is the cursor of the chain of the next
+   position (and r9 of the one two on, when there are lazy looks that far), each link stored at RBB or RBC
+   plus twice the links that remain, the node the chain starts from kept in BN0 or CN0, a zero after the last. */
+#define LZ_CHAIN_REC_COLD_X64(S, DIST, DIST8)                                                                            \
+    ".Ldpc_x64_wcs_" S ":  cmpq $3, 88(%rdi)\n   je .Ldpc_x64_wccs_" S "\n   cmpq $2, 88(%rdi)\n   jb .Ldpc_x64_w_" S "\n"        \
+    "movzwl (%r15,%r11,2), %r12d\n   mov %r12w, 120(%rsp,%rbp,2)\n   mov %r12d, 96(%rsp)\n"                       \
+    ".Ldpc_x64_w_" S "c:  cmp %edx, %esi\n   jbe .Ldpc_x64_r_" S "c\n   lea (%r14,%rsi), %rax\n"                           \
+    "cmp %r8d, -3(%rax,%rbx)\n   je .Ldpc_x64_t_" S "c\n"                                                             \
+    ".Ldpc_x64_n_" S "c:  and $0x7fff, %esi\n   movzwl 0x30000(%r15,%rsi,2), %esi\n"                                  \
+    "and $0x7fff, %r12d\n   movzwl 0x30000(%r15,%r12,2), %r12d\n   mov %r12w, 118(%rsp,%rbp,2)\n"             \
+    "dec %ebp\n   jnz .Ldpc_x64_w_" S "c\n"                                                                           \
+    ".Ldpc_x64_r_" S "c:  movw $0, 118(%rsp,%rbp,2)\n   lea 118(%rsp,%rbp,2), %rax\n   mov %rax, 56(%rsp)\n"       \
+    "lea 1(%r13), %rax\n   mov %rax, 64(%rsp)\n   movq $0, 80(%rsp)\n   jmp .Ldpc_x64_r_" S "\n"                       \
+    ".Ldpc_x64_t_" S "c:  cmp %ecx, (%rax)\n   jne .Ldpc_x64_n_" S "c\n"                                                   \
+    "movdqu 4(%r13), %xmm0\n   movdqu 4(%rax), %xmm1\n   pcmpeqb %xmm1, %xmm0\n   pmovmskb %xmm0, %r9d\n"        \
+    "not %r9d\n   or $0x10000, %r9d\n   bsf %r9d, %r9d\n   cmp $16, %r9d\n   jae .Ldpc_x64_x_" S "c\n   add $4, %r9d\n" \
+    ".Ldpc_x64_i_" S "c:  cmp %ebx, %r9d\n   jbe .Ldpc_x64_n_" S "c\n   mov %r9d, %ebx\n"                                    \
+    "mov %r13, %r9\n   sub %rax, %r9\n   mov %r9d, " DIST "\n   cmp 56(%rdi), %ebx\n   jae .Ldpc_x64_r_" S "c\n"      \
+    "mov -3(%r13,%rbx), %r8d\n   jmp .Ldpc_x64_n_" S "c\n"                                                            \
+    ".Ldpc_x64_x_" S "c:  call .Ldpc_x64_ext\n   jmp .Ldpc_x64_i_" S "c\n"                                                      \
+    ".Ldpc_x64_wccs_" S ":  movzwl (%r15,%r11,2), %r12d\n   mov %r12w, 120(%rsp,%rbp,2)\n   mov %r12d, 96(%rsp)\n"      \
+    "imul $0x1e35a7bd, 2(%r13), %r9d\n   shr $16, %r9d\n   movzwl (%r15,%r9,2), %r9d\n"                          \
+    "mov %r9w, 1328(%rsp,%rbp,2)\n   mov %r9d, 104(%rsp)\n"                                                       \
+    ".Ldpc_x64_w_" S "cc:  cmp %edx, %esi\n   jbe .Ldpc_x64_r_" S "cc\n   lea (%r14,%rsi), %rax\n"                         \
+    "cmp %r8d, -3(%rax,%rbx)\n   je .Ldpc_x64_t_" S "cc\n"                                                            \
+    ".Ldpc_x64_n_" S "cc:  and $0x7fff, %esi\n   movzwl 0x30000(%r15,%rsi,2), %esi\n"                                 \
+    "and $0x7fff, %r12d\n   movzwl 0x30000(%r15,%r12,2), %r12d\n   mov %r12w, 118(%rsp,%rbp,2)\n"             \
+    "and $0x7fff, %r9d\n   movzwl 0x30000(%r15,%r9,2), %r9d\n   mov %r9w, 1326(%rsp,%rbp,2)\n"                  \
+    "dec %ebp\n   jnz .Ldpc_x64_w_" S "cc\n"                                                                          \
+    ".Ldpc_x64_r_" S "cc:  movw $0, 118(%rsp,%rbp,2)\n   lea 118(%rsp,%rbp,2), %rax\n   mov %rax, 56(%rsp)\n"      \
+    "movw $0, 1326(%rsp,%rbp,2)\n   lea 1326(%rsp,%rbp,2), %rax\n   mov %rax, 72(%rsp)\n"                       \
+    "lea 1(%r13), %rax\n   mov %rax, 64(%rsp)\n   add $1, %rax\n   mov %rax, 80(%rsp)\n   jmp .Ldpc_x64_r_" S "\n"       \
+    ".Ldpc_x64_t_" S "cc:  cmp %ecx, (%rax)\n   jne .Ldpc_x64_n_" S "cc\n   push %r9\n"                                      \
+    "movdqu 4(%r13), %xmm0\n   movdqu 4(%rax), %xmm1\n   pcmpeqb %xmm1, %xmm0\n   pmovmskb %xmm0, %r9d\n"        \
+    "not %r9d\n   or $0x10000, %r9d\n   bsf %r9d, %r9d\n   cmp $16, %r9d\n   jae .Ldpc_x64_x_" S "cc\n   add $4, %r9d\n" \
+    ".Ldpc_x64_i_" S "cc:  cmp %ebx, %r9d\n   jbe .Ldpc_x64_q_" S "cc\n   mov %r9d, %ebx\n"                                  \
+    "mov %r13, %r9\n   sub %rax, %r9\n   mov %r9d, " DIST8 "\n   cmp 56(%rdi), %ebx\n   jae .Ldpc_x64_qr_" S "cc\n"       \
+    "mov -3(%r13,%rbx), %r8d\n"                                                                                  \
+    ".Ldpc_x64_q_" S "cc:  pop %r9\n   jmp .Ldpc_x64_n_" S "cc\n"                                                          \
+    ".Ldpc_x64_qr_" S "cc:  pop %r9\n   jmp .Ldpc_x64_r_" S "cc\n"                                                         \
+    ".Ldpc_x64_x_" S "cc:  call .Ldpc_x64_ext\n   jmp .Ldpc_x64_i_" S "cc\n"
+
+#define LZ_CHAIN_USE_COLD_X64(S, DIST8)                                                                                  \
+    ".Ldpc_x64_wbs_" S ":  cmp 96(%rsp), %esi\n   jne .Ldpc_x64_w_" S "\n   mov 64(%rdi), %r9d\n"                           \
+    "lea 118(%rsp,%r9,2), %r9\n   mov 56(%rsp), %rax\n   mov %rax, 88(%rsp)\n   jmp .Ldpc_x64_w_" S "b\n"            \
+    ".Ldpc_x64_wcs2_" S ":  cmp 104(%rsp), %esi\n   jne .Ldpc_x64_w_" S "\n   mov 64(%rdi), %r9d\n"                        \
+    "lea 1326(%rsp,%r9,2), %r9\n   mov 72(%rsp), %rax\n   mov %rax, 88(%rsp)\n"                                  \
+    ".Ldpc_x64_w_" S "b:  cmp %edx, %esi\n   jbe .Ldpc_x64_xe_" S "b\n   lea (%r14,%rsi), %rax\n"                           \
+    "cmp %r8d, -3(%rax,%rbx)\n   je .Ldpc_x64_t_" S "b\n"                                                             \
+    ".Ldpc_x64_n_" S "b:  movzwl (%r9), %esi\n   sub $2, %r9\n   dec %ebp\n   jnz .Ldpc_x64_w_" S "b\n"                     \
+    ".Ldpc_x64_r_" S "b:  jmp .Ldpc_x64_r_" S "\n"                                                                         \
+    ".Ldpc_x64_xe_" S "b:  lea 2(%r9), %rax\n   cmp 88(%rsp), %rax\n   jne .Ldpc_x64_r_" S "\n"                             \
+    "movzwl 4(%r9), %esi\n   and $0x7fff, %esi\n   movzwl 0x30000(%r15,%rsi,2), %esi\n   jmp .Ldpc_x64_w_" S "\n"     \
+    ".Ldpc_x64_t_" S "b:  cmp %ecx, (%rax)\n   jne .Ldpc_x64_n_" S "b\n   push %r9\n"                                       \
+    "movdqu 4(%r13), %xmm0\n   movdqu 4(%rax), %xmm1\n   pcmpeqb %xmm1, %xmm0\n   pmovmskb %xmm0, %r9d\n"        \
+    "not %r9d\n   or $0x10000, %r9d\n   bsf %r9d, %r9d\n   cmp $16, %r9d\n   jae .Ldpc_x64_x_" S "b\n   add $4, %r9d\n" \
+    ".Ldpc_x64_i_" S "b:  cmp %ebx, %r9d\n   jbe .Ldpc_x64_q_" S "b\n   mov %r9d, %ebx\n"                                    \
+    "mov %r13, %r9\n   sub %rax, %r9\n   mov %r9d, " DIST8 "\n   cmp 56(%rdi), %ebx\n   jae .Ldpc_x64_qr_" S "b\n"        \
+    "mov -3(%r13,%rbx), %r8d\n"                                                                                  \
+    ".Ldpc_x64_q_" S "b:  pop %r9\n   jmp .Ldpc_x64_n_" S "b\n"                                                            \
+    ".Ldpc_x64_qr_" S "b:  pop %r9\n   jmp .Ldpc_x64_r_" S "b\n"                                                           \
+    ".Ldpc_x64_x_" S "b:  call .Ldpc_x64_ext\n   jmp .Ldpc_x64_i_" S "b\n"
 
 /* The parts of LZ_CHAIN_FIND_X64 that are seldom reached, out of line: a candidate
    that passed the first test, and a search that starts below four. */
@@ -12496,27 +12703,38 @@ __asm__(
        the length to beat and then by the first four, and a candidate that
        passes is measured sixteen bytes at a time (pcmpeqb, pmovmskb, bsf),
        beyond the first sixteen by the loop in .Ldpc_x64_ext; the walk itself
-       is nine instructions a link. Measured, user cycles from perf stat on a
-       9950X, builds alternated, best of 11, one core, against the C it
-       replaces: gzip -6 text -7.6 percent (instructions -26), source tar -9.1
-       (-27), binary tar -10.4 (-30); -9 source -4.0; -4 source -10.2; -2
-       binary -12.5; against libdeflate in the same runs -6 goes from 2
-       percent ahead, 5 behind and 4 behind to 10, 4 and 7 ahead, -9 source from
-       2 behind to 2 ahead, -4 source and -2 binary from 13 and 15 behind to 1
-       and 0. Tried and not kept: running the next
-       position's chain a link behind this one's to fetch its cells (up to 18
-       percent more instructions, no fewer cycles: the walk is not waiting on
-       the cells it fetches), a bucket of the two or four newest positions
-       beside head4 so the first links need no hop (the same output, but a
-       head table of 256 or 512 KiB: 5 to 16 percent more cycles), both hashes
-       from one multiply (more instructions on x86-64; kept on arm64, where it
-       drops a multiply and a shift), the table of three-byte positions read
-       only when the length to beat is under four (no change). */
+       is nine instructions a link, and a link is a load that waits for the
+       one before it: past 600 links of a deep chain 90 percent of the time is
+       that wait, so a search of 64 links or more (levels 7 to 9) follows the
+       chains of the next position, and of the one after when the parse looks
+       two on, as it goes (each hop is independent of the walk's, the three
+       are in flight at once), stores the nodes on the stack with the node
+       each starts from, and the look one on or two on reads them back with
+       no hop to wait for, going on by hopping if its chain is longer than
+       what was stored; it takes a record only for the position and the first
+       node it was made for, and a search the record does not fit walks as it
+       always did. Measured, user cycles from perf stat on a 9950X, builds
+       alternated, best of 11, one core, against the C it replaces: gzip -6 text -7.6
+       percent (instructions -26), source tar -9.1 (-27), binary tar -10.4
+       (-30); -9 source -4.0; -4 source -10.2; -2 binary -12.5; against
+       libdeflate in the same runs -6 goes from 2 percent ahead, 5 behind and
+       4 behind to 10, 4 and 7 ahead, -9 source from 2 behind to 2 ahead, -4
+       source and -2 binary from 13 and 15 behind to 1 and 0. Tried and not
+       kept: running the next position's chain a link behind this one's to
+       fetch its cells and walk them again (up to 18 percent more
+       instructions, no fewer cycles), a bucket of the two or four newest
+       positions beside head4 so the first links need no hop (the same output,
+       but a head table of 256 or 512 KiB: 5 to 16 percent more cycles), both
+       hashes from one multiply (more instructions on x86-64; kept on arm64,
+       where it drops a multiply and a shift), the table of three-byte
+       positions read only when the length to beat is under four (no change),
+       one limit for the checks at the top of the loop (2 percent fewer
+       instructions, no fewer cycles). */
     ASM_FUNC(deflate_parse_chain)
 #ifdef KERNEL_MODE
     ASM_RET
 #else
-    "push %rbx\n   push %rbp\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n   sub $72, %rsp\n"
+    "push %rbx\n   push %rbp\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n   sub $2544, %rsp\n   movq $0, 64(%rsp)\n   movq $0, 80(%rsp)\n"
     "mov (%rdi), %rax\n   mov 8(%rdi), %r15\n   mov 48(%rdi), %rcx\n   lea -32768(%rax,%rcx), %r14\n"
     "mov 32(%rdi), %rdx\n   lea (%rax,%rdx), %r13\n"
     "mov 16(%rdi), %rdx\n   xor %ecx, %ecx\n   sub $299, %rdx\n   cmovb %rcx, %rdx\n   mov 40(%rdi), %rcx\n   cmp %rdx, %rcx\n   cmova %rdx, %rcx\n   add %rax, %rcx\n   mov %rcx, 16(%rsp)\n"
@@ -12531,12 +12749,12 @@ __asm__(
     "1:  cmp 24(%rsp), %r13\n   jae .Ldpc_x64_done\n"
     "mov %r13, %rax\n   sub %r14, %rax\n   cmp $65275, %eax\n   ja .Ldpc_x64_done\n"
     "mov 72(%rdi), %ebx\n   dec %ebx\n   mov 64(%rdi), %ebp\n"
-    LZ_CHAIN_FIND_X64("a", "0(%rsp)")
+    LZ_CHAIN_FIND_REC_X64("a", "0(%rsp)")
     "cmp 72(%rdi), %ebx\n   jb .Ldpc_x64_lit\n   cmp $3, %ebx\n   jne .Ldpc_x64_have\n   mov 0(%rsp), %eax\n   cmp 80(%rdi), %eax\n   ja .Ldpc_x64_lit\n"
     ".Ldpc_x64_have:  mov %ebx, %r12d\n"
     ".Ldpc_x64_lazy:  cmpq $2, 88(%rdi)\n   jb .Ldpc_x64_emit1\n   cmp 56(%rdi), %r12d\n   jae .Ldpc_x64_emit1\n"
     "inc %r13\n   lea -1(%r12), %ebx\n   mov 64(%rdi), %ebp\n   shr $1, %ebp\n   or $1, %ebp\n"
-    LZ_CHAIN_FIND_X64("b", "8(%rsp)")
+    LZ_CHAIN_FIND_USE_X64("b", "8(%rsp)")
     "cmp %r12d, %ebx\n   jb .Ldpc_x64_l1no\n"
     "mov %ebx, %eax\n   sub %r12d, %eax\n   shl $2, %eax\n   bsr 0(%rsp), %ecx\n   bsr 8(%rsp), %edx\n"
     "add %ecx, %eax\n   sub %edx, %eax\n   cmp $2, %eax\n   jle .Ldpc_x64_l1no\n"
@@ -12544,7 +12762,7 @@ __asm__(
     "mov %ebx, %r12d\n   mov 8(%rsp), %eax\n   mov %eax, 0(%rsp)\n   jmp .Ldpc_x64_lazy\n"
     ".Ldpc_x64_l1no:  cmpq $3, 88(%rdi)\n   jb .Ldpc_x64_emit2\n"
     "inc %r13\n   lea -1(%r12), %ebx\n   mov 64(%rdi), %ebp\n   shr $2, %ebp\n   or $1, %ebp\n"
-    LZ_CHAIN_FIND_X64("c", "8(%rsp)")
+    LZ_CHAIN_FIND_USE_X64("c", "8(%rsp)")
     "cmp %r12d, %ebx\n   jb .Ldpc_x64_l2no\n"
     "mov %ebx, %eax\n   sub %r12d, %eax\n   shl $2, %eax\n   bsr 0(%rsp), %ecx\n   bsr 8(%rsp), %edx\n"
     "add %ecx, %eax\n   sub %edx, %eax\n   cmp $6, %eax\n   jle .Ldpc_x64_l2no\n"
@@ -12572,10 +12790,13 @@ __asm__(
     ".Ldpc_x64_noskip:  add %r12, %r13\n   mov 96(%rdi), %rax\n   cmp 184(%rdi), %rax\n   jae .Ldpc_x64_done\n   jmp .Ldpc_x64_top\n"
     ".Ldpc_x64_lit:  movzbl (%r13), %eax\n   mov 128(%rdi), %rdx\n   incl (%rdx,%rax,4)\n   incq 152(%rdi)\n   inc %r13\n   jmp .Ldpc_x64_top\n"
     ".Ldpc_x64_done:  mov %r13, %rax\n   sub (%rdi), %rax\n   mov %rax, 32(%rdi)\n   mov %r10d, 168(%rdi)\n   mov %r11d, 176(%rdi)\n"
-    "add $72, %rsp\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n" ASM_RET
+    "add $2544, %rsp\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n" ASM_RET
     LZ_CHAIN_FIND_COLD_X64("a", "0(%rsp)")
     LZ_CHAIN_FIND_COLD_X64("b", "8(%rsp)")
     LZ_CHAIN_FIND_COLD_X64("c", "8(%rsp)")
+    LZ_CHAIN_REC_COLD_X64("a", "0(%rsp)", "8(%rsp)")
+    LZ_CHAIN_USE_COLD_X64("b", "16(%rsp)")
+    LZ_CHAIN_USE_COLD_X64("c", "16(%rsp)")
     /* The match past sixteen bytes: sixteen at a time from byte 20, the
        length cut at 258. rax the candidate, r13 here; r9d the length. */
     ".Ldpc_x64_ext:  push %rdx\n   mov $20, %r9d\n"
@@ -20737,13 +20958,16 @@ __asm__(
     // hashes of the next position come from one multiply (the three-byte hash is bits 9 to 23 of
     // it), a candidate is rejected by the four bytes at the length to beat, a match is measured
     // sixteen bytes at a time in general registers (two ldur pairs, eor, rbit and clz, as
-    // deflate_parse_fast does; NEON lost there), and prfm fetches the next position's cells.
-    // Measured on an M2 Pro, native, against gcc 16.1 -O2 (the compiler the product is built with)
-    // compiled from the same C, 32 MiB of each corpus through the chain parse alone: gzip -6 ns a
-    // byte text 10.34 to 6.94 (-32.9 percent), source tar 7.61 to 5.61 (-26.3), binary tar 8.69 to
-    // 6.69 (-23.0); clang -O2 compiled the C to within 1 percent of gcc's.
+    // deflate_parse_fast does; NEON lost there), and prfm fetches the next position's cells. A
+    // search of 64 links or more follows the next two positions' chains as it goes, as the
+    // x86-64 body does, and the looks one and two on read them back; the walks that read and
+    // write them use the registers the others leave, so no push is needed. Measured on an M2
+    // Pro, native, against gcc 16.1 -O2 (the compiler the product is built with) compiled from the
+    // same C, 32 MiB of each corpus through the chain parse alone: gzip -6 ns a byte text 10.34 to
+    // 6.94 (-32.9 percent), source tar 7.61 to 5.61 (-26.3), binary tar 8.69 to 6.69 (-23.0);
+    // clang -O2 compiled the C to within 1 percent of gcc's.
     ASM_FUNC(deflate_parse_chain)
-    "stp x29, x30, [sp, #-144]!\n   stp x19, x20, [sp, #16]\n   stp x21, x22, [sp, #32]\n   stp x23, x24, [sp, #48]\n   stp x25, x26, [sp, #64]\n   stp x27, x28, [sp, #80]\n"
+    "sub sp, sp, #2624\n   stp x29, x30, [sp]\n   stp xzr, xzr, [sp, #152]\n   stp x19, x20, [sp, #16]\n   stp x21, x22, [sp, #32]\n   stp x23, x24, [sp, #48]\n   stp x25, x26, [sp, #64]\n   stp x27, x28, [sp, #80]\n"
     "ldr x5, [x0]\n   ldr x1, [x0, #8]\n   ldr x6, [x0, #48]\n   add x2, x5, x6\n   sub x2, x2, #8, lsl #12\n"
     "ldr x7, [x0, #32]\n   add x3, x5, x7\n   ldr x9, [x0, #16]\n   subs x9, x9, #299\n   csel x9, xzr, x9, lo\n   ldr x28, [x0, #40]\n   cmp x28, x9\n   csel x28, x9, x28, hi\n   add x28, x28, x5\n"
     "ldr x7, [x0, #160]\n   add x7, x7, x5\n   str x7, [sp, #112]\n   ldr x7, [x0, #192]\n   add x7, x7, x5\n   str x7, [sp, #120]\n"
@@ -20757,13 +20981,13 @@ __asm__(
     "1:  ldr x5, [sp, #112]\n   cmp x3, x5\n   b.hs .Ldpc_arm64_done\n"
     "sub x5, x3, x2\n   mov w6, #0xfefb\n   cmp w5, w6\n   b.hi .Ldpc_arm64_done\n"
     "ldr w25, [x0, #72]\n   sub w25, w25, #1\n   ldr w26, [x0, #64]\n"
-    LZ_CHAIN_FIND_A64("a", "96")
+    LZ_CHAIN_FIND_REC_A64("a", "96")
     "ldr w5, [x0, #72]\n   cmp w25, w5\n   b.lo .Ldpc_arm64_lit\n   cmp w25, #3\n   b.ne .Ldpc_arm64_have\n"
     "ldr w5, [sp, #96]\n   ldr w6, [x0, #80]\n   cmp w5, w6\n   b.hi .Ldpc_arm64_lit\n"
     ".Ldpc_arm64_have:  mov w19, w25\n"
     ".Ldpc_arm64_lazy:  ldr x5, [x0, #88]\n   cmp x5, #2\n   b.lo .Ldpc_arm64_emit1\n   ldr w5, [x0, #56]\n   cmp w19, w5\n   b.hs .Ldpc_arm64_emit1\n"
     "add x3, x3, #1\n   sub w25, w19, #1\n   ldr w26, [x0, #64]\n   lsr w26, w26, #1\n   orr w26, w26, #1\n"
-    LZ_CHAIN_FIND_A64("b", "104")
+    LZ_CHAIN_FIND_USE_A64("b", "104")
     "cmp w25, w19\n   b.lo .Ldpc_arm64_l1no\n"
     "sub w5, w25, w19\n   lsl w5, w5, #2\n   ldr w6, [sp, #96]\n   clz w6, w6\n   ldr w7, [sp, #104]\n   clz w7, w7\n"
     "add w5, w5, w7\n   sub w5, w5, w6\n   cmp w5, #2\n   b.le .Ldpc_arm64_l1no\n"
@@ -20771,7 +20995,7 @@ __asm__(
     "mov w19, w25\n   ldr w5, [sp, #104]\n   str w5, [sp, #96]\n   b .Ldpc_arm64_lazy\n"
     ".Ldpc_arm64_l1no:  ldr x5, [x0, #88]\n   cmp x5, #3\n   b.lo .Ldpc_arm64_emit2\n"
     "add x3, x3, #1\n   sub w25, w19, #1\n   ldr w26, [x0, #64]\n   lsr w26, w26, #2\n   orr w26, w26, #1\n"
-    LZ_CHAIN_FIND_A64("c", "104")
+    LZ_CHAIN_FIND_USE_A64("c", "104")
     "cmp w25, w19\n   b.lo .Ldpc_arm64_l2no\n"
     "sub w5, w25, w19\n   lsl w5, w5, #2\n   ldr w6, [sp, #96]\n   clz w6, w6\n   ldr w7, [sp, #104]\n   clz w7, w7\n"
     "add w5, w5, w7\n   sub w5, w5, w6\n   cmp w5, #6\n   b.le .Ldpc_arm64_l2no\n"
@@ -20797,17 +21021,20 @@ __asm__(
     ".Ldpc_arm64_noskip:  add x3, x3, x19\n   ldr x5, [x0, #184]\n   cmp x16, x5\n   b.hs .Ldpc_arm64_done\n   b .Ldpc_arm64_top\n"
     ".Ldpc_arm64_lit:  ldrb w5, [x3]\n   ldr x6, [x0, #128]\n   ldr w7, [x6, x5, lsl #2]\n   add w7, w7, #1\n   str w7, [x6, x5, lsl #2]\n   add x15, x15, #1\n   add x3, x3, #1\n   b .Ldpc_arm64_top\n"
     ".Ldpc_arm64_done:  ldr x5, [x0]\n   sub x5, x3, x5\n   str x5, [x0, #32]\n   str w20, [x0, #168]\n   str w21, [x0, #176]\n   str x15, [x0, #152]\n   str x16, [x0, #96]\n"
-    "ldp x27, x28, [sp, #80]\n   ldp x25, x26, [sp, #64]\n   ldp x23, x24, [sp, #48]\n   ldp x21, x22, [sp, #32]\n   ldp x19, x20, [sp, #16]\n   ldp x29, x30, [sp], #144\n" ASM_RET
+    "ldp x27, x28, [sp, #80]\n   ldp x25, x26, [sp, #64]\n   ldp x23, x24, [sp, #48]\n   ldp x21, x22, [sp, #32]\n   ldp x19, x20, [sp, #16]\n   ldp x29, x30, [sp]\n   add sp, sp, #2624\n" ASM_RET
     LZ_CHAIN_FIND_COLD_A64("a", "96")
     LZ_CHAIN_FIND_COLD_A64("b", "104")
     LZ_CHAIN_FIND_COLD_A64("c", "104")
+    LZ_CHAIN_REC_COLD_A64("a", "96")
+    LZ_CHAIN_USE_COLD_A64("b", "104")
+    LZ_CHAIN_USE_COLD_A64("c", "104")
     /* The match past sixteen bytes: sixteen at a time from byte 20, the length
        cut at 258. x3 here, x4 the candidate; w9 the length. */
-    ".Ldpc_arm64_ext:  mov x9, #20\n"
+    ".Ldpc_arm64_ext:  stp x9, x10, [sp, #-32]!\n   stp x13, x17, [sp, #16]\n   mov x9, #20\n"
     ".Ldpc_arm64_e1:  cmp x9, #258\n   b.hs .Ldpc_arm64_e2\n   add x13, x3, x9\n   add x17, x4, x9\n   ldp x5, x6, [x13]\n   ldp x7, x8, [x17]\n"
     "eor x7, x7, x5\n   eor x8, x8, x6\n   rbit x10, x7\n   clz x10, x10\n   rbit x13, x8\n   clz x13, x13\n   lsr w10, w10, #3\n   lsr w13, w13, #3\n"
     "cmp x7, #0\n   csel w13, w13, wzr, eq\n   add w10, w10, w13\n   add w9, w9, w10\n   cmp w10, #16\n   b.eq .Ldpc_arm64_e1\n"
-    ".Ldpc_arm64_e2:  cmp w9, #258\n   mov w10, #258\n   csel w9, w9, w10, ls\n   ret\n"
+    ".Ldpc_arm64_e2:  cmp w9, #258\n   mov w10, #258\n   csel w5, w9, w10, ls\n   ldp x13, x17, [sp, #16]\n   ldp x9, x10, [sp], #32\n   ret\n"
     ASM_END(deflate_parse_chain)
     /* See the x86_64 huffman_lengths contract. */
     ASM_FUNC(huffman_lengths)
@@ -27936,7 +28163,9 @@ __asm__(
     // slides a byte a turn (srli, one lbu, slli, or). Measured under qemu-user, guest instructions
     // a byte (two sizes differenced, 128 KiB apart) against gcc -O2 -march=rv64imafd_zicsr_zicntr
     // compiled from the same C: gzip -6 text 239 to 132 (-44.7 percent), source tar 133 to 90 (-32.2),
-    // binary tar 204 to 124 (-39.0); cycles unmeasured.
+    // binary tar 204 to 124 (-39.0); cycles unmeasured. It does not follow the next positions'
+    // chains as it goes, as the other two do for a deep search: that adds instructions, which are
+    // all that is counted here.
     ASM_FUNC(deflate_parse_chain)
     "addi sp, sp, -192\n   sd s0, 48(sp)\n   sd s1, 56(sp)\n   sd s2, 64(sp)\n   sd s3, 72(sp)\n   sd s4, 80(sp)\n   sd s5, 88(sp)\n   sd s6, 96(sp)\n   sd s7, 104(sp)\n"
     "sd s8, 112(sp)\n   sd s9, 120(sp)\n   sd s10, 128(sp)\n   sd s11, 136(sp)\n"

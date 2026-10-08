@@ -114468,10 +114468,10 @@ static fn floor_deflate_parse(void)
 /* deflate_parse_chain against gzip's chain levels written out a position at
    a time: the same pairs, literals, counts, three tables, hashes and stopping
    place from blocks of random bytes, of a few symbols, of copies of earlier
-   bytes, of runs and of short periods, at all three parses and at lengths to
-   beat, nices and numbers of links from one to hundreds, started from the
-   first window to past the first slide, with a pair limit, a split test and a
-   count of the literals that stop it where they bite. */
+   bytes, of runs, of short runs and of short periods, every shape at every
+   number of links and every parse, at lengths to beat and nices that vary,
+   started from the first window to past the first slide, with a pair limit,
+   a split test and a count of the literals that stop it where they bite. */
 typedef struct
 {
         p8 address_to base;
@@ -114655,9 +114655,9 @@ static fn floor_deflate_chain(void)
         bool same = true, anything = false;
 
 #define FLOOR_RANDOM() (random ^= random << 13, random ^= random >> 17, random ^= random << 5, random)
-        for (positive trial = 0; trial < 150; trial++)
+        for (positive trial = 0; trial < 189; trial++)
         {
-                positive shape = trial % 6, total = 70000 + FLOOR_RANDOM() % 900, at = 0;
+                positive shape = trial % 7, total = 70000 + FLOOR_RANDOM() % 900, at = 0;
                 positive pos = starts[trial % 8], before;
                 floor_chain_job got, want;
 
@@ -114692,6 +114692,14 @@ static fn floor_deflate_chain(void)
                                 run = 1 + FLOOR_RANDOM() % 700;
                                 p8 value = (p8)FLOOR_RANDOM();
 
+                                while (run-- && at < total)
+                                        data[at++] = value;
+                        }
+                        else if (shape == 6)
+                        {
+                                p8 value = (p8)(FLOOR_RANDOM() % 3);
+
+                                run = 2 + FLOOR_RANDOM() % 40;
                                 while (run-- && at < total)
                                         data[at++] = value;
                         }
@@ -114742,9 +114750,9 @@ static fn floor_deflate_chain(void)
                 got.pos = pos;
                 got.limit = trial % 4 == 0 ? pos + 1 + FLOOR_RANDOM() % 9000 : total;
                 got.nice = nices[(trial / 3) % 7];
-                got.depth = depths[trial % 9];
+                got.depth = depths[(trial / 7) % 9];
                 got.least = leasts[(trial / 2) % 5];
-                got.mode = 1 + trial % 3;
+                got.mode = 1 + (trial / 63) % 3;
                 got.far = got.mode >= 2 ? 8192 : 4096;
                 got.pairs = trial % 13 == 0 ? 16380 : 0;
                 got.pairs_max = trial % 5 == 0 ? got.pairs + 1 + FLOOR_RANDOM() % 40 : 16382;

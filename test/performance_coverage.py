@@ -506,8 +506,8 @@ cover('correctness_only', 'test/checks.c#CHECK_compression_floor', 'deflate_pars
       anchors={'deflate_parse_fast': 'floor_deflate_parse'})
 cover('correctness_only', 'test/checks.c#CHECK_compression_floor', 'deflate_parse_chain',
       'the pairs, literal and pair counts, the three tables, hashes and stopping '
-      'place of 150 blocks (random bytes, four symbols, copies of earlier bytes, '
-      'runs, short periods) against gzip levels 2 to 9 written out a position at '
+      'place of 189 blocks (random bytes, four symbols, copies of earlier bytes, '
+      'runs, short runs, short periods) against gzip levels 2 to 9 written out a position at '
       'a time, at all three parses, lengths to beat from three to nine, nices '
       'from five to 258 and links from one to 600, started from the first window '
       'to past the first slide, with a pair limit, a split window and a count of '
