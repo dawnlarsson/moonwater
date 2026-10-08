@@ -6482,6 +6482,11 @@ FIXTURES["files"] = {
     "updown": files_link("dir/sub/..", 1298000000),
     ".": files_dir(1650000000),
 }
+#       A chain of links longer than forty: GNU's realpath follows it to the
+#       end, and so must ours. Each hop is a link to the next, the last to a.txt.
+FIXTURES["files"]["hops"] = files_dir(1297400000)
+for _hop in range(64):
+    FIXTURES["files"]["hops/h%d" % _hop] = files_link("h%d" % (_hop + 1) if _hop < 63 else "../a.txt", 1297500000 + _hop)
 
 #       A tree cp merges into, with links a user planted where the source has
 #       directories: T/sub and T/src/a point at victim, dl at dl.t. GNU looks
@@ -7902,7 +7907,8 @@ FILES_UTILITIES = (
                                      "dir/missing/../sub", "dirlink/./inside", "dirlink/../dir", "dir//sub//back",
                                      "badwalk/x", "shut/", "a.txt/../a.txt", "dir/sub/back/./inside",
                                      "deep/one/./two//three/leaf", "./dir/", "dir/sub/..", "dir/sub/../..", "link/.",
-                                     "dangling", "dangling/x", "loop/loop", "./", ".", "dir/.."))),
+                                     "dangling", "dangling/x", "loop/loop", "./", ".", "dir/.."))
+            + (("hops/h0",), ("hops/h0/",), ("hops/h63",), ("-P", "hops/h0"), ("-L", "hops/h0"), ("-m", "-L", "hops/h0"))),
     Utility("pathchk", options=(Option("-p"), Option("-P"), Option("--portability")),
             operands=(("absent",), ("a.txt",), ("",), ("A-z_09.ok/path",), ("bad+name",), ("okay/-bad",),
                       ("okay/name",), ("okay/" + "x" * 14,), ("okay/" + "x" * 15,), ("missing/" + "x" * 255,),

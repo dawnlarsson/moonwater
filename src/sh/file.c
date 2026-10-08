@@ -1880,6 +1880,13 @@ bipolar file_link_text(string_address path, p8 address_to into, positive limit)
    pair takes the walk out of that, since it drops a name the kernel did
    look through, and a walk that says no is to be made again without it. */
 #define FILE_RESOLVE_PROVEN 16
+/* A walk that follows links without a count, as GNU's realpath -P and
+   readlink -f do, and so may follow a chain of any length that ends. Every
+   other walk gives up after the forty links the kernel allows one lookup,
+   which is what GNU's realpath -L and -e and everything that opens a name
+   do; -m never asks the kernel and follows as far as the loop check lets it. */
+#define FILE_RESOLVE_CHAIN 32
+#define FILE_RESOLVE_LINK_LIMIT 40
 
 /* Whether the last refusal was a working directory with no name. */
 static bool file_resolve_homeless;
@@ -1888,6 +1895,27 @@ static bool file_resolve_homeless;
    above a name that exists is a directory, and need not be asked. */
 static bool file_resolve_present;
 
+/* Whether two names left to resolve walk the same way: a run of slashes
+   is one separator to the walk, and a self-link followed with a trailing
+   slash leaves one more slash each time round, which must not hide the
+   loop. */
+static bool file_resolve_same_walk(string_address a, string_address b)
+{
+        for (;;)
+        {
+                while (string_is(a, '/'))
+                        a++;
+                while (string_is(b, '/'))
+                        b++;
+                if (string_get(a) != string_get(b))
+                        return false;
+                if (!string_get(a))
+                        return true;
+                a++;
+                b++;
+        }
+}
+
 static bool file_resolve_as(string_address path, p8 address_to into,
                             bool follow, p8 policy)
 {
@@ -1895,8 +1923,22 @@ static bool file_resolve_as(string_address path, p8 address_to into,
         p8 link[FILE_PATH_MAX];
         positive at = 0;
         positive length = 0;
-        positive hops = 0;
         bool missing_walk = false;
+        positive hops = 0;
+
+        /* A loop is told by a state that comes round again: where the walk
+           stands (the prefix resolved, the name left to resolve) when it is
+           about to follow a link. The walk is a function of that state, so
+           the second time is the loop. Brent's method keeps one saved state
+           and doubles the span between saves, so a loop of any length is
+           told within twice its length, and a chain of any length (GNU's
+           realpath follows one of 70,000 links) is followed in full. */
+        p8 saved_into[FILE_PATH_MAX];
+        p8 saved_rest[FILE_PATH_MAX];
+        bool saved_missing = false;
+        bool saved_any = false;
+        positive saved_span = 1;
+        positive saved_gap = 0;
 
         file_resolve_homeless = false;
         file_resolve_present = false;
@@ -2060,14 +2102,33 @@ static bool file_resolve_as(string_address path, p8 address_to into,
                         continue;
                 }
 
-                if (++hops > 40)
+                if (!(policy & (FILE_RESOLVE_CHAIN | FILE_RESOLVE_UNRESOLVED)) &&
+                    ++hops > FILE_RESOLVE_LINK_LIMIT)
+                        return false;
+
+                if (saved_any && saved_missing == missing_walk &&
+                    file_resolve_same_walk(into, saved_into) &&
+                    file_resolve_same_walk(rest + start, saved_rest))
                 {
-                        /* -m treats the link at the resolution ceiling like
-                           an absent component and preserves its spelling. */
+                        /* -m treats the link of a loop like an absent
+                           component and preserves its spelling. */
                         if (policy & FILE_RESOLVE_UNRESOLVED)
                                 continue;
                         return false;
                 }
+
+                if (!saved_any || saved_gap == saved_span)
+                {
+                        string_copy_max_end(saved_into, into, FILE_PATH_MAX - 1);
+                        string_copy_max_end(saved_rest, rest + start, FILE_PATH_MAX - 1);
+                        saved_missing = missing_walk;
+                        if (saved_any)
+                                saved_span <<= 1;
+                        saved_any = true;
+                        saved_gap = 0;
+                }
+                else
+                        saved_gap++;
 
                 link[seen] = end;
 
@@ -24885,12 +24946,13 @@ static b32 file_readlink()
 
                 if (resolve)
                 {
-                        p8 policy = readlink_selected.canonical == 'm'
-                                        ? FILE_RESOLVE_UNRESOLVED
-                                    : readlink_selected.canonical == 'e'
-                                        ? FILE_RESOLVE_DIRECTORIES
-                                        : FILE_RESOLVE_DIRECTORIES |
-                                              FILE_RESOLVE_FINAL_MISSING;
+                        p8 policy = (readlink_selected.canonical == 'm'
+                                         ? FILE_RESOLVE_UNRESOLVED
+                                     : readlink_selected.canonical == 'e'
+                                         ? FILE_RESOLVE_DIRECTORIES
+                                         : FILE_RESOLVE_DIRECTORIES |
+                                               FILE_RESOLVE_FINAL_MISSING) |
+                                    FILE_RESOLVE_CHAIN;
                         bool valid = file_resolve_as(path, answer, true,
                                                      policy);
 
@@ -25225,6 +25287,9 @@ static bool realpath_named(string_address path, p8 policy, bool logical,
 {
         p8 scratch[FILE_PATH_MAX];
         string_address source = path;
+
+        if (!logical)
+                policy |= FILE_RESOLVE_CHAIN;
 
         if (!string_get(path) || string_length(path) >= FILE_PATH_MAX)
         {
