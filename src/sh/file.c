@@ -16730,39 +16730,66 @@ static __attribute__((noinline)) bool find_true_test(find_node address_to node);
         backslash before it, the control characters ls's C escapes name, and
         every other control byte and every byte past ASCII in octal.
 */
+//      The bytes -ls spells: every control byte, a blank, a quote, a backslash
+//      and every byte past ASCII. The rest go out as they are.
+static p8 find_ls_spelled[256] = {[0 ... 31] = 1, [127 ... 255] = 1,
+                                        [' '] = 1, ['"'] = 1, ['\\'] = 1};
+
+#define FIND_LS_MARKS 64
+
+static fn find_ls_spell(p8 byte)
+{
+        p8 piece[4];
+
+        if (byte == '\\' || byte == '"' || byte == ' ')
+        {
+                piece[0] = '\\';
+                piece[1] = byte;
+                log(piece, 2);
+        }
+        else if (byte == '\b' || byte == '\t' || byte == '\n' || byte == '\f' || byte == '\r')
+        {
+                piece[0] = '\\';
+                piece[1] = byte == '\b' ? 'b' : byte == '\t' ? 't' : byte == '\n' ? 'n'
+                         : byte == '\f' ? 'f' : 'r';
+                log(piece, 2);
+        }
+        else
+        {
+                piece[0] = '\\';
+                piece[1] = (p8)('0' + (byte >> 6));
+                piece[2] = (p8)('0' + ((byte >> 3) & 7));
+                piece[3] = (p8)('0' + (byte & 7));
+                log(piece, 4);
+        }
+}
+
 static fn find_ls_quote(string_address name)
 {
-        for (; string_get(name); name++)
-        {
-                p8 byte = string_get(name);
-                p8 piece[4];
+        positive length = string_length(name);
+        positive at = 0;
+        p32 marks[FIND_LS_MARKS];
 
-                if (byte == '\\' || byte == '"' || byte == ' ')
+        while (at < length)
+        {
+                positive base = at;
+                positive count = memory_offsets_in_set(marks, name + base, length - base,
+                                                       find_ls_spelled, FIND_LS_MARKS);
+
+                for (positive i = 0; i < count; i++)
                 {
-                        piece[0] = '\\';
-                        piece[1] = byte;
-                        log(piece, 2);
-                        continue;
+                        positive mark = base + marks[i];
+
+                        if (mark > at)
+                                log(name + at, mark - at);
+                        find_ls_spell(string_get(name + mark));
+                        at = mark + 1;
                 }
-                if (byte == '\b' || byte == '\t' || byte == '\n' || byte == '\f' || byte == '\r')
-                {
-                        piece[0] = '\\';
-                        piece[1] = byte == '\b' ? 'b' : byte == '\t' ? 't' : byte == '\n' ? 'n'
-                                 : byte == '\f' ? 'f' : 'r';
-                        log(piece, 2);
-                        continue;
-                }
-                if (byte < ' ' || byte >= 127)
-                {
-                        piece[0] = '\\';
-                        piece[1] = (p8)('0' + (byte >> 6));
-                        piece[2] = (p8)('0' + ((byte >> 3) & 7));
-                        piece[3] = (p8)('0' + (byte & 7));
-                        log(piece, 4);
-                        continue;
-                }
-                log(name, 1);
+                if (count < FIND_LS_MARKS)
+                        break;
         }
+        if (length > at)
+                log(name + at, length - at);
 }
 
 /*
