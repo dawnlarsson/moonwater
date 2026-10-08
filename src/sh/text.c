@@ -31152,12 +31152,11 @@ static b32 text_grep()
         of changing one, and e, which runs a shell.
 */
 //      GNU's sed has no table to fill: a script of ten thousand commands is a
-//      script. These are the room a script is given, taken from the kernel on
-//      the first command that wants it and so free to a sed that never reads
-//      one, and a script past them is refused by name. The commands and the
-//      programs are a regular expression each, which is a few hundred bytes
-//      beside the page they are written on; the text and the script are the
-//      bytes themselves.
+//      script. These are the room a script starts with, taken from the kernel
+//      on the first command that wants it and so free to a sed that never
+//      reads one; past them the commands and the programs grow with the
+//      script, as GNU's do. The text and the script are the bytes themselves,
+//      and keep the ceilings they had.
 #define SED_COMMANDS_MAX (1 << 16)
 #define SED_PROGRAMS_MAX (1 << 16)
 #define SED_TEXT_MAX (1 << 24)
@@ -31220,10 +31219,10 @@ typedef struct
 //      whole by every sed, and a sed run under ulimit -v 20000 died of the
 //      16 MiB of the script's before it read a byte.
 static sed_command address_to sed_commands;
-static positive sed_limit_commands, sed_commands_room;
+static positive sed_commands_room;
 static b32 sed_command_count;
 static regex_program address_to sed_programs;
-static positive sed_limit_programs, sed_programs_room, sed_end_only_room;
+static positive sed_programs_room, sed_end_only_room;
 static b32 sed_program_count;
 //      Which of them is no more than `$`, which matches once, at the end of
 //      the pattern space, and needs no machine to say so: s/$/ </ is the line
@@ -32092,7 +32091,12 @@ static b32 sed_compile_regex(string_address pattern, bool icase, bool multiline)
         if (!pattern[0])
                 return -1;
 
-        if (sed_program_count >= sed_limit_programs)
+        // A program is a table entry that grows with the script, as the commands do.
+        if (sed_program_count >= sed_programs_room &&
+            !(array_store_reserve(sed_programs, sed_programs_room, sed_program_count,
+                                  sed_program_count + 1, 16) &&
+              array_store_reserve(sed_program_end_only, sed_end_only_room, sed_program_count,
+                                  sed_program_count + 1, 16)))
         {
                 sed_broken = true;
                 return 0;
@@ -32356,8 +32360,6 @@ static fn sed_stores_hold()
         if (appends < 4096)
                 appends = 4096;
 
-        sed_limit_commands = commands;
-        sed_limit_programs = programs;
         sed_limit_text = text;
         sed_limit_maps = maps;
         sed_limit_blocks = blocks;
@@ -32418,7 +32420,9 @@ static fn sed_parse()
                         continue;
                 }
 
-                if (sed_command_count >= sed_limit_commands)
+                if (sed_command_count >= sed_commands_room &&
+                    !array_store_reserve(sed_commands, sed_commands_room, sed_command_count,
+                                         sed_command_count + 1, 16))
                 {
                         sed_broken = true;
                         return;

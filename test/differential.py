@@ -22072,6 +22072,10 @@ _TEXT_SED_EXTRA = (
         ((), "N;s/^t/T/Mg"), ((), "N;s/^t/T/M"), ((), "N;s/o$/0/Mg"), ((), "N;s/e$/E/Mg"),
         ((), "N;s/^/>/Mg"), ((), "$!N;s/^/>/Mg"), ((), "$!N;s/w$/W/M"), (("-n",), "N;/^t/Mp"),
         (("-n",), "N;/e$/Ip"), ((), "N;s/x/y/Mg"), ((), "N;s/^t/T/g"))),
+    #       A script of sixty-six thousand commands is past the table the commands
+    #       were given at first, which refused it ("unsupported or invalid
+    #       script") where GNU runs it; the table grows with the script now.
+    {"argv": ("-n", *(("-e", "=") * 66000)), "stdin": "text"},
     #       Blocks past the thirty-second nesting were dropped from the table
     #       an unbalanced script jumped through, and a line address counted
     #       from the largest wrapped to a small one.
