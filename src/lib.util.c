@@ -9824,10 +9824,41 @@ static fn parallel_forget(void)
         parallel_pool.run = null;
 }
 
+#ifndef THREAD_MAPPING_BYTES
+#define THREAD_MAPPING_BYTES 8388608
+#endif
+
+/*
+        How many workers the address space has room for. Every thread maps its
+        whole stack, eight megabytes of it, and a limit on the address space
+        counts that mapping whether or not a page of it is ever touched. Left
+        to the affinity count, a machine of thirty two processors under a
+        200 MB limit started twenty threads, the limit was spent on their
+        stacks, and find and du answered "out of memory" where a single thread
+        runs the same walk. A quarter of the limit is for stacks, which leaves
+        the rest for the program and its buffers. No limit, or one that is not
+        finite, is the affinity count.
+*/
+static positive parallel_workers_allowed(void)
+{
+        positive limits[2] = {0, 0};
+        bipolar got = system_call_4(syscall(prlimit64), 0, 9, 0,
+                                    (positive)limits);
+        positive allowed;
+
+        if (got < 0 || limits[0] == positive_max)
+                return PARALLEL_WORKERS_MAX;
+
+        allowed = limits[0] / 4 / THREAD_MAPPING_BYTES;
+
+        return allowed < PARALLEL_WORKERS_MAX ? allowed : PARALLEL_WORKERS_MAX;
+}
+
 //      Workers for this process, started if none are; false means run inline.
 static bool parallel_ready(void)
 {
         b32 me = (b32)system_call(syscall(gettid));
+        positive allowed;
         positive slot;
 
         if (parallel_pool.workers && parallel_pool.owner != me)
@@ -9837,8 +9868,10 @@ static bool parallel_ready(void)
                 return true;
 
         parallel_pool.owner = me;
+        allowed = parallel_workers_allowed();
 
-        for (slot = 1; slot < parallel_width(); slot++)
+        for (slot = 1; slot < parallel_width() && parallel_pool.workers < allowed;
+             slot++)
         {
                 thread address_to handle =
                         thread_start(parallel_worker, (address_any)slot);
@@ -9849,7 +9882,8 @@ static bool parallel_ready(void)
                 parallel_pool.worker[parallel_pool.workers++] = handle;
         }
 
-        if (parallel_width() > 1 && parallel_pool.workers == parallel_width() - 1)
+        if (parallel_width() > 1 && parallel_pool.workers == parallel_width() - 1 &&
+            parallel_pool.workers < allowed)
         {
                 thread address_to handle =
                         thread_start(parallel_worker, (address_any)(parallel_width() + 1));

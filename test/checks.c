@@ -52053,6 +52053,38 @@ static fn lock_pool(bool emulated)
         check("every job kept its own errno", pool_errno_bad == 0);
         check("every job's slot was below parallel_slots()", pool_slot_out_of_range == 0);
 
+        //      Under an address-space limit the pool starts only the workers
+        //      whose eight-megabyte stacks fit in a quarter of it, whatever
+        //      width was asked for: 200 MB is six workers. Width 63 is forced so
+        //      the answer does not depend on how many processors this has. A
+        //      user-mode emulator keeps no address-space limit of the guest's
+        //      (it reads back infinity after a successful setrlimit), so there
+        //      the limit is not in force and the count cannot be checked.
+        {
+                positive saved[2] = {0, 0};
+                positive lowered[2] = {0, 0};
+                positive read_back[2] = {0, 0};
+
+                system_call_4(syscall(prlimit64), 0, 9, 0, (positive)saved);
+                lowered[0] = 200 * 1024 * 1024;
+                lowered[1] = saved[1];
+                system_call_4(syscall(prlimit64), 0, 9, (positive)lowered, 0);
+                system_call_4(syscall(prlimit64), 0, 9, 0, (positive)read_back);
+
+                parallel_reset(63);
+                check("a parallel_for under a 200 MB address space completes",
+                      parallel_for(pool_count_job, null, POOL_JOBS, PARALLEL_SPREAD));
+
+                if (read_back[0] == lowered[0])
+                        check("the pool starts only the workers the address space holds",
+                              parallel_pool.workers <= 6);
+                else
+                        log_direct(str("  pool: the address-space limit is not kept under emulation, NOT RUN\n"));
+
+                system_call_4(syscall(prlimit64), 0, 9, (positive)saved, 0);
+                parallel_reset(0);
+        }
+
         //      Stopping, at width 8.
         parallel_reset(8);
         pool_stop_index = 300;
