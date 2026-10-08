@@ -24995,6 +24995,15 @@ UTIL_LINUX_UTILITIES = (
             operands=(("lock", UL_OBS, "echo"), ("lock", UL_OBS, "flock_nb"), ("lock", "-c", "echo held"), ("-n", "-E", "42", "lock", "true"),
                       ("-w", "0.05", "-E", "42", "lock", "true"), ("--close", "lock", UL_OBS, "flock_nb"), ("lock",)),
             stdin=("empty",), max_flags=3),
+    #   -w sleeps in the kernel until the holder lets go: the waiter's own
+    #   voluntary context switches count the wake-up, which is a handful where
+    #   a poll of the lock is one for every nap across the two-second hold.
+    Utility("flock_wait_live", modes=("bash",), stderr="loose", normalize=ul_norm_flock,
+            script=ul_script("flock", ": > lock\nrm -f held\nenv flock -x lock sh -c 'touch held; sleep 2' </dev/null >/dev/null 2>&1 &\nholder=$!\ni=0\nuntil [ -e held ] || [ $i -ge 150 ]; do sleep .02; i=$((i+1)); done\n",
+                             "kill $holder 2>/dev/null; wait $holder 2>/dev/null\n", observe=True),
+            operands=(("-w", "5", "lock", "sh", "-c",
+                       "n=$(grep voluntary_ctxt_switches /proc/$PPID/status | tr -dc 0-9); if [ \"$n\" -lt 50 ]; then echo blocked; else echo polled; fi"),),
+            stdin=("empty",), max_flags=1),
     Utility("mesg_live", modes=("bash",), stderr="loose",
             script=ul_script("mesg", UL_MESG_PY, "", status="status=$?"),
             operands=((),), stdin=("empty",), max_flags=1,
