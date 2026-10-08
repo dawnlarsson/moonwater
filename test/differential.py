@@ -25850,16 +25850,34 @@ static b32 memory_compare_ascii_case(const void *one, const void *two,
         }
         return 0;
 }
-static unsigned char string_set_blanks[256];
+static const b8 string_set_blanks[256] = {[' '] = 1, ['\t'] = 1};
+static const b8 string_set_http_token[256] = {
+        ['0' ... '9'] = 1, ['A' ... 'Z'] = 1, ['a' ... 'z'] = 1,
+        ['!'] = 1, ['#'] = 1, ['$'] = 1, ['%'] = 1, ['&'] = 1, ['\''] = 1,
+        ['*'] = 1, ['+'] = 1, ['-'] = 1, ['.'] = 1, ['^'] = 1, ['_'] = 1,
+        ['`'] = 1, ['|'] = 1, ['~'] = 1};
 static positive string_span_max(const_string source, positive bound,
                                 const b8 *set)
 {
-        (void)set;
         positive i = 0;
-        while (i < bound && (source[i] == ' ' || source[i] == '\t'))
+        while (i < bound && source[i] && set[(p8)source[i]])
                 i++;
         return i;
 }
+static positive memory_text_span(const void *block, positive size)
+{
+        const p8 *at = block;
+        positive i = 0;
+        while (i < size && (at[i] == '\t' || (at[i] >= ' ' && at[i] != 127)))
+                i++;
+        return i;
+}
+static void memory_zero(void *into, positive size)
+{
+        if (size)
+                memset(into, 0, size);
+}
+#define max(a, b) ((a) > (b) ? (a) : (b))
 static positive digit_known(p8 character, positive base)
 {
         positive v;
@@ -25961,6 +25979,14 @@ HOSTED_SPAN_BYTE = r"""static positive memory_span_byte(const void *block, p8 by
         const p8 *at = block;
         positive i = 0;
         while (i < size && at[i] == byte)
+                i++;
+        return i;
+}
+static positive memory_span_byte_reverse(const void *block, p8 byte, positive size)
+{
+        const p8 *at = block;
+        positive i = 0;
+        while (i < size && at[size - 1 - i] == byte)
                 i++;
         return i;
 }"""
@@ -50387,6 +50413,25 @@ static positive string_span_max(const void *s, positive bound, const b8 *set)
                 n++;
         return n;
 }
+static const b8 string_set_http_token[256] = {
+        ['0' ... '9'] = 1, ['A' ... 'Z'] = 1, ['a' ... 'z'] = 1,
+        ['!'] = 1, ['#'] = 1, ['$'] = 1, ['%'] = 1, ['&'] = 1, ['\''] = 1,
+        ['*'] = 1, ['+'] = 1, ['-'] = 1, ['.'] = 1, ['^'] = 1, ['_'] = 1,
+        ['`'] = 1, ['|'] = 1, ['~'] = 1};
+static positive memory_text_span(const void *block, positive size)
+{
+        const p8 *at = block;
+        positive n = 0;
+        while (n < size && (at[n] == '\t' || (at[n] >= ' ' && at[n] != 127)))
+                n++;
+        return n;
+}
+static void memory_zero(void *into, positive size)
+{
+        if (size)
+                memset(into, 0, size);
+}
+#define max(a, b) ((a) > (b) ? (a) : (b))
 static address_any memory_first_of(const void *block, int value, positive size)
 {
         return memchr(block, value, size);
@@ -50425,6 +50470,18 @@ static positive string_digits_max(string_address source, positive bound,
         return got;
 }
 static void crypto_forget(void *at, positive n) { memset(at, 0, n); }
+static bool memory_from_hex_exact(address_any into, const p8 *text, positive bytes,
+                                  const p8 *nibbles)
+{
+        p8 *out = into;
+        for (positive at = 0; at < bytes; at++) {
+                p8 high = nibbles[text[2 * at]], low = nibbles[text[2 * at + 1]];
+                if (high == 255 || low == 255)
+                        return false;
+                out[at] = (p8)(high << 4 | low);
+        }
+        return true;
+}
 typedef struct { p8 *bytes; positive room; positive used; } byte_store;
 """ + digits + appends + r"""
 static bool fuzz_reserve(byte_store *store, positive wanted, positive step)
@@ -50526,10 +50583,18 @@ static bipolar socket_new(int a, int b, int c)
         fuzz_opened++;
         return 1000;
 }
+#define IPPROTO_TCP 6
+#define TCP_NODELAY 1
 static bool network_stream_timeout(bipolar h, positive s, positive n)
 {
         (void)h; (void)s; (void)n;
         return true;
+}
+static bipolar socket_option_set(b32 handle, b32 level, b32 name,
+                                 address_any value, positive size)
+{
+        (void)handle, (void)level, (void)name, (void)value, (void)size;
+        return 0;
 }
 static int socket_connect(b32 h, const void *where, positive size)
 {
@@ -54098,6 +54163,14 @@ static fn crypto_forget(address_any at, positive length)
         memset(at, 0, length);
         __asm__ __volatile__("" : : "r"(at) : "memory");
 }
+static positive memory_span_byte_reverse(const void *block, p8 byte, positive size)
+{
+        const p8 *at = block;
+        positive i = 0;
+        while (i < size && at[size - 1 - i] == byte)
+                i++;
+        return i;
+}
 static p16 network_load_16(const p8 *bytes)
 {
         return (p16)(((p16)bytes[0] << 8) | (p16)bytes[1]);
@@ -56516,6 +56589,14 @@ static positive string_span_max(const_string source, positive bound,
         while (at < bound && set[(p8)source[at]])
                 at++;
         return at;
+}
+static positive memory_span_byte_reverse(const void *block, p8 byte, positive size)
+{
+        const p8 *at = block;
+        positive i = 0;
+        while (i < size && at[size - 1 - i] == byte)
+                i++;
+        return i;
 }
 static string_address string_first_of_or_end(string_address at, int byte)
 {
