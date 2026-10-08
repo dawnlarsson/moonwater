@@ -31264,7 +31264,9 @@ def harness_native_extract(argv):
     while i < len(lines):
         if lines[i].startswith(('#define NEON_', '#define WIDE_', '#define LZ_', '#define RV_')):
             while True:
-                print(lines[i])
+                # A macro that holds a branch target spells it as ELF does; Mach-O's local
+                # label is L, as in the bodies darwin() rewrites.
+                print(lines[i].replace('.L', 'L'))
                 if not lines[i].rstrip().endswith('\\'):
                     break
                 i += 1

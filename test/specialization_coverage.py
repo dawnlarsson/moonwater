@@ -679,6 +679,8 @@ cover('nothing_to_fold', None, 'deflate_tokens_count deflate_tokens_encode defla
       'a pointer to a block of tokens and its code tables, all run-time data')
 cover('nothing_to_fold', None, 'deflate_parse_fast',
       'a pointer to a job: the input, the bucket table and the output arrays, all run-time data')
+cover('nothing_to_fold', None, 'deflate_parse_chain',
+      'a pointer to a job: the input, the three tables and the output arrays, all run-time data')
 cover('nothing_to_fold', None, 'lzma_range_shift deflate_decode_span lzma_decode_span',
       'a pointer to evolving range or token-loop state; values live in memory '
       'and are not known at the call site')

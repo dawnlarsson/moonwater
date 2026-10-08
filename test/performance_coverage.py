@@ -504,6 +504,16 @@ cover('correctness_only', 'test/checks.c#CHECK_compression_floor', 'deflate_pars
       'end-to-end gzip -1 timing on three corpora, and the native arm64 row '
       'against gcc and clang builds of the C it replaces',
       anchors={'deflate_parse_fast': 'floor_deflate_parse'})
+cover('correctness_only', 'test/checks.c#CHECK_compression_floor', 'deflate_parse_chain',
+      'the pairs, literal and pair counts, the three tables, hashes and stopping '
+      'place of 150 blocks (random bytes, four symbols, copies of earlier bytes, '
+      'runs, short periods) against gzip levels 2 to 9 written out a position at '
+      'a time, at all three parses, lengths to beat from three to nine, nices '
+      'from five to 258 and links from one to 600, started from the first window '
+      'to past the first slide, with a pair limit, a split window and a count of '
+      'literals that stop it where they bite; end-to-end gzip -2 to -9 timing on '
+      'three corpora, with no isolated timing row',
+      anchors={'deflate_parse_chain': 'floor_deflate_chain'})
 cover('correctness_only', 'test/checks.c#CHECK_compression_floor', 'zstd_sequences_encode',
       'bit-exact against a bit-at-a-time model over random tables, every code '
       'and pending width, the output ending at a protected page, and the room '

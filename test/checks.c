@@ -114359,6 +114359,326 @@ static fn floor_deflate_parse(void)
         check("deflate parse fast agrees with the position at a time walk: pairs, counts, table, stopping place", same && anything);
 }
 
+/* deflate_parse_chain against gzip's chain levels written out a position at
+   a time: the same pairs, literals, counts, three tables, hashes and stopping
+   place from blocks of random bytes, of a few symbols, of copies of earlier
+   bytes, of runs and of short periods, at all three parses and at lengths to
+   beat, nices and numbers of links from one to hundreds, started from the
+   first window to past the first slide, with a pair limit, a split test and a
+   count of the literals that stop it where they bite. */
+typedef struct
+{
+        p8 address_to base;
+        p16 address_to tab;
+        positive total, start, pos, limit, slid, nice, depth, least, far, mode, pairs;
+        p32 address_to mpos;
+        p16 address_to mlen;
+        p16 address_to mdist;
+        p32 address_to lit_freq;
+        p32 address_to dist_freq;
+        p32 address_to fresh;
+        positive tokens, recount, h3, h4, pairs_max, split_lo, split_hi;
+} floor_chain_job;
+
+static fn floor_chain_hashes(p8 address_to at, positive address_to h3, positive address_to h4)
+{
+        p32 seq = memory_load_unaligned(p32, at);
+
+        address_to h3 = (seq << 8) * 0x1e35a7bdu >> 17;
+        address_to h4 = seq * 0x1e35a7bdu >> 16;
+}
+
+/* The position goes into the tables at its place in the window. */
+static fn floor_chain_insert(floor_chain_job address_to j, positive pos)
+{
+        p16 address_to head4 = j->tab;
+        p16 address_to head3 = j->tab + 65536;
+        p16 address_to prev = j->tab + 65536 + 32768;
+        positive rel = pos - j->slid;
+
+        head3[j->h3] = (p16)(rel + 32768);
+        prev[rel] = head4[j->h4];
+        head4[j->h4] = (p16)(rel + 32768);
+        floor_chain_hashes(j->base + pos + 1, address_of j->h3, address_of j->h4);
+}
+
+static positive floor_chain_find(floor_chain_job address_to j, positive pos, positive best,
+                                 positive depth, positive address_to dist)
+{
+        p16 address_to head4 = j->tab;
+        p16 address_to head3 = j->tab + 65536;
+        p16 address_to prev = j->tab + 65536 + 32768;
+        positive rel = pos - j->slid;
+        positive cur = rel + 32768;
+        p8 address_to window = j->base + j->slid - 32768;
+        p8 address_to here = j->base + pos;
+        positive node3 = head3[j->h3];
+        positive node = head4[j->h4];
+
+        floor_chain_insert(j, pos);
+        if (best < 4)
+        {
+                if (node3 <= rel)
+                        return best;
+                if (best < 3 && !memory_compare(window + node3, here, 3))
+                {
+                        best = 3;
+                        address_to dist = cur - node3;
+                }
+        }
+        else if (best >= j->nice)
+                return best;
+        for (; depth && node > rel; depth--, node = prev[node & 32767])
+        {
+                p8 address_to match = window + node;
+                positive length = 0;
+
+                while (length < 258 && match[length] == here[length])
+                        length++;
+                if (length >= 4 && length > best)
+                {
+                        best = length;
+                        address_to dist = (positive)(here - match);
+                        if (best >= j->nice)
+                                return best;
+                }
+        }
+        return best;
+}
+
+static bipolar floor_chain_gain(positive length, positive dist, positive next, positive next_dist)
+{
+        bipolar a = 0, b = 0;
+
+        while (dist >> (a + 1))
+                a++;
+        while (next_dist >> (b + 1))
+                b++;
+        return 4 * ((bipolar)next - (bipolar)length) + a - b;
+}
+
+static fn floor_deflate_chain_model(floor_chain_job address_to j)
+{
+        positive pos = j->pos;
+        positive stop = j->total >= 299 ? j->total - 299 : 0;
+
+        if (j->limit < stop)
+                stop = j->limit;
+        while (pos < stop && !(j->tokens >= 512 && pos >= j->split_lo && pos <= j->split_hi) &&
+               pos < j->recount && pos - j->slid <= 32507)
+        {
+                positive dist = 0, length, taken = 1;
+
+                length = floor_chain_find(j, pos, j->least - 1, j->depth, address_of dist);
+                if (length < j->least || (length == 3 && dist > j->far))
+                {
+                        j->lit_freq[j->base[pos]]++;
+                        j->tokens++;
+                        pos++;
+                        continue;
+                }
+                if (j->mode >= 2)
+                        while (length < j->nice)
+                        {
+                                positive next_dist = 0, next;
+
+                                next = floor_chain_find(j, pos + 1, length - 1, (j->depth >> 1) | 1,
+                                                        address_of next_dist);
+                                taken = 2;
+                                if (next >= length && floor_chain_gain(length, dist, next, next_dist) > 2)
+                                {
+                                        j->lit_freq[j->base[pos]]++;
+                                        j->tokens++;
+                                        pos++;
+                                        length = next;
+                                        dist = next_dist;
+                                        taken = 1;
+                                        continue;
+                                }
+                                if (j->mode < 3)
+                                        break;
+                                next = floor_chain_find(j, pos + 2, length - 1, (j->depth >> 2) | 1,
+                                                        address_of next_dist);
+                                taken = 3;
+                                if (next >= length && floor_chain_gain(length, dist, next, next_dist) > 6)
+                                {
+                                        j->lit_freq[j->base[pos]]++;
+                                        j->lit_freq[j->base[pos + 1]]++;
+                                        j->tokens += 2;
+                                        pos += 2;
+                                        length = next;
+                                        dist = next_dist;
+                                        taken = 1;
+                                        continue;
+                                }
+                                break;
+                        }
+                {
+                        positive k = j->pairs++;
+
+                        j->mpos[k] = (p32)(pos - j->start);
+                        j->mlen[k] = (p16)length;
+                        j->mdist[k] = (p16)dist;
+                        j->tokens++;
+                        j->lit_freq[257 + deflate_symbol_tab[length - 3]]++;
+                        j->dist_freq[dist <= 256 ? deflate_symbol_tab[256 + dist - 1]
+                                                 : deflate_symbol_tab[512 + ((dist - 1) >> 7)]]++;
+                        j->fresh[8 + (length >= 9)]++;
+                }
+                for (positive p = pos + taken; p < pos + length; p++)
+                        floor_chain_insert(j, p);
+                pos += length;
+                if (j->pairs >= j->pairs_max)
+                        break;
+        }
+        j->pos = pos;
+}
+
+static fn floor_deflate_chain(void)
+{
+        static p8 data[70000 + 1024];
+        static p16 tab_got[65536 + 32768 + 32768], tab_want[65536 + 32768 + 32768];
+        static p32 mpos_got[16500], mpos_want[16500];
+        static p16 mlen_got[16500], mlen_want[16500], mdist_got[16500], mdist_want[16500];
+        static const positive depths[9] = {1, 2, 3, 6, 16, 35, 100, 300, 600};
+        static const positive nices[7] = {5, 10, 14, 30, 65, 130, 258};
+        static const positive leasts[5] = {3, 4, 5, 7, 9};
+        static const positive starts[8] = {0, 3, 4096, 20000, 32400, 33000, 41000, 64900};
+        p32 lit_got[288], lit_want[288], dist_got[32], dist_want[32], fresh_got[10], fresh_want[10];
+        p32 random = 0x5d2f1b97u;
+        bool same = true, anything = false;
+
+#define FLOOR_RANDOM() (random ^= random << 13, random ^= random >> 17, random ^= random << 5, random)
+        for (positive trial = 0; trial < 150; trial++)
+        {
+                positive shape = trial % 6, total = 70000 + FLOOR_RANDOM() % 900, at = 0;
+                positive pos = starts[trial % 8], before;
+                floor_chain_job got, want;
+
+                memory_fill(data, 0, sizeof(data));
+                while (at < total)
+                {
+                        positive run, take;
+
+                        if (shape == 0)
+                                data[at++] = (p8)FLOOR_RANDOM();
+                        else if (shape == 1)
+                                data[at++] = (p8)(FLOOR_RANDOM() % 4);
+                        else if (shape == 2 || shape == 5)
+                        {
+                                run = FLOOR_RANDOM() % (shape == 5 ? 3 : 12);
+                                while (run-- && at < total)
+                                        data[at++] = (p8)FLOOR_RANDOM();
+                                take = 3 + FLOOR_RANDOM() % (FLOOR_RANDOM() % 8 ? 20 : 300);
+                                if (at > 8)
+                                {
+                                        positive from = 1 + FLOOR_RANDOM() % (at > 32767 ? 32767 : at);
+
+                                        while (take-- && at < total)
+                                        {
+                                                data[at] = data[at - from];
+                                                at++;
+                                        }
+                                }
+                        }
+                        else if (shape == 3)
+                        {
+                                run = 1 + FLOOR_RANDOM() % 700;
+                                p8 value = (p8)FLOOR_RANDOM();
+
+                                while (run-- && at < total)
+                                        data[at++] = value;
+                        }
+                        else
+                        {
+                                positive period = 3 + FLOOR_RANDOM() % 5;
+
+                                data[at] = at >= period && FLOOR_RANDOM() % 50 ? data[at - period] : (p8)FLOOR_RANDOM();
+                                at++;
+                        }
+                }
+                memory_fill(tab_got, 0, sizeof(tab_got));
+                got.base = data;
+                got.tab = tab_got;
+                got.slid = 0;
+                floor_chain_hashes(data, address_of got.h3, address_of got.h4);
+                for (positive p = 0; p < pos; p++)
+                {
+                        if (p - got.slid >= 32768)
+                        {
+                                for (positive i = 0; i < sizeof(tab_got) / sizeof(p16); i++)
+                                        tab_got[i] = (p16)(tab_got[i] > 32768 ? tab_got[i] - 32768 : 0);
+                                got.slid += 32768;
+                        }
+                        floor_chain_insert(address_of got, p);
+                }
+                if (pos - got.slid >= 32768)
+                {
+                        for (positive i = 0; i < sizeof(tab_got) / sizeof(p16); i++)
+                                tab_got[i] = (p16)(tab_got[i] > 32768 ? tab_got[i] - 32768 : 0);
+                        got.slid += 32768;
+                }
+                memory_copy(tab_want, tab_got, sizeof(tab_got));
+                memory_fill(mpos_got, 0xa5, sizeof(mpos_got));
+                memory_fill(mlen_got, 0xa5, sizeof(mlen_got));
+                memory_fill(mdist_got, 0xa5, sizeof(mdist_got));
+                memory_copy(mpos_want, mpos_got, sizeof(mpos_got));
+                memory_copy(mlen_want, mlen_got, sizeof(mlen_got));
+                memory_copy(mdist_want, mdist_got, sizeof(mdist_got));
+                for (positive i = 0; i < 288; i++)
+                        lit_got[i] = lit_want[i] = (p32)(FLOOR_RANDOM() % 5);
+                for (positive i = 0; i < 32; i++)
+                        dist_got[i] = dist_want[i] = (p32)(FLOOR_RANDOM() % 5);
+                for (positive i = 0; i < 10; i++)
+                        fresh_got[i] = fresh_want[i] = (p32)(FLOOR_RANDOM() % 5);
+                got.total = total;
+                got.start = pos - FLOOR_RANDOM() % (pos + 1) % 5000;
+                got.pos = pos;
+                got.limit = trial % 4 == 0 ? pos + 1 + FLOOR_RANDOM() % 9000 : total;
+                got.nice = nices[(trial / 3) % 7];
+                got.depth = depths[trial % 9];
+                got.least = leasts[(trial / 2) % 5];
+                got.mode = 1 + trial % 3;
+                got.far = got.mode >= 2 ? 8192 : 4096;
+                got.pairs = trial % 13 == 0 ? 16380 : 0;
+                got.pairs_max = trial % 5 == 0 ? got.pairs + 1 + FLOOR_RANDOM() % 40 : 16382;
+                got.tokens = trial % 7 == 0 ? 500 + FLOOR_RANDOM() % 20 : FLOOR_RANDOM() % 400;
+                got.recount = got.mode >= 2 && trial % 3 != 1 ? pos + 1 + FLOOR_RANDOM() % 20000 : total;
+                got.split_lo = got.start + 5000;
+                got.split_hi = total - 5000;
+                got.mpos = mpos_got;
+                got.mlen = mlen_got;
+                got.mdist = mdist_got;
+                got.lit_freq = lit_got;
+                got.dist_freq = dist_got;
+                got.fresh = fresh_got;
+                want = got;
+                want.tab = tab_want;
+                want.mpos = mpos_want;
+                want.mlen = mlen_want;
+                want.mdist = mdist_want;
+                want.lit_freq = lit_want;
+                want.dist_freq = dist_want;
+                want.fresh = fresh_want;
+                before = want.pairs;
+                floor_deflate_chain_model(address_of want);
+                deflate_parse_chain(address_of got);
+                anything = anything || want.pairs > before;
+                same = same && got.pos == want.pos && got.pairs == want.pairs && got.tokens == want.tokens &&
+                       (p32)got.h3 == (p32)want.h3 && (p32)got.h4 == (p32)want.h4 &&
+                       !memory_compare(tab_got, tab_want, sizeof(tab_got)) &&
+                       !memory_compare(mpos_got, mpos_want, sizeof(mpos_got)) &&
+                       !memory_compare(mlen_got, mlen_want, sizeof(mlen_got)) &&
+                       !memory_compare(mdist_got, mdist_want, sizeof(mdist_got)) &&
+                       !memory_compare(lit_got, lit_want, sizeof(lit_got)) &&
+                       !memory_compare(dist_got, dist_want, sizeof(dist_got)) &&
+                       !memory_compare(fresh_got, fresh_want, sizeof(fresh_got));
+        }
+#undef FLOOR_RANDOM
+        check("deflate parse chain agrees with the position at a time walk: pairs, counts, tables, hashes, stopping place",
+              same && anything);
+}
+
 /* zstd_huffman_cells against a cell at a time: complete codes from
    huffman_lengths over random counts, as weights, into a guarded table. */
 static fn floor_zstd_huffman_cells(void)
@@ -114853,6 +115173,7 @@ b32 main(void)
         floor_deflate_codes();
         floor_deflate_tokens();
         floor_deflate_parse();
+        floor_deflate_chain();
         floor_huffman_lengths();
         floor_zstd_huffman_cells();
         floor_huffman_codes();

@@ -2535,6 +2535,83 @@ static inline INLINE bipolar gzip_lazy_gain(positive length, positive dist,
                ((bipolar)top_bit_known(dist) - (bipolar)top_bit_known(next_dist));
 }
 
+/* deflate_parse_chain's job (lib.c documents each field). */
+typedef struct
+{
+        p8 address_to base;
+        p16 address_to tab;
+        positive total;
+        positive start;
+        positive pos;
+        positive limit;
+        positive slid;
+        positive nice;
+        positive depth;
+        positive least;
+        positive far;
+        positive mode;
+        positive pairs;
+        p32 address_to mpos;
+        p16 address_to mlen;
+        p16 address_to mdist;
+        p32 address_to lit_freq;
+        p32 address_to dist_freq;
+        p32 address_to fresh;
+        positive tokens;
+        positive recount;
+        positive h3;
+        positive h4;
+        positive pairs_max;
+        positive split_lo;
+        positive split_hi;
+} gzip_chain_job;
+
+/* The offsets deflate_parse_chain reads, and the tables it indexes from one
+   base: head4, then head3, then prev. */
+_Static_assert(__builtin_offsetof(gzip_chain_job, base) == 0 &&
+                       __builtin_offsetof(gzip_chain_job, tab) == 8 &&
+                       __builtin_offsetof(gzip_chain_job, total) == 16 &&
+                       __builtin_offsetof(gzip_chain_job, start) == 24 &&
+                       __builtin_offsetof(gzip_chain_job, pos) == 32 &&
+                       __builtin_offsetof(gzip_chain_job, limit) == 40 &&
+                       __builtin_offsetof(gzip_chain_job, slid) == 48 &&
+                       __builtin_offsetof(gzip_chain_job, nice) == 56 &&
+                       __builtin_offsetof(gzip_chain_job, depth) == 64 &&
+                       __builtin_offsetof(gzip_chain_job, least) == 72 &&
+                       __builtin_offsetof(gzip_chain_job, far) == 80 &&
+                       __builtin_offsetof(gzip_chain_job, mode) == 88 &&
+                       __builtin_offsetof(gzip_chain_job, pairs) == 96 &&
+                       __builtin_offsetof(gzip_chain_job, mpos) == 104 &&
+                       __builtin_offsetof(gzip_chain_job, mlen) == 112 &&
+                       __builtin_offsetof(gzip_chain_job, mdist) == 120 &&
+                       __builtin_offsetof(gzip_chain_job, lit_freq) == 128 &&
+                       __builtin_offsetof(gzip_chain_job, dist_freq) == 136 &&
+                       __builtin_offsetof(gzip_chain_job, fresh) == 144 &&
+                       __builtin_offsetof(gzip_chain_job, tokens) == 152 &&
+                       __builtin_offsetof(gzip_chain_job, recount) == 160 &&
+                       __builtin_offsetof(gzip_chain_job, h3) == 168 &&
+                       __builtin_offsetof(gzip_chain_job, h4) == 176 &&
+                       __builtin_offsetof(gzip_chain_job, pairs_max) == 184 &&
+                       __builtin_offsetof(gzip_chain_job, split_lo) == 192 &&
+                       __builtin_offsetof(gzip_chain_job, split_hi) == 200 &&
+                       sizeof(gzip_chain_job) == 208,
+               "deflate_parse_chain's job layout");
+_Static_assert(__builtin_offsetof(gzip_encoder, head3) == __builtin_offsetof(gzip_encoder, head4) +
+                                                                  sizeof(((gzip_encoder *)0)->head4) &&
+                       __builtin_offsetof(gzip_encoder, prev) ==
+                               __builtin_offsetof(gzip_encoder, head3) +
+                                       sizeof(((gzip_encoder *)0)->head3) &&
+                       sizeof(((gzip_encoder *)0)->head4) == 0x20000 &&
+                       sizeof(((gzip_encoder *)0)->head3) == 0x10000,
+               "deflate_parse_chain's tables are head4, head3 and prev one after the other");
+
+/* The library walks a stretch only while this many bytes remain before the end
+   of the input (a match of 258 bytes and the sixteen byte reads past it) and
+   while the tables have this much room before they slide (the longest match
+   less one, and the lazy look two on); the C takes the rest. */
+#define GZIP_CHAIN_TAIL 300
+#define GZIP_CHAIN_ROOM 261
+
 static inline INLINE positive gzip_parse_chain(gzip_encoder address_to e, positive start,
                                                positive pos, positive limit, p8 parse,
                                                positive depth, positive nice)
@@ -2565,6 +2642,32 @@ static inline INLINE positive gzip_parse_chain(gzip_encoder address_to e, positi
                 {
                         least = gzip_min_match_seen(e, depth);
                         recount += min(total - recount, pos - start);
+                }
+                if (most >= GZIP_CHAIN_TAIL && pos - e->slid <= GZIP_WINDOW - GZIP_CHAIN_ROOM)
+                {
+                        gzip_chain_job job = {base,    e->head4,   total,         start,         pos,
+                                              cap,     e->slid,    nice,          depth,         least,
+                                              far,     parse,      pairs,         e->mpos,       e->mlen,
+                                              e->mdist, e->lit_freq, e->dist_freq, e->fresh,     tokens,
+                                              parse >= GZIP_PARSE_LAZY ? recount : total, h3, h4,
+                                              GZIP_PAIRS - 2, start + GZIP_SPLIT_LEAST,
+                                              total >= GZIP_SPLIT_LEAST ? total - GZIP_SPLIT_LEAST : 0};
+
+                        deflate_parse_chain(address_of job);
+                        pairs = job.pairs;
+                        tokens = job.tokens;
+                        h3 = (p32)job.h3;
+                        h4 = (p32)job.h4;
+                        if (pairs >= GZIP_PAIRS - 2)
+                        {
+                                pos = job.pos;
+                                break;
+                        }
+                        if (job.pos != pos)
+                        {
+                                pos = job.pos;
+                                continue;
+                        }
                 }
                 if (most > GZIP_MAX_MATCH)
                         most = GZIP_MAX_MATCH;
