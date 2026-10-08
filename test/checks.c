@@ -83451,16 +83451,19 @@ static fn dictionaries(void)
    repeat offsets, the table, the sequence and literal counts and where the
    unparsed literals begin. */
 #include "codec_floor/reference/zstd_fast_parse.c"
+#include "codec_floor/reference/zstd_dfast_parse.c"
 
 static zstd_encoder fast_parse_a, fast_parse_b;
 static zstd_enc_seq fast_parse_seqs_a[ZSTD_ENC_SEQ_MAX], fast_parse_seqs_b[ZSTD_ENC_SEQ_MAX];
 static p8 fast_parse_lits_a[ZSTD_BLOCK_MAX + 64], fast_parse_lits_b[ZSTD_BLOCK_MAX + 64];
 static p32 fast_parse_table_a[1 << 16], fast_parse_table_b[1 << 16];
+static p32 fast_parse_chain_a[1 << 16], fast_parse_chain_b[1 << 16];
 static p8 fast_parse_data[ZSTD_BLOCK_MAX * 2 + 256];
 
-static fn fast_parse(void)
+/* The two walks, fast and then dfast, over the same kinds of blocks. */
+static fn fast_parse_walk(bool dfast)
 {
-        p32 random = 0x7f4a7c15u;
+        p32 random = dfast ? 0x1b873593u : 0x7f4a7c15u;
         bool same = true;
         positive total = 0;
 
@@ -83471,6 +83474,7 @@ static fn fast_parse(void)
                 positive const block = trial % 5 ? 12 + FAST_RANDOM() % 40000 : 12 + FAST_RANDOM() % (ZSTD_BLOCK_MAX - 12);
                 positive const size = history + block;
                 positive const hlog = 8 + FAST_RANDOM() % 9;
+                positive const slog = 8 + FAST_RANDOM() % 9;
                 p32 const from = (p32)(1 + history);
                 p32 const to = from + (p32)block;
                 p32 low = 1;
@@ -83514,14 +83518,17 @@ static fn fast_parse(void)
                 {
                         zstd_encoder address_to e = which ? address_of fast_parse_b : address_of fast_parse_a;
                         p32 address_to table = which ? fast_parse_table_b : fast_parse_table_a;
+                        p32 address_to chain = which ? fast_parse_chain_b : fast_parse_chain_a;
                         p32 sample = 0x2545f491u + (p32)trial;
 
                         memory_fill(e, 0, sizeof(*e));
                         e->base = fast_parse_data - 1;
                         e->hash = table;
+                        e->chain = chain;
                         e->seqs = which ? fast_parse_seqs_b : fast_parse_seqs_a;
                         e->lits = which ? fast_parse_lits_b : fast_parse_lits_a;
                         e->p.hash_log = (p8)hlog;
+                        e->p.chain_log = (p8)slog;
                         e->p.min_match = (p8)(trial % 7 ? 4 + trial % 5 : trial % 11);
                         e->p.target_length = (p32)(trial % 4 ? trial % 3 : 3 + trial % 130);
                         if (trial % 4 == 1)
@@ -83531,7 +83538,6 @@ static fn fast_parse(void)
                                 e->rep[0] = 1 + (p32)(FAST_RANDOM() % from);
                                 e->rep[1] = 1 + (p32)(FAST_RANDOM() % from);
                                 e->rep[2] = 1 + (p32)(FAST_RANDOM() % from);
-                                random = sample ^ random;
                         }
                         else
                         {
@@ -83540,6 +83546,7 @@ static fn fast_parse(void)
                                 e->rep[2] = 8;
                         }
                         memory_fill(table, 0, sizeof(fast_parse_table_a));
+                        memory_fill(chain, 0, sizeof(fast_parse_chain_a));
                         if (trial % 2)
                                 for (positive i = 0; i < ((positive)1 << hlog); i++)
                                 {
@@ -83547,19 +83554,23 @@ static fn fast_parse(void)
                                         sample ^= sample >> 17;
                                         sample ^= sample << 5;
                                         table[i] = sample % from;
+                                        chain[i] = (sample >> 7) % from;
                                 }
-                        //      The random state is the same for both runs: the
-                        //      repeat offsets were drawn before the second
-                        //      encoder is made, so make it from the first's.
+                        //      Both runs start from the first's draw.
                         if (which)
                         {
                                 memory_copy(e->rep, fast_parse_a.rep, sizeof(e->rep));
                                 memory_copy(table, fast_parse_table_a, sizeof(fast_parse_table_a));
+                                memory_copy(chain, fast_parse_chain_a, sizeof(fast_parse_chain_a));
                         }
                 }
                 {
-                        p8 address_to const reference = zstd_parse_fast_reference(address_of fast_parse_a, from, to, low);
-                        p8 address_to const got = zstd_parse_fast(address_of fast_parse_b, from, to, low);
+                        p8 address_to const reference = dfast
+                            ? zstd_parse_dfast_reference(address_of fast_parse_a, from, to, low)
+                            : zstd_parse_fast_reference(address_of fast_parse_a, from, to, low);
+                        p8 address_to const got = dfast
+                            ? zstd_parse_dfast(address_of fast_parse_b, from, to, low)
+                            : zstd_parse_fast(address_of fast_parse_b, from, to, low);
 
                         total += fast_parse_a.nseq;
                         same = same && reference - fast_parse_a.base == got - fast_parse_b.base &&
@@ -83567,7 +83578,8 @@ static fn fast_parse(void)
                                !memory_compare(fast_parse_a.rep, fast_parse_b.rep, sizeof(fast_parse_a.rep)) &&
                                !memory_compare(address_of fast_parse_a.freq, address_of fast_parse_b.freq, sizeof(fast_parse_a.freq)) &&
                                !memory_compare(fast_parse_lits_a, fast_parse_lits_b, fast_parse_a.nlit) &&
-                               !memory_compare(fast_parse_table_a, fast_parse_table_b, sizeof(fast_parse_table_a));
+                               !memory_compare(fast_parse_table_a, fast_parse_table_b, sizeof(fast_parse_table_a)) &&
+                               !memory_compare(fast_parse_chain_a, fast_parse_chain_b, sizeof(fast_parse_chain_a));
                         for (positive i = 0; same && i < fast_parse_a.nseq; i++)
                                 same = fast_parse_seqs_a[i].lit == fast_parse_seqs_b[i].lit &&
                                        fast_parse_seqs_a[i].match == fast_parse_seqs_b[i].match &&
@@ -83578,8 +83590,22 @@ static fn fast_parse(void)
                 }
         }
 #undef FAST_RANDOM
-        check("the fast parse leaves what the C parse left: sequences, literals, counts, repeats, table, anchor", same);
-        check("the fast parse trials found sequences to compare", total > 20000);
+        if (dfast)
+        {
+                check("the dfast parse leaves what the C parse left: sequences, literals, counts, repeats, tables, anchor", same);
+                check("the dfast parse trials found sequences to compare", total > 20000);
+        }
+        else
+        {
+                check("the fast parse leaves what the C parse left: sequences, literals, counts, repeats, table, anchor", same);
+                check("the fast parse trials found sequences to compare", total > 20000);
+        }
+}
+
+static fn fast_parse(void)
+{
+        fast_parse_walk(false);
+        fast_parse_walk(true);
 }
 
 b32 main(void)
