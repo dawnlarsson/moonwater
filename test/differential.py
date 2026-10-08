@@ -20339,16 +20339,6 @@ def shell_lang_wait_stopped_kill(rng):
         "echo \"st=$?\""))
 
 
-def shell_lang_read_timed_wakeup(rng):
-    """A timed read on an idle descriptor times out with status 142 in bash."""
-    return ("read-timed-wakeup", shell_BASH, shell_program(
-        "mkfifo rw.fifo",
-        "exec 3<>rw.fifo",
-        "read -t 0.2 x <&3",
-        "echo \"st=$?\"",
-        "exec 3<&-"))
-
-
 def shell_lang_read_trap_interrupt(rng):
     """A caught signal ends a blocked read in dash mode; bash reads on."""
     return ("read-trap-interrupt", ("dash", "sh"), shell_program(
@@ -20360,6 +20350,27 @@ def shell_lang_read_trap_interrupt(rng):
         "( sleep 0.3; kill -USR1 $$ ) >/dev/null 2>&1 &",
         "read x <&3",
         "echo \"st=$? x=$x\"",
+        "exec 3<&-"))
+
+
+def shell_lang_read_bad_descriptor(rng):
+    """A descriptor read cannot use is named, as bash names it."""
+    return ("read-bad-descriptor", shell_BASH, shell_program(
+        "read x <&- 2>&1",
+        "echo \"st=$?\"",
+        "read -u 7 x 2>&1",
+        "echo \"st=$?\"",
+        "read -u abc x 2>&1",
+        "echo \"st=$?\""))
+
+
+def shell_lang_read_timed_wakeup(rng):
+    """A timed read on an idle descriptor times out with status 142 in bash."""
+    return ("read-timed-wakeup", shell_BASH, shell_program(
+        "mkfifo rw.fifo",
+        "exec 3<>rw.fifo",
+        "read -t 0.2 x <&3",
+        "echo \"st=$?\"",
         "exec 3<&-"))
 
 
@@ -20573,8 +20584,9 @@ SHELL_FAMILIES = (
     shell_lang_process_redirection,
     shell_lang_trap_in_pipeline,
     shell_lang_wait_stopped_kill,
-    shell_lang_read_timed_wakeup,
     shell_lang_read_trap_interrupt,
+    shell_lang_read_bad_descriptor,
+    shell_lang_read_timed_wakeup,
     shell_lang_errexit_functions,
     shell_lang_heredoc_expansion,
     shell_lang_arithmetic_edges,

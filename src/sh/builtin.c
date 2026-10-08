@@ -14536,6 +14536,7 @@ COLD fn shell_read(writer write, string_address input)
         bool timed = false;
         bool timed_out = false;
         timespec timeout;
+        bool named_descriptor = false;
         timespec deadline;
         p8 stop_at = '\n';
         bool exact = false;
@@ -14604,10 +14605,17 @@ COLD fn shell_read(writer write, string_address input)
 
                         if (!read_nonnegative(value, b32_max,
                                               address_of asked))
+                        {
+                                if (shell_bash_compat)
+                                        return shell_answered(1,
+                                            "read: %s: invalid file descriptor specification\n",
+                                            value);
                                 return shell_answered(1, "read: bad descriptor: %s\n",
                                            value);
+                        }
 
                         descriptor = (b32)asked;
+                        named_descriptor = true;
                 }
                 else if (which == 'n' || which == 'N')
                 {
@@ -14844,6 +14852,22 @@ COLD fn shell_read(writer write, string_address input)
                                         ended = true;
                                 else
                                         failed = true;
+
+                                //      Bash says why a descriptor it cannot
+                                //      read is refused; the failure alone
+                                //      left a silent status 1.
+                                if (shell_bash_compat && got == -ERROR_BAD_DESCRIPTOR)
+                                {
+                                        shell_diagnostic_where();
+                                        if (named_descriptor)
+                                                string_format(log_error,
+                                                    "read: %p: invalid file descriptor: Bad file descriptor\n",
+                                                    (positive)descriptor);
+                                        else
+                                                string_format(log_error,
+                                                    "read: %p: read error: Bad file descriptor\n",
+                                                    (positive)descriptor);
+                                }
                         }
                         else
                         {
