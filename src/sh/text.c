@@ -40496,7 +40496,57 @@ static bool sort_memory(positive address_to total, positive address_to available
         return true;
 }
 
-static positive sort_default_budget()
+/*
+        The address space this process may still map under RLIMIT_AS, when it
+        has a limit: the limit less what is mapped now (VmSize, in kilobytes).
+        False when there is no limit. Every thread a sort starts maps eight
+        megabytes of its own, and the static arrays of the binary count too,
+        so a budget of half the limit left nothing for them and sort answered
+        "out of memory" where GNU sorted under the same cap.
+*/
+static bool sort_address_space(positive address_to free)
+{
+        positive limit[2];
+
+        if (system_call_4(syscall(prlimit64), 0, 9, 0, (positive)limit) < 0 ||
+            limit[0] == positive_max)
+                return false;
+
+        p8 text[2048];
+        bipolar handle = system_open_at(AT_FDCWD, "/proc/self/status", FILE_READ | O_CLOEXEC);
+        positive mapped = 0;
+
+        if (handle >= 0)
+        {
+                bipolar got = system_call_3(syscall(read), (positive)handle, (positive)text,
+                                            sizeof(text) - 1);
+                system_call_1(syscall(close), (positive)handle);
+
+                if (got > 0)
+                {
+                        text[got] = '\0';
+
+                        positive at = 0;
+
+                        while (at + 7 <= (positive)got && memory_compare(text + at, "VmSize:", 7))
+                                at++;
+                        if (at + 7 <= (positive)got)
+                        {
+                                at += 7;
+                                while (text[at] == ' ' || text[at] == '\t')
+                                        at++;
+                                while (byte_is_digit(text[at]))
+                                        mapped = mapped * 10 + (positive)(text[at++] - '0');
+                                mapped *= 1024;
+                        }
+                }
+        }
+
+        *free = limit[0] > mapped ? limit[0] - mapped : 0;
+        return true;
+}
+
+static positive sort_default_budget(positive address_space, bool limited)
 {
         positive size = positive_max;
         positive limit[2];
@@ -40511,6 +40561,11 @@ static positive sort_default_budget()
                 size = limit[0];
 
         size /= 2;
+
+        // Under an address-space limit, three eighths of what is left: the
+        // run, its line records and its write buffer each take a share.
+        if (limited && address_space / 8 * 3 < size)
+                size = address_space / 8 * 3;
 
         if (system_call_4(syscall(prlimit64), 0, 5, 0, (positive)limit) >= 0 &&
             limit[0] / 16 * 15 < size)
@@ -41625,7 +41680,19 @@ static b32 sort_inputs(string_address output)
         b32 inputs = text_input_count();
         sort_writer out;
 
-        sort_budget = sort_size ? sort_size : sort_default_budget();
+        positive address_space = 0;
+        bool limited = sort_address_space(address_of address_space);
+
+        // A thread per worker maps eight megabytes of its own, and under a
+        // limit those count against the same space as the run: sort goes on
+        // alone, as --parallel=1 does, and the budget leaves room for it.
+        if (limited)
+                sort_alone = true;
+        // An -S past what the limit leaves is cut to it, as GNU sort lets its
+        // buffer fall back when the memory is not there.
+        positive budget = sort_default_budget(address_space, limited);
+
+        sort_budget = sort_size && !(limited && sort_size > budget) ? sort_size : budget;
 
         for (b32 i = 0; i < inputs; i++)
         {
