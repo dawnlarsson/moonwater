@@ -1096,6 +1096,21 @@ static decimal awk_global_number(b32 which)
         return awk_to_number(address_of awk_globals[which].value);
 }
 
+// One more, for NR and FNR a record: a number the last bump left is a number
+// and nothing else, and the sum is written where it lies.
+static inline INLINE fn awk_global_bump(b32 which, decimal by)
+{
+        awk_value address_to cell = address_of awk_globals[which].value;
+
+        if (likely(cell->state == (AWK_HAS_NUMBER | AWK_NUMERIC) && !cell->text))
+        {
+                cell->number += by;
+                return;
+        }
+
+        awk_set_global_number(which, awk_global_number(which) + by);
+}
+
 /*
         Regular expressions, out of text.c's machine.
 
@@ -1450,6 +1465,16 @@ static fn awk_field_from_piece(awk_value address_to field,
 //      line. With that and the fields it names, parsed, what it can ask a
 //      record for is known before the first one is read.
 static bool awk_nf_named;
+// Whether the program names RS anywhere, which keeps a record from being
+// known to end at a newline for as long as the program runs.
+static bool awk_rs_named;
+// The string every record that is selected has in it (see awk_gate_prepare),
+// and the last record passed over because it had not.
+static const_string awk_gate_text;
+static positive awk_gate_size;
+static positive2 awk_gate_anchors;
+static bool awk_gate_on;
+static awk_text address_to awk_gate_tail;
 
 static fn awk_split_record()
 {
@@ -2276,10 +2301,21 @@ static b32 awk_reader_end(awk_reader address_to which)
         return answer;
 }
 
+// The byte that ends a record, once the program can no longer change what RS
+// is (it names no RS and what was given on the command line and in BEGIN has
+// been given), where asking for it costs a call a record; -1 until then.
+static int awk_rs_fixed = -1;
+static p8 awk_rs_byte[2];
+
 static b32 awk_read_record(awk_reader address_to which, awk_text address_to address_to into)
 {
-        positive length;
-        string_address separator = awk_separator(awk_where_rs, address_of length);
+        positive length = 1;
+        string_address separator = (string_address)awk_rs_byte;
+
+        if (likely(awk_rs_fixed >= 0))
+                awk_rs_byte[0] = (p8)awk_rs_fixed;
+        else
+                separator = awk_separator(awk_where_rs, address_of length);
 
         if (!length)
         {
@@ -3787,6 +3823,9 @@ static b32 awk_resolve(awk_text address_to name)
 
         if (which == awk_where_nf)
                 awk_nf_named = true;
+
+        if (which == awk_where_rs)
+                awk_rs_named = true;
 
         return which;
 }
@@ -6679,6 +6718,13 @@ static bool awk_assignment(string_address text, positive length)
                 awk_nf_written(awk_whole(awk_global_number(where)));
         }
 
+        // An operand between the files can say where records end from here on.
+        if (where == awk_where_rs)
+        {
+                awk_rs_fixed = -1;
+                awk_gate_on = false;
+        }
+
         awk_text_drop(name);
         return true;
 }
@@ -6812,15 +6858,198 @@ static b32 awk_main_next_record(awk_text address_to address_to into)
                 awk_reading_main = false;
                 if (answer > 0)
                 {
-                        awk_set_global_number(awk_where_nr, awk_global_number(awk_where_nr) + 1);
-                        awk_set_global_number(awk_where_fnr,
-                                              awk_global_number(awk_where_fnr) + 1);
+                        awk_global_bump(awk_where_nr, 1);
+                        awk_global_bump(awk_where_fnr, 1);
+                        if (unlikely(awk_gate_tail))
+                        {
+                                awk_text_drop(awk_gate_tail);
+                                awk_gate_tail = null;
+                        }
                         return true;
                 }
                 if (answer < 0)
                         return answer;
 
                 awk_close_main();
+        }
+}
+
+/*
+        Records no rule can select.
+
+        A program of one rule with a pattern, and BEGIN and END rules besides,
+        selects a record only when the pattern is true of it, and a pattern
+        that is /re/, $0 ~ /re/, $3 ~ /re/ or $3 == "string" (or one of
+        those and something else, on the left of an &&) is true of no record
+        that has not got a string in it: the one the expression cannot match
+        without, which the compiler knows, or the string itself. The records
+        before the first that holds it are taken from the reader in one
+        pass, counted into NR and FNR, and never made into texts or split
+        into fields; the one that holds it is read as ever.
+
+        $0 and NF in an END action are the last record read, so when the
+        input ends in records that were passed over, the last of them is
+        kept (it is copied before the reader moves on) and becomes $0 for END
+        as the record it was. The newline has to be what ends a record,
+        and nothing in the program may change that.
+*/
+static bool awk_gate_hints(const regex_program address_to program)
+{
+        if (!program || !program->hints->literal_length)
+                return false;
+
+        awk_gate_text = (const_string)program->hints->literal;
+        awk_gate_size = program->hints->literal_length;
+        awk_gate_anchors = program->hints->literal_anchors;
+        return true;
+}
+
+// Whether the node is $0 or a field by number: a string every record that
+// has the field in it has in it.
+static bool awk_gate_subject(awk_node address_to node)
+{
+        return node->kind == N_FIELD && node->a->kind == N_NUMBER;
+}
+
+static bool awk_gate_of(awk_node address_to node)
+{
+        switch (node->kind)
+        {
+        case N_GROUP:
+                return awk_gate_of(node->a);
+
+        case N_REGEX:
+                return awk_gate_hints(node->program);
+
+        case N_MATCH:
+                if (node->sub || !awk_gate_subject(node->a))
+                        return false;
+
+                // A string used as a pattern is compiled when it is first
+                // asked, and a bad one is the first record's to report.
+                return node->b->kind == N_REGEX && awk_gate_hints(node->b->program);
+
+        case N_COMPARE:
+        {
+                bool subject_first = awk_gate_subject(node->a);
+                awk_node address_to constant = subject_first ? node->b : node->a;
+
+                if (node->sub != T_EQUAL || !awk_gate_subject(subject_first ? node->a : node->b) ||
+                    constant->kind != N_STRING || !constant->text->length)
+                        return false;
+
+                awk_gate_text = (const_string)constant->text->text;
+                awk_gate_size = constant->text->length;
+                awk_gate_anchors = memory_search_prepare(awk_gate_text, awk_gate_size, false);
+                return true;
+        }
+
+        // The right side is only asked when the left is true, so it is the
+        // left that says which records are never asked.
+        case N_AND:
+                return awk_gate_of(node->a);
+        }
+
+        return false;
+}
+
+static fn awk_gate_prepare()
+{
+        awk_gate_on = false;
+
+        positive length;
+        string_address separator = awk_separator(awk_where_rs, address_of length);
+        awk_rule address_to only = null;
+
+        awk_rs_fixed = !awk_rs_named && length == 1 ? separator[0] : -1;
+
+        if (awk_rs_named || length != 1 || separator[0] != '\n')
+                return;
+
+        for (b32 i = 0; i < awk_rule_count; i++)
+                if (awk_rules[i].kind == RULE_PLAIN)
+                {
+                        if (only)
+                                return;
+
+                        only = address_of awk_rules[i];
+                }
+
+        if (!only || !only->first || only->second)
+                return;
+
+        awk_gate_on = awk_gate_of(only->first);
+}
+
+// The records the reader holds that come before the first the string is in,
+// passed over, and the reader filled for more of them while it has none
+// that holds it. Where it stops the next record is the one to read.
+static fn awk_gate_skip()
+{
+        awk_reader address_to which = address_of awk_main;
+
+        if (!awk_main_live)
+                return;
+
+        for (;;)
+        {
+                if (which->at >= which->filled)
+                {
+                        if (!awk_reader_fill(which))
+                                return;
+
+                        continue;
+                }
+
+                p8 address_to from = which->data + which->at;
+                p8 address_to last = memory_last_of(from, '\n', which->filled - which->at);
+
+                if (!last)
+                {
+                        if (!awk_reader_fill(which))
+                                return;
+
+                        continue;
+                }
+
+                positive whole = (positive)(last + 1 - from);
+                string_address found = whole < awk_gate_size
+                    ? null
+                    : memory_search_prepared(from, whole, awk_gate_text, awk_gate_size,
+                                             awk_gate_anchors.x, awk_gate_anchors.y);
+                positive inert = whole;
+
+                if (found)
+                {
+                        p8 address_to before = memory_last_of(from, '\n', (positive)((p8 address_to)found - from));
+
+                        inert = before ? (positive)(before + 1 - from) : 0;
+                }
+
+                if (inert)
+                {
+                        positive passed = memory_count(from, inert, '\n');
+
+                        awk_global_bump(awk_where_nr, (decimal)passed);
+                        awk_global_bump(awk_where_fnr, (decimal)passed);
+
+                        // The last of them is the record END would see, and
+                        // the reader may move it before then.
+                        if (inert == whole)
+                        {
+                                p8 address_to line = memory_last_of(from, '\n', inert - 1);
+
+                                line = line ? line + 1 : from;
+                                awk_text_drop(awk_gate_tail);
+                                awk_gate_tail = awk_text_new((string_address)line,
+                                                             (positive)(last - line));
+                        }
+
+                        which->at += inert;
+                }
+
+                if (inert < whole)
+                        return;
         }
 }
 
@@ -6855,9 +7084,14 @@ static b32 awk_run_rules()
                 if (awk_rules[i].kind != RULE_BEGIN)
                         wanted = true;
 
+        awk_gate_prepare();
+
         while (answer != RUN_EXIT && wanted)
         {
                 awk_text address_to record;
+
+                if (awk_gate_on)
+                        awk_gate_skip();
 
                 b32 got = awk_main_next_record(address_of record);
                 if (got <= 0)
@@ -6933,6 +7167,13 @@ static b32 awk_run_rules()
                         break;
 
                 answer = RUN_ON;
+        }
+
+        // The last record read is $0 in END, passed over or not.
+        if (awk_gate_tail)
+        {
+                awk_record_install(awk_gate_tail);
+                awk_gate_tail = null;
         }
 
         awk_exiting = false;

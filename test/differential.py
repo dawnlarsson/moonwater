@@ -21646,6 +21646,134 @@ def text_sed_gate(farm):
     return passed, len(cases), notes
 
 
+#       A program of one rule whose pattern is true only of a record with a
+#       string in it passes the records without the string over without
+#       making them: they still count into NR and FNR, and the last of them is
+#       the $0 of END. The inputs put the string at the edges of every size of
+#       read, end in records that were passed over or in one that was not,
+#       and the programs ask for the patterns that take the shortcut, the
+#       ones that do not, and what could tell the difference (NR, FNR, NF
+#       and $0 in END, getline, next, exit, a second file, RS).
+_AWK_GATE_PROGRAMS = (
+    ("/needle/",), ("/needle/ {print $1}",), ("/needle/ {n++} END {print n+0, NR}",),
+    ("/needle/ {n++} END {print n+0, $0, NF, NR, FNR}",), ("END {print $0}",),
+    ("/needle/ {print NR\": \"$0}",), ("-F:", "/beta:0/ {print $2}"), ("$2 == \"needle\"",),
+    ("$1 == \"x\" {print NR}",), ("$0 ~ /ab/",), ("$0 ~ \"ab\"",), ("$2 ~ /needle/ {print $2}",),
+    ("/ab/ && /x/",), ("/a.b/ {c++} END {print c+0}",), ("/foo/ {print; next}",),
+    ("/foo/ {getline; print \"got\", $0}",), ("/needle/ {exit} END {print NR}",),
+    ("BEGIN {RS=\"\\n\"} /needle/ {n++} END {print n+0}",), ("/needle/ {RS=\";\"}",),
+    ("/needle/ || /ab/",), ("!/needle/",), ("NR==2 {print} /needle/",), ("/x/ {print FILENAME, FNR}",),
+    ("/\u00e9/",), ("/needle/ {$2 = \"Z\"; print}",), ("/needle/ {print NF}",), ("END {print NR, FNR, NF}",),
+)
+
+
+def awk_gate(farm):
+    import shutil
+    import subprocess
+    import tempfile
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    reference = shutil.which("gawk", path=os.defpath)
+    candidate = Path(farm) / "awk"
+    if not reference or not candidate.exists():
+        return 0, 1, ["the awk cells need both gawk and a candidate awk"]
+    environment = dict(os.environ, LC_ALL="C")
+    rnd = random.Random(0xA3C6A7E)
+    needles = ("needle", "ab", "x", "beta:0", "Q", "\u00e9", "a.b", "foo")
+
+    def lines_of(count, density):
+        lines = []
+        for _ in range(count):
+            width = rnd.choice((0, 0, 1, 3, 10, 20, 20, 40, 120, 300))
+            line = "".join(rnd.choice("abcdefgh ,:.-") for _ in range(width))
+            if rnd.random() < density:
+                cut = rnd.randrange(len(line) + 1)
+                line = line[:cut] + rnd.choice(needles) + line[cut:]
+            if rnd.random() < 0.02:
+                line += "\r"
+            lines.append(line)
+        return lines
+
+    inputs = []
+    for density in (0.0, 0.01, 0.2, 1.0):
+        lines = lines_of(rnd.choice((60, 700, 4000)), density)
+        inputs.append((f"d{density}", ("\n".join(lines) + "\n").encode()))
+        inputs.append((f"d{density}-nonl", "\n".join(lines).encode()))
+    inputs.append(("nul", b"abc\0needle\nplain\n\0\nxx needle\n"))
+    inputs.append(("long", b"z" * 200000 + b"needle" + b"z" * 1000 + b"\n" + b"plain\n" * 50 + b"y" * 300000 + b"\n"))
+    inputs.append(("tail", b"a needle\nb\nc\nd tail\n"))
+    inputs.append(("empty", b""))
+    big = lines_of(30000, 0.03)
+    inputs.append(("big", ("\n".join(big) + "\n").encode() * 3))
+
+    with tempfile.TemporaryDirectory(prefix="awk-gate-") as temporary:
+        root = Path(temporary)
+        for name, data in inputs:
+            (root / name).write_bytes(data)
+        (root / "second").write_bytes(b"tail needle\nlast\n")
+        cases = []
+        for name, data in inputs:
+            for program in _AWK_GATE_PROGRAMS:
+                cases.append((name, program, "file"))
+                if len(data) < 2000000:
+                    cases.append((name, program, "pipe"))
+        cases.append(("d0.2", ("/needle/ {n++} END {print n+0, $0, NR, FNR}",), "files"))
+        cases.append(("tail", ("END {print $0, NR}",), "files"))
+
+        def run(case):
+            name, program, how = case
+            answers = []
+            for binary in (reference, candidate):
+                command = [str(binary), *program]
+                if how == "pipe":
+                    child = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                             stderr=subprocess.PIPE, cwd=temporary, env=environment)
+                    data = (root / name).read_bytes()
+                    feeder_rnd = random.Random(len(data))
+
+                    def feed():
+                        try:
+                            at = 0
+                            while at < len(data):
+                                step = feeder_rnd.choice((7, 100, 4096, 65536, 70000))
+                                child.stdin.write(data[at:at + step])
+                                child.stdin.flush()
+                                at += step
+                        except OSError:
+                            pass
+                        try:
+                            child.stdin.close()
+                        except OSError:
+                            pass
+
+                    feeder = threading.Thread(target=feed)
+                    feeder.start()
+                    out, err = child.stdout.read(), child.stderr.read()
+                    child.wait()
+                    feeder.join()
+                    answers.append((child.returncode, out, err))
+                else:
+                    operands = [name, "second", name] if how == "files" else [name]
+                    result = subprocess.run(command + operands, cwd=temporary, env=environment,
+                                            capture_output=True, timeout=60)
+                    answers.append((result.returncode, result.stdout, result.stderr))
+            return case, answers
+
+        passed, notes = 0, []
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for case, answers in pool.map(run, cases):
+                if answers[0][:2] == answers[1][:2]:
+                    passed += 1
+                elif len(notes) < 40:
+                    notes.append(f"awk {shlex.join(case[1])} ({case[0]}, {case[2]}): reference={answers[0][0]}"
+                                 f" ({len(answers[0][1])} bytes), candidate={answers[1][0]}"
+                                 f" ({len(answers[1][1])} bytes)")
+    return passed, len(cases), notes
+
+
+AWK_CHECKS = (awk_gate,)
+
 TEXT_CHECKS = (text_grep_encoding, text_grep_engine, text_grep_many, text_sed_gate, text_file_failures, text_collation)
 
 _TEXT_GREP_OPERANDS = (
