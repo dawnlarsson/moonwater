@@ -12839,11 +12839,11 @@ HOT fn shell_test(writer write, string_address input)
         //      from every shell it is compared against.
         if (bracket)
         {
-                return_if(argc < 2, shell_answered(2, "%s: missing `]'\n", name));
+                return_if(argc < 2, shell_refuse(2, shell_bash_compat ? "%s: missing `]'\n" : "%s: missing ]\n", name));
 
                 last = shell_argv[argc - 1];
                 if (!last || string_not(last, ']') || string_get(last + 1))
-                        return shell_answered(2, "%s: missing `]'\n", name);
+                        return shell_refuse(2, shell_bash_compat ? "%s: missing `]'\n" : "%s: missing ]\n", name);
 
                 test_stop = argc - 1;
         }
@@ -12869,6 +12869,18 @@ HOT fn shell_test(writer write, string_address input)
                 }
         }
 
+        /* Two words that are not a test primary. Bash names the first as
+           not a unary operator; dash names the second when it is a binary
+           operator still wanting its right operand, and otherwise the first. */
+        if (count == 2 && shell_bash_compat)
+                return shell_refuse(2, "%s: %s: unary operator expected\n",
+                    shell_argv[0], shell_argv[test_at]);
+        if (count == 2 && test_is_binary(shell_argv[test_at + 1]))
+                return shell_refuse(2, "%s: %s: argument expected\n",
+                    shell_argv[0], shell_argv[test_at + 1]);
+        if (count == 2)
+                return shell_refuse(2, "%s: %s: unexpected operator\n",
+                    shell_argv[0], shell_argv[test_at]);
 
         value = test_expression();
 
@@ -12876,6 +12888,10 @@ HOT fn shell_test(writer write, string_address input)
         {
                 return_if(test_said, shell_answer(2));
 
+                // Bash names a -a or -o whose right operand is missing.
+                if (shell_bash_compat && test_at >= test_stop)
+                        return shell_refuse(2, "%s: argument expected\n",
+                            shell_argv[0]);
 
                 return shell_refuse(
                     2, test_bad ? "%s: %s: unexpected operator\n"
@@ -15379,9 +15395,18 @@ COLD fn shell_getopts(writer write, string_address input)
                         // complaint, which is what a script that prints its
                         // own usage sets before the loop.
                         if (getopts_complains())
-                                string_format(log_error,
-                                              "getopts: illegal option -- %s\n",
-                                              value);
+                        {
+                                // Bash names the shell and says it plainly;
+                                // dash says `Illegal option -x`.
+                                if (shell_bash_compat)
+                                        string_format(log_error,
+                                                      "%s: illegal option -- %s\n",
+                                                      shell_where_self(), value);
+                                else
+                                        string_format(log_error,
+                                                      "Illegal option -%s\n",
+                                                      value);
+                        }
                 }
 
                 return shell_getopts_answer(name, "?", word, step, next,
@@ -21431,7 +21456,9 @@ COLD fn shell_let(writer write, string_address input)
         (void)write;
         (void)input;
 
-        return_if(shell_argc < 2, shell_answer(1));
+        return_if(shell_argc < 2,
+                  shell_bash_compat ? shell_refuse(1, "let: expression expected\n")
+                                    : shell_answer(1));
 
         at = 1;
 

@@ -2274,7 +2274,14 @@ static fn job_line(writer write, job_entry address_to entry, bool detailed)
         string_format(write, "[%p]%s", entry->number, job_mark_of(entry));
 
         if (detailed)
-                string_format(write, " %b ", job_first_child(entry));
+        {
+                // Bash prints the pid in a field five wide, after one space.
+                positive child = job_first_child(entry);
+
+                string_format(write, " ");
+                writer_fill_bulk(write, difference_or_zero(5, positive_digits((positive)child)), ' ');
+                string_format(write, "%b ", child);
+        }
         else
                 string_format(write, "  ");
 
@@ -2381,7 +2388,10 @@ fn job_report()
                         continue;
                 }
 
-                shell_wait_drop(entry->last);
+                /* Bash keeps the status of a finished job for a wait of its
+                   pid after the report, so only dash forgets the row here. */
+                if (!shell_bash_compat)
+                        shell_wait_drop(entry->last);
                 job_drop_at(at);
         }
 
@@ -2691,7 +2701,8 @@ fn shell_jobs(writer write, string_address input)
                    then does not. */
                 if (show && entry->state == JOB_FINISHED)
                 {
-                        shell_wait_drop(entry->last);
+                        if (!shell_bash_compat)
+                                shell_wait_drop(entry->last);
                         job_drop_at(at);
                         if (!newest)
                                 continue;
