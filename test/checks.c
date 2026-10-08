@@ -83621,6 +83621,26 @@ b32 main(void)
         roundtrip();
         job_widths();
         fast_parse();
+#if X64
+        {
+                p8 const probed = cpu_hash_probed;
+                p8 const mulx = cpu_has_mulx;
+
+                //      The sequence decoder and encoder without BMI2 are what
+                //      the kernel and older processors run and a processor with
+                //      it never would, so the decoding and round trip checks
+                //      are walked once more with the flag down.
+                cpu_hash_probed = 1;
+                cpu_has_mulx = 0;
+                frames();
+                sequence_capacity();
+                roundtrip();
+                pull_block_shapes();
+                dictionaries();
+                cpu_hash_probed = probed;
+                cpu_has_mulx = mulx;
+        }
+#endif
         return test_report(null);
 }
 #endif /* CHECK_zstd */

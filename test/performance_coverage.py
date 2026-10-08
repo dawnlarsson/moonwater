@@ -593,8 +593,10 @@ zstd_bits_open zstd_bits_reload zstd_bits_get
 ''', 'backward bitstream open, reload, and get against marked and empty streams')
 
 cover('correctness_only', 'src/sh/zstd.c', '''
-zstd_huffman_stream zstd_huffman_4x zstd_sequences_run
-''', 'Huffman and sequence kernels called from the RFC 8878 decoder')
+zstd_huffman_stream zstd_huffman_4x zstd_sequences_run zstd_sequences_run_bmi2
+''', 'Huffman and sequence kernels called from the RFC 8878 decoder, the sequence '
+     'one in its BMI2 body and (test/checks.c#CHECK_zstd walks the flag down) its baseline',
+      anchors={'zstd_sequences_run_bmi2': 'zstd_sequences_run'})
 
 cover('correctness_only', 'test/checks.c#CHECK_native_reserve', '''
 memory_growth memory_release
