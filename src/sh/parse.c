@@ -274,6 +274,13 @@ static positive parse_memo_room;
 static positive parse_memo_epoch HOT_DATA = 1;
 static bool parse_memo_on;
 
+/* The same memo for a case, kept apart from parse_memos because a case may be
+   the first command of a list that has its own. Each entry is the case as far
+   as its last complete item: the node, the items so far and where the next
+   one begins. */
+static parse_memo address_to parse_case_memos;
+static positive parse_case_memo_room;
+
 /* Live marks and saved marks intentionally have one shape. One assignment is
    the complete nest transition, so future state cannot drift between entry
    and return. */
@@ -2742,26 +2749,53 @@ static b32 parse_for(b32 kind)
 
 static b32 parse_case()
 {
-        b32 index = parse_node_new(NODE_CASE);
+        b32 index = 0;
         b32 head = 0;
         b32 tail = 0;
+        b32 start = parse_position;
+        b32 here_start = (b32)here_taken;
 
         if (parse_state)
                 return 0;
 
-        parse_position++;
+        //      A case read again by a parse of the same tokens resumes at the
+        //      item after the last one it finished. Read from its first
+        //      pattern every time, a case of n lines took n times its items.
+        if (parse_memo_on && (positive)start < parse_case_memo_room &&
+            parse_case_memos[start].epoch == parse_memo_epoch &&
+            parse_case_memos[start].here_start == here_start)
+        {
+                parse_memo address_to memo = parse_case_memos + start;
 
-        if (!parse_want_word(index))
-                return 0;
+                index = memo->index;
+                head = memo->head;
+                tail = memo->tail;
+                parse_position = memo->at;
+                here_taken = (positive)memo->here_at;
+                parse_want_push_for("esac", index);
+        }
+        else
+        {
+                index = parse_node_new(NODE_CASE);
 
-        parse_skip_newlines();
+                if (parse_state)
+                        return 0;
 
-        if (!parse_expect_word("in"))
-                return 0;
+                parse_position++;
 
-        parse_skip_newlines();
+                if (!parse_want_word(index))
+                        return 0;
 
-        parse_want_push_for("esac", index);
+                parse_skip_newlines();
+
+                if (!parse_expect_word("in"))
+                        return 0;
+
+                parse_skip_newlines();
+
+                parse_want_push_for("esac", index);
+        }
+
         while (!parse_word_is(0, "esac"))
         {
                 b32 item;
@@ -2833,6 +2867,11 @@ static b32 parse_case()
                         head = item;
 
                 tail = item;
+
+                if (parse_memo_on && shell_array_room(parse_case_memos, parse_case_memo_room, (positive)start + 1))
+                        parse_case_memos[start] = (parse_memo){
+                            parse_memo_epoch, index, head, tail, parse_position,
+                            here_start, (b32)here_taken};
         }
 
         parse_position++;
