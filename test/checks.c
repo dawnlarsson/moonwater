@@ -114380,7 +114380,7 @@ static fn floor_deflate_parse(void)
         //      before the first (a candidate, a window, a sixteen byte compare) is a
         //      fault and not a quiet wrong answer.
         p8 address_to guarded = floor_pages(24);
-        positive usable = 22 * 4096;
+        positive usable = 22 * FLOOR_PAGE;
 
         if (!guarded)
         {
@@ -114437,7 +114437,7 @@ static fn floor_deflate_parse(void)
                                 at++;
                         }
                 }
-                p8 address_to input = trial % 2 ? guarded + 4096 : guarded + 4096 + usable - total;
+                p8 address_to input = trial % 2 ? guarded + FLOOR_PAGE : guarded + FLOOR_PAGE + usable - total;
 
                 memory_copy(input, data, total);
                 start = pos - FLOOR_RANDOM() % (pos + 1) % 5000;
@@ -114496,7 +114496,7 @@ static fn floor_deflate_parse(void)
                        !memory_compare(dist_got, dist_want, sizeof(dist_got));
         }
 #undef FLOOR_RANDOM
-        memory_free(guarded, 24 * 4096);
+        memory_free(guarded, 24 * FLOOR_PAGE);
         check("deflate parse fast agrees with the position at a time walk: pairs, counts, table, stopping place", same && anything);
 }
 
