@@ -24995,6 +24995,13 @@ UTIL_LINUX_UTILITIES = (
             operands=(("lock", UL_OBS, "echo"), ("lock", UL_OBS, "flock_nb"), ("lock", "-c", "echo held"), ("-n", "-E", "42", "lock", "true"),
                       ("-w", "0.05", "-E", "42", "lock", "true"), ("--close", "lock", UL_OBS, "flock_nb"), ("lock",)),
             stdin=("empty",), max_flags=3),
+    #   A command that is closed is waited for with what the program printed
+    #   before the close already out: the command's own line comes after
+    #   "got", as gawk's does.
+    Utility("awk_live", modes=("bash",), stderr="loose",
+            script=ul_script("awk", "", ""),
+            operands=(("BEGIN { c = \"cat >/dev/null; sleep 1; echo child\"; print \"in\" | c; print \"got\"; close(c); print \"end\" }",),),
+            stdin=("empty",), max_flags=0),
     #   -w sleeps in the kernel until the holder lets go: the waiter's own
     #   voluntary context switches count the wake-up, which is a handful where
     #   a poll of the lock is one for every nap across the two-second hold.

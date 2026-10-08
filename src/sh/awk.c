@@ -2266,6 +2266,14 @@ static b32 awk_close_named(awk_text address_to name)
                     !awk_text_is(which->name, name->text, name->length))
                         continue;
 
+                //      A command closed by name is waited for with standard
+                //      output already out, as gawk has it: what the program
+                //      printed before the close does not wait for the
+                //      command to finish. The exit does not do this: a
+                //      command still on a pipe writes before standard output
+                //      goes out, which awk_leave keeps.
+                if (which->kind == AWK_TO_PIPE)
+                        awk_writer_flush(address_of awk_standard_out);
                 answer = awk_writer_close(which);
         }
 
@@ -2277,6 +2285,8 @@ static b32 awk_close_named(awk_text address_to name)
                     !awk_text_is(which->name, name->text, name->length))
                         continue;
 
+                if (which->pipe)
+                        awk_writer_flush(address_of awk_standard_out);
                 answer = awk_reader_close(which);
         }
 
