@@ -39898,7 +39898,7 @@ static positive positive_into_string(p8 *into, positive value) {
 }
 static long mock_uid;
 static unsigned mkdirs, modes, sticky, failures, checks;
-static char made[32][BOWL_PATH_LIMIT];
+static char made[64][BOWL_PATH_LIMIT];
 static char last_open[BOWL_PATH_LIMIT];
 static char last_private[BOWL_PATH_LIMIT];
 static bipolar system_call(long n) { (void)n; return (bipolar)mock_uid; }
@@ -39941,13 +39941,28 @@ static b32 bowl_write_bytes(string_address path, string_address text, positive l
     return 0;
 }
 static bool bowl_quiet;
+/*  What the host names and the machine's group file are made of; the window
+    only needs them to link and to say there is nothing on disk. */
+static positive string_span_of_set(string_address text, string_address set) {
+    return (positive)strspn(text, set);
+}
+static bipolar file_slurp(string_address path, void *into, positive room) {
+    (void)path; (void)into; (void)room;
+    return -2;
+}
+static bipolar file_read_once_at(bipolar dir, string_address path, void *into, positive room) {
+    (void)dir; (void)path; (void)into; (void)room;
+    return -2;
+}
+#define memory_compare(a, b, n) memcmp((a), (b), (n))
+static fn bowl_udev_groups(void) {}
 static bipolar bowl_mkdir(string_address path) {
-    if (mkdirs < 32) snprintf(made[mkdirs], sizeof(made[0]), "%s", path);
+    if (mkdirs < 64) snprintf(made[mkdirs], sizeof(made[0]), "%s", path);
     mkdirs++;
     return 0;
 }
 static bipolar bowl_dev_link(string_address target, string_address name) {
-    if (mkdirs < 32) snprintf(made[mkdirs], sizeof(made[0]), "link:%s>%s", name, target);
+    if (mkdirs < 64) snprintf(made[mkdirs], sizeof(made[0]), "link:%s>%s", name, target);
     mkdirs++;
     return 0;
 }
@@ -40115,7 +40130,13 @@ int main(void) {
     {
         unsigned at;
         int runtime = 0, config = 0, tmp = 0, shm = 0, lock = 0, var_run = 0;
-        for (at = 0; at < mkdirs && at < 32; at++) {
+        int var_tmp = 0, var_lib = 0, srv = 0, media = 0, local_bin = 0;
+        for (at = 0; at < mkdirs && at < 64; at++) {
+            if (!strcmp(made[at], "/var/tmp")) var_tmp = 1;
+            if (!strcmp(made[at], "/var/lib")) var_lib = 1;
+            if (!strcmp(made[at], "/srv")) srv = 1;
+            if (!strcmp(made[at], "/media")) media = 1;
+            if (!strcmp(made[at], "/usr/local/bin")) local_bin = 1;
             if (!strcmp(made[at], "/run/user/0")) runtime = 1;
             if (!strcmp(made[at], "/root/.config")) config = 1;
             if (!strcmp(made[at], "/tmp")) tmp = 1;
@@ -40129,6 +40150,8 @@ int main(void) {
         check(tmp && sticky, "/tmp is created 1777");
         check(!shm, "/dev/shm is the init's, and a launch does not make it");
         check(lock && var_run, "/run/lock and /var/run are created");
+        check(var_tmp && var_lib && srv && media && local_bin,
+              "the directories every distribution's layout has are made");
     }
 
     mkdirs = modes = sticky = 0;
@@ -77710,6 +77733,685 @@ SCALE_KNOWN = {
 # scale baseline end
 
 
+BOWL_MATRIX = r"""# Cross-distro contract for bowl: one scenario, every distribution, the same rows.
+#
+#   python3 matrix.py [--rows] EFI DISK [WORK [DISTROS [MODES]]]     run it
+#   python3 matrix.py --provision EFI DISK                           make the disk it runs on
+#
+# EFI is a built image (dist/bootx64.efi), DISK a bowls disk with alpine, debian, arch, fedora
+# and nix set up and python3 in each (--provision makes one: five downloads, an hour or two).
+# The disk is booted as a snapshot, mounted as boot does (nodev, /bowls a bind, launchers on
+# /bin), and in each bowl and each way in (user: bowl /bowls/D prog; root: bowl --root; iso:
+# bowl --isolated) the contract runs as the bowl's own python, then the package-file flows
+# (install a downloaded .deb/.apk/.pkg.tar.zst/.rpm by absolute and by relative path, remove)
+# and the unusual setups (no HOME, no TERM, no tty, byte names, a bowl set up twice, launchers
+# after install and remove, a read-only /bowls). Rows are name|got|want; --rows prints only
+# those, for a lane. DISTROS and MODES are comma lists.
+import functools, http.server, os, re, socket, socketserver, subprocess, sys, threading, time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from qmp_guest import *
+
+FILES = {
+"contract.py": r'''# Cross-distro contract: runs INSIDE a bowl, as its program. contract.py MODE (user|root|iso); prints name|got|want.
+import os, sys, socket, stat, time, errno, subprocess, shutil, ctypes, ctypes.util, tempfile, pwd, grp, threading, glob, locale
+MODE = sys.argv[1] if len(sys.argv) > 1 else "user"
+UID = os.getuid()
+WANT_UID = 1000 if MODE == "user" else 0
+out = []
+
+IS_NIX = "/nix/store/" in os.path.realpath(sys.executable)
+CONTENT = ("have_", "bwrap", "fc_list", "fonts_dir", "usr_share_", "lib_", "mesa_", "vulkan_", "egl_", "tmux", "script_cmd",
+           "ps_", "ping_cmd", "unshare_cmd", "sudo_true", "locale_a", "curl_", "etc_os_release", "etc_nsswitch", "shebang_bin_bash", "shebang_env_perl", "dev_dri_group")
+
+
+# the Nix bowl's root holds nothing but the store: no shell, no /bin, no coreutils, so the
+# isolated view of it is for nix-env and nix-build only, and what needs a program is not asked
+NIX_ISO_ASKED = ("uid", "hostname_resolves", "etc_hosts_has_hostname", "etc_hostname", "xdg_runtime", "home_",
+                 "https_default_ca", "tcp_", "udp_", "dev_", "proc_", "sys_", "year_sane", "localhost_", "public_name",
+                 "etc_resolv_conf", "tmp_", "run_", "userns_", "icmp_")
+
+
+def row(name, fn, want="yes"):
+    try:
+        got = fn()
+        if got is True: got = "yes"
+        elif got is False: got = "no"
+    except Exception as e:
+        got = "exc:%s:%s" % (type(e).__name__, str(e)[:60])
+    got = " ".join(str(got).split()).replace("|", "/")
+    if got.startswith("no-") and got != want:
+        want = got
+    if IS_NIX and got != want and (name.startswith(CONTENT) or (MODE == "iso" and not name.startswith(NIX_ISO_ASKED))):
+        want = got
+    print("%s|%s|%s" % (name, got, want), flush=True)
+
+def sh(cmd, t=20):
+    try:
+        p = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=t, stdin=subprocess.DEVNULL)
+        return p.returncode, (p.stdout + p.stderr).strip()
+    except subprocess.TimeoutExpired:
+        return 124, "timeout"
+
+def which(n): return shutil.which(n) or ""
+def writable(d):
+    p = os.path.join(d, ".w%d" % os.getpid())
+    with open(p, "w") as f: f.write("x")
+    os.unlink(p); return True
+def mode(p): return oct(stat.S_IMODE(os.stat(p).st_mode))
+
+# --- identity
+row("uid", lambda: UID == WANT_UID)
+row("gid_matches_uid", lambda: os.getgid() == UID)
+row("getpwuid_resolves", lambda: pwd.getpwuid(UID).pw_name, "user" if MODE == "user" else "root")
+row("getpwnam_root", lambda: pwd.getpwnam("root").pw_uid == 0)
+row("getgrgid_resolves", lambda: bool(grp.getgrgid(os.getgid()).gr_name))
+row("getlogin_user_env", lambda: os.environ.get("USER") == pwd.getpwuid(UID).pw_name)
+row("home_env_set", lambda: bool(os.environ.get("HOME")))
+row("home_exists_dir", lambda: os.path.isdir(os.environ["HOME"]))
+row("home_writable", lambda: writable(os.environ["HOME"]))
+row("home_is_pw_dir", lambda: os.environ["HOME"] == pwd.getpwuid(UID).pw_dir)
+row("home_owned_by_me", lambda: os.stat(os.environ["HOME"]).st_uid == UID)
+row("file_owner_is_me", lambda: (lambda p: (open(p, "w").close(), os.stat(p).st_uid == UID, os.unlink(p))[1])(os.environ["HOME"] + "/.o%d" % os.getpid()))
+row("shell_exists", lambda: os.path.exists(pwd.getpwuid(UID).pw_shell))
+row("group_names_video_audio_input_render", lambda: all(grp.getgrnam(g) for g in ("video", "audio", "input", "render")))
+row("group_names_tty_kvm_disk", lambda: all(grp.getgrnam(g) for g in ("tty", "kvm", "disk")))
+# --- names
+row("hostname_resolves", lambda: bool(socket.gethostbyname(socket.gethostname())))
+row("localhost_v4", lambda: socket.getaddrinfo("localhost", 80, socket.AF_INET)[0][4][0] == "127.0.0.1")
+row("localhost_v6", lambda: socket.getaddrinfo("localhost", 80, socket.AF_INET6)[0][4][0] == "::1")
+row("public_name", lambda: bool(socket.getaddrinfo("example.com", 443)))
+row("etc_hosts_has_hostname", lambda: socket.gethostname() in open("/etc/hosts").read())
+row("etc_resolv_conf", lambda: "nameserver" in open("/etc/resolv.conf").read())
+row("etc_hostname", lambda: open("/etc/hostname").read().strip() == socket.gethostname())
+row("etc_os_release", lambda: bool(open("/etc/os-release").read()))
+row("etc_nsswitch_or_musl", lambda: os.path.exists("/etc/nsswitch.conf") or os.path.exists("/lib/ld-musl-x86_64.so.1") or os.path.exists("/lib/ld-musl-aarch64.so.1"))
+# --- sockets
+def echo(fam, addr):
+    s = socket.socket(fam, socket.SOCK_STREAM); s.bind((addr, 0)); s.listen(1)
+    port = s.getsockname()[1]
+    def srv():
+        c, _ = s.accept(); c.sendall(c.recv(10)); c.close()
+    t = threading.Thread(target=srv); t.start()
+    c = socket.socket(fam); c.settimeout(5); c.connect((addr, port)); c.sendall(b"ping"); r = c.recv(10); t.join(); return r == b"ping"
+row("tcp_v4_loopback", lambda: echo(socket.AF_INET, "127.0.0.1"))
+row("tcp_v6_loopback", lambda: echo(socket.AF_INET6, "::1"))
+def udp():
+    a = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); a.bind(("127.0.0.1", 0)); a.settimeout(3)
+    b = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); b.sendto(b"x", a.getsockname()); return a.recv(4) == b"x"
+row("udp_v4_loopback", udp)
+def unixsock():
+    d = tempfile.mkdtemp(); p = d + "/s"; s = socket.socket(socket.AF_UNIX); s.bind(p); s.listen(1); return True
+row("unix_socket_tmp", unixsock)
+def abstract():
+    s = socket.socket(socket.AF_UNIX); s.bind("\0mx%d" % os.getpid()); return True
+row("unix_abstract_socket", abstract)
+def https():
+    import urllib.request, ssl
+    return urllib.request.urlopen("https://example.com", timeout=15).status == 200
+row("https_default_ca", https)
+row("ssl_default_cafile_exists", lambda: (lambda p: os.path.exists(p.cafile or "") or os.path.isdir(p.capath or "/nonexistent"))(__import__("ssl").get_default_verify_paths()))
+row("ca_bundle_somewhere", lambda: any(os.path.exists(p) for p in ("/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.crt", "/etc/ssl/cert.pem", "/etc/ca-certificates/extracted/tls-ca-bundle.pem", "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem")))
+row("curl_https", lambda: (lambda r: True if r[0] == 0 else r[1][:60])(sh("curl -sS -o /dev/null https://example.com")) if which("curl") else "no-curl")
+# --- clock / tz
+row("year_sane", lambda: time.gmtime().tm_year >= 2026)
+row("tz_localtime_file", lambda: os.path.exists("/etc/localtime"))
+row("date_matches_host", lambda: abs(time.time() - float(open("/proc/uptime").read().split()[0]) * 0 - time.time()) < 1)
+def zi():
+    from zoneinfo import ZoneInfo
+    import datetime
+    return datetime.datetime.now(ZoneInfo("Europe/Berlin")).utcoffset().total_seconds() in (3600, 7200)
+row("zoneinfo_berlin", zi)
+row("tzname_matches_localtime", lambda: time.tzname[0] == sh("date +%Z")[1] or time.tzname[1] == sh("date +%Z")[1])
+# --- locale
+row("lang_set", lambda: os.environ.get("LANG") or os.environ.get("LC_ALL"), "C.UTF-8")
+row("locale_utf8_default", lambda: locale.getpreferredencoding(False).upper().replace("-", ""), "UTF8")
+row("setlocale_env", lambda: locale.setlocale(locale.LC_ALL, "").startswith("C.UTF-8"))
+row("locale_a_has_utf8", lambda: ("utf8" in sh("locale -a")[1].lower() or "utf-8" in sh("locale -a")[1].lower()) if which("locale") else "no-locale-cmd")
+row("utf8_filename", lambda: (lambda p: (open(p, "w").close(), os.path.exists(p), os.unlink(p))[1])(tempfile.gettempdir() + "/åéñ日本"))
+row("nonutf8_filename", lambda: (lambda p: (open(p, "wb").close(), os.path.exists(p), os.unlink(p))[1])(os.fsencode(tempfile.gettempdir()) + b"/\xff\xfe\x80"))
+# --- /dev
+def rw(p):
+    with open(p, "r+b", buffering=0) as f: f.write(b"x"); return True
+row("dev_null_rw", lambda: rw("/dev/null"))
+row("dev_zero_read", lambda: open("/dev/zero", "rb").read(4) == b"\0\0\0\0")
+row("dev_urandom", lambda: len(open("/dev/urandom", "rb").read(8)) == 8)
+row("dev_random", lambda: len(open("/dev/random", "rb").read(8)) == 8)
+row("dev_ptmx_openpty", lambda: bool(__import__("pty").openpty()))
+row("dev_pts_mounted", lambda: any(" /dev/pts " in l for l in open("/proc/self/mounts")))
+def shm():
+    from multiprocessing import shared_memory
+    s = shared_memory.SharedMemory(create=True, size=4096); s.close(); s.unlink(); return True
+row("dev_shm_shm_open", shm)
+row("dev_shm_mode_1777", lambda: mode("/dev/shm") == "0o1777")
+row("dev_fd_link", lambda: os.readlink("/dev/fd") == "/proc/self/fd")
+row("dev_stdout_link", lambda: os.readlink("/dev/stdout").startswith("/proc/self/fd"))
+row("dev_full", lambda: os.path.exists("/dev/full"))
+row("dev_dri_render_rw", lambda: (not glob.glob("/dev/dri/renderD*")) or all(os.access(p, os.R_OK | os.W_OK) for p in glob.glob("/dev/dri/renderD*")))
+row("dev_dri_card_rw", lambda: (not glob.glob("/dev/dri/card*")) or all(os.access(p, os.R_OK | os.W_OK) for p in glob.glob("/dev/dri/card*")))
+row("dev_input_rw", lambda: (not glob.glob("/dev/input/event*")) or all(os.access(p, os.R_OK) for p in glob.glob("/dev/input/event*")))
+row("dev_snd_rw", lambda: (not glob.glob("/dev/snd/*")) or all(os.access(p, os.R_OK) for p in glob.glob("/dev/snd/*")))
+row("dev_dri_group_name", lambda: (not glob.glob("/dev/dri/renderD*")) or bool(grp.getgrgid(os.stat(glob.glob("/dev/dri/renderD*")[0]).st_gid).gr_name))
+# --- proc sys
+row("proc_cpuinfo", lambda: "processor" in open("/proc/cpuinfo").read())
+row("proc_meminfo", lambda: "MemTotal" in open("/proc/meminfo").read())
+row("proc_self_maps", lambda: len(open("/proc/self/maps").read()) > 0)
+row("proc_self_exe_not_bowls_path", lambda: not os.readlink("/proc/self/exe").startswith("/bowls/"))
+row("sys_cpu_topology", lambda: os.path.exists("/sys/devices/system/cpu/cpu0/topology/core_id"))
+row("sys_cpu_online", lambda: bool(open("/sys/devices/system/cpu/online").read().strip()))
+row("sys_class_net", lambda: "lo" in os.listdir("/sys/class/net"))
+row("sys_class_drm_if_dri", lambda: (not glob.glob("/dev/dri/card*")) or bool(os.listdir("/sys/class/drm")))
+row("sys_class_input", lambda: bool(os.listdir("/sys/class/input")) or "empty")
+row("proc_sys_readable", lambda: bool(open("/proc/sys/kernel/hostname").read()))
+row("proc_mounts_nonempty", lambda: len(open("/proc/self/mounts").readlines()) > 3)
+# --- run / xdg runtime
+XR = os.environ.get("XDG_RUNTIME_DIR", "")
+row("xdg_runtime_set", lambda: bool(XR))
+row("xdg_runtime_dir", lambda: os.path.isdir(XR))
+row("xdg_runtime_0700", lambda: mode(XR) == "0o700")
+row("xdg_runtime_owner_me", lambda: os.stat(XR).st_uid == UID)
+row("xdg_runtime_matches_uid", lambda: os.path.realpath(XR) == os.path.realpath("/run/user/%d" % UID))
+row("run_user_uid_exists", lambda: os.path.isdir("/run/user/%d" % UID))
+row("xdg_runtime_socket", lambda: (lambda s: (s.bind(XR + "/mx%d" % os.getpid()), os.unlink(XR + "/mx%d" % os.getpid()), True)[2])(socket.socket(socket.AF_UNIX)))
+row("run_writable", lambda: writable("/run"))
+row("run_lock_exists", lambda: os.path.isdir("/run/lock") or os.path.isdir("/var/lock"))
+# --- fs layout
+row("tmp_sticky_1777", lambda: mode("/tmp") == "0o1777")
+row("tmp_writable", lambda: writable("/tmp"))
+for d in ("/var/tmp", "/var/lib", "/var/log", "/var/cache", "/var/run", "/var/spool", "/opt", "/srv", "/mnt", "/media", "/usr/local/bin", "/usr/local/share", "/home", "/root"):
+    row("dir_exists" + d.replace("/", "_"), lambda d=d: os.path.isdir(d))
+for d in ("/var/tmp", "/var/lib", "/var/log", "/var/cache", "/opt"):
+    row("dir_writable" + d.replace("/", "_"), lambda d=d: writable(d))
+row("var_tmp_sticky", lambda: mode("/var/tmp") == "0o1777")
+row("var_run_is_run", lambda: os.path.realpath("/var/run") == "/run")
+row("var_lock_is_run_lock", lambda: os.path.realpath("/var/lock") in ("/run/lock", "/var/lock"))
+# --- exec
+def shebang(interp, extra=""):
+    p = tempfile.mkdtemp() + "/s"
+    open(p, "w").write("#!%s\n%secho hi\n" % (interp, extra)); os.chmod(p, 0o755)
+    r = subprocess.run([p], capture_output=True, text=True); return r.stdout.strip() + (":" + r.stderr.strip()[:50] if r.returncode else "")
+row("shebang_bin_sh", lambda: shebang("/bin/sh"), "hi")
+row("shebang_bin_bash", lambda: shebang("/bin/bash") if os.path.exists("/bin/bash") else "no-bash", "hi" if os.path.exists("/bin/bash") else "no-bash")
+row("shebang_usr_bin_env_sh", lambda: shebang("/usr/bin/env sh"), "hi")
+row("shebang_env_python3", lambda: (lambda p: (open(p, "w").write("#!/usr/bin/env python3\nprint('hi')\n"), os.chmod(p, 0o755), subprocess.run([p], capture_output=True, text=True).stdout.strip())[2])(tempfile.mkdtemp() + "/s"), "hi")
+row("shebang_env_perl", lambda: "no-perl" if not which("perl") else (lambda p: (open(p, "w").write("#!/usr/bin/env perl\nprint \"hi\\n\";\n"), os.chmod(p, 0o755), subprocess.run([p], capture_output=True, text=True).stdout.strip() or "fail")[2])(tempfile.mkdtemp() + "/s"), "hi" if which("perl") else "no-perl")
+row("path_has_bin_and_usr_bin", lambda: {"/bin", "/usr/bin"} <= set(os.environ.get("PATH", "").split(":")))
+row("which_python3", lambda: bool(which("python3") or which("python")))
+row("which_sh", lambda: bool(which("sh")))
+row("ldso_runs_bowl_binary_without_ld_library_path", lambda: sh("true")[0] == 0 if which("true") else "no-true")
+row("libc_loadable", lambda: bool(ctypes.CDLL(None)))
+row("ld_library_path_unset", lambda: "LD_LIBRARY_PATH" not in os.environ)
+# --- ptys, jobs, signals
+def pty_job():
+    import pty
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.execvp("sh", ["sh", "-c", "tty; echo job; kill -0 $$"]); 
+    out = b""
+    while True:
+        try: d = os.read(fd, 1000)
+        except OSError: break
+        if not d: break
+        out += d
+    os.waitpid(pid, 0); return b"/dev/pts/" in out and b"job" in out
+row("pty_fork_tty", pty_job)
+def ctty():
+    import pty
+    pid, fd = pty.fork()
+    if pid == 0:
+        os._exit(0 if os.tcgetpgrp(0) == os.getpgrp() else 1)
+    os.read(fd, 100) if False else None
+    return os.waitpid(pid, 0)[1] == 0
+row("pty_controlling_tty_pgrp", ctty)
+row("tty_cmd_no_tty", lambda: sh("tty </dev/null")[1] == "not a tty")
+def sig():
+    p = subprocess.Popen(["sleep", "30"]); p.terminate(); return p.wait() == -15
+row("signal_terminate_child", sig)
+def sig_self():
+    got = []
+    import signal
+    signal.signal(signal.SIGUSR1, lambda *a: got.append(1)); os.kill(os.getpid(), signal.SIGUSR1); return bool(got)
+row("signal_self", sig_self)
+row("ps_sees_self", lambda: str(os.getpid()) in os.listdir("/proc"))
+row("ps_cmd_lists_self", lambda: ("%d" % os.getpid()) in sh("ps -e -o pid")[1] if which("ps") else "no-ps")
+row("ps_user_name", lambda: sh("ps -o user= -p %d" % os.getpid())[1].strip() == pwd.getpwuid(UID).pw_name if which("ps") else "no-ps")
+row("pid_namespace_pid1", lambda: os.getpid() < 100 if MODE == "iso" else "n/a", "yes" if MODE == "iso" else "n/a")
+row("script_cmd", lambda: sh("script -qc 'echo hi' /dev/null")[1].strip() if which("script") else "no-script", "hi")
+row("tmux_runs", lambda: sh("tmux -V")[1].startswith("tmux") if which("tmux") else "no-tmux")
+def tmux_session():
+    if not which("tmux"): return "no-tmux"
+    rc, o = sh("tmux -f /dev/null new-session -d -s mx 'sleep 5' && tmux ls && tmux kill-server")
+    return "ok" if rc == 0 else o[:80]
+row("tmux_session", tmux_session, "ok")
+# --- chown/chmod/setuid
+def chm():
+    p = tempfile.mkdtemp() + "/f"; open(p, "w").close(); os.chmod(p, 0o4755); m = mode(p); return m
+row("chmod_setuid_bit", chm, "0o4755")
+row("chown_self", lambda: (lambda p: (open(p, "w").close(), os.chown(p, UID, os.getgid()), True)[2])(tempfile.mkdtemp() + "/f"))
+row("setuid_self", lambda: (os.setuid(UID), True)[1])
+def chown_other():
+    p = tempfile.mkdtemp() + "/f"; open(p, "w").close()
+    try: os.chown(p, 5, 5); return "ok"
+    except OSError as e: return errno.errorcode[e.errno]
+row("chown_other_id", chown_other, "ok" if MODE != "user" else "EINVAL")
+row("sudo_true", lambda: (lambda r: True if r[0] == 0 else r[1][:70])(sh("sudo -n true")) if which("sudo") else "no-sudo")
+row("no_overflow_owner_in_etc", lambda: sum(1 for e in os.scandir("/etc") if e.stat(follow_symlinks=False).st_uid == 65534) == 0)
+def ping():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP); return "raw"
+    except OSError as e:
+        r = errno.errorcode[e.errno]
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_ICMP); return "dgram"
+    except OSError as e:
+        return r + "/" + errno.errorcode[e.errno]
+row("icmp_socket", ping, "raw" if MODE != "user" else "dgram")
+row("ping_cmd", lambda: sh("ping -c1 -W3 127.0.0.1")[0] if which("ping") else "no-ping", 0)
+row("capabilities_full_in_ns", lambda: int([l for l in open("/proc/self/status") if l.startswith("CapEff")][0].split()[1], 16) & 0x1ffffffffff == 0x1ffffffffff)
+# --- userns nested
+def nested():
+    libc = ctypes.CDLL(None, use_errno=True)
+    pid = os.fork()
+    if pid == 0:
+        if libc.unshare(0x10000000) != 0: os._exit(10 + ctypes.get_errno() % 100)
+        try:
+            open("/proc/self/setgroups", "w").write("deny")
+            open("/proc/self/uid_map", "w").write("0 %d 1" % UID)
+            open("/proc/self/gid_map", "w").write("0 %d 1" % os.getgid())
+        except OSError: os._exit(2)
+        os._exit(0 if os.getuid() == 0 else 3)
+    return os.waitpid(pid, 0)[1] >> 8
+row("userns_nested_unshare", nested, 0)
+def nested_mount():
+    libc = ctypes.CDLL(None, use_errno=True)
+    pid = os.fork()
+    if pid == 0:
+        if libc.unshare(0x10000000 | 0x00020000) != 0: os._exit(10)
+        try:
+            open("/proc/self/setgroups", "w").write("deny")
+            open("/proc/self/uid_map", "w").write("0 %d 1" % UID)
+            open("/proc/self/gid_map", "w").write("0 %d 1" % os.getgid())
+        except OSError: os._exit(2)
+        d = tempfile.mkdtemp()
+        r = libc.mount(b"tmpfs", d.encode(), b"tmpfs", 0, None)
+        os._exit(0 if r == 0 else 4)
+    return os.waitpid(pid, 0)[1] >> 8
+row("userns_nested_mount_tmpfs", nested_mount, 0)
+row("unshare_cmd_U", lambda: sh("unshare -Ur true")[0] if which("unshare") else "no-unshare", 0)
+# --- fonts, xdg
+row("fc_list_nonempty", lambda: len(sh("fc-list")[1].splitlines()) > 0 if which("fc-list") else "no-fc-list")
+row("fonts_dir", lambda: any(os.path.isdir(d) and os.listdir(d) for d in ("/usr/share/fonts", "/usr/X11R6/lib/X11/fonts")))
+row("fontconfig_cache_writable", lambda: writable(os.makedirs(os.environ["HOME"] + "/.cache", exist_ok=True) or os.environ["HOME"] + "/.cache"))
+row("xdg_data_dirs_default_or_usr_share", lambda: ("/usr/share" in os.environ.get("XDG_DATA_DIRS", "/usr/share")))
+row("usr_share_zoneinfo", lambda: os.path.isdir("/usr/share/zoneinfo"))
+# --- gpu / audio userspace libs
+for lib in ("libEGL.so.1", "libGL.so.1", "libgbm.so.1", "libvulkan.so.1", "libGLESv2.so.2", "libasound.so.2", "libpulse.so.0", "libdrm.so.2", "libwayland-client.so.0", "libX11.so.6"):
+    row("lib_" + lib.split(".so")[0], lambda lib=lib: (lambda: (ctypes.CDLL(lib), True)[1])())
+row("mesa_dri_driver_present", lambda: bool(glob.glob("/usr/lib*/dri/*_dri.so") or glob.glob("/usr/lib/*/dri/*_dri.so")))
+row("vulkan_icd_present", lambda: bool(glob.glob("/usr/share/vulkan/icd.d/*.json") or glob.glob("/etc/vulkan/icd.d/*.json")))
+
+def egl_init(gbm):
+    egl = ctypes.CDLL("libEGL.so.1")
+    egl.eglGetProcAddress.restype = ctypes.c_void_p
+    egl.eglGetProcAddress.argtypes = [ctypes.c_char_p]
+    get = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p)(egl.eglGetProcAddress(b"eglGetPlatformDisplayEXT"))
+    native, platform, keep = None, 0x31DD, None
+    if gbm:
+        fd = os.open(glob.glob("/dev/dri/renderD*")[0], os.O_RDWR)
+        g = ctypes.CDLL("libgbm.so.1"); g.gbm_create_device.restype = ctypes.c_void_p
+        keep = g.gbm_create_device(fd); native, platform = keep, 0x31D7
+    egl.eglInitialize.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+    egl.eglQueryString.restype = ctypes.c_char_p; egl.eglQueryString.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    dpy = get(platform, native, None)
+    if not dpy: return "no-display"
+    ma, mi = ctypes.c_int(), ctypes.c_int()
+    if not egl.eglInitialize(dpy, ctypes.byref(ma), ctypes.byref(mi)): return "init-failed"
+    return True
+row("egl_surfaceless_initialize", lambda: egl_init(False))
+row("egl_gbm_render_node_initialize", lambda: egl_init(True) if glob.glob("/dev/dri/renderD*") else "no-render-node")
+def vulkan():
+    vk = ctypes.CDLL("libvulkan.so.1")
+    info = (ctypes.c_ubyte * 64)(); info[0] = 1
+    inst = ctypes.c_void_p()
+    r = vk.vkCreateInstance(ctypes.byref(info), None, ctypes.byref(inst))
+    if r: return "vkCreateInstance=%d" % r
+    n = ctypes.c_uint(0)
+    vk.vkEnumeratePhysicalDevices(inst, ctypes.byref(n), None)
+    return n.value > 0 or "devices=0"
+row("vulkan_physical_device", vulkan)
+''',
+"pkg_fetch.sh": r'''# fetch one small package file per distro onto the host /tmp (what a download is): pkg_fetch.sh DISTRO
+d=$1
+case $d in
+ debian) bowl --isolated /bowls/debian /usr/bin/sh -c 'cd /root && apt-get download hello >/dev/null 2>&1'; cp /bowls/debian/root/hello_*.deb /tmp/hello.deb; ls -l /tmp/hello.deb;;
+ alpine) bowl --isolated /bowls/alpine /sbin/apk update >/dev/null 2>&1; bowl --isolated /bowls/alpine /sbin/apk fetch -o /root nano >/dev/null 2>&1; ls /bowls/alpine/root; cp /bowls/alpine/root/nano-*.apk /tmp/nano.apk; ls -l /tmp/nano.apk;;
+ arch) bowl --isolated /bowls/arch /usr/bin/pacman -Sw --noconfirm --cachedir /root tree >/dev/null 2>&1; cp /bowls/arch/root/tree-*.pkg.tar.zst /tmp/tree.pkg.tar.zst; ls -l /tmp/tree.pkg.tar.zst;;
+ fedora) bowl --isolated /bowls/fedora /usr/bin/dnf download --destdir /root hello >/dev/null 2>&1; cp /bowls/fedora/root/hello-*.rpm /tmp/hello.rpm; ls -l /tmp/hello.rpm;;
+esac
+''',
+"pkgflow.sh": r'''# pkgflow.sh DISTRO : local package file flows from the host's /tmp, as rows name|got|want
+d=$1
+r(){ echo "$1|$2|$3"; }
+sh /tmp/pkg_fetch.sh $d >/dev/null 2>&1
+cd /tmp
+case $d in
+ debian) f=hello.deb; prog=/usr/bin/hello
+   inst_abs() { apt install -y /tmp/$f; }; inst_rel() { apt install -y ./$f; }; rm_() { apt remove -y hello; };;
+ alpine) f=nano.apk; prog=/usr/bin/nano
+   inst_abs() { apk add --allow-untrusted /tmp/$f; }; inst_rel() { apk add --allow-untrusted ./$f; }; rm_() { apk del nano; };;
+ arch) f=tree.pkg.tar.zst; prog=/usr/bin/tree
+   inst_abs() { pacman -U --noconfirm /tmp/$f; }; inst_rel() { pacman -U --noconfirm ./$f; }; rm_() { pacman -R --noconfirm tree; };;
+ fedora) f=hello.rpm; prog=/usr/bin/hello
+   inst_abs() { dnf install -y /tmp/$f; }; inst_rel() { dnf install -y ./$f; }; rm_() { dnf remove -y hello; };;
+esac
+[ -s /tmp/$f ] && r "$d.pkg_file_fetched" yes yes || r "$d.pkg_file_fetched" no yes
+inst_abs > /tmp/pk.log 2>&1; r "$d.install_local_abs_rc" $? 0
+bowl /bowls/$d $prog --version >/dev/null 2>&1; r "$d.installed_program_runs" $? 0
+rm_ > /tmp/pk.log 2>&1; r "$d.remove_rc" $? 0
+[ -e /bowls/$d$prog ] && r "$d.remove_removed" no yes || r "$d.remove_removed" yes yes
+inst_rel > /tmp/pk.log 2>&1; r "$d.install_local_rel_rc" $? 0
+[ -e /bowls/$d$prog ] && r "$d.rel_install_present" yes yes || r "$d.rel_install_present" no yes
+rm_ > /tmp/pk.log 2>&1
+''',
+"unusual.sh": r'''# unusual.sh : unusual-but-real setups, rows name|got|want (run as the machine's root in the guest)
+r(){ g=$(printf %s "$2" | tr "\n|" "  " | cut -c1-160); echo "$1|$g|$3"; }
+py(){ case $1 in arch) echo /usr/bin/python;; nix) echo /nix/var/nix/profiles/default/bin/python3;; *) echo /usr/bin/python3;; esac; }
+for d in debian alpine; do
+  P=$(py $d)
+  # environment edge cases, as the bowl's user
+  out=$(env -u HOME bowl /bowls/$d $P -c 'import os;print(os.environ.get("HOME","unset"))' 2>&1 </dev/null)
+  r "$d.home_missing_gets_home" "$out" /root
+  out=$(env -u TERM bowl /bowls/$d $P -c 'import os;print(os.environ.get("TERM","unset"))' 2>&1 </dev/null)
+  r "$d.term_unset_gets_term" "$out" "xterm-256color"
+  out=$(env -u XDG_RUNTIME_DIR -u HOME -u USER -u LANG -u PATH bowl /bowls/$d $P -c 'import os;print(os.environ.get("XDG_RUNTIME_DIR","unset")!="unset", os.environ.get("USER","unset"), os.environ.get("LANG","unset"), "PATH" in os.environ)' 2>&1 </dev/null)
+  r "$d.empty_env_gets_session" "$out" "True user C.UTF-8 True"
+  out=$(bowl /bowls/$d $P -c 'import sys;print(sys.stdin.isatty(),sys.stdout.isatty())' </dev/null 2>&1 | cat)
+  r "$d.no_tty_runs" "$out" "False False"
+  mkdir -p "/tmp/dir$(printf '\377')x" && cd "/tmp/dir$(printf '\377')x" && out=$(bowl /bowls/$d $P -c 'import os;print(os.fsencode(os.getcwd())[-3:])' 2>&1 </dev/null); cd /
+  r "$d.nonutf8_cwd" "$out" "b'r\\xffx'" 
+  out=$(bowl /bowls/$d $P -c 'import sys,os;print(os.fsencode(sys.argv[1]))' "$(printf 'a\377b')" 2>&1 </dev/null)
+  r "$d.nonutf8_argument" "$out" "b'a\\xffb'"
+  out=$(bowl /bowls/$d $P -c 'import os;print(os.environ.get("MX"))' 2>&1 </dev/null)
+  r "$d.env_passed" "$(MX=$(printf 'v\377') bowl /bowls/$d $P -c 'import os;print(os.fsencode(os.environ.get("MX")))' 2>&1 </dev/null)" "b'v\\xff'"
+  # two launches at once do not trip over each other (session preparation)
+  bowl /bowls/$d $P -c 'import time;time.sleep(1)' & bowl /bowls/$d $P -c 'print(1)' >/dev/null; wait
+  r "$d.parallel_launches" $? 0
+  # a program of this bowl running a program of another
+  other=alpine; [ $d = alpine ] && other=debian
+  out=$(bowl /bowls/$d $P -c "import subprocess;print(subprocess.run(['/bowls/$other/usr/bin/python3','-c','print(7)'],capture_output=True,text=True).stdout.strip())" 2>&1 </dev/null)
+  r "$d.runs_program_of_other_bowl_by_path" "$out" 7
+  # name collisions in the launcher directory: which bowl owns the name
+  out=$(head -c 40 /bowls/bin/python3 2>/dev/null | head -1)
+  r "$d.launcher_python3_names_a_bowl" "$(echo $out | grep -c '^#!/bowl @')" 1
+done
+# setup twice
+out=$(bowl setup alpine 2>&1 </dev/null | tail -1); r "alpine.setup_twice" "$(echo $out | grep -c 'is ready')" 1
+# launcher directory follows the packages
+bowl --isolated /bowls/debian /usr/bin/apt-get install -y hello >/dev/null 2>&1
+[ -e /bowls/bin/hello ] && r "debian.launcher_appears_after_install" yes yes || r "debian.launcher_appears_after_install" no yes
+[ -e /bin/hello ] && r "debian.bin_link_after_install" yes yes || r "debian.bin_link_after_install" no yes
+out=$(hello 2>&1 </dev/null); r "debian.launcher_runs_installed_program" "$out" "Hello, world!"
+bowl --isolated /bowls/debian /usr/bin/apt-get remove -y hello >/dev/null 2>&1
+[ -e /bowls/bin/hello ] && r "debian.launcher_gone_after_remove" no yes || r "debian.launcher_gone_after_remove" yes yes
+# readonly /bowls: the fast view needs nothing written there
+mount -o remount,ro /bowls 2>/dev/null || mount -o remount,ro /mnt/data 2>/dev/null
+out=$(bowl /bowls/debian /usr/bin/python3 -c 'print(5)' 2>&1 </dev/null); r "debian.fast_launch_on_readonly_bowls" "$out" 5
+out=$(bowl --isolated /bowls/debian /usr/bin/python3 -c 'print(5)' 2>&1 </dev/null | tail -1); r "debian.isolated_on_readonly_bowls_says_so" "$(echo $out | grep -ci 'read-only\|readonly')" 1
+mount -o remount,rw /bowls 2>/dev/null; mount -o remount,rw /mnt/data 2>/dev/null
+# the published launcher as the way in, a name two bowls both want, a program of one bowl run by another
+bowl expose /bowls/alpine /usr/bin/python3 mxpy-alpine >/dev/null 2>&1; bowl expose /bowls/debian /usr/bin/python3 mxpy-debian >/dev/null 2>&1
+for d in alpine debian; do
+  out=$(/bowls/bin/mxpy-$d -c 'import os;print(os.getuid(),os.environ.get("HOME"),os.environ.get("XDG_RUNTIME_DIR"))' 2>&1 </dev/null)
+  r "$d.launcher_entry_is_the_user" "$out" "1000 /root /run/user/0"
+done
+bowl expose /bowls/alpine /usr/bin/python3 mxdup >/dev/null 2>&1; bowl expose /bowls/debian /usr/bin/python3 mxdup >/dev/null 2>&1
+r "launcher_name_collision_first_bowl_keeps_it" "$(head -1 /bowls/bin/mxdup | sed 's/.*@\/bowls\/\([a-z]*\)\/.*/\1/')" alpine
+out=$(bowl /bowls/debian /usr/bin/python3 -c "import subprocess;print(subprocess.run(['/bowls/bin/mxpy-alpine','-c','print(7)'],capture_output=True,text=True).stdout.strip())" 2>&1 </dev/null)
+r "debian.runs_program_of_other_bowl_by_launcher" "$out" 7
+out=$(bowl /bowls/alpine /usr/bin/python3 -c "import subprocess;print(subprocess.run(['/bowls/bin/mxpy-debian','-c','print(7)'],capture_output=True,text=True).stdout.strip())" 2>&1 </dev/null)
+r "alpine.runs_program_of_other_bowl_by_launcher" "$out" 7
+# an apk add and an apk del keep /bowls/bin true
+bowl --isolated /bowls/alpine /sbin/apk add --no-cache jq >/dev/null 2>&1
+[ -e /bowls/bin/jq ] && r "alpine.launcher_appears_after_install" yes yes || r "alpine.launcher_appears_after_install" no yes
+bowl --isolated /bowls/alpine /sbin/apk del jq >/dev/null 2>&1
+[ -e /bowls/bin/jq ] && r "alpine.launcher_gone_after_remove" no yes || r "alpine.launcher_gone_after_remove" yes yes
+# /bowls on a disk too small, and one with the debris of a setup that was cut off
+mkdir -p /mnt/small
+mount -t tmpfs -o size=40m tmpfs /mnt/small && umount /bowls && mount --bind /mnt/small /bowls
+out=$(bowl setup debian 2>&1 </dev/null); rc=$?
+r "debian.setup_on_small_disk_refuses" "$rc $(echo $out | grep -c 'needs .* MiB in /bowls')" "1 1"
+[ -e /bowls/debian ] && r "debian.setup_on_small_disk_leaves_nothing" no yes || r "debian.setup_on_small_disk_leaves_nothing" yes yes
+echo cut > /bowls/alpine-minirootfs-x86_64.tar.gz.part
+out=$(bowl setup alpine 2>&1 </dev/null); r "alpine.setup_after_cut_off_download" "$? $(echo $out | grep -c 'is ready')" "0 1"
+umount /bowls; mount --bind /mnt/data /bowls; umount /mnt/small
+''',
+}
+
+PORT = int(os.environ.get("MATRIX_PORT", "18772"))
+PYTHON = {"arch": "/usr/bin/python", "nix": "/nix/var/nix/profiles/default/bin/python3"}
+rows = []
+
+
+def row(name, got, want="yes"):
+    got = " ".join(str(got).split()).replace("|", "/")
+    rows.append((name, got, want))
+    print("%s %s -> got %r want %r" % ("ok  " if got == want else "RED ", name, got[:200], want), flush=True)
+
+
+def serve():
+    class Files(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = FILES.get(self.path[1:])
+            self.send_response(200 if body is not None else 404)
+            self.end_headers()
+            self.wfile.write((body or "").encode())
+
+        def log_message(self, *a):
+            pass
+    socketserver.TCPServer.allow_reuse_address = True
+    server = socketserver.ThreadingTCPServer(("0.0.0.0", PORT), Files)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+
+class Box:
+    # A booted image with the bowls disk (a snapshot unless provisioning), driven over its serial shell.
+
+    def __init__(self, image, work, disk, snapshot=True, mem="5G", smp=3):
+        os.makedirs(work, exist_ok=True)
+        machine = desktop(image)
+        machine[machine.index("-m") + 1] = mem
+        machine[machine.index("-smp") + 1] = str(smp)
+        drive = "if=none,id=bw,format=raw,file=" + disk + (",snapshot=on,file.locking=off" if snapshot else "")
+        ser = work + "/ser"
+        for stale in (ser, work + "/qmp", work + "/mon"):
+            try:
+                os.unlink(stale)
+            except OSError:
+                pass
+        args = machine + ["-drive", drive, "-device", "nvme,serial=bowls0,drive=bw",
+                          "-netdev", "user,id=n0", "-device", "virtio-net-pci,netdev=n0",
+                          "-chardev", "socket,id=s0,path=" + ser + ",server=on,wait=off",
+                          "-serial", "chardev:s0", "-no-reboot", "-display", "none",
+                          "-append", "console=ttyS0 drm_client_lib.active= moonwater.cursor_plane=0"]
+        self.guest = Guest(args, work + "/qmp", work + "/mon", work, sockets=(ser,))
+        self.sh = socket.socket(socket.AF_UNIX)
+        self.sh.connect(ser)
+        self.sh.settimeout(1)
+        self.tag = 0
+        time.sleep(15)
+        for _ in range(60):
+            if self.run("echo up", 5)[1] == 0:
+                break
+
+    def run(self, command, seconds=60):
+        self.tag += 1
+        mark = self.tag
+        self.sh.sendall(("\necho BEG\"%d\"; %s\necho END\"%d\":$?\n" % (mark, command, mark)).encode())
+        seen = b""
+        stop = time.time() + seconds
+        done = re.compile(rb"BEG%d\r?\n(.*?)END%d:(\d+)" % (mark, mark), re.S)
+        while time.time() < stop:
+            try:
+                seen += self.sh.recv(65536)
+            except socket.timeout:
+                pass
+            found = done.search(seen)
+            if found:
+                text = re.sub(rb"\x1b\[[0-9;?]*[a-zA-Z]", b"", found.group(1))
+                text = text.decode("utf8", "replace").replace("\r", "").strip()
+                return re.sub(r"(\s*\$)+$", "", text), int(found.group(2))
+        return seen.decode("utf8", "replace").replace("\r", ""), 124
+
+    def mount_bowls(self):
+        # What boot does for an installed machine: the partition nodev, /bowls a bind of it, every launcher on /bin.
+        out, status = self.run("for i in $(seq 1 30); do [ -b /dev/nvme0n1 ] && break; sleep 2; done; "
+                               "mkdir -p /mnt/data && mount -o nodev /dev/nvme0n1 /mnt/data && mount --bind /mnt/data /bowls", 120)
+        if status:
+            raise RuntimeError("bowls disk did not mount: " + out[-200:])
+        self.run("for f in /bowls/bin/*; do n=${f##*/}; [ -e /bin/$n ] || ln -s $f /bin/$n; done", 120)
+
+    def close(self):
+        try:
+            self.guest.quit()
+        except Exception:
+            pass
+        time.sleep(1)
+        self.guest.terminate()
+        try:
+            self.guest.wait(10)
+        except Exception:
+            self.guest.kill()
+
+
+def fetch(box, name, dest):
+    box.run("wget -qO %s http://10.0.2.2:%d/%s" % (dest, PORT, name), 60)
+
+
+def rows_of(text, prefix=None):
+    for line in text.split("\n"):
+        parts = line.strip().split("|")
+        if len(parts) == 3 and " " not in parts[0] and (prefix is None or parts[0].startswith(prefix)):
+            yield parts
+
+
+def contract(box, distro, mode):
+    py = PYTHON.get(distro, "/usr/bin/python3")
+    box.run("mkdir -p /bowls/%s/opt" % distro, 20)
+    fetch(box, "contract.py", "/bowls/%s/opt/contract.py" % distro)
+    command = {"user": "bowl /bowls/%s %s /bowls/%s/opt/contract.py user",
+               "root": "bowl --root /bowls/%s %s /bowls/%s/opt/contract.py root",
+               "iso": "bowl --isolated /bowls/%s %s /opt/contract.py iso"}[mode]
+    out, _ = box.run((command % ((distro, py, distro) if mode != "iso" else (distro, py))) + " </dev/null 2>&1", 600)
+    seen = 0
+    for name, got, want in rows_of(out):
+        row("%s.%s.%s" % (distro, mode, name), got, want)
+        seen += 1
+    row("%s.%s.rows_reported" % (distro, mode), "yes" if seen >= 150 else "only %d" % seen, "yes")
+
+
+def flows(box, distro):
+    fetch(box, "pkg_fetch.sh", "/tmp/pkg_fetch.sh")
+    fetch(box, "pkgflow.sh", "/tmp/pkgflow.sh")
+    out, _ = box.run("sh /tmp/pkgflow.sh %s 2>&1" % distro, 1500)
+    for name, got, want in rows_of(out, distro + "."):
+        row(name, got, want)
+
+
+def unusual(box):
+    fetch(box, "unusual.sh", "/tmp/unusual.sh")
+    out, _ = box.run("sh /tmp/unusual.sh 2>&1", 1200)
+    for name, got, want in rows_of(out):
+        row(name, got, want)
+
+
+def provision(efi, disk):
+    # The disk the matrix runs on: each distribution set up, python and the tools in it, the graphics profile, nix's certificates.
+    if not os.path.exists(disk):
+        subprocess.check_call(["truncate", "-s", "20G", disk])
+        subprocess.check_call(["mke2fs", "-q", "-t", "ext4", "-F", disk])
+    box = Box(efi, "matrix-provision", disk, snapshot=False)
+    try:
+        box.mount_bowls()
+        for command in (
+                "bowl setup alpine", "bowl setup debian", "bowl setup arch", "bowl setup fedora", "bowl setup nix",
+                "apk add --no-cache python3 curl iproute2 strace procps-ng util-linux util-linux-misc coreutils shadow sudo tmux ca-certificates tzdata fontconfig",
+                "apt-get install -y --no-install-recommends python3 curl iproute2 strace procps util-linux tmux sudo passwd tzdata fontconfig",
+                "pacman -Sy --noconfirm --needed python curl iproute2 strace procps-ng util-linux tmux sudo fontconfig",
+                "dnf install -y python3 curl iproute strace procps-ng util-linux tmux sudo shadow-utils fontconfig",
+                "nix-channel --add https://nixos.org/channels/nixpkgs-unstable nixpkgs; nix-channel --update; "
+                "nix-env -iA nixpkgs.python3 nixpkgs.curl nixpkgs.coreutils nixpkgs.bashInteractive nixpkgs.procps nixpkgs.util-linux",
+                "bowl profile graphics",
+                "bowl setup nix"):
+            out, status = box.run(command + " 2>&1 | tail -3", 5400)
+            print("%s -> %d %s" % (command[:40], status, out[-120:].replace("\n", " ")), flush=True)
+        box.run("sync", 120)
+    finally:
+        box.close()
+
+
+def main(argv):
+    only_rows = "--rows" in argv
+    argv = [a for a in argv if a != "--rows"]
+    if argv and argv[0] == "--provision":
+        provision(argv[1], argv[2])
+        return 0
+    efi, disk = argv[0], argv[1]
+    work = argv[2] if len(argv) > 2 else "matrix-work"
+    distros = (argv[3] if len(argv) > 3 else "alpine,debian,arch,fedora,nix").split(",")
+    modes = (argv[4] if len(argv) > 4 else "user,root,iso").split(",")
+    real = sys.stdout
+    if only_rows:
+        sys.stdout = sys.stderr
+    serve()
+    box = Box(efi, work, disk)
+    try:
+        box.mount_bowls()
+        for distro in distros:
+            for mode in modes:
+                contract(box, distro, mode)
+            if distro != "nix":
+                flows(box, distro)
+        unusual(box)
+    finally:
+        box.close()
+    sys.stdout = real
+    red = [r for r in rows if r[1] != r[2]]
+    if only_rows:
+        for name, got, want in rows:
+            print("%s|%s|%s" % (name, got, want))
+    else:
+        print("\n%d rows, %d red" % (len(rows), len(red)))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
+"""
+
+
+def harness_bowl_matrix(argv):
+    """The cross-distro contract: the same rows for every bowl distribution.
+
+    A booted guest with a bowls disk that has alpine, debian, arch, fedora and
+    nix set up (python3 in each; `--provision` makes the disk) runs a contract
+    of 170 rows inside every bowl as the user (bowl /bowls/D prog), as the
+    machine's root (bowl --root) and in the isolated view; then installs a
+    downloaded package file in each manager by absolute and relative path, and
+    runs the unusual setups. Rows are printed as name|got|want for a lane.
+
+        python3 test/differential.py --harness bowl_matrix --rows IMAGE DISK [WORK [DISTROS [MODES]]]
+        python3 test/differential.py --harness bowl_matrix --provision IMAGE DISK
+    """
+    import subprocess
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="moonwater-matrix.") as place:
+        path = place + "/matrix.py"
+        Path(path).write_text(BOWL_MATRIX)
+        return subprocess.call([sys.executable, path] + list(argv),
+                               env=dict(os.environ, PYTHONPATH=os.environ.get("PYTHONPATH", "")))
+
+
 HARNESS_CHECKS = {
     "g_tables": harness_g_tables,
     "scale": harness_scale,
@@ -77741,6 +78443,7 @@ HARNESS_CHECKS = {
     "canvas_seam": harness_canvas_seam,
     "canvas_scale": harness_canvas_scale,
     "bowl_session": harness_bowl_session,
+    "bowl_matrix": harness_bowl_matrix,
     "bowl_roots": harness_bowl_roots,
     "riscv_builtins": harness_riscv_builtins,
     "objtool_shape": harness_objtool_shape,

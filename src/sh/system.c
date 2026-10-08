@@ -405,6 +405,12 @@ static COLD fn system_kernel_defaults(void)
         system_sysctl("/proc/sys/kernel/modules_disabled", "1\n");
 #endif
 #endif
+        /*  Who may open an ICMP echo socket, which is all ping needs: the
+            kernel's range is empty, so a program of a bowl (whose root is a
+            user namespace with no CAP_NET_RAW in the machine's) could not
+            ping at all. The socket is an echo to a peer, and carries no
+            packet the program wrote. */
+        system_sysctl("/proc/sys/net/ipv4/ping_group_range", "0 2147483647\n");
 }
 #endif
 

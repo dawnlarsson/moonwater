@@ -1672,6 +1672,166 @@ static bool bowl_view_program(string_address root, bipolar handle,
                held.modified.nanoseconds == named.modified.nanoseconds;
 }
 
+/*
+        Package files named on a package manager's command line.
+
+        The isolated view is the bowl's own tree with a fresh /tmp and its own
+        /root, so a file the person downloaded (a Chrome .deb in ~/Downloads,
+        a .pkg.tar.zst from a build, an .rpm, an .apk) is not there for the
+        manager to open: apt says "Unsupported file /tmp/x.deb given on
+        commandline", pacman -U and dnf install say the same in their words.
+        Each argument that names a package file of a kind a manager installs
+        and that is a regular file for the person (taken from where the person
+        stands, so ./x.deb and x.pkg.tar.zst are found) is opened before the
+        view is made, and bound read-only inside it, under
+        BOWL_INPUT_DIRECTORY/N/NAME, where the argument is rewritten to point.
+        Nothing is copied (a Chrome package is 100 MB and /tmp is memory), no
+        directory of the person's is exposed, and a name that is only a
+        package name stays one: it is a suffix, an existing file and an
+        argument, all three.
+*/
+#define BOWL_INPUTS 16
+#define BOWL_INPUT_DIRECTORY "/tmp/.bowl-in"
+#define BOWL_INPUT_ROOM 512
+#define BOWL_OPEN_TREE_CLONE 1
+#define BOWL_MOVE_MOUNT_EMPTY 4
+static bipolar bowl_input_handle[BOWL_INPUTS];
+static p8 bowl_input_target[BOWL_INPUTS][BOWL_INPUT_ROOM];
+static positive bowl_input_count;
+static string_address bowl_input_vector[BOWL_WRAP_ARGV];
+
+static bool bowl_input_package(string_address name)
+{
+        static string_address const suffixes[] = {
+            ".deb", ".udeb", ".rpm", ".apk", ".pkg.tar", ".pkg.tar.zst",
+            ".pkg.tar.xz", ".pkg.tar.gz", ".pkg.tar.bz2", ".pkg.tar.lz4",
+            ".pkg.tar.lzo", null};
+        positive length = string_length(name);
+
+        for (positive at = 0; suffixes[at]; at++)
+        {
+                positive tail = string_length(suffixes[at]);
+
+                if (length > tail &&
+                    !memory_compare(name + length - tail, suffixes[at], tail))
+                        return true;
+        }
+        return false;
+}
+
+static string_address address_to bowl_inputs_take(
+    string_address address_to arguments)
+{
+        p8 cwd[BOWL_PATH_LIMIT];
+        p8 full[BOWL_PATH_LIMIT];
+        positive count = 0;
+
+        if (!arguments)
+                return arguments;
+        while (arguments[count])
+                count++;
+        if (count < 2 || count + 1 >= BOWL_WRAP_ARGV ||
+            system_call_2(syscall(getcwd), (positive)cwd, sizeof(cwd)) < 0)
+                return arguments;
+
+        memory_copy(bowl_input_vector, arguments,
+                    (count + 1) * sizeof(*arguments));
+        for (positive at = 1; at < count && bowl_input_count < BOWL_INPUTS; at++)
+        {
+                string_address name = arguments[at];
+                string_address base;
+                file_facts facts;
+                positive length;
+                positive made = 0;
+                bipolar handle;
+
+                if (!bowl_input_package(name) ||
+                    !bowl_guest_absolute(name, cwd, full, sizeof(full)) ||
+                    !file_look_at(full, address_of facts) ||
+                    (facts.mode & 0170000) != 0100000)
+                        continue;
+
+                base = full + string_length(full);
+                while (base > full && base[-1] != '/')
+                        base--;
+                length = string_length(base);
+                if (length + sizeof(BOWL_INPUT_DIRECTORY) + 24 >= BOWL_INPUT_ROOM)
+                        continue;
+                handle = system_open_at(AT_FDCWD, full, FILE_READ | O_CLOEXEC);
+                if (handle < 0)
+                        continue;
+                /*  A detached copy of the file's mount: the view's old root
+                    is detached once it is pivoted away, and a mount that
+                    is not in the namespace cannot be bound from by name. */
+                {
+                        bipolar tree = system_call_3(
+                            syscall(open_tree), (positive)handle, (positive)"",
+                            AT_EMPTY_PATH | BOWL_OPEN_TREE_CLONE | O_CLOEXEC);
+
+                        system_close(handle);
+                        if (tree < 0)
+                                continue;
+                        handle = tree;
+                }
+
+                memory_copy(bowl_input_target[bowl_input_count],
+                            BOWL_INPUT_DIRECTORY "/", sizeof(BOWL_INPUT_DIRECTORY));
+                made = sizeof(BOWL_INPUT_DIRECTORY);
+                made += positive_into_string(
+                    bowl_input_target[bowl_input_count] + made,
+                    bowl_input_count);
+                bowl_input_target[bowl_input_count][made++] = '/';
+                memory_copy(bowl_input_target[bowl_input_count] + made, base,
+                            length + 1);
+                bowl_input_handle[bowl_input_count] = handle;
+                bowl_input_vector[at] = bowl_input_target[bowl_input_count];
+                bowl_input_count++;
+        }
+        return bowl_input_vector;
+}
+
+// Inside the isolated view: the files taken before it was made.
+static bipolar bowl_inputs_mount(void)
+{
+        for (positive at = 0; at < bowl_input_count; at++)
+        {
+                p8 directory[BOWL_INPUT_ROOM];
+                positive length = string_length(bowl_input_target[at]);
+                bipolar failed;
+                bipolar made;
+
+                while (length && bowl_input_target[at][length - 1] != '/')
+                        length--;
+                memory_copy(directory, bowl_input_target[at], length - 1);
+                directory[length - 1] = end;
+                failed = bowl_mkdir_parents(directory);
+                if (failed < 0)
+                        return failed;
+
+                made = system_open_at_mode(AT_FDCWD, bowl_input_target[at],
+                                           FILE_WRITE | O_CLOEXEC | O_NOFOLLOW,
+                                           0444);
+                if (made < 0)
+                        return made;
+                system_close(made);
+
+                bowl_doing("bind", bowl_input_target[at]);
+                failed = system_call_5(syscall(move_mount),
+                                       (positive)bowl_input_handle[at],
+                                       (positive)"", AT_FDCWD,
+                                       (positive)bowl_input_target[at],
+                                       BOWL_MOVE_MOUNT_EMPTY);
+                if (failed)
+                        return failed;
+                failed = system_mount(0, bowl_input_target[at], 0,
+                                      MS_BIND | MS_REMOUNT | MS_RDONLY |
+                                          bowl_mount_kept(bowl_input_target[at]), 0);
+                if (failed)
+                        return failed;
+        }
+        return 0;
+}
+
 static b32 bowl_launch_failed(bipolar native_shell, string_address what,
                               bipolar failed)
 {
@@ -1706,6 +1866,8 @@ static DEAD_END fn bowl_inside(string_address root,
         if (!failed)
                 failed = isolated ? bowl_isolated_enter(root)
                                   : bowl_fast_enter(root);
+        if (!failed && isolated)
+                failed = bowl_inputs_mount();
 
         if (failed)
         {
@@ -2091,27 +2253,80 @@ static b32 bowl_write_bytes(string_address path, string_address text,
         the machine takes its name (name_apply) and, where nothing has yet,
         by the first launch from the name the kernel has.
 */
-static fn bowl_hosts_write(string_address name)
+/*
+        keep is for a bowl that has a /etc/hosts of its own (an isolated
+        entry, where the distribution's file says localhost and nothing of
+        the machine's name, so sudo and every program that resolves its own
+        host name wait for a resolver to answer): the machine's line is
+        added to what is there when it is not, and nothing is rewritten when
+        it is. Otherwise the file is the machine's and is written whole.
+*/
+static fn bowl_hosts_write_in(string_address root, string_address name,
+                              bool keep)
 {
         static const p8 fixed[] = "127.0.0.1 localhost\n"
                                   "::1 localhost ip6-localhost ip6-loopback\n";
-        p8 text[sizeof(fixed) + 80];
-        positive used = sizeof(fixed) - 1;
+        p8 hosts[BOWL_PATH_LIMIT];
+        p8 hostname[BOWL_PATH_LIMIT];
+        p8 text[4096];
+        positive used = 0;
         positive length = string_length(name);
 
-        memory_copy(text, fixed, used);
-        if (length && length <= 64 &&
-            string_span_of_set(name, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-.") == length)
+        bool have = false;
+
+        if (!bowl_root_path(hosts, sizeof(hosts), root, "/etc/hosts") ||
+            !bowl_root_path(hostname, sizeof(hostname), root, "/etc/hostname"))
+                return;
+        if (length > 64 ||
+            string_span_of_set(name, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-.") != length)
+                length = 0;
+
+        if (keep && !length)
+                return;
+        if (keep)
         {
-                memory_copy(text + used, "127.0.1.1 ", 10);
-                used += 10;
-                memory_copy(text + used, name, length);
-                used += length;
-                text[used++] = '\n';
+                bipolar got = file_read_once_at(AT_FDCWD, hosts, text,
+                                                sizeof(text) - 100);
+
+                used = got > 0 ? (positive)got : 0;
+                for (positive at = 0; at + length <= used && !have; at++)
+                        have = !memory_compare(text + at, name, length) &&
+                               (!at || text[at - 1] == ' ' || text[at - 1] == '\t') &&
+                               (at + length == used || text[at + length] == ' ' ||
+                                text[at + length] == '\t' || text[at + length] == '\n');
+                if (used && text[used - 1] != '\n')
+                        text[used++] = '\n';
         }
         bowl_quiet = true;
-        bowl_write_bytes("/etc/hosts", text, used);
+        if (!have)
+        {
+                if (!used)
+                {
+                        memory_copy(text, fixed, sizeof(fixed) - 1);
+                        used = sizeof(fixed) - 1;
+                }
+                if (length)
+                {
+                        memory_copy(text + used, "127.0.1.1 ", 10);
+                        used += 10;
+                        memory_copy(text + used, name, length);
+                        used += length;
+                        text[used++] = '\n';
+                }
+                bowl_write_bytes(hosts, text, used);
+        }
+        if (length)
+        {
+                memory_copy(text, name, length);
+                text[length] = '\n';
+                bowl_write_bytes(hostname, text, length + 1);
+        }
         bowl_quiet = false;
+}
+
+static fn bowl_hosts_write(string_address name)
+{
+        bowl_hosts_write_in("", name, false);
 }
 
 static fn bowl_session_hosts(void)
@@ -2166,6 +2381,41 @@ static fn bowl_session_identity(void)
         bowl_quiet = false;
 }
 
+/*
+        The directories every distribution's filesystem layout has and the
+        machine's root, which starts empty, does not. The fast view keeps the
+        machine's /var, /srv and /usr/local/bin, so a program that writes
+        /var/lib/NAME or /var/cache/NAME, keeps a file in /var/tmp or looks
+        in /srv, /media or /usr/local/bin was told they do not exist; in an
+        isolated view the bowl's own tree is there and a missing one is
+        made. Each is made once, where it is not, and never changed.
+*/
+static fn bowl_udev_groups(void);
+
+static fn bowl_session_tree(void)
+{
+        static const struct { string_address path; positive mode; } tree[] = {
+            {"/var/tmp", 01777}, {"/var/lib", 0}, {"/var/log", 0},
+            {"/var/cache", 0}, {"/var/spool", 0}, {"/srv", 0},
+            {"/media", 0}, {"/home", 0}, {"/usr/local/bin", 0},
+            {"/usr/local/sbin", 0}, {"/usr/local/lib", 0},
+            {"/usr/local/share", 0}};
+
+        bowl_quiet = true;
+        for (positive at = 0; at < array_count(tree); at++)
+        {
+                bool made = false;
+
+                if (system_access_at(AT_FDCWD, tree[at].path, 0) >= 0)
+                        continue;
+                bowl_mkdir_parents_made(tree[at].path, BOWL_MAKE_CHAIN,
+                                        address_of made);
+                if (made && tree[at].mode)
+                        bowl_chmod_directory(tree[at].path, tree[at].mode);
+        }
+        bowl_quiet = false;
+}
+
 static fn bowl_session_prepare_at(string_address home, string_address runtime,
                                   bool user_dirs)
 {
@@ -2180,7 +2430,8 @@ static fn bowl_session_prepare_at(string_address home, string_address runtime,
                 bowl_session_fill_started();
 
         if (!runtime || bowl_path_steps(runtime) ||
-            bowl_session_host_path(runtime))
+            bowl_session_host_path(runtime) ||
+            bowl_path_same(runtime, bowl_runtime_path))
                 runtime = bowl_runtime_path;
 
         /*  0700 is Weston's requirement of the runtime directory it is
@@ -2281,9 +2532,17 @@ static fn bowl_session_prepare_at(string_address home, string_address runtime,
                                 bowl_mkdir("/run/lock");
                         if (system_access_at(AT_FDCWD, "/var", 0) < 0)
                                 bowl_mkdir("/var");
+                        bowl_session_tree();
                         bowl_dev_link("/run", "/var/run");
                         bowl_dev_link("/run/lock", "/var/lock");
                         bowl_session_identity();
+                        bowl_udev_groups();
+                        /* The user is 1000 to itself and the machine's root
+                           to the kernel, whose runtime directory is
+                           /run/user/0: a program that spells it from its own
+                           id finds the same one. */
+                        if (system_access_at(AT_FDCWD, "/run/user/0", 0) >= 0)
+                                bowl_dev_link("0", BOWL_RUNTIME_DIR BOWL_USER_ID_TEXT);
                         if (markable)
                         {
                                 bowl_quiet = true;
@@ -3431,7 +3690,19 @@ static b32 bowl_write_resolv(string_address root)
         if (!bowl_resolv_compose(address_of out, host, got))
                 return bowl_refuse("resolv.conf is too long\n");
 
-        return bowl_write_bytes(path, out.bytes, out.used);
+        failed = bowl_write_bytes(path, out.bytes, out.used);
+        if (!failed)
+        {
+                p8 name[66];
+
+                got = file_slurp("/proc/sys/kernel/hostname", name,
+                                 sizeof(name) - 1);
+                if (got > 0 && name[got - 1] == '\n')
+                        got--;
+                name[got > 0 ? got : 0] = end;
+                bowl_hosts_write_in(root, name, true);
+        }
+        return failed;
 }
 
 /*
@@ -5436,6 +5707,7 @@ static b32 bowl_land(string_address archive, string_address root,
 #define BOWL_PRIME_NONE 0
 #define BOWL_PRIME_ARCH 1
 #define BOWL_PRIME_NIX 2
+#define BOWL_PRIME_DEBIAN 3
 
 struct bowl_distro
 {
@@ -5829,6 +6101,32 @@ static b32 bowl_prime_arch(string_address root)
         command and Nix's own TLS look. Each is skipped once it has been done,
         so a setup that stopped part way picks up where it was.
 */
+#define BOWL_NIX_PROFILE_CERTS \
+        "/nix/var/nix/profiles/default/etc/ssl/certs/ca-bundle.crt"
+
+static string_address bowl_nix_certs[] = {
+    "/etc/ssl/certs/ca-bundle.crt", "/etc/ssl/certs/ca-certificates.crt",
+    "/etc/ssl/cert.pem"};
+
+// A link at path inside the bowl, its directory made, and left if it is there.
+static fn bowl_link_in(string_address root, string_address path,
+                       string_address target)
+{
+        p8 full[BOWL_PATH_LIMIT];
+        positive cut;
+
+        if (!bowl_root_path(full, sizeof(full), root, path))
+                return;
+        cut = string_length(full);
+        while (cut && full[cut - 1] != '/')
+                cut--;
+        full[cut - 1] = end;
+        if (bowl_mkdir_parents(full) < 0)
+                return;
+        full[cut - 1] = '/';
+        system_symbolic_link_at(target, AT_FDCWD, full);
+}
+
 static b32 bowl_prime_nix(string_address root)
 {
         p8 nix[BOWL_NIX_PATH];
@@ -5863,6 +6161,46 @@ static b32 bowl_prime_nix(string_address root)
                                              "nix-env -i failed\n", null);
         }
 
+        /*  The bundle is in the profile (nix-env -i took it with Nix), and
+            nothing outside Nix looks there: OpenSSL, Python, curl and git
+            of the store read the system's, which on a machine that is not
+            NixOS is empty. The names every other distribution has, linked
+            to the profile's, which nix-env keeps current. */
+        if (!failed)
+                for (positive at = 0; at < array_count(bowl_nix_certs); at++)
+                        bowl_link_in(root, bowl_nix_certs[at],
+                                     BOWL_NIX_PROFILE_CERTS);
+
+        return failed;
+}
+
+/*
+        Debian's root tarball has no certificate store, so nothing in the
+        bowl can check an https server: curl, Python, apt over https, a
+        browser, git. Distributions that ship a root with the bundle (Arch,
+        Alpine, Fedora) are not asked; Debian's own package, which gets the
+        bundle where Debian programs look, is.
+*/
+static b32 bowl_prime_debian(string_address root)
+{
+        string_address update_argv[] = {"/usr/bin/apt-get", "update", null};
+        string_address add_argv[] = {"/usr/bin/apt-get", "install", "-y",
+                                     "--no-install-recommends",
+                                     "ca-certificates", null};
+        b32 failed;
+
+        if (bowl_has(root, "/etc/ssl/certs/ca-certificates.crt"))
+                return 0;
+
+        string_format(log, bowl_label "adding the certificate store\n");
+        log_flush();
+        failed = bowl_setup_isolated(root, "/usr/bin/apt-get", update_argv,
+                                     "apt-get update failed\n", null);
+        if (!failed)
+                failed = bowl_setup_isolated(root, "/usr/bin/apt-get",
+                                             add_argv,
+                                             "ca-certificates would not install\n",
+                                             null);
         return failed;
 }
 
@@ -5899,6 +6237,14 @@ static string_address bowl_arch_remove[] = {
 static string_address bowl_alpine_install[] = {
     "/sbin/apk", "add", "--no-cache", null};
 static string_address bowl_alpine_remove[] = {"/sbin/apk", "del", null};
+static string_address bowl_debian_install[] = {
+    "/usr/bin/apt-get", "install", "-y", "--no-install-recommends", null};
+static string_address bowl_debian_remove[] = {"/usr/bin/apt-get", "remove",
+                                              "-y", null};
+static string_address bowl_fedora_install[] = {
+    "/usr/bin/dnf", "install", "-y", "--setopt=install_weak_deps=False", null};
+static string_address bowl_fedora_remove[] = {"/usr/bin/dnf", "remove", "-y",
+                                              null};
 
 static const struct bowl_distro bowl_distros[] = {
     {"arch", BOWL_ARCH_LABEL, BOWL_ROOT_PREFIX "arch",
@@ -5914,12 +6260,14 @@ static const struct bowl_distro bowl_distros[] = {
     {"debian", "Debian", BOWL_ROOT_PREFIX "debian",
      BOWL_ROOT_PREFIX BOWL_DEBIAN_STORE, BOWL_DEBIAN_URL, "/usr/bin/apt-get",
      "apt-get update", (p64)8 * 1024 * 1024, BOWL_DEBIAN_BYTES,
-     BOWL_PRIME_NONE, bowl_debian_expose, BOWL_DEBIAN_SHA256, null},
+     BOWL_PRIME_DEBIAN, bowl_debian_expose, BOWL_DEBIAN_SHA256, null, null,
+     bowl_debian_install, bowl_debian_remove},
     {"fedora", "Fedora", BOWL_ROOT_PREFIX "fedora",
      BOWL_ROOT_PREFIX BOWL_FEDORA_STORE, BOWL_FEDORA_URL,
      "/usr/bin/dnf", "dnf makecache", (p64)32 * 1024 * 1024,
      BOWL_FEDORA_BYTES, BOWL_PRIME_NONE, bowl_fedora_expose,
-     BOWL_FEDORA_SHA256, bowl_extract_oci},
+     BOWL_FEDORA_SHA256, bowl_extract_oci, null, bowl_fedora_install,
+     bowl_fedora_remove},
     {"nix", "Nix", BOWL_ROOT_PREFIX "nix",
      BOWL_ROOT_PREFIX BOWL_NIX_STORE, BOWL_NIX_URL, "/nix/.reginfo",
      "nix-channel --update, or nix run nixpkgs#hello",
@@ -6048,6 +6396,8 @@ static b32 bowl_setup_distro(const struct bowl_distro address_to distro)
                 failed = bowl_prime_arch(distro->root);
         else if (distro->prime == BOWL_PRIME_NIX)
                 failed = bowl_prime_nix(distro->root);
+        else if (distro->prime == BOWL_PRIME_DEBIAN)
+                failed = bowl_prime_debian(distro->root);
         if (failed)
                 return failed;
 
@@ -7106,6 +7456,10 @@ struct bowl_profile
         const struct bowl_component address_to components;
         // Lines of the session script, run by /bin/sh.
         string_address address_to session;
+        // Libraries and drivers for the programs of bowls that are already
+        // there: no bowl is landed for it, nothing is made reachable by
+        // name, and there is no session script.
+        bool libraries;
 };
 
 /*
@@ -7193,9 +7547,50 @@ static string_address bowl_desktop_session[] = {
     "exec dbus-run-session -- startplasma-wayland",
     null};
 
+/*
+        The graphics, fonts and sound a program of a bowl loads by name, which
+        a distribution's minimal root leaves out: Chrome in a Debian bowl logs
+        "Could not dlopen native EGL: libEGL.so.1" and runs without the GPU,
+        draws no text where no font is installed, and nothing asks for the
+        driver, the font or the sound library until it is run.
+        Each bowl that is already set up gets the loaders and drivers of its
+        own distribution (Mesa's EGL, GBM and GL, the Vulkan loader with the
+        Mesa drivers, ALSA and the PulseAudio client library, fontconfig and
+        DejaVu), which are
+        small next to a browser and cost a bowl nothing while it has none of
+        them. A bowl that is not set up is left alone; Nix finds its own
+        libraries by path and has nothing to add.
+*/
+static string_address bowl_graphics_alpine[] = {
+    "mesa-egl", "mesa-gl", "mesa-gles", "mesa-gbm", "mesa-dri-gallium",
+    "mesa-vulkan-ati", "mesa-vulkan-intel", "mesa-vulkan-swrast",
+    "vulkan-loader", "alsa-lib", "libpulse", "fontconfig", "font-dejavu", null};
+static string_address bowl_graphics_debian[] = {
+    "libegl1", "libgl1", "libgles2", "libgbm1", "libgl1-mesa-dri",
+    "libegl-mesa0", "libglx-mesa0", "mesa-vulkan-drivers", "libvulkan1",
+    "libasound2t64", "libpulse0", "fontconfig", "fonts-dejavu-core", null};
+static string_address bowl_graphics_arch[] = {
+    "mesa", "libglvnd", "vulkan-icd-loader", "vulkan-radeon", "vulkan-intel",
+    "vulkan-swrast", "alsa-lib", "libpulse", "fontconfig", "ttf-dejavu", null};
+static string_address bowl_graphics_fedora[] = {
+    "mesa-libEGL", "mesa-libGL", "mesa-libGLES", "mesa-libgbm",
+    "mesa-dri-drivers", "mesa-vulkan-drivers", "vulkan-loader", "alsa-lib",
+    "pulseaudio-libs", "fontconfig", "dejavu-sans-fonts", null};
+
+static const struct bowl_component bowl_graphics_components[] = {
+    {"alpine", bowl_graphics_alpine, 0},
+    {"debian", bowl_graphics_debian, 0},
+    {"arch", bowl_graphics_arch, 0},
+    {"fedora", bowl_graphics_fedora, 0},
+    {null, null, 0},
+};
+
 static const struct bowl_profile bowl_profiles[] = {
     {"desktop", "KDE Plasma", "start it with: desktop", bowl_desktop_components,
-     bowl_desktop_session},
+     bowl_desktop_session, false},
+    {"graphics", "Graphics, fonts and sound libraries",
+     "programs of the bowls set up now can use the GPU, fonts and sound",
+     bowl_graphics_components, null, true},
 };
 
 static const struct bowl_profile address_to bowl_find_profile(string_address name)
@@ -7337,10 +7732,65 @@ static string_address bowl_profile_bins[] = {"/usr/bin", "/usr/sbin", null};
         has it, as in a profile, and what is added is not recorded under a
         profile, so no profile's remove takes it away.
 */
+static fn bowl_profile_drop(string_address root, string_address name);
+
+/*
+        A package manager that removed or renamed a program leaves its
+        launcher in /bowls/bin, and the link to it in /bin, naming a file that
+        is not there: `hello` after apt remove hello answered "No such file"
+        from a launcher, and a new program of the same name in another bowl
+        could not take the name. A launcher of this bowl whose program is gone
+        goes, with the link that points at it; one that names another bowl, or
+        a program still there, is not touched.
+*/
+static fn bowl_prune(string_address root)
+{
+        file_walk walk;
+        struct linux_dirent64 address_to entry;
+
+        if (!file_walk_open(address_of walk, AT_FDCWD, BOWL_EXPOSE_DIRECTORY))
+                return;
+
+        while ((entry = file_walk_next(address_of walk)))
+        {
+                p8 launcher[BOWL_PATH_LIMIT];
+                p8 line[BOWL_SHEBANG_LIMIT];
+                p8 owner[BOWL_PATH_LIMIT];
+                string_address program = null;
+                bipolar reader;
+                bipolar got;
+
+                if (file_is_dot(entry->d_name) ||
+                    !path_join(launcher, sizeof(launcher),
+                               BOWL_EXPOSE_DIRECTORY, entry->d_name))
+                        continue;
+
+                reader = system_open_at(AT_FDCWD, launcher,
+                                        FILE_READ | O_CLOEXEC | O_NOFOLLOW);
+                if (reader < 0)
+                        continue;
+                got = system_read_retry((positive)reader, line,
+                                        sizeof(line) - 1);
+                system_close(reader);
+                if (got <= 0)
+                        continue;
+                line[got] = end;
+
+                if (bowl_shebang_target(line, owner, sizeof(owner),
+                                        address_of program) &&
+                    program && string_equals(owner, root) &&
+                    bowl_executable_in_root(root, program) < 0)
+                        bowl_profile_drop(root, entry->d_name);
+        }
+
+        file_walk_close(address_of walk);
+}
+
 static fn bowl_reconcile(string_address root)
 {
         positive made = 0;
 
+        bowl_prune(root);
         bowl_quiet = true;
         for (positive at = 0; bowl_profile_bins[at]; at++)
                 made += bowl_profile_expose_dir(root, bowl_profile_bins[at], -1);
@@ -7354,6 +7804,26 @@ static fn bowl_reconcile(string_address root)
                               made);
                 log_flush();
         }
+}
+
+// A profile of libraries leaves the marker and nothing to expose.
+static b32 bowl_profile_mark(string_address root, string_address name)
+{
+        p8 marker_path[BOWL_PATH_LIMIT];
+        p8 state[BOWL_PATH_LIMIT];
+        bipolar marker;
+        bipolar failed;
+
+        if (!bowl_profile_marker(marker_path, sizeof(marker_path), root, name) ||
+            !bowl_root_path(state, sizeof(state), root, BOWL_PROFILE_STATE))
+                return bowl_refuse("bowl path is too long\n");
+
+        failed = bowl_mkdir_parents(state);
+        return_if(failed < 0, bowl_fail(state, failed));
+        marker = bowl_profile_marker_open(marker_path);
+        return_if(marker < 0, bowl_fail(marker_path, marker));
+        system_close(marker);
+        return 0;
 }
 
 static b32 bowl_profile_expose(string_address root, string_address name)
@@ -7507,6 +7977,9 @@ static b32 bowl_profile_install(const struct bowl_profile address_to profile)
                 if (!distro || !distro->install)
                         return bowl_refuse("a profile cannot use that "
                                            "distribution yet\n");
+                if (profile->libraries &&
+                    !bowl_has(distro->root, distro->marker))
+                        continue;
 
                 failed = bowl_setup_distro(distro);
                 if (!failed)
@@ -7524,12 +7997,16 @@ static b32 bowl_profile_install(const struct bowl_profile address_to profile)
                             "the package manager could not add them\n");
                 }
                 if (!failed)
-                        failed = bowl_profile_expose(distro->root,
-                                                     profile->name);
+                        failed = profile->libraries
+                                     ? bowl_profile_mark(distro->root,
+                                                         profile->name)
+                                     : bowl_profile_expose(distro->root,
+                                                           profile->name);
                 if (failed)
                         return failed;
         }
 
+        if (profile->session)
         {
                 // Published beside the managers, so it is on every PATH.
                 b32 failed = bowl_profile_script(profile);
@@ -7644,6 +8121,9 @@ static b32 bowl_profile_remove(const struct bowl_profile address_to profile)
                                          profile->name))
                         return bowl_refuse("a profile cannot use that "
                                            "distribution yet\n");
+                if (profile->libraries &&
+                    system_access_at(AT_FDCWD, marker, 0) < 0)
+                        continue;
 
                 failed = bowl_profile_unexpose(distro->root, marker);
                 if (!failed && bowl_has(distro->root, distro->marker))
@@ -7658,7 +8138,8 @@ static b32 bowl_profile_remove(const struct bowl_profile address_to profile)
         }
 
         // The script goes only if it is the one install wrote.
-        if (path_join(path, sizeof(path), BOWL_EXPOSE_DIRECTORY, profile->name) &&
+        if (profile->session &&
+            path_join(path, sizeof(path), BOWL_EXPOSE_DIRECTORY, profile->name) &&
             bowl_profile_header(want, sizeof(want), profile->name))
         {
                 reader = system_open_at(AT_FDCWD, path,
@@ -7698,7 +8179,7 @@ static b32 bowl_profile_list(void)
         for (positive at = 0; at < array_count(bowl_profiles); at++)
         {
                 const struct bowl_profile address_to profile = bowl_profiles + at;
-                bool installed = true;
+                bool installed = !profile->libraries;
 
                 for (const struct bowl_component address_to part =
                          profile->components;
@@ -7708,11 +8189,16 @@ static b32 bowl_profile_list(void)
                             bowl_find_distro(part->distro);
                         p8 marker[BOWL_PATH_LIMIT];
 
-                        installed &= distro &&
-                                     bowl_profile_marker(marker, sizeof(marker),
-                                                         distro->root,
-                                                         profile->name) &&
-                                     system_access_at(AT_FDCWD, marker, 0) >= 0;
+                        bool here = distro &&
+                                    bowl_profile_marker(marker, sizeof(marker),
+                                                        distro->root,
+                                                        profile->name) &&
+                                    system_access_at(AT_FDCWD, marker, 0) >= 0;
+
+                        if (profile->libraries)
+                                installed |= here;
+                        else
+                                installed &= here;
                 }
 
                 string_format(log, bowl_label "%s  %s%s\n", profile->name,
@@ -7781,7 +8267,7 @@ bowl_profile_main(positive count, string_address address_to arguments)
         words = bowl_profile_words(count, arguments, address_of profile,
                                    address_of remove);
         return_if(words == BOWL_PROFILE_WORDS_USAGE, bowl_usage());
-        return_if(words == BOWL_PROFILE_WORDS_UNKNOWN, bowl_refuse("known profiles: desktop\n"));
+        return_if(words == BOWL_PROFILE_WORDS_UNKNOWN, bowl_refuse("known profiles: desktop, graphics\n"));
 
         if (bowl_setup_become_root("profile", profile->name,
                                    remove ? "remove" : "install"))
@@ -7876,6 +8362,8 @@ static b32 bowl_main()
         if (isolated)
         {
                 b32 failed = bowl_write_resolv(root);
+
+                command_arguments = bowl_inputs_take(command_arguments);
 
                 if (failed)
                         return failed;

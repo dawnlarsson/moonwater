@@ -80770,7 +80770,7 @@ static fn profiles(void)
         {
                 const struct bowl_profile address_to row = bowl_profiles + at;
                 bool packages = true;
-                bool session = row->session && row->session[0];
+                bool session = row->libraries || (row->session && row->session[0]);
                 positive words = 0;
 
                 for (const struct bowl_component address_to part = row->components;
