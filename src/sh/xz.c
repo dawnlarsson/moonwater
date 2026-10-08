@@ -2122,6 +2122,7 @@ static p8 xz_prop_from_dict(positive dict)
 */
 
 #define XZ_OPTS 4096
+#define XZ_OPT_PAD 16
 #define XZ_LOOP_INPUT (XZ_OPTS + 1)
 #define XZ_INFINITY_PRICE (1u << 30)
 #define XZ_HASH2_SIZE (1u << 10)
@@ -2230,16 +2231,16 @@ typedef struct
         xz_found address_to matches;
 } xz_finder;
 
+/* The optimal parser's table: what the pricing of the lengths of a match
+   reads and writes for every length (the cost, where it came from, which
+   symbol, whether a literal came first) is four arrays, a run of lengths
+   being a run of each, and the rest of an entry is the struct. */
 typedef struct
 {
         p8 state;
-        bool prev_1_is_literal;
         bool prev_2;
         p32 pos_prev_2;
         p32 back_prev_2;
-        p32 price;
-        p32 pos_prev;
-        p32 back_prev;
         p32 backs[4];
 } xz_optimal;
 
@@ -2312,6 +2313,10 @@ typedef struct
         p32 opts_end;
         p32 opts_current;
         xz_optimal opts[XZ_OPTS];
+        p32 opt_price[XZ_OPTS + XZ_OPT_PAD];
+        p32 opt_pos[XZ_OPTS + XZ_OPT_PAD];
+        p32 opt_back[XZ_OPTS + XZ_OPT_PAD];
+        p32 opt_literal[XZ_OPTS + XZ_OPT_PAD];
 
         /* The finished block: out_n bytes at out + out_at. */
         p8 address_to out;
@@ -3451,17 +3456,76 @@ static fn xz_skip(xz_encoder address_to e, p32 amount)
         }
 }
 
-static inline INLINE fn xz_make_literal(xz_optimal address_to o)
+static inline INLINE fn xz_make_literal(xz_encoder address_to e, p32 at)
 {
-        o->back_prev = XZ_LITERAL;
-        o->prev_1_is_literal = false;
+        e->opt_back[at] = XZ_LITERAL;
+        e->opt_literal[at] = false;
 }
 
-static inline INLINE fn xz_make_short_rep(xz_optimal address_to o)
+static inline INLINE fn xz_make_short_rep(xz_encoder address_to e, p32 at)
 {
-        o->back_prev = 0;
-        o->prev_1_is_literal = false;
+        e->opt_back[at] = 0;
+        e->opt_literal[at] = false;
 }
+
+/* lzma_match_prices' job (lib.c documents each field). */
+typedef struct
+{
+        p32 address_to arr;
+        xz_found address_to matches;
+        p32 address_to prices;
+        p32 address_to dist_prices;
+        p32 address_to slot_prices;
+        p32 address_to align_prices;
+        positive base;
+        positive cur;
+        positive index;
+        positive count;
+        positive len;
+        positive avail;
+        p8 address_to buf;
+        positive stop;
+} xz_match_job;
+
+_Static_assert(sizeof(xz_match_job) == 112 &&
+               XZ_FULL_DIST == 128 && XZ_DIST_SLOTS == 64 &&
+               __builtin_offsetof(xz_encoder, opt_pos) - __builtin_offsetof(xz_encoder, opt_price) == 16448 &&
+               __builtin_offsetof(xz_encoder, opt_back) - __builtin_offsetof(xz_encoder, opt_pos) == 16448 &&
+               __builtin_offsetof(xz_encoder, opt_literal) - __builtin_offsetof(xz_encoder, opt_back) == 16448 &&
+               __builtin_offsetof(xz_match_job, matches) == 8 &&
+               __builtin_offsetof(xz_match_job, prices) == 16 &&
+               __builtin_offsetof(xz_match_job, dist_prices) == 24 &&
+               __builtin_offsetof(xz_match_job, slot_prices) == 32 &&
+               __builtin_offsetof(xz_match_job, align_prices) == 40 &&
+               __builtin_offsetof(xz_match_job, base) == 48 &&
+               __builtin_offsetof(xz_match_job, cur) == 56 &&
+               __builtin_offsetof(xz_match_job, index) == 64 &&
+               __builtin_offsetof(xz_match_job, count) == 72 &&
+               __builtin_offsetof(xz_match_job, len) == 80 &&
+               __builtin_offsetof(xz_match_job, avail) == 88 &&
+               __builtin_offsetof(xz_match_job, buf) == 96 &&
+               __builtin_offsetof(xz_match_job, stop) == 104,
+               "lzma_match_prices' job layout");
+
+/* lzma_relax's job (lib.c documents each field). */
+typedef struct
+{
+        p32 address_to arr;
+        p32 address_to prices;
+        positive first;
+        positive n;
+        positive base;
+        positive pos;
+        positive back;
+} xz_relax_job;
+
+_Static_assert(sizeof(xz_relax_job) == 56 &&
+               __builtin_offsetof(xz_relax_job, first) == 16 &&
+               __builtin_offsetof(xz_relax_job, n) == 24 &&
+               __builtin_offsetof(xz_relax_job, base) == 32 &&
+               __builtin_offsetof(xz_relax_job, pos) == 40 &&
+               __builtin_offsetof(xz_relax_job, back) == 48,
+               "lzma_relax's job layout");
 
 /* Levels 0-3: the longest match, repeats preferred by a distance rule and
    a one-byte lazy look. */
@@ -3576,35 +3640,35 @@ static fn xz_backward(xz_encoder address_to e, p32 address_to len_res, p32 addre
                       p32 cur)
 {
         xz_optimal address_to opts = e->opts;
-        p32 pos_mem = opts[cur].pos_prev;
-        p32 back_mem = opts[cur].back_prev;
+        p32 pos_mem = e->opt_pos[cur];
+        p32 back_mem = e->opt_back[cur];
 
         e->opts_end = cur;
         do
         {
-                if (opts[cur].prev_1_is_literal)
+                if (e->opt_literal[cur])
                 {
-                        xz_make_literal(opts + pos_mem);
-                        opts[pos_mem].pos_prev = pos_mem - 1;
+                        xz_make_literal(e, pos_mem);
+                        e->opt_pos[pos_mem] = pos_mem - 1;
                         if (opts[cur].prev_2)
                         {
-                                opts[pos_mem - 1].prev_1_is_literal = false;
-                                opts[pos_mem - 1].pos_prev = opts[cur].pos_prev_2;
-                                opts[pos_mem - 1].back_prev = opts[cur].back_prev_2;
+                                e->opt_literal[pos_mem - 1] = false;
+                                e->opt_pos[pos_mem - 1] = opts[cur].pos_prev_2;
+                                e->opt_back[pos_mem - 1] = opts[cur].back_prev_2;
                         }
                 }
                 p32 pos_prev = pos_mem;
                 p32 back_cur = back_mem;
 
-                back_mem = opts[pos_prev].back_prev;
-                pos_mem = opts[pos_prev].pos_prev;
-                opts[pos_prev].back_prev = back_cur;
-                opts[pos_prev].pos_prev = cur;
+                back_mem = e->opt_back[pos_prev];
+                pos_mem = e->opt_pos[pos_prev];
+                e->opt_back[pos_prev] = back_cur;
+                e->opt_pos[pos_prev] = cur;
                 cur = pos_prev;
         } while (cur);
-        e->opts_current = opts[0].pos_prev;
-        address_to len_res = opts[0].pos_prev;
-        address_to back_res = opts[0].back_prev;
+        e->opts_current = e->opt_pos[0];
+        address_to len_res = e->opt_pos[0];
+        address_to back_res = e->opt_back[0];
 }
 
 static p32 xz_optimum_first(xz_encoder address_to e, p32 address_to back_res,
@@ -3675,10 +3739,10 @@ static p32 xz_optimum_first(xz_encoder address_to e, p32 address_to back_res,
         opts[0].state = e->state;
         p32 ps = position & e->pos_mask;
 
-        opts[1].price = xz_price0(e, m->is_match[state][ps]) +
-                        xz_literal_price(e, position, buf[-1], state >= 7, match_byte,
-                                         current);
-        xz_make_literal(opts + 1);
+        e->opt_price[1] = xz_price0(e, m->is_match[state][ps]) +
+                          xz_literal_price(e, position, buf[-1], state >= 7, match_byte,
+                                           current);
+        xz_make_literal(e, 1);
 
         p32 match_price = xz_price1(e, m->is_match[state][ps]);
         p32 rep_match_price = match_price + xz_price1(e, m->is_rep[state]);
@@ -3687,10 +3751,10 @@ static p32 xz_optimum_first(xz_encoder address_to e, p32 address_to back_res,
         {
                 p32 short_rep_price = rep_match_price + xz_short_rep_price(e, state, ps);
 
-                if (short_rep_price < opts[1].price)
+                if (short_rep_price < e->opt_price[1])
                 {
-                        opts[1].price = short_rep_price;
-                        xz_make_short_rep(opts + 1);
+                        e->opt_price[1] = short_rep_price;
+                        xz_make_short_rep(e, 1);
                 }
         }
 
@@ -3698,17 +3762,17 @@ static p32 xz_optimum_first(xz_encoder address_to e, p32 address_to back_res,
 
         if (len_end < 2)
         {
-                address_to back_res = opts[1].back_prev;
+                address_to back_res = e->opt_back[1];
                 address_to len_res = 1;
                 return XZ_LITERAL;
         }
-        opts[1].pos_prev = 0;
+        e->opt_pos[1] = 0;
         for (p32 i = 0; i < 4; i++)
                 opts[0].backs[i] = e->reps[i];
 
         p32 len = len_end;
         do
-                opts[len].price = XZ_INFINITY_PRICE;
+                e->opt_price[len] = XZ_INFINITY_PRICE;
         while (--len >= 2);
 
         for (p32 i = 0; i < 4; i++)
@@ -3718,18 +3782,9 @@ static p32 xz_optimum_first(xz_encoder address_to e, p32 address_to back_res,
                 if (rep_len < 2)
                         continue;
                 p32 price = rep_match_price + xz_pure_rep_price(e, i, state, ps);
-                do
-                {
-                        p32 cost = price + e->rep_prices.prices[ps][rep_len - 2];
+                xz_relax_job relax = {e->opt_price, e->rep_prices.prices[ps], 2, rep_len - 1, price, 0, i};
 
-                        if (cost < opts[rep_len].price)
-                        {
-                                opts[rep_len].price = cost;
-                                opts[rep_len].pos_prev = 0;
-                                opts[rep_len].back_prev = i;
-                                opts[rep_len].prev_1_is_literal = false;
-                        }
-                } while (--rep_len >= 2);
+                lzma_relax(address_of relax);
         }
 
         p32 normal_match_price = match_price + xz_price0(e, m->is_rep[state]);
@@ -3741,21 +3796,12 @@ static p32 xz_optimum_first(xz_encoder address_to e, p32 address_to back_res,
 
                 while (len > e->matches[i].len)
                         i++;
-                for (;; len++)
-                {
-                        p32 dist = e->matches[i].dist;
-                        p32 cost = normal_match_price + xz_dist_len_price(e, dist, len, ps);
 
-                        if (cost < opts[len].price)
-                        {
-                                opts[len].price = cost;
-                                opts[len].pos_prev = 0;
-                                opts[len].back_prev = dist + 4;
-                                opts[len].prev_1_is_literal = false;
-                        }
-                        if (len == e->matches[i].len && ++i == count)
-                                break;
-                }
+                xz_match_job job = {e->opt_price, e->matches, e->match_prices.prices[ps],
+                                    address_of e->dist_prices[0][0], address_of e->dist_slot_prices[0][0],
+                                    e->align_prices, normal_match_price, 0, i, count, len, 0, null, 0};
+
+                lzma_match_prices(address_of job);
         }
         return len_end;
 }
@@ -3788,10 +3834,10 @@ static p32 xz_optimum_next(xz_encoder address_to e, p32 address_to reps, p8 addr
         xz_optimal address_to opts = e->opts;
         p32 count = e->match_count;
         p32 new_len = e->longest;
-        p32 pos_prev = opts[cur].pos_prev;
+        p32 pos_prev = e->opt_pos[cur];
         p8 state;
 
-        if (opts[cur].prev_1_is_literal)
+        if (e->opt_literal[cur])
         {
                 pos_prev--;
                 if (opts[cur].prev_2)
@@ -3809,14 +3855,14 @@ static p32 xz_optimum_next(xz_encoder address_to e, p32 address_to reps, p8 addr
 
         if (pos_prev == cur - 1)
         {
-                state = opts[cur].back_prev == 0 ? xz_after_short_rep(state)
-                                                 : xz_after_literal(state);
+                state = e->opt_back[cur] == 0 ? xz_after_short_rep(state)
+                                              : xz_after_literal(state);
         }
         else
         {
                 p32 pos;
 
-                if (opts[cur].prev_1_is_literal && opts[cur].prev_2)
+                if (e->opt_literal[cur] && opts[cur].prev_2)
                 {
                         pos_prev = opts[cur].pos_prev_2;
                         pos = opts[cur].back_prev_2;
@@ -3824,7 +3870,7 @@ static p32 xz_optimum_next(xz_encoder address_to e, p32 address_to reps, p8 addr
                 }
                 else
                 {
-                        pos = opts[cur].back_prev;
+                        pos = e->opt_back[cur];
                         state = pos < 4 ? xz_after_long_rep(state) : xz_after_match(state);
                 }
                 if (pos < 4)
@@ -3848,7 +3894,7 @@ static p32 xz_optimum_next(xz_encoder address_to e, p32 address_to reps, p8 addr
         for (p32 i = 0; i < 4; i++)
                 opts[cur].backs[i] = reps[i];
 
-        p32 cur_price = opts[cur].price;
+        p32 cur_price = e->opt_price[cur];
         p8 current = buf[0];
         p8 match_byte = *(buf - reps[0] - 1);
         p32 ps = position & e->pos_mask;
@@ -3857,11 +3903,11 @@ static p32 xz_optimum_next(xz_encoder address_to e, p32 address_to reps, p8 addr
                                                current);
         bool next_is_literal = false;
 
-        if (cur_and_1_price < opts[cur + 1].price)
+        if (cur_and_1_price < e->opt_price[cur + 1])
         {
-                opts[cur + 1].price = cur_and_1_price;
-                opts[cur + 1].pos_prev = cur;
-                xz_make_literal(opts + cur + 1);
+                e->opt_price[cur + 1] = cur_and_1_price;
+                e->opt_pos[cur + 1] = cur;
+                xz_make_literal(e, cur + 1);
                 next_is_literal = true;
         }
 
@@ -3869,15 +3915,15 @@ static p32 xz_optimum_next(xz_encoder address_to e, p32 address_to reps, p8 addr
         p32 rep_match_price = match_price + xz_price1(e, m->is_rep[state]);
 
         if (match_byte == current &&
-            !(opts[cur + 1].pos_prev < cur && opts[cur + 1].back_prev == 0))
+            !(e->opt_pos[cur + 1] < cur && e->opt_back[cur + 1] == 0))
         {
                 p32 short_rep_price = rep_match_price + xz_short_rep_price(e, state, ps);
 
-                if (short_rep_price <= opts[cur + 1].price)
+                if (short_rep_price <= e->opt_price[cur + 1])
                 {
-                        opts[cur + 1].price = short_rep_price;
-                        opts[cur + 1].pos_prev = cur;
-                        xz_make_short_rep(opts + cur + 1);
+                        e->opt_price[cur + 1] = short_rep_price;
+                        e->opt_pos[cur + 1] = cur;
+                        xz_make_short_rep(e, cur + 1);
                         next_is_literal = true;
                 }
         }
@@ -3903,15 +3949,15 @@ static p32 xz_optimum_next(xz_encoder address_to e, p32 address_to reps, p8 addr
                         p32 offset = cur + 1 + len_test;
 
                         while (len_end < offset)
-                                opts[++len_end].price = XZ_INFINITY_PRICE;
+                                e->opt_price[++len_end] = XZ_INFINITY_PRICE;
                         p32 cost = next_rep_match_price +
                                    xz_rep_price(e, 0, len_test, state_2, ps_next);
-                        if (cost < opts[offset].price)
+                        if (cost < e->opt_price[offset])
                         {
-                                opts[offset].price = cost;
-                                opts[offset].pos_prev = cur + 1;
-                                opts[offset].back_prev = 0;
-                                opts[offset].prev_1_is_literal = true;
+                                e->opt_price[offset] = cost;
+                                e->opt_pos[offset] = cur + 1;
+                                e->opt_back[offset] = 0;
+                                e->opt_literal[offset] = true;
                                 opts[offset].prev_2 = false;
                         }
                 }
@@ -3928,24 +3974,13 @@ static p32 xz_optimum_next(xz_encoder address_to e, p32 address_to reps, p8 addr
                 p32 len_test = xz_common(buf, back, 2, buf_avail);
 
                 while (len_end < cur + len_test)
-                        opts[++len_end].price = XZ_INFINITY_PRICE;
+                        e->opt_price[++len_end] = XZ_INFINITY_PRICE;
 
-                p32 len_test_temp = len_test;
                 p32 price = rep_match_price + xz_pure_rep_price(e, rep_index, state, ps);
+                xz_relax_job relax = {e->opt_price, e->rep_prices.prices[ps], cur + 2, len_test - 1,
+                                      price, cur, rep_index};
 
-                do
-                {
-                        p32 cost = price + e->rep_prices.prices[ps][len_test - 2];
-
-                        if (cost < opts[cur + len_test].price)
-                        {
-                                opts[cur + len_test].price = cost;
-                                opts[cur + len_test].pos_prev = cur;
-                                opts[cur + len_test].back_prev = rep_index;
-                                opts[cur + len_test].prev_1_is_literal = false;
-                        }
-                } while (--len_test >= 2);
-                len_test = len_test_temp;
+                lzma_relax(address_of relax);
                 if (!rep_index)
                         start_len = len_test + 1;
 
@@ -3973,15 +4008,15 @@ static p32 xz_optimum_next(xz_encoder address_to e, p32 address_to reps, p8 addr
                         p32 offset = cur + len_test + 1 + len_test_2;
 
                         while (len_end < offset)
-                                opts[++len_end].price = XZ_INFINITY_PRICE;
+                                e->opt_price[++len_end] = XZ_INFINITY_PRICE;
                         p32 cost = next_rep_match_price +
                                    xz_rep_price(e, 0, len_test_2, state_2, ps_next);
-                        if (cost < opts[offset].price)
+                        if (cost < e->opt_price[offset])
                         {
-                                opts[offset].price = cost;
-                                opts[offset].pos_prev = cur + len_test + 1;
-                                opts[offset].back_prev = 0;
-                                opts[offset].prev_1_is_literal = true;
+                                e->opt_price[offset] = cost;
+                                e->opt_pos[offset] = cur + len_test + 1;
+                                e->opt_back[offset] = 0;
+                                e->opt_literal[offset] = true;
                                 opts[offset].prev_2 = true;
                                 opts[offset].pos_prev_2 = cur;
                                 opts[offset].back_prev_2 = rep_index;
@@ -4003,26 +4038,25 @@ static p32 xz_optimum_next(xz_encoder address_to e, p32 address_to reps, p8 addr
         p32 normal_match_price = match_price + xz_price0(e, m->is_rep[state]);
 
         while (len_end < cur + new_len)
-                opts[++len_end].price = XZ_INFINITY_PRICE;
+                e->opt_price[++len_end] = XZ_INFINITY_PRICE;
 
         p32 i = 0;
 
         while (start_len > e->matches[i].len)
                 i++;
-        for (p32 len_test = start_len;; len_test++)
-        {
-                p32 cur_back = e->matches[i].dist;
-                p32 cost = normal_match_price + xz_dist_len_price(e, cur_back, len_test, ps);
 
-                if (cost < opts[cur + len_test].price)
-                {
-                        opts[cur + len_test].price = cost;
-                        opts[cur + len_test].pos_prev = cur;
-                        opts[cur + len_test].back_prev = cur_back + 4;
-                        opts[cur + len_test].prev_1_is_literal = false;
-                }
-                if (len_test != e->matches[i].len)
-                        continue;
+        xz_match_job job = {e->opt_price, e->matches, e->match_prices.prices[ps],
+                            address_of e->dist_prices[0][0], address_of e->dist_slot_prices[0][0],
+                            e->align_prices, normal_match_price, cur, i, count, start_len,
+                            buf_avail_full, buf, 1};
+
+        //      The routine prices every length of every match and stops where a
+        //      match may be followed by a literal and the same distance again.
+        while (lzma_match_prices(address_of job))
+        {
+                p32 len_test = (p32)job.len;
+                p32 cur_back = e->matches[job.index].dist;
+                p32 cost = normal_match_price + xz_dist_len_price(e, cur_back, len_test, ps);
 
                 /* Match, literal, repeat 0. */
                 p8 address_to back = buf - cur_back - 1;
@@ -4050,22 +4084,23 @@ static p32 xz_optimum_next(xz_encoder address_to e, p32 address_to reps, p8 addr
                         p32 offset = cur + len_test + 1 + len_test_2;
 
                         while (len_end < offset)
-                                opts[++len_end].price = XZ_INFINITY_PRICE;
+                                e->opt_price[++len_end] = XZ_INFINITY_PRICE;
                         p32 cost_2 = next_rep_match_price +
                                      xz_rep_price(e, 0, len_test_2, state_2, ps_next);
-                        if (cost_2 < opts[offset].price)
+                        if (cost_2 < e->opt_price[offset])
                         {
-                                opts[offset].price = cost_2;
-                                opts[offset].pos_prev = cur + len_test + 1;
-                                opts[offset].back_prev = 0;
-                                opts[offset].prev_1_is_literal = true;
+                                e->opt_price[offset] = cost_2;
+                                e->opt_pos[offset] = cur + len_test + 1;
+                                e->opt_back[offset] = 0;
+                                e->opt_literal[offset] = true;
                                 opts[offset].prev_2 = true;
                                 opts[offset].pos_prev_2 = cur;
                                 opts[offset].back_prev_2 = cur_back + 4;
                         }
                 }
-                if (++i == count)
+                if (++job.index == count)
                         break;
+                job.len = len_test + 1;
         }
         return len_end;
 }
@@ -4081,9 +4116,9 @@ static fn xz_optimum_normal(xz_encoder address_to e, p32 address_to back_res,
         {
                 p32 at = e->opts_current;
 
-                address_to len_res = opts[at].pos_prev - at;
-                address_to back_res = opts[at].back_prev;
-                e->opts_current = opts[at].pos_prev;
+                address_to len_res = e->opt_pos[at] - at;
+                address_to back_res = e->opt_back[at];
+                e->opts_current = e->opt_pos[at];
                 return;
         }
         if (!e->read_ahead)

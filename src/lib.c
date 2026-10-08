@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        392 routines (369 public, 23 local), 382 of them on all three and 10 local to one.
+        394 routines (371 public, 23 local), 384 of them on all three and 10 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -196,9 +196,11 @@
           log_failure_reset              public  yes     yes     yes
           log_flush                      public  yes     yes     yes
           lzma_decode_span               public  yes     yes     yes
+          lzma_match_prices              public  yes     yes     yes
           lzma_range_decode              public  yes     yes     yes
           lzma_range_encode              public  yes     yes     yes
           lzma_range_shift               public  yes     yes     yes
+          lzma_relax                     public  yes     yes     yes
           lzma_tree_walk                 public  yes     yes     yes
           md5_blocks                     public  yes     yes     yes
           memory                         public  yes     yes     yes
@@ -1622,6 +1624,39 @@ typedef typeof(sizeof(0)) sized;
     "lwu t1, 0(t0)\n   lwu t2, 4(t0)\n   sw t2, 0(a4)\n   sw t1, 0(a5)\n   j .Llzt_rv_ret" ID "\n"                  \
     ".Llzt_rv_done" ID ":  sw zero, 0(a4)\n   sw zero, 0(a5)\n"                                                    \
     ".Llzt_rv_ret" ID ":\n"
+
+/* The scalar relax of one length of lzma_match_prices, arm64: the cost in w16 against the entry at byte
+   offset x14 of the four arrays whose bases are x2 (price), x3 (pos_prev), x4 (back_prev) and x5
+   (prev_literal); an entry it beats takes the cost, w6 (the position), w13 (the symbol) and no literal
+   before it. Clobbers w16 and w17. */
+#define LZ_RELAX_A64                                                                                         \
+    "ldr w17, [x2, x14]\n   cmp w16, w17\n   csel w16, w16, w17, lo\n   str w16, [x2, x14]\n"                    \
+    "ldr w16, [x3, x14]\n   csel w16, w6, w16, lo\n   str w16, [x3, x14]\n"                                    \
+    "ldr w16, [x4, x14]\n   csel w16, w13, w16, lo\n   str w16, [x4, x14]\n"                                   \
+    "ldr w16, [x5, x14]\n   csel w16, wzr, w16, lo\n   str w16, [x5, x14]\n"
+
+/* The run of lzma_match_prices and lzma_relax, arm64: the w16 costs P[k] + w22 for k below n, P at x17,
+   against the entries from byte offset x14 of the four arrays x2 to x5 (as LZ_RELAX_A64), four lanes at a
+   time in v registers with the last turn masked by the lanes left. Clobbers x14, x16, x17 and v0 to v7. */
+#define LZ_RELAX_RUN_A64(ID)                                                                                 \
+    "dup v0.4s, w22\n   dup v1.4s, w6\n   dup v2.4s, w13\n   movz x15, #1, lsl #32\n   fmov d7, x15\n"            \
+    "movz x15, #2\n   movk x15, #3, lsl #32\n   mov v7.d[1], x15\n"                                              \
+    ".Llrx_arm64_l" ID ":  ldr q3, [x17], #16\n   add v3.4s, v3.4s, v0.4s\n   ldr q4, [x2, x14]\n   cmhi v5.4s, v4.4s, v3.4s\n" \
+    "dup v6.4s, w16\n   cmhi v6.4s, v6.4s, v7.4s\n   and v5.16b, v5.16b, v6.16b\n"                               \
+    "bit v4.16b, v3.16b, v5.16b\n   str q4, [x2, x14]\n"                                                         \
+    "ldr q4, [x3, x14]\n   bit v4.16b, v1.16b, v5.16b\n   str q4, [x3, x14]\n"                                  \
+    "ldr q4, [x4, x14]\n   bit v4.16b, v2.16b, v5.16b\n   str q4, [x4, x14]\n"                                  \
+    "ldr q4, [x5, x14]\n   bic v4.16b, v4.16b, v5.16b\n   str q4, [x5, x14]\n"                                  \
+    "add x14, x14, #16\n   subs w16, w16, #4\n   b.gt .Llrx_arm64_l" ID "\n"
+
+/* The relax of one length of lzma_match_prices, riscv64: the cost in t3 against the entry at byte offset a4
+   of the four arrays whose bases are s0 (price), s1 (pos_prev), s2 (back_prev) and s3 (prev_literal); an
+   entry it beats takes the cost, s4 (the position), s8 (the symbol) and no literal before it. Clobbers t0
+   and t1. ID makes the label. */
+#define LZ_RELAX_RV(ID)                                                                                      \
+    "add t0, s0, a4\n   lwu t1, 0(t0)\n   bgeu t3, t1, .Llrx_rv_n" ID "\n   sw t3, 0(t0)\n"                       \
+    "add t0, s1, a4\n   sw s4, 0(t0)\n   add t0, s2, a4\n   sw s8, 0(t0)\n   add t0, s3, a4\n   sw zero, 0(t0)\n" \
+    ".Llrx_rv_n" ID ":\n"
 
 
 #define asm_x64_add "add"
@@ -4123,6 +4158,47 @@ __asm__(
     "mov (%rcx), %edx\n   mov 4(%rcx), %edi\n   mov %edi, (%r12)\n   mov %edx, (%r13)\n   jmp .Llzt_x64_ret" ID "\n" \
     ".Llzt_x64_done" ID ":  movl $0, (%r12)\n   movl $0, (%r13)\n"                                                 \
     ".Llzt_x64_ret" ID ":\n"
+
+/* The relax of one length of lzma_match_prices on the parser's four arrays (price, pos_prev, back_prev,
+   prev_literal, 16448 bytes apart): the cost in eax is tried against the entry r8 + rsi, and an entry it
+   beats takes the cost, the position r12d, the symbol ebp and no literal before it, without a branch.
+   T and M name the two registers it clobbers (without the r's number's size letter). */
+#define LZ_RELAX_X64(T, M)                                                                                   \
+    "mov (%r8,%rsi), %" T "d\n   cmp %" T "d, %eax\n   sbb %" M "d, %" M "d\n   cmovae %" T "d, %eax\n"          \
+    "mov %eax, (%r8,%rsi)\n   mov 16448(%r8,%rsi), %" T "d\n   cmovb %r12d, %" T "d\n"                           \
+    "mov %" T "d, 16448(%r8,%rsi)\n   mov 32896(%r8,%rsi), %" T "d\n   cmovb %ebp, %" T "d\n"                   \
+    "mov %" T "d, 32896(%r8,%rsi)\n   not %" M "d\n   and %" M "d, 49344(%r8,%rsi)\n"
+
+/* The run of lzma_match_prices and lzma_relax, x86-64: the n (r10d) costs P[k] + base (r14d), P at r13, are
+   tried against the entries from r8 + rsi (the price array; the other three 16448 bytes apart each), and an
+   entry one beats takes the cost, the position r12d, the symbol ebp and no literal before it. Eight lanes in
+   ymm with AVX2, sixteen in zmm with AVX-512 (the last turn masked by the lanes left), else one by one
+   without a branch. ID makes the labels. Clobbers rax, r10, r13, r15, rsi and the vector registers. */
+#define LZ_RELAX_RUN_X64(ID)                                                                                 \
+    "cmpb $0, cpu_has_avx512(%rip)\n   jne .Llrx_x64_z" ID "\n   cmpb $0, cpu_has_avx2(%rip)\n   jne .Llrx_x64_y" ID "\n" \
+    ".Llrx_x64_s" ID ":  mov (%r13), %eax\n   add %r14d, %eax\n"                                              \
+    LZ_RELAX_X64("r11", "r15")                                                                                 \
+    "add $4, %r13\n   add $4, %rsi\n   dec %r10d\n   jnz .Llrx_x64_s" ID "\n   jmp .Llrx_x64_d" ID "\n"      \
+    ".Llrx_x64_y" ID ":  vmovd %r14d, %xmm0\n   vpbroadcastd %xmm0, %ymm0\n   vmovd %r12d, %xmm1\n   vpbroadcastd %xmm1, %ymm1\n" \
+    "vmovd %ebp, %xmm2\n   vpbroadcastd %xmm2, %ymm2\n   mov $0x0706050403020100, %rax\n   vmovq %rax, %xmm7\n   vpmovzxbd %xmm7, %ymm7\n" \
+    ".Llrx_x64_yl" ID ":  vmovd %r10d, %xmm3\n   vpbroadcastd %xmm3, %ymm3\n   vpcmpgtd %ymm7, %ymm3, %ymm3\n"  \
+    "vpaddd (%r13), %ymm0, %ymm4\n   vmovdqu (%r8,%rsi), %ymm5\n   vpcmpgtd %ymm4, %ymm5, %ymm6\n   vpand %ymm3, %ymm6, %ymm6\n" \
+    "vpblendvb %ymm6, %ymm4, %ymm5, %ymm4\n   vmovdqu %ymm4, (%r8,%rsi)\n"                                      \
+    "vmovdqu 16448(%r8,%rsi), %ymm4\n   vpblendvb %ymm6, %ymm1, %ymm4, %ymm4\n   vmovdqu %ymm4, 16448(%r8,%rsi)\n" \
+    "vmovdqu 32896(%r8,%rsi), %ymm4\n   vpblendvb %ymm6, %ymm2, %ymm4, %ymm4\n   vmovdqu %ymm4, 32896(%r8,%rsi)\n" \
+    "vmovdqu 49344(%r8,%rsi), %ymm4\n   vpandn %ymm4, %ymm6, %ymm4\n   vmovdqu %ymm4, 49344(%r8,%rsi)\n"       \
+    "add $32, %rsi\n   add $32, %r13\n   sub $8, %r10d\n   jg .Llrx_x64_yl" ID "\n   vzeroupper\n   jmp .Llrx_x64_d" ID "\n" \
+    ".Llrx_x64_z" ID ":  vpbroadcastd %r14d, %zmm0\n   vpbroadcastd %r12d, %zmm1\n   vpbroadcastd %ebp, %zmm2\n   vpxord %zmm3, %zmm3, %zmm3\n" \
+    ".Llrx_x64_zl" ID ":  cmp $16, %r10d\n   jb .Llrx_x64_zt" ID "\n"                                          \
+    "vpaddd (%r13), %zmm0, %zmm4\n   vmovdqu32 (%r8,%rsi), %zmm5\n   vpcmpud $1, %zmm5, %zmm4, %k1\n   vpminud %zmm5, %zmm4, %zmm6\n   vmovdqu32 %zmm6, (%r8,%rsi)\n" \
+    "vmovdqu32 %zmm1, 16448(%r8,%rsi){%k1}\n   vmovdqu32 %zmm2, 32896(%r8,%rsi){%k1}\n   vmovdqu32 %zmm3, 49344(%r8,%rsi){%k1}\n" \
+    "add $64, %rsi\n   add $64, %r13\n   sub $16, %r10d\n   jnz .Llrx_x64_zl" ID "\n   jmp .Llrx_x64_zd" ID "\n"  \
+    ".Llrx_x64_zt" ID ":  mov $-1, %eax\n   bzhi %r10d, %eax, %eax\n   kmovw %eax, %k2\n"                       \
+    "vpaddd (%r13), %zmm0, %zmm4{%k2}{z}\n   vmovdqu32 (%r8,%rsi), %zmm5{%k2}{z}\n   vpcmpud $1, %zmm5, %zmm4, %k1{%k2}\n" \
+    "vpminud %zmm5, %zmm4, %zmm6\n   vmovdqu32 %zmm6, (%r8,%rsi){%k2}\n"                                      \
+    "vmovdqu32 %zmm1, 16448(%r8,%rsi){%k1}\n   vmovdqu32 %zmm2, 32896(%r8,%rsi){%k1}\n   vmovdqu32 %zmm3, 49344(%r8,%rsi){%k1}\n" \
+    ".Llrx_x64_zd" ID ":  vzeroupper\n"                                                                      \
+    ".Llrx_x64_d" ID ":\n"
 
 
 //      The masked window: every size up to sixty four bytes in one mask.
@@ -13621,6 +13697,87 @@ __asm__(
     ".Llzt_x64_out:  add $56, %rsp\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n" ASM_RET
 #endif
     ASM_END(lzma_tree_walk)
+    /* lzma_match_prices(job) prices the matches of a find against the optimal parser's table: for each
+       match, from the length after the one before it to its own, the cost of a match of that length
+       at that distance (the base price of the symbol, the price of the distance in the class of the
+       length, the price of the length) is tried against the entry that many bytes on, and an entry
+       it beats takes the cost, the position the match was made at, the distance + 4 and no literal
+       before it, as xz.c's loop over the matches did (the C of that loop is the model test/checks.c
+       keeps). The table is four arrays of u32, 16448 bytes apart (price, pos_prev, back_prev, and
+       prev_1_is_literal as 0 or 1), indexed by position less the block's start, so a run of lengths is
+       a run of each. The job, 112 bytes, * what the routine changes: arr 0 (the price array: the
+       other three follow it), matches 8 (length and distance - 1 as u32 pairs, lengths increasing),
+       prices 16 (the match lengths' price table of this position state, indexed by length - 2),
+       dist_prices 24 (the prices of distances under 128, [4][128] u32 by length class), slot_prices
+       32 ([4][64] u32), align_prices 40, base 48 (the price of the symbol's match flag and the bit
+       that says it is no repeat), cur 56, *index 64 (the match to start at), count 72, *len 80 (the
+       length to start at), avail 88 (bytes left), buf 96 (the bytes here), stop 104. A distance of
+       128 or more costs its slot's price and the price of its low four bits (the slot is twice the
+       position of the top bit and the bit below it). Lengths 2 to 5 each have a class of their own,
+       a length of 6 or more the same one, so the lengths from 6 are one price table added to one
+       constant and tried eight (AVX2) or sixteen (AVX-512) at a time, the lanes past the match's
+       length masked, and below 6 four at most are done one by one, without a branch. The routine
+       stops, with index and len at the match and its last length, where the match may be followed
+       by a literal and a repeat of the same distance (the stop is nonzero and the two bytes after
+       the match are the same as at the distance: the parser tries that in C) and returns 1; it
+       returns 0 when the matches are done. The C loop took 35 instructions a length and a
+       mispredict at the end of every match's run of lengths and for one entry in four; the lengths
+       from 6 are now two or three instructions. Measured on a 9950X over 3352, 1412 and 1652 jobs
+       dumped from an xz -6 run of 16 MiB of text, source tar and binary tar (the routine alone, the
+       table's four windows copied in before each call and that copy taken off, a new order every
+       pass), ns a call against the C loop: text 90.4 to 43.9 with zmm (-51 percent), 45.2 with ymm,
+       77.1 one by one; source tar 47.8 to 30.5, 31.8, 40.0; binary tar 37.3 to 29.0, 29.2, 32.2.
+       Tried and not kept: the base prices of lengths 2 to 5 and the near and far classes without a
+       branch (vpermd of the four prices of the match, one turn for the whole match: -0.8 to -1.3
+       percent in cycles), and loading and storing the tail turn without a mask (no change). */
+    ASM_FUNC(lzma_match_prices)
+#ifdef KERNEL_MODE
+    ASM_RET
+#else
+    "push %rbx\n   push %rbp\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n   sub $16, %rsp\n"
+    "mov (%rdi), %r8\n   mov 16(%rdi), %r9\n   mov 56(%rdi), %r12\n   mov 64(%rdi), %rbx\n   mov 80(%rdi), %rcx\n"
+    ".Llmp_x64_match:  mov 8(%rdi), %rax\n   lea (%rax,%rbx,8), %rax\n   mov (%rax), %edx\n   mov 4(%rax), %esi\n   lea 4(%rsi), %ebp\n"
+    "cmp $128, %esi\n   jae .Llmp_x64_far\n"
+    "mov 24(%rdi), %r13\n   lea (%r13,%rsi,4), %r13\n   mov $512, %r15d\n   xor %eax, %eax\n   jmp .Llmp_x64_have\n"
+    ".Llmp_x64_far:  bsr %esi, %eax\n   lea -1(%rax), %r13d\n   bt %r13d, %esi\n   lea (%rax,%rax), %eax\n   adc $0, %eax\n"
+    "mov 32(%rdi), %r13\n   lea (%r13,%rax,4), %r13\n   mov $256, %r15d\n   mov 40(%rdi), %rax\n   and $15, %esi\n   mov (%rax,%rsi,4), %eax\n"
+    ".Llmp_x64_have:  mov 48(%rdi), %r11\n   lea (%rax,%r11), %r10d\n   lea (%r12,%rcx), %esi\n   shl $2, %rsi\n"
+    "lea (%r15,%r15,2), %rax\n   mov (%r13,%rax), %eax\n   add %r10d, %eax\n   mov %eax, %r14d\n   mov %r13, %r11\n"
+    "cmp $5, %ecx\n   ja .Llmp_x64_b\n"
+    "mov %r15, 0(%rsp)\n   lea -2(%rcx), %eax\n   imul %r15, %rax\n   add %rax, %r11\n"
+    ".balign 16\n"
+    ".Llmp_x64_a:  mov (%r11), %eax\n   add %r10d, %eax\n   add -8(%r9,%rcx,4), %eax\n"
+    LZ_RELAX_X64("r13", "r15")
+    "add $4, %rsi\n   add 0(%rsp), %r11\n   inc %ecx\n   cmp %edx, %ecx\n   ja .Llmp_x64_end\n   cmp $5, %ecx\n   jbe .Llmp_x64_a\n"
+    ".Llmp_x64_b:  mov %edx, %r10d\n   sub %ecx, %r10d\n   inc %r10d\n   lea -8(%r9,%rcx,4), %r13\n"
+    LZ_RELAX_RUN_X64("m")
+    "mov %edx, %ecx\n   jmp .Llmp_x64_end2\n"
+    ".Llmp_x64_end:  dec %ecx\n"
+    ".Llmp_x64_end2:  cmpq $0, 104(%rdi)\n   je .Llmp_x64_next\n"
+    "mov 88(%rdi), %rax\n   lea 3(%rcx), %rdx\n   cmp %rax, %rdx\n   ja .Llmp_x64_next\n"
+    "mov 96(%rdi), %rax\n   add %rcx, %rax\n   movzwl 1(%rax), %esi\n   lea -4(%rbp), %edx\n   sub %rdx, %rax\n   movzwl (%rax), %eax\n   cmp %eax, %esi\n   jne .Llmp_x64_next\n"
+    "mov %rbx, 64(%rdi)\n   mov %rcx, 80(%rdi)\n   mov $1, %eax\n   jmp .Llmp_x64_out\n"
+    ".Llmp_x64_next:  inc %rbx\n   inc %ecx\n   cmp 72(%rdi), %rbx\n   jb .Llmp_x64_match\n   xor %eax, %eax\n"
+    ".Llmp_x64_out:  add $16, %rsp\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n" ASM_RET
+#endif
+    ASM_END(lzma_match_prices)
+    /* lzma_relax(job) tries the costs of a run of lengths against the optimal parser's table, as
+       lzma_match_prices does for one price class: the n costs base + prices[k] against the entries
+       from first on, and an entry one beats takes the cost, pos and back and no literal before it.
+       The job, 56 bytes, none of it changed: arr 0 (the price array of the table; see
+       lzma_match_prices), prices 8 (the first price of the run), first 16 (the index of the first
+       entry), n 24, base 32, pos 40, back 48. */
+    ASM_FUNC(lzma_relax)
+#ifdef KERNEL_MODE
+    ASM_RET
+#else
+    "push %rbp\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n"
+    "mov (%rdi), %r8\n   mov 8(%rdi), %r13\n   mov 16(%rdi), %rsi\n   shl $2, %rsi\n   mov 24(%rdi), %r10\n   mov 32(%rdi), %r14\n"
+    "mov 40(%rdi), %r12\n   mov 48(%rdi), %ebp\n   test %r10d, %r10d\n   jle .Llrl_x64_out\n"
+    LZ_RELAX_RUN_X64("r")
+    ".Llrl_x64_out:  pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n" ASM_RET
+#endif
+    ASM_END(lzma_relax)
     /* huffman_lengths(freq, n, length, limit): code lengths of at most
        limit (1..15) bits for n <= 288 counts summing below 2^22, 1 on
        success and 0 when the lengths cannot be limited. The symbols in use are sorted by count,
@@ -22071,6 +22228,59 @@ __asm__(
     "mov x0, xzr\n"
     ".Llzt_arm64_out:  ldp x25, x26, [sp, #48]\n   ldp x23, x24, [sp, #32]\n   ldp x21, x22, [sp, #16]\n   ldp x19, x20, [sp], #64\n" ASM_RET
     ASM_END(lzma_tree_walk)
+    // lzma_match_prices (the job and the pricing are described with the x86-64 body). The lengths
+    // from 6 are one price class and go four to a turn through v registers (cmhi for the entries the
+    // cost beats, bit and bic to write the position, the symbol and no literal into them, the last turn
+    // masked by the lanes left); lengths 2 to 5 have a class of their own and are done one by one with
+    // csel. Nothing waits for a branch but the loops' exits. Measured on an M2 Pro, native, replaying
+    // 300 jobs dumped from an xz -6 run of 16 MiB of each corpus (the routine alone, the table's four
+    // windows copied in before each call and that copy taken off), ns a call against gcc 16.1 -O2
+    // compiled from the C loop it replaces: text 54.9 to 34.6 (-37 percent), source tar 25.1 to 17.6
+    // (-30), binary tar 16.1 to 14.6 (-9); against clang -O2 -28, -22 and -6 percent.
+    ASM_FUNC(lzma_match_prices)
+#ifdef KERNEL_MODE
+    ASM_RET
+#else
+    "stp x19, x20, [sp, #-48]!\n   stp x21, x22, [sp, #16]\n   stp x23, x24, [sp, #32]\n"
+    "ldr x2, [x0]\n   mov w16, #16448\n   add x3, x2, x16\n   add x4, x3, x16\n   add x5, x4, x16\n"
+    "ldr x1, [x0, #16]\n   ldr w6, [x0, #56]\n   ldr x7, [x0, #64]\n   ldr w9, [x0, #80]\n"
+    ".Llmp_arm64_match:  ldr x16, [x0, #8]\n   add x16, x16, x7, lsl #3\n   ldp w11, w12, [x16]\n   add w13, w12, #4\n"
+    "ldr x19, [x0, #24]\n   add x19, x19, x12, lsl #2\n   mov w20, #512\n   mov w21, wzr\n   cmp w12, #128\n   b.lo .Llmp_arm64_have\n"
+    "orr w16, w12, #1\n   clz w16, w16\n   mov w17, #31\n   sub w16, w17, w16\n   sub w17, w16, #1\n   lsr w17, w12, w17\n"
+    "and w17, w17, #1\n   add w17, w17, w16, lsl #1\n   ldr x19, [x0, #32]\n   add x19, x19, x17, lsl #2\n   mov w20, #256\n"
+    "and w16, w12, #15\n   ldr x17, [x0, #40]\n   ldr w21, [x17, x16, lsl #2]\n"
+    ".Llmp_arm64_have:  ldr x16, [x0, #48]\n   add w15, w16, w21\n   add w14, w6, w9\n   lsl x14, x14, #2\n"
+    "add w16, w20, w20, lsl #1\n   ldr w16, [x19, x16]\n   add w22, w16, w15\n"
+    "cmp w9, #5\n   b.hi .Llmp_arm64_b\n"
+    "sub w16, w9, #2\n   umull x16, w16, w20\n   add x23, x19, x16\n"
+    ".Llmp_arm64_a:  ldr w16, [x23]\n   add w16, w16, w15\n   sub w17, w9, #2\n   ldr w17, [x1, x17, lsl #2]\n   add w16, w16, w17\n"
+    LZ_RELAX_A64
+    "add x14, x14, #4\n   add x23, x23, x20\n   add w9, w9, #1\n   cmp w9, w11\n   b.hi .Llmp_arm64_end\n   cmp w9, #5\n   b.ls .Llmp_arm64_a\n"
+    ".Llmp_arm64_b:  sub w16, w11, w9\n   add w16, w16, #1\n   sub w17, w9, #2\n   add x17, x1, x17, lsl #2\n"
+    LZ_RELAX_RUN_A64("m")
+    "mov w9, w11\n   b .Llmp_arm64_end2\n"
+    ".Llmp_arm64_end:  sub w9, w9, #1\n"
+    ".Llmp_arm64_end2:  ldr x16, [x0, #104]\n   cbz x16, .Llmp_arm64_next\n"
+    "ldr x16, [x0, #88]\n   add x17, x9, #3\n   cmp x17, x16\n   b.hi .Llmp_arm64_next\n"
+    "ldr x16, [x0, #96]\n   add x16, x16, x9\n   ldrh w17, [x16, #1]\n   sub w19, w13, #4\n   sub x16, x16, x19\n   ldrh w16, [x16]\n   cmp w16, w17\n   b.ne .Llmp_arm64_next\n"
+    "str x7, [x0, #64]\n   str x9, [x0, #80]\n   mov x0, #1\n   b .Llmp_arm64_out\n"
+    ".Llmp_arm64_next:  add x7, x7, #1\n   add w9, w9, #1\n   ldr x16, [x0, #72]\n   cmp x7, x16\n   b.lo .Llmp_arm64_match\n   mov x0, xzr\n"
+    ".Llmp_arm64_out:  ldp x23, x24, [sp, #32]\n   ldp x21, x22, [sp, #16]\n   ldp x19, x20, [sp], #48\n" ASM_RET
+#endif
+    ASM_END(lzma_match_prices)
+    // lzma_relax (the job is described with the x86-64 body): the same four-lane run.
+    ASM_FUNC(lzma_relax)
+#ifdef KERNEL_MODE
+    ASM_RET
+#else
+    "stp x21, x22, [sp, #-16]!\n"
+    "ldr x2, [x0]\n   mov w16, #16448\n   add x3, x2, x16\n   add x4, x3, x16\n   add x5, x4, x16\n"
+    "ldr x17, [x0, #8]\n   ldr x14, [x0, #16]\n   lsl x14, x14, #2\n   ldr x16, [x0, #24]\n   ldr x22, [x0, #32]\n   ldr x6, [x0, #40]\n   ldr x13, [x0, #48]\n"
+    "cmp w16, #0\n   b.le .Llrl_arm64_out\n"
+    LZ_RELAX_RUN_A64("r")
+    ".Llrl_arm64_out:  ldp x21, x22, [sp], #16\n" ASM_RET
+#endif
+    ASM_END(lzma_relax)
     /* See the x86_64 huffman_lengths contract. */
     ASM_FUNC(huffman_lengths)
     "stp x29, x30, [sp, #-96]!\n   mov x29, sp\n   stp x19, x20, [sp, #16]\n   stp x21, x22, [sp, #32]\n   stp x23, x24, [sp, #48]\n   stp x25, x26, [sp, #64]\n   stp x27, x28, [sp, #80]\n"
@@ -30053,6 +30263,59 @@ __asm__(
     "li a0, 0\n"
     ".Llzt_rv_out:  ld s0, 0(sp)\n   ld s1, 8(sp)\n   ld s2, 16(sp)\n   ld s3, 24(sp)\n   ld s4, 32(sp)\n   ld s5, 40(sp)\n   ld s6, 48(sp)\n   ld s7, 56(sp)\n   addi sp, sp, 64\n" ASM_RET
     ASM_END(lzma_tree_walk)
+    // lzma_match_prices (the job and the pricing are described with the x86-64 body). Base RV64I has
+    // no conditional move and no vectors, so an entry is tried and written only if the cost beats it,
+    // and the slot of a far distance comes from the position of its top bit found by halving.
+    // Measured under qemu-user, guest instructions a call over 300 jobs dumped from an xz -6 run of
+    // 16 MiB of each corpus (the copy of the table's windows taken off), against gcc -O2
+    // -march=rv64imafd_zicsr_zicntr compiled from the C loop it replaces: text 2632 to 683
+    // (-74 percent), source tar 1280 to 380 (-70), binary tar 758 to 296 (-61); cycles unmeasured.
+    ASM_FUNC(lzma_match_prices)
+    "addi sp, sp, -96\n   sd s0, 0(sp)\n   sd s1, 8(sp)\n   sd s2, 16(sp)\n   sd s3, 24(sp)\n   sd s4, 32(sp)\n   sd s5, 40(sp)\n"
+    "sd s6, 48(sp)\n   sd s7, 56(sp)\n   sd s8, 64(sp)\n   sd s9, 72(sp)\n   sd s10, 80(sp)\n   sd s11, 88(sp)\n"
+    "ld s0, 0(a0)\n   li t0, 16448\n   add s1, s0, t0\n   add s2, s1, t0\n   add s3, s2, t0\n"
+    "ld a1, 16(a0)\n   ld s4, 56(a0)\n   ld s5, 64(a0)\n   ld s6, 80(a0)\n"
+    ".Llmp_rv_match:  ld t0, 8(a0)\n   slli t1, s5, 3\n   add t0, t0, t1\n   lwu s7, 0(t0)\n   lwu t2, 4(t0)\n   addiw s8, t2, 4\n"
+    "li t3, 128\n   bgeu t2, t3, .Llmp_rv_far\n"
+    "ld s11, 24(a0)\n   slli t3, t2, 2\n   add s11, s11, t3\n   li a2, 512\n   li t4, 0\n   j .Llmp_rv_have\n"
+    ".Llmp_rv_far:  mv t3, t2\n   li t5, 0\n   li t6, 65536\n   bltu t3, t6, 1f\n   srli t3, t3, 16\n   addi t5, t5, 16\n"
+    "1:  li t6, 256\n   bltu t3, t6, 2f\n   srli t3, t3, 8\n   addi t5, t5, 8\n"
+    "2:  li t6, 16\n   bltu t3, t6, 3f\n   srli t3, t3, 4\n   addi t5, t5, 4\n"
+    "3:  li t6, 4\n   bltu t3, t6, 4f\n   srli t3, t3, 2\n   addi t5, t5, 2\n"
+    "4:  li t6, 2\n   bltu t3, t6, 5f\n   addi t5, t5, 1\n"
+    "5:  addi t6, t5, -1\n   srl t6, t2, t6\n   andi t6, t6, 1\n   slli t5, t5, 1\n   add t5, t5, t6\n"
+    "ld s11, 32(a0)\n   slli t5, t5, 2\n   add s11, s11, t5\n   li a2, 256\n   andi t6, t2, 15\n   slli t6, t6, 2\n   ld t5, 40(a0)\n   add t5, t5, t6\n   lwu t4, 0(t5)\n"
+    ".Llmp_rv_have:  ld t0, 48(a0)\n   add s9, t0, t4\n   slli t0, a2, 1\n   add t0, t0, a2\n   add t0, s11, t0\n   lwu t0, 0(t0)\n   add s10, t0, s9\n"
+    "add t5, s4, s6\n   slli a4, t5, 2\n   li t0, 5\n   bgtu s6, t0, .Llmp_rv_b\n"
+    "addiw t1, s6, -2\n   mul t1, t1, a2\n   add a5, s11, t1\n"
+    ".Llmp_rv_a:  lwu t0, 0(a5)\n   add t0, t0, s9\n   addiw t1, s6, -2\n   slli t1, t1, 2\n   add t1, a1, t1\n   lwu t1, 0(t1)\n   add t3, t0, t1\n"
+    LZ_RELAX_RV("a")
+    "addi a4, a4, 4\n   add a5, a5, a2\n   addi s6, s6, 1\n   bgtu s6, s7, .Llmp_rv_end\n   li t0, 5\n   bleu s6, t0, .Llmp_rv_a\n"
+    ".Llmp_rv_b:  addiw t1, s6, -2\n   slli t1, t1, 2\n   add a6, a1, t1\n"
+    ".Llmp_rv_bl:  lwu t1, 0(a6)\n   add t3, t1, s10\n"
+    LZ_RELAX_RV("b")
+    "addi a4, a4, 4\n   addi a6, a6, 4\n   addi s6, s6, 1\n   bleu s6, s7, .Llmp_rv_bl\n"
+    ".Llmp_rv_end:  addi s6, s6, -1\n"
+    "ld t0, 104(a0)\n   beqz t0, .Llmp_rv_next\n"
+    "ld t0, 88(a0)\n   addi t1, s6, 3\n   bgtu t1, t0, .Llmp_rv_next\n"
+    "ld t0, 96(a0)\n   add t0, t0, s6\n   lbu t1, 1(t0)\n   addiw t2, s8, -4\n   sub t3, t0, t2\n   lbu t4, 0(t3)\n   bne t1, t4, .Llmp_rv_next\n"
+    "lbu t1, 2(t0)\n   lbu t4, 1(t3)\n   bne t1, t4, .Llmp_rv_next\n"
+    "sd s5, 64(a0)\n   sd s6, 80(a0)\n   li a0, 1\n   j .Llmp_rv_out\n"
+    ".Llmp_rv_next:  addi s5, s5, 1\n   addi s6, s6, 1\n   ld t0, 72(a0)\n   bltu s5, t0, .Llmp_rv_match\n   li a0, 0\n"
+    ".Llmp_rv_out:  ld s0, 0(sp)\n   ld s1, 8(sp)\n   ld s2, 16(sp)\n   ld s3, 24(sp)\n   ld s4, 32(sp)\n   ld s5, 40(sp)\n"
+    "ld s6, 48(sp)\n   ld s7, 56(sp)\n   ld s8, 64(sp)\n   ld s9, 72(sp)\n   ld s10, 80(sp)\n   ld s11, 88(sp)\n   addi sp, sp, 96\n" ASM_RET
+    ASM_END(lzma_match_prices)
+    // lzma_relax (the job is described with the x86-64 body): the same, one price class.
+    ASM_FUNC(lzma_relax)
+    "addi sp, sp, -48\n   sd s0, 0(sp)\n   sd s1, 8(sp)\n   sd s2, 16(sp)\n   sd s3, 24(sp)\n   sd s4, 32(sp)\n   sd s8, 40(sp)\n"
+    "ld s0, 0(a0)\n   li t0, 16448\n   add s1, s0, t0\n   add s2, s1, t0\n   add s3, s2, t0\n"
+    "ld a6, 8(a0)\n   ld t5, 16(a0)\n   slli a4, t5, 2\n   ld a5, 24(a0)\n   ld a1, 32(a0)\n   ld s4, 40(a0)\n   ld s8, 48(a0)\n"
+    "blez a5, .Llrl_rv_out\n"
+    ".Llrl_rv_l:  lwu t1, 0(a6)\n   add t3, t1, a1\n"
+    LZ_RELAX_RV("r")
+    "addi a4, a4, 4\n   addi a6, a6, 4\n   addi a5, a5, -1\n   bnez a5, .Llrl_rv_l\n"
+    ".Llrl_rv_out:  ld s0, 0(sp)\n   ld s1, 8(sp)\n   ld s2, 16(sp)\n   ld s3, 24(sp)\n   ld s4, 32(sp)\n   ld s8, 40(sp)\n   addi sp, sp, 48\n" ASM_RET
+    ASM_END(lzma_relax)
     /* See the x86_64 huffman_lengths contract. */
     ASM_FUNC(huffman_lengths)
     "li t0, 10816\n   sub sp, sp, t0\n   li t0, 10736\n   add t0, sp, t0\n   sd s0, 0(t0)\n   sd s1, 8(t0)\n   sd s2, 16(t0)\n   sd s3, 24(t0)\n   sd s4, 32(t0)\n   sd s5, 40(t0)\n"
@@ -36022,6 +36285,9 @@ READS_WRITES(1) fn deflate_parse_chain(address_any job);
 /* xz's binary tree match finder: the descent from one position, finding (the pairs written, the end
    of them returned) or skipping (zero); 88-byte job, see the x86_64 assembly. */
 READS_WRITES(1) address_any lzma_tree_walk(address_any job);
+/* The optimal parser's pricing of the lengths of a find's matches; 112-byte job, see the x86_64 assembly. */
+READS_WRITES(1) positive lzma_match_prices(address_any job);
+READS_WRITES(1) fn lzma_relax(address_any job);
 /* Code lengths of at most limit bits for n <= 288 counts summing below
    2^22; 0 when they cannot be limited. */
 READS(1) WRITES(3) bool huffman_lengths(const p32 address_to freq, positive n,

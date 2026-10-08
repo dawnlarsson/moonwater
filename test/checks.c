@@ -116246,6 +116246,205 @@ static fn floor_lzma_walk(void)
               same && anything && longs);
 }
 
+/* lzma_match_prices and lzma_relax against the loops of xz.c's optimal parser that they replaced, written
+   out a length at a time: for random matches (near and far distances, lengths increasing, started anywhere
+   in them), random price tables and tables of costs, the same entries of the four arrays changed and the
+   same stops, where a match may be followed by a literal and the same distance and the parser goes on in C
+   (here a canned update stands for that work, in the same place of the order). Once for each body the
+   machine has (zmm, ymm and one by one on x86-64), the buffer ending where the bytes the routine reads end
+   against a protected page. */
+#define FLOOR_TABLE (XZ_OPTS + XZ_OPT_PAD)
+
+//      What the parser does in C at a match that may be followed by a literal and the same distance:
+//      a price tried against an entry past the match, then the entry (so a later length can meet it).
+static positive floor_prices_extension(p32 address_to table, p32 cur, p32 len, p32 dist, p32 base, p32 avail,
+                                       p32 nice, const p8 address_to buf)
+{
+        const p8 address_to back = buf - dist - 1;
+        p32 len_2 = len + 1;
+        p32 limit = avail < len_2 + nice ? avail : len_2 + nice;
+
+        while (len_2 < limit && buf[len_2] == back[len_2])
+                len_2++;
+        len_2 -= len + 1;
+        if (len_2 < 2)
+                return 0;
+
+        p32 offset = cur + len + 1 + len_2;
+        p32 cost = base + 3 * len + len_2;
+
+        if (cost < table[offset])
+        {
+                table[offset] = cost;
+                table[FLOOR_TABLE + offset] = cur + len + 1;
+                table[2 * FLOOR_TABLE + offset] = 0;
+                table[3 * FLOOR_TABLE + offset] = 1;
+        }
+        return 1;
+}
+
+static positive floor_prices_model(xz_match_job address_to j, p32 address_to table, p32 nice, positive address_to stops)
+{
+        positive count = 0;
+        p32 len = (p32)j->len;
+        p32 cur = (p32)j->cur;
+
+        for (positive i = j->index;; len++)
+        {
+                p32 hi = j->matches[i].len, dist = j->matches[i].dist;
+                p32 ds = len < 6 ? len - 2 : 3;
+                p32 base = dist < XZ_FULL_DIST ? j->dist_prices[ds * XZ_FULL_DIST + dist]
+                                               : j->slot_prices[ds * XZ_DIST_SLOTS + xz_slot(dist)] +
+                                                         j->align_prices[dist & 15];
+                p32 cost = (p32)j->base + base + j->prices[len - 2];
+
+                if (cost < table[cur + len])
+                {
+                        table[cur + len] = cost;
+                        table[FLOOR_TABLE + cur + len] = cur;
+                        table[2 * FLOOR_TABLE + cur + len] = dist + 4;
+                        table[3 * FLOOR_TABLE + cur + len] = 0;
+                }
+                if (len != hi)
+                        continue;
+                if (j->stop && floor_prices_extension(table, cur, len, dist, (p32)j->base, (p32)j->avail, nice, j->buf))
+                        count = count * 31 + len + 1000 * i;
+                if (++i == j->count)
+                        break;
+        }
+        *stops = count;
+        return count;
+}
+
+static fn floor_lzma_prices(void)
+{
+        static p32 want[4 * FLOOR_TABLE], got[4 * FLOOR_TABLE];
+        static p32 prices[300], dists[XZ_FULL_DIST * 4], slots[XZ_DIST_SLOTS * 4], aligns[16];
+        static xz_found matches[16];
+        p8 address_to region = floor_pages(42);
+        p32 random = 0x7f4a7c15u;
+        bool same = true, extended = false, far = false;
+        positive bodies = 1;
+
+        if (!region)
+        {
+                check("lzma match prices agree with the length at a time loops: entries, stops", false);
+                return;
+        }
+#if X64
+        p8 avx2 = cpu_has_avx2, avx512 = cpu_has_avx512;
+
+        bodies = 3;
+#endif
+#define FLOOR_RANDOM() (random ^= random << 13, random ^= random >> 17, random ^= random << 5, random)
+        for (positive body = 0; body < bodies; body++)
+        {
+#if X64
+                cpu_has_avx2 = body < 2 ? avx2 : 0;
+                cpu_has_avx512 = body < 1 ? avx512 : 0;
+#endif
+                for (positive trial = 0; trial < 3000 && same; trial++)
+                {
+                        positive count = 1 + FLOOR_RANDOM() % 10;
+                        p32 cur = FLOOR_RANDOM() % 3500;
+                        p32 avail = FLOOR_RANDOM() % 130;
+                        p32 nice = 16 + FLOOR_RANDOM() % 258;
+                        p8 address_to buf = region + 41 * FLOOR_PAGE - avail;
+                        p32 len = 2;
+                        xz_match_job job;
+
+                        for (positive i = 0; i < count; i++)
+                        {
+                                len += 1 + FLOOR_RANDOM() % (trial % 4 == 0 ? 25 : 6);
+                                matches[i].len = len;
+                                matches[i].dist = FLOOR_RANDOM() % 3 == 0 ? FLOOR_RANDOM() % 130
+                                                  : FLOOR_RANDOM() % 2 ? FLOOR_RANDOM() % 4096 : FLOOR_RANDOM() % 100000;
+                                far = far || matches[i].dist >= XZ_FULL_DIST;
+                        }
+                        for (positive i = 0; i < sizeof(prices) / sizeof(prices[0]); i++)
+                                prices[i] = FLOOR_RANDOM() % 3000;
+                        for (positive i = 0; i < sizeof(dists) / sizeof(dists[0]); i++)
+                                dists[i] = FLOOR_RANDOM() % 9000;
+                        for (positive i = 0; i < sizeof(slots) / sizeof(slots[0]); i++)
+                                slots[i] = FLOOR_RANDOM() % 9000;
+                        for (positive i = 0; i < 16; i++)
+                                aligns[i] = FLOOR_RANDOM() % 300;
+                        for (positive i = 0; i < 4 * FLOOR_TABLE; i++)
+                                want[i] = FLOOR_RANDOM() % 5 ? FLOOR_RANDOM() % 20000 : FLOOR_RANDOM() % 3 ? XZ_INFINITY_PRICE : 5;
+                        memory_copy(got, want, sizeof(got));
+                        //      Bytes that repeat at the distances, so the two after a match sometimes agree.
+                        for (positive i = 0; i < 100001 + avail; i++)
+                                (buf - 100001)[i] = (p8)(FLOOR_RANDOM() % 3);
+                        for (positive i = 0; i < count; i++)
+                                if (FLOOR_RANDOM() % 2 && matches[i].len + 3 <= avail)
+                                {
+                                        p8 address_to at = buf + matches[i].len - matches[i].dist;
+
+                                        at[0] = buf[matches[i].len + 1];
+                                        at[1] = buf[matches[i].len + 2];
+                                }
+                        positive first = FLOOR_RANDOM() % count;
+                        p32 start = first ? matches[first - 1].len + 1 : 2;
+
+                        job = (xz_match_job){got, matches, prices, dists, slots, aligns,
+                                             FLOOR_RANDOM() % 5000, cur, first, count, start, avail, buf,
+                                             FLOOR_RANDOM() % 4 != 0};
+
+                        xz_match_job model = job;
+                        positive stops_want = 0, stops_got = 0;
+
+                        model.arr = want;
+                        floor_prices_model(address_of model, want, nice, address_of stops_want);
+                        while (lzma_match_prices(address_of job))
+                        {
+                                if (floor_prices_extension(got, cur, (p32)job.len, matches[job.index].dist,
+                                                           (p32)job.base, avail, nice, buf))
+                                {
+                                        stops_got = stops_got * 31 + (p32)job.len + 1000 * job.index;
+                                        extended = true;
+                                }
+                                if (++job.index == count)
+                                        break;
+                                job.len = job.len + 1;
+                        }
+                        same = same && stops_got == stops_want && !memory_compare(got, want, sizeof(got));
+                }
+                //      lzma_relax: a run of costs P[k] + base from one entry on.
+                for (positive trial = 0; trial < 3000 && same; trial++)
+                {
+                        p32 first = FLOOR_RANDOM() % 3500;
+                        positive n = 1 + FLOOR_RANDOM() % 70;
+                        p32 base = FLOOR_RANDOM() % 5000, pos = FLOOR_RANDOM() % 4000, back = FLOOR_RANDOM() % 4;
+
+                        for (positive i = 0; i < sizeof(prices) / sizeof(prices[0]); i++)
+                                prices[i] = FLOOR_RANDOM() % 3000;
+                        for (positive i = 0; i < 4 * FLOOR_TABLE; i++)
+                                want[i] = FLOOR_RANDOM() % 5 ? FLOOR_RANDOM() % 9000 : XZ_INFINITY_PRICE;
+                        memory_copy(got, want, sizeof(got));
+                        for (positive k = 0; k < n; k++)
+                                if (base + prices[k] < want[first + k])
+                                {
+                                        want[first + k] = base + prices[k];
+                                        want[FLOOR_TABLE + first + k] = pos;
+                                        want[2 * FLOOR_TABLE + first + k] = back;
+                                        want[3 * FLOOR_TABLE + first + k] = 0;
+                                }
+                        xz_relax_job relax = {got, prices, first, n, base, pos, back};
+
+                        lzma_relax(address_of relax);
+                        same = same && !memory_compare(got, want, sizeof(got));
+                }
+        }
+#if X64
+        cpu_has_avx2 = avx2;
+        cpu_has_avx512 = avx512;
+#endif
+#undef FLOOR_RANDOM
+        memory_free(region, 42 * FLOOR_PAGE);
+        check("lzma match prices agree with the length at a time loops: entries, stops",
+              same && extended && far);
+}
+
 #ifdef CHECK_compression_floor
 b32 main(void)
 {
@@ -116260,6 +116459,7 @@ b32 main(void)
         floor_deflate_parse();
         floor_deflate_chain();
         floor_lzma_walk();
+        floor_lzma_prices();
         floor_huffman_lengths();
         floor_zstd_huffman_cells();
         floor_huffman_codes();

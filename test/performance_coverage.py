@@ -524,6 +524,15 @@ cover('correctness_only', 'test/checks.c#CHECK_compression_floor', 'lzma_tree_wa
       'protected page; end-to-end xz -6 timing on three corpora, with no isolated '
       'timing row',
       anchors={'lzma_tree_walk': 'floor_lzma_walk'})
+cover('correctness_only', 'test/checks.c#CHECK_compression_floor', 'lzma_match_prices lzma_relax',
+      'the four arrays of the optimal parser\'s table and the stops of 3000 random '
+      'finds (near and far distances, lengths increasing, started anywhere in them, '
+      'random price tables, the block ending where the bytes the pretest reads end '
+      'against a protected page) and 3000 runs of costs against the loops of xz.c '
+      'they replaced, written out a length at a time, once for each body the '
+      'machine has (zmm, ymm and one by one on x86-64); end-to-end xz -6 timing on '
+      'three corpora, with no isolated timing row',
+      anchors={'lzma_match_prices': 'floor_lzma_prices', 'lzma_relax': 'floor_lzma_prices'})
 cover('correctness_only', 'test/checks.c#CHECK_compression_floor', 'zstd_sequences_encode',
       'bit-exact against a bit-at-a-time model over random tables, every code '
       'and pending width, the output ending at a protected page, and the room '

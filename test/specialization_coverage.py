@@ -685,6 +685,8 @@ cover('nothing_to_fold', None, 'deflate_parse_chain',
       'a pointer to a job: the input, the three tables and the output arrays, all run-time data')
 cover('nothing_to_fold', None, 'lzma_tree_walk',
       'a pointer to a job: the tree, the window and the output pairs, all run-time data')
+cover('nothing_to_fold', None, 'lzma_match_prices lzma_relax',
+      'a pointer to a job: the parser\'s table, the matches and the price tables, all run-time data')
 cover('nothing_to_fold', None, 'lzma_range_shift deflate_decode_span lzma_decode_span',
       'a pointer to evolving range or token-loop state; values live in memory '
       'and are not known at the call site')
