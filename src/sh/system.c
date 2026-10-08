@@ -146,24 +146,49 @@ static positive machine_restart_wait(positive failures)
         return wait < RESTART_BACKOFF_MAX_NS ? wait : RESTART_BACKOFF_MAX_NS;
 }
 
+/*
+        Waits for the settling service to end, or for SETTLE_WAIT_NS to pass.
+        The service's pidfd is polled with the time left, so the boot goes on
+        the moment the service ends; a loop that slept 20 ms between looks
+        added up to that much to every boot.
+*/
 static fn wait_for_settling(bipolar service)
 {
         positive started = clock_monotonic_nanoseconds();
+        bipolar pidfd = service > 0
+                            ? system_call_2(syscall(pidfd_open), (positive)service, 0)
+                            : -1;
 
-        while (service > 0 &&
-               clock_monotonic_nanoseconds() - started < SETTLE_WAIT_NS)
+        while (service > 0)
         {
                 positive status = 0;
+                positive elapsed = clock_monotonic_nanoseconds() - started;
+
+                if (elapsed >= SETTLE_WAIT_NS)
+                        break;
 
                 //      lib.c's retry: an interruption here is not an
                 //      answer about the service, and asking again is the
                 //      whole of what this loop used to do about one.
                 if (system_wait4_retry(service, address_of status,
                                        WAIT_NO_HANG, null) != 0)
-                        return;
+                        break;
 
-                host_pause(20000000);
+                if (pidfd < 0)
+                {
+                        host_pause(20000000);
+                        continue;
+                }
+
+                positive left = SETTLE_WAIT_NS - elapsed;
+                timespec span = {left / 1000000000, left % 1000000000};
+                system_poll_descriptor waited = {(b32)pidfd, SYSTEM_POLL_READ, 0};
+
+                system_poll_wait(address_of waited, 1, address_of span, null);
         }
+
+        if (pidfd >= 0)
+                system_close(pidfd);
 }
 
 static bipolar start_shell_until_ready(positive address_to started)

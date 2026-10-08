@@ -4612,9 +4612,15 @@ static positive host_event_wait(bipolar child, p64 limit, bool address_to stoppe
 {
         p64 started = system_clock_ns(HOST_CLOCK_BOOTTIME);
         positive status = 0;
+        bipolar pidfd = limit ? system_call_2(syscall(pidfd_open), (positive)child, 0)
+                              : -1;
 
         address_to stopped = false;
 
+        /*      With a limit, the child's pidfd is polled for as long as is
+                left of it, so the end is heard when it comes; the 20 ms look
+                that used to sit here was late by up to that much on every
+                event. */
         for (;;)
         {
                 bipolar reaped = system_call_4(syscall(wait4), (positive)child,
@@ -4622,13 +4628,23 @@ static positive host_event_wait(bipolar child, p64 limit, bool address_to stoppe
                                                limit ? 1 : 0, 0);
 
                 if (reaped == child)
+                {
+                        if (pidfd >= 0)
+                                system_close(pidfd);
                         return status;
+                }
                 if (reaped == -4)
                         continue;
                 if (reaped < 0)
+                {
+                        if (pidfd >= 0)
+                                system_close(pidfd);
                         return 0;
+                }
 
-                if (system_clock_ns(HOST_CLOCK_BOOTTIME) - started >= limit)
+                p64 elapsed = system_clock_ns(HOST_CLOCK_BOOTTIME) - started;
+
+                if (elapsed >= limit)
                 {
                         system_call_2(syscall(kill), (positive)(-child), SIGKILL);
                         system_call_2(syscall(kill), (positive)child, SIGKILL);
@@ -4637,7 +4653,17 @@ static positive host_event_wait(bipolar child, p64 limit, bool address_to stoppe
                         continue;
                 }
 
-                host_pause(HOST_EVENT_POLL_NS);
+                if (pidfd < 0)
+                {
+                        host_pause(HOST_EVENT_POLL_NS);
+                        continue;
+                }
+
+                p64 left = limit - elapsed;
+                timespec span = {left / 1000000000, left % 1000000000};
+                system_poll_descriptor waited = {(b32)pidfd, SYSTEM_POLL_READ, 0};
+
+                system_poll_wait(address_of waited, 1, address_of span, null);
         }
 }
 
