@@ -82701,6 +82701,9 @@ b32 main(void)
 #include "checks.c"
 #undef SHARED_counted
 
+#include "codec_floor/reference/zstd_sequences_decode.c"
+#include "codec_floor/reference/zstd_sequences_exec.c"
+
 static p8 zstd_empty_sum[] = {
         0x28, 0xb5, 0x2f, 0xfd, 0x24, 0x00, 0x01, 0x00, 0x00, 0x99, 0xe9,
         0xd8, 0x51};
@@ -83705,6 +83708,293 @@ static fn row_mask(void)
         check("the row finder's tag mask has one bit for each tag that equals the one asked", same);
 }
 
+/*
+        The two kernels the pool's decoder is made of, each against its model:
+        zstd_sequences_decode (a block's sequence bitstream into records) against
+        zstd_sequences_decode_reference and zstd_sequences_exec (the copies) against
+        zstd_sequences_exec_reference.
+*/
+/* Random tables for the decode kernel: counts that fill 2^log, with
+   low-probability symbols now and then, drawn so offsets are mostly repeats
+   and small codes; or one symbol and no log. */
+static fn par_table(zstd_fse address_to table, p8 kind, p32 address_to random)
+{
+        static const positive top[3] = {35, 31, 52};
+        static const p8 logs[3] = {9, 8, 9};
+        bipolar norm[256];
+        positive const max = top[kind];
+        positive left;
+        positive log;
+
+        memory_fill(norm, 0, sizeof norm);
+        if (XORSHIFT32(*random) % 7 == 0)
+        {
+                positive sym = (*random >> 6) % (max + 1);
+
+                if (kind == 1 && sym > 24 && (*random & 16))
+                        sym = (*random >> 11) % 3;
+                zstd_fse_rle(table, (p8)sym);
+                zstd_seq_fuse(table, kind);
+                return;
+        }
+        log = 5 + (XORSHIFT32(*random) >> 4) % (positive)(logs[kind] - 4);
+        left = (positive)1 << log;
+        while (left)
+        {
+                positive sym = XORSHIFT32(*random) % (kind == 1 && (*random & 0x300) ? 5 : max + 1);
+                positive take;
+
+                if (kind == 1 && !(*random & 0xf000))
+                        sym = 28 + (*random >> 8) % 4;
+                if (sym > max)
+                        sym = max;
+                take = 1 + XORSHIFT32(*random) % (left > 3 ? left / 2 + 1 : left);
+                if (norm[sym] == 0 && !((*random >> 9) % 9) && left > 1)
+                {
+                        norm[sym] = -1;
+                        left--;
+                        continue;
+                }
+                if (norm[sym] < 0)
+                        continue;
+                norm[sym] += (bipolar)take;
+                left -= take;
+        }
+        zstd_seq_build(table, norm, max, (p8)log, kind);
+}
+
+/* A stream of nseq sequences over three tables from random bits, in the
+   order they are read, then laid out from the top; flaws on request. */
+static positive par_stream(p8 address_to dst, zstd_fse address_to table[3], positive nseq,
+                           p32 address_to random)
+{
+        static p8 bits[1 << 20];
+        positive used = 0;
+        p32 state[3];
+        positive bytes;
+
+#define PAR_BITS(into, n)                                                      \
+        do                                                                     \
+        {                                                                      \
+                p32 value_ = 0;                                                \
+                for (positive i_ = 0; i_ < (n); i_++)                          \
+                {                                                              \
+                        p8 bit_ = (p8)(XORSHIFT32(*random) >> 13) & 1;         \
+                        bits[used++] = bit_;                                   \
+                        value_ = value_ << 1 | bit_;                           \
+                }                                                              \
+                into = value_;                                                 \
+        } while (0)
+        for (positive k = 0; k < 3; k++)
+                PAR_BITS(state[k], table[k]->log);
+        for (positive i = 0; i < nseq; i++)
+        {
+                zstd_fse_cell const of = table[1]->cell[state[1]];
+                zstd_fse_cell const ml = table[2]->cell[state[2]];
+                zstd_fse_cell const ll = table[0]->cell[state[0]];
+                p32 skip;
+
+                PAR_BITS(skip, of.extra);
+                PAR_BITS(skip, ml.extra);
+                PAR_BITS(skip, ll.extra);
+                if (i + 1 < nseq)
+                {
+                        p32 more;
+
+                        PAR_BITS(more, ll.bits);
+                        state[0] = ll.next + more;
+                        PAR_BITS(more, ml.bits);
+                        state[2] = ml.next + more;
+                        PAR_BITS(more, of.bits);
+                        state[1] = of.next + more;
+                }
+        }
+#undef PAR_BITS
+        bytes = used / 8 + 1;
+        memory_fill(dst, 0, bytes);
+        for (positive k = 0; k < used; k++)
+        {
+                positive const g = used - 1 - k;
+
+                dst[g / 8] |= (p8)(bits[k] << (g % 8));
+        }
+        dst[used / 8] |= (p8)(1 << (used % 8));
+        return bytes;
+}
+
+/* The decode kernel against its model on random tables and streams that are
+   what they say (every field read, the last bit the stream's last), then the
+   same streams flawed: a bit flipped, a byte more, a byte less, the
+   sentinel moved. Both answer alike, and when they succeed they leave alike. */
+static fn par_decode_kernel(void)
+{
+        static zstd_fse tables[3];
+        static p8 stream[1 << 16];
+        static p32 out_a[3 * 700 + 8], out_b[3 * 700 + 8];
+        p32 random = 0x9e3779b9u;
+        positive agree = 0;
+        positive total = 0;
+        positive succeeded = 0;
+        positive refused = 0;
+
+        for (positive trial = 0; trial < 6000; trial++)
+        {
+                zstd_fse address_to use[3] = {address_of tables[0], address_of tables[1], address_of tables[2]};
+                positive const nseq = 1 + XORSHIFT32(random) % (trial % 5 ? 40 : 600);
+                positive bytes;
+                bool flaw = trial % 3 == 2;
+                zstd_seq_decode_job a;
+                zstd_seq_decode_job b;
+                bipolar ra;
+                bipolar rb;
+
+                for (p8 k = 0; k < 3; k++)
+                        par_table(address_of tables[k], k, address_of random);
+                bytes = par_stream(stream, use, nseq, address_of random);
+                if (flaw)
+                {
+                        p8 const how = (p8)(XORSHIFT32(random) >> 7) % 4;
+
+                        if (how == 0)
+                                stream[(random >> 9) % bytes] ^= (p8)(1u << (random >> 4) % 8);
+                        else if (how == 1)
+                                stream[bytes++] = (p8)(random >> 5);
+                        else if (how == 2 && bytes > 1)
+                                bytes--;
+                        else
+                                stream[bytes - 1] = (p8)((random >> 9) & 0xff);
+                }
+                a = (zstd_seq_decode_job){stream, bytes, use[0], use[1], use[2], nseq, out_a,
+                                          {0xfff0ffffu, 0xfff1ffffu, 0xfff2ffffu}, 0, 0, 0, 0};
+                b = a;
+                b.out = out_b;
+                ra = zstd_sequences_decode(address_of a);
+                rb = zstd_sequences_decode_reference(address_of b);
+                total++;
+                if ((ra == 0) != (rb == 0))
+                        continue;
+                if (ra)
+                {
+                        refused++;
+                        agree++;
+                        continue;
+                }
+                succeeded++;
+                agree += a.max_off == b.max_off && a.sym_end == b.sym_end && a.sum_ll == b.sum_ll &&
+                         a.sum_ml == b.sum_ml && a.rep[0] == b.rep[0] && a.rep[1] == b.rep[1] &&
+                         a.rep[2] == b.rep[2] && !memory_compare(out_a, out_b, 12 * nseq);
+        }
+        check("the decode kernel is its model on random tables and streams, whole and flawed",
+              agree == total && succeeded > 3000 && refused > 500);
+}
+
+/* Records that keep exec's contract, made at random: literal lengths mostly
+   zero, match lengths from the minimum up, offsets of every size in the
+   neighbourhood of 8, 16 and 32 and some far, none past the bytes written. */
+static positive par_records(p32 address_to recs, positive nseq, positive history, p32 address_to random,
+                            positive address_to lit_total)
+{
+        static const p32 near[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 15, 16, 17, 24, 31, 32, 33, 47, 64, 100, 1000};
+        positive out = history;
+        positive total = 0;
+
+        *lit_total = 0;
+        for (positive i = 0; i < nseq; i++)
+        {
+                p32 ll = XORSHIFT32(*random) % 5 < 3 ? 0 : (*random >> 8) % (*random & 0x1000 ? 300 : 20);
+                p32 ml = 3 + (XORSHIFT32(*random) >> 4) % ((*random & 0x700) ? 30 : 700);
+                p32 off = (*random >> 9) & 1 ? near[(*random >> 10) % array_count(near)]
+                                              : 1 + (*random >> 3) % (out + ll);
+
+                if (off > out + ll)
+                        off = 1 + (*random >> 3) % (out + ll);
+                recs[3 * i] = ll;
+                recs[3 * i + 1] = ml;
+                recs[3 * i + 2] = off;
+                out += ll + ml;
+                total += ll + ml;
+                *lit_total += ll;
+        }
+        return total;
+}
+
+static fn par_exec_kernel(void)
+{
+        static p8 lits[1 << 16];
+        static p8 win_a[1 << 17], win_b[1 << 17];
+        static p32 recs[3 * 80];
+        positive const page = 4096;
+        p8 address_to const map = memory(3 * page);
+        p32 random = 0x7f4a7c15u;
+        positive agree = 0;
+        positive total_cases = 0;
+        positive guarded = 0;
+        bool mapped = map && !system_failed(map);
+
+        if (mapped)
+                memory_free(map + 2 * page, page);
+        for (positive trial = 0; trial < 3000; trial++)
+        {
+                positive const history = 2000 + XORSHIFT32(random) % 1000;
+                positive const nseq = 1 + (random >> 6) % (trial % 4 ? 12 : 80);
+                positive lit_total;
+                positive total = par_records(recs, nseq, history, address_of random, address_of lit_total);
+                zstd_seq_exec_job a;
+                zstd_seq_exec_job b;
+                bool same;
+
+                if (history + total + 64 > sizeof(win_a) || lit_total + 64 > sizeof(lits))
+                        continue;
+                for (positive i = 0; i < sizeof(lits); i++)
+                        lits[i] = (p8)(XORSHIFT32(random) >> 11);
+                for (positive i = 0; i < history; i++)
+                        win_a[i] = win_b[i] = (p8)(XORSHIFT32(random) >> 13);
+                memory_fill(win_a + history, 0xaa, sizeof(win_a) - history);
+                memory_fill(win_b + history, 0xaa, sizeof(win_b) - history);
+                a = (zstd_seq_exec_job){win_a + history, lits, recs, nseq};
+                b = (zstd_seq_exec_job){win_b + history, lits, recs, nseq};
+                zstd_sequences_exec(address_of a);
+                zstd_sequences_exec_reference(address_of b);
+                same = a.out == win_a + history + total && a.lits == lits + lit_total &&
+                       !memory_compare(win_a, win_b, history + total);
+                for (positive i = history + total + 32; i < sizeof(win_a); i++)
+                        same &= win_a[i] == 0xaa;
+                total_cases++;
+                agree += same;
+
+                //      The same block with its output, then its literals, then its
+                //      records ending where the next page is not.
+                if (mapped && total + 32 <= page - history && lit_total + 32 <= page && nseq * 12 <= page)
+                {
+                        p8 address_to const edge = map + 2 * page;
+                        p8 address_to out_at = edge - total - 32;
+                        p8 address_to lit_at = edge - lit_total - 32;
+                        p32 address_to rec_at = (p32 address_to)(edge - nseq * 12);
+
+                        for (positive mode = 0; mode < 3; mode++)
+                        {
+                                zstd_seq_exec_job g;
+                                p8 address_to const base = mode == 0 ? out_at : map + page / 2 + history;
+                                p8 address_to const lit_use = mode == 1 ? lit_at : lits;
+                                p32 address_to const rec_use = mode == 2 ? rec_at : recs;
+
+                                memory_copy(base - history, win_b, history);
+                                if (mode == 1)
+                                        memory_copy(lit_at, lits, lit_total);
+                                if (mode == 2)
+                                        memory_copy(rec_at, recs, nseq * 12);
+                                g = (zstd_seq_exec_job){base, lit_use, rec_use, nseq};
+                                zstd_sequences_exec(address_of g);
+                                guarded += !memory_compare(base - history, win_b, history + total);
+                        }
+                }
+        }
+        check("exec is its model on random records of every length and offset",
+              agree == total_cases && total_cases > 2000);
+        check("exec stays inside the bytes its contract gives it at the edge of a mapping",
+              !mapped || guarded > 3 * 500);
+}
+
 b32 main(void)
 {
         pull_block_shapes();
@@ -83719,6 +84009,8 @@ b32 main(void)
         job_widths();
         fast_parse();
         row_mask();
+        par_decode_kernel();
+        par_exec_kernel();
 #if X64
         {
                 p8 const probed = cpu_hash_probed;
@@ -83735,6 +84027,7 @@ b32 main(void)
                 roundtrip();
                 pull_block_shapes();
                 dictionaries();
+                par_decode_kernel();
                 cpu_hash_probed = probed;
                 cpu_has_mulx = mulx;
         }

@@ -77,6 +77,33 @@ typedef struct
         p8 address_to output_end;
 } zstd_seq_job;
 
+/* The two halves of zstd_sequences_run the pool's decoder runs apart, lib.c's
+   zstd_sequences_decode and zstd_sequences_exec: the layouts of their jobs
+   (see the x86_64 assembly). */
+typedef struct
+{
+        p8 address_to seq;
+        positive seq_len;
+        zstd_fse address_to ll;
+        zstd_fse address_to of;
+        zstd_fse address_to ml;
+        positive nseq;
+        p32 address_to out;
+        p32 rep[3];
+        p32 max_off;
+        positive sym_end;
+        p64 sum_ll;
+        p64 sum_ml;
+} zstd_seq_decode_job;
+
+typedef struct
+{
+        p8 address_to out;
+        p8 address_to lits;
+        p32 address_to recs;
+        positive nseq;
+} zstd_seq_exec_job;
+
 typedef struct
 {
         p8 max_bits;

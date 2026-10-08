@@ -538,6 +538,20 @@ cover('correctness_only', 'test/checks.c#CHECK_zstd', 'zstd_fast_parse',
       'zstd -1 timing, and the native arm64 row against gcc and clang builds '
       'of the C it replaces; test/codec_floor/reference/zstd_fast_parse.c',
       anchors={'zstd_fast_parse': 'fast_parse'})
+cover('correctness_only', 'test/checks.c#CHECK_zstd', 'zstd_sequences_decode',
+      'the records, totals, largest offset, stand-in end, repeat offsets left and answer '
+      'of 6000 random tables and streams (whole, with a bit flipped, a byte more or less, '
+      'the sentinel moved; every table width, repeat codes, low-probability symbols, one-symbol '
+      'tables) against a bit-at-a-time model, and of every block the pool decodes in frames of '
+      'ten levels, on three machines and with BMI2 down; end-to-end zstd -d timing at 1 to 16 '
+      'cores; test/codec_floor/reference/zstd_sequences_decode.c',
+      anchors={'zstd_sequences_decode': 'par_decode_kernel'})
+cover('correctness_only', 'test/checks.c#CHECK_zstd', 'zstd_sequences_exec',
+      'the bytes of 3000 random record lists (every literal length, match length and offset '
+      'around 8, 16 and 32) against a byte-at-a-time model, with the output, the literals and '
+      'the records each ending at a protected page, and of every block the pool executes; '
+      'test/codec_floor/reference/zstd_sequences_exec.c',
+      anchors={'zstd_sequences_exec': 'par_exec_kernel'})
 cover('correctness_only', 'test/checks.c#CHECK_zstd', 'zstd_dfast_parse',
       'the sequences, literals, code counts, repeat offsets, table and anchor '
       'of 240 random blocks (copies at near, far and repeated distances, runs, '
@@ -603,10 +617,10 @@ zstd_bits_open zstd_bits_reload zstd_bits_get
 ''', 'backward bitstream open, reload, and get against marked and empty streams')
 
 cover('correctness_only', 'src/sh/zstd.c', '''
-zstd_huffman_stream zstd_huffman_4x zstd_sequences_run zstd_sequences_run_bmi2
+zstd_huffman_stream zstd_huffman_4x zstd_sequences_run zstd_sequences_run_bmi2 zstd_sequences_decode_bmi2
 ''', 'Huffman and sequence kernels called from the RFC 8878 decoder, the sequence '
      'one in its BMI2 body and (test/checks.c#CHECK_zstd walks the flag down) its baseline',
-      anchors={'zstd_sequences_run_bmi2': 'zstd_sequences_run'})
+      anchors={'zstd_sequences_run_bmi2': 'zstd_sequences_run', 'zstd_sequences_decode_bmi2': 'zstd_sequences_decode'})
 
 cover('correctness_only', 'test/checks.c#CHECK_native_reserve', '''
 memory_growth memory_release

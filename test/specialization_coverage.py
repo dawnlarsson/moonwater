@@ -673,6 +673,8 @@ cover('nothing_to_fold', None, 'zstd_dfast_parse',
       'a pointer to a job: the window, the two tables and the output arrays, all run-time data')
 cover('nothing_to_fold', None, 'zstd_fast_parse',
       'a pointer to a job: the window, the table and the output arrays, all run-time data')
+cover('nothing_to_fold', None, 'zstd_sequences_decode zstd_sequences_decode_bmi2 zstd_sequences_exec',
+      'a pointer to a job: the bitstream, the tables and the record arrays, all run-time data')
 cover('nothing_to_fold', None, 'zstd_sequences_encode',
       'a pointer to a block of sequences and their tables, all run-time data')
 cover('nothing_to_fold', None, 'deflate_tokens_count deflate_tokens_encode deflate_tokens_encode_bmi2',
