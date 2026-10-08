@@ -1399,9 +1399,14 @@ static fn tar_fail_at(string_address what, string_address doing, bipolar failed)
         tar_status = 2;
 }
 
+/* Refusals said so far: a member whose data stops short has been said by
+   the refusal that stopped it, and its failure is not said again. */
+static positive tar_refusals;
+
 static fn tar_refuse(string_address message)
 {
         string_format(log_error, "tar: %s\n", message);
+        tar_refusals++;
         tar_status = 2;
 }
 
@@ -2752,6 +2757,10 @@ static bipolar tar_fill(bipolar handle)
    whose last block there is cut short ends quietly, as GNU tar drops an
    incomplete trailing block; a compressed archive still meets the trailer
    check on those bytes.  Any other block cut short is an error. */
+/* Blocks handed out so far in this archive: a header cut short before the
+   first one is no archive at all, as GNU tar says. */
+static positive tar_blocks_taken;
+
 static p8 address_to tar_next_block(bipolar handle, bool header)
 {
         p8 address_to block;
@@ -2768,15 +2777,21 @@ static p8 address_to tar_next_block(bipolar handle, bool header)
 
         if (tar_at + TAR_BLOCK > tar_have)
         {
+                if (header && !tar_blocks_taken)
+                {
+                        tar_refuse("This does not look like a tar archive");
+                        return null;
+                }
                 if (tar_at >= tar_have || header)
                         return null;
 
-                tar_refuse("unexpected EOF in archive");
+                tar_refuse("Unexpected EOF in archive");
                 return null;
         }
 
         block = tar_record + tar_at;
         tar_at += TAR_BLOCK;
+        tar_blocks_taken++;
         return block;
 }
 
@@ -2807,7 +2822,7 @@ static bool tar_skip(bipolar handle, p64 bytes, bool seekable)
                 if (reached >= 0 && tar_archive_sized &&
                     (p64)reached > tar_archive_size)
                 {
-                        tar_refuse("unexpected EOF in archive");
+                        tar_refuse("Unexpected EOF in archive");
                         return false;
                 }
                 if (reached >= 0)
@@ -2824,7 +2839,7 @@ static bool tar_skip(bipolar handle, p64 bytes, bool seekable)
 
                 if (got <= 0)
                 {
-                        tar_refuse("unexpected EOF in archive");
+                        tar_refuse("Unexpected EOF in archive");
                         return false;
                 }
 
@@ -2944,7 +2959,7 @@ static bool tar_copy_n(bipolar archive, bipolar out, p64 size, bool seekable)
                                 tar_write_failure = 0;
                                 if (got < 0)
                                         tar_refuse("cannot read archive");
-                                tar_refuse("unexpected EOF in archive");
+                                tar_refuse("Unexpected EOF in archive");
                                 return false;
                         }
                         if (out >= 0)
@@ -2970,7 +2985,7 @@ static bool tar_copy_n(bipolar archive, bipolar out, p64 size, bool seekable)
                 if (tar_at >= tar_have && tar_fill(archive) <= 0)
                 {
                         tar_write_failure = 0;
-                        tar_refuse("unexpected EOF in archive");
+                        tar_refuse("Unexpected EOF in archive");
                         return false;
                 }
 
@@ -2978,7 +2993,7 @@ static bool tar_copy_n(bipolar archive, bipolar out, p64 size, bool seekable)
                 if (!have)
                 {
                         tar_write_failure = 0;
-                        tar_refuse("unexpected EOF in archive");
+                        tar_refuse("Unexpected EOF in archive");
                         return false;
                 }
 
@@ -3006,12 +3021,18 @@ static bool tar_copy_n(bipolar archive, bipolar out, p64 size, bool seekable)
 
 static bool tar_deliver(bipolar archive, bipolar out, p64 size, bool seekable)
 {
+        positive refused = tar_refusals;
         bool copied = tar_copy_n(archive, out, size, seekable);
 
         // A member that could not be written was still read to its end, and
-        // its padding goes as well; one that could not be read stops here.
+        // its padding goes as well; one that could not be read stops here,
+        // and says so unless the copy already has.
         if (!copied && !tar_write_failure)
+        {
+                if (tar_refusals == refused)
+                        tar_refuse("Unexpected EOF in archive");
                 return false;
+        }
 
         return tar_skip(archive, tar_padded(size) - size, seekable) && copied;
 }
@@ -3476,14 +3497,14 @@ static bool tar_read_payload(bipolar handle, p64 size, p8 address_to into,
 
                 if (tar_at >= tar_have && tar_fill(handle) <= 0)
                 {
-                        tar_refuse("unexpected EOF in archive");
+                        tar_refuse("Unexpected EOF in archive");
                         return false;
                 }
 
                 have = tar_have - tar_at;
                 if (!have)
                 {
-                        tar_refuse("unexpected EOF in archive");
+                        tar_refuse("Unexpected EOF in archive");
                         return false;
                 }
 
@@ -3772,6 +3793,7 @@ static bool tar_extract_regular_staged(bipolar archive, bipolar directory,
                 return tar_skip(archive, tar_padded(size), seekable);
         }
 
+        positive refused = tar_refusals;
         if ((tar_sparse_active &&
              !tar_deliver_sparse(archive, made, size, seekable)) ||
             (!tar_sparse_active &&
@@ -3781,8 +3803,9 @@ static bool tar_extract_regular_staged(bipolar archive, bipolar directory,
                     address_of protected, directory, leaf, made,
                     -ERROR_INPUT_OUTPUT, false,
                     replaced_known ? address_of replaced : null, 0);
-                tar_fail(path, tar_write_failure ? tar_write_failure
-                                                 : -ERROR_INPUT_OUTPUT);
+                if (tar_write_failure || tar_refusals == refused)
+                        tar_fail(path, tar_write_failure ? tar_write_failure
+                                                         : -ERROR_INPUT_OUTPUT);
                 return false;
         }
 
@@ -3841,6 +3864,7 @@ static bool tar_extract_regular(bipolar archive, bipolar directory,
                 return tar_skip(archive, tar_padded(size), seekable);
         }
 
+        positive refused = tar_refusals;
         if ((tar_sparse_active &&
              !tar_deliver_sparse(archive, made, size, seekable)) ||
             (!tar_sparse_active &&
@@ -3848,8 +3872,9 @@ static bool tar_extract_regular(bipolar archive, bipolar directory,
         {
                 (void)system_path_remove_opened_at(directory, leaf, made, 0);
                 (void)system_close(made);
-                tar_fail(path, tar_write_failure ? tar_write_failure
-                                                 : -ERROR_INPUT_OUTPUT);
+                if (tar_write_failure || tar_refusals == refused)
+                        tar_fail(path, tar_write_failure ? tar_write_failure
+                                                         : -ERROR_INPUT_OUTPUT);
                 return false;
         }
 
@@ -4390,7 +4415,7 @@ static bool tar_diff_bytes(bipolar archive, bipolar file, p64 offset,
         {
                 if (tar_at >= tar_have && tar_fill(archive) <= 0)
                 {
-                        tar_refuse("unexpected EOF in archive");
+                        tar_refuse("Unexpected EOF in archive");
                         return false;
                 }
                 positive take = tar_have - tar_at;

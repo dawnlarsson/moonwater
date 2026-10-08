@@ -11046,10 +11046,62 @@ def files_kill_bash_word(farm):
     return won, total, notes
 
 
+def files_tar_short_archive(farm):
+    """A tar archive cut short answers the reference's status and first line.
+
+    A header cut short before its first block, and an empty file, are not a
+    tar archive: the reference says so and answers 2, where a tool that reads
+    the cut as the quiet end of the archive answers 0 with nothing listed. A
+    member cut short in its data is "Unexpected EOF in archive" in the
+    reference's own words.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    reference = shutil.which("tar", path=os.defpath)
+    candidate = Path(farm) / "tar"
+    if not reference or not candidate.exists():
+        return 0, 1, ["tar short-archive check needs tar on both sides"]
+
+    member = ustar_member(b"a", "0", b"x" * 10000)
+    cases = {
+        "header cut at 300 bytes": ustar_header(b"a", 0)[:300],
+        "empty file": b"",
+        "member cut in its data": (member + bytes(1024))[:5000],
+    }
+    won = total = 0
+    notes = []
+    with tempfile.TemporaryDirectory(prefix="tar-short-") as work:
+        top = Path(work)
+        for label, data in cases.items():
+            archive = top / "short.tar"
+            archive.write_bytes(data)
+            for option in ("-tf", "-xf"):
+                cwd = top / ("out" + option[1])
+                shutil.rmtree(cwd, ignore_errors=True)
+                cwd.mkdir()
+                want = subprocess.run([reference, option, str(archive)], cwd=cwd,
+                                      capture_output=True, timeout=60)
+                shutil.rmtree(cwd, ignore_errors=True)
+                cwd.mkdir()
+                got = subprocess.run([str(candidate), option, str(archive)], cwd=cwd,
+                                     capture_output=True, timeout=60)
+                total += 1
+                said_want = files_fail_first_line(want).split(": ", 1)[-1]
+                said_got = files_fail_first_line(got).split(": ", 1)[-1]
+                if got.returncode == want.returncode and said_got == said_want:
+                    won += 1
+                else:
+                    notes.append(f"tar {option} {label}: reference {want.returncode} "
+                                 f"{said_want!r}, candidate {got.returncode} {said_got!r}")
+    return won, total, notes
+
+
 FILES_CHECKS = (files_uname_identity, files_cp_into_self, files_locale_names, files_collation_ls, files_large_inputs, files_column_layout, files_xargs_parallel, files_zones, files_tar,
                 files_tar_formats,
                 files_find_terminal, files_zone_names, files_hostname_set, files_move_across,
-                files_address_cap, files_kill_bash_word)
+                files_address_cap, files_kill_bash_word, files_tar_short_archive)
 
 # ---- domain: misc (from spec_misc.py) ----
 
