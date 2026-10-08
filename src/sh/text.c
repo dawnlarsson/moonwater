@@ -31095,6 +31095,12 @@ typedef struct
         bool global;
         bool printing;
         p8 references;
+        // A replacement of nothing but bytes, which is copied whole (and its
+        // length), where one with an & or a backslash is read a byte at a
+        // time. Both sit in what the byte flags above leave of a word, so the
+        // command is no larger than it was.
+        bool plain;
+        b32 replacement_length;
         positive which;
         b32 block_stop;
 } sed_command;
@@ -32441,6 +32447,11 @@ static fn sed_parse()
                                                 command->references = next - '0';
                                 }
 
+                        command->plain = !memory_first_of(replacement, '&', have) &&
+                                         !memory_first_of(replacement, '\\', have) &&
+                                         !memory_first_of(replacement, '\0', have);
+                        command->replacement_length = (b32)have;
+
                         command->global = false;
                         command->printing = false;
                         command->writer = -1;
@@ -33283,7 +33294,18 @@ static inline INLINE bool sed_substitute_in(sed_context address_to ctx,
                         ctx->case_span = 0;
                         ctx->case_once = 0;
 
-                        for (positive c = 0; replacement[c]; c++)
+                        // A replacement of bytes alone goes across in one copy.
+                        if (command->plain)
+                        {
+                                if (!sed_space_fits(ctx, have, command->replacement_length))
+                                        return false;
+
+                                memory_copy(ctx->work_store->bytes + have, replacement,
+                                            command->replacement_length);
+                                have += command->replacement_length;
+                        }
+
+                        for (positive c = 0; !command->plain && replacement[c]; c++)
                         {
                                 p8 character = replacement[c];
                                 positive copy_from = TEXT_UNSET;
@@ -33354,7 +33376,7 @@ static inline INLINE bool sed_substitute_in(sed_context address_to ctx,
                                 else
                                 {
                                         if (!sed_case_byte(ctx, address_of have, character))
-                                        return false;
+                                                return false;
                                         continue;
                                 }
 
@@ -33417,12 +33439,22 @@ static inline INLINE bool sed_substitute_in(sed_context address_to ctx,
         return true;
 }
 
-static bool sed_substitute(sed_command address_to command)
+/*
+        Out of line, one copy of the substitution for the serial run and one
+        for a job. Expanded into text_sed (which GCC did of its own accord) a
+        few more lines in the replacement changed what the executor's loop
+        around them was compiled to: a script of a thousand nested blocks
+        ran 26 percent more instructions and 55 percent more cycles, and the
+        flags of a command are packed into the word they had so that its
+        size, which that loop steps by, stays what it was.
+*/
+static __attribute__((noinline)) bool sed_substitute(sed_command address_to command)
 {
         return sed_substitute_in(address_of sed_serial, command, false);
 }
 
-static bool sed_substitute_pieces(sed_context address_to ctx, sed_command address_to command)
+static __attribute__((noinline)) bool sed_substitute_pieces(sed_context address_to ctx,
+                                                            sed_command address_to command)
 {
         return sed_substitute_in(ctx, command, true);
 }
