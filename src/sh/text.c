@@ -24625,9 +24625,11 @@ static b32 text_uniq()
         several programs, because a line has to be tried against all of them
         anyway and the machine already knows how to choose a branch.
 */
-#define GREP_PATTERN_MAX 16384
-
-static p8 grep_pattern[GREP_PATTERN_MAX];
+// The joined pattern grows with what it is given, as GNU's does: a bracket of
+// twenty thousand bytes, or a -f file of two thousand expressions, is a
+// pattern like any other and not "pattern too long".
+static p8 address_to grep_pattern;
+static positive grep_pattern_room;
 static positive grep_pattern_length;
 static bool grep_pattern_any;
 // A pattern that ends in a backslash of its own is refused as GNU refuses
@@ -24742,9 +24744,25 @@ static bool grep_pattern_broken;
 static fn grep_many_add(string_address text, positive length, bool fixed,
                         bool extended);
 
+// One byte more than the pattern always has room, for the terminator the
+// compile is handed as a C string.
+static fn grep_pattern_grow(positive more)
+{
+        if (grep_pattern_broken)
+                return;
+        if (grep_pattern_length + more + 1 > grep_pattern_room &&
+            !array_store_reserve(grep_pattern, grep_pattern_room, grep_pattern_length,
+                                 grep_pattern_length + more + 1, 4096))
+                grep_pattern_broken = true;
+}
+
 #define grep_pattern_put(character)                                          \
-        fixed_store_byte(grep_pattern, grep_pattern_length,                  \
-                         grep_pattern_broken, character)
+        do                                                                   \
+        {                                                                    \
+                grep_pattern_grow(1);                                        \
+                if (!grep_pattern_broken)                                    \
+                        grep_pattern[grep_pattern_length++] = (p8)(character); \
+        } while (0)
 
 static fn grep_pattern_add(string_address text, positive length, bool fixed, bool extended)
 {
@@ -24818,7 +24836,9 @@ static fn grep_pattern_add(string_address text, positive length, bool fixed, boo
                 from = at + 1;
         }
 
-        grep_pattern[grep_pattern_length] = '\0';
+        grep_pattern_grow(0);
+        if (!grep_pattern_broken)
+                grep_pattern[grep_pattern_length] = '\0';
 }
 
 /*
