@@ -22,6 +22,7 @@
 #define RX_SET_FIRST 16
 #define RX_FIXED_MAX 8192
 #define RX_LITERAL_MAX 256
+#define RX_EXTRA_MAX 32
 #define RX_GROUP_MAX 9
 #define RX_SLOT_MAX 20
 #define RX_UNBOUNDED (-1)
@@ -88,12 +89,26 @@ typedef struct
 {
         p8 first_skip[256], last_bytes[256], literal[RX_LITERAL_MAX];
         positive literal_length, fixed_length, fixed_work;
+        // The next longest string the pattern cannot match without, for the
+        // line that has the first and not this one: a.*b on a line of a's.
+        p8 extra[RX_EXTRA_MAX];
+        positive extra_length;
+        // A pattern that begins with a run of one set with no end to it: the
+        // node of the set, or none; and whether the end of the text is all
+        // that follows the run.
+        rx_ref lead_run, lead_next, shape_node;
+        b16 lead_minimum, shape_minimum;
+        p8 lead_tail, shape;
+        // Keeps what follows off the address the walk's stores of its slots
+        // alias: without it grep -o and awk match ran a fifth slower on the
+        // same instructions, for no reason but where the fields fell.
+        p8 apart[64];
         // regex_test's ledger of this program: what its questions cost the
         // graph, and which compile this is.
         positive asks, work, bytes;
         p32 serial;
         p8 verdict;
-        positive2 literal_anchors, fixed_anchors;
+        positive2 literal_anchors, extra_anchors, fixed_anchors;
         p8 fixed_literal[RX_FIXED_MAX];
 } rx_hints;
 
@@ -425,7 +440,17 @@ static rx_fragment rx_character(rx_compiler *c, b32 ascii)
                                      rx_wide_run(c, c->wide_four, 3));
 
         wide = rx_either(c, rx_wide_run(c, c->wide_two, 1), wide);
-        return rx_either(c, rx_one(c, RX_SET, (p8)ascii), wide);
+
+        /*
+                The alternation is marked (a branch has no use for its
+                minimum), so that the walk can tell this one from any other
+                and decide a character that is one byte without a choice.
+        */
+        rx_fragment character = rx_either(c, rx_one(c, RX_SET, (p8)ascii), wide);
+
+        if (character.first)
+                c->pool->nodes[character.first].minimum = 1;
+        return character;
 }
 
 /*
@@ -1351,16 +1376,33 @@ typedef struct
 {
         p8 *literal;
         positive *literal_length;
+        p8 *extra;
+        positive *extra_length;
         p8 run[RX_LITERAL_MAX];
         positive run_length;
 } rx_required_state;
 
 static fn rx_required_flush(rx_required_state *state)
 {
+        positive kept = min(state->run_length, (positive)RX_EXTRA_MAX);
+
         if (state->run_length > *state->literal_length)
         {
+                // The longest so far steps down to be the next, if it is longer.
+                positive stepped = min(*state->literal_length, (positive)RX_EXTRA_MAX);
+
+                if (stepped > *state->extra_length)
+                {
+                        *state->extra_length = stepped;
+                        memory_copy_apart(state->extra, state->literal, stepped);
+                }
                 *state->literal_length = state->run_length;
                 memory_copy_apart(state->literal, state->run, state->run_length);
+        }
+        else if (kept > *state->extra_length)
+        {
+                *state->extra_length = kept;
+                memory_copy_apart(state->extra, state->run, kept);
         }
         state->run_length = 0;
 }
@@ -1391,12 +1433,22 @@ static fn rx_required_walk(const rx_node *nodes, rx_ref first, rx_required_state
         }
 }
 
-static fn rx_required(const rx_node *nodes, rx_ref first, p8 *literal, positive *literal_length)
+static fn rx_required_two(const rx_node *nodes, rx_ref first, p8 *literal, positive *literal_length,
+                          p8 *extra, positive *extra_length)
 {
-        rx_required_state state = {.literal = literal, .literal_length = literal_length};
+        rx_required_state state = {.literal = literal, .literal_length = literal_length,
+                                   .extra = extra, .extra_length = extra_length};
 
         rx_required_walk(nodes, first, &state);
         rx_required_flush(&state);
+}
+
+static fn rx_required(const rx_node *nodes, rx_ref first, p8 *literal, positive *literal_length)
+{
+        p8 extra[RX_EXTRA_MAX];
+        positive extra_length = 0;
+
+        rx_required_two(nodes, first, literal, literal_length, extra, &extra_length);
 }
 
 /* A deterministic graph can reuse the prepared literal search when its
@@ -1446,6 +1498,8 @@ static bool rx_fixed(const rx_node *nodes, rx_ref first, rx_hints *hints, positi
         }
         return true;
 }
+
+static bool rx_single(const regex_program *program, const rx_node *node, p8 byte);
 
 static p32 rx_compiles;
 
@@ -1514,7 +1568,120 @@ static bool rx_compile(rx_pool *pool, regex_program *out, string_address pattern
         }
         if (root.first && pool->nodes[root.first].kind == RX_BEGIN)
                 c.program.flags |= RX_ANCHORED;
-        rx_required(pool->nodes, root.first, hints->literal, address_of hints->literal_length);
+        rx_required_two(pool->nodes, root.first, hints->literal, address_of hints->literal_length,
+                        hints->extra, address_of hints->extra_length);
+        /*
+                The run a pattern begins with, if it does, through the
+                groups it sits at the front of (when nothing refers back to
+                one): its set, how many it needs, and the node that must
+                follow it when that is a byte or a set no byte of the run
+                can also be, so the run's last place is the only one it can
+                be followed from.
+        */
+        if (root.first && !(c.program.flags & RX_HAS_BACKREF))
+        {
+                rx_ref head = root.first, after = 0;
+
+                while (head && pool->nodes[head].kind == RX_CAPTURE && pool->nodes[head].left)
+                {
+                        if (pool->nodes[head].next)
+                                after = pool->nodes[head].next;
+                        head = pool->nodes[head].left;
+                }
+                if (head && pool->nodes[head].kind == RX_COUNT && pool->nodes[head].maximum < 0)
+                {
+                        const rx_node *count = pool->nodes + head;
+                        const rx_node *child = pool->nodes + count->left;
+
+                        if (count->left && !child->next && child->kind >= RX_BYTE && child->kind <= RX_SET)
+                        {
+                                rx_ref follow = count->next ? count->next : after;
+                                const rx_node *next = pool->nodes + follow;
+
+                                hints->lead_run = count->left;
+                                hints->lead_minimum = count->minimum;
+                                hints->lead_tail = head == root.first && count->next &&
+                                                   pool->nodes[count->next].kind == RX_END &&
+                                                   !pool->nodes[count->next].next &&
+                                                   !(policy & REGEX_LINE_ANCHORS);
+                                if (follow && (next->kind == RX_BYTE || next->kind == RX_SET))
+                                {
+                                        bool apart = true;
+
+                                        for (b32 b = 0; b < 256 && apart; b++)
+                                                apart = !(rx_single(&c.program, child, (p8)b) &&
+                                                          rx_single(&c.program, next, (p8)b));
+                                        if (apart)
+                                                hints->lead_next = follow;
+                                }
+                        }
+                }
+        }
+        /*
+                A pattern that is one class of byte ([aeiou], [0-9], a dot)
+                or a run of one of them ([0-9]+, [0-9][0-9]*, " *") needs no
+                walk: the first byte of the class, and the run from it.
+        */
+        if (root.first && !c.program.groups && !(c.program.flags & RX_HAS_BACKREF))
+        {
+                const rx_node *one = pool->nodes + root.first;
+
+                if (!one->next && (one->kind == RX_SET || one->kind == RX_ANY))
+                {
+                        hints->shape = 1;
+                        hints->shape_node = root.first;
+                }
+                else if (one->kind == RX_COUNT && one->maximum < 0 && !one->next && one->left &&
+                         !pool->nodes[one->left].next && pool->nodes[one->left].kind >= RX_BYTE &&
+                         pool->nodes[one->left].kind <= RX_SET)
+                {
+                        hints->shape = 2;
+                        hints->shape_node = one->left;
+                        hints->shape_minimum = one->minimum;
+                }
+                else if (one->next && one->kind >= RX_BYTE && one->kind <= RX_SET &&
+                         pool->nodes[one->next].kind == RX_COUNT && pool->nodes[one->next].maximum < 0 &&
+                         !pool->nodes[one->next].next && pool->nodes[one->next].left)
+                {
+                        const rx_node *more = pool->nodes + one->next;
+                        const rx_node *again = pool->nodes + more->left;
+
+                        if (!again->next && again->kind == one->kind &&
+                            (one->kind == RX_ANY || (one->kind == RX_BYTE && again->argument == one->argument) ||
+                             (one->kind == RX_SET &&
+                              !memory_compare(pool->sets[again->argument], pool->sets[one->argument], 256))))
+                        {
+                                hints->shape = 2;
+                                hints->shape_node = root.first;
+                                hints->shape_minimum = 1 + more->minimum;
+                        }
+                }
+        }
+        /*
+                A string and the end of the text, or all of the text (X$,
+                \.$, ^X$): the text ends with it or it does not.
+        */
+        if (!hints->shape && root.first && !c.program.groups && !(policy & REGEX_LINE_ANCHORS) &&
+            hints->literal_length)
+        {
+                rx_ref at = root.first;
+                bool begins = pool->nodes[at].kind == RX_BEGIN;
+                positive size = 0;
+
+                if (begins)
+                        at = pool->nodes[at].next;
+                while (at && pool->nodes[at].kind == RX_BYTE)
+                {
+                        size++;
+                        at = pool->nodes[at].next;
+                }
+                if (at && size == hints->literal_length && pool->nodes[at].kind == RX_END &&
+                    !pool->nodes[at].next)
+                {
+                        hints->shape = 3;
+                        hints->shape_minimum = begins;
+                }
+        }
         positive fixed_work = 0;
         if (!literal && rx_fixed(pool->nodes, root.first, hints, &fixed_work) &&
             hints->fixed_length)
@@ -1526,6 +1693,8 @@ static bool rx_compile(rx_pool *pool, regex_program *out, string_address pattern
         if (literal)
                 c.program.flags |= RX_LITERAL_PROVES;
         hints->literal_anchors = memory_search_prepare(hints->literal, hints->literal_length, icase);
+        if (hints->extra_length)
+                hints->extra_anchors = memory_search_prepare(hints->extra, hints->extra_length, icase);
         *out = c.program;
         pool->used = c.cursor;
         return true;
@@ -1622,6 +1791,8 @@ typedef struct {
         positive work_yield;
         p32 frame_used, choice_used, undo_used;
         p8 selection, active_captures;
+        // The last walk's slots are its answer, none having been set aside.
+        bool best_in_place;
         bool pending_exhaustion, first_exhausted;
 } rx_match;
 
@@ -1700,9 +1871,9 @@ static bool rx_accept(rx_match *match, positive position)
         */
         if (match->best_stop == positive_max && !match->choice_used)
         {
+                /* The walk ends here, and what it holds is the answer where it stands. */
                 match->best_stop = stop;
-                memory_copy_apart(match->best_slots, match->slots,
-                                  match->active_captures * sizeof(positive));
+                match->best_in_place = true;
                 return true;
         }
         if (match->best_limit == positive_max &&
@@ -1725,6 +1896,97 @@ static bool rx_accept(rx_match *match, positive position)
         return stop == match->best_limit;
 }
 
+/* How many bytes of at[0, available) a single-node child takes in a row. */
+static inline INLINE positive rx_span(const regex_program *program, const rx_node *child,
+                                      string_address at, positive available)
+{
+        if (child->kind == RX_BYTE && !(program->flags & RX_IGNORE_CASE))
+                return memory_span_byte(at, child->argument, available);
+        if (child->kind == RX_ANY)
+        {
+                string_address newline = (program->policy & REGEX_DOT_NEWLINE)
+                    ? 0 : memory_first_of(at, '\n', available);
+                return newline ? (positive)(newline - at) : available;
+        }
+        if (child->kind == RX_SET)
+                return string_span_max(at, available, (const b8 *)program->sets[child->argument]);
+        positive taken = 0;
+        while (taken < available && rx_single(program, child, at[taken]))
+                taken++;
+        return taken;
+}
+
+/*
+        A run of a set gives its bytes back one at a time, and what follows
+        it is tried at each. When what follows is a byte or a set (past the
+        ends of the groups the run sits in, whose closing cannot fail) only
+        the places that hold one can go on, so the others are not tried:
+        .*: or [0-9]*\. made a choice, a pop and a failed compare for every
+        byte. The place to try is moved down to the last that can, or the
+        choice is spent when none can. Each place passed over is charged
+        what the walk spent on it, and a pass that the work ceiling would
+        end inside is not made.
+*/
+enum { RX_BACK_STAY, RX_BACK_MOVED, RX_BACK_NONE };
+
+static __attribute__((noinline)) positive rx_run_span(const regex_program *program, const rx_node *child,
+                                                       string_address at, positive available)
+{
+        return rx_span(program, child, at, available);
+}
+
+static inline INLINE int rx_back(const rx_match *match, const rx_choice *choice,
+                                 positive *position, positive *work, positive work_limit)
+{
+        const regex_program *program = match->program;
+        rx_ref ahead = choice->node;
+        p32 beyond = choice->continuation;
+        positive charge = 1;
+
+        while (!ahead && beyond && match->frames[beyond - 1].slot >= 0)
+        {
+                ahead = match->frames[beyond - 1].node;
+                beyond = match->frames[beyond - 1].parent;
+                charge = 2;
+        }
+
+        const rx_node *next = program->nodes + ahead;
+
+        if (!ahead || (next->kind != RX_SET && next->kind != RX_BYTE))
+                return RX_BACK_STAY;
+
+        positive above = *position + 1;
+
+        if (next->kind == RX_BYTE && !(program->flags & RX_IGNORE_CASE))
+        {
+                string_address hit = memory_last_of(match->bytes + choice->lower, next->argument,
+                                                    above - choice->lower);
+
+                above = hit ? (positive)(hit - match->bytes) + 1 : choice->lower;
+        }
+        else if (next->kind == RX_SET)
+        {
+                const p8 *member = program->sets[next->argument];
+
+                while (above > choice->lower && !member[match->bytes[above - 1]])
+                        above--;
+        }
+        else
+                while (above > choice->lower && !rx_single(program, next, match->bytes[above - 1]))
+                        above--;
+
+        /* The places above the last one that can go on, or all of them. */
+        positive cost = (*position + 1 - above) * charge;
+
+        if (cost >= work_limit - *work)
+                return RX_BACK_STAY;
+        *work += cost;
+        if (above == choice->lower)
+                return RX_BACK_NONE;
+        *position = above - 1;
+        return RX_BACK_MOVED;
+}
+
 static bool rx_run(rx_match *match, positive start)
 {
         const regex_program *program = match->program;
@@ -1740,7 +2002,12 @@ static bool rx_run(rx_match *match, positive start)
         bool accepted = false;
         match->frame_used = match->choice_used = match->undo_used = 0;
         match->best_limit = positive_max;
-        memory_fill(match->slots, -1, match->active_captures * sizeof(positive));
+        match->best_in_place = false;
+        // Two slots are the common walk, and two stores are not a call.
+        if (match->active_captures == 2)
+                match->slots[1] = positive_max;
+        else
+                memory_fill(match->slots, -1, match->active_captures * sizeof(positive));
         match->slots[0] = start;
         for (;;)
         {
@@ -1835,6 +2102,22 @@ static bool rx_run(rx_match *match, positive start)
                 case RX_CAPTURE:
                 case RX_ALT:
                 {
+                        /*
+                                A character (rx_character's alternation)
+                                that stands on a byte below 0x80 is that
+                                byte or nothing: the sequences beside it
+                                begin above 0x7f, so no choice is left to go
+                                back to, and none is made.
+                        */
+                        if (instruction->kind == RX_ALT && instruction->minimum == 1 &&
+                            position < length && bytes[position] < 0x80 &&
+                            program->boundary == REGEX_BOUNDARY_NONE && !match->work_yield)
+                        {
+                                if (!program->sets[program->nodes[instruction->left].argument][bytes[position]])
+                                        goto backtrack;
+                                position++;
+                                break;
+                        }
                         p32 resume = continuation;
                         p8 slot = (p8)(instruction->argument * 2);
                         bool capture = instruction->kind == RX_CAPTURE && slot < match->active_captures;
@@ -1858,6 +2141,27 @@ static bool rx_run(rx_match *match, positive start)
                 case RX_COUNT:
                 {
                         const rx_node *child = program->nodes + instruction->left;
+                        /*
+                                A repeated character (a dot or a negated
+                                bracket in a UTF-8 locale) is the run of the
+                                bytes below 0x80 its set takes, when what
+                                stops the run is the end, the repeat's
+                                ceiling or a byte below 0x80: no sequence
+                                lies in it, so a character is a byte and the
+                                run is the one a set would make. A run that
+                                stops on a byte above 0x7f goes the long way
+                                round the graph, as it always did. So does a
+                                word or line boundary, which reads the walk's
+                                choices where it ends, and a walk with a
+                                machine standing by (see rx_find), whose
+                                spending is what hands the line over.
+                        */
+                        bool characters = instruction->left && !child->next &&
+                                          child->kind == RX_ALT && child->minimum == 1 &&
+                                          program->boundary == REGEX_BOUNDARY_NONE &&
+                                          !match->work_yield;
+                        if (characters)
+                                child = program->nodes + child->left;
                         if (instruction->left && !child->next &&
                             (child->kind == RX_BYTE || child->kind == RX_ANY || child->kind == RX_SET))
                         {
@@ -1868,20 +2172,14 @@ static bool rx_run(rx_match *match, positive start)
                                 if (available > limit)
                                         available = limit;
                                 string_address at = bytes + position;
-                                if (child->kind == RX_BYTE && !(program->flags & RX_IGNORE_CASE))
-                                        taken = memory_span_byte(at, child->argument, available);
-                                else if (child->kind == RX_ANY)
+                                taken = rx_span(program, child, at, available);
+                                if (characters && taken != limit &&
+                                    (taken == available || at[taken] >= 0x80))
                                 {
-                                        string_address newline = (program->policy & REGEX_DOT_NEWLINE)
-                                            ? 0 : memory_first_of(at, '\n', available);
-                                        taken = newline ? (positive)(newline - at) : available;
+                                        repetitions = 0;
+                                        previous = positive_max;
+                                        goto count;
                                 }
-                                else if (child->kind == RX_SET)
-                                        taken = string_span_max(at, available,
-                                            (const b8 *)program->sets[child->argument]);
-                                else
-                                        while (taken < available && rx_single(program, child, at[taken]))
-                                                taken++;
                                 work += taken;
                                 /* The old loop charged only matching bytes: a mismatch at
                                    the work limit must still finish without exhaustion. */
@@ -1892,7 +2190,19 @@ static bool rx_run(rx_match *match, positive start)
                                 }
                                 if (taken < (positive)instruction->minimum)
                                         goto backtrack;
+                                /*
+                                        A run with nothing after it in the
+                                        pattern has no use for the places it
+                                        could give back: each ends a match
+                                        that is shorter than the one this
+                                        run makes, and none can come to be
+                                        preferred (a word or line boundary
+                                        can refuse the longest, and then a
+                                        shorter one may stand).
+                                */
                                 if (taken > (positive)instruction->minimum &&
+                                    (instruction->next || continuation ||
+                                     program->boundary != REGEX_BOUNDARY_NONE) &&
                                     !rx_choice_put(match, instruction->next, continuation,
                                                    position + taken - 1, position + instruction->minimum))
                                         goto backtrack;
@@ -1939,10 +2249,18 @@ static bool rx_run(rx_match *match, positive start)
                 node = choice.node;
                 continuation = choice.continuation;
                 position = choice.position;
-                if (choice.lower != positive_max && choice.position > choice.lower)
+                if (choice.lower != positive_max)
                 {
-                        choice.position--;
-                        match->choices[match->choice_used++] = choice;
+                        /* Only a byte or a set ahead, there or past a group's close, is worth the look. */
+                        if ((node ? program->nodes[node].kind == RX_BYTE || program->nodes[node].kind == RX_SET
+                                  : continuation != 0) &&
+                            rx_back(match, &choice, &position, &work, work_limit) == RX_BACK_NONE)
+                                goto backtrack;
+                        if (position > choice.lower)
+                        {
+                                choice.position = position - 1;
+                                match->choices[match->choice_used++] = choice;
+                        }
                 }
         }
         match->work_used = work;
@@ -1997,6 +2315,104 @@ static p8 rx_find(rx_match *match, const regex_program *program, p8 mode, bool c
                                (program->flags & RX_IGNORE_CASE) != 0,
                                hints->literal_anchors))
                 return RX_NO_MATCH;
+        if (hints->extra_length && !start && !match->literal_known && !match->work_yield &&
+            !text_literal_find(bytes, length, 0, (string_address)hints->extra, hints->extra_length,
+                               (program->flags & RX_IGNORE_CASE) != 0, hints->extra_anchors))
+                return RX_NO_MATCH;
+        /*
+                A pattern that begins with a run of one set, [a-z]+ or
+                " *", that has tried a start and failed has tried every
+                start inside the run: from a later one the run is shorter,
+                and each place the shorter run could hand on from was one
+                the longer run handed on from. The next start is the byte
+                that ended the run, not the next of its bytes, and a word of
+                n letters was n starts of n steps.
+        */
+        const rx_node *run = hints->lead_run && program->boundary == REGEX_BOUNDARY_NONE &&
+                                     mode != REGEX_EXACT_LONGEST
+                                 ? program->nodes + hints->lead_run : null;
+        if (hints->shape == 3 && program->boundary == REGEX_BOUNDARY_NONE && mode != REGEX_EXACT_LONGEST)
+        {
+                positive size = hints->literal_length;
+
+                // ^X$ is the whole text and X$ the end of it; neither is anywhere else.
+                if (length < size || length - size < start || (hints->shape_minimum && (start || length != size)))
+                        return RX_NO_MATCH;
+                if (program->flags & RX_IGNORE_CASE)
+                {
+                        for (positive i = 0; i < size; i++)
+                                if (byte_to_lower(bytes[length - size + i]) != hints->literal[i])
+                                        return RX_NO_MATCH;
+                }
+                else if (memory_compare(bytes + length - size, hints->literal, size))
+                        return RX_NO_MATCH;
+                memory_fill(match->slots, -1, match->active_captures * sizeof(positive));
+                match->slots[0] = length - size;
+                match->slots[1] = length;
+                return RX_MATCH;
+        }
+        if (hints->shape && hints->shape != 3 && program->boundary == REGEX_BOUNDARY_NONE &&
+            mode != REGEX_EXACT_LONGEST)
+        {
+                const rx_node *one = program->nodes + hints->shape_node;
+                positive at = start;
+
+                if (hints->shape == 2 && !hints->shape_minimum)
+                {
+                        match->slots[0] = at;
+                        match->slots[1] = at + rx_run_span(program, one, bytes + at, length - at);
+                        return RX_MATCH;
+                }
+                for (;;)
+                {
+                        if (program->flags & RX_FIRST_KNOWN)
+                                at += string_span_max(bytes + at, length - at, (const b8 *)hints->first_skip);
+                        else
+                                while (at < length && !rx_single(program, one, bytes[at]))
+                                        at++;
+                        if (at >= length)
+                                return RX_NO_MATCH;
+                        positive taken = hints->shape == 1 ? 1 : rx_run_span(program, one, bytes + at, length - at);
+
+                        if (taken >= (hints->shape == 1 ? 1 : (positive)hints->shape_minimum))
+                        {
+                                match->slots[0] = at;
+                                match->slots[1] = at + taken;
+                                return RX_MATCH;
+                        }
+                        at += taken;
+                }
+        }
+        /*
+                And when nothing but the end of the text follows the run,
+                " *$" or "[ \t]*$", it is the only place a match can be: the
+                last byte that is not the run's, and the run after it.
+                Every earlier start was a try that could only fail.
+        */
+        if (run && hints->lead_tail)
+        {
+                positive reach = length;
+
+                while (reach > start && rx_single(program, run, bytes[reach - 1]))
+                        reach--;
+                if (length - reach < (positive)program->nodes[program->first].minimum)
+                        return RX_NO_MATCH;
+                memory_fill(match->slots, -1, match->active_captures * sizeof(positive));
+                match->slots[0] = reach;
+                match->slots[1] = length;
+                return RX_MATCH;
+        }
+        /*
+                Where a machine stands by (grep's, whose caller gave the walk
+                a ceiling to spend before the machine reads the line), the
+                walk does not take the short ways through a run: what it
+                spends is how the caller knows to hand the line over, and
+                the machine reads a line faster than a try at every start
+                of a run does, shortcut or not.
+        */
+        if (match->work_yield)
+                run = null;
+        const rx_node *follow = run && hints->lead_next ? program->nodes + hints->lead_next : null;
         for (positive at = start; at <= length; at++)
         {
                 if (program->boundary == REGEX_BOUNDARY_WORD && at && mode != REGEX_EXACT_LONGEST)
@@ -2007,6 +2423,25 @@ static p8 rx_find(rx_match *match, const regex_program *program, p8 mode, bool c
                         if (at == length)
                                 return RX_NO_MATCH;
                 }
+                /*
+                        A run that nothing in it can be followed from, and
+                        the byte after it is not what must follow, has no
+                        start in it that goes anywhere: the word that is not
+                        followed by "=" is passed in the one look, not tried
+                        by a walk and its choices.
+                */
+                if (follow)
+                {
+                        positive taken = rx_run_span(program, run, bytes + at, length - at);
+
+                        if (taken < (positive)hints->lead_minimum || at + taken >= length ||
+                            !rx_single(program, follow, bytes[at + taken]))
+                        {
+                                if (taken > 1)
+                                        at += taken - 1;
+                                continue;
+                        }
+                }
                 match->best_stop = positive_max;
                 bool found = false;
                 if (program->boundary == REGEX_BOUNDARY_NONE || !at)
@@ -2015,7 +2450,9 @@ static p8 rx_find(rx_match *match, const regex_program *program, p8 mode, bool c
                         found = rx_run(match, at + 1);
                 if (match->best_stop != positive_max)
                 {
-                        memory_copy_apart(match->slots, match->best_slots, match->active_captures * sizeof(positive));
+                        if (!match->best_in_place)
+                                memory_copy_apart(match->slots, match->best_slots,
+                                                  match->active_captures * sizeof(positive));
                         found = true;
                 }
                 if (found && (mode != REGEX_EXACT_LONGEST || !match->first_exhausted))
@@ -2030,6 +2467,13 @@ static p8 rx_find(rx_match *match, const regex_program *program, p8 mode, bool c
                 if (program->boundary == REGEX_BOUNDARY_LINE ||
                     ((program->flags & RX_ANCHORED) && program->boundary != REGEX_BOUNDARY_WORD))
                         return RX_NO_MATCH;
+                if (run && at < length && rx_single(program, run, bytes[at]))
+                {
+                        positive taken = rx_run_span(program, run, bytes + at, length - at);
+
+                        if (taken > 1)
+                                at += taken - 1;
+                }
         }
         return RX_NO_MATCH;
 }

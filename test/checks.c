@@ -100970,6 +100970,88 @@ b32 main(void)
                 proof_check(regex_find(REGEX_LONGEST, reuse_subjects[i], length, 0));
                 proof_check(regex_slots[0] == 0 && regex_slots[1] == length);
         }
+        /*
+                The shortcuts of rx_find that look at a pattern's shape (a
+                class, a run of one, a run at the front, a run at the end)
+                and the character that is a byte below 0x80, against the
+                walk with none of them: the hints that name them taken out
+                of a copy of the program and the mark of the character
+                taken off a copy of its nodes. Same answer, same slots, in
+                every mode and for every subject here, UTF-8 or not.
+        */
+        static string_address shape_patterns[] = {
+            ".*", ".*o", "a.*b", ".+x", "[^,]*,", "[^,]+", "([^:]*):(.*)", ".{3}", ".{2,4}x",
+            "(.*)(.)", "x*", "x+", "[0-9]+", "[0-9][0-9]*", "[a-z]+=", "([a-z]+)-([0-9]+),",
+            " *$", "[ \t]*$", "a*$", ".*$", "[aeiou]", ".", "[0-9]*\\.html", "(a*)b", "(a*b)c",
+            "((a*))b", "a+b|c", "x{2,}y", "\xc3\xa9+", ".\xc3\xa9", "\xc3\xa9.*\xc3\xa9", "[^a]*",
+            "[^a]*b", "[a-c]+c", "[a-c]*c", "(b*)(b*)b", "a*a*a", "b+$", "^.*$", "[a-z]{2,}",
+            "a.*b.*c", "x.*y", "w.*d", "(.*)x(.*)y", "key.*val", "foo.*bar", "o.*o", "ab.*ca",
+            "o$", "\\.html$", "^hello world$", "ld$", "^aaa$", "^abc$", "3,$", "z$",
+        };
+        static string_address shape_subjects[] = {
+            "", "a", "x", "o", "hello world", "key=value", "foo-12, bar-3,", "  trailing   ", "a,b,,c",
+            "aaaaaaaaaabaaaaaaaaaab", "ab\nab", "h\xc3\xa9llo w\xc3\xb6rld", "\xe6\x97\xa5\xe6\x9c\xac text",
+            "\xc3\xa9\xc3\xa9\xc3\xa9", "\xff\xfe a b", "ab12.html cd345.html", "wxyzzx xx xxy", "bbb", "abcabcabcc",
+            "a:b:c", "  \t \t", "x\xc3\xa9y,z",
+        };
+        static p8 shape_policies[] = {REGEX_POLICY_DEFAULT, REGEX_POLICY_DEFAULT | REGEX_CHARACTERS,
+                                      REGEX_BASIC_REPEATS | REGEX_LINE_ANCHORS | REGEX_CHARACTERS,
+                                      REGEX_BASIC_REPEATS};
+        static rx_node plain_nodes[4096];
+
+        for (positive p = 0; p < array_count(shape_patterns); p++)
+        for (positive q = 0; q < array_count(shape_policies); q++)
+        for (b32 fold = 0; fold < 2; fold++)
+        {
+                regex_pool.used = (rx_mark){0};
+                regex_program program;
+                bool compiled = rx_compile(&regex_pool, &program, shape_patterns[p], true, fold, true,
+                                           shape_policies[q]);
+                proof_check(compiled);
+                if (!compiled || regex_pool.used.nodes > array_count(plain_nodes))
+                        continue;
+                rx_hints plain_hints = *program.hints;
+                plain_hints.lead_run = plain_hints.lead_next = plain_hints.shape_node = 0;
+                plain_hints.lead_minimum = plain_hints.shape_minimum = 0;
+                plain_hints.lead_tail = plain_hints.shape = 0;
+                plain_hints.extra_length = 0;
+                memory_copy_apart(plain_nodes, program.nodes, regex_pool.used.nodes * sizeof(rx_node));
+                for (positive n = 0; n < regex_pool.used.nodes; n++)
+                        if (plain_nodes[n].kind == RX_ALT)
+                                plain_nodes[n].minimum = 0;
+                regex_program plain = program;
+                plain.hints = &plain_hints;
+                plain.nodes = plain_nodes;
+                for (positive s = 0; s < array_count(shape_subjects); s++)
+                {
+                        string_address bytes = shape_subjects[s];
+                        positive length = string_length(bytes);
+                        for (positive start = 0; start <= length && start < 4; start++)
+                        for (p8 mode = REGEX_FIRST; mode <= REGEX_EXACT_LONGEST; mode++)
+                        for (p8 boundary = REGEX_BOUNDARY_NONE; boundary <= REGEX_BOUNDARY_LINE; boundary++)
+                        for (p8 capture = 0; capture < 2; capture++)
+                        {
+                                program.boundary = plain.boundary = boundary;
+                                rx_match fast = regex_match;
+                                fast.work_limit = 100000000;
+                                fast.pending_exhaustion = false;
+                                rx_match slow = fast;
+                                p8 one = rx_find(&fast, &program, mode, capture, bytes, length, start);
+                                p8 two = rx_find(&slow, &plain, mode, capture, bytes, length, start);
+                                bool same = one == two;
+                                if (one == RX_MATCH && two == RX_MATCH)
+                                        same = same && !memory_compare(fast.slots, slow.slots,
+                                            (capture ? (program.groups + 1) * 2 : 2) * sizeof(positive));
+                                proof_check(same);
+                                if (!same && proof_failures < 40)
+                                        string_format(log, "shape %s policy %p fold %p subject %s start %p mode %p boundary %p capture %p: %p [%p %p] against %p [%p %p]\n",
+                                                      shape_patterns[p], (positive)shape_policies[q], (positive)fold, bytes,
+                                                      start, (positive)mode, (positive)boundary, (positive)capture,
+                                                      (positive)one, fast.slots[0], fast.slots[1],
+                                                      (positive)two, slow.slots[0], slow.slots[1]);
+                        }
+                }
+        }
         string_format(log, "%p checks, %p failures\n", proof_checks, proof_failures);
         log_flush();
         return proof_failures != 0;
