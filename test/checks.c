@@ -93975,22 +93975,25 @@ static fn hash_check_all(p8 address_to limit)
         }
         p8 sha = cpu_has_sha;
         p8 sha512 = cpu_has_sha512;
+        p8 zbb = cpu_has_zbb;
 #if X64
         p8 avx2 = cpu_has_avx2;
         p8 avx512 = cpu_has_avx512;
 #endif
-        for (positive pass = 1; pass < 16; pass++)
+        for (positive pass = 1; pass < 32; pass++)
         {
                 cpu_has_sha = (pass & 1) ? 0 : sha;
                 cpu_has_sha512 = (pass & 2) ? 0 : sha512;
+                cpu_has_zbb = (pass & 16) ? 0 : zbb;
 #if X64
                 cpu_has_avx512 = (pass & 4) ? 0 : avx512;
                 cpu_has_avx2 = (pass & 8) ? 0 : avx2;
                 if (((pass & 1) && !sha) || ((pass & 2) && !sha512) ||
-                    ((pass & 4) && !avx512) || ((pass & 8) && !avx2))
+                    ((pass & 4) && !avx512) || ((pass & 8) && !avx2) || ((pass & 16) && !zbb))
                         continue;
 #else
-                if ((pass & 12) || ((pass & 1) && !sha) || ((pass & 2) && !sha512))
+                if ((pass & 12) || ((pass & 1) && !sha) || ((pass & 2) && !sha512) ||
+                    ((pass & 16) && !zbb))
                         continue;
 #endif
                 bodies++;
@@ -94000,6 +94003,7 @@ static fn hash_check_all(p8 address_to limit)
         }
         cpu_has_sha = sha;
         cpu_has_sha512 = sha512;
+        cpu_has_zbb = zbb;
 #if X64
         cpu_has_avx2 = avx2;
         cpu_has_avx512 = avx512;
