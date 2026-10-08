@@ -35274,14 +35274,6 @@ static PURE b32 fileno_unlocked(stream address_to handle)
 #endif
 
 /*
-        How deep a chain of symbolic links realpath will follow before it
-        decides the chain is a loop. Linux itself stops at forty and answers
-        ELOOP, and matching the kernel means a path this refuses is a path the
-        kernel would have refused too.
-*/
-#define PROCESS_SYMLINK_DEPTH 40
-
-/*
         The getdents64 buffer, which is the one size in this file that is a
         judgement rather than a constant somebody else fixed.
 
@@ -36359,6 +36351,29 @@ static fn process_nap_ns(positive nanoseconds)
 //      -- names in the file system ------------------------------------------
 
 /*
+        Whether two names left to resolve walk the same way: a run of slashes
+        is one separator to the walk, so a self-link followed with a trailing
+        slash, which adds a slash each time round, is the same state and not
+        a longer one that never repeats.
+*/
+static bool realpath_same_walk(string_address a, string_address b)
+{
+        for (;;)
+        {
+                while (string_is(a, '/'))
+                        a++;
+                while (string_is(b, '/'))
+                        b++;
+                if (string_get(a) != string_get(b))
+                        return false;
+                if (!string_get(a))
+                        return true;
+                a++;
+                b++;
+        }
+}
+
+/*
         realpath, and the reason it is a walk rather than a call.
 
         There is no syscall that answers this. The kernel resolves a path
@@ -36398,12 +36413,25 @@ static string_address realpath(string_address path, string_address into)
         p8 rest[PATH_MAX];
         p8 link[PATH_MAX];
         p8 merged[PATH_MAX];
+        p8 saved_answer[PATH_MAX];
+        p8 saved_rest[PATH_MAX];
         struct stat facts;
         positive answer_length = 0;
         positive at = 0;
-        positive followed = 0;
+        positive saved_answer_length = 0;
+        positive saved_span = 1;
+        positive saved_gap = 0;
+        bool saved_any = false;
         bool last_was_directory = true;
         b32 saved;
+
+        //      A loop is told by a state that comes round again: the prefix
+        //      resolved and the name left to resolve, taken where a link is
+        //      about to be followed. The walk is a function of that state, so
+        //      the second time is the loop. Brent's method keeps one saved
+        //      state and doubles the span between saves, so a loop of any
+        //      length is told within twice its own length, and a chain of any
+        //      length is followed in full, as GNU's realpath follows one.
 
         if (is_null(path))
                 errno_refuse(EINVAL, null);
@@ -36498,8 +36526,32 @@ static string_address realpath(string_address path, string_address into)
                                 {
                                         bipolar wrote;
 
-                                        if (++followed > PROCESS_SYMLINK_DEPTH)
+                                        //      The state is the prefix as it
+                                        //      was before this component and the
+                                        //      name from this component on.
+                                        if (saved_any &&
+                                            saved_answer_length == was &&
+                                            !memory_compare(saved_answer, answer,
+                                                            was) &&
+                                            realpath_same_walk(rest + at,
+                                                               saved_rest))
                                                 errno_refuse(ELOOP, null);
+
+                                        if (!saved_any || saved_gap == saved_span)
+                                        {
+                                                memory_copy(saved_answer, answer,
+                                                            was);
+                                                saved_answer_length = was;
+                                                string_copy_max_end(saved_rest,
+                                                                    rest + at,
+                                                                    PATH_MAX - 1);
+                                                if (saved_any)
+                                                        saved_span <<= 1;
+                                                saved_any = true;
+                                                saved_gap = 0;
+                                        }
+                                        else
+                                                saved_gap++;
 
                                         wrote = readlink(answer, link,
                                                          PATH_MAX - 1);

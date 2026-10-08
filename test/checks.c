@@ -49674,12 +49674,32 @@ static fn test_names(void)
 
 //      -- realpath ------------------------------------------------------------
 
+//      The name of link number index in the chain: chain-0, chain-1 and so on.
+static fn test_chain_name(p8 address_to name, positive index)
+{
+        p8 digits[24];
+        positive count = 0;
+        positive at = 6;
+
+        do
+        {
+                digits[count++] = (p8)('0' + index % 10);
+                index /= 10;
+        } while (index);
+
+        memory_copy(name, "chain-", 6);
+        while (count)
+                name[at++] = digits[--count];
+        name[at] = end;
+}
+
 static fn test_realpath(void)
 {
         p8 path[PATH_MAX];
         p8 answer[PATH_MAX];
         p8 wanted[PATH_MAX];
         string_address allocated;
+        p8 name[32];
 
         test_path(path, (string_address) "pointer");
         test_path(wanted, (string_address) "one");
@@ -49758,6 +49778,43 @@ static fn test_realpath(void)
         errno = 0;
         true_is("realpath refuses a loop", is_null(realpath(path, answer)));
         same("realpath on a loop is ELOOP", errno, ELOOP);
+
+        //      A self-link followed with a trailing slash grows by one slash
+        //      each time round and is still a loop.
+        test_path(path, (string_address) "spin");
+        symlink((string_address) "spin/", path);
+        errno = 0;
+        true_is("realpath refuses a self-link with a slash",
+                is_null(realpath(path, answer)));
+        same("realpath on a self-link with a slash is ELOOP", errno, ELOOP);
+
+        //      A chain of 2,000 links is a path, not a loop: GNU's realpath
+        //      follows a chain of any length, and the kernel's forty lookups
+        //      limit open(2), not a name. Each link names the next by its
+        //      absolute path, and the last one is pointer.
+        {
+                positive chain = 2000;
+
+                for (positive i = 0; i <= chain; i++)
+                {
+                        test_chain_name(name, i);
+                        test_path(path, name);
+                        if (i == chain)
+                                test_path(wanted, (string_address) "pointer");
+                        else
+                        {
+                                test_chain_name(name, i + 1);
+                                test_path(wanted, name);
+                        }
+                        symlink(wanted, path);
+                }
+
+                test_chain_name(name, 0);
+                test_path(path, name);
+                test_path(wanted, (string_address) "one");
+                same_text("realpath follows a chain of 2000 links",
+                          realpath(path, answer), wanted);
+        }
 
         //      Root is its own parent.
         same_text("realpath of root", realpath((string_address) "/", answer),
