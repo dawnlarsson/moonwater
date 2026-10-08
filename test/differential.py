@@ -38602,14 +38602,23 @@ def harness_compression(argv):
             victim.write_bytes(b'symlink victim must survive\n')
             before = victim.read_bytes()
             linked_archive.symlink_to(victim.name)
+            #   An archive named by a link is written through it, as GNU tar's
+            #   open does and as every default output of this tree is
+            #   (file_link_chain_open): the link stays, what it names becomes
+            #   the archive, and no stage is left. The tier that replaces the
+            #   link and leaves its target alone is MOONWATER_STRICT 2, run by
+            #   floodlight_hardened's tar-link-replaced in test/run.
             linked = call(our_tar + ['-cf', str(linked_archive),
                                      '-C', str(output_root), member.name])
             listed = call([refs['tar'], '-tf', str(linked_archive)])
+            written = call([refs['tar'], '-tf', str(victim)])
             check(label + '/tar-output/symlink-victim',
-                  linked.returncode == listed.returncode == 0 and
-                  victim.read_bytes() == before and
-                  not linked_archive.is_symlink() and
+                  linked.returncode == listed.returncode == written.returncode == 0 and
+                  victim.stat().st_size == 10240 and
+                  linked_archive.is_symlink() and
+                  os.readlink(linked_archive) == victim.name and
                   member.name.encode() in listed.stdout and
+                  listed.stdout == written.stdout and
                   not list(output_root.glob('.moonwater-stage-*')),
                   linked.stderr.decode(errors='replace') +
                   listed.stderr.decode(errors='replace'))

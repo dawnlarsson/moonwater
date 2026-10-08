@@ -5216,6 +5216,7 @@ cp-link-replaced|0||d=$(mktemp -d) && cd "$d" && echo a > f && ln -s f l && echo
 cp-dangling-refused|1|not writing through dangling|d=$(mktemp -d) && cd "$d" && echo b > g && ln -s gone l && POSIXLY_CORRECT=1 "$HB/cp" g l; s=$?; cd /; rm -rf "$d"; exit $s
 split-link-replaced|0||d=$(mktemp -d) && cd "$d" && echo a > t && ln -s t xaa && seq 2 | "$HB/split" -b 1 - && [ "$(cat t)" = a ] && [ ! -L xaa ]; s=$?; cd /; rm -rf "$d"; exit $s
 csplit-link-replaced|0||d=$(mktemp -d) && cd "$d" && echo a > t && ln -s t xx01 && seq 2 | "$HB/csplit" -k - 2 > /dev/null && [ "$(cat t)" = a ] && [ ! -L xx01 ]; s=$?; cd /; rm -rf "$d"; exit $s
+tar-link-replaced|0||d=$(mktemp -d) && cd "$d" && echo a > t && echo m > m && ln -s t out.tar && "$HB/tar" -cf out.tar m && [ "$(cat t)" = a ] && [ ! -L out.tar ] && [ -f out.tar ] && [ -z "$(ls -A | grep moonwater-stage)" ]; s=$?; cd /; rm -rf "$d"; exit $s
 chown-L-not-followed|0||d=$(mktemp -d) && cd "$d" && mkdir t && ln -s /etc t/e && n=$("$HB/chown" -RL "$(id -u)" t 2>&1 | wc -l); cd /; rm -rf "$d"; [ "$n" -le 1 ]
 cp-tree-staged|0||d=$(mktemp -d) && cd "$d" && mkdir s && mkfifo s/f && { timeout 5 "$HB/cp" -R --copy-contents s t & p=$!; sleep 1; [ ! -e t ]; r=$?; kill $p 2>/dev/null; wait $p 2>/dev/null; cd /; rm -rf "$d"; exit $r; }
 install-owner-discarded|1|cannot publish|[ "$(id -u)" = 0 ] && { echo cannot publish; exit 1; }; d=$(mktemp -d) && echo x > "$d.src" && "$HB/install" -o 0 "$d.src" "$d/out"; s=$?; [ -e "$d/out" ] && s=9; rm -rf "$d" "$d.src"; exit $s
