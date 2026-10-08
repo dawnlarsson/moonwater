@@ -4355,6 +4355,18 @@ def text_regex_lines():
 
 INPUTS["regex_lines"] = text_regex_lines()
 
+
+def text_long_ab_lines():
+    """Three lines of letters a and b, forty thousand and more long, and
+    one of them ends in the tail that the machine patterns end in: the
+    long line is the case the graph refuses."""
+    rng = random.Random(0x4C4F4E47)
+    body = "".join(rng.choice("ab") for _ in range(40000))
+    return ("\n".join((body, body[:-5] + "abbbb", "ab" * 50)) + "\n").encode("latin-1")
+
+
+INPUTS["long_ab_lines"] = text_long_ab_lines()
+
 #       A letter and the other cases it has outside ASCII: Latin-1, Greek, the
 #       final sigma, Cyrillic, the digraphs with a title case, the dotless
 #       and long forms. Each row runs under C.UTF-8, where grep -i, sed I and
@@ -22031,6 +22043,13 @@ _TEXT_SED_EXTRA = (
       for pattern in TEXT_REGEX_MACHINE + TEXT_REGEX_MACHINE_WORDS
       for flags, script in ((("-n",), "/%s/p"), (("-n",), "/%s/="), ((), "/%s/d"), (("-n",), "$!N;/%s/p"),
                             (("-n",), "/%s/!p"), (("-n",), "/%s/I{p}"), (("-n",), "/%s/,/b$/p"))),
+    #       A line of forty thousand letters is past the graph's work for these
+    #       patterns: the walk refused it ("too complex") where the automaton
+    #       answers, and an s/// on it left the line unchanged. The machine
+    #       gives the leftmost-longest span, so the substitutions are GNU's.
+    *({"argv": (*flags, "-E", "-e", script % pattern), "stdin": "long_ab_lines"}
+      for pattern in TEXT_REGEX_MACHINE
+      for flags, script in ((("-n",), "/%s/p"), ((), "s/%s/[&]/"), ((), "s/%s/<&>/g"), ((), "s/%s/X/2"))),
     #       Blocks past the thirty-second nesting were dropped from the table
     #       an unbalanced script jumped through, and a line address counted
     #       from the largest wrapped to a small one.

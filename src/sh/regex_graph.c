@@ -2267,8 +2267,8 @@ static bool rx_run(rx_match *match, positive start)
         return accepted;
 }
 
-static p8 rx_find(rx_match *match, const regex_program *program, p8 mode, bool captures,
-                   string_address bytes, positive length, positive start)
+static p8 rx_find_walk(rx_match *match, const regex_program *program, p8 mode, bool captures,
+                       string_address bytes, positive length, positive start)
 {
         match->program = program;
         match->bytes = bytes;
@@ -2455,6 +2455,16 @@ static p8 rx_find(rx_match *match, const regex_program *program, p8 mode, bool c
                                                   match->active_captures * sizeof(positive));
                         found = true;
                 }
+                /*
+                        A longest search that ran out of work after it found a
+                        match has not seen every alternative: the match it has
+                        may be shorter than the longest, so it is not an answer.
+                */
+                if (found && match->pending_exhaustion && match->selection == REGEX_LONGEST)
+                {
+                        match->pending_exhaustion = false;
+                        return RX_COMPLEX;
+                }
                 if (found && (mode != REGEX_EXACT_LONGEST || !match->first_exhausted))
                         return RX_MATCH;
                 if (!found && mode == REGEX_EXACT_LONGEST)
@@ -2543,6 +2553,7 @@ enum { RX_NFA_SET = 1, RX_NFA_SPLIT, RX_NFA_BEGIN, RX_NFA_END, RX_NFA_EDGE, RX_N
 enum { RX_DFA_UNKNOWN = -1, RX_DFA_HIT = -2, RX_DFA_DEAD = -3,
        RX_DFA_END_HIT = -4, RX_DFA_FULL = -6 };
 enum { RX_DFA_PREVIOUS_NAME = 1, RX_DFA_BEGINNING = 2 };
+enum { RX_ACCEPT_NAME = 1, RX_ACCEPT_OTHER = 2, RX_ACCEPT_END = 4 };
 enum { RX_DFA_RESTART_ALWAYS, RX_DFA_RESTART_AFTER_OTHER, RX_DFA_RESTART_NEVER };
 
 typedef struct
@@ -2570,6 +2581,9 @@ typedef struct
         // which rx_find tries at nought and nowhere else.
         p8 restart;
         bool usable;
+        // A longest machine reads on past a match, which its states' accept
+        // bits (rx_dfa_cache.accept) say where it was, and is anchored.
+        bool longest;
 } rx_dfa;
 
 typedef struct
@@ -2581,6 +2595,9 @@ typedef struct
         p32 hashed[RX_DFA_STATE_MAX];
         p16 set_size[RX_DFA_STATE_MAX];
         p8 flags[RX_DFA_STATE_MAX];
+        // For a longest machine: a match ends before a byte of a name, before
+        // one that is not, and at the end of the record.
+        p8 accept[RX_DFA_STATE_MAX];
         p16 pool[RX_DFA_POOL_MAX];
         p32 hash[RX_DFA_HASH_MAX];
         p32 mark[RX_DFA_NFA_MAX];
@@ -2738,6 +2755,7 @@ static bool rx_dfa_compile(rx_dfa *dfa, const regex_program *program, p8 boundar
                            p8 delimiter)
 {
         dfa->usable = !(program->flags & RX_HAS_BACKREF);
+        dfa->longest = false;
         dfa->nfa_count = 1;
         dfa->set_count = 0;
         dfa->order_top = 0;
@@ -2773,6 +2791,8 @@ static bool rx_dfa_compile(rx_dfa *dfa, const regex_program *program, p8 boundar
 }
 
 static fn rx_dfa_begin(rx_dfa_cache *cache);
+static bool rx_dfa_close(rx_dfa_cache *cache, b32 state, bool before, bool after,
+                         bool ending, positive *consuming);
 
 /* A state for the positions in cache->bits; interned, and the cache begun
    again when it has no room for one more. */
@@ -2840,6 +2860,14 @@ static b32 rx_dfa_intern(rx_dfa_cache *cache, p8 flags, bool *reset)
         cache->hash[slot] = (p32)state + 1;
         for (positive c = 0; c < dfa->class_count; c++)
                 cache->trans[(positive)state * dfa->class_count + c] = RX_DFA_UNKNOWN;
+        if (dfa->longest)
+        {
+                positive consuming;
+                bool before = (flags & RX_DFA_PREVIOUS_NAME) != 0;
+                cache->accept[state] = (p8)((rx_dfa_close(cache, state, before, true, false, &consuming) ? RX_ACCEPT_NAME : 0) |
+                                            (rx_dfa_close(cache, state, before, false, false, &consuming) ? RX_ACCEPT_OTHER : 0) |
+                                            (rx_dfa_close(cache, state, before, false, true, &consuming) ? RX_ACCEPT_END : 0));
+        }
         return state;
 }
 
@@ -2948,8 +2976,8 @@ static b32 rx_dfa_step(rx_dfa_cache *cache, b32 row, p8 class)
                 return next;
         }
         bool after = dfa->name[class];
-        if (rx_dfa_close(cache, state, before, after, false, &consuming) &&
-            dfa->boundary != REGEX_BOUNDARY_LINE &&
+        bool matched = rx_dfa_close(cache, state, before, after, false, &consuming);
+        if (matched && !dfa->longest && dfa->boundary != REGEX_BOUNDARY_LINE &&
             (dfa->boundary != REGEX_BOUNDARY_WORD || !after))
         {
                 cache->trans[cell] = RX_DFA_HIT;
@@ -3403,23 +3431,197 @@ static positive regex_machine_handovers;
 
 static bool regex_find(p8 mode, string_address text, positive length, positive from);
 
+/*
+        The machine holds this program: it is compiled and attached unless it
+        already is. A program the machine will not take is answered false.
+        The handover budget bounds the switches a verdict makes; a graph walk
+        that ran out of its work asks with force, which is not counted, so a
+        line the graph cannot answer is never refused for want of a switch.
+*/
+static bool regex_machine_holds(const regex_program *program, rx_hints *hints, bool force)
+{
+        if (regex_machine_owner == hints && regex_machine_serial == hints->serial)
+                return true;
+        if (!force && regex_machine_handovers == RX_MACHINE_HANDOVERS)
+                return false;
+        if (!rx_dfa_compile(&regex_dfa, program, REGEX_BOUNDARY_NONE, '\0'))
+                return false;
+        if (!force)
+                regex_machine_handovers++;
+        rx_dfa_attach(&regex_dfa_cache, &regex_dfa);
+        regex_machine_owner = hints;
+        regex_machine_serial = hints->serial;
+        return true;
+}
+
+/*
+        Leftmost-longest positions from the machines, for a pattern with no
+        back-reference, when the walk ran out of its work. The forward machine
+        (regex_dfa) gives the earliest end of any match from `from`, E0; the
+        leftmost match starts at or before E0, so the starts from `from` to E0
+        are tried in order by an anchored longest machine (regex_anchor),
+        and the first that matches is the leftmost, with its longest end.
+        Each try is a walk over the line that stops when no thread is left,
+        so a line costs its starts times the reach of each, not a backtrack.
+        It needs no NUL in the line, and a pattern with no word boundary to ask
+        (-w): the end of the line is the end, whatever byte follows it.
+*/
+static rx_dfa regex_anchor_dfa;
+static rx_dfa_cache regex_anchor_cache;
+static const rx_hints *regex_anchor_owner;
+static p32 regex_anchor_serial;
+
+static bool regex_anchor_holds(const regex_program *program, rx_hints *hints)
+{
+        if (regex_anchor_owner == hints && regex_anchor_serial == hints->serial)
+                return true;
+        if (!rx_dfa_compile(&regex_anchor_dfa, program, REGEX_BOUNDARY_NONE, '\0'))
+                return false;
+        regex_anchor_dfa.restart = RX_DFA_RESTART_NEVER;
+        regex_anchor_dfa.longest = true;
+        rx_dfa_attach(&regex_anchor_cache, &regex_anchor_dfa);
+        regex_anchor_owner = hints;
+        regex_anchor_serial = hints->serial;
+        return !regex_anchor_cache.failed;
+}
+
+/* The row a machine's walk starts from at `at` in the record: the start
+   state, with the flags the byte before it gives (none at the record's first
+   byte). Null when the machine has no room for it. */
+static b32 rx_dfa_row_at(rx_dfa_cache *cache, string_address text, positive at, bool *failed)
+{
+        p8 flags = at == 0 ? RX_DFA_BEGINNING
+                 : string_set_name[text[at - 1]] ? RX_DFA_PREVIOUS_NAME : 0;
+        memory_fill(cache->bits, 0, sizeof(cache->bits));
+        cache->bits[cache->dfa->start / 64] |= 1ull << (cache->dfa->start % 64);
+        bool reset = false;
+        b32 state = rx_dfa_intern(cache, flags, &reset);
+        if (state < 0)
+        {
+                *failed = true;
+                return 0;
+        }
+        return state * (b32)cache->dfa->class_count;
+}
+
+/* The earliest end of a match that starts at or after `at`, or -1 for none;
+   -2 when the machine would not hold the line. */
+static positive rx_dfa_first_end(rx_dfa_cache *cache, string_address text, positive at, positive length)
+{
+        const rx_dfa *dfa = cache->dfa;
+        bool failed = false;
+        b32 row = rx_dfa_row_at(cache, text, at, &failed);
+        if (failed)
+                return (positive)-2;
+        for (positive p = at;; p++)
+        {
+                p8 class = p == length ? dfa->delimiter_class : dfa->classes[text[p]];
+                b32 next = cache->trans[row + class];
+                if (next == RX_DFA_UNKNOWN)
+                        next = rx_dfa_step(cache, row, class);
+                if (next == RX_DFA_FULL)
+                        return (positive)-2;
+                if (next == RX_DFA_HIT || (p == length && next == RX_DFA_END_HIT))
+                        return p;
+                if (next < 0)
+                        return (positive)-1;
+                row = next;
+                if (p == length)
+                        return (positive)-1;
+        }
+}
+
+/* The longest end of a match that starts at `at` (the machine's start is
+   the row given), or -1 when none does; -2 when the machine would not hold
+   the line. */
+static positive rx_dfa_longest_end(rx_dfa_cache *cache, b32 row, string_address text,
+                                   positive at, positive length)
+{
+        const rx_dfa *dfa = cache->dfa;
+        positive last = (positive)-1;
+        for (positive p = at;; p++)
+        {
+                b32 state = row / (b32)dfa->class_count;
+                if (p == length)
+                {
+                        if (cache->accept[state] & RX_ACCEPT_END)
+                                last = length;
+                        return last;
+                }
+                p8 class = dfa->classes[text[p]];
+                if (cache->accept[state] & (dfa->name[class] ? RX_ACCEPT_NAME : RX_ACCEPT_OTHER))
+                        last = p;
+                b32 next = cache->trans[row + class];
+                if (next == RX_DFA_UNKNOWN)
+                        next = rx_dfa_step(cache, row, class);
+                if (next == RX_DFA_FULL)
+                        return (positive)-2;
+                if (next == RX_DFA_DEAD)
+                        return last;
+                if (next < 0)
+                        return (positive)-2;
+                row = next;
+        }
+}
+
+/* 1 with the leftmost-longest match of a no-back-reference program from
+   `from` in `text` as begin and finish, 0 for none, -1 when the machines
+   would not hold it. */
+static int rx_span_machine(const regex_program *program, string_address text, positive length,
+                           positive from, positive *begin, positive *finish)
+{
+        rx_hints *hints = (rx_hints *)program->hints;
+        if (!regex_machine_holds(program, hints, true) || regex_dfa_cache.failed)
+                return -1;
+        positive first = rx_dfa_first_end(&regex_dfa_cache, text, from, length);
+        if (first == (positive)-1)
+                return 0;
+        if (first == (positive)-2 || regex_dfa_cache.failed)
+                return -1;
+        if (!regex_anchor_holds(program, hints))
+                return -1;
+        for (positive at = from; at <= first; at++)
+        {
+                bool failed = false;
+                b32 row = rx_dfa_row_at(&regex_anchor_cache, text, at, &failed);
+                if (failed)
+                        return -1;
+                positive stop = rx_dfa_longest_end(&regex_anchor_cache, row, text, at, length);
+                if (stop == (positive)-2 || regex_anchor_cache.failed)
+                        return -1;
+                if (stop != (positive)-1)
+                {
+                        *begin = at;
+                        *finish = stop;
+                        return 1;
+                }
+        }
+        return -1;
+}
+
+static p8 rx_find(rx_match *match, const regex_program *program, p8 mode, bool captures,
+                  string_address bytes, positive length, positive start)
+{
+        p8 result = rx_find_walk(match, program, mode, captures, bytes, length, start);
+        if (result != RX_COMPLEX || mode != REGEX_LONGEST || captures ||
+            (program->flags & RX_HAS_BACKREF) || program->boundary != REGEX_BOUNDARY_NONE ||
+            start > length || memory_first_of(bytes, 0, length))
+                return result;
+        positive begin, finish;
+        int found = rx_span_machine(program, bytes, length, start, &begin, &finish);
+        if (found < 0)
+                return RX_COMPLEX;
+        memory_fill(match->slots, -1, match->active_captures * sizeof(positive));
+        match->slots[0] = found ? begin : 0;
+        match->slots[1] = found ? finish : 0;
+        return found ? RX_MATCH : RX_NO_MATCH;
+}
+
 static bool regex_test(const regex_program *program, string_address text, positive length)
 {
         rx_hints *hints = (rx_hints *)program->hints;
-        if (hints->verdict == RX_ASK_MACHINE &&
-            (regex_machine_owner != hints || regex_machine_serial != hints->serial))
-        {
-                if (regex_machine_handovers == RX_MACHINE_HANDOVERS ||
-                    !rx_dfa_compile(&regex_dfa, program, REGEX_BOUNDARY_NONE, '\0'))
-                        hints->verdict = RX_ASK_GRAPH;
-                else
-                {
-                        regex_machine_handovers++;
-                        rx_dfa_attach(&regex_dfa_cache, &regex_dfa);
-                        regex_machine_owner = hints;
-                        regex_machine_serial = hints->serial;
-                }
-        }
+        if (hints->verdict == RX_ASK_MACHINE && !regex_machine_holds(program, hints, false))
+                hints->verdict = RX_ASK_GRAPH;
         if (hints->verdict == RX_ASK_MACHINE && !regex_dfa_cache.failed &&
             !memory_first_of(text, 0, length))
         {
@@ -3428,7 +3630,27 @@ static bool regex_test(const regex_program *program, string_address text, positi
                         return hit != null;
         }
         regex_current = *program;
-        bool answer = regex_find(REGEX_FIRST, text, length, 0);
+        /*
+                The graph ran out of its work on this line. A pattern with no
+                back-reference is a regular language, and the machine answers
+                it in one pass whatever the line is: the line is the machine's
+                to answer, and "too complex" is said only where neither can.
+        */
+        p8 result = rx_find(&regex_match, &regex_current, REGEX_FIRST, false, text, length, 0);
+        if (result == RX_COMPLEX && !(program->flags & RX_HAS_BACKREF) &&
+            !memory_first_of(text, 0, length) && regex_machine_holds(program, hints, true) &&
+            !regex_dfa_cache.failed)
+        {
+                string_address hit = rx_dfa_scan(&regex_dfa_cache, text, text + length + 1);
+                if (hit || !regex_dfa_cache.failed)
+                        return hit != null;
+        }
+        if (result == RX_COMPLEX)
+        {
+                string_diagnostic(&text_diagnostic, 0, null, "regular expression too complex");
+                text_status = 2;
+        }
+        bool answer = result == RX_MATCH;
         if (hints->verdict == RX_ASK_WATCH)
         {
                 hints->asks++;
