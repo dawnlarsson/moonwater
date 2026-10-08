@@ -2506,10 +2506,9 @@ static COLD bipolar net_watch_events(b32 events, netlink_buffer address_to messa
         bipolar got = netlink_receive(events, message, null);
         net_event_turn turn = {.held = held};
 
-        /* recvfrom can still be interrupted in the narrow interval after the
-           readiness poll.  Nothing was consumed, and the lease deadline is
-           recomputed by the caller. */
-        if (got == NETWORK_INTERRUPTED)
+        /* Interrupted or vanished readiness leaves no event to act on. The
+           caller recomputes the lease deadline before waiting again. */
+        if (got == NETWORK_INTERRUPTED || got == NETWORK_TRY_AGAIN)
                 return 0;
         if (got == -ENOBUFS)
         {

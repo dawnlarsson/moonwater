@@ -3119,20 +3119,27 @@ static fn gzip_block_emit(gzip_encoder address_to e, p8 address_to src, positive
 
 /* Every table position down 32 KiB, and zero for any that falls out: one
    saturating subtract a lane. */
+static fn gzip_slide_table(p16 address_to table, positive count)
+{
+        for (positive i = 0; i < count; i++)
+                table[i] = (p16)(table[i] > GZIP_WINDOW ? table[i] - GZIP_WINDOW : 0);
+}
+
 static fn gzip_slide(gzip_encoder address_to e)
 {
-        p16 address_to t = e->head4;
-        positive n = (sizeof(e->head4) + sizeof(e->head3) + sizeof(e->prev)) / sizeof(p16);
-
-        for (positive i = 0; i < n; i++)
-                t[i] = (p16)(t[i] > GZIP_WINDOW ? t[i] - GZIP_WINDOW : 0);
+        /* Adjacent members are distinct arrays; indexing head4 cannot walk
+           head3 and prev even when they occupy one contiguous allocation. */
+        gzip_slide_table(e->head4, array_count(e->head4));
+        gzip_slide_table(e->head3, array_count(e->head3));
+        gzip_slide_table(e->prev, array_count(e->prev));
         e->slid += GZIP_WINDOW;
 }
 
 static fn gzip_finder_open(gzip_encoder address_to e)
 {
-        memory_fill(e->head4, 0,
-                    sizeof(e->head4) + sizeof(e->head3) + sizeof(e->prev));
+        memory_fill(e->head4, 0, sizeof(e->head4));
+        memory_fill(e->head3, 0, sizeof(e->head3));
+        memory_fill(e->prev, 0, sizeof(e->prev));
         e->slid = 0;
         e->hash3 = 0;
         e->hash4 = 0;

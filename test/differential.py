@@ -25850,16 +25850,34 @@ static b32 memory_compare_ascii_case(const void *one, const void *two,
         }
         return 0;
 }
-static unsigned char string_set_blanks[256];
+static const b8 string_set_blanks[256] = {[' '] = 1, ['\t'] = 1};
+static const b8 string_set_http_token[256] = {
+        ['0' ... '9'] = 1, ['A' ... 'Z'] = 1, ['a' ... 'z'] = 1,
+        ['!'] = 1, ['#'] = 1, ['$'] = 1, ['%'] = 1, ['&'] = 1, ['\''] = 1,
+        ['*'] = 1, ['+'] = 1, ['-'] = 1, ['.'] = 1, ['^'] = 1, ['_'] = 1,
+        ['`'] = 1, ['|'] = 1, ['~'] = 1};
 static positive string_span_max(const_string source, positive bound,
                                 const b8 *set)
 {
-        (void)set;
         positive i = 0;
-        while (i < bound && (source[i] == ' ' || source[i] == '\t'))
+        while (i < bound && source[i] && set[(p8)source[i]])
                 i++;
         return i;
 }
+static positive memory_text_span(const void *block, positive size)
+{
+        const p8 *at = block;
+        positive i = 0;
+        while (i < size && (at[i] == '\t' || (at[i] >= ' ' && at[i] != 127)))
+                i++;
+        return i;
+}
+static void memory_zero(void *into, positive size)
+{
+        if (size)
+                memset(into, 0, size);
+}
+#define max(a, b) ((a) > (b) ? (a) : (b))
 static positive digit_known(p8 character, positive base)
 {
         positive v;
@@ -29809,6 +29827,9 @@ int main(void) {
                 "\trecent_used_cpu = p->recent_used_cpu;\n}\n"
                 "static void wakeup_preempt_fair(struct rq *rq, struct task_struct *p, int wake_flags)\n{\n"
                 "\tif (test_tsk_need_resched(rq->curr))\n\t\treturn;\n}\n",
+            "linux/fs/overlayfs/super.c":
+                "static const struct dentry_operations ovl_dentry_operations = {\n"
+                "\t.d_real = ovl_d_real,\n};\n",
         }
 
         def settings_placed(tree):
@@ -29919,6 +29940,14 @@ line_add_padded() { line_add "$@"; }
                 assert all(("# moonwater took " + name in makefile) != stock
                            for name in displaced), makefile
                 assert settings_placed(tree), result.stderr
+                #   An overlay keeps no negative dentry and no unused one without an
+                #   upper layer: the hook is defined ahead of the operations table and
+                #   named in it.
+                if kind in ("absent", "symlink"):
+                    overlay = (tree / "linux/fs/overlayfs/super.c").read_text()
+                    assert overlay.index("static int ovl_dentry_delete") < \
+                        overlay.index("ovl_dentry_operations = {") and \
+                        ".d_delete = ovl_dentry_delete," in overlay, overlay
                 #   Both kernel directories are grafted and linked: the core's
                 #   and Canvas's, which is its own object beside it.
                 if kind in ("absent", "symlink"):
@@ -47162,10 +47191,40 @@ def spark_shell_command(cc, output, anchor=None, defines=()):
     arch_flags = {"x86_64": ["-march=x86-64"], "amd64": ["-march=x86-64"],
                   "aarch64": ["-mno-outline-atomics"], "arm64": ["-mno-outline-atomics"],
                   "riscv64": ["-march=rv64imafd_zicsr_zicntr", "-mabi=lp64d"]}
+    output = Path(output)
+    coverage_args = []
+    coverage = os.environ.get("MOONWATER_INTEGRATION_COVERAGE")
+    if coverage:
+        if platform.machine().lower() not in ("x86_64", "amd64"):
+            raise RuntimeError("integration trace-PC coverage currently requires x86-64")
+        folder = Path(coverage).resolve()
+        folder.mkdir(parents=True, exist_ok=True)
+        label = re.sub(r"[^A-Za-z0-9_.-]", "-",
+                       os.environ.get("MOONWATER_INTEGRATION_LABEL", output.name))
+        handle, retained_name = tempfile.mkstemp(prefix=label + ".", suffix=".elf",
+                                                 dir=folder)
+        os.close(handle)
+        retained = Path(retained_name)
+        record = retained.with_suffix(".map")
+        hook = retained.with_suffix(".o")
+        with record.open("wb") as stream:
+            stream.truncate(64 * 1024 * 1024)
+        hook_command = [cc, "-O2", "-c", "-march=x86-64",
+                        "-fno-stack-protector", "-fno-builtin",
+                        '-DCOVERAGE_PATH="%s"' % record, "-DCOVERAGE_hook",
+                        "test/checks.c", "-o", str(hook)]
+        built = subprocess.run(hook_command, cwd=HARNESS_ROOT,
+                               capture_output=True, text=True)
+        if built.returncode:
+            raise RuntimeError("integration coverage hook does not build:\n" +
+                               built.stderr[-2000:])
+        output.symlink_to(retained)
+        output = retained
+        coverage_args = ["-g", "-fsanitize-coverage=trace-pc", str(hook)]
     return [cc, "-O2", "-static", "-nostdlib", "-nostartfiles", "-fno-stack-protector",
             "-fno-builtin", *arch_flags.get(platform.machine().lower(), []), "-w",
             "-T", "src/build/spark.ld", "-Wl,-e,_start", "-Wl,--build-id=none",
-            "-Wl,--no-warn-rwx-segments",
+            "-Wl,--no-warn-rwx-segments", *coverage_args,
             *(['-DTLS_BENCH_ANCHOR="%s"' % anchor] if anchor else []),
             *("-D" + define for define in defines),
             "-o", str(output), "programs/shell.c"]
@@ -47738,9 +47797,13 @@ def harness_tls_chains(argv):
 
         go_rows = []
         go_verifier = None
-        if shutil.which("go"):
+        go = shutil.which("go")
+        go_version = (subprocess.run([go, "version"], capture_output=True, text=True)
+                      if go else None)
+        if go_version and go_version.returncode == 0 and \
+                go_version.stdout.startswith("go version "):
             (work / "gochain.go").write_text(GO_CHAIN_VERIFIER)
-            built = subprocess.run(["go", "build", "-o", str(work / "gochain"),
+            built = subprocess.run([go, "build", "-o", str(work / "gochain"),
                                     str(work / "gochain.go")], cwd=work,
                                    capture_output=True, text=True,
                                    env=dict(os.environ, GO111MODULE="off",
@@ -47750,7 +47813,7 @@ def harness_tls_chains(argv):
             else:
                 print("tls chains: Go oracle NOT RUN -- " + built.stderr[-200:])
         else:
-            print("tls chains: Go oracle NOT RUN -- no go toolchain")
+            print("tls chains: Go oracle NOT RUN -- no Go language toolchain")
 
         files = http.server.ThreadingHTTPServer(
             ("127.0.0.1", 0), functools.partial(Quiet, directory=str(work)))
@@ -50353,6 +50416,25 @@ static positive string_span_max(const void *s, positive bound, const b8 *set)
                 n++;
         return n;
 }
+static const b8 string_set_http_token[256] = {
+        ['0' ... '9'] = 1, ['A' ... 'Z'] = 1, ['a' ... 'z'] = 1,
+        ['!'] = 1, ['#'] = 1, ['$'] = 1, ['%'] = 1, ['&'] = 1, ['\''] = 1,
+        ['*'] = 1, ['+'] = 1, ['-'] = 1, ['.'] = 1, ['^'] = 1, ['_'] = 1,
+        ['`'] = 1, ['|'] = 1, ['~'] = 1};
+static positive memory_text_span(const void *block, positive size)
+{
+        const p8 *at = block;
+        positive n = 0;
+        while (n < size && (at[n] == '\t' || (at[n] >= ' ' && at[n] != 127)))
+                n++;
+        return n;
+}
+static void memory_zero(void *into, positive size)
+{
+        if (size)
+                memset(into, 0, size);
+}
+#define max(a, b) ((a) > (b) ? (a) : (b))
 static address_any memory_first_of(const void *block, int value, positive size)
 {
         return memchr(block, value, size);
@@ -50391,6 +50473,18 @@ static positive string_digits_max(string_address source, positive bound,
         return got;
 }
 static void crypto_forget(void *at, positive n) { memset(at, 0, n); }
+static bool memory_from_hex_exact(address_any into, const p8 *text, positive bytes,
+                                  const p8 *nibbles)
+{
+        p8 *out = into;
+        for (positive at = 0; at < bytes; at++) {
+                p8 high = nibbles[text[2 * at]], low = nibbles[text[2 * at + 1]];
+                if (high == 255 || low == 255)
+                        return false;
+                out[at] = (p8)(high << 4 | low);
+        }
+        return true;
+}
 typedef struct { p8 *bytes; positive room; positive used; } byte_store;
 """ + digits + appends + r"""
 static bool fuzz_reserve(byte_store *store, positive wanted, positive step)
@@ -50492,10 +50586,18 @@ static bipolar socket_new(int a, int b, int c)
         fuzz_opened++;
         return 1000;
 }
+#define IPPROTO_TCP 6
+#define TCP_NODELAY 1
 static bool network_stream_timeout(bipolar h, positive s, positive n)
 {
         (void)h; (void)s; (void)n;
         return true;
+}
+static bipolar socket_option_set(b32 handle, b32 level, b32 name,
+                                 address_any value, positive size)
+{
+        (void)handle, (void)level, (void)name, (void)value, (void)size;
+        return 0;
 }
 static int socket_connect(b32 h, const void *where, positive size)
 {
@@ -51991,8 +52093,9 @@ def harness_http_urls(argv):
     backslash, under HTTP_URL_MAX -- urlsplit must name the same scheme,
     host, port and origin-form target, and every URL urlsplit reads that way
     must be accepted. A resolved Location must name what urljoin names, less
-    the fragment. DELIBERATE lists where this client refuses what urllib
-    takes. Paths and references carry dot segments too: the client resolves
+    the fragment and with RFC 3986's defined-empty-query distinction restored.
+    DELIBERATE lists where this client refuses what urllib takes. Paths and
+    references carry dot segments too: the client resolves
     them before it asks, as GNU wget does (http_path_simplify, %2e spellings
     included), and the oracle by RFC 3986 5.2.4 over urllib's answer.
 
@@ -52188,11 +52291,20 @@ int main(void)
         return (tls, host, int(port) if colon else 443 if tls else 80, dot_free(target))
 
     def same(got, want):
-        """urljoin drops an empty query that RFC 3986 keeps; nothing else
-        is folded."""
-        def bare(target):
-            return target[:-1] if target.find("?") == len(target) - 1 else target
-        return got is not None and got[:3] == want[:3] and bare(got[3]) == bare(want[3])
+        return got is not None and got == want
+
+    def reference_join(base, reference):
+        """urljoin, retaining an explicitly empty RFC 3986 query.
+
+        urllib treats the reference ``?`` as though its query were absent and
+        inherits the base query. RFC 3986 5.2.2 distinguishes a defined empty
+        query from an undefined one: it replaces the base query with empty.
+        """
+        joined = urljoin(base, reference).split("#", 1)[0]
+        before_fragment = reference.split("#", 1)[0]
+        if "?" in before_fragment and not before_fragment.split("?", 1)[1]:
+            joined = joined.split("?", 1)[0] + "?"
+        return joined
 
     checks = Checks()
     compiler = "clang" if shutil.which("clang") else os.environ.get("CC", "cc")
@@ -52258,7 +52370,7 @@ int main(void)
                 checks(got is None, "%r + %r: a scheme without // was followed: %r"
                        % (base, reference, got))
                 continue
-            joined = urljoin(base, reference).split("#", 1)[0]
+            joined = reference_join(base, reference)
             want = subset(joined)
             if isinstance(want, tuple):
                 checks(same(got, want), "%r + %r: absolutize %r, urljoin %r"
@@ -52904,6 +53016,28 @@ def byte_store_source():
         "/*\n        The read side of byte_store")
 
 
+TLS_FUZZ_RESULTS = []
+
+
+def tls_fuzz_metrics(log):
+    """libFuzzer's instrumented lift counters; not whole-program coverage."""
+    metrics = {}
+    for field, pattern in (
+            ("executed_units", r"stat::number_of_executed_units:\s*(\d+)"),
+            ("initialized_units", r"#(\d+)\s+INITED"),
+            ("peak_rss_mb", r"stat::peak_rss_mb:\s*(\d+)"),
+            ("covered_edges", r"cov:\s*(\d+)"),
+            ("features", r"ft:\s*(\d+)"),
+            ("instrumented_pcs", r"PC tables .*?\((\d+) PCs\)")):
+        matches = re.findall(pattern, log)
+        if matches:
+            metrics[field] = int(matches[-1])
+    if "executed_units" in metrics and "initialized_units" in metrics:
+        metrics["mutation_units"] = max(0, metrics["executed_units"] -
+                                           metrics["initialized_units"])
+    return metrics
+
+
 def tls_fuzz_run(label, corpus, source, max_len, extra=()):
     """Build source as a libFuzzer target and run it over corpus's seeds.
 
@@ -52914,6 +53048,20 @@ def tls_fuzz_run(label, corpus, source, max_len, extra=()):
     report; expected TLS_FAIL verdicts are ignored."""
     runs, seconds, timeout = tls_fuzz_budget()
     name = label.replace(" ", "_") + "_fuzz"
+    random_seed = int(os.environ.get("MOONWATER_FUZZ_SEED", "1"))
+    if not 1 <= random_seed <= 0xffffffff:
+        raise ValueError("MOONWATER_FUZZ_SEED must be in 1..4294967295")
+    result = dict(name=name, random_seed=random_seed, max_input_bytes=max_len,
+                  source_sha256=hashlib.sha256(source.encode()).hexdigest())
+    TLS_FUZZ_RESULTS.append(result)
+    result["exit"] = 2
+    artifact_root = os.environ.get("MOONWATER_FUZZ_ARTIFACTS")
+    retained = None
+    if artifact_root:
+        root = Path(artifact_root).resolve()
+        root.mkdir(parents=True, exist_ok=True)
+        retained = Path(tempfile.mkdtemp(prefix=name + "-", dir=root))
+        result["artifacts"] = str(retained)
     clang = shutil.which("clang")
     if not clang:
         print("%s fuzz: NOT RUN -- no clang" % label)
@@ -52922,6 +53070,7 @@ def tls_fuzz_run(label, corpus, source, max_len, extra=()):
     if sanitize is None:
         print("%s fuzz: NOT RUN -- %s" % (label, san_label))
         return 2
+    result["sanitizer"] = san_label
     with tempfile.TemporaryDirectory(prefix=name.replace("_", "-") + "-") as temporary:
         work = Path(temporary)
         unit = work / (name + ".c")
@@ -52943,23 +53092,54 @@ def tls_fuzz_run(label, corpus, source, max_len, extra=()):
         unit.write_text(source)
         built = subprocess.run(flags + [str(unit), "-o", str(binary)] + list(extra),
                                capture_output=True, text=True)
+        if retained:
+            (retained / "build.log").write_text(built.stdout + built.stderr)
         if built.returncode:
+            result["exit"] = 1
             print("  FAIL %s fuzz lift does not build:\n" % label +
                   built.stderr[-2000:])
             write_tally(name.replace("_", "-"), 0, 1)
             return 1
-        seeds = tls_fuzz_write_seeds(corpus, work / "corpus")
-        ran = subprocess.run(
-            [str(binary), str(work / "corpus"),
-             "-seed=1", "-runs=%d" % runs, "-max_total_time=%d" % seconds,
-             "-max_len=%d" % max_len,
-             "-artifact_prefix=" + str(work) + "/",
-             "-print_final_stats=0"],
-            capture_output=True, text=True, env=environment, timeout=timeout)
+        seed_bytes = dict(corpus) if isinstance(corpus, dict) else tls_fuzz_seeds(corpus)
+        result["corpus"] = dict(original_seeds=len(seed_bytes), generated_seeds=0)
+        if os.environ.get("MOONWATER_FUZZ_BOUNDARIES") == "1":
+            seed_bytes, result["corpus"] = network_expand(seed_bytes, max_len)
+        corpus_directory = (retained or work) / "corpus"
+        seeds = tls_fuzz_write_seeds(seed_bytes, corpus_directory)
+        if retained:
+            shutil.copy2(binary, retained / binary.name)
+            binary = retained / binary.name
+            result["binary_sha256"] = hashlib.sha256(binary.read_bytes()).hexdigest()
+        command = [str(binary), str(corpus_directory),
+                   "-seed=%d" % random_seed, "-runs=%d" % runs,
+                   "-max_total_time=%d" % seconds, "-max_len=%d" % max_len,
+                   "-artifact_prefix=" + str(retained or work) + "/",
+                   "-print_final_stats=1"]
+        if retained:
+            (retained / "command.json").write_text(json.dumps(command, indent=2) + "\n")
+            # Keep the exact tested lift for diagnosis when source changes.
+            shutil.copy2(unit, retained / unit.name)
+        try:
+            ran = subprocess.run(command, capture_output=True, text=True,
+                                 env=environment, timeout=timeout)
+        except subprocess.TimeoutExpired as error:
+            log = error.stderr or b""
+            if isinstance(log, bytes):
+                log = log.decode(errors="replace")
+            if retained:
+                (retained / "fuzzer.log").write_text(log)
+            result.update(exit=1, timed_out=True, metrics=tls_fuzz_metrics(log))
+            print("  FAIL %s fuzz: process timeout" % label)
+            write_tally(name.replace("_", "-"), 0, 1)
+            return 1
+        result.update(exit=ran.returncode, metrics=tls_fuzz_metrics(ran.stderr))
+        if retained:
+            (retained / "fuzzer.log").write_text(ran.stdout + ran.stderr)
         tally = name.replace("_", "-")
         ok = ran.returncode == 0 and "ERROR" not in ran.stderr and \
             "Sanitizer" not in ran.stderr and "runtime error" not in ran.stderr
         if not ok:
+            result["exit"] = 1
             print("  FAIL %s libFuzzer:\n" % label +
                   (ran.stderr or ran.stdout)[-3000:])
             write_tally(tally, 0, 1)
@@ -53985,6 +54165,14 @@ static fn crypto_forget(address_any at, positive length)
 {
         memset(at, 0, length);
         __asm__ __volatile__("" : : "r"(at) : "memory");
+}
+static positive memory_span_byte_reverse(const void *block, p8 byte, positive size)
+{
+        const p8 *at = block;
+        positive i = 0;
+        while (i < size && at[size - 1 - i] == byte)
+                i++;
+        return i;
 }
 static p16 network_load_16(const p8 *bytes)
 {
@@ -56405,6 +56593,14 @@ static positive string_span_max(const_string source, positive bound,
                 at++;
         return at;
 }
+static positive memory_span_byte_reverse(const void *block, p8 byte, positive size)
+{
+        const p8 *at = block;
+        positive i = 0;
+        while (i < size && at[size - 1 - i] == byte)
+                i++;
+        return i;
+}
 static string_address string_first_of_or_end(string_address at, int byte)
 {
         while (*at && *at != (char)byte)
@@ -57812,22 +58008,22 @@ def crypto_vectors_lines(seed):
 #       or, on x86_64, the feature bytes (and p384_multiply's two, which pick
 #       its mulx body the same way). Nothing the scalar or u reaches.
 CRYPTO_X25519_COUNTED = (
-    r'"cmpb \$0, cpu_hash_probed\(%rip\)\\n jne \.Lp384_multiply_probed\\n call cpu_hash_detect\\n"',
-    r'"cmpb \$0, cpu_has_mulx\(%rip\)\\n jne \.Lp384_multiply_mulx\\n"',
-    r'"cmpb \$0, cpu_hash_probed\(%rip\)\\n jne \.Lp256_multiply_probed\\n call cpu_hash_detect\\n"',
-    r'"cmpb \$0, cpu_has_mulx\(%rip\)\\n jne \.Lp256_multiply_mulx\\n"',
-    r'"cmpb \$0, cpu_hash_probed\(%rip\)\\n jne \.Lp384_square_probed\\n call cpu_hash_detect\\n"',
-    r'"cmpb \$0, cpu_has_mulx\(%rip\)\\n jne \.Lp384_square_mulx\\n"',
+    r'"(?:\.L\w+:\s+)?cmpb \$0, cpu_hash_probed\(%rip\)\\n jne \.Lp384_multiply_probed\\n call cpu_hash_detect\\n"',
+    r'"(?:\.L\w+:\s+)?cmpb \$0, cpu_has_mulx\(%rip\)\\n jne \.Lp384_multiply_mulx\\n"',
+    r'"(?:\.L\w+:\s+)?cmpb \$0, cpu_hash_probed\(%rip\)\\n jne \.Lp256_multiply_probed\\n call cpu_hash_detect\\n"',
+    r'"(?:\.L\w+:\s+)?cmpb \$0, cpu_has_mulx\(%rip\)\\n jne \.Lp256_multiply_mulx\\n"',
+    r'"(?:\.L\w+:\s+)?cmpb \$0, cpu_hash_probed\(%rip\)\\n jne \.Lp384_square_probed\\n call cpu_hash_detect\\n"',
+    r'"(?:\.L\w+:\s+)?cmpb \$0, cpu_has_mulx\(%rip\)\\n jne \.Lp384_square_mulx\\n"',
     r'"decq 520\(%rsp\)\\n\s+jns \.Lx25519_x64_" s "_step\\n"',
     r'"dec %ebp\\n\s+jnz \.Lx25519_x64_" s "_squares_" id "\\n"',
-    r'"cmpb \$0, cpu_hash_probed\(%rip\)\\n\s+jne \.Lx25519_x64_probed\\n"',
-    r'"cmpb \$0, cpu_has_mulx\(%rip\)\\n\s+je \.Lx25519_x64_mulq_step\\n"',
-    r'"subs x20, x20, #1\\n\s+b\.pl \.Lx25519_arm64_step\\n"',
+    r'"(?:\.L\w+:\s+)?cmpb \$0, cpu_hash_probed\(%rip\)\\n\s+jne \.Lx25519_x64_probed\\n\s+call cpu_hash_detect\\n"',
+    r'"(?:\.L\w+:\s+)?cmpb \$0, cpu_has_mulx\(%rip\)\\n\s+je \.Lx25519_x64_mulq_step\\n"',
+    r'"subs x20, x20, #1\\n\s+b\.pl \.Lx25519_arm64_step\\n',
     r'"subs x20, x20, #1\\n\s+b\.ne \.Lx25519_arm64_squares_" id "\\n"',
     r'stp xzr, xzr, \[x3\], #16\\n\s+subs x4, x4, #1\\n\s+b\.ne \.Lx25519_arm64_wipe\\n"',
-    r'"addi s0, s0, -1\\n\s+bgez s0, \.Lx25519_rv_step\\n"',
+    r'"addi s0, s0, -1\\n\s+bgez s0, \.Lx25519_rv_step\\n',
     r'"addi s0, s0, -1\\n\s+bnez s0, \.Lx25519_rv_squares_" id "\\n"',
-    r'addi t0, t0, 8\\n\s+bltu t0, t1, \.Lx25519_rv_wipe\\n"',
+    r'addi t0, t0, 8\\n\s+bltu t0, t1, \.Lx25519_rv_wipe\\n',
 )
 
 
@@ -60236,15 +60432,15 @@ def harness_bowl_sig_fuzz(argv):
 def harness_tls_fuzz(argv):
     """tls_der_fuzz, tls_hs_fuzz, tls_verify_fuzz, waterlink_pre_fuzz,
     waterlink_fuzz, dhcp_fuzz, sntp_fuzz, dns_fuzz, netlink_fuzz,
-    crypto_fuzz, bowl_sig_fuzz and http_fuzz in turn: `sh test/run fuzz`.
+    crypto_fuzz, bowl_sig_fuzz, wifi_eapol_fuzz, wifi_scan_fuzz and http_fuzz in turn: `sh test/run fuzz`.
 
     Continuous by default, an hour a target with no run cap, unless
     MOONWATER_FUZZ_SECONDS / MOONWATER_FUZZ_RUNS say otherwise. With
     MOONWATER_FUZZ_REPORT=PATH the default budget is lane_net's smoke (20000
     runs / 5 s), and a JSON report of the toolchain, seed counts, budget and
-    each target's exit and duration is printed and written to PATH (relative
-    to the tree). Coverage here is seed inventory plus a clean sanitizer run,
-    not source-line coverage. Exit 1 when a target failed, else 2 when one
+    each target's exit, duration and lift instrumentation counters are printed
+    and written to PATH (relative to the tree). These are not source-line
+    coverage. Exit 1 when a target failed, else 2 when one
     did not run.
     """
     del argv
@@ -60254,7 +60450,7 @@ def harness_tls_fuzz(argv):
     os.environ.setdefault("MOONWATER_FUZZ_RUNS", "20000" if report else "-1")
     os.environ.setdefault("MOONWATER_FUZZ_SECONDS", "5" if report else "3600")
     runs, seconds, _ = tls_fuzz_budget()
-    print("tls fuzz: der then hs then verify then waterlink pre then waterlink then dhcp then sntp then dns then netlink then crypto then bowl sig then http "
+    print("tls fuzz: der then hs then verify then waterlink pre then waterlink then dhcp then sntp then wifi eapol then wifi scan then dns then netlink then crypto then bowl sig then http "
           "(runs=%d seconds=%d)" % (runs, seconds))
     seeds = {corpus: len(tls_fuzz_seeds(corpus))
              for corpus in ("tls_der", "tls_hs", "waterlink", "dhcp", "sntp", "dns", "netlink", "crypto", "http")}
@@ -60279,6 +60475,7 @@ def harness_tls_fuzz(argv):
             ("bowl_sig_fuzz", "bowl_sig", harness_bowl_sig_fuzz),
             ("http_fuzz", "http", harness_http_fuzz)):
         began = time.time()
+        result_start = len(TLS_FUZZ_RESULTS)
         try:
             code = harness([])
         except Exception:
@@ -60286,7 +60483,8 @@ def harness_tls_fuzz(argv):
             code = 1
         targets.append(dict(name=name, seeds=seeds[corpus], runs=runs,
                             max_total_time_seconds=seconds,
-                            duration_seconds=int(time.time() - began), exit=code))
+                            duration_seconds=int(time.time() - began), exit=code,
+                            invocations=TLS_FUZZ_RESULTS[result_start:]))
     codes = [target["exit"] for target in targets]
     overall = 1 if any(code not in (0, 2) for code in codes) else (2 if 2 in codes else 0)
     if not report:
@@ -60306,6 +60504,9 @@ def harness_tls_fuzz(argv):
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "git_commit": first_line(["git", "-C", str(HARNESS_ROOT), "rev-parse", "HEAD"])
                       or "unknown",
+        "test_sources_sha256": {
+            name: hashlib.sha256((HERE / name).read_bytes()).hexdigest()
+            for name in ("differential.py",)},
         "host": {"system": os.uname().sysname, "arch": os.uname().machine},
         "sanitizer": {
             "clang": clang,
@@ -60316,11 +60517,13 @@ def harness_tls_fuzz(argv):
         },
         "corpora": {corpus: {"path": 'tls_fuzz_seeds("%s") in test/differential.py' % corpus,
                              "seed_count": count} for corpus, count in seeds.items()},
-        "budget": {"runs": runs, "seconds": seconds},
+        "budget": {"runs": runs, "seconds": seconds,
+                   "random_seed": int(os.environ.get("MOONWATER_FUZZ_SEED", "1")),
+                   "procedural_boundaries": os.environ.get("MOONWATER_FUZZ_BOUNDARIES") == "1"},
         "targets": targets,
         "coverage_note": (
-            "Seed inventory plus sanitizer libFuzzer completion under the "
-            "recorded budget, not LLVM source-line coverage. The seeds are "
+            "Per-invocation libFuzzer edge/feature counters measure hosted lifts, "
+            "not kernel integration or LLVM source-line coverage. The seeds are "
             "test/differential.py's tls_fuzz_seeds at git_commit."),
         "overall_exit": overall,
     }, indent=2)
@@ -61574,11 +61777,11 @@ byte_reader_vector24 byte_reader_vector8 byte_reader_window
 byte_store_append_exact byte_store_release byte_store_reserve
 memory_compare memory_compare_ascii_case memory_copy memory_copy_apart
 memory_copy_apart_end memory_copy_end memory_fill memory_first_of
-memory_load_unaligned memory_search memory_span_byte memory_span_without_byte
-memory_zero network_deadline_begin network_deadline_left network_load_16
+memory_load_unaligned memory_search memory_span_byte memory_span_byte_reverse
+memory_span_without_byte memory_text_span memory_zero network_deadline_begin network_deadline_left network_load_16
 network_load_32 network_load_64 network_order_16 network_order_32
 network_receive_next network_store_16 network_store_32 network_store_64 network_stream_read_all
-network_stream_read_now network_stream_read_some_for network_stream_read_some_until
+network_stream_read_some_for network_stream_read_some_until
 network_stream_send_all network_stream_send_all_until network_stream_timeout
 network_transaction_secure network_wait_readable_until network_wait_writable_until
 positive_into socket_bind socket_close socket_connect socket_name socket_new
@@ -62263,20 +62466,27 @@ def harness_hostile_strings(argv):
 
         #   Interfaces, in a namespace of their own.
         if shutil.which("unshare") and shutil.which("ip", path="/usr/sbin:/usr/bin:/sbin:/bin"):
-            inner = subprocess.run(
-                ["unshare", "-Urn", sys.executable, str(Path(__file__).resolve()),
-                 "--harness", "hostile_strings", "--inside", "--farm", str(farm),
-                 "--shell", args.shell], capture_output=True, text=True, timeout=300,
-                env=dict(os.environ, MOONWATER_HOSTILE_SEED=str(seed + 4)))
-            tally = re.search(r"^hostile strings \(namespace\) (\d+)/(\d+)$", inner.stdout, re.M)
-            for line in inner.stdout.splitlines():
-                if line.startswith("  FAIL"):
-                    print(line)
-            checks(inner.returncode in (0, 1) and tally,
-                   "ifname: the namespace run did not finish (%s)" % inner.stderr[-200:])
-            if tally:
-                checks.checks += int(tally.group(2))
-                checks.failures += int(tally.group(2)) - int(tally.group(1))
+            probe = subprocess.run(["unshare", "-Urn", "true"], capture_output=True,
+                                   text=True)
+            if probe.returncode:
+                print("hostile strings: ifname NOT RUN -- no unprivileged user and "
+                      "network namespace here (%s)" % probe.stderr.strip()[:160])
+            else:
+                inner = subprocess.run(
+                    ["unshare", "-Urn", sys.executable, str(Path(__file__).resolve()),
+                     "--harness", "hostile_strings", "--inside", "--farm", str(farm),
+                     "--shell", args.shell], capture_output=True, text=True, timeout=300,
+                    env=dict(os.environ, MOONWATER_HOSTILE_SEED=str(seed + 4)))
+                tally = re.search(r"^hostile strings \(namespace\) (\d+)/(\d+)$",
+                                  inner.stdout, re.M)
+                for line in inner.stdout.splitlines():
+                    if line.startswith("  FAIL"):
+                        print(line)
+                checks(inner.returncode in (0, 1) and tally,
+                       "ifname: the namespace run did not finish (%s)" % inner.stderr[-200:])
+                if tally:
+                    checks.checks += int(tally.group(2))
+                    checks.failures += int(tally.group(2)) - int(tally.group(1))
         else:
             print("hostile strings: ifname NOT RUN -- no unshare or ip")
     finally:
@@ -64714,7 +64924,9 @@ def harness_net_epoch_mutants(argv):
                                  cwd=temporary, timeout=600)
             said = ran.stdout + ran.stderr
             if "NOT RUN" in said:
-                print("net epoch mutants: NOT RUN -- " + said.strip().splitlines()[-1][:160])
+                reason = next((line.strip() for line in said.splitlines()
+                               if "NOT RUN" in line), "namespace setup unavailable")
+                print("net epoch mutants: NOT RUN -- " + reason[:160])
                 return 2
             verdict = re.search(r"^(\d+) checks, (\d+) failures$", said, re.M)
             checks(verdict is not None and int(verdict.group(2)) > 0,
@@ -64751,7 +64963,12 @@ def harness_net_netem(argv):
     that says RATE. NOT RUN (exit 2) where unprivileged user namespaces,
     --map-auto, veth, netem, ip, tc or nsenter are not there.
 
-        python3 test/differential.py --harness net_netem [--shell PATH]
+        python3 test/differential.py --harness net_netem [--shell PATH] [--plain-only]
+
+    --plain-only keeps the hostile server schedules and namespace/kernel
+    integration but omits the duplicate netem scenes. It is an explicitly
+    reduced lane for kernels built without sch_netem; the default still
+    requires and exercises netem.
     """
     import shutil
     import subprocess
@@ -64759,21 +64976,25 @@ def harness_net_netem(argv):
     parser = argparse.ArgumentParser(prog="differential.py --harness net_netem")
     parser.add_argument("--shell")
     parser.add_argument("--cc", default=os.environ.get("CC", "gcc"))
+    parser.add_argument("--plain-only", action="store_true")
     args = parser.parse_args(argv)
     if platform.system() != "Linux":
         print("net netem: NOT RUN -- Linux namespaces")
         return 2
-    for tool in ("unshare", "ip", "tc", "nsenter"):
+    tools = ("unshare", "ip", "nsenter") + (() if args.plain_only else ("tc",))
+    for tool in tools:
         if not shutil.which(tool):
             print("net netem: NOT RUN -- no %s" % tool)
             return 2
     unshare = ["unshare", "--map-root-user", "--map-auto", "-m", "-n", "--fork"]
-    probe = subprocess.run(unshare + ["sh", "-c",
-                                      "ip link add na type veth peer name nb && "
-                                      "tc qdisc add dev na root netem delay 1ms seed 7"],
+    probe_script = "ip link add na type veth peer name nb"
+    if not args.plain_only:
+        probe_script += " && tc qdisc add dev na root netem delay 1ms seed 7"
+    probe = subprocess.run(unshare + ["sh", "-c", probe_script],
                            capture_output=True, stdin=subprocess.DEVNULL)
     if probe.returncode:
-        print("net netem: NOT RUN -- no user namespaces with --map-auto, veth or netem here: " +
+        need = "veth" if args.plain_only else "veth or netem"
+        print("net netem: NOT RUN -- no user namespaces with --map-auto and %s here: " % need +
               probe.stderr.decode(errors="replace")[:200])
         return 2
 
@@ -64790,13 +65011,14 @@ def harness_net_netem(argv):
         (top / "dhcpsrv.py").write_text(NET_NETEM_DHCP_SERVER)
         (top / "ntpsrv.py").write_text(NET_NETEM_NTP_SERVER)
         (top / "inner.py").write_text(NET_NETEM_INNER)
-        scenes = [("dhcp", mode, netem, "0") for netem in ("", "netem")
+        impairments = ("",) if args.plain_only else ("", "netem")
+        scenes = [("dhcp", mode, netem, "0") for netem in impairments
                   for mode in ("clean", "dup", "stale", "late", "drop3", "nak")]
         #   The ARP probe is three frames; netem's 25% loss on each leg would
         #   miss the defender one run in twelve, so the conflict scenes are
         #   asked on a clean wire.
         scenes += [("dhcp", mode, "", "0") for mode in ("conflict", "conflict-watch", "mute-watch")]
-        scenes += [("sntp", mode, netem, "0") for netem in ("", "netem")
+        scenes += [("sntp", mode, netem, "0") for netem in impairments
                    for mode in ("clean", "dup", "spoof", "late", "drop2", "skewed", "kod")]
         checks = Checks()
         for kind, mode, netem, rp in scenes:
@@ -64823,7 +65045,8 @@ def harness_net_netem(argv):
                     checks(line.startswith("ok "), line.split(" ", 1)[1])
             checks(asked >= 2, "%s %s %s: the scene asked its questions (%d)%s" % (
                 kind, mode, netem, asked, "" if asked >= 2 else ": " + text[-400:]))
-        return checks.verdict("net netem", "net-netem")
+        return checks.verdict("net namespace plain" if args.plain_only else "net netem",
+                              "net-namespace-plain" if args.plain_only else "net-netem")
 
 
 def harness_waterlink_link(argv):
@@ -72021,12 +72244,13 @@ static p64 wl_clock = 1000000000ull;
 static p64 wl_wall = 1700000000000000000ull;
 static bool wl_clock_set; // the wall clock reads a time, which freshness is asked of
 static bool wl_entropy_down;
+static positive wl_entropy_fail_size;
 static p64 wl_random_state = 1;
 static p64 system_clock_ns(int which) { return which ? wl_clock : wl_wall + wl_clock; }
 static bipolar system_random_fill(void *into, positive size, positive flags)
 {
         (void)flags;
-        if (wl_entropy_down)
+        if (wl_entropy_down || (wl_entropy_fail_size && size == wl_entropy_fail_size))
                 return -EIO;
         for (positive at = 0; at < size; at++)
                 ((p8 *)into)[at] = (p8)(wl_random_state = wl_mix(wl_random_state + at));
@@ -72519,6 +72743,7 @@ static void wl_reset(bool server)
         memset(&link_client, 0, sizeof link_client);
         memset(&wl_file, 0, sizeof wl_file);
         wl_file_unreadable = wl_entropy_down = wl_groups_unreadable = false;
+        wl_entropy_fail_size = 0;
         wl_bad_names = 0;
         wl_greeted_count = wl_answered_count = wl_greeted_back = 0;
         wl_run_count = wl_run_next = wl_mdns_count = wl_mdns_next = 0;
@@ -73078,6 +73303,62 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                 memcpy(s->peer, wl_id[0].public, 32);
                 memcpy(s->address, wl_addresses[1], 16);
                 s->port = LINK_PORT;
+                /* Exercise the client's earliest failure before any script
+                   bytes can replace it.  Under MSan this catches a read from
+                   the unbuilt handshake datagram; on every sanitizer it also
+                   pins the no-stale-MAC state contract. */
+                memset(link_client.mac1, 0xa5, sizeof link_client.mac1);
+                wl_entropy_down = true;
+                wl_check(!link_client_initiate(s, wl_clock / 1000) &&
+                                 !link_client.ours &&
+                                 memory_span_byte(link_client.mac1, 0,
+                                                  sizeof link_client.mac1) ==
+                                         sizeof link_client.mac1,
+                         "a failed client initiation retained or read a MAC");
+                wl_entropy_down = false;
+                memset(link_client.mac1, 0xa5, sizeof link_client.mac1);
+                wl_entropy_fail_size = 32;
+                wl_check(!link_client_initiate(s, wl_clock / 1000) &&
+                                 !link_client.ours &&
+                                 memory_span_byte(link_client.mac1, 0,
+                                                  sizeof link_client.mac1) ==
+                                         sizeof link_client.mac1,
+                         "an ephemeral failure retained or read a MAC");
+                wl_entropy_fail_size = 0;
+                {
+                        p8 peer[32];
+
+                        memcpy(peer, s->peer, sizeof peer);
+                        memset(s->peer, 0, sizeof peer);
+                        memset(link_client.mac1, 0xa5, sizeof link_client.mac1);
+                        wl_check(!link_client_initiate(s, wl_clock / 1000) &&
+                                         !link_client.ours &&
+                                         memory_span_byte(link_client.mac1, 0,
+                                                          sizeof link_client.mac1) ==
+                                                 sizeof link_client.mac1,
+                                 "a refused peer key retained or read a MAC");
+                        memcpy(s->peer, peer, sizeof peer);
+                }
+                {
+                        struct waterlink_admission table = {0};
+                        p8 nonce[24] = {0};
+                        p8 reply[WATERLINK_COOKIE_DATAGRAM];
+                        p16 port = s->port;
+
+                        memset(table.secret, 0x5c, sizeof table.secret);
+                        table.secret_made = 1;
+                        s->port = 0;
+                        wl_check(!link_client_initiate(s, wl_clock / 1000) &&
+                                         !link_client.ours,
+                                 "a locally refused initiation stayed active");
+                        waterlink_cookie_reply(&wl_id[0], &table, wl_client_first,
+                                               s->address, 0, nonce, reply);
+                        link_client.cookie_at = 0;
+                        link_client_cookie(reply, sizeof reply, wl_clock / 1000 + 1);
+                        wl_check(!link_client.cookie_at,
+                                 "a failed initiation accepted a cookie");
+                        s->port = port;
+                }
         }
         for (int steps = 0; wl_left && steps < 64; steps++)
                 wl_step(server);
@@ -73748,8 +74029,9 @@ def harness_waterlink_fuzz(argv):
         print("waterlink fuzz: NOT RUN -- no C compiler")
         return 2
     core_source, shim = lifted
-    if waterlink_script_scan(shim):
-        return 1
+    script_code = waterlink_script_scan(shim)
+    if script_code:
+        return script_code
     with_asm = (platform.system() != "Darwin" and
                 platform.machine() in ("x86_64", "amd64") and
                 not moonwater_msan_requested())
@@ -73766,8 +74048,8 @@ def waterlink_script_scan(shim):
     regular expression over a grammar of machine-script lines. It once
     compared the namespace's whole length with memory_compare wherever
     "link group " was found, reading past a script that ended sooner.
-    Returns 1 on a report or a disagreement, 0 otherwise, and 0 without
-    a compiler that has ASan."""
+    Returns 1 on a build failure, sanitizer report or disagreement; 2 when
+    a compiler with ASan/UBSan is unavailable; 0 only after execution."""
     import random
     import subprocess
     import tempfile
@@ -73782,6 +74064,7 @@ def waterlink_script_scan(shim):
               "(!string_compare_max((text), literal, sizeof(literal) - 1))\n" +
               src_slice(host, "static bool host_starts(", "/* The words a switch is set by"))
     driver = shim + r"""
+#define string_first_of strchr
 static b32 string_compare_max(const void *one, const void *two, positive size)
 {
         return strncmp(one, two, size);
@@ -73820,6 +74103,9 @@ int main(void)
 }
 """
     clang = shutil.which("clang") or shutil.which("cc")
+    if not clang:
+        print("waterlink script scan: NOT RUN -- no compiler")
+        return 2
     generator = random.Random(0x5c1e)
     names = ["home", "lab.1", "a", "net_9", "office-2", "x" * 31]
     pieces = ["link group ", "link group  ", "link group", "allow", "allowed", "run",
@@ -73839,17 +74125,26 @@ int main(void)
     cases = [case() for _ in range(20000)]
     with tempfile.TemporaryDirectory(prefix="wl-script-") as temporary:
         work = Path(temporary)
+        probe = work / "probe.c"
+        probe.write_text("int main(void) { return 0; }\n")
+        sanitizer_flags = [clang, "-O1", "-g", "-w", "-fsanitize=address,undefined",
+                           "-fno-sanitize-recover=all"]
+        if subprocess.run(sanitizer_flags + [str(probe), "-o", str(work / "probe")],
+                          capture_output=True, text=True).returncode:
+            print("waterlink script scan: NOT RUN -- compiler lacks ASan/UBSan")
+            return 2
         (work / "scan.c").write_text(driver)
         built = subprocess.run([clang, "-O1", "-g", "-w", "-fsanitize=address,undefined",
                                 "-fno-sanitize-recover=all", str(work / "scan.c"), "-o",
                                 str(work / "scan")], capture_output=True, text=True)
         if built.returncode:
-            print("  waterlink script scan: NOT RUN -- no ASan build\n" +
+            print("  FAIL waterlink script scan lift does not build:\n" +
                   built.stderr[-800:])
-            return 0
+            return 1
         ran = subprocess.run([str(work / "scan")], capture_output=True, text=True,
                              input="".join("%s\t%s\n" % pair for pair in cases),
-                             env=dict(os.environ, ASAN_OPTIONS="detect_leaks=0"))
+                             env=dict(os.environ, ASAN_OPTIONS="detect_leaks=0:halt_on_error=1"),
+                             timeout=60)
     wrong = [pair for pair, got in zip(cases, ran.stdout)
              if (got == "1") != bool(re.search(
                  "link group +" + re.escape(pair[0]) + " +(?! |allow)[^\x01;#]",
@@ -79105,6 +79400,380 @@ def harness_bowl_matrix(argv):
                                env=dict(os.environ, PYTHONPATH=os.environ.get("PYTHONPATH", "")))
 
 
+def network_variants(data, max_len):
+    size = len(data)
+    cuts = set(range(min(size, 64)))
+    cuts.update(range(max(0, size - 16), size))
+    cuts.update(range(size) if size <= 512 else
+                (size * i // 64 for i in range(1, 64)))
+    for bit in range(max_len.bit_length()):
+        cuts.update((2 ** bit - 1, 2 ** bit, 2 ** bit + 1))
+    ordered = list(dict.fromkeys([size - 1, 0, size // 2] + sorted(cuts)))
+    truncations = (data[:cut] for cut in ordered if 0 <= cut < size and cut <= max_len)
+    suffixes = (data + suffix for suffix in
+                (b"\x00", b"\xff", b"\x00\xff", b"\x00" * 16)
+                if size + len(suffix) <= max_len)
+    # Byte and multi-byte length boundaries at header and trailer positions.
+    offsets = sorted(set(range(min(size, 64))) |
+                     set(range(max(0, size - 8), size)))
+    def replacements(width):
+        for offset in offsets:
+            if offset + width > size or size > max_len:
+                continue
+            maximum = (1 << (width * 8)) - 1
+            values = dict.fromkeys((maximum, 0, maximum // 2, maximum // 2 + 1,
+                                   min(size, maximum), min(size + 1, maximum),
+                                   1, 127, 128, 255, min(256, maximum), maximum - 1))
+            for value in values:
+                for order in ("big", "little") if width > 1 else ("big",):
+                    yield (data[:offset] + value.to_bytes(width, order) +
+                           data[offset + width:])
+
+    def integer_cases():
+        # Spread the early budget across integer widths rather than exhausting
+        # all byte values before reaching a multi-byte length/counter field.
+        for row in itertools.zip_longest(*(replacements(width) for width in (1, 2, 4, 8))):
+            for case in row:
+                if case is not None:
+                    yield case
+
+    for row in itertools.zip_longest(truncations, suffixes, integer_cases()):
+        for case in row:
+            if case is not None:
+                yield case
+
+
+def network_expand(seeds, max_len, limit=4096, byte_limit=64 * 1024 * 1024):
+    """Return originals plus at most limit unique variants and their census.
+
+    The byte cap applies to generated data; original fixtures are never
+    removed. Cap exhaustion is recorded rather than called exhaustive.
+    """
+    expanded = dict(seeds)
+    seen = set(seeds.values())
+    generators = [iter(network_variants(data, max_len))
+                  for _, data in sorted(seeds.items())]
+    count = used = 0
+    capped = False
+    while generators:
+        active = []
+        for generator in generators:
+            data = next(generator, None)
+            if data is None:
+                continue
+            active.append(generator)
+            if data in seen:
+                continue
+            if count >= limit or used + len(data) > byte_limit:
+                capped = True
+                break
+            seen.add(data)
+            count += 1
+            used += len(data)
+            name = "procedural_%06d.bin" % count
+            while name in expanded:
+                name = "_" + name
+            expanded[name] = data
+        if capped:
+            break
+        generators = active
+    return expanded, dict(original_seeds=len(seeds), generated_seeds=count,
+                         generated_bytes=used, capped=capped,
+                         variant_limit=limit, byte_limit=byte_limit)
+
+
+def harness_network_campaign(argv):
+    """Repeatable local ASan/UBSan network campaigns with procedural boundaries.
+
+        python3 test/differential.py --harness network_campaign --output DIR [--seeds 1 7 42] [--runs N] [--seconds N]
+    """
+    parser = argparse.ArgumentParser(prog="differential.py --harness network_campaign")
+    parser.add_argument("--output", required=True, type=Path,
+                        help="new directory for reports, logs, and replay corpora")
+    parser.add_argument("--seeds", nargs="+", type=int, default=[1, 7, 42])
+    parser.add_argument("--runs", type=int, default=200000)
+    parser.add_argument("--seconds", type=int, default=30,
+                        help="time budget per target (either run or time limit stops it)")
+    args = parser.parse_args(argv)
+    if args.runs < 1 or args.seconds < 1 or any(
+            not 1 <= seed <= 0xffffffff for seed in args.seeds):
+        parser.error("positive runs/seconds and seeds in 1..4294967295 required")
+    if len(set(args.seeds)) != len(args.seeds):
+        parser.error("seeds must be distinct")
+    output = args.output.resolve()
+    # A new directory prevents accidentally reporting stale campaign artifacts.
+    output.mkdir(parents=True, exist_ok=False)
+    reports = []
+    for seed in args.seeds:
+        run = output / ("seed-%d" % seed)
+        run.mkdir()
+        environment = dict(os.environ, PYTHONUNBUFFERED="1",
+                           MOONWATER_MSAN="0",
+                           MOONWATER_FUZZ_BOUNDARIES="1",
+                           MOONWATER_FUZZ_SEED=str(seed),
+                           MOONWATER_FUZZ_RUNS=str(args.runs),
+                           MOONWATER_FUZZ_SECONDS=str(args.seconds),
+                           MOONWATER_FUZZ_REPORT=str(run / "report.json"),
+                           MOONWATER_FUZZ_ARTIFACTS=str(run / "artifacts"))
+        print("network campaign seed %d: %s" % (seed, run), flush=True)
+        with (run / "campaign.log").open("w") as log:
+            done = subprocess.run([sys.executable, "test/differential.py",
+                                   "--harness", "tls_fuzz"], cwd=HARNESS_ROOT,
+                                  env=environment, stdout=log, stderr=subprocess.STDOUT)
+        entry = dict(seed=seed, exit=done.returncode, report=str(run / "report.json"))
+        try:
+            report = json.loads((run / "report.json").read_text())
+            invocations = [inv for target in report["targets"]
+                           for inv in target.get("invocations", [])]
+            entry["invocations"] = invocations
+            # Clean exit without evidence of execution must not count as coverage.
+            if done.returncode == 0 and (len(report["targets"]) != 14 or
+                    len(invocations) != 15 or any(
+                        inv.get("exit") != 0 or
+                        inv.get("metrics", {}).get("executed_units", 0) == 0 or
+                        inv.get("corpus", {}).get("generated_seeds", 0) == 0
+                        for inv in invocations)):
+                entry.update(exit=1, error="missing target execution or procedural evidence")
+        except (OSError, ValueError, KeyError) as error:
+            entry.update(exit=1, error="missing/invalid report: " + str(error))
+        reports.append(entry)
+        print("seed %d completed: exit %d" % (seed, entry["exit"]), flush=True)
+    codes = [report["exit"] for report in reports]
+    overall = 1 if any(code not in (0, 2) for code in codes) else (2 if 2 in codes else 0)
+    (output / "campaign.json").write_text(json.dumps(dict(
+        schema="moonwater.network_campaign.v1", runs=args.runs,
+        seconds=args.seconds, campaigns=reports, overall_exit=overall,
+        coverage_note="Counters cover hosted parser lifts. Kernel, drivers, live "
+                      "network integration, and all protocol states require separate tests."
+    ), indent=2) + "\n")
+    return overall
+
+
+
+
+def harness_network_integration(argv):
+    """Trace real loopback TLS, certificate, and downgrade paths into coverage.
+
+        python3 test/differential.py --harness network_integration --output DIR [--baseline DIR] [--against FILE]
+    """
+    parser = argparse.ArgumentParser(prog="differential.py --harness network_integration")
+    parser.add_argument("--output", required=True, type=Path,
+                        help="new directory for logs, retained binaries, and maps")
+    parser.add_argument("--baseline", type=Path,
+                        help="optional prior coverage directory to combine")
+    parser.add_argument("--against", type=Path,
+                        help="optional saved coverage JSON for delta reporting")
+    parser.add_argument("--mutations", type=int, default=500)
+    parser.add_argument("--schedules", type=int, default=60)
+    parser.add_argument("--timeout", type=int, default=1800)
+    args = parser.parse_args(argv)
+    if args.mutations < 1 or args.schedules < 1 or args.timeout < 60:
+        parser.error("positive mutations/schedules and timeout >= 60 required")
+    output = args.output.resolve()
+    output.mkdir(parents=True, exist_ok=False)
+    coverage = output / "coverage"
+    coverage.mkdir()
+    if args.baseline:
+        baseline = args.baseline.resolve()
+        for elf in baseline.glob("*.elf"):
+            record = elf.with_suffix(".map")
+            if not record.is_file():
+                continue
+            stem = "baseline-" + elf.name
+            shutil.copy2(elf, coverage / stem)
+            shutil.copy2(record, (coverage / stem).with_suffix(".map"))
+
+    rows = (
+        ("tls-chains", ["--harness", "tls_chains"]),
+        ("tls-mutations", ["--harness", "tls_peer", "--mutate", str(args.mutations)]),
+        ("tls-schedules", ["--harness", "tls_peer", "--schedule", str(args.schedules)]),
+        ("https-downgrade", ["--harness", "https_downgrade"]),
+    )
+    results = []
+    for label, arguments in rows:
+        environment = dict(os.environ, MOONWATER_INTEGRATION_COVERAGE=str(coverage),
+                           MOONWATER_INTEGRATION_LABEL=label, PYTHONUNBUFFERED="1")
+        began = time.monotonic()
+        log = output / (label + ".log")
+        print("network integration: " + label, flush=True)
+        try:
+            with log.open("w") as stream:
+                done = subprocess.run([sys.executable, "test/differential.py", *arguments],
+                                      cwd=HARNESS_ROOT, env=environment, stdout=stream,
+                                      stderr=subprocess.STDOUT, timeout=args.timeout)
+            code = done.returncode
+            timed_out = False
+        except subprocess.TimeoutExpired:
+            code = 1
+            timed_out = True
+        results.append(dict(name=label, exit=code, timed_out=timed_out,
+                            duration_seconds=round(time.monotonic() - began, 3),
+                            log=str(log)))
+
+    report = output / "coverage.json"
+    command = [sys.executable, "test/differential.py", "--harness", "coverage_report",
+               str(coverage), "--save", str(report), "--files", "src/net/"]
+    if args.against:
+        command += ["--against", str(args.against.resolve())]
+    covered = subprocess.run(command, cwd=HARNESS_ROOT, capture_output=True, text=True)
+    (output / "coverage.log").write_text(covered.stdout + covered.stderr)
+    codes = [row["exit"] for row in results]
+    overall = (1 if covered.returncode or any(code not in (0, 2) for code in codes)
+               else 2 if 2 in codes else 0)
+    summary = dict(schema="moonwater.network_integration.v1", results=results,
+                   coverage_exit=covered.returncode, overall_exit=overall,
+                   coverage_note="Trace-PC coverage includes retained loopback shell "
+                                 "binaries and an optional copied baseline; it does not "
+                                 "cover kernel or driver code.")
+    (output / "integration.json").write_text(json.dumps(summary, indent=2) + "\n")
+    print((output / "coverage.log").read_text(), end="")
+    return overall
+
+
+
+
+def harness_network_cases(argv):
+    """Generator guarantees and libFuzzer reporting, independent of parser results.
+
+        python3 test/differential.py --harness network_cases
+    """
+    del argv
+    import contextlib
+    import io
+    import unittest
+    from unittest import mock
+    import tempfile
+
+    differential = sys.modules[__name__]
+
+    class NetworkCases(unittest.TestCase):
+        def test_controls_determinism_and_uniqueness(self):
+            seeds = {"valid": b"abcdefgh", "empty": b""}
+            first, census = network_expand(seeds, 32, limit=200)
+            self.assertEqual((first, census), network_expand(seeds, 32, limit=200))
+            for name, data in seeds.items():
+                self.assertEqual(first[name], data)
+            self.assertEqual(len(set(first.values())), len(first))
+            self.assertEqual(len(first) - len(seeds), census["generated_seeds"])
+
+        def test_caps_and_round_robin(self):
+            seeds = {"a": b"abcdefgh", "b": b"12345678"}
+            cases, census = network_expand(seeds, 32, limit=2)
+            self.assertTrue(census["capped"])
+            self.assertEqual(census["generated_seeds"], 2)
+            self.assertIn(b"abcdefg", cases.values())
+            self.assertIn(b"1234567", cases.values())
+            cases, census = network_expand(seeds, 32, byte_limit=6)
+            self.assertEqual(cases, seeds)
+            self.assertTrue(census["capped"])
+
+        def test_lengths_truncations_and_integer_boundaries(self):
+            data = bytes(range(32))
+            cases = set(network_variants(data, 40))
+            self.assertTrue(all(len(case) <= 40 for case in cases))
+            for cut in range(32):
+                self.assertIn(data[:cut], cases)
+            for replacement in (b"\xff\xff", b"\x7f\x00", b"\x00\x7f",
+                                b"\xff\xff\xff\xff", b"\x00" * 4):
+                self.assertIn(replacement + data[len(replacement):], cases)
+            self.assertIn(data + b"\x00", cases)
+
+        def test_mutation_classes_survive_small_budget(self):
+            data = b"abcdefgh"
+            cases, _ = network_expand({"valid": data}, 32, limit=16)
+            self.assertIn(data[:-1], cases.values())
+            self.assertIn(data + b"\x00", cases.values())
+            for width in (1, 2, 4, 8):
+                self.assertIn(b"\xff" * width + data[width:], cases.values())
+
+        def test_empty_oversized_and_name_collision(self):
+            seeds = {"procedural_000001.bin": b"abcd", "empty": b""}
+            cases, census = network_expand(seeds, 2, limit=100)
+            self.assertEqual(cases["procedural_000001.bin"], b"abcd")
+            self.assertTrue(all(len(data) <= 2 for name, data in cases.items()
+                                if name not in seeds))
+            self.assertFalse(census["capped"])
+
+        def test_metrics_use_final_counters_and_do_not_invent_missing_data(self):
+            log = ("INFO: Loaded 1 PC tables (100 PCs):\n"
+                   "#10 INITED cov: 20 ft: 25\n#200 DONE cov: 40 ft: 55\n"
+                   "stat::number_of_executed_units: 200\nstat::peak_rss_mb: 45\n")
+            self.assertEqual(differential.tls_fuzz_metrics(log), dict(executed_units=200,
+                initialized_units=10, mutation_units=190, peak_rss_mb=45,
+                covered_edges=40, features=55, instrumented_pcs=100))
+            self.assertEqual(differential.tls_fuzz_metrics("NOT RUN"), {})
+
+        def test_script_subtest_distinguishes_missing_tool_and_broken_lift(self):
+            with mock.patch.object(differential.shutil, "which", return_value=None), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(differential.waterlink_script_scan(""), 2)
+            for probe_exit, expected in ((1, 2), (0, 1)):
+                results = [subprocess.CompletedProcess([], probe_exit, "", "probe")]
+                if probe_exit == 0:
+                    results.append(subprocess.CompletedProcess([], 1, "", "broken lift"))
+                with mock.patch.object(differential.shutil, "which", return_value="clang"), \
+                        mock.patch.object(differential.subprocess, "run", side_effect=results), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(differential.waterlink_script_scan(""), expected)
+
+        def test_waterlink_propagates_required_subtest_skip(self):
+            with mock.patch.object(differential, "harness_waterlink_sanitized",
+                                   return_value=(None, "")), \
+                    mock.patch.object(differential, "waterlink_script_scan", return_value=2):
+                self.assertEqual(differential.harness_waterlink_fuzz([]), 2)
+
+        def test_campaign_requires_execution_and_pins_asan_ubsan(self):
+            for exit_code, expected in ((0, 1), (2, 2)):
+                with tempfile.TemporaryDirectory() as directory:
+                    output = Path(directory) / "campaign"
+
+                    def fake_run(command, **options):
+                        environment = options["env"]
+                        self.assertEqual(environment["MOONWATER_MSAN"], "0")
+                        self.assertEqual(environment["MOONWATER_FUZZ_BOUNDARIES"], "1")
+                        Path(environment["MOONWATER_FUZZ_REPORT"]).write_text(
+                            json.dumps({"targets": []}))
+                        return subprocess.CompletedProcess(command, exit_code)
+
+                    with mock.patch.dict(differential.os.environ, {"MOONWATER_MSAN": "1"}), \
+                            mock.patch.object(differential.subprocess, "run", side_effect=fake_run), \
+                            contextlib.redirect_stdout(io.StringIO()):
+                        self.assertEqual(differential.harness_network_campaign(
+                            ["--output", str(output), "--seeds", "1", "--runs", "10",
+                             "--seconds", "1"]), expected)
+                    report = json.loads((output / "campaign.json").read_text())
+                    self.assertEqual(report["overall_exit"], expected)
+
+        def test_integration_shell_is_retained_with_its_coverage_map(self):
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                output = root / "work" / "shell"
+                output.parent.mkdir()
+                with mock.patch.dict(differential.os.environ, {
+                        "MOONWATER_INTEGRATION_COVERAGE": str(root / "coverage"),
+                        "MOONWATER_INTEGRATION_LABEL": "tls test"}), \
+                        mock.patch.object(differential.platform, "machine",
+                                          return_value="x86_64"), \
+                        mock.patch.object(differential.subprocess, "run",
+                                          return_value=subprocess.CompletedProcess([], 0, "", "")):
+                    command = differential.spark_shell_command("cc", output)
+                retained = Path(command[command.index("-o") + 1])
+                self.assertTrue(output.is_symlink())
+                self.assertEqual(output.resolve(), retained)
+                self.assertTrue(retained.with_suffix(".map").is_file())
+                self.assertEqual(retained.with_suffix(".map").stat().st_size, 64 * 1024 * 1024)
+                self.assertIn("-fsanitize-coverage=trace-pc", command)
+                self.assertTrue(retained.with_suffix(".o").as_posix() in command)
+
+
+
+    suite = unittest.defaultTestLoader.loadTestsFromTestCase(NetworkCases)
+    outcome = unittest.TextTestRunner(verbosity=0).run(suite)
+    write_tally("network-cases", outcome.testsRun - len(outcome.failures) - len(outcome.errors),
+                outcome.testsRun)
+    return 0 if outcome.wasSuccessful() else 1
+
+
 HARNESS_CHECKS = {
     "g_tables": harness_g_tables,
     "scale": harness_scale,
@@ -79127,6 +79796,9 @@ HARNESS_CHECKS = {
     "surface_coreutils_gap": harness_surface_coreutils_gap,
     "shell_functions": harness_shell_functions,
     "pure_stores": harness_pure_stores,
+    "network_cases": harness_network_cases,
+    "network_campaign": harness_network_campaign,
+    "network_integration": harness_network_integration,
     "audit_shell_functions": harness_audit_shell_functions,
     "canvas_lifetime": harness_canvas_lifetime,
     "canvas_hold": harness_canvas_hold,

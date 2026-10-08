@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        396 routines (373 public, 23 local), 386 of them on all three and 10 local to one.
+        397 routines (374 public, 23 local), 387 of them on all three and 10 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -274,6 +274,7 @@
           memory_squeeze_bytes           public  yes     yes     yes
           memory_sum_bytes               public  yes     yes     yes
           memory_take                    public  yes     yes     yes
+          memory_text_span               public  yes     yes     yes
           memory_to_lower_ascii          public  yes     yes     yes
           memory_to_upper_ascii          public  yes     yes     yes
           memory_translate               public  yes     yes     yes
@@ -9110,7 +9111,8 @@ __asm__(
     "bt $29, %ebx\n   sbb %eax, %eax\n   and %eax, %r11d\n   mov %ebx, %eax\n   and $0x80100, %eax\n   cmp $0x80100, %eax\n   sete %al  # BMI2 and ADX\n"
     "jmp .Lcpu_hash_detect_x64_store\n"
     ".Lcpu_hash_detect_x64_none:  xor %r11d, %r11d\n   xor %eax, %eax\n"
-    ".Lcpu_hash_detect_x64_store:  mov %al, cpu_has_mulx(%rip)\n   mov %r11b, cpu_has_sha(%rip)\n   movb $1, cpu_hash_probed(%rip)\n   pop %rdx\n   pop %rcx\n   pop %rbx\n" ASM_RET
+    ".Lcpu_hash_detect_x64_store:  mov %al, cpu_has_mulx(%rip)\n   mov %r11b, cpu_has_sha(%rip)\n   movb $1, cpu_hash_probed(%rip)\n   pop %rdx\n   pop %rcx\n   pop %rbx\n"
+    "movq $0, -8(%rsp)\n   movq $0, -16(%rsp)\n   movq $0, -24(%rsp)\n" ASM_RET
     ASM_LOCAL_END(cpu_hash_detect)
 #endif
     ASM_FUNC(md5_blocks)
@@ -9362,6 +9364,8 @@ __asm__(
     //  The schedule ring is the block's words: wiped.
     "xor %eax, %eax\n   mov %rax, 0(%rsp)\n   mov %rax, 8(%rsp)\n   mov %rax, 16(%rsp)\n   mov %rax, 24(%rsp)\n"
     "mov %rax, 32(%rsp)\n   mov %rax, 40(%rsp)\n   mov %rax, 48(%rsp)\n   mov %rax, 56(%rsp)\n   mov %rax, 64(%rsp)\n   add $72, %rsp\n   pop %r12\n   pop %rbx\n"
+    //  Popped registers can carry caller secrets; erase their saved copies.
+    "movq $0, -8(%rsp)\n   movq $0, -16(%rsp)\n"
     ".Lsha1_x64_none:\n" ASM_RET
 #ifndef KERNEL_MODE
     ".Lsha1_x64_ni:  shl $6, %rdx\n   add %rsi, %rdx\n   movdqu (%rdi), %xmm1\n   pshufd $0x1b, %xmm1, %xmm1\n   movd 16(%rdi), %xmm2\n   pslldq $12, %xmm2\n"
@@ -9992,6 +9996,9 @@ __asm__(
     "xor %eax, %eax\n   mov %rax, 0(%rsp)\n   mov %rax, 8(%rsp)\n   mov %rax, 16(%rsp)\n   mov %rax, 24(%rsp)\n"
     "mov %rax, 32(%rsp)\n   mov %rax, 40(%rsp)\n   mov %rax, 48(%rsp)\n   mov %rax, 56(%rsp)\n   add $80, %rsp\n"
     "pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n"
+    //  Popped registers can carry caller secrets; erase their saved copies.
+    "movq $0, -8(%rsp)\n   movq $0, -16(%rsp)\n   movq $0, -24(%rsp)\n"
+    "movq $0, -32(%rsp)\n   movq $0, -40(%rsp)\n   movq $0, -48(%rsp)\n"
     ".Lsha256_x64_none:\n" ASM_RET
 #ifndef KERNEL_MODE
     ".Lsha256_x64_ni:  shl $6, %rdx\n   add %rsi, %rdx\n"
@@ -11028,6 +11035,9 @@ __asm__(
     "mov %rax, 32(%rsp)\n   mov %rax, 40(%rsp)\n   mov %rax, 48(%rsp)\n   mov %rax, 56(%rsp)\n   mov %rax, 64(%rsp)\n   mov %rax, 72(%rsp)\n   mov %rax, 80(%rsp)\n   mov %rax, 88(%rsp)\n"
     "mov %rax, 96(%rsp)\n   mov %rax, 104(%rsp)\n   mov %rax, 112(%rsp)\n   mov %rax, 120(%rsp)\n   add $144, %rsp\n"
     "pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n"
+    //  Popped registers can carry caller secrets; erase their saved copies.
+    "movq $0, -8(%rsp)\n   movq $0, -16(%rsp)\n   movq $0, -24(%rsp)\n"
+    "movq $0, -32(%rsp)\n   movq $0, -40(%rsp)\n   movq $0, -48(%rsp)\n"
     ".Lsha512_x64_none:\n" ASM_RET
     ASM_END(sha512_blocks)
     ASM_FUNC(blake2b_blocks)
@@ -11138,6 +11148,9 @@ __asm__(
     "xor %r8, 40(%r10)\n   xor %r9, 48(%r10)\n   xor %rdi, 56(%r10)\n   decq 152(%rsp)\n   jnz .Lblake2b_x64_block\n   xor %eax, %eax\n   mov %rax, 0(%rsp)\n   mov %rax, 8(%rsp)\n   mov %rax, 16(%rsp)\n   mov %rax, 24(%rsp)\n   mov %rax, 32(%rsp)\n   mov %rax, 40(%rsp)\n   mov %rax, 48(%rsp)\n   mov %rax, 56(%rsp)\n"
     "mov %rax, 64(%rsp)\n   mov %rax, 72(%rsp)\n   mov %rax, 80(%rsp)\n   mov %rax, 88(%rsp)\n   mov %rax, 96(%rsp)\n   mov %rax, 104(%rsp)\n   mov %rax, 112(%rsp)\n   mov %rax, 120(%rsp)\n   mov %rax, 128(%rsp)\n   mov %rax, 168(%rsp)\n   mov %rax, 176(%rsp)\n   mov %rax, 184(%rsp)\n   add $192, %rsp\n   pop %r15\n"
     "pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n"
+    //  Popped registers can carry caller secrets; erase their saved copies.
+    "movq $0, -8(%rsp)\n   movq $0, -16(%rsp)\n   movq $0, -24(%rsp)\n"
+    "movq $0, -32(%rsp)\n   movq $0, -40(%rsp)\n   movq $0, -48(%rsp)\n"
     ".Lblake2b_x64_none:\n" ASM_RET
     ASM_END(blake2b_blocks)
 
@@ -36595,6 +36608,67 @@ PURE positive2 string_hash_33_length(string_address source);
 PURE positive memory_span_byte(address_any block, p8 value, positive size);
 PURE positive memory_span_byte_reverse(address_any block, p8 value,
                                        positive size);
+
+/* A bounded text run: tab or any byte >= space except DEL. NUL and all
+   other controls stop it; high bytes are text, not ASCII controls. Each
+   load stays inside the span, including an empty span at an unmapped page. */
+PURE READS(1, 2) positive memory_text_span(address_any block, positive size);
+
+#if X64
+__asm__(
+    ASM_SECTION
+    ASM_FUNC(memory_text_span)
+    "xor %eax, %eax\n"
+#ifndef KERNEL_MODE
+    "cmp $16, %rsi\n   jb .Ltext_span_x64_bytes\n   mov $32, %ecx\n   movd %ecx, %xmm1\n   punpcklbw %xmm1, %xmm1\n   punpcklwd %xmm1, %xmm1\n   pshufd $0, %xmm1, %xmm1\n"
+    "mov $9, %ecx\n   movd %ecx, %xmm2\n   punpcklbw %xmm2, %xmm2\n   punpcklwd %xmm2, %xmm2\n   pshufd $0, %xmm2, %xmm2\n"
+    "mov $127, %ecx\n   movd %ecx, %xmm3\n   punpcklbw %xmm3, %xmm3\n   punpcklwd %xmm3, %xmm3\n   pshufd $0, %xmm3, %xmm3\n"
+    ".Ltext_span_x64_block:\n   movdqu (%rdi,%rax), %xmm0\n   movdqa %xmm0, %xmm4\n   pmaxub %xmm1, %xmm4\n   pcmpeqb %xmm0, %xmm4\n"
+    "movdqa %xmm0, %xmm5\n   pcmpeqb %xmm2, %xmm5\n   por %xmm5, %xmm4\n   pcmpeqb %xmm3, %xmm0\n   pandn %xmm4, %xmm0\n   pmovmskb %xmm0, %ecx\n"
+    "cmp $65535, %ecx\n   jne .Ltext_span_x64_found\n   add $16, %rax\n   mov %rsi, %rcx\n   sub %rax, %rcx\n   cmp $16, %rcx\n   jae .Ltext_span_x64_block\n"
+#endif
+    ".Ltext_span_x64_bytes:\n   cmp %rsi, %rax\n   jae .Ltext_span_x64_done\n   movzbl (%rdi,%rax), %ecx\n   cmp $9, %ecx\n   je .Ltext_span_x64_next\n"
+    "cmp $32, %ecx\n   jb .Ltext_span_x64_done\n   cmp $127, %ecx\n   je .Ltext_span_x64_done\n"
+    ".Ltext_span_x64_next:\n   inc %rax\n   jmp .Ltext_span_x64_bytes\n"
+#ifndef KERNEL_MODE
+    ".Ltext_span_x64_found:\n   xor $65535, %ecx\n   bsf %ecx, %ecx\n   add %rcx, %rax\n"
+#endif
+    ".Ltext_span_x64_done:\n" ASM_RET
+    ASM_END(memory_text_span)
+);
+#elif ARM64
+__asm__(
+    ASM_SECTION
+    ASM_FUNC(memory_text_span)
+    "mov x2, #0\n"
+#ifndef KERNEL_MODE
+    "cmp x1, #16\n   b.lo .Ltext_span_arm64_bytes\n   movi v1.16b, #32\n   movi v2.16b, #9\n   movi v3.16b, #127\n"
+    ".Ltext_span_arm64_block:\n   ldr q0, [x0, x2]\n   cmhs v4.16b, v0.16b, v1.16b\n   cmeq v5.16b, v0.16b, v2.16b\n   orr v4.16b, v4.16b, v5.16b\n"
+    "cmeq v0.16b, v0.16b, v3.16b\n   bic v4.16b, v4.16b, v0.16b\n   uminv b5, v4.16b\n   fmov w3, s5\n   cmp w3, #255\n   b.ne .Ltext_span_arm64_found\n"
+    "add x2, x2, #16\n   sub x3, x1, x2\n   cmp x3, #16\n   b.hs .Ltext_span_arm64_block\n"
+#endif
+    ".Ltext_span_arm64_bytes:\n   cmp x2, x1\n   b.hs .Ltext_span_arm64_done\n   ldrb w3, [x0, x2]\n   cmp w3, #9\n   b.eq .Ltext_span_arm64_next\n"
+    "cmp w3, #32\n   b.lo .Ltext_span_arm64_done\n   cmp w3, #127\n   b.eq .Ltext_span_arm64_done\n"
+    ".Ltext_span_arm64_next:\n   add x2, x2, #1\n   b .Ltext_span_arm64_bytes\n"
+#ifndef KERNEL_MODE
+    ".Ltext_span_arm64_found:\n   shrn v4.8b, v4.8h, #4\n   fmov x3, d4\n   mvn x3, x3\n   rbit x3, x3\n   clz x3, x3\n   add x2, x2, x3, lsr #2\n"
+#endif
+    ".Ltext_span_arm64_done:\n   mov x0, x2\n" ASM_RET
+    ASM_END(memory_text_span)
+);
+#elif RISCV64
+__asm__(
+    ASM_SECTION
+    ASM_FUNC(memory_text_span)
+    "li t0, 0\n   li t2, 9\n   li t3, 32\n   li t4, 127\n"
+    ".Ltext_span_rv_bytes:\n   bgeu t0, a1, .Ltext_span_rv_done\n   add t1, a0, t0\n   lbu t1, 0(t1)\n   beq t1, t2, .Ltext_span_rv_next\n"
+    "bltu t1, t3, .Ltext_span_rv_done\n   beq t1, t4, .Ltext_span_rv_done\n"
+    ".Ltext_span_rv_next:\n   addi t0, t0, 1\n   j .Ltext_span_rv_bytes\n"
+    ".Ltext_span_rv_done:\n   mv a0, t0\n" ASM_RET
+    ASM_END(memory_text_span)
+);
+#endif
+
 // A run of printable ASCII as eight-byte terminal cells, attribute | byte
 // each: from the first, until limit, a byte outside 0x20..0x7e, or a cell
 // below guarded holding any bit of stop, which is left unwritten. Answers
@@ -36920,8 +36994,16 @@ extern const b8 string_set_high[STRING_SET_BYTES];
 /* What byte_is_space answers: tab, newline, vertical tab, form feed,
    carriage return and space. */
 extern const b8 string_set_space[STRING_SET_BYTES];
+/* RFC token bytes: ASCII letters, digits and !#$%&'*+-.^_`|~. */
+extern const b8 string_set_http_token[STRING_SET_BYTES];
 
 __asm__(
+    ASM_RODATA_OBJECT_BEGIN(string_set_http_token, 16)
+    ".zero 33\n   .byte 1,0,1,1,1,1,1,0,0,1,1,0,1,1,0\n"
+    ".fill 10,1,1\n   .zero 7\n   .fill 26,1,1\n"
+    ".byte 0,0,0,1,1,1\n   .fill 26,1,1\n   .byte 0,1,0,1,0\n"
+    ".zero 128\n"
+    ASM_OBJECT_END(string_set_http_token)
     ASM_RODATA_OBJECT_BEGIN(string_set_high, 16)
     ".zero 128\n   .fill 128,1,1\n"
     ASM_OBJECT_END(string_set_high)
@@ -41503,6 +41585,7 @@ __asm__(
 #define IPPROTO_ICMP 1
 #define IPPROTO_TCP 6
 #define IPPROTO_UDP 17
+#define TCP_NODELAY 1
 
 #define SOL_SOCKET 1
 #define SO_REUSEADDR 2
@@ -48617,6 +48700,9 @@ __asm__(
     "add 40(%rdi), %r13\n   add 48(%rdi), %r14\n   add 56(%rdi), %r15\n   mov %r8, 0(%rdi)\n   mov %r9, 8(%rdi)\n   mov %r10, 16(%rdi)\n   mov %r11, 24(%rdi)\n   mov %r12, 32(%rdi)\n"
     "mov %r13, 40(%rdi)\n   mov %r14, 48(%rdi)\n   mov %r15, 56(%rdi)\n   add $128, %rsi\n   cmp 1280(%rsp), %rsi\n   jb .Lsha512_avx2_block\n   vzeroupper\n   add $1304, %rsp\n"
     "pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n"
+    //  Popped registers can carry caller secrets; erase their saved copies.
+    "movq $0, -8(%rsp)\n   movq $0, -16(%rsp)\n   movq $0, -24(%rsp)\n"
+    "movq $0, -32(%rsp)\n   movq $0, -40(%rsp)\n   movq $0, -48(%rsp)\n"
     ".Lsha512_avx2_none:\n" ASM_RET
     ".pushsection .rodata\n"
     ".balign 64\n"

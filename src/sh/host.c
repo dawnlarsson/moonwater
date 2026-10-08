@@ -6423,7 +6423,8 @@ static COLD b32 nl80211_link_news(nl80211 address_to session, p32 index)
 
         scope_exit(netlink_forget(address_of reply));
         if (got < 0)
-                return got == NETWORK_INTERRUPTED ? 0 : -1;
+                return got == NETWORK_INTERRUPTED || got == NETWORK_TRY_AGAIN
+                           ? 0 : -1;
         netlink_each(address_of reply, nl80211_link_news_take, address_of turn);
         return turn.reason;
 }
@@ -6804,8 +6805,18 @@ static COLD bipolar nl80211_join_wait(nl80211 address_to session,
         positive nanoseconds;
         bipolar got;
 
-        if (!asking || !network_deadline_begin(address_of slice, 0, NL80211_POLL_NANOSECONDS))
+        if (!asking)
                 return network_wait_readable_until(session->handle, deadline);
+        if (!network_deadline_left(deadline, address_of seconds,
+                                   address_of nanoseconds))
+                return 0;
+        /* Keep the join's original clock origin. A fresh slice must not
+           renew an expired join when unrelated news keeps the socket ready. */
+        slice = *deadline;
+        if (seconds || nanoseconds > NL80211_POLL_NANOSECONDS)
+                slice.budget = deadline->budget -
+                               (seconds * NETWORK_NANOSECONDS + nanoseconds) +
+                               NL80211_POLL_NANOSECONDS;
         got = network_wait_readable_until(session->handle, address_of slice);
         return !got && network_deadline_left(deadline, address_of seconds,
                                              address_of nanoseconds)
@@ -6853,7 +6864,7 @@ static COLD bipolar nl80211_wait_associated(nl80211 address_to session, p32 sequ
                 turn.port = 0;
                 got = netlink_receive(session->handle, address_of reply,
                                       address_of turn.port);
-                if (got == NETWORK_INTERRUPTED)
+                if (got == NETWORK_INTERRUPTED || got == NETWORK_TRY_AGAIN)
                         continue;
                 if (got < 0)
                         return got;
@@ -8466,7 +8477,7 @@ static bool radio_air_scan(nl80211 address_to session, p32 index, p8 address_to 
                 bipolar got = netlink_receive(session->handle, address_of reply,
                                               address_of local_port);
 
-                if (got == NETWORK_INTERRUPTED)
+                if (got == NETWORK_INTERRUPTED || got == NETWORK_TRY_AGAIN)
                         continue;
                 if (got < 0)
                         break;
@@ -14376,13 +14387,13 @@ static bipolar locale_ntp_take(string_address server,
 /*
         With sampling on and no server of the machine's own, the walk asks
         on after the first answer until SNTP_SERVERS have answered, and
-        sntp_choose picks which to believe; a server named in
-        /root/ntp.server is believed on its own, as before, and sampling off
-        takes the first answer -- unless it would step the clock more than
-        two seconds, when a second is asked for, since sntp_choose believes
-        no such step on one word. A clock nobody has set takes the first
-        answer there is, with sampling or not: it has no time to be moved
-        from, and waiting for the others is a minute on a machine whose
+        sntp_choose picks which to believe. Sampling off takes the first
+        answer -- including one from /root/ntp.server -- unless it would
+        step a clock that already has a plausible wall time more than two
+        seconds, when a second server is asked for: sntp_choose believes no
+        such step on one word. A clock nobody has set takes the first answer
+        there is, with sampling or not: it has no useful time to compare it
+        with, and waiting for the others is a minute on a machine whose
         network is slow to come.
 */
 //      Whether the server at address is one of the first count of heard.
@@ -14423,12 +14434,23 @@ static bipolar locale_ntp_walk(bool by_hand)
                 failed = locale_ntp_ask((string_address)server, filter, most,
                                         heard);
                 if (failed >= 0)
-                        return locale_ntp_take((string_address)server, heard);
+                {
+                        heard_from[0] = array_count(locale_ntp_fallback);
+                        heard_count = 1;
+                        if (unset || sntp_within(heard[0].offset_ns,
+                                                SNTP_OFFSET_SYNCED_NS))
+                                return locale_ntp_take((string_address)server,
+                                                       heard);
+                }
                 rated = failed == SNTP_RATE_LIMITED;
                 denied = failed == SNTP_DENIED;
         }
 
-        wanted = filter && !server[0] && !unset ? SNTP_SERVERS : 1;
+        //      A named server remains the first choice, but its name is not
+        //      an independent confirmation of a large clock step.
+        wanted = heard_count ? 2
+                 : filter && !server[0] && !unset ? SNTP_SERVERS
+                                                  : 1;
         for (at = 0; at < array_count(locale_ntp_fallback) &&
                      heard_count < wanted; at++)
         {
@@ -14465,7 +14487,9 @@ static bipolar locale_ntp_walk(bool by_hand)
                 if (chosen < 0)
                         return SNTP_UNCONFIRMED;
                 return locale_ntp_take(
-                    (string_address)locale_ntp_fallback[heard_from[chosen]],
+                    heard_from[chosen] == array_count(locale_ntp_fallback)
+                        ? (string_address)server
+                        : (string_address)locale_ntp_fallback[heard_from[chosen]],
                     heard + chosen);
         }
         return denied ? SNTP_DENIED : rated ? SNTP_RATE_LIMITED : failed;
@@ -15758,16 +15782,8 @@ static fn dns_say(bool label)
         p32 kept[DNS_SERVERS_MAX];
         p8 held[96];
         p8 text[24];
-        positive count = 0;
-
-        for (positive at = 0; at < DNS_SERVERS_MAX; at++)
-        {
-                bipolar host = dns_server_at((string_address) "/etc/resolv.conf", at);
-
-                if (host < 0)
-                        break;
-                servers[count++] = (p32)host;
-        }
+        positive count = dns_servers((string_address)"/etc/resolv.conf",
+                                     servers, array_count(servers));
 
         if (label)
                 string_format(log, host_label "dns");
