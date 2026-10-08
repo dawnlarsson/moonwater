@@ -1307,11 +1307,30 @@ static HOT b32 tools_monitor()
                 goto finished;
         }
 
+        /*      Frames are due at fixed points, one interval apart, and the
+                sleep is to the next of them: a sleep of the whole interval
+                after each frame's own work ran every frame late by that
+                work, a frame in a thousand at a tenth of a second. */
+        positive interval_ns = (positive)interval[0] * 1000000000u +
+                               (positive)interval[1];
+        positive due = clock_monotonic_nanoseconds();
+
         while (!monitor_stopping)
         {
                 if (count)
                 {
-                        b32 slept = monitor_sleep(interval);
+                        positive now = clock_monotonic_nanoseconds();
+                        p64 wait[2] = {0, 0};
+
+                        if (due > now)
+                        {
+                                positive left = due - now;
+
+                                wait[0] = left / 1000000000;
+                                wait[1] = left % 1000000000;
+                        }
+
+                        b32 slept = monitor_sleep(wait);
 
                         if (slept <= 0)
                         {
@@ -1434,6 +1453,14 @@ static HOT b32 tools_monitor()
                 if (frames && count >= frames)
                         break;
 
+                /*      A frame that overran its interval starts the next one
+                        at once, and does not owe the frames it missed. */
+                positive after = clock_monotonic_nanoseconds();
+
+                due = due > positive_max - interval_ns ? positive_max
+                                                       : due + interval_ns;
+                if (due < after)
+                        due = after;
                 old = sample;
         }
 
