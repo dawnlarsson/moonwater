@@ -32084,11 +32084,11 @@ static bool sed_line_across(b32 address_to i, b32 inputs)
 static bool sed_null_data;
 static bool sed_follow_symlinks;
 
-static b32 sed_compile_regex(string_address pattern, bool icase, bool multiline)
+static b32 sed_compile_regex(string_address pattern, positive length, bool icase, bool multiline)
 {
         // Refused when it runs rather than when it is read, because a script
         // whose input is empty never reaches the command that would complain.
-        if (!pattern[0])
+        if (!length)
                 return -1;
 
         // A program is a table entry that grows with the script, as the commands do.
@@ -32103,15 +32103,15 @@ static b32 sed_compile_regex(string_address pattern, bool icase, bool multiline)
         }
 
         // M: ^ and $ are also at the start and the end of each line in the space.
-        if (!regex_compile(pattern, sed_extended, icase, true,
-                           text_regex_policy() | (multiline ? REGEX_LINE_ANCHORS : 0)))
+        if (!regex_compile_bytes(pattern, length, sed_extended, icase, true,
+                                 text_regex_policy() | (multiline ? REGEX_LINE_ANCHORS : 0)))
         {
                 sed_broken = true;
                 return 0;
         }
 
         regex_keep(sed_programs + sed_program_count);
-        sed_program_end_only[sed_program_count] = pattern[0] == '$' && !pattern[1];
+        sed_program_end_only[sed_program_count] = length == 1 && pattern[0] == '$';
         return sed_program_count++;
 }
 
@@ -32139,6 +32139,119 @@ static positive sed_limit_blocks, sed_open_blocks_room;
 static p8 address_to sed_append_kind;
 static b32 address_to sed_append_which;
 static positive sed_limit_appends, sed_append_kind_room, sed_append_which_room;
+
+/*
+        The escapes GNU sed reads in a regular expression, a replacement, a y
+        set and the text of a, i and c: \a \f \n \r \t \v, \cX (the
+        control of X), \dNNN (decimal, three digits), \oNNN (octal, three)
+        and \xHH (hexadecimal, two). Reads the one at `at`, a backslash, and
+        says how many bytes it spans; false when the pair is not one of these,
+        which the callers keep as it was.
+*/
+static bool sed_escape_value(string_address text, positive length, positive at,
+                             p8 address_to value, positive address_to used)
+{
+        if (at + 1 >= length)
+                return false;
+
+        p8 letter = text[at + 1];
+        positive base = letter == 'd' ? 10 : letter == 'o' ? 8 : letter == 'x' ? 16 : 0;
+
+        switch (letter)
+        {
+        case 'a': *value = 7; break;
+        case 'f': *value = 12; break;
+        case 'n': *value = '\n'; break;
+        case 'r': *value = '\r'; break;
+        case 't': *value = '\t'; break;
+        case 'v': *value = 11; break;
+        case 'c':
+                if (at + 2 >= length)
+                        return false;
+                // \c\\ is the control of a backslash, as GNU reads it.
+                if (text[at + 2] == '\\' && at + 3 < length && text[at + 3] == '\\')
+                {
+                        *value = '\\' ^ 0x40;
+                        *used = 4;
+                        return true;
+                }
+                *value = (p8)(byte_is_lower(text[at + 2]) ? text[at + 2] - 32 : text[at + 2]) ^ 0x40;
+                *used = 3;
+                return true;
+        case 'd':
+        case 'o':
+        case 'x':
+        {
+                positive limit = base == 16 ? 2 : 3;
+                positive digits = 0;
+                positive whole = 0;
+                positive next = at + 2;
+
+                while (next < length && digits < limit)
+                {
+                        p8 digit = text[next];
+                        positive value_of = byte_is_digit(digit) ? (positive)(digit - '0')
+                                            : base == 16 && byte_is_hexadecimal(digit)
+                                                ? (positive)((digit | 32) - 'a' + 10) : 99;
+                        if (value_of >= base)
+                                break;
+                        whole = whole * base + value_of;
+                        next++;
+                        digits++;
+                }
+
+                if (!digits)
+                        return false;
+                *value = (p8)whole;
+                *used = next - at;
+                return true;
+        }
+        default:
+                return false;
+        }
+
+        *used = 2;
+        return true;
+}
+
+/*
+        Expands the escapes above in place, a pattern or a replacement, and
+        returns its new length. A byte the escape makes is written as it is,
+        so in a pattern it keeps the meaning its character has there (\x2a is
+        a star, as GNU reads it); in a replacement a produced backslash or
+        ampersand is written escaped, so it stands for itself. Any other pair
+        is kept whole, which is what keeps \\x41 a backslash and then x41.
+*/
+static positive sed_escapes_expand(p8 address_to text, positive length, bool replacement)
+{
+        positive have = 0;
+
+        for (positive at = 0; at < length;)
+        {
+                p8 value;
+                positive used;
+
+                if (text[at] == '\\' && sed_escape_value(text, length, at, address_of value, address_of used))
+                {
+                        if (replacement && (value == '\\' || value == '&'))
+                                text[have++] = '\\';
+                        text[have++] = value;
+                        at += used;
+                        continue;
+                }
+
+                if (text[at] == '\\' && at + 1 < length)
+                {
+                        text[have++] = text[at++];
+                        text[have++] = text[at++];
+                        continue;
+                }
+
+                text[have++] = text[at++];
+        }
+
+        return have;
+}
 
 // Everything up to the next unescaped delimiter, with an escaped delimiter
 // becoming the character itself -- s,a\,b,x, has a comma in its pattern.
@@ -32202,6 +32315,16 @@ static positive sed_unescape(p8 address_to text, positive length)
 
         for (positive i = 0; i < length; i++)
         {
+                p8 value;
+                positive used;
+
+                if (text[i] == '\\' && sed_escape_value(text, length, i, address_of value, address_of used))
+                {
+                        text[have++] = value;
+                        i += used - 1;
+                        continue;
+                }
+
                 if (text[i] == '\\' && i + 1 < length)
                 {
                         p8 next = text[++i];
@@ -32325,7 +32448,8 @@ static bool sed_parse_address(p8 address_to type, positive address_to line,
                 }
 
                 sed_at++;
-                sed_take_until(delimiter, pattern, sed_limit_piece);
+                positive length = sed_take_until(delimiter, pattern, sed_limit_piece);
+                length = sed_escapes_expand(pattern, length, false);
 
                 bool icase = false, multiline = false;
 
@@ -32337,7 +32461,7 @@ static bool sed_parse_address(p8 address_to type, positive address_to line,
                 }
 
                 address_to type = SED_ADDRESS_REGEX;
-                address_to which = sed_compile_regex(pattern, icase, multiline);
+                address_to which = sed_compile_regex(pattern, length, icase, multiline);
                 return true;
         }
 
@@ -32547,9 +32671,11 @@ static fn sed_parse()
                         p8 address_to replacement = sed_piece_replacement;
 
                         sed_at++;
-                        sed_take_until(delimiter, pattern, sed_limit_piece);
+                        positive length = sed_take_until(delimiter, pattern, sed_limit_piece);
+                        length = sed_escapes_expand(pattern, length, false);
 
                         positive have = sed_take_until(delimiter, replacement, sed_limit_piece);
+                        have = sed_escapes_expand(replacement, have, true);
                         bool icase = false, multiline = false;
 
                         command->references = 0;
@@ -32662,7 +32788,7 @@ static fn sed_parse()
                         // has to have. An empty pattern is whichever regex
                         // ran last, so only the cycle can check it: GNU runs
                         // /\(a\)/s//\1x/ and refuses s//\1/ when it runs.
-                        command->pattern = sed_compile_regex(pattern, icase, multiline);
+                        command->pattern = sed_compile_regex(pattern, length, icase, multiline);
                         if (command->pattern >= 0 &&
                             command->references > sed_programs[command->pattern].groups)
                                 sed_broken = true;
@@ -32772,6 +32898,18 @@ static fn sed_parse()
 
                         while (sed_at < sed_script_length && sed_script[sed_at] != '\n')
                         {
+                                p8 value;
+                                positive used;
+
+                                if (sed_script[sed_at] == '\\' &&
+                                    sed_escape_value(sed_script, sed_script_length, sed_at,
+                                                     address_of value, address_of used))
+                                {
+                                        sed_text_byte(value);
+                                        sed_at += used;
+                                        continue;
+                                }
+
                                 if (sed_script[sed_at] == '\\' && sed_at + 1 < sed_script_length)
                                 {
                                         sed_at++;

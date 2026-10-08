@@ -1508,11 +1508,11 @@ static p8 regex_failure;
 
 /* Compile above the current mark. Neither a failed compile nor its scratch
    metadata changes a published descriptor or the pool's ownership cursor. */
-static bool rx_compile(rx_pool *pool, regex_program *out, string_address pattern,
-                       bool extended, bool icase, bool escapes, p8 policy)
+static bool rx_compile_length(rx_pool *pool, regex_program *out, string_address pattern,
+                              positive length, bool extended, bool icase, bool escapes, p8 policy)
 {
         rx_compiler c = {.pool = pool, .cursor = pool->used, .pattern = pattern,
-                         .length = string_length(pattern), .extended = extended,
+                         .length = length, .extended = extended,
                          .escapes = escapes, .wide_ascii = -1, .wide_two = -1,
                          .wide_three = -1, .wide_four = -1, .wide_tail = -1};
         if (!c.cursor.nodes)
@@ -1720,10 +1720,16 @@ static struct
         regex_program program;
 } rx_again;
 
-static __attribute__((unused)) bool rx_compile_again(rx_pool *pool, regex_program *out, string_address pattern,
-                             bool extended, bool icase, bool escapes, p8 policy)
+static bool rx_compile(rx_pool *pool, regex_program *out, string_address pattern,
+                       bool extended, bool icase, bool escapes, p8 policy)
 {
-        positive length = string_length(pattern);
+        return rx_compile_length(pool, out, pattern, string_length(pattern), extended,
+                                 icase, escapes, policy);
+}
+
+static __attribute__((unused)) bool rx_compile_again(rx_pool *pool, regex_program *out, string_address pattern,
+                             positive length, bool extended, bool icase, bool escapes, p8 policy)
+{
         if (rx_again.valid && rx_again.compiles == rx_compiles && rx_again.pool == pool &&
             rx_again.length == length && rx_again.extended == extended &&
             rx_again.icase == icase && rx_again.escapes == escapes &&
@@ -1733,7 +1739,7 @@ static __attribute__((unused)) bool rx_compile_again(rx_pool *pool, regex_progra
                 regex_failure = 0;
                 return true;
         }
-        bool made = rx_compile(pool, out, pattern, extended, icase, escapes, policy);
+        bool made = rx_compile_length(pool, out, pattern, length, extended, icase, escapes, policy);
         rx_again.valid = made && length < sizeof(rx_again.key);
         if (rx_again.valid)
         {
@@ -3351,12 +3357,20 @@ static rx_dfa_cache address_to regex_dfa_cache_held;
 #define regex_boundary regex_current.boundary
 
 /* A compilation is made in the scratch from the start, over the one before. */
+// The pattern is the bytes it is given, NUL bytes included when a caller
+// has length for them (sed's \x00 is one): a C string stops at the first.
+static bool regex_compile_bytes(string_address pattern, positive length, bool extended,
+                                bool icase, bool escapes, p8 policy)
+{
+        regex_pool.used = (rx_mark){0};
+        return rx_compile_length(&regex_pool, &regex_current, pattern, length, extended,
+                                 icase, escapes, policy);
+}
+
 static bool regex_compile(string_address pattern, bool extended, bool icase,
                           bool escapes, p8 policy)
 {
-        regex_pool.used = (rx_mark){0};
-        return rx_compile(&regex_pool, &regex_current, pattern, extended,
-                          icase, escapes, policy);
+        return regex_compile_bytes(pattern, string_length(pattern), extended, icase, escapes, policy);
 }
 
 /*
