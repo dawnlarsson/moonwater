@@ -20193,6 +20193,25 @@ static positive clock_format_plain(p8 address_to into, positive max,
         {
                 if (address_to cursor != '%')
                 {
+                        //      A separator or two is the usual literal: walked
+                        //      by hand, since a call to find the next percent
+                        //      sign and another to copy cost more than the
+                        //      bytes. A longer run goes to the library.
+                        positive shortly = 0;
+
+                        while (shortly < 4 && cursor[shortly] != end && cursor[shortly] != '%')
+                                shortly++;
+                        if (shortly < 4)
+                        {
+                                if (max - at <= shortly)
+                                        return CLOCK_PLAIN_GIVE_UP;
+                                for (positive i = 0; i < shortly; i++)
+                                        into[at + i] = (p8)cursor[i];
+                                at += shortly;
+                                cursor += shortly;
+                                continue;
+                        }
+
                         const char address_to run =
                                 (const char address_to)string_first_of_or_end(
                                         (string_address)cursor, '%');
@@ -20207,10 +20226,30 @@ static positive clock_format_plain(p8 address_to into, positive max,
                 }
 
                 p8 which = (p8)cursor[1];
+                positive spelled = 2;
 
                 if (which == end)
                         return CLOCK_PLAIN_GIVE_UP;
-                cursor += 2;
+
+                //      The date and the time of day spelled out are %F and
+                //      %T, written the same: one directive's work and not
+                //      three's. Each test stops at the first byte that
+                //      differs, so it never reads past the end.
+                if (which == 'Y' && cursor[2] == '-' && cursor[3] == '%' &&
+                    cursor[4] == 'm' && cursor[5] == '-' && cursor[6] == '%' &&
+                    cursor[7] == 'd')
+                {
+                        which = 'F';
+                        spelled = 8;
+                }
+                else if (which == 'H' && cursor[2] == ':' && cursor[3] == '%' &&
+                         cursor[4] == 'M' && cursor[5] == ':' && cursor[6] == '%' &&
+                         cursor[7] == 'S')
+                {
+                        which = 'T';
+                        spelled = 8;
+                }
+                cursor += spelled;
 
                 //      Room for the longest thing any one directive writes
                 //      here (a composite is 24 bytes, a name 9, a zone name
