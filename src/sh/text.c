@@ -34577,41 +34577,139 @@ static positive sort_separator_from(p8 address_to at, positive length, positive 
         return found ? (positive)(found - at) : length;
 }
 
-static inline INLINE positive sort_field_edge(p8 address_to at,
-                                              positive length,
-                                              positive field, bool stop)
+/*
+        Where the count-th separator is, or the length when there are fewer.
+        One of them is a search; several are the list of them in one pass,
+        sixty four at a time, where a search apiece paid its call and its
+        setup for every field a key skipped.
+*/
+static positive sort_separator_nth(p8 address_to at, positive length, positive count)
 {
-        positive scan = 0;
-        positive first = stop ? 0 : 1;
+        p32 cuts[64];
+        positive base = 0;
 
-        if (sort_have_separator)
+        if (count < 2)
+                return count ? sort_separator_from(at, length, 0) : 0;
+
+        // A limit of sixty four, so that the wide body is the one that runs,
+        // over a stretch of the line at a time that a key rarely outruns.
+        while (base < length)
         {
-                for (positive i = first; i < field && scan < length; i++)
-                {
-                        scan = sort_separator_from(at, length, scan);
+                positive window = min(length - base, (positive)128);
+                positive found = memory_offsets_of_either(cuts, at + base, window,
+                                                          sort_separator, sort_separator,
+                                                          array_count(cuts));
 
-                        if (scan < length && (!stop || i + 1 < field))
-                                scan++;
-                }
+                if (found >= count)
+                        return base + cuts[count - 1];
 
-                return scan;
+                count -= found;
+                base += found == array_count(cuts) ? cuts[found - 1] + 1 : window;
         }
 
-        for (positive i = first; i < field && scan < length; i++)
+        return length;
+}
+
+// Where the count-th field ends: at its separator, or where the run of
+// bytes that are not blanks stops; the length when the line has fewer.
+static inline INLINE positive sort_field_end(p8 address_to at, positive length, positive count)
+{
+        if (!count)
+                return 0;
+
+        if (sort_have_separator)
+                return count == 1 ? sort_separator_from(at, length, 0)
+                                  : sort_separator_nth(at, length, count);
+
+        // A few fields are a few calls of the routine made for one; a list of
+        // them starts to pay a little further on.
+        if (count > 5)
+                return text_blank_skip(at, length, 0, count, '\n');
+
+        positive scan = 0;
+
+        for (positive i = 0; i < count && scan < length; i++)
                 scan = text_blank_field(at, length, scan, '\n').y;
 
         return scan;
 }
 
-#define sort_field_start(at, length, field)                                 \
-        sort_field_edge((at), (length), (field), false)
-#define sort_field_stop(at, length, field)                                  \
-        sort_field_edge((at), (length), (field), true)
+/*
+        Where the a-th and the b-th fields end, as sort_field_end finds each,
+        from one pass over the line when both are near enough to its front:
+        the separators (or the runs between blanks) a key asks for are listed
+        together, where a key's two edges were two searches and each field
+        skipped one more.
+*/
+static __attribute__((noinline)) fn sort_field_ends_listed(
+    p8 address_to at, positive length, positive a, positive b,
+    positive address_to end_a, positive address_to end_b)
+{
+        positive top = max(a, b);
+        p32 edges[64];
+
+        if (sort_have_separator)
+        {
+                positive window = min(length, (positive)256);
+                positive found = memory_offsets_of_either(edges, at, window,
+                                                          sort_separator, sort_separator,
+                                                          array_count(edges));
+
+                // Fewer than asked for in all of the line is a line with fewer fields.
+                if (found >= top || window == length)
+                {
+                        address_to end_a = !a ? 0 : a <= found ? edges[a - 1] : length;
+                        address_to end_b = !b ? 0 : b <= found ? edges[b - 1] : length;
+                        return;
+                }
+
+                address_to end_a = sort_field_end(at, length, a);
+                address_to end_b = sort_field_end(at, length, b);
+                return;
+        }
+
+        // Thirty two asked for, so that the wide body is the one that runs.
+        positive found = memory_offsets_fields_blank(edges, at, length, '\n', 32);
+
+        address_to end_a = !a ? 0 : a <= found ? edges[2 * a - 1] : length;
+        address_to end_b = !b ? 0 : b <= found ? edges[2 * b - 1] : length;
+}
+
+static inline INLINE fn sort_field_ends(p8 address_to at, positive length, positive a, positive b,
+                                        positive address_to end_a, positive address_to end_b)
+{
+        positive top = max(a, b);
+
+        if (top >= (sort_have_separator ? 2 : 6) && top <= 32)
+        {
+                sort_field_ends_listed(at, length, a, b, end_a, end_b);
+                return;
+        }
+
+        address_to end_a = sort_field_end(at, length, a);
+        address_to end_b = sort_field_end(at, length, b);
+}
+
+// What follows the end of a field: the separator is not part of the next one,
+// the blanks that end the last are.
+static inline INLINE positive sort_field_after(positive edge, positive length)
+{
+        return sort_have_separator && edge < length ? edge + 1 : edge;
+}
 
 static fn sort_key_span(sort_key address_to key, p8 address_to at, positive length,
                         positive address_to from, positive address_to to)
 {
-        positive begin = sort_field_start(at, length, key->first_field);
+        // The fields that end before the key's first, and before or at its last.
+        positive before = key->first_field > 1 ? key->first_field - 1 : 0;
+        positive last = !key->second_field ? 0
+                        : key->second_char ? key->second_field - 1
+                                           : key->second_field;
+        positive end_before, end_last;
+
+        sort_field_ends(at, length, before, last, address_of end_before, address_of end_last);
+
+        positive begin = before ? sort_field_after(end_before, length) : 0;
         positive finish = length;
 
         if (key->order.blanks[0])
@@ -34628,7 +34726,7 @@ static fn sort_key_span(sort_key address_to key, p8 address_to at, positive leng
         {
                 if (key->second_char)
                 {
-                        finish = sort_field_start(at, length, key->second_field);
+                        finish = last ? sort_field_after(end_last, length) : 0;
 
                         if (key->order.blanks[1])
                                 while (finish < length && sort_blanks[at[finish]])
@@ -34638,7 +34736,7 @@ static fn sort_key_span(sort_key address_to key, p8 address_to at, positive leng
                 }
                 else
                 {
-                        finish = sort_field_stop(at, length, key->second_field);
+                        finish = end_last;
                 }
         }
 
@@ -35500,6 +35598,24 @@ static PURE bipolar sort_version_walk(p8 address_to a, positive la, p8 address_t
         positive i = 0;
         positive j = 0;
 
+        /*
+                Names of a version list agree for a long way before they
+                differ, and the walk below goes a byte at a time through
+                what they agree on, which settles nothing. A walk may begin
+                anywhere both strings are between pieces: after bytes that
+                are alike, if the last of them is not a digit, and at the
+                front of the run of digits if it is, since a run of zeros and
+                the length of a number are read from where the run begins.
+        */
+        if (la >= 16 && lb >= 16)
+        {
+                positive same = memory_common_prefix(a, b, min(la, lb));
+
+                while (same && byte_is_digit(a[same - 1]))
+                        same--;
+                i = j = same;
+        }
+
         while (i < la || j < lb)
         {
                 bipolar first = 0;
@@ -35553,10 +35669,31 @@ static PURE positive sort_version_stem(p8 address_to at, positive length)
 {
         // From one, never zero: a name that is all suffix has no stem left to
         // compare, and .bashrc is a name rather than a suffix of nothing.
+        bool first_search = true;
+
         for (positive i = 1; i < length; i++)
         {
-                if (at[i] != '.')
-                        continue;
+                // The next dot. The first is a search, which is the whole of the
+                // work for a name with none; the ones after it are a few bytes
+                // looked at, since a name with one has several.
+                if (first_search || length - i > 32)
+                {
+                        string_address dot = memory_first_of(at + i, '.', length - i);
+
+                        first_search = false;
+                        if (!dot)
+                                break;
+
+                        i = (positive)(dot - at);
+                }
+                else
+                {
+                        while (i < length && at[i] != '.')
+                                i++;
+
+                        if (i == length)
+                                break;
+                }
 
                 positive j = i;
 
