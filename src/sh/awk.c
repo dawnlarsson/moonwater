@@ -1794,6 +1794,9 @@ static positive awk_readers_room;
 static b32 awk_reader_count;
 static awk_writer awk_standard_out;
 static bool awk_write_failed;
+static bipolar awk_write_reason;
+static bool awk_standard_warned;
+static bool awk_leaving;
 
 /*
         A write into a command's pipe whose reader has gone is refused, not
@@ -1819,16 +1822,23 @@ static fn awk_writer_loud(positive address_to previous)
         system_signal_action(AWK_SIGPIPE, previous, null, 8);
 }
 
+static fn awk_flush_refused(awk_writer address_to which);
+
 static bool awk_writer_flush(awk_writer address_to which)
 {
         positive previous[4];
         bool quiet = awk_writer_quiet(which, previous);
-        bool flushed = buffered_flush((positive)which->handle, which->buffer,
-                                      address_of which->used);
+        positive staged = which->used;
+        system_write_result put = {staged, 0};
+
+        if (staged)
+                put = system_write_all_checked((positive)which->handle,
+                                               which->buffer, staged);
+        which->used = 0;
 
         if (quiet)
                 awk_writer_loud(previous);
-        if (flushed)
+        if (put.bytes == staged)
                 return true;
 
         //      What is left in a command's pipe when it is closed, flushed or
@@ -1836,13 +1846,44 @@ static bool awk_writer_flush(awk_writer address_to which)
         //      gawk says nothing of it and still ends with 0: only a print
         //      or printf that finds the reader gone is refused.
         if (which->kind == AWK_TO_PIPE && which != address_of awk_standard_out)
-        {
-                which->used = 0;
                 return true;
-        }
 
         awk_write_failed = true;
+        awk_write_reason = put.error;
+        awk_flush_refused(which);
         return false;
+}
+
+/*
+        A flush the kernel refused, reported the way gawk reports it. A file
+        is fatal: the output is lost, and the program ends with 2 at the close,
+        the fflush or the exit that found it. Standard output at the exit only
+        warns and ends with 1, as gawk's does. Both forget what they staged
+        (awk_writer_flush has cleared it), so the exit that follows does not
+        write the same prefix again.
+*/
+static fn awk_flush_refused(awk_writer address_to which)
+{
+        if (which == address_of awk_standard_out)
+        {
+                if (!awk_leaving)
+                        awk_leave(string_report(writer_stderr, 2, "%s: flush to \"standard output\" failed: %s\n",
+                                                text_name, file_reason(awk_write_reason)));
+                if (!awk_standard_warned)
+                {
+                        awk_standard_warned = true;
+                        string_report(writer_stderr, 1, "%s: warning: error writing standard output: %s\n",
+                                      text_name, file_reason(awk_write_reason));
+                }
+                return;
+        }
+
+        //      What the program printed comes out before the diagnostic, as
+        //      gawk's does, and then the program ends.
+        awk_writer_flush(address_of awk_standard_out);
+        awk_leave(string_report(writer_stderr, 2, "%s: flush to \"%s\" failed: %s\n",
+                                text_name, which->name->text,
+                                file_reason(awk_write_reason)));
 }
 
 static bool awk_writer_put(awk_writer address_to which, string_address data, positive length)
@@ -5117,6 +5158,7 @@ static DEAD_END fn awk_leave(b32 code)
         // The redirections end before standard output goes out, as the
         // reference awk has it: a command still on a pipe writes first, and
         // what the program printed after opening it comes after.
+        awk_leaving = true;
         awk_close_everything();
         awk_writer_flush(address_of awk_standard_out);
 

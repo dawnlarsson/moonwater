@@ -24997,10 +24997,15 @@ UTIL_LINUX_UTILITIES = (
             stdin=("empty",), max_flags=3),
     #   A command that is closed is waited for with what the program printed
     #   before the close already out: the command's own line comes after
-    #   "got", as gawk's does.
+    #   "got", as gawk's does. A write the kernel refuses is fatal at the
+    #   close, the fflush or the exit that finds it, with status 2.
     Utility("awk_live", modes=("bash",), stderr="loose",
             script=ul_script("awk", "", ""),
-            operands=(("BEGIN { c = \"cat >/dev/null; sleep 1; echo child\"; print \"in\" | c; print \"got\"; close(c); print \"end\" }",),),
+            operands=(("BEGIN { c = \"cat >/dev/null; sleep 1; echo child\"; print \"in\" | c; print \"got\"; close(c); print \"end\" }",),
+                      ("BEGIN { print \"x\" > \"/dev/full\"; r = close(\"/dev/full\"); print \"close\", r }",),
+                      ("BEGIN { print \"x\" > \"/dev/full\"; r = fflush(\"/dev/full\"); print \"fflush\", r }",),
+                      ("BEGIN { print \"x\" > \"/dev/full\"; print \"after\" }",),
+                      ("BEGIN { printf \"x\\n\"; r = fflush(); print \"fflush\", r }",)),
             stdin=("empty",), max_flags=0),
     #   -w sleeps in the kernel until the holder lets go: the waiter's own
     #   voluntary context switches count the wake-up, which is a handful where
