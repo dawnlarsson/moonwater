@@ -353,13 +353,13 @@ static string_address lex_quote_end_kind(string_address at, p8 quote,
 static string_address parse_here_skip_bodies(string_address line,
                                               string_address newline);
 
-/* The expander enforces this same ceiling when it later evaluates the nested
-   words.  The earlier syntax walk must not be the unbounded recursive path.
-   Nested command substitutions a hundred and fifty deep work on lima 5.2.32;
-   sixty-four made the walk return unclosed and the line read as unexpected
-   EOF. Two hundred and fifty-six is enough for that family and still a bound
-   on C-stack recursion. */
-#define EXPAND_DEPTH 256
+/* How deep command and arithmetic substitutions may nest is what the stack
+   holds, as it is for groups and parentheses (parse_command, arith_primary):
+   the walk below recurses a frame a level, and asks the stack once the nesting
+   is deep enough to matter. A fixed ceiling of two hundred and fifty-six read
+   three hundred nested $( ) as unexpected EOF, where dash and bash run them. */
+#define EXPAND_DEPTH 1048576
+#define EXPAND_DEPTH_ASKED 256
 
 // The three bytes that separate words and lines. Asked in five places, which
 // used to be five spellings of the same three comparisons.
@@ -960,7 +960,8 @@ static string_address lex_nesting_at(string_address at, positive nesting,
         cases.count = 0;
         cases.command = true;
 
-        if (nesting >= EXPAND_DEPTH)
+        if (nesting >= EXPAND_DEPTH ||
+            (nesting >= EXPAND_DEPTH_ASKED && !shell_stack_within(50)))
                 return at;
 
         while (string_get(step))

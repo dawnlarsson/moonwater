@@ -9973,8 +9973,9 @@ static HOT string_address expand_dollar(string_address step, bool quoted)
         string_address result;
 
         // Deep enough. Something is expanding itself and the stack is the only
-        // thing that would notice.
-        if (expand_depth >= EXPAND_DEPTH)
+        // thing that would notice: as deep as the stack holds (lex.c).
+        if (expand_depth >= EXPAND_DEPTH ||
+            (expand_depth >= EXPAND_DEPTH_ASKED && !shell_stack_within(50)))
         {
                 expand_where();
                 string_format(writer_stderr_once, "Expansion nested too deeply\n");
