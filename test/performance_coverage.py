@@ -569,6 +569,13 @@ cover('correctness_only', 'test/checks.c#CHECK_zstd', 'zstd_dfast_parse',
       'zstd -3 timing, and the native arm64 row against gcc and clang builds '
       'of the C it replaces; test/codec_floor/reference/zstd_dfast_parse.c',
       anchors={'zstd_dfast_parse': 'fast_parse_walk'})
+cover('correctness_only', 'test/checks.c#CHECK_compression_floor', 'deflate_decode_marked',
+      'the values and bits of random token streams under skewed complete codes up to 15 '
+      'bits over a history of bytes and window-naming values, against a model that copies '
+      '16-bit values, stopping on a token boundary at every alignment against a protected '
+      'page, on three machines; end-to-end gunzip of a single member on the pool at 1 to '
+      '10 cores',
+      anchors={'deflate_decode_marked': 'floor_deflate_marked'})
 cover('correctness_only', 'test/checks.c#CHECK_compression_floor', 'deflate_decode_span',
       'all length/distance combinations with guard pages; end-to-end gzip '
       'timing is available, but there is no isolated token-loop timing row',

@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        394 routines (371 public, 23 local), 384 of them on all three and 10 local to one.
+        395 routines (372 public, 23 local), 385 of them on all three and 10 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -138,6 +138,7 @@
           decimal_to_string              public  yes     yes     yes
           decimal_truncated              public  yes     yes     yes
           decimal_with_sign              public  yes     yes     yes
+          deflate_decode_marked          public  yes     yes     yes
           deflate_decode_span            public  yes     yes     yes
           deflate_parse_chain            public  yes     yes     yes
           deflate_parse_fast             public  yes     yes     yes
@@ -13303,6 +13304,60 @@ __asm__(
     ".Linflate_x64_exit:  mov 8(%rsp),%r11\n   mov %rax,80(%r11)\n   movzbl %r14b,%ecx\n   mov %rcx,8(%r11)\n   mov $-1,%rax\n   shl %cl,%rax\n   not %rax\n   and %rax,%rbx\n"
     "mov %rbx,(%r11)\n   mov %rsi,16(%r11)\n   mov %rdi,32(%r11)\n   add $16,%rsp\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n" ASM_RET
     ASM_END(deflate_decode_span)
+    ASM_FUNC(deflate_decode_marked)
+    "push %rbx\n   push %rbp\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n   sub $16,%rsp\n   mov %rdi,8(%rsp)\n   mov (%rdi),%rbx\n   mov 8(%rdi),%r14\n   mov 16(%rdi),%rsi\n"
+    "mov 24(%rdi),%r13\n   mov 40(%rdi),%r10\n   mov 48(%rdi),%rax\n   mov %rax,(%rsp)\n   mov 56(%rdi),%rbp\n   mov 64(%rdi),%r15\n   mov 72(%rdi),%r12\n   mov 32(%rdi),%rdi\n"
+    "mov %r13,%rax\n   sub %rsi,%rax\n   cmp $33,%rax\n   jl .Lmarked_x64_margin\n   mov %r10,%rax\n   sub %rdi,%rax\n   cmp $601,%rax\n   jl .Lmarked_x64_margin\n   sub $32,%r13\n"
+    "sub $600,%r10\n   mov %r14d,%ecx\n   mov (%rsi),%r11\n   shl %cl,%r11\n   or %r11,%rbx\n   xor $63,%ecx\n   shr $3,%ecx\n   add %rcx,%rsi\n   or $56,%r14d\n   mov %ebx,%eax\n"
+    "and $2047,%eax\n   mov (%rbp,%rax,4),%ecx\n"
+    ".Lmarked_x64_top:  test %ecx,%ecx\n   jns .Lmarked_x64_plain0\n   shr %cl,%rbx\n   sub %cl,%r14b\n   movzbl %ch,%ecx\n   mov %cx,(%rdi)\n   mov %ebx,%eax\n   and $2047,%eax\n   mov (%rbp,%rax,4),%ecx\n"
+    "test %ecx,%ecx\n   jns .Lmarked_x64_plain1\n   shr %cl,%rbx\n   sub %cl,%r14b\n   movzbl %ch,%ecx\n   mov %cx,2(%rdi)\n   mov %ebx,%eax\n   and $2047,%eax\n   mov (%rbp,%rax,4),%ecx\n   test %ecx,%ecx\n"
+    "jns .Lmarked_x64_plain2\n   shr %cl,%rbx\n   sub %cl,%r14b\n   movzbl %ch,%ecx\n   mov %cx,4(%rdi)\n   add $6,%rdi\n   mov %ebx,%eax\n   and $2047,%eax\n   mov %r14d,%ecx\n   mov (%rsi),%r11\n"
+    "shl %cl,%r11\n   or %r11,%rbx\n   xor $63,%ecx\n   shr $3,%ecx\n   add %rcx,%rsi\n   or $56,%r14d\n   mov (%rbp,%rax,4),%ecx\n   cmp %r13,%rsi\n   jae .Lmarked_x64_margin\n"
+    "cmp %r10,%rdi\n   jb .Lmarked_x64_top\n   jmp .Lmarked_x64_margin\n"
+    ".Lmarked_x64_plain2:  add $4,%rdi\n   jmp .Lmarked_x64_worn\n"
+    ".Lmarked_x64_plain1:  add $2,%rdi\n"
+    ".Lmarked_x64_worn:  test $0x80,%ch\n   jnz .Lmarked_x64_exc\n   shr %cl,%rbx\n   sub %cl,%r14b\n   shr $16,%ecx\n   add %ecx,%ecx\n   mov %ecx,%r8d\n   cmp $30,%r14b\n   ja .Lmarked_x64_offset\n"
+    "mov %r14d,%ecx\n   mov (%rsi),%r11\n   shl %cl,%r11\n   or %r11,%rbx\n   xor $63,%ecx\n   shr $3,%ecx\n   add %rcx,%rsi\n   or $56,%r14d\n   jmp .Lmarked_x64_offset\n"
+    ".Lmarked_x64_plain0:  test $0x80,%ch\n   jnz .Lmarked_x64_exc\n   shr %cl,%rbx\n   sub %cl,%r14b\n   shr $16,%ecx\n   add %ecx,%ecx\n   mov %ecx,%r8d\n"
+    ".Lmarked_x64_offset:  movzbl %bl,%eax\n   mov (%r15,%rax,4),%ecx\n   test $0x80,%ch\n   jnz .Lmarked_x64_offset_exc\n"
+    ".Lmarked_x64_offset_cell:  mov %rbx,%rax\n   shr %cl,%rbx\n   sub %cl,%r14b\n   mov $-1,%edx\n   shl %cl,%edx\n   not %edx\n   and %edx,%eax\n   mov %ch,%cl\n   shr %cl,%eax\n"
+    "shr $16,%ecx\n   add %ecx,%eax\n   add %eax,%eax\n   mov %rdi,%rdx\n   sub %rax,%rdx\n   cmp (%rsp),%rdx\n   jb .Lmarked_x64_far\n   cmp $8,%eax\n   jb .Lmarked_x64_near\n   mov %ebx,%eax\n"
+    "and $2047,%eax\n   mov %r14d,%ecx\n   mov (%rsi),%r11\n   shl %cl,%r11\n   or %r11,%rbx\n   xor $63,%ecx\n   shr $3,%ecx\n   add %rcx,%rsi\n   or $56,%r14d\n   mov (%rbp,%rax,4),%ecx\n"
+    "mov (%rdx),%r11\n   mov %r11,(%rdi)\n   mov 8(%rdx),%r11\n   mov %r11,8(%rdi)\n   mov 16(%rdx),%r11\n   mov %r11,16(%rdi)\n   mov 24(%rdx),%r11\n   mov %r11,24(%rdi)\n   add %r8,%rdi\n"
+    "cmp $32,%r8d\n   ja .Lmarked_x64_words_long\n   cmp %r13,%rsi\n   jae .Lmarked_x64_margin\n   cmp %r10,%rdi\n   jb .Lmarked_x64_top\n   jmp .Lmarked_x64_margin\n"
+    ".Lmarked_x64_words_long:  mov %rdi,%r9\n   sub %r8,%r9\n   add $32,%r9\n   add $32,%rdx\n"
+    ".Lmarked_x64_words_loop:  mov (%rdx),%r11\n   mov %r11,(%r9)\n   mov 8(%rdx),%r11\n   mov %r11,8(%r9)\n   mov 16(%rdx),%r11\n   mov %r11,16(%r9)\n   mov 24(%rdx),%r11\n"
+    "mov %r11,24(%r9)\n   add $32,%rdx\n   add $32,%r9\n   cmp %rdi,%r9\n   jb .Lmarked_x64_words_loop\n   jmp .Lmarked_x64_check\n"
+    ".Lmarked_x64_near:  mov %eax,%r9d\n   mov %ebx,%eax\n   and $2047,%eax\n   mov %r14d,%ecx\n   mov (%rsi),%r11\n   shl %cl,%r11\n   or %r11,%rbx\n   xor $63,%ecx\n   shr $3,%ecx\n"
+    "add %rcx,%rsi\n   or $56,%r14d\n   mov (%rbp,%rax,4),%ecx\n   lea (%rdi,%r8),%rax\n   cmp $8,%r9d\n   jb .Lmarked_x64_tiny\n"
+    ".Lmarked_x64_near_words:  mov (%rdx),%r11\n   mov %r11,(%rdi)\n   mov 8(%rdx),%r11\n   mov %r11,8(%rdi)\n   add $16,%rdx\n   add $16,%rdi\n   cmp %rax,%rdi\n"
+    "jb .Lmarked_x64_near_words\n   mov %rax,%rdi\n"
+    ".Lmarked_x64_check:  cmp %r13,%rsi\n   jae .Lmarked_x64_margin\n   cmp %r10,%rdi\n   jb .Lmarked_x64_top\n   jmp .Lmarked_x64_margin\n"
+    ".Lmarked_x64_tiny:  cmp $1,%r9d\n   jne .Lmarked_x64_stride\n   movzbl (%rdx),%r11d\n   movabsq $0x0101010101010101,%rdx\n   imul %rdx,%r11\n"
+    ".Lmarked_x64_splat:  mov %r11,(%rdi)\n   mov %r11,8(%rdi)\n   add $16,%rdi\n   cmp %rax,%rdi\n   jb .Lmarked_x64_splat\n   mov %rax,%rdi\n   jmp .Lmarked_x64_check\n"
+    ".Lmarked_x64_stride:  mov (%rdx),%r11\n   mov %r11,(%rdi)\n   add %r9,%rdx\n   add %r9,%rdi\n   cmp %rax,%rdi\n   jb .Lmarked_x64_stride\n   mov %rax,%rdi\n"
+    "jmp .Lmarked_x64_check\n"
+    ".Lmarked_x64_exc:  test $0x20,%ch\n   jnz .Lmarked_x64_end\n   test $0x40,%ch\n   jz .Lmarked_x64_bad_litlen\n   shr %cl,%rbx\n   sub %cl,%r14b\n   mov %ecx,%edx\n   shr $8,%edx\n"
+    "and $15,%edx\n   mov (%r12,%rdx,4),%eax\n   and %ebx,%eax\n   shr $16,%ecx\n   add %ecx,%eax\n   mov (%rbp,%rax,4),%ecx\n   test %ecx,%ecx\n   jns .Lmarked_x64_sub_plain\n"
+    "shr %cl,%rbx\n   sub %cl,%r14b\n   movzbl %ch,%ecx\n   mov %cx,(%rdi)\n   add $2,%rdi\n   mov %ebx,%eax\n   and $2047,%eax\n   mov %r14d,%ecx\n   mov (%rsi),%r11\n   shl %cl,%r11\n   or %r11,%rbx\n"
+    "xor $63,%ecx\n   shr $3,%ecx\n   add %rcx,%rsi\n   or $56,%r14d\n   mov (%rbp,%rax,4),%ecx\n   jmp .Lmarked_x64_check\n"
+    ".Lmarked_x64_sub_plain:  test $0x80,%ch\n   jnz .Lmarked_x64_sub_exc\n   shr %cl,%rbx\n   sub %cl,%r14b\n   shr $16,%ecx\n   add %ecx,%ecx\n   mov %ecx,%r8d\n   cmp $30,%r14b\n"
+    "ja .Lmarked_x64_offset\n   mov %r14d,%ecx\n   mov (%rsi),%r11\n   shl %cl,%r11\n   or %r11,%rbx\n   xor $63,%ecx\n   shr $3,%ecx\n   add %rcx,%rsi\n   or $56,%r14d\n"
+    "jmp .Lmarked_x64_offset\n"
+    ".Lmarked_x64_sub_exc:  test $0x20,%ch\n   jz .Lmarked_x64_bad_litlen\n"
+    ".Lmarked_x64_end:  shr %cl,%rbx\n   sub %cl,%r14b\n   mov $1,%eax\n   jmp .Lmarked_x64_exit\n"
+    ".Lmarked_x64_offset_exc:  test $0x40,%ch\n   jz .Lmarked_x64_bad_offset\n   mov %ecx,%edx\n   cmp $37,%r14b\n   ja .Lmarked_x64_offset_sub\n   mov %r14d,%ecx\n   mov (%rsi),%r11\n"
+    "shl %cl,%r11\n   or %r11,%rbx\n   xor $63,%ecx\n   shr $3,%ecx\n   add %rcx,%rsi\n   or $56,%r14d\n"
+    ".Lmarked_x64_offset_sub:  shr $8,%rbx\n   sub $8,%r14b\n   mov %edx,%ecx\n   shr $8,%ecx\n   and $15,%ecx\n   mov (%r12,%rcx,4),%eax\n   and %ebx,%eax\n   shr $16,%edx\n"
+    "add %edx,%eax\n   mov (%r15,%rax,4),%ecx\n   test $0x80,%ch\n   jz .Lmarked_x64_offset_cell\n"
+    ".Lmarked_x64_bad_offset:  mov $3,%eax\n   jmp .Lmarked_x64_exit\n"
+    ".Lmarked_x64_bad_litlen:  mov $2,%eax\n   jmp .Lmarked_x64_exit\n"
+    ".Lmarked_x64_far:  mov $4,%eax\n   jmp .Lmarked_x64_exit\n"
+    ".Lmarked_x64_margin:  xor %eax,%eax\n"
+    ".Lmarked_x64_exit:  mov 8(%rsp),%r11\n   mov %rax,80(%r11)\n   movzbl %r14b,%ecx\n   mov %rcx,8(%r11)\n   mov $-1,%rax\n   shl %cl,%rax\n   not %rax\n   and %rax,%rbx\n"
+    "mov %rbx,(%r11)\n   mov %rsi,16(%r11)\n   mov %rdi,32(%r11)\n   add $16,%rsp\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n" ASM_RET
+    ASM_END(deflate_decode_marked)
 
     /* Encode a backwards Huffman stream, including its terminal 1 bit.
        Each table cell has the code in bits 0..15 and length (1..11) in
@@ -21969,6 +22024,52 @@ __asm__(
     ".Linflate_arm64_margin:  mov x12, #0\n"
     ".Linflate_arm64_exit:  mov x13, #-1\n   lsl x13, x13, x4\n   bic x3, x3, x13\n   stp x3, x4, [x0]\n   str x2, [x0, #16]\n   str x1, [x0, #32]\n   str x12, [x0, #80]\n" ASM_RET
     ASM_END(deflate_decode_span)
+    ASM_FUNC(deflate_decode_marked)
+    "ldp x3, x4, [x0]\n   ldp x2, x9, [x0, #16]\n   ldp x1, x10, [x0, #32]\n   ldp x11, x6, [x0, #48]\n   ldp x7, x8, [x0, #64]\n   sub x12, x9, x2\n   cmp x12, #33\n"
+    "b.lt .Lmarked_arm64_margin\n   sub x12, x10, x1\n   cmp x12, #601\n   b.lt .Lmarked_arm64_margin\n   sub x9, x9, #32\n   sub x10, x10, #600\n   ldr x16, [x2]\n   lsl x16, x16, x4\n"
+    "orr x3, x3, x16\n   add x2, x2, #7\n   sub x2, x2, x4, lsr #3\n   orr x4, x4, #56\n   and x13, x3, #2047\n   ldr w5, [x6, x13, lsl #2]\n"
+    ".Lmarked_arm64_top:  tbz w5, #31, .Lmarked_arm64_plain0\n   lsr x3, x3, x5\n   sub x4, x4, w5, uxtb\n   lsr w12, w5, #8\n   strh w12, [x1]\n   and x13, x3, #2047\n"
+    "ldr w5, [x6, x13, lsl #2]\n   tbz w5, #31, .Lmarked_arm64_plain1\n   lsr x3, x3, x5\n   sub x4, x4, w5, uxtb\n   lsr w12, w5, #8\n   strh w12, [x1, #2]\n   and x13, x3, #2047\n"
+    "ldr w5, [x6, x13, lsl #2]\n   tbz w5, #31, .Lmarked_arm64_plain2\n   lsr x3, x3, x5\n   sub x4, x4, w5, uxtb\n   lsr w12, w5, #8\n   strh w12, [x1, #4]\n   add x1, x1, #6\n"
+    "and x13, x3, #2047\n   ldr x16, [x2]\n   lsl x16, x16, x4\n   orr x3, x3, x16\n   add x2, x2, #7\n   sub x2, x2, x4, lsr #3\n   orr x4, x4, #56\n   ldr w5, [x6, x13, lsl #2]\n"
+    "cmp x2, x9\n   ccmp x1, x10, #2, lo\n   b.lo .Lmarked_arm64_top\n   b .Lmarked_arm64_margin\n"
+    ".Lmarked_arm64_plain2:  add x1, x1, #4\n   b .Lmarked_arm64_worn\n"
+    ".Lmarked_arm64_plain1:  add x1, x1, #2\n"
+    ".Lmarked_arm64_worn:  tbnz w5, #15, .Lmarked_arm64_exc\n   lsr x3, x3, x5\n   sub x4, x4, w5, uxtb\n   lsr w14, w5, #16\n   lsl w14, w14, #1\n   cmp x4, #30\n   b.hi .Lmarked_arm64_offset\n"
+    "ldr x16, [x2]\n   lsl x16, x16, x4\n   orr x3, x3, x16\n   add x2, x2, #7\n   sub x2, x2, x4, lsr #3\n   orr x4, x4, #56\n   b .Lmarked_arm64_offset\n"
+    ".Lmarked_arm64_plain0:  tbnz w5, #15, .Lmarked_arm64_exc\n   lsr x3, x3, x5\n   sub x4, x4, w5, uxtb\n   lsr w14, w5, #16\n   lsl w14, w14, #1\n"
+    ".Lmarked_arm64_offset:  and x13, x3, #255\n   ldr w5, [x7, x13, lsl #2]\n   tbnz w5, #15, .Lmarked_arm64_offset_exc\n"
+    ".Lmarked_arm64_offset_cell:  and w13, w5, #255\n   ldr w12, [x8, x13, lsl #2]\n   and x12, x12, x3\n   lsr w15, w5, #8\n   lsr x12, x12, x15\n   lsr x3, x3, x5\n"
+    "sub x4, x4, w5, uxtb\n   add x12, x12, x5, lsr #16\n   lsl x12, x12, #1\n   sub x13, x1, x12\n   cmp x13, x11\n   b.lo .Lmarked_arm64_far\n   cmp x12, #8\n   b.lo .Lmarked_arm64_near\n"
+    "and x15, x3, #2047\n   ldr x16, [x2]\n   lsl x16, x16, x4\n   orr x3, x3, x16\n   add x2, x2, #7\n   sub x2, x2, x4, lsr #3\n   orr x4, x4, #56\n   ldr w5, [x6, x15, lsl #2]\n"
+    "ldr x16, [x13]\n   str x16, [x1]\n   ldr x16, [x13, #8]\n   str x16, [x1, #8]\n   ldr x16, [x13, #16]\n   str x16, [x1, #16]\n   ldr x16, [x13, #24]\n   str x16, [x1, #24]\n"
+    "add x1, x1, x14\n   cmp w14, #32\n   b.hi .Lmarked_arm64_long\n   cmp x2, x9\n   ccmp x1, x10, #2, lo\n   b.lo .Lmarked_arm64_top\n   b .Lmarked_arm64_margin\n"
+    ".Lmarked_arm64_long:  sub x15, x1, x14\n   add x15, x15, #32\n   add x13, x13, #32\n"
+    ".Lmarked_arm64_long_loop:  ldr x16, [x13], #8\n   str x16, [x15], #8\n   cmp x15, x1\n   b.lo .Lmarked_arm64_long_loop\n   b .Lmarked_arm64_check\n"
+    ".Lmarked_arm64_near:  and x15, x3, #2047\n   ldr x16, [x2]\n   lsl x16, x16, x4\n   orr x3, x3, x16\n   add x2, x2, #7\n   sub x2, x2, x4, lsr #3\n   orr x4, x4, #56\n"
+    "ldr w5, [x6, x15, lsl #2]\n   add x14, x1, x14\n"
+    ".Lmarked_arm64_tiny:  cmp x12, #1\n   b.ne .Lmarked_arm64_stride\n   ldrb w16, [x13]\n   mov x17, #0x0101010101010101\n   mul x16, x16, x17\n"
+    ".Lmarked_arm64_splat:  stp x16, x16, [x1], #16\n   cmp x1, x14\n   b.lo .Lmarked_arm64_splat\n   mov x1, x14\n   b .Lmarked_arm64_check\n"
+    ".Lmarked_arm64_stride:  ldr x16, [x13]\n   str x16, [x1]\n   add x13, x13, x12\n   add x1, x1, x12\n   cmp x1, x14\n   b.lo .Lmarked_arm64_stride\n   mov x1, x14\n"
+    ".Lmarked_arm64_check:  cmp x2, x9\n   ccmp x1, x10, #2, lo\n   b.lo .Lmarked_arm64_top\n   b .Lmarked_arm64_margin\n"
+    ".Lmarked_arm64_exc:  tbnz w5, #13, .Lmarked_arm64_end\n   tbz w5, #14, .Lmarked_arm64_bad_litlen\n   lsr x3, x3, x5\n   sub x4, x4, w5, uxtb\n   lsr w12, w5, #8\n"
+    "and w12, w12, #15\n   ldr w12, [x8, x12, lsl #2]\n   and x12, x12, x3\n   add x12, x12, x5, lsr #16\n   ldr w5, [x6, x12, lsl #2]\n   tbz w5, #31, .Lmarked_arm64_sub_plain\n"
+    "lsr x3, x3, x5\n   sub x4, x4, w5, uxtb\n   lsr w12, w5, #8\n   strh w12, [x1], #2\n   and x15, x3, #2047\n   ldr x16, [x2]\n   lsl x16, x16, x4\n   orr x3, x3, x16\n"
+    "add x2, x2, #7\n   sub x2, x2, x4, lsr #3\n   orr x4, x4, #56\n   ldr w5, [x6, x15, lsl #2]\n   b .Lmarked_arm64_check\n"
+    ".Lmarked_arm64_sub_plain:  tbnz w5, #15, .Lmarked_arm64_sub_exc\n   lsr x3, x3, x5\n   sub x4, x4, w5, uxtb\n   lsr w14, w5, #16\n   lsl w14, w14, #1\n   cmp x4, #30\n   b.hi .Lmarked_arm64_offset\n"
+    "ldr x16, [x2]\n   lsl x16, x16, x4\n   orr x3, x3, x16\n   add x2, x2, #7\n   sub x2, x2, x4, lsr #3\n   orr x4, x4, #56\n   b .Lmarked_arm64_offset\n"
+    ".Lmarked_arm64_sub_exc:  tbz w5, #13, .Lmarked_arm64_bad_litlen\n"
+    ".Lmarked_arm64_end:  lsr x3, x3, x5\n   sub x4, x4, w5, uxtb\n   mov x12, #1\n   b .Lmarked_arm64_exit\n"
+    ".Lmarked_arm64_offset_exc:  tbz w5, #14, .Lmarked_arm64_bad_offset\n   cmp x4, #37\n   b.hi .Lmarked_arm64_offset_sub\n   ldr x16, [x2]\n   lsl x16, x16, x4\n   orr x3, x3, x16\n"
+    "add x2, x2, #7\n   sub x2, x2, x4, lsr #3\n   orr x4, x4, #56\n"
+    ".Lmarked_arm64_offset_sub:  lsr x3, x3, #8\n   sub x4, x4, #8\n   lsr w12, w5, #8\n   and w12, w12, #15\n   ldr w12, [x8, x12, lsl #2]\n   and x12, x12, x3\n"
+    "add x12, x12, x5, lsr #16\n   ldr w5, [x7, x12, lsl #2]\n   tbz w5, #15, .Lmarked_arm64_offset_cell\n"
+    ".Lmarked_arm64_bad_offset:  mov x12, #3\n   b .Lmarked_arm64_exit\n"
+    ".Lmarked_arm64_bad_litlen:  mov x12, #2\n   b .Lmarked_arm64_exit\n"
+    ".Lmarked_arm64_far:  mov x12, #4\n   b .Lmarked_arm64_exit\n"
+    ".Lmarked_arm64_margin:  mov x12, #0\n"
+    ".Lmarked_arm64_exit:  mov x13, #-1\n   lsl x13, x13, x4\n   bic x3, x3, x13\n   stp x3, x4, [x0]\n   str x2, [x0, #16]\n   str x1, [x0, #32]\n   str x12, [x0, #80]\n" ASM_RET
+    ASM_END(deflate_decode_marked)
 
     ASM_FUNC(huffman_encode_back)
     "mov x8, x0\n   cbz x2, .Lhuf_enc_arm64_7\n   mov w4, 0\n   mov x6, 0\n"
@@ -30015,6 +30116,47 @@ __asm__(
     ".Linflate_rv_exit:  li t4, -1\n   sll t4, t4, a4\n   not t4, t4\n   and a3, a3, t4\n   sd a3, 0(a0)\n   sd a4, 8(a0)\n   sd a2, 16(a0)\n   sd a1, 32(a0)\n   sd t5, 80(a0)\n"
     "ld s1, 0(sp)\n   ld s2, 8(sp)\n   ld s3, 16(sp)\n   addi sp, sp, 32\n" ASM_RET
     ASM_END(deflate_decode_span)
+    ASM_FUNC(deflate_decode_marked)
+    "addi sp, sp, -32\n   sd s1, 0(sp)\n   sd s2, 8(sp)\n   sd s3, 16(sp)\n   li s3, 32\n   ld a3, 0(a0)\n   ld a4, 8(a0)\n   ld a2, 16(a0)\n   ld t1, 24(a0)\n   ld a1, 32(a0)\n"
+    "ld t2, 40(a0)\n   ld t3, 48(a0)\n   ld a6, 56(a0)\n   ld a7, 64(a0)\n   ld t0, 72(a0)\n   sub t4, t1, a2\n   li t5, 33\n   blt t4, t5, .Lmarked_rv_margin\n   sub t4, t2, a1\n"
+    "li t5, 601\n   blt t4, t5, .Lmarked_rv_margin\n   addi t1, t1, -32\n   addi t2, t2, -600\n"
+    ".Lmarked_rv_top:  bgeu a4, s3, .Lmarked_rv_r1_done\n"
+    ".Lmarked_rv_r1_loop:  andi t6, a2, 3\n   bnez t6, .Lmarked_rv_r1_byte\n   lwu t6, 0(a2)\n   sll t6, t6, a4\n   or a3, a3, t6\n   addi a2, a2, 4\n   addi a4, a4, 32\n"
+    "j .Lmarked_rv_r1_done\n"
+    ".Lmarked_rv_r1_byte:  lbu t6, 0(a2)\n   sll t6, t6, a4\n   or a3, a3, t6\n   addi a2, a2, 1\n   addi a4, a4, 8\n   bltu a4, s3, .Lmarked_rv_r1_loop\n"
+    ".Lmarked_rv_r1_done:  andi t4, a3, 2047\n   slli t4, t4, 2\n   add t4, a6, t4\n   lw a5, 0(t4)\n   bgez a5, .Lmarked_rv_plain0\n   srl a3, a3, a5\n   andi t4, a5, 255\n"
+    "sub a4, a4, t4\n   srli t4, a5, 8\n   sh t4, 0(a1)\n   andi t4, a3, 2047\n   slli t4, t4, 2\n   add t4, a6, t4\n   lw a5, 0(t4)\n   bgez a5, .Lmarked_rv_plain1\n   srl a3, a3, a5\n"
+    "andi t4, a5, 255\n   sub a4, a4, t4\n   srli t4, a5, 8\n   sh t4, 2(a1)\n   addi a1, a1, 4\n   bgeu a2, t1, .Lmarked_rv_margin\n   bltu a1, t2, .Lmarked_rv_top\n"
+    "j .Lmarked_rv_margin\n"
+    ".Lmarked_rv_plain1:  addi a1, a1, 2\n"
+    ".Lmarked_rv_plain0:  slli t4, a5, 48\n   bltz t4, .Lmarked_rv_exc\n   srl a3, a3, a5\n   andi t4, a5, 255\n   sub a4, a4, t4\n   srliw s1, a5, 16\n   slli s1, s1, 1\n"
+    ".Lmarked_rv_offset:  bgeu a4, s3, .Lmarked_rv_r2_done\n"
+    ".Lmarked_rv_r2_loop:  andi t6, a2, 3\n   bnez t6, .Lmarked_rv_r2_byte\n   lwu t6, 0(a2)\n   sll t6, t6, a4\n   or a3, a3, t6\n   addi a2, a2, 4\n   addi a4, a4, 32\n"
+    "j .Lmarked_rv_r2_done\n"
+    ".Lmarked_rv_r2_byte:  lbu t6, 0(a2)\n   sll t6, t6, a4\n   or a3, a3, t6\n   addi a2, a2, 1\n   addi a4, a4, 8\n   bltu a4, s3, .Lmarked_rv_r2_loop\n"
+    ".Lmarked_rv_r2_done:  andi t4, a3, 255\n   slli t4, t4, 2\n   add t4, a7, t4\n   lw a5, 0(t4)\n   slli t4, a5, 48\n   bltz t4, .Lmarked_rv_offset_exc\n"
+    ".Lmarked_rv_offset_cell:  andi t4, a5, 255\n   slli t4, t4, 2\n   add t4, t0, t4\n   lwu t4, 0(t4)\n   and t4, t4, a3\n   srli t5, a5, 8\n   srl t4, t4, t5\n   srl a3, a3, a5\n"
+    "andi t5, a5, 255\n   sub a4, a4, t5\n   srliw t5, a5, 16\n   add t4, t4, t5\n   slli t4, t4, 1\n   sub s2, a1, t4\n   bltu s2, t3, .Lmarked_rv_far\n   add s1, a1, s1\n"
+    ".Lmarked_rv_copy:  lbu t5, 0(s2)\n   sb t5, 0(a1)\n   lbu t5, 1(s2)\n   sb t5, 1(a1)\n   lbu t5, 2(s2)\n   sb t5, 2(a1)\n   lbu t5, 3(s2)\n   sb t5, 3(a1)\n   lbu t5, 4(s2)\n"
+    "sb t5, 4(a1)\n   lbu t5, 5(s2)\n   sb t5, 5(a1)\n   lbu t5, 6(s2)\n   sb t5, 6(a1)\n   lbu t5, 7(s2)\n   sb t5, 7(a1)\n   addi s2, s2, 8\n   addi a1, a1, 8\n"
+    "bltu a1, s1, .Lmarked_rv_copy\n   mv a1, s1\n   bgeu a2, t1, .Lmarked_rv_margin\n   bltu a1, t2, .Lmarked_rv_top\n   j .Lmarked_rv_margin\n"
+    ".Lmarked_rv_exc:  slli t4, a5, 50\n   bltz t4, .Lmarked_rv_end\n   slli t4, a5, 49\n   bgez t4, .Lmarked_rv_bad_litlen\n   srl a3, a3, a5\n   andi t4, a5, 255\n   sub a4, a4, t4\n"
+    "srli t4, a5, 8\n   andi t4, t4, 15\n   slli t4, t4, 2\n   add t4, t0, t4\n   lwu t4, 0(t4)\n   and t4, t4, a3\n   srliw t5, a5, 16\n   add t4, t4, t5\n   slli t4, t4, 2\n"
+    "add t4, a6, t4\n   lw a5, 0(t4)\n   bgez a5, .Lmarked_rv_sub_plain\n   srl a3, a3, a5\n   andi t4, a5, 255\n   sub a4, a4, t4\n   srli t4, a5, 8\n   sh t4, 0(a1)\n   addi a1, a1, 2\n"
+    "bgeu a2, t1, .Lmarked_rv_margin\n   bltu a1, t2, .Lmarked_rv_top\n   j .Lmarked_rv_margin\n"
+    ".Lmarked_rv_sub_plain:  slli t4, a5, 48\n   bltz t4, .Lmarked_rv_sub_exc\n   srl a3, a3, a5\n   andi t4, a5, 255\n   sub a4, a4, t4\n   srliw s1, a5, 16\n   slli s1, s1, 1\n   j .Lmarked_rv_offset\n"
+    ".Lmarked_rv_sub_exc:  slli t4, a5, 50\n   bgez t4, .Lmarked_rv_bad_litlen\n"
+    ".Lmarked_rv_end:  srl a3, a3, a5\n   andi t4, a5, 255\n   sub a4, a4, t4\n   li t5, 1\n   j .Lmarked_rv_exit\n"
+    ".Lmarked_rv_offset_exc:  slli t4, a5, 49\n   bgez t4, .Lmarked_rv_bad_offset\n   srli a3, a3, 8\n   addi a4, a4, -8\n   srli t4, a5, 8\n   andi t4, t4, 15\n   slli t4, t4, 2\n"
+    "add t4, t0, t4\n   lwu t4, 0(t4)\n   and t4, t4, a3\n   srliw t5, a5, 16\n   add t4, t4, t5\n   slli t4, t4, 2\n   add t4, a7, t4\n   lw a5, 0(t4)\n   slli t4, a5, 48\n"
+    "bgez t4, .Lmarked_rv_offset_cell\n"
+    ".Lmarked_rv_bad_offset:  li t5, 3\n   j .Lmarked_rv_exit\n"
+    ".Lmarked_rv_bad_litlen:  li t5, 2\n   j .Lmarked_rv_exit\n"
+    ".Lmarked_rv_far:  li t5, 4\n   j .Lmarked_rv_exit\n"
+    ".Lmarked_rv_margin:  li t5, 0\n"
+    ".Lmarked_rv_exit:  li t4, -1\n   sll t4, t4, a4\n   not t4, t4\n   and a3, a3, t4\n   sd a3, 0(a0)\n   sd a4, 8(a0)\n   sd a2, 16(a0)\n   sd a1, 32(a0)\n   sd t5, 80(a0)\n"
+    "ld s1, 0(sp)\n   ld s2, 8(sp)\n   ld s3, 16(sp)\n   addi sp, sp, 32\n" ASM_RET
+    ASM_END(deflate_decode_marked)
 
     ASM_FUNC(huffman_encode_back)
     "beq a2,zero,.Lhuf_enc_rv_7\n   addi a5,a1,-1\n   add a2,a5,a2\n   mv a7,a0\n   li a5,0\n   li a4,0\n   li t4,31\n"
@@ -36271,6 +36413,12 @@ fn memory_copy_match(address_any dest, positive offset, positive length);
 /* 48-byte LZMA range-encoder state; see assembly for mode and bounds. */
 /* Primary-table deflate span (11-bit literal, 8-bit distance), 88-byte job; see assembly for the layout. */
 READS_WRITES(1) fn deflate_decode_span(address_any job);
+/* deflate_decode_span with 16-bit output, for a chunk of a stream whose
+   window is not known: out, out_limit and window are addresses in an array of
+   16-bit values, a match copies values, and the caller keeps the kernel to
+   output at least 32768 values from window, so no distance reaches before
+   it. The room it wants is twice the span kernel's. */
+READS_WRITES(1) fn deflate_decode_marked(address_any job);
 READS_WRITES(1) fn lzma_decode_span(address_any job);
 /* Exact backwards Huffman output, at most ceil((11*n+1)/8) bytes. */
 positive huffman_encode_back(address_any dest, address_any src, positive n,

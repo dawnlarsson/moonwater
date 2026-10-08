@@ -114159,6 +114159,124 @@ static fn floor_deflate_codes(void)
         memory_free(output, 30 * FLOOR_PAGE);
 }
 
+/* deflate_decode_marked against a model over the streams floor_deflate_codes
+   makes: the same random tokens under skewed complete codes, written as
+   16-bit values over a 32768-value history that is part bytes and part
+   values naming the window (a value is nothing to the kernel but a value,
+   copied as it stands). It must stop on a token boundary with exactly that
+   token prefix and exactly its bits, from every alignment of the end of its
+   output against a protected page. */
+static fn floor_deflate_marked(void)
+{
+        static p32 freq[GZIP_MAXLIT + GZIP_MAXDIST];
+        static p8 lens[GZIP_MAXLIT + GZIP_MAXDIST];
+        static p32 revs[GZIP_MAXLIT + GZIP_MAXDIST];
+        static p32 lit[GZIP_LITLEN_CELLS], dist[GZIP_OFFSET_CELLS];
+        static p8 packed[24 * FLOOR_PAGE_STATIC];
+        static p16 full[32768 + 40 * FLOOR_PAGE_STATIC + 300];
+        static positive boundary_bits[24 * FLOOR_PAGE_STATIC], boundary_out[24 * FLOOR_PAGE_STATIC];
+        p8 address_to input = floor_pages(26);
+        p8 address_to output = floor_pages(60);
+        check("marked kernel mappings", input && output);
+        if (!input || !output) return;
+        p8 address_to stop = input + 25 * FLOOR_PAGE;
+        p8 address_to guard = output + 59 * FLOOR_PAGE;
+        p32 random = 0x7f4a7c15u;
+        for (positive trial = 0; trial < 16; trial++)
+        {
+                memory_fill(freq, 0, sizeof(freq));
+                p32 a = 1, b = 1;
+                for (positive i = 0; i < GZIP_MAXLIT + 30; i++) freq[i] = 1;
+                for (positive i = 0; i < 24; i++)
+                {
+                        freq[(i * 7 + trial * 13) % 256] += a;
+                        freq[GZIP_MAXLIT + (i + trial) % 30] += a;
+                        p32 next = a + b; a = b; b = next;
+                }
+                freq[256 + trial % 30] += 100000;
+                bool built = huffman_lengths(freq, GZIP_MAXLIT, lens, 15) &&
+                             huffman_lengths(freq + GZIP_MAXLIT, 30, lens + GZIP_MAXLIT, 15);
+                lens[GZIP_MAXLIT + 30] = lens[GZIP_MAXLIT + 31] = 0;
+                built = built && gzip_huffman_cells(lit, lens, GZIP_MAXLIT, GZIP_LITLEN_ROOT, 1, null) == 0 &&
+                        gzip_huffman_cells(dist, lens + GZIP_MAXLIT, 30, GZIP_OFFSET_ROOT, 2, null) == 0;
+                check("marked kernel codes build", built);
+                if (!built) break;
+                for (positive part = 0; part < 2; part++)
+                {
+                        p8 address_to l = lens + (part ? GZIP_MAXLIT : 0);
+                        positive n = part ? 30 : GZIP_MAXLIT;
+                        p32 rev = 0;
+                        for (positive len = 1; len <= GZIP_MAXBITS; len++)
+                                for (positive s = 0; s < n; s++)
+                                        if (l[s] == len)
+                                        {
+                                                revs[(part ? GZIP_MAXLIT : 0) + s] = rev;
+                                                rev = gzip_revnext(rev, len);
+                                        }
+                }
+                positive room = 3 * FLOOR_PAGE + trial * 3701;
+                positive target = (trial & 1) ? room + 20000 : room / 2;
+                p16 address_to dst = (p16 address_to)(guard - 2 * room);
+                for (positive i = 0; i < 32768; i++)
+                {
+                        XORSHIFT32(random);
+                        full[i] = (random & 3) ? (p16)((random >> 11) & 255) : (p16)(32768 + ((random >> 5) % 32768));
+                }
+                memory_copy_apart(dst - 32768, full, 32768 * sizeof(p16));
+                p64 acc = 0;
+                positive held = 0, bytes = 0, bits = 0, made = 0, tokens = 0;
+                while (made < target && bytes + 8 < 24 * FLOOR_PAGE)
+                {
+                        XORSHIFT32(random);
+                        positive mode = (trial >> 1) % 4;
+                        bool literal = mode == 0 ? (random & 7) != 0 : mode == 1 ? (random & 7) == 0 : (random & 1);
+                        if (literal)
+                        {
+                                positive s = (random >> 8) & 255;
+                                acc |= (p64)revs[s] << held; held += lens[s]; bits += lens[s];
+                                full[32768 + made++] = (p16)s;
+                        }
+                        else
+                        {
+                                positive ls = (random >> 8) % 29, ds = (random >> 16) % 30;
+                                if (mode == 3) ds %= 4;
+                                XORSHIFT32(random);
+                                positive le = random & ((1u << gzip_len_extra[ls]) - 1);
+                                positive de = (random >> 8) & ((1u << gzip_dist_extra[ds]) - 1);
+                                positive length = gzip_len_base[ls] + le, distance = gzip_dist_base[ds] + de;
+                                acc |= (p64)revs[257 + ls] << held; held += lens[257 + ls];
+                                acc |= (p64)le << held; held += gzip_len_extra[ls];
+                                while (held >= 8) { packed[bytes++] = (p8)acc; acc >>= 8; held -= 8; }
+                                acc |= (p64)revs[GZIP_MAXLIT + ds] << held; held += lens[GZIP_MAXLIT + ds];
+                                acc |= (p64)de << held; held += gzip_dist_extra[ds];
+                                bits += lens[257 + ls] + gzip_len_extra[ls] + lens[GZIP_MAXLIT + ds] + gzip_dist_extra[ds];
+                                for (positive i = 0; i < length; i++, made++)
+                                        full[32768 + made] = full[32768 + made - distance];
+                        }
+                        while (held >= 8) { packed[bytes++] = (p8)acc; acc >>= 8; held -= 8; }
+                        boundary_bits[tokens] = bits;
+                        boundary_out[tokens++] = made;
+                }
+                if (held) packed[bytes++] = (p8)acc;
+                p8 address_to next = stop - bytes;
+                memory_copy_apart(next, packed, bytes);
+                gzip_decode_job job = {0, 0, next, stop, (p8 address_to)dst, guard,
+                                       (p8 address_to)(dst - 32768), lit, dist, gzip_extra_masks, 0};
+                deflate_decode_marked(address_of job);
+                positive out = (positive)((p16 address_to)job.out - dst);
+                positive consumed = (positive)(job.next - next) * 8 - job.count;
+                positive k = 0;
+                while (k < tokens && boundary_out[k] < out) k++;
+                bool same = job.status == 0 && k < tokens && boundary_out[k] == out &&
+                            boundary_bits[k] == consumed &&
+                            !memory_compare(dst, full + 32768, out * sizeof(p16)) &&
+                            ((trial & 1) ? 2 * out + 600 >= 2 * room : stop - job.next <= 32);
+                check("marked kernel stops on a token boundary with exactly its values and bits", same);
+        }
+        memory_free(input, 26 * FLOOR_PAGE);
+        memory_free(output, 60 * FLOOR_PAGE);
+}
+
 /* The scalar LZMA decoder the span kernel is held to: one packet and one bit
    at a time over a plain ring, reading nothing past its input limit. */
 typedef struct
@@ -116454,6 +116572,7 @@ b32 main(void)
         floor_range();
         floor_huffman();
         floor_deflate();
+        floor_deflate_marked();
         floor_deflate_codes();
         floor_deflate_tokens();
         floor_deflate_parse();
