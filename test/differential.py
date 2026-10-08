@@ -20349,6 +20349,20 @@ def shell_lang_read_timed_wakeup(rng):
         "exec 3<&-"))
 
 
+def shell_lang_read_trap_interrupt(rng):
+    """A caught signal ends a blocked read in dash mode; bash reads on."""
+    return ("read-trap-interrupt", ("dash", "sh"), shell_program(
+        "exec 2>/dev/null",
+        "mkfifo rt.fifo",
+        "exec 3<>rt.fifo",
+        "( sleep 2; echo late > rt.fifo ) >/dev/null 2>&1 &",
+        "trap 'echo caught' USR1",
+        "( sleep 0.3; kill -USR1 $$ ) >/dev/null 2>&1 &",
+        "read x <&3",
+        "echo \"st=$? x=$x\"",
+        "exec 3<&-"))
+
+
 SHELL_FAMILIES = (
     shell_delivered(shell_lex_quotes),
     shell_delivered(shell_lex_substitution),
@@ -20560,6 +20574,7 @@ SHELL_FAMILIES = (
     shell_lang_trap_in_pipeline,
     shell_lang_wait_stopped_kill,
     shell_lang_read_timed_wakeup,
+    shell_lang_read_trap_interrupt,
     shell_lang_errexit_functions,
     shell_lang_heredoc_expansion,
     shell_lang_arithmetic_edges,

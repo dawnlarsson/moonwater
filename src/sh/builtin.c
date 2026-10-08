@@ -14184,8 +14184,10 @@ static bipolar read_peeked(b32 descriptor, p8 address_to into, positive room, p8
         bipolar copied = system_call_4(syscall(tee), (positive)descriptor,
                                        (positive)read_peek_out, room, 0);
 
+        //      EINTR passes through: a caught signal that cut the tee short
+        //      is the read's to answer, not a reason to stop peeking.
         if (copied < 0)
-                return -1;
+                return copied == -4 ? copied : -1;
 
         if (!copied)
                 return 0;
@@ -14518,6 +14520,8 @@ static string_address read_field(positive address_to cursor, bool remainder)
         return read_line + begin;
 }
 
+static fn trap_wait_restarting(bool restart);
+
 COLD fn shell_read(writer write, string_address input)
 {
         bool raw = false;
@@ -14695,6 +14699,18 @@ COLD fn shell_read(writer write, string_address input)
 
         positive slack_before = timed ? read_timer_slack_lower() : 0;
 
+        /*
+                Dash ends a plain read that a caught signal interrupts, with
+                status 1, and runs the trap after it. The kernel restart that
+                SA_RESTART gives kept the read waiting for its input instead,
+                for as long as the input took to come. Bash is not interrupted:
+                its trap runs while the read waits and the read goes on.
+        */
+        bool interruptible = !timed && !shell_bash_compat;
+
+        if (interruptible)
+                trap_wait_restarting(false);
+
         if (hidden)
                 quieted = read_echo_off(descriptor, address_of quiet_held);
 
@@ -14750,6 +14766,8 @@ COLD fn shell_read(writer write, string_address input)
                                 system_control(descriptor, PTY_TCSETS,
                                                address_of quiet_held);
                         read_timer_slack_restore(slack_before);
+                        if (interruptible)
+                                trap_wait_restarting(true);
 
                         return shell_answered(2, "%s: no room\n", "read");
                 }
@@ -14774,7 +14792,13 @@ COLD fn shell_read(writer write, string_address input)
                 {
                         bipolar taken = read_peeked(descriptor, block, sizeof block, stop_at);
 
-                        if (taken < 0)
+                        //      A tee cut short by a caught signal is the
+                        //      read being interrupted, not a pipe that cannot
+                        //      be peeked: the byte-at-a-time read would just
+                        //      wait again, where dash returns at once.
+                        if (taken == -4 && interruptible)
+                                got = -4;
+                        else if (taken < 0)
                         {
                                 peeking = false;
                                 read_unpeekable_fd = (bipolar)descriptor;
@@ -14870,6 +14894,8 @@ COLD fn shell_read(writer write, string_address input)
         read_line[read_length] = end;
         read_literal[read_length] = 0;
         read_timer_slack_restore(slack_before);
+        if (interruptible)
+                trap_wait_restarting(true);
 
         // Put the terminal back before any name is assigned: every path out
         // of here from now on is a return.
