@@ -14467,6 +14467,7 @@ static bipolar find_parent;
 static string_address find_entry;
 static bool find_facts_known;
 static bool find_facts_follow;
+static bool find_facts_named;
 
 /* -execdir changes into a directory controlled by the walk.  A relative or
    empty PATH component would consequently let a matching directory replace
@@ -14512,10 +14513,19 @@ static bool find_facts_ready()
                 /* -L follows links that have targets. A dangling link is
                    still an entry and GNU find tests it as a link rather than
                    turning the failed follow into a failed walk. */
-                if (find_facts_follow && looked == -ERROR_NO_ENTRY &&
+                if (find_facts_follow &&
+                    (looked == -ERROR_NO_ENTRY ||
+                     (looked == -ERROR_NOT_DIRECTORY && !find_facts_named)) &&
                     file_look(find_parent, find_entry, AT_SYMLINK_NOFOLLOW,
                               find_facts))
                 {
+                        if (looked == -ERROR_NOT_DIRECTORY)
+                        {
+                                string_format(log_error, "find: '%w': %s\n",
+                                              writer_terminal_quoted_name, find_path,
+                                              file_reason(looked));
+                                find_status = 1;
+                        }
                         find_facts_known = true;
                         return true;
                 }
@@ -14825,6 +14835,7 @@ static const struct
     {(string_address) "-false", 'f', 0},
     {(string_address) "-print", 'd', FIND_SETS_ACTION},
     {(string_address) "-print0", '0', FIND_SETS_ACTION},
+    {(string_address) "-ls", 'J', FIND_SETS_ACTION},
     {(string_address) "-delete", 'D', FIND_SETS_ACTION | FIND_SETS_DEEPEST},
     {(string_address) "-prune", 'r', 0},
     {(string_address) "-quit", 'q', FIND_SETS_ACTION},
@@ -16714,6 +16725,116 @@ static bool find_regex_holds(find_node address_to node, string_address text)
 */
 static __attribute__((noinline)) bool find_true_test(find_node address_to node);
 
+/*
+        A name as -ls spells it: a backslash, a quote and a space each with a
+        backslash before it, the control characters ls's C escapes name, and
+        every other control byte and every byte past ASCII in octal.
+*/
+static fn find_ls_quote(string_address name)
+{
+        for (; string_get(name); name++)
+        {
+                p8 byte = string_get(name);
+                p8 piece[4];
+
+                if (byte == '\\' || byte == '"' || byte == ' ')
+                {
+                        piece[0] = '\\';
+                        piece[1] = byte;
+                        log(piece, 2);
+                        continue;
+                }
+                if (byte == '\b' || byte == '\t' || byte == '\n' || byte == '\f' || byte == '\r')
+                {
+                        piece[0] = '\\';
+                        piece[1] = byte == '\b' ? 'b' : byte == '\t' ? 't' : byte == '\n' ? 'n'
+                                 : byte == '\f' ? 'f' : 'r';
+                        log(piece, 2);
+                        continue;
+                }
+                if (byte < ' ' || byte >= 127)
+                {
+                        piece[0] = '\\';
+                        piece[1] = (p8)('0' + (byte >> 6));
+                        piece[2] = (p8)('0' + ((byte >> 3) & 7));
+                        piece[3] = (p8)('0' + (byte & 7));
+                        log(piece, 4);
+                        continue;
+                }
+                log(name, 1);
+        }
+}
+
+/*
+        -ls is GNU find's ls -dils line for an entry: the inode in nine
+        columns, the blocks in kilobytes in six, the mode, the links in
+        three, the owner and the group in eight each, the size in eight (the
+        major and minor of a device, three each), the time as ls writes it
+        (the year in place of the clock for a time six months or more off),
+        the name as find_ls_quote spells it and, for a link, its text after
+        an arrow.
+*/
+static fn find_ls_write(void)
+{
+        p8 text[FILE_PATH_MAX];
+        positive length;
+
+        if (!find_facts_ready())
+                return;
+
+        positive mode = find_facts->mode & MODE_FORMAT;
+        positive kilobytes = find_facts->blocks / 2 + (find_facts->blocks % 2 != 0);
+
+        positive_to_padded(log, find_facts->inode, 9, ' ', 0);
+        log(" ", 1);
+        positive_to_padded(log, kilobytes, 6, ' ', 0);
+        log(" ", 1);
+        file_mode_letters(text, find_facts->mode);
+        log(text, 10);
+        log(" ", 1);
+        positive_to_padded(log, find_facts->hard_links, 3, ' ', 0);
+        log(" ", 1);
+
+        file_account_label(find_facts->owner, false, true, text);
+        length = string_length(text);
+        log(text, length);
+        writer_fill(log, length < 8 ? 8 - length : 0, ' ');
+        log(" ", 1);
+        file_account_label(find_facts->group, true, true, text);
+        length = string_length(text);
+        log(text, length);
+        writer_fill(log, length < 8 ? 8 - length : 0, ' ');
+        log(" ", 1);
+
+        if (mode == MODE_CHARACTER || mode == MODE_BLOCK)
+        {
+                positive_to_padded(log, find_facts->rdev_major, 3, ' ', 0);
+                log(", ", 2);
+                positive_to_padded(log, find_facts->rdev_minor, 3, ' ', 0);
+        }
+        else
+                positive_to_padded(log, find_facts->size, 8, ' ', 0);
+        log(" ", 1);
+
+        file_moment address_to when = file_moment_of(find_facts, 't');
+        time_t stamp = (time_t)when->seconds;
+        tm broken;
+
+        if (localtime_r(address_of stamp, address_of broken))
+                file_stamp_short(log, address_of broken, when->seconds, find_moment);
+        else
+                positive_to_padded(log, 0, 1, ' ', 0);
+        log(" ", 1);
+
+        find_ls_quote(find_path);
+        if (mode == MODE_LINK && file_link_text(find_path, text, FILE_PATH_MAX) >= 0)
+        {
+                log(" -> ", 4);
+                find_ls_quote(text);
+        }
+        log("\n", 1);
+}
+
 static bool find_true(b32 which)
 {
         if (which < 0)
@@ -16882,6 +17003,10 @@ static __attribute__((noinline)) bool find_true_test(find_node address_to node)
                 log("\n", 1);
                 return true;
 
+        case 'J':
+                find_ls_write();
+                return true;
+
         case '0':
                 log(find_path, 0);
                 log("\0", 1);
@@ -17019,6 +17144,7 @@ static fn find_walk(string_address path, string_address name, positive depth, bo
         find_entry = entry;
         find_facts_known = false;
         find_facts_follow = follow;
+        find_facts_named = named;
         find_pruned = false;
 
         /* Roots have no dirent hint. Unknown types and followed links also
@@ -17553,13 +17679,26 @@ static fn find_tree_enter(address_any context, address_any node_address,
                                                       address_of facts);
 
                         /* -L follows links that have targets. A dangling
-                           link (no entry at the end of it) is still an entry
-                           and is tested as a link; a loop of links or any
-                           other failure to follow one is reported, as GNU
-                           find's fts reports it. */
-                        if (code == -ERROR_NO_ENTRY && follow &&
+                           link (no entry at the end of it, or a target that
+                           is not a directory) is still an entry and is tested
+                           as a link; a loop of links is reported and is not
+                           an entry, as GNU find's fts reports it. */
+                        if ((code == -ERROR_NO_ENTRY || code == -ERROR_NOT_DIRECTORY) &&
+                            follow &&
                             file_look(directory, name, AT_SYMLINK_NOFOLLOW, address_of facts))
+                        {
+                                // GNU says why a link's target is not a
+                                // directory, and lists the link all the same.
+                                if (code == -ERROR_NOT_DIRECTORY &&
+                                    !find_tree_note(output, address_of open_at, FIND_TREE_FAILED,
+                                                    code, (string_address)path, length, 0,
+                                                    depth, 0, null))
+                                {
+                                        said = false;
+                                        goto next;
+                                }
                                 code = 0;
+                        }
                         if (code >= 0)
                         {
                                 looked = true;
@@ -17766,6 +17905,7 @@ static fn find_tree_root(string_address path, string_address name, bipolar paren
         find_entry = entry;
         find_facts_known = false;
         find_facts_follow = follow;
+        find_facts_named = true;
         find_pruned = false;
 
         if (!find_facts_ready())

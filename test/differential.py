@@ -6784,6 +6784,14 @@ files_FIND_LOOPS = (
     (".", "-L", "-name", "loop"), (".", "-follow", "-name", "loop"), (".", "-L", "-type", "l"),
     ("loop",), ("-L", "loop"), ("loop", "-follow"), (".", "-H", "-L", "-name", "loop"),
 )
+#       -ls is ls's long line for each entry, the name quoted the way find
+#       quotes it there: a space, a backslash and a double quote escaped, the
+#       control bytes and the bytes past ASCII in octal, a link with its text.
+files_FIND_LS = (
+    (".", "-ls"), (".", "-maxdepth", "1", "-ls"), (".", "-type", "l", "-ls"), (".", "-name", "a.txt", "-ls"),
+    ("dirlink", "-ls"), ("link", "-ls"), ("dangling", "-ls"), ("-ls",), (".", "-L", "-ls"), (".", "-ls", "-ls"),
+    ("dir/sub/back", "-ls"), ("sp ace", "-ls"), ("empty", "-ls"), ("big.dat", "-ls"), ("old.txt", "-ls"),
+)
 files_FIND_BROKEN = (
     ("-nonsense",), (".", "-nonsense"), (".", "(", "-name", "a.txt"), (".", "-name", "a.txt", ")"),
     (".", "-exec", "echo", "{}"), (".", "-name"), (".", "-name", "a.txt", "dir"), (".", "-o", "-name", "a.txt"),
@@ -7973,7 +7981,7 @@ FILES_UTILITIES = (
     Utility("find", options=(Option("-H"), Option("-L"), Option("-P"),
                              Option("-O", ("0", "1", "2", "3"), True)),
             operands=files_FIND_WALKED, stdin=("files_yes", "files_no"), fixture="files", stderr="exact",
-            normalize=files_listing, extra=files_find_expressions(360) + files_FIND_BROKEN + files_FIND_CARET + files_FIND_LOOPS,
+            normalize=files_listing, extra=files_find_expressions(360) + files_FIND_BROKEN + files_FIND_CARET + files_FIND_LOOPS + files_FIND_LS,
             max_flags=2),
     Utility("stat", options=(Option("-L"), Option("-f"), Option("-t"), Option("--dereference"),
                              Option("--file-system"), Option("--terse"),
@@ -81991,7 +81999,6 @@ PINNED = r"""
 {"domain":"files","kind":"bug","list":"ledger","option":"-files0-from","reason_id":"r103","utility":"find"},
 {"domain":"files","kind":"bug","list":"ledger","option":"-fls","reason_id":"r103","utility":"find"},
 {"domain":"files","kind":"bug","list":"ledger","option":"-fstype","reason_id":"r103","utility":"find"},
-{"domain":"files","kind":"bug","list":"ledger","option":"-ls","reason_id":"r103","utility":"find"},
 {"candidate":[0,"394712da","0cf939b1"],"case":{"argv":["-v","-c","--verbose","-ione","-f","-S","1","."],"fixture":"files","stdin":"empty","tier":"random"},"domain":"files","kind":"deliberate","list":"ledger","reason_id":"h2dcbd","reference":[0,"2626e878","0cf939b1"],"utility":"hardlink"},
 {"candidate":[1,"e3b0c442","0cf939b1"],"case":{"argv":["--backup","--preserve-timestamps","-m","1777","--mode=0600","-T","--strip-program=true","a.txt","shut/made"],"fixture":"files","stdin":"empty","tier":"random"},"domain":"files","kind":"deliberate","list":"ledger","reason_id":"he657e","reference":[1,"e3b0c442","0cf939b1"],"utility":"install"},
 {"candidate":[1,"e3b0c442","0cf939b1"],"case":{"argv":["--backup","--verbose","-p","-T","--preserve-context","-g","1000","a.txt","shut/made"],"fixture":"files","stdin":"empty","tier":"random"},"domain":"files","kind":"deliberate","list":"ledger","reason_id":"he657e","reference":[1,"e3b0c442","0cf939b1"],"utility":"install"},
