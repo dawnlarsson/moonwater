@@ -29827,6 +29827,9 @@ int main(void) {
                 "\trecent_used_cpu = p->recent_used_cpu;\n}\n"
                 "static void wakeup_preempt_fair(struct rq *rq, struct task_struct *p, int wake_flags)\n{\n"
                 "\tif (test_tsk_need_resched(rq->curr))\n\t\treturn;\n}\n",
+            "linux/fs/overlayfs/super.c":
+                "static const struct dentry_operations ovl_dentry_operations = {\n"
+                "\t.d_real = ovl_d_real,\n};\n",
         }
 
         def settings_placed(tree):
@@ -29937,6 +29940,14 @@ line_add_padded() { line_add "$@"; }
                 assert all(("# moonwater took " + name in makefile) != stock
                            for name in displaced), makefile
                 assert settings_placed(tree), result.stderr
+                #   An overlay keeps no negative dentry and no unused one without an
+                #   upper layer: the hook is defined ahead of the operations table and
+                #   named in it.
+                if kind in ("absent", "symlink"):
+                    overlay = (tree / "linux/fs/overlayfs/super.c").read_text()
+                    assert overlay.index("static int ovl_dentry_delete") < \
+                        overlay.index("ovl_dentry_operations = {") and \
+                        ".d_delete = ovl_dentry_delete," in overlay, overlay
                 #   Both kernel directories are grafted and linked: the core's
                 #   and Canvas's, which is its own object beside it.
                 if kind in ("absent", "symlink"):
