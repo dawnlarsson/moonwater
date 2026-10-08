@@ -11582,6 +11582,83 @@ static positive dump_right(p8 address_to into, string_address text,
         return made + length;
 }
 
+/*      A value in a field of zeros, whole in a few stores, for the widths
+        the stock formats and addresses have: hexadecimal of 2, 4, 6, 8 and 16
+        digits (the nibbles spread to bytes at once) and octal of 3, 6 and 11
+        (the three-bit groups). False, with nothing written, for the rest or
+        for a value the width cannot hold. */
+static inline INLINE bool dump_radix_fixed(p8 address_to into, p64 value,
+                                           positive base, positive width)
+{
+        if (base == 16)
+        {
+                p64 word;
+
+                switch (width)
+                {
+                case 2:
+                        if (value >> 8)
+                                return false;
+                        memory_store_unaligned(p16, into, (p16)(hex_digits_word(value) >> 48));
+                        return true;
+                case 4:
+                        if (value >> 16)
+                                return false;
+                        memory_store_unaligned(p32, into, (p32)(hex_digits_word(value) >> 32));
+                        return true;
+                case 6:
+                        if (value >> 24)
+                                return false;
+                        word = hex_digits_word(value) >> 16;
+                        memory_store_unaligned(p32, into, (p32)word);
+                        memory_store_unaligned(p16, into + 4, (p16)(word >> 32));
+                        return true;
+                case 8:
+                        if (value >> 32)
+                                return false;
+                        memory_store_unaligned(p64, into, hex_digits_word(value));
+                        return true;
+                case 16:
+                        memory_store_unaligned(p64, into, hex_digits_word(value >> 32));
+                        memory_store_unaligned(p64, into + 8, hex_digits_word(value));
+                        return true;
+                }
+                return false;
+        }
+        if (base == 8)
+        {
+                p64 word;
+
+                switch (width)
+                {
+                case 3:
+                        if (value >> 9)
+                                return false;
+                        word = octal_digits_word(value) >> 40;
+                        memory_store_unaligned(p16, into, (p16)word);
+                        into[2] = (p8)(word >> 16);
+                        return true;
+                case 6:
+                        if (value >> 18)
+                                return false;
+                        word = octal_digits_word(value) >> 16;
+                        memory_store_unaligned(p32, into, (p32)word);
+                        memory_store_unaligned(p16, into + 4, (p16)(word >> 32));
+                        return true;
+                case 11:
+                        if (value >> 33)
+                                return false;
+                        word = (positive)(value >> 24);
+                        into[0] = (p8)('0' + ((word >> 6) & 7));
+                        into[1] = (p8)('0' + ((word >> 3) & 7));
+                        into[2] = (p8)('0' + (word & 7));
+                        memory_store_unaligned(p64, into + 3, octal_digits_word(value));
+                        return true;
+                }
+        }
+        return false;
+}
+
 static positive dump_unsigned_field(p8 address_to into, positive value,
                                     positive base, positive width, p8 pad)
 {
@@ -11589,6 +11666,43 @@ static positive dump_unsigned_field(p8 address_to into, positive value,
 
         if (base == 10)
                 return positive_into_padded(into, value, width, pad);
+
+        if (pad == '0')
+        {
+                if (dump_radix_fixed(into, value, base, width))
+                        return width;
+
+                //      Hexadecimal in a field of other whole bytes (hexdump's
+                //      addresses): the value's bytes, most significant
+                //      first, are what memory_into_hex turns into digits.
+                if (base == 16 && width >= 2 && !(width & 1) && width <= 16 &&
+                    (width == 16 || !(value >> (width * 4))))
+                {
+                        p8 big[8];
+                        positive bytes = width / 2;
+
+                        network_store_64(big, value);
+                        memory_into_hex(into, big + 8 - bytes, bytes);
+                        return width;
+                }
+
+                //      od's address: seven octal digits, or eight once past
+                //      2 MiB.
+                if (base == 8 && width == 7 && !(value >> 24))
+                {
+                        p64 word = octal_digits_word(value);
+
+                        if (value >> 21)
+                        {
+                                memory_store_unaligned(p64, into, word);
+                                return 8;
+                        }
+                        word >>= 8;
+                        memory_store_unaligned(p32, into, (p32)word);
+                        memory_store_unaligned(p32, into + 3, (p32)(word >> 24));
+                        return 7;
+                }
+        }
 
         return dump_right(into, digits,
                           positive_into_base(digits, value, base, false), width, pad);
@@ -11614,6 +11728,81 @@ static positive dump_signed_field(p8 address_to into, positive value,
         into[0] = ' ';
         into[memory_span_byte(into + 1, ' ', made)] = '-';
         return made + 1;
+}
+
+/*      The whole fields of an integer row in one loop, a blank and then the
+        number, for the sizes and radixes the stock formats use: the loop
+        takes the format, the byte order and the field count out of every
+        field. Answers how many bytes it wrote, or the maximum when the
+        format is not one of these and nothing was written. */
+static positive dump_integer_run(p8 address_to into, p8 address_to bytes,
+                                 positive whole, dump_format address_to format)
+{
+        positive size = format->size;
+        positive base = format->base;
+        positive width = format->width;
+        p8 address_to out = into;
+
+#define DUMP_RUN(type, body)                                                  \
+        do                                                                    \
+        {                                                                     \
+                for (positive at = 0; at < whole; at++)                       \
+                {                                                             \
+                        p64 value = memory_load_unaligned(                    \
+                            type, bytes + at * sizeof(type));                 \
+                        out[0] = ' ';                                         \
+                        body;                                                 \
+                }                                                             \
+                return (positive)(out - into);                                \
+        } while (0)
+
+        if (format->signed_value)
+        {
+                if (size == 1)
+                        DUMP_RUN(p8, out += 1 + dump_signed_field(out + 1, value, 1, width));
+                if (size == 2)
+                        DUMP_RUN(p16, out += 1 + dump_signed_field(out + 1, value, 2, width));
+                if (size == 4)
+                        DUMP_RUN(p32, out += 1 + dump_signed_field(out + 1, value, 4, width));
+                if (size == 8)
+                        DUMP_RUN(p64, out += 1 + dump_signed_field(out + 1, value, 8, width));
+                return positive_max;
+        }
+
+        if (base == 10)
+        {
+                p8 pad = format->zero ? '0' : ' ';
+
+                if (size == 1)
+                        DUMP_RUN(p8, out += 1 + positive_into_padded(out + 1, value, width, pad));
+                if (size == 2)
+                        DUMP_RUN(p16, out += 1 + positive_into_padded(out + 1, value, width, pad));
+                if (size == 4)
+                        DUMP_RUN(p32, out += 1 + positive_into_padded(out + 1, value, width, pad));
+                if (size == 8)
+                        DUMP_RUN(p64, out += 1 + positive_into_padded(out + 1, value, width, pad));
+                return positive_max;
+        }
+
+        if (!format->zero)
+                return positive_max;
+
+        //      The widths a type's largest value takes, so no value is left
+        //      out of its field; anything else goes the field by field way.
+        if (base == 8 && size == 1 && width == 3)
+                DUMP_RUN(p8, (void)dump_radix_fixed(out + 1, value, 8, 3); out += 4);
+        if (base == 8 && size == 2 && width == 6)
+                DUMP_RUN(p16, (void)dump_radix_fixed(out + 1, value, 8, 6); out += 7);
+        if (base == 8 && size == 4 && width == 11)
+                DUMP_RUN(p32, (void)dump_radix_fixed(out + 1, value, 8, 11); out += 12);
+        if (base == 16 && size == 2 && width == 4)
+                DUMP_RUN(p16, (void)dump_radix_fixed(out + 1, value, 16, 4); out += 5);
+        if (base == 16 && size == 4 && width == 8)
+                DUMP_RUN(p32, (void)dump_radix_fixed(out + 1, value, 16, 8); out += 9);
+        if (base == 16 && size == 8 && width == 16)
+                DUMP_RUN(p64, (void)dump_radix_fixed(out + 1, value, 16, 16); out += 17);
+#undef DUMP_RUN
+        return positive_max;
 }
 
 static positive dump_value(p8 address_to bytes, positive have, positive size)
@@ -12337,10 +12526,17 @@ static fn dump_regular_line(dump_format address_to format,
                             positive address, bool first)
 {
         p8 stack_line[DUMP_LINE_MAX];
-        p8 address_to line = dump_arguments.width > DUMP_BLOCK ? dump_wide_line
-                                                               : stack_line;
+        bool wide = dump_arguments.width > DUMP_BLOCK;
+        //      A row that fits the line buffer is built where it goes, in the
+        //      output buffer, and trimmed to what it came to: assembled on the
+        //      stack and copied, the copy's wide loads straddled the narrow
+        //      stores that made the row and were not forwarded.
+        p8 address_to line = wide ? dump_wide_line : text_reserve(DUMP_LINE_MAX);
         positive made = 0;
         positive fields = (length + format->size - 1) / format->size;
+
+        if (!line)
+                line = stack_line;
         positive full_fields = dump_arguments.width / format->size;
         positive gap = format->gap;
 
@@ -12371,49 +12567,95 @@ static fn dump_regular_line(dump_format address_to format,
                                         : stack_hex;
                 memory_into_hex(hex, bytes, length);
 
-                for (positive field = 0; field < fields; field++)
+                if (!shared && gap == 1)
+                {
+                        //      A blank and a pair of digits is three bytes, written
+                        //      as four and the fourth written over by the next.
+                        for (positive field = 0; field < fields; field++)
+                        {
+                                memory_store_unaligned(p32, line + made,
+                                                       ' ' | (p32)memory_load_unaligned(p16, hex + field * 2) << 8);
+                                made += 3;
+                        }
+                }
+                else for (positive field = 0; field < fields; field++)
                 {
                         if (shared)
                                 gap = dump_pad_at(full_fields, full_fields - field, pad) -
                                       dump_pad_at(full_fields, full_fields - field - 1, pad);
-                        made += dump_pad(line + made, gap, ' ');
+                        if (gap == 1)
+                                line[made++] = ' ';
+                        else
+                                made += dump_pad(line + made, gap, ' ');
                         line[made++] = hex[field * 2];
                         line[made++] = hex[field * 2 + 1];
                 }
         }
-        else for (positive field = 0; field < fields; field++)
+        else if (!shared && gap == 1 &&
+                 (format->kind == DUMP_CHARACTER || format->kind == DUMP_NAMED))
         {
-                if (shared)
-                        gap = dump_pad_at(full_fields, full_fields - field, pad) -
-                              dump_pad_at(full_fields, full_fields - field - 1, pad);
-                if (gap == 1)
-                        line[made++] = ' ';
-                else
-                        made += dump_pad(line + made, gap, ' ');
+                //      A blank and a field of three columns is four bytes: one
+                //      store of the table's entry moved up a byte.
+                const p32 address_to table = dump_spelled_table(format->kind == DUMP_NAMED);
 
-                if (format->kind == DUMP_CHARACTER || format->kind == DUMP_NAMED)
+                for (positive field = 0; field < fields; field++)
+                        memory_store_unaligned(p32, line + made + field * 4,
+                                               ' ' | table[bytes[field]] << 8);
+                made += fields * 4;
+        }
+        else
+        {
+                positive first = 0;
+
+                //      Whole fields of a stock integer format, a blank apart,
+                //      go in one loop; a short last field goes the long way.
+                if (format->kind == DUMP_INTEGER &&
+                    !shared && gap == 1 && !dump_arguments.big_endian &&
+                    length >= format->size)
                 {
-                        memory_store_unaligned(p32, line + made,
-                                               dump_spelled_table(format->kind == DUMP_NAMED)[bytes[field]]);
-                        made += 3;
+                        positive whole = length / format->size;
+                        positive wrote = dump_integer_run(line + made, bytes, whole, format);
+
+                        if (wrote != positive_max)
+                        {
+                                made += wrote;
+                                first = whole;
+                        }
                 }
-                else if (format->kind == DUMP_FLOAT)
-                        made += dump_float_field(line + made, bytes + field * format->size,
-                                                 length - field * format->size, format);
-                else
+                for (positive field = first; field < fields; field++)
                 {
-                        positive left = length - field * format->size;
-                        positive value = dump_value(bytes + field * format->size,
-                                                    left, format->size);
-
-                        if (format->signed_value)
-                                made += dump_signed_field(line + made, value,
-                                                          format->size,
-                                                          format->width);
+                        if (shared)
+                                gap = dump_pad_at(full_fields, full_fields - field, pad) -
+                                      dump_pad_at(full_fields, full_fields - field - 1, pad);
+                        if (gap == 1)
+                                line[made++] = ' ';
                         else
-                                made += dump_unsigned_field(
-                                    line + made, value, format->base,
-                                    format->width, format->zero ? '0' : ' ');
+                                made += dump_pad(line + made, gap, ' ');
+
+                        if (format->kind == DUMP_CHARACTER || format->kind == DUMP_NAMED)
+                        {
+                                memory_store_unaligned(p32, line + made,
+                                                       dump_spelled_table(format->kind == DUMP_NAMED)[bytes[field]]);
+                                made += 3;
+                        }
+                        else if (format->kind == DUMP_FLOAT)
+                                made += dump_float_field(line + made, bytes + field * format->size,
+                                                         length - field * format->size, format);
+                        else
+                        {
+                                positive left = length - field * format->size;
+                                positive value = dump_value(bytes + field * format->size,
+                                                            left, format->size);
+
+                                if (format->signed_value)
+                                        made += dump_signed_field(line + made, value,
+                                                                  format->size,
+                                                                  format->width);
+                                else
+                                        made += dump_unsigned_field(
+                                            line + made, value, format->base,
+                                            format->width, format->zero ? '0' : ' ');
+                        }
                 }
         }
 
@@ -12449,7 +12691,10 @@ static fn dump_regular_line(dump_format address_to format,
         }
 
         line[made++] = '\n';
-        text_put(line, made);
+        if (!wide && line != stack_line)
+                text_out_used -= DUMP_LINE_MAX - made;
+        else
+                text_put(line, made);
 }
 
 static fn dump_row(p8 address_to bytes, positive length, positive address)
@@ -12620,6 +12865,9 @@ static b32 dump_run(positive first, positive count)
         positive skip = dump_arguments.skip;
         positive left = dump_arguments.limit;
         bool have_previous = false;
+        //      The row before this one, where it lies: in the input buffer
+        //      until that is read over, then in previous.
+        p8 address_to previous_row = previous;
         bool starred = false;
         bool wrote = false;
         bool opened = false;
@@ -12722,14 +12970,21 @@ static b32 dump_run(positive first, positive count)
                         while (available)
                         {
                                 positive take = width - held;
+                                p8 address_to row = block;
 
                                 if (take > available)
                                         take = available;
 
-                                memory_copy_apart(block + held,
-                                                  text_input.buffer +
-                                                      text_input.position,
-                                                  take);
+                                //      A whole row that is there to be read is
+                                //      read where it lies, not copied first.
+                                if (!held && take == width)
+                                        row = text_input.buffer +
+                                              text_input.position;
+                                else
+                                        memory_copy_apart(block + held,
+                                                          text_input.buffer +
+                                                              text_input.position,
+                                                          take);
                                 held += take;
                                 text_input.position += take;
                                 available -= take;
@@ -12742,7 +12997,7 @@ static b32 dump_run(positive first, positive count)
 
                                         if (!dump_arguments.duplicates &&
                                             have_previous &&
-                                            !memory_compare(previous, block,
+                                            !memory_compare(previous_row, row,
                                                             width))
                                         {
                                                 if (!starred)
@@ -12753,10 +13008,16 @@ static b32 dump_run(positive first, positive count)
                                         }
                                         else
                                         {
-                                                dump_row(block, width,
+                                                dump_row(row, width,
                                                          row_address);
-                                                memory_copy(previous, block,
-                                                            width);
+                                                if (row == block)
+                                                {
+                                                        memory_copy(previous, row,
+                                                                    width);
+                                                        previous_row = previous;
+                                                }
+                                                else
+                                                        previous_row = row;
                                                 have_previous = true;
                                                 starred = false;
                                                 wrote = true;
@@ -12764,6 +13025,14 @@ static b32 dump_run(positive first, positive count)
 
                                         held = 0;
                                 }
+                        }
+
+                        //      The buffer is read over next: what is in it that
+                        //      the next row is compared with moves out.
+                        if (previous_row != previous)
+                        {
+                                memory_copy(previous, previous_row, width);
+                                previous_row = previous;
                         }
                 }
 

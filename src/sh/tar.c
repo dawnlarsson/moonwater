@@ -94,7 +94,7 @@ static bool tar_field_moment(p8 address_to field, positive width,
 /* Eight octal digit characters, the first the most significant, read as a
    number in a handful of instructions: false unless every byte is 0 to 7.
    The bytes are three-bit groups spread out again by multiply and mask, the
-   way tar_octal_word spreads them out. */
+   way octal_digits_word spreads them out. */
 static inline bool tar_octal_eight(p64 word, p64 address_to value)
 {
         if ((word ^ 0x3030303030303030ull) & 0xf8f8f8f8f8f8f8f8ull)
@@ -195,28 +195,6 @@ static bool tar_field_value(p8 address_to field, positive width,
         return true;
 }
 
-/* Eight octal digits of the low 24 bits, most significant first, as the
-   bytes of one little-endian word: three-bit groups spread to bytes by
-   shifts and masks, then the bytes turned round and made characters. */
-static inline p64 tar_octal_word(p64 value)
-{
-        p64 word = value & 0xffffff;
-
-        word = (word | (word << 20)) & 0x00000fff00000fffull;
-        word = (word | (word << 10)) & 0x003f003f003f003full;
-        word = (word | (word << 5)) & 0x0707070707070707ull;
-#if defined(__riscv)
-        //      No byte swap instruction without Zbb, and the compiler's call
-        //      needs a library this build does not link.
-        word = ((word & 0x00ff00ff00ff00ffull) << 8) | ((word >> 8) & 0x00ff00ff00ff00ffull);
-        word = ((word & 0x0000ffff0000ffffull) << 16) | ((word >> 16) & 0x0000ffff0000ffffull);
-        word = (word << 32) | (word >> 32);
-        return word | 0x3030303030303030ull;
-#else
-        return __builtin_bswap64(word) | 0x3030303030303030ull;
-#endif
-}
-
 static fn tar_field_put_octal(p8 address_to field, positive width, p64 value)
 {
         p8 digits[32];
@@ -225,21 +203,21 @@ static fn tar_field_put_octal(p8 address_to field, positive width, p64 value)
         //      The widths a header has, whole and in a few instructions.
         if (width == 8 && value < ((p64)1 << 21))
         {
-                p64 word = tar_octal_word(value) >> 8;
+                p64 word = octal_digits_word(value) >> 8;
 
                 memory_copy(field, address_of word, 8);
                 return;
         }
         if (width == 7 && value < ((p64)1 << 18))
         {
-                p64 word = tar_octal_word(value) >> 16;
+                p64 word = octal_digits_word(value) >> 16;
 
                 memory_copy(field, address_of word, 7);
                 return;
         }
         if (width == 12 && value < ((p64)1 << 33))
         {
-                p64 word = tar_octal_word(value);
+                p64 word = octal_digits_word(value);
                 positive high = (positive)(value >> 24);
 
                 field[0] = (p8)('0' + ((high >> 6) & 7));

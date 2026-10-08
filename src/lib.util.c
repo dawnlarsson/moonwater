@@ -545,6 +545,50 @@ static inline INLINE fn network_store_64(p8 address_to at, p64 value)
         at[7] = (p8)value;
 }
 
+/* The eight bytes of a word in the other order: one instruction where the
+   machine has a byte swap, shifts and masks where it has not (the RV64 floor
+   has no Zbb, and the compiler's call needs a library this build does not
+   link). */
+static inline INLINE p64 word_bytes_reversed(p64 word)
+{
+#if defined(__riscv)
+        word = ((word & 0x00ff00ff00ff00ffull) << 8) | ((word >> 8) & 0x00ff00ff00ff00ffull);
+        word = ((word & 0x0000ffff0000ffffull) << 16) | ((word >> 16) & 0x0000ffff0000ffffull);
+        return (word << 32) | (word >> 32);
+#else
+        return __builtin_bswap64(word);
+#endif
+}
+
+/* Eight octal digits of the low 24 bits, most significant first, as the
+   bytes of one little-endian word: three-bit groups spread to bytes by
+   shifts and masks, then the bytes turned round and made characters. */
+static inline INLINE p64 octal_digits_word(p64 value)
+{
+        p64 word = value & 0xffffff;
+
+        word = (word | (word << 20)) & 0x00000fff00000fffull;
+        word = (word | (word << 10)) & 0x003f003f003f003full;
+        word = (word | (word << 5)) & 0x0707070707070707ull;
+        return word_bytes_reversed(word) | 0x3030303030303030ull;
+}
+
+/* Eight lower-case hexadecimal digits of the low 32 bits, most significant
+   first, as the bytes of one little-endian word: nibbles spread to bytes,
+   a digit 10 to 15 found by the carry into bit 4 of the nibble plus 6 and
+   given the 39 that takes '9' + 1 to 'a', then the bytes turned round. */
+static inline INLINE p64 hex_digits_word(p64 value)
+{
+        p64 word = value & 0xffffffff;
+
+        word = (word | (word << 16)) & 0x0000ffff0000ffffull;
+        word = (word | (word << 8)) & 0x00ff00ff00ff00ffull;
+        word = (word | (word << 4)) & 0x0f0f0f0f0f0f0f0full;
+        word += 0x3030303030303030ull +
+                (((word + 0x0606060606060606ull) >> 4) & 0x0101010101010101ull) * 39;
+        return word_bytes_reversed(word);
+}
+
 #define memory_cast(type, value)                                             \
         ({ __auto_type _memory_from = (value); type _memory_to;              \
            _Static_assert(sizeof(_memory_to) == sizeof(_memory_from),         \

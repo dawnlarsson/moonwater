@@ -82615,6 +82615,67 @@ static fn name_spelling(void)
               !tar_spell_directory(wide, spelled, TAR_PATH));
 }
 
+/* The digit words od and tar write numbers with, against the digits one at a
+   time: every 17-bit octal value, every 16-bit hexadecimal value, and 300,000
+   random and edge ones, and the byte reversal they end in
+   (shifts on the RV64 floor, a byte swap elsewhere). */
+static fn digit_words(void)
+{
+        static const char digits[] = "0123456789abcdef";
+        p64 state = 0x9e3779b97f4a7c15ull;
+        bool octal_whole = true;
+        bool hex_short = true;
+        bool hex_wide = true;
+        bool reversed = true;
+
+        for (p64 value = 0; value < ((p64)1 << 17); value++)
+        {
+                p64 word = octal_digits_word(value);
+                p8 text[8];
+
+                memory_copy(text, address_of word, 8);
+                for (positive at = 0; at < 8; at++)
+                        octal_whole = octal_whole && text[at] == (p8)('0' + ((value >> (21 - 3 * at)) & 7));
+        }
+        for (p64 value = 0; value < ((p64)1 << 16); value++)
+        {
+                p64 word = hex_digits_word(value);
+                p8 text[8];
+
+                memory_copy(text, address_of word, 8);
+                for (positive at = 0; at < 8; at++)
+                        hex_short = hex_short && text[at] == (p8)digits[(value >> (28 - 4 * at)) & 15];
+        }
+        for (positive turn = 0; turn < 300000; turn++)
+        {
+                p64 value;
+                p64 word;
+                p8 text[8];
+                p8 bytes[8];
+
+                state = state * 6364136223846793005ull + 1442695040888963407ull;
+                value = state >> (turn % 33);
+                if (turn % 7 == 0)
+                        value = (p64)0xffffffff - (turn % 5);
+                word = octal_digits_word(value);
+                memory_copy(text, address_of word, 8);
+                for (positive at = 0; at < 8; at++)
+                        octal_whole = octal_whole && text[at] == (p8)('0' + (((value & 0xffffff) >> (21 - 3 * at)) & 7));
+                word = hex_digits_word(value);
+                memory_copy(text, address_of word, 8);
+                for (positive at = 0; at < 8; at++)
+                        hex_wide = hex_wide && text[at] == (p8)digits[((value & 0xffffffff) >> (28 - 4 * at)) & 15];
+                word = word_bytes_reversed(state);
+                memory_copy(bytes, address_of word, 8);
+                for (positive at = 0; at < 8; at++)
+                        reversed = reversed && bytes[at] == (p8)(state >> (8 * (7 - at)));
+        }
+        check("octal_digits_word spells every 17-bit value and random 24-bit ones", octal_whole);
+        check("hex_digits_word spells every 16-bit value", hex_short);
+        check("hex_digits_word spells random and edge 32-bit values", hex_wide);
+        check("word_bytes_reversed reverses the eight bytes", reversed);
+}
+
 b32 main(void)
 {
         checksums();
@@ -82624,6 +82685,7 @@ b32 main(void)
         pax_records();
         name_precedence();
         name_spelling();
+        digit_words();
         return test_report(null);
 }
 #endif /* CHECK_tar */
