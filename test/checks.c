@@ -94128,6 +94128,42 @@ static positive crc_check_case(p8 address_to at, positive size, p32 seed,
         return bad;
 }
 
+/*
+        The 16-lane fold keeps sixteen vector registers and v8 to v15 are the
+        caller's: their low halves are written into d8 to d15, the three CRCs
+        are run over spans that take each tier, and the registers are read
+        back. arm64 only; nothing else saves a register a caller owns.
+*/
+#if ARM64
+static positive crc_check_registers(p8 address_to bytes)
+{
+        static const p64 sentinel[8] = {0x0123456789abcdefull, 0x1122334455667788ull, 0x2468ace013579bdfull, 0x8000000000000001ull,
+                                        0xfedcba9876543210ull, 0x0f1e2d3c4b5a6978ull, 0xa5a5a5a55a5a5a5aull, 0xdeadbeefcafef00dull};
+        positive bad = 0;
+        static const positive sizes[] = {64, 130, 511, 512, 700, 1279, 1280, 1281, 4096, 5000, 8000};
+
+        for (positive k = 0; k < array_count(sizes); k++)
+                for (positive which = 0; which < 3; which++)
+                {
+                        p64 got[8];
+                        volatile p64 sink = 0;
+
+                        __asm__ volatile("ldp d8, d9, [%0]\n   ldp d10, d11, [%0, #16]\n   ldp d12, d13, [%0, #32]\n   ldp d14, d15, [%0, #48]\n"
+                                         : : "r"(sentinel) : "memory", "d8", "d9", "d10", "d11", "d12", "d13", "d14", "d15");
+                        if (which == 0)
+                                sink = hash_crc32(1, bytes + 3, sizes[k]);
+                        else if (which == 1)
+                                sink = hash_crc32c(1, bytes + 3, sizes[k]);
+                        else
+                                sink = hash_crc64(1, bytes + 3, sizes[k]);
+                        __asm__ volatile("stp d8, d9, [%0]\n   stp d10, d11, [%0, #16]\n   stp d12, d13, [%0, #32]\n   stp d14, d15, [%0, #48]\n"
+                                         : : "r"(got) : "memory");
+                        bad += memory_compare(got, sentinel, sizeof got) != 0;
+                }
+        return bad;
+}
+#endif
+
 static fn crc_check_all(p8 address_to bytes)
 {
         static const p8 zero = 0;
@@ -94186,8 +94222,10 @@ static fn crc_check_all(p8 address_to bytes)
         alignments, runs that end on the protected page -- long enough for
         the three-stream path -- and random lengths, alignments and splits,
         under every body this machine has: slicing by eight, the crc32
-        instruction one stream at a time, and the three streams PCLMULQDQ or
-        PMULL joins (on RISC-V the table and the Zbc Barrett step).
+        instruction one stream at a time, the three streams PCLMULQDQ joins
+        and on x86_64 with AVX-512 the zmm fold; on arm64 the PMULL folds of
+        4, 8 and 16 lanes in place of the streams (on RISC-V the table and
+        the Zbc Barrett step).
 */
 static p32 crc32c_model(const p8 address_to bytes, positive length, p32 crc)
 {
@@ -94209,17 +94247,24 @@ static positive crc32c_check_case(p8 address_to at, positive size, p32 seed,
         p8 pclmul = cpu_has_pclmul;
 #if X64
         p8 instruction = cpu_has_sse42;
+        p8 vpclmul = cpu_has_vpclmul;
+        p8 avx512 = cpu_has_avx512;
+        positive tiers = 4;
 #elif ARM64
         p8 instruction = cpu_has_crc32;
+        positive tiers = 3;
 #else
         p8 instruction = pclmul;
+        positive tiers = 3;
 #endif
 
-        for (positive tier = 0; tier < 3; tier++)
+        for (positive tier = 0; tier < tiers; tier++)
         {
-                cpu_has_pclmul = tier == 2 ? pclmul : 0;
+                cpu_has_pclmul = tier >= 2 ? pclmul : 0;
 #if X64
                 cpu_has_sse42 = tier >= 1 ? instruction : 0;
+                cpu_has_vpclmul = tier >= 3 ? vpclmul : 0;
+                cpu_has_avx512 = tier >= 3 ? avx512 : 0;
 #elif ARM64
                 cpu_has_crc32 = tier >= 1 ? instruction : 0;
 #endif
@@ -94234,6 +94279,8 @@ static positive crc32c_check_case(p8 address_to at, positive size, p32 seed,
         cpu_has_pclmul = pclmul;
 #if X64
         cpu_has_sse42 = instruction;
+        cpu_has_vpclmul = vpclmul;
+        cpu_has_avx512 = avx512;
 #elif ARM64
         cpu_has_crc32 = instruction;
 #endif
@@ -94689,6 +94736,9 @@ b32 main(void)
         hash_check_all(bytes + 8192);
         crc_check_all(bytes);
         crc32c_check_all(bytes);
+#if ARM64
+        check("hash_crc32, hash_crc32c and hash_crc64 keep the caller's v8 to v15", crc_check_registers(bytes) == 0);
+#endif
         keccak_check_all(bytes + 8192);
         return test_report(null);
 }
@@ -113031,12 +113081,15 @@ static p8 address_to floor_pages(positive pages)
 
 static fn floor_checksums(void)
 {
-        p8 address_to p = floor_pages(3);
+        //      Two pages of data between the guards: the folds of 4, 8 and 16 lanes
+        //      change over at 512 and 1280 bytes (arm64) and the zmm fold at 256 and 512 (x86_64).
+        p8 address_to p = floor_pages(4);
         check("CRC protected mappings", p != null);
         if (!p) return;
-        for (positive i = 0; i < 4096; i++) p[4096 + i] = (p8)(i * 37 + i / 11);
+        for (positive i = 0; i < 8192; i++) p[4096 + i] = (p8)(i * 37 + i / 11);
         const positive sizes[] = {0,1,2,3,4,5,6,7,8,9,15,16,17,31,32,33,63,64,
-                                  65,127,128,129,255,256,257,1023,1024,1025,1039,1040,1055,1056,1087,1088,1089,4095,4096};
+                                  65,127,128,129,191,192,255,256,257,383,384,511,512,513,767,768,769,1023,1024,1025,1039,1040,1055,1056,1087,1088,1089,
+                                  1279,1280,1281,1535,1536,1537,2047,2048,2049,4095,4096,4097,8191,8192};
         p8 pclmul = cpu_has_pclmul;
 #if X64
         p8 vpclmul = cpu_has_vpclmul;
@@ -113054,7 +113107,7 @@ static fn floor_checksums(void)
                         for (positive seed = 0; seed < 3; seed++)
                         {
                                 positive n = sizes[k];
-                                p8 address_to src = p + (edge ? 8192 - n : 4096);
+                                p8 address_to src = p + (edge ? 12288 - n : 4096);
                                 p64 initial = seed == 0 ? 0 : seed == 1 ? ~(p64)0
                                                                        : 0x9b37216c8123abfeull;
                                 p32 c32 = hash_crc32((p32)initial, src, n);
@@ -113075,7 +113128,7 @@ static fn floor_checksums(void)
 #if X64
         cpu_has_vpclmul = vpclmul;
 #endif
-        memory_free(p, 3 * 4096);
+        memory_free(p, 4 * 4096);
 }
 
 static fn floor_shift_reference(xz_range_state address_to s)

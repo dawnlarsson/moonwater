@@ -1218,6 +1218,83 @@ typedef typeof(sizeof(0)) sized;
     "neg " T ", " S "\n   and " T ", " T ", " S "\n   addi " T ", " T ", -1\n   and " T ", " T ", " K80 "\n"       \
     "srli " T ", " T ", 7\n   mul " T ", " T ", " K01 "\n   srli " D ", " T ", 56\n"
 
+/* The PMULL fold of a reflected CRC with a finish the caller supplies (hash_crc32, hash_crc32c, hash_crc64 expand it).
+   From sixty four bytes: 4 lanes of sixteen bytes, from T8 bytes 8 lanes, from T16 bytes 16 lanes, each lane a
+   message of its own and the constants (K512 for 4 lanes, K1024 for 8, K2048 for 16, K128 for the join of the 4:
+   x^(d+31) and x^(d-33) for a 32-bit polynomial, x^(d+63) and x^(d-1) for 64, each reversed, d the bits a lane
+   moves on) what carries a lane across the others. 16 lanes want v8 to v15, whose low halves a caller expects
+   kept; the 16-lane tier saves them. The lanes are halved (16 to 8 to 4) with the same constants as the loops
+   above them, the 4-lane loop and the join then run as they did, and the sixteen bytes left in v0 are message
+   not yet checksummed, which FINISH checksums (two crc32x for a 32-bit polynomial, the table for crc64) and then
+   branches to its own tail. In: x0 the crc (SEED4 and SEED8 move it into v4 and v31), x1 the data, x2 at least 64
+   the length, the crypto extension on. 16 lanes cost 12 cycles for 256 bytes on an M2 Pro where PMULL issues
+   four a cycle: the loop is the arithmetic, not the loads. */
+#define NEON_CRC_FOLD(L, SEED4, SEED8, K512, K128, K1024, K2048, FINISH, T8, T16)                       \
+    L "_fold:\n.arch_extension crypto\ncmp x2, #" T8 "\nb.hs " L "_fold_big\n" SEED4 \
+    "\nldp q0, q1, [x1]\nldp q2, q3, [x1, #32]\neor v0.16b, v0.16b, v4.16b\nadd x1, x1, #64\nsub x2, x2, #64\nadr x9, " L \
+    "_fold_k\nldr q7, [x9]\ncmp x2, #64\nb.lo " L "_fold_join\n.balign 16\n" L \
+    "_fold_four:  ldp q16, q17, [x1]\nldp q18, q19, [x1, #32]\npmull v4.1q, v0.1d, v7.1d\npmull2 v0.1q, v0.2d, v7.2d\neor v0.16b, v0.16b, v4.16b\neor v0.16b, v0.16b, v16.16b\n" \
+    "pmull v4.1q, v1.1d, v7.1d\npmull2 v1.1q, v1.2d, v7.2d\neor v1.16b, v1.16b, v4.16b\neor v1.16b, v1.16b, v17.16b\npmull v4.1q, v2.1d, v7.1d\npmull2 v2.1q, v2.2d, v7.2d\n" \
+    "eor v2.16b, v2.16b, v4.16b\neor v2.16b, v2.16b, v18.16b\npmull v4.1q, v3.1d, v7.1d\npmull2 v3.1q, v3.2d, v7.2d\neor v3.16b, v3.16b, v4.16b\neor v3.16b, v3.16b, v19.16b\n" \
+    "add x1, x1, #64\nsub x2, x2, #64\ncmp x2, #64\nb.hs " L "_fold_four\n" L \
+    "_fold_join:  ldr q7, [x9, #16]\npmull v4.1q, v0.1d, v7.1d\npmull2 v0.1q, v0.2d, v7.2d\neor v0.16b, v0.16b, v4.16b\neor v0.16b, v0.16b, v1.16b\npmull v4.1q, v0.1d, v7.1d\n" \
+    "pmull2 v0.1q, v0.2d, v7.2d\neor v0.16b, v0.16b, v4.16b\neor v0.16b, v0.16b, v2.16b\npmull v4.1q, v0.1d, v7.1d\npmull2 v0.1q, v0.2d, v7.2d\neor v0.16b, v0.16b, v4.16b\n" \
+    "eor v0.16b, v0.16b, v3.16b\ncmp x2, #16\nb.lo " L "_fold_finish\n" L \
+    "_fold_one:  ldr q16, [x1], #16\npmull v4.1q, v0.1d, v7.1d\npmull2 v0.1q, v0.2d, v7.2d\neor v0.16b, v0.16b, v4.16b\neor v0.16b, v0.16b, v16.16b\nsub x2, x2, #16\n" \
+    "cmp x2, #16\nb.hs " L "_fold_one\n.arch_extension nocrypto\n" L "_fold_finish:  " FINISH "\n.arch_extension crypto\n" \
+    L "_fold_big:  adr x9, " L "_fold_k\ncmp x2, #" T16 "\nb.hs " L "_fold16\n" L "_fold8:  " SEED8 \
+    "\nld1 {v0.16b-v3.16b}, [x1], #64\nld1 {v4.16b-v7.16b}, [x1], #64\neor v0.16b, v0.16b, v31.16b\nsub x2, x2, #128\nldr q31, [x9, #32]\n" \
+    L "_fold8_check:  cmp x2, #128\nb.lo " L "_fold8_reduce\n.balign 16\n" L \
+    "_fold8_loop:  ldr q16, [x1, #0]\npmull v24.1q, v0.1d, v31.1d\npmull2 v0.1q, v0.2d, v31.2d\neor v0.16b, v0.16b, v24.16b\neor v0.16b, v0.16b, v16.16b\nldr q17, [x1, #16]\n" \
+    "pmull v25.1q, v1.1d, v31.1d\npmull2 v1.1q, v1.2d, v31.2d\neor v1.16b, v1.16b, v25.16b\neor v1.16b, v1.16b, v17.16b\nldr q18, [x1, #32]\npmull v26.1q, v2.1d, v31.1d\n" \
+    "pmull2 v2.1q, v2.2d, v31.2d\neor v2.16b, v2.16b, v26.16b\neor v2.16b, v2.16b, v18.16b\nldr q19, [x1, #48]\npmull v27.1q, v3.1d, v31.1d\npmull2 v3.1q, v3.2d, v31.2d\n" \
+    "eor v3.16b, v3.16b, v27.16b\neor v3.16b, v3.16b, v19.16b\nldr q20, [x1, #64]\npmull v28.1q, v4.1d, v31.1d\npmull2 v4.1q, v4.2d, v31.2d\neor v4.16b, v4.16b, v28.16b\n" \
+    "eor v4.16b, v4.16b, v20.16b\nldr q21, [x1, #80]\npmull v29.1q, v5.1d, v31.1d\npmull2 v5.1q, v5.2d, v31.2d\neor v5.16b, v5.16b, v29.16b\neor v5.16b, v5.16b, v21.16b\n" \
+    "ldr q22, [x1, #96]\npmull v30.1q, v6.1d, v31.1d\npmull2 v6.1q, v6.2d, v31.2d\neor v6.16b, v6.16b, v30.16b\neor v6.16b, v6.16b, v22.16b\nldr q23, [x1, #112]\n" \
+    "pmull v24.1q, v7.1d, v31.1d\npmull2 v7.1q, v7.2d, v31.2d\neor v7.16b, v7.16b, v24.16b\neor v7.16b, v7.16b, v23.16b\nadd x1, x1, #128\nsub x2, x2, #128\n" \
+    "cmp x2, #128\nb.hs " L "_fold8_loop\n" L \
+    "_fold8_reduce:  ldr q31, [x9]\npmull v24.1q, v0.1d, v31.1d\npmull2 v0.1q, v0.2d, v31.2d\neor v0.16b, v0.16b, v24.16b\neor v0.16b, v0.16b, v4.16b\npmull v25.1q, v1.1d, v31.1d\n" \
+    "pmull2 v1.1q, v1.2d, v31.2d\neor v1.16b, v1.16b, v25.16b\neor v1.16b, v1.16b, v5.16b\npmull v26.1q, v2.1d, v31.1d\npmull2 v2.1q, v2.2d, v31.2d\neor v2.16b, v2.16b, v26.16b\n" \
+    "eor v2.16b, v2.16b, v6.16b\npmull v27.1q, v3.1d, v31.1d\npmull2 v3.1q, v3.2d, v31.2d\neor v3.16b, v3.16b, v27.16b\neor v3.16b, v3.16b, v7.16b\nldr q7, [x9]\n" \
+    "cmp x2, #64\nb.hs " L "_fold_four\nb " L "_fold_join\n" L \
+    "_fold16:  stp d8, d9, [sp, #-64]!\nstp d10, d11, [sp, #16]\nstp d12, d13, [sp, #32]\nstp d14, d15, [sp, #48]\n" SEED8 \
+    "\nld1 {v0.16b-v3.16b}, [x1], #64\nld1 {v4.16b-v7.16b}, [x1], #64\nld1 {v8.16b-v11.16b}, [x1], #64\nld1 {v12.16b-v15.16b}, [x1], #64\neor v0.16b, v0.16b, v31.16b\n" \
+    "sub x2, x2, #256\nldr q31, [x9, #48]\ncmp x2, #256\nb.lo " L "_fold16_reduce\n.balign 16\n" L \
+    "_fold16_loop:  ldr q16, [x1, #0]\npmull v24.1q, v0.1d, v31.1d\npmull2 v0.1q, v0.2d, v31.2d\neor v0.16b, v0.16b, v24.16b\neor v0.16b, v0.16b, v16.16b\nldr q17, [x1, #16]\n" \
+    "pmull v25.1q, v1.1d, v31.1d\npmull2 v1.1q, v1.2d, v31.2d\neor v1.16b, v1.16b, v25.16b\neor v1.16b, v1.16b, v17.16b\nldr q18, [x1, #32]\npmull v26.1q, v2.1d, v31.1d\n" \
+    "pmull2 v2.1q, v2.2d, v31.2d\neor v2.16b, v2.16b, v26.16b\neor v2.16b, v2.16b, v18.16b\nldr q19, [x1, #48]\npmull v27.1q, v3.1d, v31.1d\npmull2 v3.1q, v3.2d, v31.2d\n" \
+    "eor v3.16b, v3.16b, v27.16b\neor v3.16b, v3.16b, v19.16b\nldr q20, [x1, #64]\npmull v28.1q, v4.1d, v31.1d\npmull2 v4.1q, v4.2d, v31.2d\neor v4.16b, v4.16b, v28.16b\n" \
+    "eor v4.16b, v4.16b, v20.16b\nldr q21, [x1, #80]\npmull v29.1q, v5.1d, v31.1d\npmull2 v5.1q, v5.2d, v31.2d\neor v5.16b, v5.16b, v29.16b\neor v5.16b, v5.16b, v21.16b\n" \
+    "ldr q22, [x1, #96]\npmull v30.1q, v6.1d, v31.1d\npmull2 v6.1q, v6.2d, v31.2d\neor v6.16b, v6.16b, v30.16b\neor v6.16b, v6.16b, v22.16b\nldr q23, [x1, #112]\n" \
+    "pmull v24.1q, v7.1d, v31.1d\npmull2 v7.1q, v7.2d, v31.2d\neor v7.16b, v7.16b, v24.16b\neor v7.16b, v7.16b, v23.16b\nldr q16, [x1, #128]\npmull v25.1q, v8.1d, v31.1d\n" \
+    "pmull2 v8.1q, v8.2d, v31.2d\neor v8.16b, v8.16b, v25.16b\neor v8.16b, v8.16b, v16.16b\nldr q17, [x1, #144]\npmull v26.1q, v9.1d, v31.1d\npmull2 v9.1q, v9.2d, v31.2d\n" \
+    "eor v9.16b, v9.16b, v26.16b\neor v9.16b, v9.16b, v17.16b\nldr q18, [x1, #160]\npmull v27.1q, v10.1d, v31.1d\npmull2 v10.1q, v10.2d, v31.2d\neor v10.16b, v10.16b, v27.16b\n" \
+    "eor v10.16b, v10.16b, v18.16b\nldr q19, [x1, #176]\npmull v28.1q, v11.1d, v31.1d\npmull2 v11.1q, v11.2d, v31.2d\neor v11.16b, v11.16b, v28.16b\neor v11.16b, v11.16b, v19.16b\n" \
+    "ldr q20, [x1, #192]\npmull v29.1q, v12.1d, v31.1d\npmull2 v12.1q, v12.2d, v31.2d\neor v12.16b, v12.16b, v29.16b\neor v12.16b, v12.16b, v20.16b\nldr q21, [x1, #208]\n" \
+    "pmull v30.1q, v13.1d, v31.1d\npmull2 v13.1q, v13.2d, v31.2d\neor v13.16b, v13.16b, v30.16b\neor v13.16b, v13.16b, v21.16b\nldr q22, [x1, #224]\npmull v24.1q, v14.1d, v31.1d\n" \
+    "pmull2 v14.1q, v14.2d, v31.2d\neor v14.16b, v14.16b, v24.16b\neor v14.16b, v14.16b, v22.16b\nldr q23, [x1, #240]\npmull v25.1q, v15.1d, v31.1d\npmull2 v15.1q, v15.2d, v31.2d\n" \
+    "eor v15.16b, v15.16b, v25.16b\neor v15.16b, v15.16b, v23.16b\nadd x1, x1, #256\nsub x2, x2, #256\ncmp x2, #256\nb.hs " \
+    L "_fold16_loop\n" L \
+    "_fold16_reduce:  ldr q31, [x9, #32]\npmull v24.1q, v0.1d, v31.1d\npmull2 v0.1q, v0.2d, v31.2d\neor v0.16b, v0.16b, v24.16b\neor v0.16b, v0.16b, v8.16b\n" \
+    "pmull v25.1q, v1.1d, v31.1d\npmull2 v1.1q, v1.2d, v31.2d\neor v1.16b, v1.16b, v25.16b\neor v1.16b, v1.16b, v9.16b\npmull v26.1q, v2.1d, v31.1d\npmull2 v2.1q, v2.2d, v31.2d\n" \
+    "eor v2.16b, v2.16b, v26.16b\neor v2.16b, v2.16b, v10.16b\npmull v27.1q, v3.1d, v31.1d\npmull2 v3.1q, v3.2d, v31.2d\neor v3.16b, v3.16b, v27.16b\neor v3.16b, v3.16b, v11.16b\n" \
+    "pmull v28.1q, v4.1d, v31.1d\npmull2 v4.1q, v4.2d, v31.2d\neor v4.16b, v4.16b, v28.16b\neor v4.16b, v4.16b, v12.16b\npmull v29.1q, v5.1d, v31.1d\npmull2 v5.1q, v5.2d, v31.2d\n" \
+    "eor v5.16b, v5.16b, v29.16b\neor v5.16b, v5.16b, v13.16b\npmull v30.1q, v6.1d, v31.1d\npmull2 v6.1q, v6.2d, v31.2d\neor v6.16b, v6.16b, v30.16b\neor v6.16b, v6.16b, v14.16b\n" \
+    "pmull v24.1q, v7.1d, v31.1d\npmull2 v7.1q, v7.2d, v31.2d\neor v7.16b, v7.16b, v24.16b\neor v7.16b, v7.16b, v15.16b\nldp d10, d11, [sp, #16]\nldp d12, d13, [sp, #32]\n" \
+    "ldp d14, d15, [sp, #48]\nldp d8, d9, [sp], #64\nb " L "_fold8_check\n.balign 16\n" L "_fold_k:\n.quad " K512 \
+    "\n.quad " K128 "\n.quad " K1024 "\n.quad " K2048 "\n.arch_extension nocrypto\n"
+/* The eight lookups of a 64-bit word in x3 through hash_crc64_tab, which the fold's finish does twice: the crc in x0 (zero on
+   entry), the table at x4. */
+#define NEON_CRC64_EIGHT                                                           \
+    "ubfx x6, x3, #0, #8\nadd x6, x4, x6, lsl #3\nldr x5, [x6, #14336]\neor x0, x0, x5\n"  \
+    "ubfx x6, x3, #8, #8\nadd x6, x4, x6, lsl #3\nldr x5, [x6, #12288]\neor x0, x0, x5\n"  \
+    "ubfx x6, x3, #16, #8\nadd x6, x4, x6, lsl #3\nldr x5, [x6, #10240]\neor x0, x0, x5\n" \
+    "ubfx x6, x3, #24, #8\nadd x6, x4, x6, lsl #3\nldr x5, [x6, #8192]\neor x0, x0, x5\n"  \
+    "ubfx x6, x3, #32, #8\nadd x6, x4, x6, lsl #3\nldr x5, [x6, #6144]\neor x0, x0, x5\n"  \
+    "ubfx x6, x3, #40, #8\nadd x6, x4, x6, lsl #3\nldr x5, [x6, #4096]\neor x0, x0, x5\n"  \
+    "ubfx x6, x3, #48, #8\nadd x6, x4, x6, lsl #3\nldr x5, [x6, #2048]\neor x0, x0, x5\n"  \
+    "ubfx x6, x3, #56, #8\nadd x6, x4, x6, lsl #3\nldr x5, [x6, #0]\neor x0, x0, x5\n"
+
 /* deflate_parse_chain's finder, arm64 and riscv64 (the contract is written with the x86-64 one, LZ_CHAIN_FIND_X64). */
 /* The chain finder at HERE (x3) for the parse loop. In: x3 HERE, w20 and w21
    the hashes of HERE, w25 the length to beat, w26 the links; x0 the job, x1
@@ -8412,7 +8489,7 @@ __asm__(
     ASM_FUNC(hash_crc64)
     "mov %rdi, %rax\n"
 #ifndef KERNEL_MODE
-    "cmp $1024, %rdx\n   jb .Lcrc64_x64_fold_skip\n   cmpb $0, cpu_has_pclmul(%rip)\n   jne .Lcrc64_x64_fold\n"
+    "cmp $64, %rdx\n   jb .Lcrc64_x64_fold_skip\n   cmpb $0, cpu_has_pclmul(%rip)\n   jne .Lcrc64_x64_fold\n"
     ".Lcrc64_x64_fold_skip:\n"
 #endif
     "test %rdx, %rdx\n   jz .Lcrc64_x64_done\n   lea hash_crc64_tab(%rip), %r8\n   cmp $8, %rdx\n   jb .Lcrc64_x64_byte\n"
@@ -8426,12 +8503,14 @@ __asm__(
     ".Lcrc64_x64_done:\n" ASM_RET
 #ifndef KERNEL_MODE
     /* Fold four independent reflected polynomial streams. k(d) is x^-d
-       modulo (reflected_polynomial<<1)|1. The final fixed reduction is
-       amortized over >=1 KiB; short spans retain slicing-by-eight. Every
-       input vector is an unaligned exact load. XMM use stays out of kernels. */
-    ".Lcrc64_x64_fold:  cmpb $0, cpu_has_vpclmul(%rip)\n   je .Lcrc64_x64_fold_xmm\n   cmpb $0, cpu_has_avx512(%rip)\n   jne .Lcrc64_x64_fold_zmm\n"
+       modulo (reflected_polynomial<<1)|1. The sixteen bytes left in the register
+       are put through the table, from sixty four bytes (it was 1,024, behind a loop of sixty four turns of
+       a bit at a time). GB/s on a 9950X at 5 GHz, before and after, xmm fold then zmm: 64 bytes 2.7 and 4.8,
+       256 2.6 and 13.1 (13.8), 1 KiB 12.0 and 19.4 (18.3 and 43.9), 4 KiB 17.2 and 19.8 (45.9 and 73.5), 16 KiB
+       19.2 and 19.8 (67.6 and 79.4). Every input vector is an unaligned exact load. XMM use stays out of kernels. */
+    ".Lcrc64_x64_fold:  cmp $256, %rdx\n   jb .Lcrc64_x64_fold_xmm\n   cmpb $0, cpu_has_vpclmul(%rip)\n   je .Lcrc64_x64_fold_xmm\n   cmpb $0, cpu_has_avx512(%rip)\n   jne .Lcrc64_x64_fold_zmm\n"
     ".Lcrc64_x64_fold_xmm:  movdqu (%rsi), %xmm0\n   movq %rax, %xmm4\n   pxor %xmm4, %xmm0\n   movdqu 16(%rsi), %xmm1\n   movdqu 32(%rsi), %xmm2\n   movdqu 48(%rsi), %xmm3\n"
-    "add $64, %rsi\n   sub $64, %rdx\n   movdqa .Lcrc64_x64_fold_k512(%rip), %xmm7\n"
+    "add $64, %rsi\n   sub $64, %rdx\n   movdqa .Lcrc64_x64_fold_k512(%rip), %xmm7\n   cmp $64, %rdx\n   jb .Lcrc64_x64_fold_join\n"
     ".Lcrc64_x64_fold_four:  movdqa %xmm0, %xmm4\n   pclmulqdq $0x00, %xmm7, %xmm0\n   pclmulqdq $0x11, %xmm7, %xmm4\n   pxor %xmm4, %xmm0\n   movdqu 0(%rsi), %xmm4\n   pxor %xmm4, %xmm0\n"
     "movdqa %xmm1, %xmm4\n   pclmulqdq $0x00, %xmm7, %xmm1\n   pclmulqdq $0x11, %xmm7, %xmm4\n   pxor %xmm4, %xmm1\n   movdqu 16(%rsi), %xmm4\n   pxor %xmm4, %xmm1\n   movdqa %xmm2, %xmm4\n"
     "pclmulqdq $0x00, %xmm7, %xmm2\n   pclmulqdq $0x11, %xmm7, %xmm4\n   pxor %xmm4, %xmm2\n   movdqu 32(%rsi), %xmm4\n   pxor %xmm4, %xmm2\n   movdqa %xmm3, %xmm4\n"
@@ -8442,9 +8521,12 @@ __asm__(
     "pclmulqdq $0x00, %xmm7, %xmm0\n   pclmulqdq $0x11, %xmm7, %xmm4\n   pxor %xmm4, %xmm0\n   pxor %xmm3, %xmm0\n   cmp $16, %rdx\n   jb .Lcrc64_x64_fold_reduce\n"
     ".Lcrc64_x64_fold_one:  movdqa %xmm0, %xmm4\n   pclmulqdq $0x00, %xmm7, %xmm0\n   pclmulqdq $0x11, %xmm7, %xmm4\n   pxor %xmm4, %xmm0\n   movdqu (%rsi), %xmm4\n   pxor %xmm4, %xmm0\n"
     "add $16, %rsi\n   sub $16, %rdx\n   cmp $16, %rdx\n   jae .Lcrc64_x64_fold_one\n"
-    ".Lcrc64_x64_fold_reduce:  movdqa %xmm0, %xmm4\n   pclmulqdq $0x00, %xmm7, %xmm0\n   pclmulqdq $0x11, %xmm7, %xmm4\n   pxor %xmm4, %xmm0\n   movq %xmm0, %r9\n   psrldq $8, %xmm0\n"
-    "movq %xmm0, %rax\n   movabs $0x92d8af2baf0e1e85, %r8\n   mov $64, %ecx\n"
-    ".Lcrc64_x64_fold_mod:  mov %rax, %rdi\n   sar $63, %rdi\n   add %rax, %rax\n   and %r8, %rdi\n   xor %rdi, %rax\n   sub $1, %ecx\n   jne .Lcrc64_x64_fold_mod\n   xor %r9, %rax\n"
+    //  The register is sixteen bytes of message that have not been checksummed yet (see hash_crc32): two words through the table
+    //  from nothing, where sixty four turns of a bit at a time did, which was the whole of a call of a few kilobytes.
+    ".Lcrc64_x64_fold_reduce:  lea hash_crc64_tab(%rip), %r8\n   movq %xmm0, %r9\n   xor %eax, %eax\n"
+    "movzbl %r9b, %ecx\n   xor 14336(%r8,%rcx,8), %rax\n   shr $8, %r9\n   movzbl %r9b, %ecx\n   xor 12288(%r8,%rcx,8), %rax\n   shr $8, %r9\n   movzbl %r9b, %ecx\n   xor 10240(%r8,%rcx,8), %rax\n   shr $8, %r9\n   movzbl %r9b, %ecx\n   xor 8192(%r8,%rcx,8), %rax\n   shr $8, %r9\n   movzbl %r9b, %ecx\n   xor 6144(%r8,%rcx,8), %rax\n   shr $8, %r9\n   movzbl %r9b, %ecx\n   xor 4096(%r8,%rcx,8), %rax\n   shr $8, %r9\n   movzbl %r9b, %ecx\n   xor 2048(%r8,%rcx,8), %rax\n   shr $8, %r9\n   movzbl %r9b, %ecx\n   xor 0(%r8,%rcx,8), %rax\n"
+    "psrldq $8, %xmm0\n   movq %xmm0, %r9\n   xor %rax, %r9\n   xor %eax, %eax\n"
+    "movzbl %r9b, %ecx\n   xor 14336(%r8,%rcx,8), %rax\n   shr $8, %r9\n   movzbl %r9b, %ecx\n   xor 12288(%r8,%rcx,8), %rax\n   shr $8, %r9\n   movzbl %r9b, %ecx\n   xor 10240(%r8,%rcx,8), %rax\n   shr $8, %r9\n   movzbl %r9b, %ecx\n   xor 8192(%r8,%rcx,8), %rax\n   shr $8, %r9\n   movzbl %r9b, %ecx\n   xor 6144(%r8,%rcx,8), %rax\n   shr $8, %r9\n   movzbl %r9b, %ecx\n   xor 4096(%r8,%rcx,8), %rax\n   shr $8, %r9\n   movzbl %r9b, %ecx\n   xor 2048(%r8,%rcx,8), %rax\n   shr $8, %r9\n   movzbl %r9b, %ecx\n   xor 0(%r8,%rcx,8), %rax\n"
     "test %rdx, %rdx\n   jz .Lcrc64_x64_fold_done\n   lea hash_crc64_tab(%rip), %r8\n   jmp .Lcrc64_x64_byte\n"
     ".Lcrc64_x64_fold_done:\n" ASM_RET
     //  hash_crc32's zmm fold: sixteen lanes, 256 bytes apart.
@@ -17923,6 +18005,14 @@ __asm__(
     //      same as before. A processor without CRC32 takes the table, as it did, once the lazy probe has
     //      said so.
     //
+    //      Four lanes are what one M2 core's PMULL, which issues four a cycle, cannot keep busy: a lane is a chain of
+    //      pmull, eor, eor and the loop retires 64 bytes every eight cycles. From 512 bytes there are eight lanes and
+    //      from 1,280 sixteen (NEON_CRC_FOLD, which hash_crc32c and hash_crc64 expand with their own constants and
+    //      finish): the loop is then 256 bytes in twelve cycles. GB/s on an M2 Pro, before and after (libz's own
+    //      crc32 in brackets): 128 bytes 32.0 and 29.9, 256 44.8 and 44.9, 768 47.8 and 59.8, 1 KiB 47.6 and 61.2,
+    //      4 KiB 32.1 and 70.0 (32.5), 16 KiB 28.3 and 73.4 (36.0), 256 KiB 27.3 and 74.3 (37.1). The 128-byte row
+    //      is the one that lost, by a cycle.
+    //
     ".Lcrc32_arm64_dispatch:  cbz x2, .Lcrc32_arm64_done\n   adrp x16, cpu_has_crc32\n   ldrb w16, [x16, :lo12:cpu_has_crc32]\n   cbnz w16, .Lcrc32_arm64_hw\n   adrp x16, cpu_hash_probed\n"
     "ldrb w16, [x16, :lo12:cpu_hash_probed]\n   cbnz w16, .Lcrc32_arm64_floor\n   stp x29, x30, [sp, #-16]!\n   bl cpu_hash_detect\n   ldp x29, x30, [sp], #16\n   b .Lcrc32_arm64_dispatch\n"
     ".Lcrc32_arm64_hw:\n"
@@ -17935,28 +18025,11 @@ __asm__(
     ".Lcrc32_arm64_half:  tbz x2, #1, .Lcrc32_arm64_last\n   ldrh w3, [x1], #2\n   crc32h w0, w0, w3\n"
     ".Lcrc32_arm64_last:  tbz x2, #0, .Lcrc32_arm64_hw_done\n   ldrb w3, [x1]\n   crc32b w0, w0, w3\n"
     ".Lcrc32_arm64_hw_done:\n" ASM_RET
-    //  The x86_64 xmm fold with PMULL: four lanes sixteen bytes apart, the same constants in the same halves.
-    ".Lcrc32_arm64_fold:\n"
-    ".arch_extension crypto\n"
-    "fmov s4, w0\n   ldp q0, q1, [x1]\n   ldp q2, q3, [x1, #32]\n   eor v0.16b, v0.16b, v4.16b\n   add x1, x1, #64\n   sub x2, x2, #64\n   adr x9, .Lcrc32_arm64_fold_k\n"
-    "ldr q7, [x9]\n   cmp x2, #64\n   b.lo .Lcrc32_arm64_fold_join\n"
-    ".Lcrc32_arm64_fold_four:  ldp q16, q17, [x1]\n   ldp q18, q19, [x1, #32]\n   pmull v4.1q, v0.1d, v7.1d\n   pmull2 v0.1q, v0.2d, v7.2d\n   eor v0.16b, v0.16b, v4.16b\n"
-    "eor v0.16b, v0.16b, v16.16b\n   pmull v4.1q, v1.1d, v7.1d\n   pmull2 v1.1q, v1.2d, v7.2d\n   eor v1.16b, v1.16b, v4.16b\n   eor v1.16b, v1.16b, v17.16b\n   pmull v4.1q, v2.1d, v7.1d\n"
-    "pmull2 v2.1q, v2.2d, v7.2d\n   eor v2.16b, v2.16b, v4.16b\n   eor v2.16b, v2.16b, v18.16b\n   pmull v4.1q, v3.1d, v7.1d\n   pmull2 v3.1q, v3.2d, v7.2d\n   eor v3.16b, v3.16b, v4.16b\n"
-    "eor v3.16b, v3.16b, v19.16b\n   add x1, x1, #64\n   sub x2, x2, #64\n   cmp x2, #64\n   b.hs .Lcrc32_arm64_fold_four\n"
-    ".Lcrc32_arm64_fold_join:  ldr q7, [x9, #16]\n   pmull v4.1q, v0.1d, v7.1d\n"
-    "pmull2 v0.1q, v0.2d, v7.2d\n   eor v0.16b, v0.16b, v4.16b\n   eor v0.16b, v0.16b, v1.16b\n   pmull v4.1q, v0.1d, v7.1d\n   pmull2 v0.1q, v0.2d, v7.2d\n   eor v0.16b, v0.16b, v4.16b\n"
-    "eor v0.16b, v0.16b, v2.16b\n   pmull v4.1q, v0.1d, v7.1d\n   pmull2 v0.1q, v0.2d, v7.2d\n   eor v0.16b, v0.16b, v4.16b\n   eor v0.16b, v0.16b, v3.16b\n   cmp x2, #16\n"
-    "b.lo .Lcrc32_arm64_fold_finish\n"
-    ".Lcrc32_arm64_fold_one:  ldr q16, [x1], #16\n   pmull v4.1q, v0.1d, v7.1d\n   pmull2 v0.1q, v0.2d, v7.2d\n   eor v0.16b, v0.16b, v4.16b\n   eor v0.16b, v0.16b, v16.16b\n"
-    "sub x2, x2, #16\n   cmp x2, #16\n   b.hs .Lcrc32_arm64_fold_one\n"
-    ".arch_extension nocrypto\n"
-    ".Lcrc32_arm64_fold_finish:  fmov x9, d0\n   mov x10, v0.d[1]\n   mov w0, wzr\n   crc32x w0, w0, x9\n   crc32x w0, w0, x10\n   b .Lcrc32_arm64_chain\n"
+    NEON_CRC_FOLD(".Lcrc32_arm64", "fmov s4, w0", "fmov s31, w0",
+                 "0x8f352d95, 0x1d9513d7", "0xae689191, 0xccaa009e",
+                 "0x33fff533, 0x910eeec1", "0xce3371cb, 0xe95c1271",
+                 "fmov x9, d0\nmov x10, v0.d[1]\nmov w0, wzr\ncrc32x w0, w0, x9\ncrc32x w0, w0, x10\nb .Lcrc32_arm64_chain", "512", "1280")
     ".arch_extension nocrc\n"
-    ".balign 16\n"
-    ".Lcrc32_arm64_fold_k:\n"
-    ".quad 0x8f352d95, 0x1d9513d7\n"
-    ".quad 0xae689191, 0xccaa009e\n"
     ".Lcrc32_arm64_floor:\n"
 #endif
     "cbz x2, .Lcrc32_arm64_done\n   mov w0, w0\n   adrp x4, hash_crc32_tab\n   add x4, x4, :lo12:hash_crc32_tab\n   cmp x2, #8\n   b.lo .Lcrc32_arm64_byte\n"
@@ -18103,9 +18176,12 @@ __asm__(
     ".Lunicode_case_arm64_done:\n" ASM_RET
     ASM_END(unicode_case)
 
+    //  From sixty four bytes the fold, where it was 1,024 because the finish was sixty four turns of a bit at a time: the
+    //  sixteen bytes left go through the table from nothing. GB/s on an M2 Pro, before and after: 64 bytes 2.4 and 12.8,
+    //  256 1.8 and 36.5, 1 KiB 13.1 and 57.5, 4 KiB 21.8 and 68.5, 256 KiB 27.2 and 73.9.
     ASM_FUNC(hash_crc64)
 #ifndef KERNEL_MODE
-    "cmp x2, #1024\n   b.lo .Lcrc64_arm64_floor\n   adrp x9, cpu_has_pclmul\n   ldrb w9, [x9, :lo12:cpu_has_pclmul]\n   cbnz w9, .Lcrc64_arm64_fold\n"
+    "cmp x2, #64\n   b.lo .Lcrc64_arm64_floor\n   adrp x9, cpu_has_pclmul\n   ldrb w9, [x9, :lo12:cpu_has_pclmul]\n   cbnz w9, .Lcrc64_arm64_fold\n"
     ".Lcrc64_arm64_floor:\n"
 #endif
     "cbz x2, .Lcrc64_arm64_done\n   adrp x4, hash_crc64_tab\n   add x4, x4, :lo12:hash_crc64_tab\n   cmp x2, #8\n   b.lo .Lcrc64_arm64_byte\n"
@@ -18118,30 +18194,13 @@ __asm__(
     ".Lcrc64_arm64_byte:  ldrb w5, [x1], #1\n   eor x5, x0, x5\n   and w5, w5, #255\n   ldr x5, [x4, x5, lsl #3]\n   eor x0, x5, x0, lsr #8\n   subs x2, x2, #1\n   b.ne .Lcrc64_arm64_byte\n"
     ".Lcrc64_arm64_done:\n" ASM_RET
 #ifndef KERNEL_MODE
-    //  The x86_64 xmm fold with PMULL, as hash_crc32 does it.
-    ".Lcrc64_arm64_fold:\n"
-    ".arch_extension crypto\n"
-    "fmov d4, x0\n   ldp q0, q1, [x1]\n   ldp q2, q3, [x1, #32]\n   eor v0.16b, v0.16b, v4.16b\n   add x1, x1, #64\n   sub x2, x2, #64\n   adr x9, .Lcrc64_arm64_fold_k\n   ldr q7, [x9]\n"
-    ".Lcrc64_arm64_fold_four:  ldp q16, q17, [x1]\n   ldp q18, q19, [x1, #32]\n   pmull v4.1q, v0.1d, v7.1d\n   pmull2 v0.1q, v0.2d, v7.2d\n   eor v0.16b, v0.16b, v4.16b\n"
-    "eor v0.16b, v0.16b, v16.16b\n   pmull v4.1q, v1.1d, v7.1d\n   pmull2 v1.1q, v1.2d, v7.2d\n   eor v1.16b, v1.16b, v4.16b\n   eor v1.16b, v1.16b, v17.16b\n   pmull v4.1q, v2.1d, v7.1d\n"
-    "pmull2 v2.1q, v2.2d, v7.2d\n   eor v2.16b, v2.16b, v4.16b\n   eor v2.16b, v2.16b, v18.16b\n   pmull v4.1q, v3.1d, v7.1d\n   pmull2 v3.1q, v3.2d, v7.2d\n   eor v3.16b, v3.16b, v4.16b\n"
-    "eor v3.16b, v3.16b, v19.16b\n   add x1, x1, #64\n   sub x2, x2, #64\n   cmp x2, #64\n   b.hs .Lcrc64_arm64_fold_four\n   ldr q7, [x9, #16]\n   pmull v4.1q, v0.1d, v7.1d\n"
-    "pmull2 v0.1q, v0.2d, v7.2d\n   eor v0.16b, v0.16b, v4.16b\n   eor v0.16b, v0.16b, v1.16b\n   pmull v4.1q, v0.1d, v7.1d\n   pmull2 v0.1q, v0.2d, v7.2d\n   eor v0.16b, v0.16b, v4.16b\n"
-    "eor v0.16b, v0.16b, v2.16b\n   pmull v4.1q, v0.1d, v7.1d\n   pmull2 v0.1q, v0.2d, v7.2d\n   eor v0.16b, v0.16b, v4.16b\n   eor v0.16b, v0.16b, v3.16b\n   cmp x2, #16\n"
-    "b.lo .Lcrc64_arm64_fold_reduce\n"
-    ".Lcrc64_arm64_fold_one:  ldr q16, [x1], #16\n   pmull v4.1q, v0.1d, v7.1d\n   pmull2 v0.1q, v0.2d, v7.2d\n   eor v0.16b, v0.16b, v4.16b\n   eor v0.16b, v0.16b, v16.16b\n"
-    "sub x2, x2, #16\n   cmp x2, #16\n   b.hs .Lcrc64_arm64_fold_one\n"
-    ".Lcrc64_arm64_fold_reduce:  pmull v4.1q, v0.1d, v7.1d\n   pmull2 v0.1q, v0.2d, v7.2d\n   eor v0.16b, v0.16b, v4.16b\n"
-    ".arch_extension nocrypto\n"
-    "fmov x10, d0\n   mov x0, v0.d[1]\n   ldr x11, [x9, #32]\n   mov w12, #64\n"
-    ".Lcrc64_arm64_fold_mod:  asr x14, x0, #63\n   lsl x0, x0, #1\n   and x14, x14, x11\n   eor x0, x0, x14\n   subs w12, w12, #1\n   b.ne .Lcrc64_arm64_fold_mod\n   eor x0, x0, x10\n"
-    "cbz x2, .Lcrc64_arm64_fold_done\n   adrp x4, hash_crc64_tab\n   add x4, x4, :lo12:hash_crc64_tab\n   b .Lcrc64_arm64_byte\n"
-    ".Lcrc64_arm64_fold_done:\n" ASM_RET
-    ".balign 16\n"
-    ".Lcrc64_arm64_fold_k:\n"
-    ".quad 0x6ae3efbb9dd441f3, 0x81f6054a7842df4\n"
-    ".quad 0xe05dd497ca393ae4, 0xdabe95afc7875f40\n"
-    ".quad 0x92d8af2baf0e1e85\n"
+    //  The same fold as hash_crc32, 64 bit constants (x^(d+63) and x^(d-1)); the sixteen bytes left are put through the table.
+    NEON_CRC_FOLD(".Lcrc64_arm64", "fmov d4, x0", "fmov d31, x0",
+                 "0x6ae3efbb9dd441f3, 0x81f6054a7842df4", "0xe05dd497ca393ae4, 0xdabe95afc7875f40",
+                 "0x8757d71d4fcc1000, 0xd7d86b2af73de740", "0x8260adf2381ad81c, 0xf31fd9271e228b79",
+                 "fmov x3, d0\nmov x10, v0.d[1]\n   adrp x4, hash_crc64_tab\n   add x4, x4, :lo12:hash_crc64_tab\n   mov x0, #0\n"
+                 NEON_CRC64_EIGHT "eor x3, x10, x0\nmov x0, #0\n" NEON_CRC64_EIGHT
+                 "cbz x2, .Lcrc64_arm64_done\nb .Lcrc64_arm64_byte", "512", "1280")
 #endif
     ASM_END(hash_crc64)
 
@@ -24448,6 +24507,21 @@ __asm__(
        the same ABI wants the return sign-extended again. */
     ASM_FUNC(hash_crc32)
     "slli a0, a0, 32\n   srli a0, a0, 32\n   beqz a2, .Lcrc32_rv_done\n   lla t0, hash_crc32_tab\n"
+#ifndef KERNEL_MODE
+    //  Zbc where the processor has it: hash_crc32c's Barrett step with this polynomial's constants -- the quotient of x^96
+    //  over 0x104c11db7, reversed and halved, and the polynomial 0xedb88320 in the high word -- eight bytes in ten
+    //  instructions where the table takes sixty: 8.00 instructions a byte under qemu to 1.25 (-84 percent).
+    "lla t1, cpu_has_pclmul\n   lbu t1, 0(t1)\n   beqz t1, .Lcrc32_rv_gate\n"
+    ".option push\n"
+    ".option arch, +zbc\n"
+    "li t5, 0x5a72d812fb808b20\n   li t6, 0xedb8832000000000\n"
+    ".Lcrc32_rv_zbc_gate:  li t2, 8\n   bltu a2, t2, .Lcrc32_rv_byte\n   andi t1, a1, 7\n   bnez t1, .Lcrc32_rv_zbc_peel\n"
+    ".Lcrc32_rv_zbc_eight:  ld t1, 0(a1)\n   xor t1, t1, a0\n   clmul t3, t1, t5\n   slli t3, t3, 1\n   xor t3, t3, t1\n   clmulr t3, t3, t6\n   srli a0, t3, 32\n   addi a1, a1, 8\n"
+    "addi a2, a2, -8\n   bgeu a2, t2, .Lcrc32_rv_zbc_eight\n   beqz a2, .Lcrc32_rv_done\n   j .Lcrc32_rv_byte\n"
+    ".Lcrc32_rv_zbc_peel:  lbu t1, 0(a1)\n   xor t1, a0, t1\n   andi t1, t1, 255\n   slli t1, t1, 2\n   add t1, t0, t1\n   lwu t1, 0(t1)\n   srli a0, a0, 8\n   xor a0, a0, t1\n"
+    "addi a1, a1, 1\n   addi a2, a2, -1\n   j .Lcrc32_rv_zbc_gate\n"
+    ".option pop\n"
+#endif
     ".Lcrc32_rv_gate:  li t6, 8\n   bltu a2, t6, .Lcrc32_rv_byte\n   andi t1, a1, 7\n   bnez t1, .Lcrc32_rv_peel\n"
     ".Lcrc32_rv_eight:  ld t2, 0(a1)\n   xor t2, t2, a0\n   li a0, 0\n   li t1, 7168\n   add t1, t0, t1\n   andi t3, t2, 255\n   slli t3, t3, 2\n   add t3, t1, t3\n   lwu t4, 0(t3)\n"
     "xor a0, a0, t4\n   srli t2, t2, 8\n   addi t1, t1, -1024\n   andi t3, t2, 255\n   slli t3, t3, 2\n   add t3, t1, t3\n   lwu t4, 0(t3)\n   xor a0, a0, t4\n   srli t2, t2, 8\n"
@@ -24564,6 +24638,21 @@ __asm__(
 
     ASM_FUNC(hash_crc64)
     "beqz a2, .Lcrc64_rv_done\n   lla t0, hash_crc64_tab\n"
+#ifndef KERNEL_MODE
+    //  Zbc: two carry-less multiplies a word. The quotient of x^127 over 0x142f0e1eba9ea3693, reversed, and the
+    //  polynomial 0xc96c5795d7870f42; clmulr takes the 64 bits that are the remainder: 8.00 instructions a byte under
+    //  qemu to 0.875 (-89 percent).
+    "lla t1, cpu_has_pclmul\n   lbu t1, 0(t1)\n   beqz t1, .Lcrc64_rv_gate\n"
+    ".option push\n"
+    ".option arch, +zbc\n"
+    "li t5, 0x9c3e466c172963d5\n   li t6, 0xc96c5795d7870f42\n"
+    ".Lcrc64_rv_zbc_gate:  li t2, 8\n   bltu a2, t2, .Lcrc64_rv_byte\n   andi t1, a1, 7\n   bnez t1, .Lcrc64_rv_zbc_peel\n"
+    ".Lcrc64_rv_zbc_eight:  ld t1, 0(a1)\n   xor t1, t1, a0\n   clmul t3, t1, t5\n   clmulr a0, t3, t6\n   addi a1, a1, 8\n   addi a2, a2, -8\n   bgeu a2, t2, .Lcrc64_rv_zbc_eight\n"
+    "beqz a2, .Lcrc64_rv_done\n   j .Lcrc64_rv_byte\n"
+    ".Lcrc64_rv_zbc_peel:  lbu t1, 0(a1)\n   xor t1, a0, t1\n   andi t1, t1, 255\n   slli t1, t1, 3\n   add t1, t0, t1\n   ld t1, 0(t1)\n   srli a0, a0, 8\n   xor a0, a0, t1\n"
+    "addi a1, a1, 1\n   addi a2, a2, -1\n   j .Lcrc64_rv_zbc_gate\n"
+    ".option pop\n"
+#endif
     ".Lcrc64_rv_gate:  li t6, 8\n   bltu a2, t6, .Lcrc64_rv_byte\n   andi t1, a1, 7\n   bnez t1, .Lcrc64_rv_peel\n"
     ".Lcrc64_rv_eight:  ld t2, 0(a1)\n   xor t2, t2, a0\n   li a0, 0\n   li t1, 14336\n   add t1, t0, t1\n   andi t3, t2, 255\n   slli t3, t3, 3\n   add t3, t1, t3\n   ld t4, 0(t3)\n"
     "xor a0, a0, t4\n   srli t2, t2, 8\n   addi t1, t1, -2048\n   andi t3, t2, 255\n   slli t3, t3, 3\n   add t3, t1, t3\n   ld t4, 0(t3)\n   xor a0, a0, t4\n   srli t2, t2, 8\n"
@@ -44826,7 +44915,31 @@ __asm__(
     "mov %edi, %eax\n   test %rdx, %rdx\n   jz .Lcrc32c_x64_done\n"
     ".Lcrc32c_x64_dispatch:  cmpb $0, cpu_has_sse42(%rip)\n   jne .Lcrc32c_x64_hw\n   cmpb $0, cpu_hash_probed(%rip)\n   jne .Lcrc32c_x64_table\n   call cpu_hash_detect\n   mov %edi, %eax\n"
     "jmp .Lcrc32c_x64_dispatch\n"
-    ".Lcrc32c_x64_hw:  cmp $768, %rdx\n   jb .Lcrc32c_x64_one\n   cmpb $0, cpu_has_pclmul(%rip)\n   je .Lcrc32c_x64_one\n"
+    //  From 512 bytes, where the processor has VPCLMULQDQ and AVX-512, the zmm fold of hash_crc32 with this polynomial's
+    //  constants: sixteen lanes 256 bytes apart, PCLMUL issuing every other cycle on a Zen 5 so that 64 bytes cost four cycles and
+    //  the three crc32 streams (8 bytes a cycle) cost eight. The sixteen bytes left are put through crc32q from nothing.
+    //  GB/s on a 9950X at 5 GHz, before and after: 512 bytes 13.3 and 32.3, 1 KiB 24.9 and 54.3, 4 KiB 31.1 and 78.1,
+    //  256 KiB 34.7 and 80.6. VPCLMULQDQ issues every other cycle whatever its width (2.0 cycles measured on xmm, ymm
+    //  and zmm, latency 5), so 64 bytes in four cycles is its ceiling and the xmm fold's 20 GB/s is the xmm ceiling.
+    ".Lcrc32c_x64_hw:  cmp $512, %rdx\n   jb .Lcrc32c_x64_hw3\n   cmpb $0, cpu_has_pclmul(%rip)\n   je .Lcrc32c_x64_hw3\n   cmpb $0, cpu_has_vpclmul(%rip)\n   je .Lcrc32c_x64_hw3\n   cmpb $0, cpu_has_avx512(%rip)\n   je .Lcrc32c_x64_hw3\n"
+    "vbroadcasti32x4 .Lcrc32c_x64_k2048(%rip), %zmm7\n   vmovd %eax, %xmm5\n   vmovdqu64 (%rsi), %zmm0\n   vpxorq %zmm5, %zmm0, %zmm0\n"
+    "vmovdqu64 64(%rsi), %zmm1\n   vmovdqu64 128(%rsi), %zmm2\n   vmovdqu64 192(%rsi), %zmm3\n   add $256, %rsi\n   sub $256, %rdx\n   cmp $256, %rdx\n   jb .Lcrc32c_x64_zmm_down\n"
+    ".balign 16\n"
+    ".Lcrc32c_x64_zmm_turn:  vpclmulqdq $0x00, %zmm7, %zmm0, %zmm4\n   vpclmulqdq $0x11, %zmm7, %zmm0, %zmm0\n   vmovdqu64 0(%rsi), %zmm5\n   vpternlogq $0x96, %zmm5, %zmm4, %zmm0\n"
+    "vpclmulqdq $0x00, %zmm7, %zmm1, %zmm4\n   vpclmulqdq $0x11, %zmm7, %zmm1, %zmm1\n   vmovdqu64 64(%rsi), %zmm5\n   vpternlogq $0x96, %zmm5, %zmm4, %zmm1\n"
+    "vpclmulqdq $0x00, %zmm7, %zmm2, %zmm4\n   vpclmulqdq $0x11, %zmm7, %zmm2, %zmm2\n   vmovdqu64 128(%rsi), %zmm5\n   vpternlogq $0x96, %zmm5, %zmm4, %zmm2\n"
+    "vpclmulqdq $0x00, %zmm7, %zmm3, %zmm4\n   vpclmulqdq $0x11, %zmm7, %zmm3, %zmm3\n   vmovdqu64 192(%rsi), %zmm5\n   vpternlogq $0x96, %zmm5, %zmm4, %zmm3\n   add $256, %rsi\n"
+    "sub $256, %rdx\n   cmp $256, %rdx\n   jae .Lcrc32c_x64_zmm_turn\n"
+    ".Lcrc32c_x64_zmm_down:  vbroadcasti32x4 .Lcrc32c_x64_k512(%rip), %zmm7\n   vpclmulqdq $0x00, %zmm7, %zmm0, %zmm4\n   vpclmulqdq $0x11, %zmm7, %zmm0, %zmm0\n"
+    "vpternlogq $0x96, %zmm4, %zmm0, %zmm1\n   vpclmulqdq $0x00, %zmm7, %zmm1, %zmm4\n   vpclmulqdq $0x11, %zmm7, %zmm1, %zmm1\n   vpternlogq $0x96, %zmm4, %zmm1, %zmm2\n"
+    "vpclmulqdq $0x00, %zmm7, %zmm2, %zmm4\n   vpclmulqdq $0x11, %zmm7, %zmm2, %zmm2\n   vpternlogq $0x96, %zmm4, %zmm2, %zmm3\n   vmovdqa %xmm3, %xmm0\n   vextracti32x4 $1, %zmm3, %xmm1\n"
+    "vextracti32x4 $2, %zmm3, %xmm2\n   vextracti32x4 $3, %zmm3, %xmm3\n   vzeroupper\n   movdqa .Lcrc32c_x64_k128(%rip), %xmm7\n   movdqa %xmm0, %xmm4\n   pclmulqdq $0x00, %xmm7, %xmm0\n   pclmulqdq $0x11, %xmm7, %xmm4\n"
+    "pxor %xmm4, %xmm0\n   pxor %xmm1, %xmm0\n   movdqa %xmm0, %xmm4\n   pclmulqdq $0x00, %xmm7, %xmm0\n   pclmulqdq $0x11, %xmm7, %xmm4\n   pxor %xmm4, %xmm0\n   pxor %xmm2, %xmm0\n   movdqa %xmm0, %xmm4\n"
+    "pclmulqdq $0x00, %xmm7, %xmm0\n   pclmulqdq $0x11, %xmm7, %xmm4\n   pxor %xmm4, %xmm0\n   pxor %xmm3, %xmm0\n   cmp $16, %rdx\n   jb .Lcrc32c_x64_zmm_finish\n"
+    ".Lcrc32c_x64_zmm_one:  movdqa %xmm0, %xmm4\n   pclmulqdq $0x00, %xmm7, %xmm0\n   pclmulqdq $0x11, %xmm7, %xmm4\n   pxor %xmm4, %xmm0\n   movdqu (%rsi), %xmm4\n   pxor %xmm4, %xmm0\n"
+    "add $16, %rsi\n   sub $16, %rdx\n   cmp $16, %rdx\n   jae .Lcrc32c_x64_zmm_one\n"
+    ".Lcrc32c_x64_zmm_finish:  movq %xmm0, %r9\n   psrldq $8, %xmm0\n   movq %xmm0, %r10\n   xor %eax, %eax\n   crc32q %r9, %rax\n   crc32q %r10, %rax\n   jmp .Lcrc32c_x64_one\n"
+    ".Lcrc32c_x64_hw3:  cmp $768, %rdx\n   jb .Lcrc32c_x64_one\n   cmpb $0, cpu_has_pclmul(%rip)\n   je .Lcrc32c_x64_one\n"
     ".Lcrc32c_x64_three:  xor %r8d, %r8d\n   xor %r9d, %r9d\n   xor %ecx, %ecx\n"
     ".balign 16\n"
     ".Lcrc32c_x64_three_turn:  crc32q 0(%rsi,%rcx), %rax\n   crc32q 256(%rsi,%rcx), %r8\n   crc32q 512(%rsi,%rcx), %r9\n   crc32q 8(%rsi,%rcx), %rax\n   crc32q 264(%rsi,%rcx), %r8\n"
@@ -44852,6 +44965,13 @@ __asm__(
     ".balign 16\n"
     ".Lcrc32c_x64_k:\n"
     ".quad 0xdd7e3b0c, 0xb9e02b86\n"
+    ".balign 16\n"
+    ".Lcrc32c_x64_k2048:\n"
+    ".quad 0xdcb17aa4, 0xb9e02b86\n"
+    ".Lcrc32c_x64_k512:\n"
+    ".quad 0x740eef02, 0x9e4addf8\n"
+    ".Lcrc32c_x64_k128:\n"
+    ".quad 0xf20c0dfe, 0x493c7d27\n"
     ".popsection\n"
     ASM_END(hash_crc32c)
     ASM_FUNC(keccak_blocks)
@@ -45778,6 +45898,10 @@ __asm__(
 #elif ARM64
 __asm__(
     ASM_SECTION
+    //  The same fold as hash_crc32 with Castagnoli's constants and crc32cx for the finish, from sixty four bytes; the
+    //  three crc32cx streams this had (eight bytes a cycle, 22.7 GB/s on an M2 Pro at 256 KiB, and only from 768 bytes)
+    //  are gone. GB/s, before and after: 64 bytes 14.9 and 22.4, 256 17.5 and 49.8, 1 KiB 20.0 and 62.0, 4 KiB 22.0 and
+    //  70.7, 256 KiB 22.7 and 74.3.
     ASM_FUNC(hash_crc32c)
     "cbz x2, .Lcrc32c_arm64_done\n   mov w0, w0\n"
     ".Lcrc32c_arm64_dispatch:  adrp x16, cpu_has_crc32\n   ldrb w16, [x16, :lo12:cpu_has_crc32]\n   cbnz w16, .Lcrc32c_arm64_hw\n   adrp x16, cpu_hash_probed\n"
@@ -45785,17 +45909,11 @@ __asm__(
     "b .Lcrc32c_arm64_dispatch\n"
     ".Lcrc32c_arm64_hw:\n"
     ".arch_extension crc\n"
-    "cmp x2, #768\n   b.lo .Lcrc32c_arm64_one\n   adrp x16, cpu_has_pclmul\n   ldrb w16, [x16, :lo12:cpu_has_pclmul]\n   cbz w16, .Lcrc32c_arm64_one\n"
-    ".arch_extension crypto\n"
-    "adrp x16, .Lcrc32c_arm64_k\n   add x16, x16, :lo12:.Lcrc32c_arm64_k\n   ldp d2, d3, [x16]\n"
-    ".Lcrc32c_arm64_three:  mov w8, #0\n   mov w9, #0\n   add x10, x1, #256\n   add x11, x1, #512\n   mov x12, #8\n"
-    ".balign 16\n"
-    ".Lcrc32c_arm64_three_turn:  ldp x3, x4, [x1], #16\n   ldp x5, x6, [x10], #16\n   ldp x7, x13, [x11], #16\n   crc32cx w0, w0, x3\n   crc32cx w8, w8, x5\n   crc32cx w9, w9, x7\n"
-    "crc32cx w0, w0, x4\n   crc32cx w8, w8, x6\n   crc32cx w9, w9, x13\n   ldp x3, x4, [x1], #16\n   ldp x5, x6, [x10], #16\n   ldp x7, x13, [x11], #16\n   crc32cx w0, w0, x3\n"
-    "crc32cx w8, w8, x5\n   crc32cx w9, w9, x7\n   crc32cx w0, w0, x4\n   crc32cx w8, w8, x6\n   crc32cx w9, w9, x13\n   subs x12, x12, #1\n   b.ne .Lcrc32c_arm64_three_turn\n"
-    "fmov d0, x0\n   fmov d1, x8\n   pmull v0.1q, v0.1d, v2.1d\n   pmull v1.1q, v1.1d, v3.1d\n   eor v0.16b, v0.16b, v1.16b\n   fmov x3, d0\n   crc32cx w0, wzr, x3\n   eor w0, w0, w9\n"
-    "mov x1, x11\n   sub x2, x2, #768\n   cmp x2, #768\n   b.hs .Lcrc32c_arm64_three\n"
-    ".arch_extension nocrypto\n"
+    "cmp x2, #64\n   b.lo .Lcrc32c_arm64_one\n   adrp x16, cpu_has_pclmul\n   ldrb w16, [x16, :lo12:cpu_has_pclmul]\n   cbz w16, .Lcrc32c_arm64_one\n"
+    NEON_CRC_FOLD(".Lcrc32c_arm64", "fmov s4, w0", "fmov s31, w0",
+                 "0x740eef02, 0x9e4addf8", "0xf20c0dfe, 0x493c7d27",
+                 "0x6992cea2, 0xd3b6092", "0xdcb17aa4, 0xb9e02b86",
+                 "fmov x9, d0\nmov x10, v0.d[1]\nmov w0, wzr\ncrc32cx w0, w0, x9\ncrc32cx w0, w0, x10\nb .Lcrc32c_arm64_one", "512", "1280")
     ".Lcrc32c_arm64_one:  cmp x2, #8\n   b.lo .Lcrc32c_arm64_bytes\n"
     ".balign 16\n"
     ".Lcrc32c_arm64_one_turn:  ldr x3, [x1], #8\n   crc32cx w0, w0, x3\n   sub x2, x2, #8\n   cmp x2, #8\n   b.hs .Lcrc32c_arm64_one_turn\n"
@@ -45813,11 +45931,6 @@ __asm__(
     ".Lcrc32c_arm64_table_byte:  ldrb w5, [x1], #1\n   eor x5, x0, x5\n   and w5, w5, #255\n   ldr w5, [x4, x5, lsl #2]\n   eor w0, w5, w0, lsr #8\n   subs x2, x2, #1\n"
     "b.ne .Lcrc32c_arm64_table_byte\n"
     ".Lcrc32c_arm64_done:\n" ASM_RET
-    ".pushsection .rodata\n"
-    ".balign 16\n"
-    ".Lcrc32c_arm64_k:\n"
-    ".quad 0xdd7e3b0c, 0xb9e02b86\n"
-    ".popsection\n"
     ASM_END(hash_crc32c)
     ASM_FUNC(keccak_blocks)
     "cbz x2, .Lkeccak_arm64_none\n"
