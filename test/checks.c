@@ -94770,6 +94770,15 @@ static fn keccak_check_all(p8 address_to limit)
                 sm3 += sm3_check_cores(limit) + sm3_check_sponge(limit - 8192);
                 cpu_has_sm3 = extension;
         }
+#elif X64
+        p8 bmi2 = cpu_has_mulx;
+
+        if (bmi2)
+        {
+                cpu_has_mulx = 0;
+                sm3 += sm3_check_cores(limit) + sm3_check_sponge(limit - 8192);
+                cpu_has_mulx = bmi2;
+        }
 #endif
         sm3 += sm3_check_cores(limit) + sm3_check_sponge(limit - 8192);
         check("sm3_blocks agrees with the textbook rounds, and SM3 gives GB/T 32905's answers", sm3 == 0);
