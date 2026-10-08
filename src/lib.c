@@ -1283,6 +1283,70 @@ typedef typeof(sizeof(0)) sized;
     "pmull v24.1q, v7.1d, v31.1d\npmull2 v7.1q, v7.2d, v31.2d\neor v7.16b, v7.16b, v24.16b\neor v7.16b, v7.16b, v15.16b\nldp d10, d11, [sp, #16]\nldp d12, d13, [sp, #32]\n" \
     "ldp d14, d15, [sp, #48]\nldp d8, d9, [sp], #64\nb " L "_fold8_check\n.balign 16\n" L "_fold_k:\n.quad " K512 \
     "\n.quad " K128 "\n.quad " K1024 "\n.quad " K2048 "\n.arch_extension nocrypto\n"
+#define NEON_CRC_FOLD_MSB(L, SEED4, SEED8, K512, K128, K1024, K2048, FINISH, T8, T16)                          \
+    L "_fold:\n.arch_extension crypto\ncmp x2, #" T8 "\nb.hs " L "_fold_big\n" SEED4 \
+    "\nldp q0, q1, [x1]\nldp q2, q3, [x1, #32]\neor v0.16b, v0.16b, v4.16b\nrbit v0.16b, v0.16b\nrbit v1.16b, v1.16b\nrbit v2.16b, v2.16b\nrbit v3.16b, v3.16b\n" \
+    "add x1, x1, #64\nsub x2, x2, #64\nadr x9, " L "_fold_k\nldr q7, [x9]\ncmp x2, #64\nb.lo " L \
+    "_fold_join\n.balign 16\n" L \
+    "_fold_four:  ldp q16, q17, [x1]\nldp q18, q19, [x1, #32]\nrbit v16.16b, v16.16b\nrbit v17.16b, v17.16b\nrbit v18.16b, v18.16b\nrbit v19.16b, v19.16b\npmull v4.1q, v0.1d, v7.1d\n" \
+    "pmull2 v0.1q, v0.2d, v7.2d\neor v0.16b, v0.16b, v4.16b\neor v0.16b, v0.16b, v16.16b\npmull v4.1q, v1.1d, v7.1d\npmull2 v1.1q, v1.2d, v7.2d\neor v1.16b, v1.16b, v4.16b\n" \
+    "eor v1.16b, v1.16b, v17.16b\npmull v4.1q, v2.1d, v7.1d\npmull2 v2.1q, v2.2d, v7.2d\neor v2.16b, v2.16b, v4.16b\neor v2.16b, v2.16b, v18.16b\npmull v4.1q, v3.1d, v7.1d\n" \
+    "pmull2 v3.1q, v3.2d, v7.2d\neor v3.16b, v3.16b, v4.16b\neor v3.16b, v3.16b, v19.16b\nadd x1, x1, #64\nsub x2, x2, #64\ncmp x2, #64\nb.hs " \
+    L "_fold_four\n" L \
+    "_fold_join:  ldr q7, [x9, #16]\npmull v4.1q, v0.1d, v7.1d\npmull2 v0.1q, v0.2d, v7.2d\neor v0.16b, v0.16b, v4.16b\neor v0.16b, v0.16b, v1.16b\npmull v4.1q, v0.1d, v7.1d\n" \
+    "pmull2 v0.1q, v0.2d, v7.2d\neor v0.16b, v0.16b, v4.16b\neor v0.16b, v0.16b, v2.16b\npmull v4.1q, v0.1d, v7.1d\npmull2 v0.1q, v0.2d, v7.2d\neor v0.16b, v0.16b, v4.16b\n" \
+    "eor v0.16b, v0.16b, v3.16b\ncmp x2, #16\nb.lo " L "_fold_finish\n" L \
+    "_fold_one:  ldr q16, [x1], #16\nrbit v16.16b, v16.16b\npmull v4.1q, v0.1d, v7.1d\npmull2 v0.1q, v0.2d, v7.2d\neor v0.16b, v0.16b, v4.16b\neor v0.16b, v0.16b, v16.16b\n" \
+    "sub x2, x2, #16\ncmp x2, #16\nb.hs " L "_fold_one\n.arch_extension nocrypto\n" L "_fold_finish:  " FINISH \
+    "\n.arch_extension crypto\n" L "_fold_big:  adr x9, " L "_fold_k\ncmp x2, #" T16 "\nb.hs " L "_fold16\n" L "_fold8:  " \
+    SEED8 \
+    "\nld1 {v0.16b-v3.16b}, [x1], #64\nld1 {v4.16b-v7.16b}, [x1], #64\neor v0.16b, v0.16b, v31.16b\nrbit v0.16b, v0.16b\nrbit v1.16b, v1.16b\nrbit v2.16b, v2.16b\n" \
+    "rbit v3.16b, v3.16b\nrbit v4.16b, v4.16b\nrbit v5.16b, v5.16b\nrbit v6.16b, v6.16b\nrbit v7.16b, v7.16b\nsub x2, x2, #128\nldr q31, [x9, #32]\n" \
+    L "_fold8_check:  cmp x2, #128\nb.lo " L "_fold8_reduce\n.balign 16\n" L \
+    "_fold8_loop:  ldr q16, [x1, #0]\nrbit v16.16b, v16.16b\npmull v24.1q, v0.1d, v31.1d\npmull2 v0.1q, v0.2d, v31.2d\neor v0.16b, v0.16b, v24.16b\neor v0.16b, v0.16b, v16.16b\n" \
+    "ldr q17, [x1, #16]\nrbit v17.16b, v17.16b\npmull v25.1q, v1.1d, v31.1d\npmull2 v1.1q, v1.2d, v31.2d\neor v1.16b, v1.16b, v25.16b\neor v1.16b, v1.16b, v17.16b\n" \
+    "ldr q18, [x1, #32]\nrbit v18.16b, v18.16b\npmull v26.1q, v2.1d, v31.1d\npmull2 v2.1q, v2.2d, v31.2d\neor v2.16b, v2.16b, v26.16b\neor v2.16b, v2.16b, v18.16b\n" \
+    "ldr q19, [x1, #48]\nrbit v19.16b, v19.16b\npmull v27.1q, v3.1d, v31.1d\npmull2 v3.1q, v3.2d, v31.2d\neor v3.16b, v3.16b, v27.16b\neor v3.16b, v3.16b, v19.16b\n" \
+    "ldr q20, [x1, #64]\nrbit v20.16b, v20.16b\npmull v28.1q, v4.1d, v31.1d\npmull2 v4.1q, v4.2d, v31.2d\neor v4.16b, v4.16b, v28.16b\neor v4.16b, v4.16b, v20.16b\n" \
+    "ldr q21, [x1, #80]\nrbit v21.16b, v21.16b\npmull v29.1q, v5.1d, v31.1d\npmull2 v5.1q, v5.2d, v31.2d\neor v5.16b, v5.16b, v29.16b\neor v5.16b, v5.16b, v21.16b\n" \
+    "ldr q22, [x1, #96]\nrbit v22.16b, v22.16b\npmull v30.1q, v6.1d, v31.1d\npmull2 v6.1q, v6.2d, v31.2d\neor v6.16b, v6.16b, v30.16b\neor v6.16b, v6.16b, v22.16b\n" \
+    "ldr q23, [x1, #112]\nrbit v23.16b, v23.16b\npmull v24.1q, v7.1d, v31.1d\npmull2 v7.1q, v7.2d, v31.2d\neor v7.16b, v7.16b, v24.16b\neor v7.16b, v7.16b, v23.16b\n" \
+    "add x1, x1, #128\nsub x2, x2, #128\ncmp x2, #128\nb.hs " L "_fold8_loop\n" L \
+    "_fold8_reduce:  ldr q31, [x9]\npmull v24.1q, v0.1d, v31.1d\npmull2 v0.1q, v0.2d, v31.2d\neor v0.16b, v0.16b, v24.16b\neor v0.16b, v0.16b, v4.16b\npmull v25.1q, v1.1d, v31.1d\n" \
+    "pmull2 v1.1q, v1.2d, v31.2d\neor v1.16b, v1.16b, v25.16b\neor v1.16b, v1.16b, v5.16b\npmull v26.1q, v2.1d, v31.1d\npmull2 v2.1q, v2.2d, v31.2d\neor v2.16b, v2.16b, v26.16b\n" \
+    "eor v2.16b, v2.16b, v6.16b\npmull v27.1q, v3.1d, v31.1d\npmull2 v3.1q, v3.2d, v31.2d\neor v3.16b, v3.16b, v27.16b\neor v3.16b, v3.16b, v7.16b\nldr q7, [x9]\n" \
+    "cmp x2, #64\nb.hs " L "_fold_four\nb " L "_fold_join\n" L \
+    "_fold16:  stp d8, d9, [sp, #-64]!\nstp d10, d11, [sp, #16]\nstp d12, d13, [sp, #32]\nstp d14, d15, [sp, #48]\n" SEED8 \
+    "\nld1 {v0.16b-v3.16b}, [x1], #64\nld1 {v4.16b-v7.16b}, [x1], #64\nld1 {v8.16b-v11.16b}, [x1], #64\nld1 {v12.16b-v15.16b}, [x1], #64\neor v0.16b, v0.16b, v31.16b\n" \
+    "rbit v0.16b, v0.16b\nrbit v1.16b, v1.16b\nrbit v2.16b, v2.16b\nrbit v3.16b, v3.16b\nrbit v4.16b, v4.16b\nrbit v5.16b, v5.16b\nrbit v6.16b, v6.16b\nrbit v7.16b, v7.16b\n" \
+    "rbit v8.16b, v8.16b\nrbit v9.16b, v9.16b\nrbit v10.16b, v10.16b\nrbit v11.16b, v11.16b\nrbit v12.16b, v12.16b\nrbit v13.16b, v13.16b\nrbit v14.16b, v14.16b\n" \
+    "rbit v15.16b, v15.16b\nsub x2, x2, #256\nldr q31, [x9, #48]\ncmp x2, #256\nb.lo " L "_fold16_reduce\n.balign 16\n" L \
+    "_fold16_loop:  ldr q16, [x1, #0]\nrbit v16.16b, v16.16b\npmull v24.1q, v0.1d, v31.1d\npmull2 v0.1q, v0.2d, v31.2d\neor v0.16b, v0.16b, v24.16b\neor v0.16b, v0.16b, v16.16b\n" \
+    "ldr q17, [x1, #16]\nrbit v17.16b, v17.16b\npmull v25.1q, v1.1d, v31.1d\npmull2 v1.1q, v1.2d, v31.2d\neor v1.16b, v1.16b, v25.16b\neor v1.16b, v1.16b, v17.16b\n" \
+    "ldr q18, [x1, #32]\nrbit v18.16b, v18.16b\npmull v26.1q, v2.1d, v31.1d\npmull2 v2.1q, v2.2d, v31.2d\neor v2.16b, v2.16b, v26.16b\neor v2.16b, v2.16b, v18.16b\n" \
+    "ldr q19, [x1, #48]\nrbit v19.16b, v19.16b\npmull v27.1q, v3.1d, v31.1d\npmull2 v3.1q, v3.2d, v31.2d\neor v3.16b, v3.16b, v27.16b\neor v3.16b, v3.16b, v19.16b\n" \
+    "ldr q20, [x1, #64]\nrbit v20.16b, v20.16b\npmull v28.1q, v4.1d, v31.1d\npmull2 v4.1q, v4.2d, v31.2d\neor v4.16b, v4.16b, v28.16b\neor v4.16b, v4.16b, v20.16b\n" \
+    "ldr q21, [x1, #80]\nrbit v21.16b, v21.16b\npmull v29.1q, v5.1d, v31.1d\npmull2 v5.1q, v5.2d, v31.2d\neor v5.16b, v5.16b, v29.16b\neor v5.16b, v5.16b, v21.16b\n" \
+    "ldr q22, [x1, #96]\nrbit v22.16b, v22.16b\npmull v30.1q, v6.1d, v31.1d\npmull2 v6.1q, v6.2d, v31.2d\neor v6.16b, v6.16b, v30.16b\neor v6.16b, v6.16b, v22.16b\n" \
+    "ldr q23, [x1, #112]\nrbit v23.16b, v23.16b\npmull v24.1q, v7.1d, v31.1d\npmull2 v7.1q, v7.2d, v31.2d\neor v7.16b, v7.16b, v24.16b\neor v7.16b, v7.16b, v23.16b\n" \
+    "ldr q16, [x1, #128]\nrbit v16.16b, v16.16b\npmull v25.1q, v8.1d, v31.1d\npmull2 v8.1q, v8.2d, v31.2d\neor v8.16b, v8.16b, v25.16b\neor v8.16b, v8.16b, v16.16b\n" \
+    "ldr q17, [x1, #144]\nrbit v17.16b, v17.16b\npmull v26.1q, v9.1d, v31.1d\npmull2 v9.1q, v9.2d, v31.2d\neor v9.16b, v9.16b, v26.16b\neor v9.16b, v9.16b, v17.16b\n" \
+    "ldr q18, [x1, #160]\nrbit v18.16b, v18.16b\npmull v27.1q, v10.1d, v31.1d\npmull2 v10.1q, v10.2d, v31.2d\neor v10.16b, v10.16b, v27.16b\neor v10.16b, v10.16b, v18.16b\n" \
+    "ldr q19, [x1, #176]\nrbit v19.16b, v19.16b\npmull v28.1q, v11.1d, v31.1d\npmull2 v11.1q, v11.2d, v31.2d\neor v11.16b, v11.16b, v28.16b\neor v11.16b, v11.16b, v19.16b\n" \
+    "ldr q20, [x1, #192]\nrbit v20.16b, v20.16b\npmull v29.1q, v12.1d, v31.1d\npmull2 v12.1q, v12.2d, v31.2d\neor v12.16b, v12.16b, v29.16b\neor v12.16b, v12.16b, v20.16b\n" \
+    "ldr q21, [x1, #208]\nrbit v21.16b, v21.16b\npmull v30.1q, v13.1d, v31.1d\npmull2 v13.1q, v13.2d, v31.2d\neor v13.16b, v13.16b, v30.16b\neor v13.16b, v13.16b, v21.16b\n" \
+    "ldr q22, [x1, #224]\nrbit v22.16b, v22.16b\npmull v24.1q, v14.1d, v31.1d\npmull2 v14.1q, v14.2d, v31.2d\neor v14.16b, v14.16b, v24.16b\neor v14.16b, v14.16b, v22.16b\n" \
+    "ldr q23, [x1, #240]\nrbit v23.16b, v23.16b\npmull v25.1q, v15.1d, v31.1d\npmull2 v15.1q, v15.2d, v31.2d\neor v15.16b, v15.16b, v25.16b\neor v15.16b, v15.16b, v23.16b\n" \
+    "add x1, x1, #256\nsub x2, x2, #256\ncmp x2, #256\nb.hs " L "_fold16_loop\n" L \
+    "_fold16_reduce:  ldr q31, [x9, #32]\npmull v24.1q, v0.1d, v31.1d\npmull2 v0.1q, v0.2d, v31.2d\neor v0.16b, v0.16b, v24.16b\neor v0.16b, v0.16b, v8.16b\n" \
+    "pmull v25.1q, v1.1d, v31.1d\npmull2 v1.1q, v1.2d, v31.2d\neor v1.16b, v1.16b, v25.16b\neor v1.16b, v1.16b, v9.16b\npmull v26.1q, v2.1d, v31.1d\npmull2 v2.1q, v2.2d, v31.2d\n" \
+    "eor v2.16b, v2.16b, v26.16b\neor v2.16b, v2.16b, v10.16b\npmull v27.1q, v3.1d, v31.1d\npmull2 v3.1q, v3.2d, v31.2d\neor v3.16b, v3.16b, v27.16b\neor v3.16b, v3.16b, v11.16b\n" \
+    "pmull v28.1q, v4.1d, v31.1d\npmull2 v4.1q, v4.2d, v31.2d\neor v4.16b, v4.16b, v28.16b\neor v4.16b, v4.16b, v12.16b\npmull v29.1q, v5.1d, v31.1d\npmull2 v5.1q, v5.2d, v31.2d\n" \
+    "eor v5.16b, v5.16b, v29.16b\neor v5.16b, v5.16b, v13.16b\npmull v30.1q, v6.1d, v31.1d\npmull2 v6.1q, v6.2d, v31.2d\neor v6.16b, v6.16b, v30.16b\neor v6.16b, v6.16b, v14.16b\n" \
+    "pmull v24.1q, v7.1d, v31.1d\npmull2 v7.1q, v7.2d, v31.2d\neor v7.16b, v7.16b, v24.16b\neor v7.16b, v7.16b, v15.16b\nldp d10, d11, [sp, #16]\nldp d12, d13, [sp, #32]\n" \
+    "ldp d14, d15, [sp, #48]\nldp d8, d9, [sp], #64\nb " L "_fold8_check\n.balign 16\n" L "_fold_k:\n.quad " K512 \
+    "\n.quad " K128 "\n.quad " K1024 "\n.quad " K2048 "\n.arch_extension nocrypto\n"
+
 /* The eight lookups of a 64-bit word in x3 through hash_crc64_tab, which the fold's finish does twice: the crc in x0 (zero on
    entry), the table at x4. */
 #define NEON_CRC64_EIGHT                                                           \
@@ -18051,7 +18115,7 @@ __asm__(
        reversed across 64 bits, leave the product in that same order with
        no shift and no swap -- five instructions a lane where rev64 would
        need an ext as well. Vector use stays out of kernels. */
-#define CRC32_MSB_ARM64_WORD(load, wide, narrow)                              \
+#define NEON_CRC32_MSB_WORD(load, wide, narrow)                              \
     load "eor x7, x7, " wide "\n"                                            \
     "and x16, x7, #255\n   ldr " narrow ", [x8, x16, lsl #2]\n"               \
     "ubfx x16, x7, #8, #8\n   ldr w17, [x9, x16, lsl #2]\n   eor " narrow ", " narrow ", w17\n"  \
@@ -18061,15 +18125,9 @@ __asm__(
     "ubfx x16, x7, #40, #8\n   ldr w17, [x13, x16, lsl #2]\n   eor " narrow ", " narrow ", w17\n" \
     "ubfx x16, x7, #48, #8\n   ldr w17, [x14, x16, lsl #2]\n   eor " narrow ", " narrow ", w17\n" \
     "lsr x16, x7, #56\n   ldr w17, [x15, x16, lsl #2]\n   eor " narrow ", " narrow ", w17\n"
-#define CRC32_MSB_ARM64_BASES                                                 \
+#define NEON_CRC32_MSB_BASES                                                 \
     "add x14, x15, #1024\n   add x13, x14, #1024\n   add x12, x13, #1024\n   add x11, x12, #1024\n   add x10, x11, #1024\n   add x9, x10, #1024\n" \
     "add x8, x9, #1024\n"
-#define CRC32_MSB_ARM64_FOLD(lane)                                            \
-    "pmull v6.1q, " lane ".1d, v16.1d\n   pmull2 v7.1q, " lane ".2d, v16.2d\n" \
-    "eor " lane ".16b, v6.16b, v7.16b\n"
-#define CRC32_MSB_ARM64_LANE(lane, data)                                      \
-    CRC32_MSB_ARM64_FOLD(lane)                                                \
-    "rbit " data ".16b, " data ".16b\n   eor " lane ".16b, " lane ".16b, " data ".16b\n"
     ASM_FUNC(hash_crc32_msb)
     "rev w0, w0\n"
 #ifndef KERNEL_MODE
@@ -18077,71 +18135,52 @@ __asm__(
     ".Lcrc32_msb_arm64_floor:\n"
 #endif
     "adrp x3, hash_crc32_msb_tab\n   add x3, x3, :lo12:hash_crc32_msb_tab\n   cmp x2, #64\n   b.lo .Lcrc32_msb_arm64_short\n   add x15, x3, #2, lsl #12\n"
-    CRC32_MSB_ARM64_BASES
+    NEON_CRC32_MSB_BASES
     "mov w4, #0\n   mov w5, #0\n   mov w6, #0\n"
     ".balign 16\n"
     ".Lcrc32_msb_arm64_braid:\n"
-    CRC32_MSB_ARM64_WORD("ldr x7, [x1]\n", "x0", "w0")
-    CRC32_MSB_ARM64_WORD("ldr x7, [x1, #8]\n", "x4", "w4")
-    CRC32_MSB_ARM64_WORD("ldr x7, [x1, #16]\n", "x5", "w5")
-    CRC32_MSB_ARM64_WORD("ldr x7, [x1, #24]\n", "x6", "w6")
+    NEON_CRC32_MSB_WORD("ldr x7, [x1]\n", "x0", "w0")
+    NEON_CRC32_MSB_WORD("ldr x7, [x1, #8]\n", "x4", "w4")
+    NEON_CRC32_MSB_WORD("ldr x7, [x1, #16]\n", "x5", "w5")
+    NEON_CRC32_MSB_WORD("ldr x7, [x1, #24]\n", "x6", "w6")
     "add x1, x1, #32\n   sub x2, x2, #32\n   cmp x2, #64\n   b.hs .Lcrc32_msb_arm64_braid\n   sub x8, x8, #2, lsl #12\n   sub x9, x9, #2, lsl #12\n   sub x10, x10, #2, lsl #12\n"
     "sub x11, x11, #2, lsl #12\n   sub x12, x12, #2, lsl #12\n   sub x13, x13, #2, lsl #12\n   sub x14, x14, #2, lsl #12\n   sub x15, x15, #2, lsl #12\n"
-    CRC32_MSB_ARM64_WORD("ldr x7, [x1]\n", "x0", "w0")
+    NEON_CRC32_MSB_WORD("ldr x7, [x1]\n", "x0", "w0")
     "eor w0, w0, w4\n"
-    CRC32_MSB_ARM64_WORD("ldr x7, [x1, #8]\n", "x0", "w0")
+    NEON_CRC32_MSB_WORD("ldr x7, [x1, #8]\n", "x0", "w0")
     "eor w0, w0, w5\n"
-    CRC32_MSB_ARM64_WORD("ldr x7, [x1, #16]\n", "x0", "w0")
+    NEON_CRC32_MSB_WORD("ldr x7, [x1, #16]\n", "x0", "w0")
     "eor w0, w0, w6\n"
-    CRC32_MSB_ARM64_WORD("ldr x7, [x1, #24]\n", "x0", "w0")
+    NEON_CRC32_MSB_WORD("ldr x7, [x1, #24]\n", "x0", "w0")
     "add x1, x1, #32\n   sub x2, x2, #32\n   b .Lcrc32_msb_arm64_serial\n"
     ".Lcrc32_msb_arm64_short:  mov x15, x3\n   cmp x2, #8\n   b.lo .Lcrc32_msb_arm64_tail\n"
-    CRC32_MSB_ARM64_BASES
+    NEON_CRC32_MSB_BASES
     ".Lcrc32_msb_arm64_serial:  cmp x2, #8\n   b.lo .Lcrc32_msb_arm64_tail\n"
     ".Lcrc32_msb_arm64_eight:\n"
-    CRC32_MSB_ARM64_WORD("ldr x7, [x1], #8\n", "x0", "w0")
+    NEON_CRC32_MSB_WORD("ldr x7, [x1], #8\n", "x0", "w0")
     "sub x2, x2, #8\n   cmp x2, #8\n   b.hs .Lcrc32_msb_arm64_eight\n"
     ".Lcrc32_msb_arm64_tail:  cbz x2, .Lcrc32_msb_arm64_done\n"
     ".Lcrc32_msb_arm64_byte:  ldrb w16, [x1], #1\n   eor w16, w16, w0\n   and w16, w16, #255\n   ldr w17, [x15, x16, lsl #2]\n   eor w0, w17, w0, lsr #8\n"
     "subs x2, x2, #1\n   b.ne .Lcrc32_msb_arm64_byte\n"
     ".Lcrc32_msb_arm64_done:  rev w0, w0\n" ASM_RET
 #ifndef KERNEL_MODE
-    ".Lcrc32_msb_arm64_fold:\n"
-    ".arch_extension crypto\n"
-    //  rev64(x^575) and rev64(x^511) mod P: the fold across 64 bytes.
-    "movz x9, #0x653d, lsl #48\n   movk x9, #0x9822, lsl #32\n   movz x10, #0xcad3, lsl #48\n   movk x10, #0x8e8f, lsl #32\n   fmov d16, x9\n   mov v16.d[1], x10\n"
-    "ldp q0, q1, [x1]\n   ldp q2, q3, [x1, #32]\n   fmov d5, x0\n   eor v0.16b, v0.16b, v5.16b\n   rbit v0.16b, v0.16b\n   rbit v1.16b, v1.16b\n"
-    "rbit v2.16b, v2.16b\n   rbit v3.16b, v3.16b\n   add x1, x1, #64\n   sub x2, x2, #64\n   cmp x2, #64\n   b.lo .Lcrc32_msb_arm64_four\n"
-    ".balign 16\n"
-    ".Lcrc32_msb_arm64_turn:  ldp q4, q5, [x1]\n   ldp q18, q19, [x1, #32]\n"
-    CRC32_MSB_ARM64_LANE("v0", "v4")
-    CRC32_MSB_ARM64_LANE("v1", "v5")
-    CRC32_MSB_ARM64_LANE("v2", "v18")
-    CRC32_MSB_ARM64_LANE("v3", "v19")
-    "add x1, x1, #64\n   sub x2, x2, #64\n   cmp x2, #64\n   b.hs .Lcrc32_msb_arm64_turn\n"
-    //  rev64(x^191) and rev64(x^127): the fold across 16 bytes.
-    ".Lcrc32_msb_arm64_four:  movz x9, #0x6567, lsl #48\n   movk x9, #0x3b46, lsl #32\n   movz x10, #0x9ba5, lsl #48\n   movk x10, #0x4c6f, lsl #32\n   fmov d16, x9\n   mov v16.d[1], x10\n"
-    CRC32_MSB_ARM64_FOLD("v0") "eor v0.16b, v0.16b, v1.16b\n"
-    CRC32_MSB_ARM64_FOLD("v0") "eor v0.16b, v0.16b, v2.16b\n"
-    CRC32_MSB_ARM64_FOLD("v0") "eor v0.16b, v0.16b, v3.16b\n"
-    "cmp x2, #16\n   b.lo .Lcrc32_msb_arm64_reduce\n"
-    ".Lcrc32_msb_arm64_sixteen:  ldr q4, [x1], #16\n"
-    CRC32_MSB_ARM64_LANE("v0", "v4")
-    "sub x2, x2, #16\n   cmp x2, #16\n   b.hs .Lcrc32_msb_arm64_sixteen\n"
-    //  The last lane back in message order, then through the table.
-    ".Lcrc32_msb_arm64_reduce:  rbit v0.16b, v0.16b\n   fmov x7, d0\n   mov x4, v0.d[1]\n   adrp x3, hash_crc32_msb_tab\n   add x3, x3, :lo12:hash_crc32_msb_tab\n   mov x15, x3\n"
-    CRC32_MSB_ARM64_BASES
-    "mov w0, #0\n"
-    CRC32_MSB_ARM64_WORD("", "x0", "w0")
-    CRC32_MSB_ARM64_WORD("mov x7, x4\n", "x0", "w0")
-    "b .Lcrc32_msb_arm64_serial\n"
-    ".arch_extension nocrypto\n"
+    //  hash_crc32's fold in the order the bits of the message come: every lane is turned round by rbit as it is read, the
+    //  constants are rev64(x^(d+63)) and rev64(x^(d-1)) for the distance d, and the sixteen bytes left are turned back and
+    //  put through the table from nothing. 4 lanes from 128 bytes, 8 from 512, 16 from 1,280. GB/s on an M2 Pro, before and after:
+    //  128 bytes 18.2 and 21.1, 256 22.9 and 28.4, 1 KiB 30.6 and 44.7, 4 KiB 30.0 and 51.8, 256 KiB 29.1 and 55.2 (an rbit a lane
+    //  is what holds it under hash_crc32's 74).
+    NEON_CRC_FOLD_MSB(".Lcrc32_msb_arm64", "fmov d4, x0", "fmov d31, x0",
+                      "0x653d982200000000, 0xcad38e8f00000000", "0x65673b4600000000, 0x9ba54c6f00000000",
+                      "0x7d657a1000000000, 0x7406fa9500000000", "0x7cc8e1e700000000, 0x3f9f86300000000",
+                      "rbit v0.16b, v0.16b\nfmov x7, d0\nmov x4, v0.d[1]\n   adrp x3, hash_crc32_msb_tab\n   add x3, x3, :lo12:hash_crc32_msb_tab\n   mov x15, x3\n"
+                      NEON_CRC32_MSB_BASES "mov w0, #0\n" NEON_CRC32_MSB_WORD("", "x0", "w0") NEON_CRC32_MSB_WORD("mov x7, x4\n", "x0", "w0")
+                      "b .Lcrc32_msb_arm64_serial", "512", "1280")
 #endif
     ASM_END(hash_crc32_msb)
-#undef CRC32_MSB_ARM64_LANE
-#undef CRC32_MSB_ARM64_FOLD
-#undef CRC32_MSB_ARM64_BASES
-#undef CRC32_MSB_ARM64_WORD
+#undef NEON_CRC32_MSB_LANE
+#undef NEON_CRC32_MSB_FOLD
+#undef NEON_CRC32_MSB_BASES
+#undef NEON_CRC32_MSB_WORD
 
     /* The x86_64 block has the reasoning: two compares, then three loads
        from unicode_width_tab and a shift, or the planes past U+3FFFF by
