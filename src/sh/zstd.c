@@ -3794,11 +3794,26 @@ static p8 address_to zstd_parse_dfast(zstd_encoder address_to e, p32 from,
         the row's tags a word at a time and walks, newest first, only the
         slots whose tag matched; the first one older than the window ends it.
 */
-/* One bit a slot whose tag is tag: the exact zero-byte test on the row
-   xor the tag, and a multiply that gathers a word's eight flags. */
+/* One bit a slot whose tag is tag.  x86-64 compares sixteen tags at a time
+   (pcmpeqb, pmovmskb: three instructions a sixteen where the word-at-a-time
+   form below is about thirty); elsewhere the exact zero-byte test on the row xor
+   the tag, and a multiply that gathers a word's eight flags.  (On an M2 the
+   vector compare and a multiply to gather it is a quarter faster alone and
+   a seventh slower where the mask is waited for, so arm64 keeps the words.) */
 static __attribute__((always_inline)) inline p64
 zstd_row_mask(p8 address_to tags, p8 tag, positive entries)
 {
+#if X64
+        zstd_v16 const pattern = {tag, tag, tag, tag, tag, tag, tag, tag,
+                                  tag, tag, tag, tag, tag, tag, tag, tag};
+        p64 mask = 0;
+
+        for (positive at = 0; at < entries; at += 16)
+                mask |= (p64)(p32)__builtin_ia32_pmovmskb128(
+                                __builtin_ia32_pcmpeqb128(*(zstd_v16 address_to)(tags + at), pattern))
+                        << at;
+        return mask;
+#else
         p64 const lows = 0x7f7f7f7f7f7f7f7full;
         p64 const pattern = 0x0101010101010101ull * tag;
         p64 mask = 0;
@@ -3811,6 +3826,7 @@ zstd_row_mask(p8 address_to tags, p8 tag, positive entries)
                 mask |= (((zero >> 7) * 0x0102040810204080ull) >> 56) << at;
         }
         return mask;
+#endif
 }
 
 static __attribute__((always_inline)) inline fn

@@ -83608,6 +83608,40 @@ static fn fast_parse(void)
         fast_parse_walk(true);
 }
 
+/* zstd_row_mask against one comparison a slot, over rows of 16, 32 and 64 tags
+   drawn from few values (so most tags match one of them), from one value (all
+   match) and from two disjoint ones (none), at every tag it is asked about. */
+static fn row_mask(void)
+{
+        static p8 row[64 + 16];
+        p32 random = 0x2545f491u;
+        bool same = true;
+
+        for (positive trial = 0; trial < 3000; trial++)
+        {
+                positive const entries = (positive)16 << (trial % 3);
+                p8 const spread = (p8)(trial % 7 == 0 ? 1 : trial % 5 == 0 ? 2 : 4 + trial % 9);
+
+                for (positive i = 0; i < sizeof(row); i++)
+                {
+                        random ^= random << 13;
+                        random ^= random >> 17;
+                        random ^= random << 5;
+                        row[i] = (p8)(random % spread);
+                }
+                for (positive offset = 0; offset < 8; offset++)
+                        for (p8 tag = 0; tag < 4; tag++)
+                        {
+                                p64 want = 0;
+
+                                for (positive i = 0; i < entries; i++)
+                                        want |= (p64)(row[offset + i] == tag) << i;
+                                same = same && zstd_row_mask(row + offset, tag, entries) == want;
+                        }
+        }
+        check("the row finder's tag mask has one bit for each tag that equals the one asked", same);
+}
+
 b32 main(void)
 {
         pull_block_shapes();
@@ -83621,6 +83655,7 @@ b32 main(void)
         roundtrip();
         job_widths();
         fast_parse();
+        row_mask();
 #if X64
         {
                 p8 const probed = cpu_hash_probed;
