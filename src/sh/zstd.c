@@ -77,33 +77,6 @@ typedef struct
         p8 address_to output_end;
 } zstd_seq_job;
 
-/* The two halves of zstd_sequences_run the pool's decoder runs apart, lib.c's
-   zstd_sequences_decode and zstd_sequences_exec: the layouts of their jobs
-   (see the x86_64 assembly). */
-typedef struct
-{
-        p8 address_to seq;
-        positive seq_len;
-        zstd_fse address_to ll;
-        zstd_fse address_to of;
-        zstd_fse address_to ml;
-        positive nseq;
-        p32 address_to out;
-        p32 rep[3];
-        p32 max_off;
-        positive sym_end;
-        p64 sum_ll;
-        p64 sum_ml;
-} zstd_seq_decode_job;
-
-typedef struct
-{
-        p8 address_to out;
-        p8 address_to lits;
-        p32 address_to recs;
-        positive nseq;
-} zstd_seq_exec_job;
-
 typedef struct
 {
         p8 max_bits;
@@ -186,6 +159,23 @@ static zstd_fse zstd_ll_def;
 static zstd_fse zstd_of_def;
 static zstd_fse zstd_ml_def;
 static positive zstd_block_limit;
+/* While the pool decodes a frame's blocks, a worker's refusals are not the
+   reason the decode reports: the block is looked at again by the serial
+   decoder, which says its own. The calling thread is a worker too while it
+   runs a job itself. */
+static bool zstd_par_live;
+static bool zstd_par_inline;
+/* Whether the frame being opened will be decoded on the pool, which wants
+   its window a ring: the slide of a plain window is a copy of the whole
+   window every window's worth of output, on the one thread that cannot
+   spare it. */
+static bool zstd_par_go;
+#define ZSTD_RING_POOL ((positive)256 << 10)
+/* Whether the finished bytes of a block go to the writer thread, which the
+   ring-sized frames of the pool's path start (see the writer, below). */
+static bool zstd_par_async;
+static bool zstd_par_throttle(positive room);
+static bool zstd_emit_window(p8 address_to p, positive n);
 
 static p32 zstd_get24(p8 address_to p)
 {
@@ -201,6 +191,9 @@ static p8 zstd_highbit32(p32 value)
 
 static bool zstd_fail(string_address why)
 {
+        if (zstd_par_live && parallel_slot() != parallel_width() &&
+            (parallel_slot() || zstd_par_inline))
+                return false;
         zstd_why = why;
         return false;
 }
@@ -918,6 +911,8 @@ static bool zstd_emit(p8 address_to p, positive n)
 
 static bool zstd_window_room(positive need)
 {
+        if (zstd_par_async && !zstd_par_throttle(need))
+                return false;
         if (zstd_pos + need <= zstd_window_cap)
                 return true;
 
@@ -952,7 +947,7 @@ static bool zstd_put(p8 address_to p, positive n)
         if (!zstd_window_room(n))
                 return false;
         memory_copy(zstd_window + zstd_pos, p, n);
-        if (!zstd_hold_emit && !zstd_emit(zstd_window + zstd_pos, n))
+        if (!zstd_hold_emit && !zstd_emit_window(zstd_window + zstd_pos, n))
                 return false;
         zstd_pos += n;
         return true;
@@ -965,12 +960,41 @@ static bool zstd_put_fill(p8 value, positive n)
         if (!zstd_window_room(n))
                 return false;
         memory_fill(zstd_window + zstd_pos, value, n);
-        if (!zstd_hold_emit && !zstd_emit(zstd_window + zstd_pos, n))
+        if (!zstd_hold_emit && !zstd_emit_window(zstd_window + zstd_pos, n))
                 return false;
         zstd_pos += n;
         return true;
 }
 
+
+/* A table the block carries: mode 1, one symbol repeated, or mode 2, the
+   counts of an FSE table, read from src and made for the sequence alphabet
+   kind (0 literal lengths, 1 offsets, 2 match lengths). */
+static bool zstd_seq_make(zstd_fse address_to table, p8 kind, p8 mode, p8 address_to src,
+                          positive src_len, positive address_to used,
+                          positive max_sym, p8 max_log)
+{
+        if (mode == 1)
+        {
+                return_if(!src_len, zstd_fail("zstd truncated RLE table"));
+                zstd_fse_rle(table, src[0]);
+                address_to used = 1;
+                return zstd_seq_fuse(table, kind);
+        }
+        {
+                bipolar norm[256];
+                p8 log;
+                positive ncount;
+
+                if (!zstd_fse_read(src, src_len, address_of ncount, norm, max_sym,
+                                   address_of log, max_log))
+                        return false;
+                if (!zstd_seq_build(table, norm, max_sym, log, kind))
+                        return false;
+                address_to used = ncount;
+                return true;
+        }
+}
 
 static bool zstd_seq_table(zstd_fse address_to address_to out, p8 mode, p8 address_to src,
                            positive src_len, positive address_to used, p8 kind,
@@ -991,27 +1015,8 @@ static bool zstd_seq_table(zstd_fse address_to address_to out, p8 mode, p8 addre
                 return true;
         }
         address_to out = table;
-        if (mode == 1)
-        {
-                return_if(!src_len, zstd_fail("zstd truncated RLE table"));
-                zstd_fse_rle(table, src[0]);
-                address_to used = 1;
-                return zstd_seq_fuse(table, kind);
-        }
-        if (mode == 2)
-        {
-                bipolar norm[256];
-                p8 log;
-                positive ncount;
-
-                if (!zstd_fse_read(src, src_len, address_of ncount, norm, max_sym,
-                                   address_of log, max_log))
-                        return false;
-                if (!zstd_seq_build(table, norm, max_sym, log, kind))
-                        return false;
-                address_to used = ncount;
-                return true;
-        }
+        if (mode == 1 || mode == 2)
+                return zstd_seq_make(table, kind, mode, src, src_len, used, max_sym, max_log);
         if (mode == 3)
         {
                 return_if(!prev, zstd_fail("zstd repeat FSE with no previous table"));
@@ -1022,9 +1027,9 @@ static bool zstd_seq_table(zstd_fse address_to address_to out, p8 mode, p8 addre
         return zstd_fail("zstd unknown FSE mode");
 }
 
-static bool zstd_literals(p8 address_to src, positive src_len,
-                          positive address_to used, p8 address_to lit,
-                          positive address_to lit_len)
+static bool zstd_literals_with(zstd_huff address_to huff, p8 address_to src,
+                               positive src_len, positive address_to used,
+                               p8 address_to lit, positive address_to lit_len)
 {
         p8 type;
         p8 format;
@@ -1114,25 +1119,25 @@ static bool zstd_literals(p8 address_to src, positive src_len,
                 positive tree;
 
                 if (!zstd_huff_read(body, compressed, address_of tree,
-                                    address_of zstd_lit_huff))
+                                    huff))
                         return false;
                 return_if(tree > compressed, zstd_fail("zstd Huffman tree larger than literals"));
                 body += tree;
                 compressed -= tree;
         }
-        else if (!zstd_lit_huff.valid)
+        else if (!huff->valid)
                 return zstd_fail("zstd treeless literals with no Huffman table");
 
         if (!format)
         {
-                if (!zstd_huff_stream(address_of zstd_lit_huff, lit, regen, body,
+                if (!zstd_huff_stream(huff, lit, regen, body,
                                       compressed))
                         return false;
         }
         else
         {
                 return_if(regen < 6, zstd_fail("zstd 4-stream literals too small"));
-                if (!zstd_huff_four(address_of zstd_lit_huff, lit, regen, body,
+                if (!zstd_huff_four(huff, lit, regen, body,
                                     compressed))
                         return false;
         }
@@ -1142,6 +1147,14 @@ static bool zstd_literals(p8 address_to src, positive src_len,
         return true;
 }
 
+
+static bool zstd_literals(p8 address_to src, positive src_len,
+                          positive address_to used, p8 address_to lit,
+                          positive address_to lit_len)
+{
+        return zstd_literals_with(address_of zstd_lit_huff, src, src_len, used,
+                                  lit, lit_len);
+}
 
 static bool zstd_sequences(p8 address_to src, positive src_len, p8 address_to lit,
                            positive lit_len)
@@ -1373,7 +1386,8 @@ static bool zstd_window_open(positive window)
                 return true;
         zstd_window_free();
 
-        zstd_ring = window >= ZSTD_RING_LEAST && zstd_ring_huge()
+        zstd_ring = (window >= ZSTD_RING_LEAST && zstd_ring_huge()) ||
+                            (zstd_par_go && window >= ZSTD_RING_POOL)
                             ? zstd_ring_map(ring)
                             : null;
         if (zstd_ring)
@@ -1390,8 +1404,11 @@ static bool zstd_window_open(positive window)
         return true;
 }
 
+static fn zstd_par_unmap(void);
+
 static fn zstd_window_close(void)
 {
+        zstd_par_unmap();
         zstd_window_free();
 }
 
@@ -1474,6 +1491,1064 @@ static bool zstd_dictionary_load(p8 address_to bytes, positive length)
         zstd_dict_entropy = true;
         zstd_dict_on = true;
         return true;
+}
+
+/*
+        A big frame on the pool.
+
+        A block's work is two things of different kinds. Decoding its
+        entropy -- the literals' Huffman streams and the sequence bitstream's
+        three FSE states -- is a function of the block's bytes and of the
+        tables it repeats from earlier blocks, and nothing else. Executing
+        it -- copying literals and matches over the window -- needs the
+        window, which the previous block's execution leaves, and the three
+        repeat offsets it leaves. So the frame is cut into its blocks (they
+        are length prefixed, no guessing), each block is decoded on the pool
+        into a record array, and the calling thread executes the records in
+        order into the window and hands each block's bytes on exactly as the
+        serial decoder does. The serial decoder stays: it runs below a size,
+        at a width of one, and for any block the pool's path declines.
+
+        What a block repeats is found by the scan, which reads only the few
+        bytes of each block that say so (the literals' header, the sequence
+        count and the modes byte) and so costs a few tens of nanoseconds a
+        block: the block whose Huffman tree or sequence table is the one in
+        force. A block that repeats builds that table again from the bytes
+        of the block that defined it, so a job needs nothing from any other
+        job.
+
+        The repeat offsets a block's first sequences name are the previous
+        block's, which its job cannot know. They run as three stand-in
+        values (ZSTD_SYM_BASE and up: no offset reaches them) that the repeat
+        rules move around like any others, with "less one" counted in the
+        low bits, and the executing thread replaces the few records that
+        still name one with the offsets the previous block left. A block is
+        executed here only when the facts its job proved about it settle
+        every bound at once -- the literals it takes, the bytes it writes,
+        and the farthest it reaches back -- and goes the serial way (the
+        tables it repeats rebuilt, the block run by zstd_sequences) when
+        they do not: the first block of a frame reaches back into itself,
+        and every malformed block lands here, so the message and the bytes
+        written before it are the serial decoder's own.
+*/
+#define ZSTD_PAR_LEAST ((positive)2 << 20)
+/* Fewer threads than this and the sink, the writer and the one worker take
+   turns on the cores: two cores decode slower than one. */
+#define ZSTD_PAR_WIDTH 3
+/* Below this much input past the header a frame is decoded serially. */
+static positive zstd_par_least = ZSTD_PAR_LEAST;
+#define ZSTD_PAR_BLOCKS 4096
+#define ZSTD_PAR_HEAD 64
+#define ZSTD_PAR_RECORDS ((ZSTD_PAR_HEAD + ZSTD_BLOCK_MAX + 64 + 63) & ~(positive)63)
+#define ZSTD_PAR_SEQ_MAX 65535
+#define ZSTD_SYM_BASE 0xFFF00000u
+#define ZSTD_SYM_STEP 0x10000u
+
+/* A block's payload: where a table in force was defined. */
+typedef struct
+{
+        p8 address_to src;
+        positive size;
+} zstd_par_ref;
+
+typedef struct
+{
+        p8 address_to src;
+        positive size;
+        p8 type;
+        p8 last;
+        /* What was in force before the block: the Huffman table and the
+           three sequence tables. No source is none. */
+        zstd_par_ref huf;
+        zstd_par_ref seq[3];
+} zstd_par_block;
+
+/* What a worker keeps between its jobs: the tables it built last and the
+   bytes they were built from, so a block that repeats a table the same
+   thread just built does not build it again. */
+typedef struct
+{
+        zstd_huff huff;
+        p8 address_to huff_key;
+        zstd_fse fse[3];
+        p8 address_to fse_key[3];
+        positive fse_used[3];
+} zstd_par_slot;
+
+/* The head of a job's output; the literals follow it and then, at
+   ZSTD_PAR_RECORDS, the sequences, three words each. */
+typedef struct
+{
+        p32 status;
+        p32 nseq;
+        p32 lit_len;
+        p32 max_off;
+        p32 sym_end;
+        p32 rep[3];
+        p32 spare;
+        p64 sum_ll;
+        p64 sum_ml;
+} zstd_par_head;
+
+typedef struct
+{
+        p8 address_to seq;
+        positive seq_len;
+        zstd_fse address_to ll;
+        zstd_fse address_to of;
+        zstd_fse address_to ml;
+        positive nseq;
+        p32 address_to out;
+        p32 rep[3];
+        p32 max_off;
+        positive sym_end;
+        p64 sum_ll;
+        p64 sum_ml;
+} zstd_seq_decode_job;
+
+typedef struct
+{
+        p8 address_to out;
+        p8 address_to lits;
+        p32 address_to recs;
+        positive nseq;
+} zstd_seq_exec_job;
+
+typedef struct
+{
+        zstd_par_block address_to block;
+        zstd_par_slot address_to slot;
+        zstd_par_ref huf;
+        zstd_par_ref seq[3];
+} zstd_par_run;
+
+#ifdef ZSTD_PAR_AUDIT
+/* test/checks.c sees every block a job decodes and the bytes exec makes of it
+   to hold both kernels to their models: the job before and after the kernel
+   and its answer, and where the block's bytes begin with its literals and
+   records. */
+static fn(address_to zstd_par_audit_decode)(const zstd_seq_decode_job address_to before,
+                                           const zstd_seq_decode_job address_to after,
+                                           bipolar result);
+static fn(address_to zstd_par_audit_exec)(p8 address_to out, p8 address_to lits,
+                                         p32 address_to recs, positive nseq);
+#endif
+
+typedef struct
+{
+        p8 type;
+        p8 format;
+        positive header;
+        positive body;
+        positive regen;
+} zstd_par_lit;
+
+static const p8 zstd_par_mark;
+static const p8 zstd_seq_symbols[3] = {35, 31, 52};
+static const p8 zstd_seq_logs[3] = {9, 8, 9};
+static p8 address_to zstd_par_map;
+static positive zstd_par_map_size;
+static bipolar zstd_par_map_fd = -1;
+
+/* A literals section's header: its type, how far header and body reach and
+   how many bytes it regenerates. False when the block is too short for it. */
+static bool zstd_par_lit_parse(p8 address_to src, positive size, zstd_par_lit address_to l)
+{
+        p32 pack;
+
+        if (!size)
+                return false;
+        l->type = src[0] & 3;
+        l->format = (src[0] >> 2) & 3;
+        if (l->type <= 1)
+        {
+                if (l->format == 0 || l->format == 2)
+                {
+                        l->header = 1;
+                        l->regen = src[0] >> 3;
+                }
+                else if (l->format == 1)
+                {
+                        if (size < 2)
+                                return false;
+                        l->header = 2;
+                        l->regen = memory_load_unaligned(p16, src) >> 4;
+                }
+                else
+                {
+                        if (size < 3)
+                                return false;
+                        l->header = 3;
+                        l->regen = zstd_get24(src) >> 4;
+                }
+                l->body = l->type == 0 ? l->regen : 1;
+        }
+        else if (l->format <= 1)
+        {
+                if (size < 3)
+                        return false;
+                pack = zstd_get24(src);
+                l->header = 3;
+                l->regen = (pack >> 4) & 0x3ff;
+                l->body = (pack >> 14) & 0x3ff;
+        }
+        else if (l->format == 2)
+        {
+                if (size < 4)
+                        return false;
+                pack = memory_load_unaligned(p32, src);
+                l->header = 4;
+                l->regen = (pack >> 4) & 0x3fff;
+                l->body = pack >> 18;
+        }
+        else
+        {
+                if (size < 5)
+                        return false;
+                pack = memory_load_unaligned(p32, src);
+                l->header = 5;
+                l->regen = (pack >> 4) & 0x3ffff;
+                l->body = (pack >> 22) + ((positive)src[4] << 10);
+        }
+        return l->header + l->body <= size;
+}
+
+/* A compressed block's sequence section: the count, the modes byte and where
+   the tables begin. False for a block too short to hold what it says. */
+static bool zstd_par_seq_head(p8 address_to src, positive size, positive address_to nseq,
+                              p8 address_to modes, p8 address_to address_to tables)
+{
+        zstd_par_lit lit;
+        p8 address_to p;
+        p8 address_to const stop = src + size;
+
+        if (!zstd_par_lit_parse(src, size, address_of lit))
+                return false;
+        p = src + lit.header + lit.body;
+        if (p >= stop)
+                return false;
+        if (p[0] < 128)
+        {
+                address_to nseq = p[0];
+                p += 1;
+        }
+        else if (p[0] < 255)
+        {
+                if (p + 2 > stop)
+                        return false;
+                address_to nseq = ((positive)(p[0] - 128) << 8) + p[1];
+                p += 2;
+        }
+        else
+        {
+                if (p + 3 > stop)
+                        return false;
+                address_to nseq = 0x7f00u + memory_load_unaligned(p16, p + 1);
+                p += 3;
+        }
+        address_to modes = 0;
+        if (address_to nseq)
+        {
+                if (p >= stop)
+                        return false;
+                address_to modes = p[0];
+                if (p[0] & 3)
+                        return false;
+                p += 1;
+        }
+        address_to tables = p;
+        return true;
+}
+
+/* Where the table of kind that block ref defined begins: its mode, the
+   bytes and how many follow. */
+static bool zstd_par_find(zstd_par_ref ref, p8 kind, p8 address_to mode,
+                          p8 address_to address_to desc, positive address_to limit)
+{
+        positive nseq;
+        p8 modes;
+        p8 address_to p;
+        p8 address_to const stop = ref.src + ref.size;
+
+        if (!zstd_par_seq_head(ref.src, ref.size, address_of nseq, address_of modes,
+                               address_of p) || !nseq)
+                return false;
+        for (positive j = 0; j < kind; j++)
+        {
+                p8 const m = (modes >> (6 - 2 * j)) & 3;
+
+                if (m == 1)
+                        p += 1;
+                else if (m == 2)
+                {
+                        bipolar norm[256];
+                        positive used;
+                        p8 log;
+
+                        if (p >= stop || !zstd_fse_read(p, (positive)(stop - p), address_of used, norm,
+                                                         zstd_seq_symbols[j], address_of log,
+                                                         zstd_seq_logs[j]))
+                                return false;
+                        p += used;
+                }
+        }
+        address_to mode = (modes >> (6 - 2 * kind)) & 3;
+        address_to desc = p;
+        address_to limit = p < stop ? (positive)(stop - p) : 0;
+        return true;
+}
+
+static zstd_fse address_to zstd_par_default(p8 kind)
+{
+        return kind == 0 ? address_of zstd_ll_def
+             : kind == 1 ? address_of zstd_of_def : address_of zstd_ml_def;
+}
+
+/* The table of kind a worker needs from the bytes at desc, built into its
+   own, or the one it built from those bytes last. */
+static zstd_fse address_to zstd_par_table(zstd_par_slot address_to slot, p8 kind, p8 mode,
+                                          p8 address_to desc, positive limit,
+                                          positive address_to used)
+{
+        if (mode == 0)
+        {
+                address_to used = 0;
+                return zstd_par_default(kind);
+        }
+        if (slot->fse_key[kind] == desc)
+        {
+                address_to used = slot->fse_used[kind];
+                return address_of slot->fse[kind];
+        }
+        slot->fse_key[kind] = null;
+        if (!zstd_seq_make(address_of slot->fse[kind], kind, mode, desc, limit, used,
+                           zstd_seq_symbols[kind], zstd_seq_logs[kind]))
+                return null;
+        slot->fse_key[kind] = desc;
+        slot->fse_used[kind] = address_to used;
+        return address_of slot->fse[kind];
+}
+
+/* The Huffman table the literals of block ref carry, built into huff. */
+static bool zstd_par_huff(zstd_par_ref ref, zstd_huff address_to huff)
+{
+        zstd_par_lit lit;
+        positive tree;
+
+        if (!zstd_par_lit_parse(ref.src, ref.size, address_of lit) || lit.type != 2)
+                return false;
+        return zstd_huff_read(ref.src + lit.header, lit.body, address_of tree, huff) &&
+               tree <= lit.body;
+}
+
+/* One block's entropy decode, into its output: head, literals, records. */
+static bool zstd_par_decode(zstd_par_block address_to b, zstd_par_slot address_to slot,
+                            p8 address_to out)
+{
+        zstd_par_head address_to const head = (zstd_par_head address_to)out;
+        zstd_seq_decode_job job;
+        zstd_fse address_to table[3];
+        zstd_par_lit lit;
+        positive nseq;
+        positive used;
+        positive lit_len;
+        p8 modes;
+        p8 address_to p;
+        p8 address_to const stop = b->src + b->size;
+
+        if (!zstd_par_seq_head(b->src, b->size, address_of nseq, address_of modes, address_of p))
+                return false;
+        zstd_par_lit_parse(b->src, b->size, address_of lit);
+        if (lit.type == 3)
+        {
+                if (!b->huf.src)
+                        return false;
+                if (slot->huff_key != b->huf.src)
+                {
+                        slot->huff_key = null;
+                        if (!zstd_par_huff(b->huf, address_of slot->huff))
+                                return false;
+                        slot->huff_key = b->huf.src;
+                }
+        }
+        else if (lit.type == 2)
+                slot->huff_key = null;
+        if (!zstd_literals_with(address_of slot->huff, b->src, b->size, address_of used,
+                                out + ZSTD_PAR_HEAD, address_of lit_len))
+                return false;
+        if (lit.type == 2)
+                slot->huff_key = b->src;
+        if (used != lit.header + lit.body)
+                return false;
+        head->lit_len = (p32)lit_len;
+        head->nseq = (p32)nseq;
+        if (!nseq)
+        {
+                head->sum_ll = head->sum_ml = 0;
+                head->max_off = head->sym_end = 0;
+                head->rep[0] = ZSTD_SYM_BASE + 0xFFFF;
+                head->rep[1] = ZSTD_SYM_BASE + ZSTD_SYM_STEP + 0xFFFF;
+                head->rep[2] = ZSTD_SYM_BASE + 2 * ZSTD_SYM_STEP + 0xFFFF;
+                return p == stop;
+        }
+        for (p8 kind = 0; kind < 3; kind++)
+        {
+                p8 const mode = (modes >> (6 - 2 * kind)) & 3;
+
+                if (mode == 3)
+                {
+                        zstd_par_ref const ref = b->seq[kind];
+                        p8 m;
+                        p8 address_to d;
+                        positive limit;
+                        positive ignored;
+
+                        if (!ref.src)
+                                return false;
+                        if (ref.src == address_of zstd_par_mark)
+                                table[kind] = zstd_par_default(kind);
+                        else
+                        {
+                                if (!zstd_par_find(ref, kind, address_of m, address_of d, address_of limit) ||
+                                    (m != 1 && m != 2))
+                                        return false;
+                                table[kind] = zstd_par_table(slot, kind, m, d, limit, address_of ignored);
+                        }
+                }
+                else
+                {
+                        if (mode && p >= stop)
+                                return false;
+                        table[kind] = zstd_par_table(slot, kind, mode, p, (positive)(stop - p), address_of used);
+                        if (mode)
+                                p += used;
+                }
+                if (!table[kind])
+                        return false;
+        }
+        if (p >= stop)
+                return false;
+        job.seq = p;
+        job.seq_len = (positive)(stop - p);
+        job.ll = table[0];
+        job.of = table[1];
+        job.ml = table[2];
+        job.nseq = nseq;
+        job.out = (p32 address_to)(out + ZSTD_PAR_RECORDS);
+        job.rep[0] = ZSTD_SYM_BASE + 0xFFFF;
+        job.rep[1] = ZSTD_SYM_BASE + ZSTD_SYM_STEP + 0xFFFF;
+        job.rep[2] = ZSTD_SYM_BASE + 2 * ZSTD_SYM_STEP + 0xFFFF;
+#ifdef ZSTD_PAR_AUDIT
+        {
+                zstd_seq_decode_job const audit = job;
+                bipolar const result = zstd_sequences_decode(address_of job);
+
+                if (zstd_par_audit_decode)
+                        zstd_par_audit_decode(address_of audit, address_of job, result);
+                if (result)
+                        return false;
+        }
+#else
+        if (zstd_sequences_decode(address_of job))
+                return false;
+#endif
+        head->sum_ll = job.sum_ll;
+        head->sum_ml = job.sum_ml;
+        head->max_off = job.max_off;
+        head->sym_end = (p32)job.sym_end;
+        head->rep[0] = job.rep[0];
+        head->rep[1] = job.rep[1];
+        head->rep[2] = job.rep[2];
+        return true;
+}
+
+static fn zstd_par_job(address_any context, positive index, parallel_output address_to output)
+{
+        zstd_par_run address_to const run = context;
+        zstd_par_block address_to const b = run->block + index;
+        zstd_par_head address_to head;
+        positive nseq = 0;
+        p8 modes;
+        p8 address_to tables;
+        positive size = ZSTD_PAR_HEAD;
+        bool ok;
+
+        if (b->type != 2)
+                return;
+        ok = zstd_par_seq_head(b->src, b->size, address_of nseq, address_of modes,
+                               address_of tables) &&
+             nseq <= ZSTD_PAR_SEQ_MAX;
+        if (ok)
+                size = ZSTD_PAR_RECORDS + 12 * nseq + 16;
+        head = (zstd_par_head address_to)parallel_reserve(output, size);
+        if (!head)
+                return;
+        head->status = 1;
+        if (!ok)
+                return;
+        if (!parallel_slot())
+                zstd_par_inline = true;
+        if (zstd_par_decode(b, run->slot + parallel_slot(), (p8 address_to)head))
+                head->status = 0;
+        if (!parallel_slot())
+                zstd_par_inline = false;
+}
+
+/*
+        The writer. Hashing the bytes of a block and writing them is as long
+        as copying the block was, and the calling thread has nothing to spare
+        for it, so a frame that runs on a ring (the finished bytes stay where
+        they are until the ring comes round, which the sink keeps from
+        happening before the writer is through) hands each block's span to a
+        thread beside the pool and goes on. The writer owns what zstd_emit
+        touches -- the hash, the count, the buffer and the descriptor -- from
+        the first span to its join, and takes spans in order, so what it
+        writes and what it hashes is what the sink would have, and a failure
+        of its own is reported ahead of any later one of the sink's: it is
+        the earlier block's.
+*/
+#define ZSTD_PAR_QUEUE 256
+#define ZSTD_PAR_SPIN 0
+
+#if X64
+#define ZSTD_PAUSE() __asm__ volatile("pause" ::: "memory")
+#elif ARM64
+#define ZSTD_PAUSE() __asm__ volatile("yield" ::: "memory")
+#else
+#define ZSTD_PAUSE() __asm__ volatile("" ::: "memory")
+#endif
+
+typedef struct
+{
+        p8 address_to at;
+        positive length;
+} zstd_par_span;
+
+static struct
+{
+        b32 head;
+        b32 tail;
+        b32 writer_asleep;
+        b32 sink_asleep;
+        b32 failed;
+        string_address why;
+        positive queued;
+        positive done;
+        positive ring;
+        zstd_par_span span[ZSTD_PAR_QUEUE];
+} zstd_par_out;
+
+static fn zstd_par_writer(address_any context, positive index)
+{
+        b32 tail = 0;
+
+        (void)context;
+        (void)index;
+        for (;;)
+        {
+                zstd_par_span span;
+
+                if (tail == atomic_load(address_of zstd_par_out.head))
+                {
+                        for (positive spin = 0; spin < ZSTD_PAR_SPIN; spin++)
+                        {
+                                ZSTD_PAUSE();
+                                if (atomic_load(address_of zstd_par_out.head) != tail)
+                                        break;
+                        }
+                        if (tail == atomic_load(address_of zstd_par_out.head))
+                        {
+                                atomic_exchange(address_of zstd_par_out.writer_asleep, 1);
+                                if (tail == atomic_load(address_of zstd_par_out.head))
+                                        thread_wait(address_of zstd_par_out.head, tail);
+                                atomic_exchange(address_of zstd_par_out.writer_asleep, 0);
+                        }
+                        continue;
+                }
+                span = zstd_par_out.span[tail % ZSTD_PAR_QUEUE];
+                //      A span of no place is the end.
+                if (!span.at)
+                        return;
+                if (!atomic_load(address_of zstd_par_out.failed) && !zstd_emit(span.at, span.length))
+                {
+                        zstd_par_out.why = zstd_why;
+                        atomic_exchange(address_of zstd_par_out.failed, 1);
+                }
+                tail++;
+                __atomic_add_fetch(address_of zstd_par_out.done, span.length, __ATOMIC_SEQ_CST);
+                atomic_exchange(address_of zstd_par_out.tail, tail);
+                if (atomic_load(address_of zstd_par_out.sink_asleep))
+                        thread_wake(address_of zstd_par_out.tail, 1);
+        }
+}
+
+/* Wait until the writer has taken enough off the ring for room more bytes
+   (and the sixty-four a copy passes its end by) to be written without
+   reaching bytes it has yet to write. */
+static bool zstd_par_throttle(positive room)
+{
+        while (zstd_par_out.queued + room + 64 - atomic_load(address_of zstd_par_out.done) >
+               zstd_par_out.ring)
+        {
+                b32 tail = atomic_load(address_of zstd_par_out.tail);
+
+                if (atomic_load(address_of zstd_par_out.failed))
+                        return false;
+                atomic_exchange(address_of zstd_par_out.sink_asleep, 1);
+                if (zstd_par_out.queued + room + 64 - atomic_load(address_of zstd_par_out.done) >
+                        zstd_par_out.ring &&
+                    tail == atomic_load(address_of zstd_par_out.tail))
+                        thread_wait(address_of zstd_par_out.tail, tail);
+                atomic_exchange(address_of zstd_par_out.sink_asleep, 0);
+        }
+        return !atomic_load(address_of zstd_par_out.failed);
+}
+
+/* A span, or the end, to the writer. */
+static bool zstd_par_push(p8 address_to p, positive n)
+{
+        b32 head = zstd_par_out.head;
+
+        while (head - atomic_load(address_of zstd_par_out.tail) >= ZSTD_PAR_QUEUE)
+        {
+                b32 tail = atomic_load(address_of zstd_par_out.tail);
+
+                if (p && atomic_load(address_of zstd_par_out.failed))
+                        return false;
+                atomic_exchange(address_of zstd_par_out.sink_asleep, 1);
+                if (head - atomic_load(address_of zstd_par_out.tail) >= ZSTD_PAR_QUEUE &&
+                    tail == atomic_load(address_of zstd_par_out.tail))
+                        thread_wait(address_of zstd_par_out.tail, tail);
+                atomic_exchange(address_of zstd_par_out.sink_asleep, 0);
+        }
+        zstd_par_out.span[head % ZSTD_PAR_QUEUE].at = p;
+        zstd_par_out.span[head % ZSTD_PAR_QUEUE].length = n;
+        zstd_par_out.queued += n;
+        atomic_exchange(address_of zstd_par_out.head, head + 1);
+        if (atomic_load(address_of zstd_par_out.writer_asleep))
+                thread_wake(address_of zstd_par_out.head, 1);
+        return !atomic_load(address_of zstd_par_out.failed);
+}
+
+/* A finished span of the window, to the writer. */
+static bool zstd_par_enqueue(p8 address_to p, positive n)
+{
+        return !n || zstd_par_push(p, n);
+}
+
+/* Where a finished span of the window goes: to the writer while it runs,
+   else to zstd_emit. */
+static bool zstd_emit_window(p8 address_to p, positive n)
+{
+        return zstd_par_async ? zstd_par_enqueue(p, n) : zstd_emit(p, n);
+}
+
+/* The writer, started before the first span; false (and the sink emits for
+   itself) when the pool has no thread to spare. */
+static bool zstd_par_writer_open(void)
+{
+        memory_fill(address_of zstd_par_out, 0, sizeof zstd_par_out);
+        zstd_par_out.ring = zstd_ring_size;
+        zstd_par_async = parallel_beside(zstd_par_writer, null);
+        return zstd_par_async;
+}
+
+/* Everything handed over is written (or has failed), and the writer is gone. */
+static fn zstd_par_writer_close(void)
+{
+        if (!zstd_par_async)
+                return;
+        zstd_par_push(null, 0);
+        parallel_beside_wait();
+        zstd_par_async = false;
+        if (zstd_par_out.failed)
+                zstd_why = zstd_par_out.why;
+}
+
+/* An offset the job left as a stand-in, made the previous block's. */
+static bool zstd_par_resolve(p32 address_to value, const p32 address_to rep)
+{
+        p32 const v = address_to value;
+        p32 k;
+        p32 d;
+
+        if (v < ZSTD_SYM_BASE)
+                return true;
+        k = (v - ZSTD_SYM_BASE) >> 16;
+        d = ZSTD_SYM_BASE + (k << 16) + 0xFFFFu - v;
+        if (k > 2 || rep[k] <= d)
+                return false;
+        address_to value = rep[k] - d;
+        return true;
+}
+
+/* A block whose job proved its bounds, executed: 1 done, 0 declined with
+   the window and the repeat offsets as they were (the serial way takes the
+   block), -1 refused with the reason set. */
+static bipolar zstd_par_execute(zstd_par_head address_to head)
+{
+        p8 address_to const lits = (p8 address_to)head + ZSTD_PAR_HEAD;
+        p32 address_to const recs = (p32 address_to)((p8 address_to)head + ZSTD_PAR_RECORDS);
+        p32 rep[3];
+        p32 max = head->max_off;
+        positive total;
+        positive reach;
+
+        if (head->status || head->lit_len > zstd_block_limit)
+                return 0;
+        if (!zstd_window_room(zstd_block_limit + 64))
+                return 0;
+        if (!head->nseq)
+        {
+                positive at = zstd_pos;
+                bool ok;
+
+                zstd_hold_emit = true;
+                ok = zstd_put(lits, head->lit_len);
+                zstd_hold_emit = false;
+                return ok && zstd_emit_window(zstd_window + at, zstd_pos - at) ? 1 : -1;
+        }
+        if (head->sum_ll > head->lit_len)
+                return 0;
+        total = head->lit_len + head->sum_ml;
+        if (total > zstd_block_limit)
+                return 0;
+        for (positive k = 0; k < 3; k++)
+        {
+                rep[k] = head->rep[k];
+                if (!zstd_par_resolve(address_of rep[k], zstd_rep))
+                        return 0;
+        }
+        for (positive i = 0; i < head->sym_end; i++)
+        {
+                if (!zstd_par_resolve(address_of recs[3 * i + 2], zstd_rep))
+                        return 0;
+                if (recs[3 * i + 2] > max)
+                        max = recs[3 * i + 2];
+        }
+        reach = zstd_window_size ? zstd_window_size : positive_max;
+        if (reach > zstd_pos)
+                reach = zstd_pos;
+        if (max > reach)
+                return 0;
+        {
+                zstd_seq_exec_job exec = {zstd_window + zstd_pos, lits, recs, head->nseq};
+                positive at = zstd_pos;
+
+                zstd_sequences_exec(address_of exec);
+#ifdef ZSTD_PAR_AUDIT
+                if (zstd_par_audit_exec)
+                        zstd_par_audit_exec(zstd_window + at, lits, recs, head->nseq);
+#endif
+                memory_copy_apart(exec.out, exec.lits, head->lit_len - (positive)head->sum_ll);
+                zstd_pos += total;
+                zstd_rep[0] = rep[0];
+                zstd_rep[1] = rep[1];
+                zstd_rep[2] = rep[2];
+                return zstd_emit_window(zstd_window + at, total) ? 1 : -1;
+        }
+}
+
+/* What the serial decoder holds before block b, rebuilt from the blocks
+   that defined it. */
+static bool zstd_par_sync(zstd_par_block address_to b)
+{
+        zstd_fse_defaults();
+        zstd_lit_huff.valid = false;
+        if (b->huf.src && !zstd_par_huff(b->huf, address_of zstd_lit_huff))
+                return false;
+        for (p8 kind = 0; kind < 3; kind++)
+        {
+                zstd_par_ref const ref = b->seq[kind];
+
+                zstd_seq_prev[kind] = null;
+                if (!ref.src)
+                        continue;
+                if (ref.src == address_of zstd_par_mark)
+                        zstd_seq_prev[kind] = zstd_par_default(kind);
+                else
+                {
+                        p8 m;
+                        p8 address_to d;
+                        positive limit;
+                        positive used;
+
+                        if (!zstd_par_find(ref, kind, address_of m, address_of d, address_of limit) ||
+                            !zstd_seq_make(address_of zstd_seq_tables[kind][0], kind, m, d, limit,
+                                           address_of used, zstd_seq_symbols[kind], zstd_seq_logs[kind]))
+                                return false;
+                        zstd_seq_prev[kind] = address_of zstd_seq_tables[kind][0];
+                }
+        }
+        return true;
+}
+
+/* A block the serial decoder runs: the same calls zstd_frame makes. */
+static bool zstd_par_serial(zstd_par_block address_to b)
+{
+        positive lit_used;
+        positive lit_len;
+        positive at;
+        bool ok;
+
+        if (!zstd_par_sync(b))
+                return zstd_fail("zstd table of an earlier block is corrupt");
+        if (!zstd_literals(b->src, b->size, address_of lit_used, zstd_lit_buf, address_of lit_len))
+                return false;
+        return_if(lit_used > b->size, zstd_fail("zstd literals overran the block"));
+        if (!zstd_window_room(zstd_block_limit))
+                return false;
+        at = zstd_pos;
+        zstd_hold_emit = true;
+        ok = zstd_sequences(b->src + lit_used, b->size - lit_used, zstd_lit_buf, lit_len);
+        zstd_hold_emit = false;
+        return ok && zstd_emit_window(zstd_window + at, zstd_pos - at);
+}
+
+static bool zstd_par_sink(address_any context, positive index, address_any data, positive length)
+{
+        zstd_par_run address_to const run = context;
+        zstd_par_block address_to const b = run->block + index;
+        bipolar done;
+
+        if (b->type == 0)
+                return zstd_put(b->src, b->size);
+        if (b->type == 1)
+                return zstd_put_fill(b->src[0], b->size);
+        done = length >= ZSTD_PAR_HEAD ? zstd_par_execute((zstd_par_head address_to)data) : 0;
+        return done ? done > 0 : zstd_par_serial(b);
+}
+
+/* The next blocks of a frame, from at, as many as a batch holds: where each
+   lies and which tables it repeats. Stops at the end of the frame, or at a
+   block this path leaves to the serial decoder -- a header that does not
+   parse, a repeat of nothing, a size over its limit, bytes past the input --
+   so everything refused lands in the same code and says the same thing. */
+static positive zstd_par_scan(zstd_par_run address_to run, p8 address_to base, positive size,
+                              positive address_to at, bool address_to ended,
+                              bool address_to stopped, positive address_to bytes)
+{
+        positive count = 0;
+
+        address_to bytes = 0;
+        while (count < ZSTD_PAR_BLOCKS)
+        {
+                zstd_par_block address_to const b = run->block + count;
+                p8 address_to payload;
+                p32 header;
+                positive length;
+                positive used;
+
+                if (address_to at + 3 > size)
+                        goto stop;
+                header = zstd_get24(base + address_to at);
+                payload = base + address_to at + 3;
+                b->last = header & 1;
+                b->type = (header >> 1) & 3;
+                b->size = header >> 3;
+                used = b->type == 1 ? 1 : b->size;
+                if (b->type == 3 || address_to at + 3 + used > size)
+                        goto stop;
+                b->src = payload;
+                if (b->type < 2)
+                {
+                        if (b->size > zstd_block_limit)
+                                goto stop;
+                }
+                else
+                {
+                        zstd_par_lit lit;
+                        positive nseq;
+                        p8 modes;
+                        p8 address_to tables;
+
+                        if (!b->size || b->size > ZSTD_BLOCK_MAX ||
+                            !zstd_par_lit_parse(payload, b->size, address_of lit) ||
+                            (lit.type == 3 && !run->huf.src) ||
+                            !zstd_par_seq_head(payload, b->size, address_of nseq, address_of modes,
+                                               address_of tables) ||
+                            (!nseq && tables != payload + b->size))
+                                goto stop;
+                        for (positive kind = 0; nseq && kind < 3; kind++)
+                                if (((modes >> (6 - 2 * kind)) & 3) == 3 && !run->seq[kind].src)
+                                        goto stop;
+                        b->huf = run->huf;
+                        for (positive kind = 0; kind < 3; kind++)
+                                b->seq[kind] = run->seq[kind];
+                        if (lit.type == 2)
+                        {
+                                run->huf.src = payload;
+                                run->huf.size = b->size;
+                        }
+                        for (positive kind = 0; nseq && kind < 3; kind++)
+                        {
+                                p8 const mode = (modes >> (6 - 2 * kind)) & 3;
+
+                                if (mode == 0)
+                                {
+                                        run->seq[kind].src = (p8 address_to)address_of zstd_par_mark;
+                                        run->seq[kind].size = 0;
+                                }
+                                else if (mode != 3)
+                                {
+                                        run->seq[kind].src = payload;
+                                        run->seq[kind].size = b->size;
+                                }
+                        }
+                }
+                address_to at += 3 + used;
+                address_to bytes += 3 + used;
+                count++;
+                if (b->last)
+                {
+                        address_to ended = true;
+                        return count;
+                }
+        }
+        return count;
+stop:
+        address_to stopped = true;
+        return count;
+}
+
+/* Whether descriptor fd is a regular file, and its size. */
+static bool zstd_par_file_size(bipolar fd, positive address_to size);
+
+/* The bytes the frame's blocks are read from, all of them, at the position
+   of the next block: a regular file mapped whole, or the memory the stream
+   was opened on. False when the input is neither (a pipe), and the serial
+   decoder reads it. */
+static bool zstd_par_input(p8 address_to address_to base, positive address_to size,
+                           positive address_to at)
+{
+        positive const buffered = zstd_src.have - zstd_src.at;
+        positive file_size;
+        bipolar where;
+
+        if (zstd_src.mem)
+        {
+                address_to base = zstd_src.mem;
+                address_to size = zstd_src.mem_len;
+                address_to at = zstd_src.mem_at - buffered;
+                return true;
+        }
+        if (zstd_src.fd < 0 || !zstd_par_file_size(zstd_src.fd, address_of file_size))
+                return false;
+        where = system_seek(zstd_src.fd, 0, FILE_SEEK_CUR);
+        if (where < 0 || (positive)where < buffered)
+                return false;
+        if (zstd_par_map_fd != zstd_src.fd || zstd_par_map_size != file_size)
+        {
+                bipolar mapped;
+
+                if (zstd_par_map)
+                        system_call_2(syscall(munmap), (positive)zstd_par_map, zstd_par_map_size);
+                zstd_par_map = null;
+                mapped = system_call_6(syscall(mmap), 0, file_size, FILE_PROTECT_READ,
+                                       FILE_MAP_PRIVATE, (positive)zstd_src.fd, 0);
+                if (mapped < 0 && mapped > -4096)
+                        return false;
+                zstd_par_map = (p8 address_to)mapped;
+                zstd_par_map_size = file_size;
+                zstd_par_map_fd = zstd_src.fd;
+        }
+        address_to base = zstd_par_map;
+        address_to size = zstd_par_map_size;
+        address_to at = (positive)where - buffered;
+        return true;
+}
+
+static fn zstd_par_unmap(void)
+{
+        if (zstd_par_map)
+                system_call_2(syscall(munmap), (positive)zstd_par_map, zstd_par_map_size);
+        zstd_par_map = null;
+        zstd_par_map_size = 0;
+        zstd_par_map_fd = -1;
+}
+
+/* The serial decoder goes on from byte at of the input. */
+static fn zstd_par_resume(positive at)
+{
+        if (zstd_src.mem)
+        {
+                zstd_src.mem_at = at;
+                zstd_src.eof = at == zstd_src.mem_len;
+        }
+        else
+        {
+                system_seek(zstd_src.fd, at, FILE_SEEK_SET);
+                zstd_src.eof = false;
+        }
+        zstd_src.at = zstd_src.have = 0;
+}
+
+/* Whether the frame whose header was just read is decoded on the pool: the
+   stream is not pulled, has no dictionary, the pool has three threads or more and
+   the input holds enough blocks past the header to be worth it. */
+static bool zstd_par_gate(void)
+{
+        p8 address_to base;
+        positive size;
+        positive at;
+
+        return !zstd_pull && !zstd_dict_on && parallel_width() >= ZSTD_PAR_WIDTH &&
+               zstd_par_input(address_of base, address_of size, address_of at) &&
+               at <= size && size - at >= zstd_par_least;
+}
+
+/* The blocks of the frame just opened: 1 when its last block is done, 2 when
+   the serial decoder goes on from the input as left (the frame is small, the
+   input a pipe, or a block this path does not take), 0 on an error. */
+static bipolar zstd_par_frame(void)
+{
+        zstd_par_run run = {0};
+        p8 address_to base;
+        positive size;
+        positive at;
+        bool ended = false;
+        bool stopped = false;
+        bool failed = false;
+
+        if (!zstd_par_go || !zstd_par_input(address_of base, address_of size, address_of at) ||
+            at > size)
+                return 2;
+        run.block = memory_take_zeroed(ZSTD_PAR_BLOCKS, sizeof(zstd_par_block));
+        run.slot = memory_take_zeroed(parallel_slots(), sizeof(zstd_par_slot));
+        if (!run.block || !run.slot)
+        {
+                memory_give(run.block);
+                memory_give(run.slot);
+                return 2;
+        }
+        zstd_fse_defaults();
+        zstd_par_live = true;
+        if (zstd_ring)
+                zstd_par_writer_open();
+        while (!ended && !stopped && !failed)
+        {
+                positive bytes;
+                positive count = zstd_par_scan(address_of run, base, size, address_of at,
+                                               address_of ended, address_of stopped,
+                                               address_of bytes);
+
+                if (count)
+                        failed = !parallel_ordered(zstd_par_job, zstd_par_sink, address_of run,
+                                                   count, bytes);
+        }
+        zstd_par_writer_close();
+        zstd_par_live = false;
+        memory_give(run.block);
+        memory_give(run.slot);
+        zstd_par_go = false;
+        if (failed)
+        {
+                if (!zstd_why)
+                        zstd_fail("zstd: out of memory");
+                return 0;
+        }
+        zstd_par_resume(at);
+        return ended ? 1 : 2;
 }
 
 static bool zstd_frame(void)
@@ -1589,6 +2664,7 @@ static bool zstd_frame(void)
         // may carry anything: this read it as the full 128 KiB and wrote the
         // block into the previous frame's window before the size said no.
         zstd_block_limit = window < ZSTD_BLOCK_MAX ? window : ZSTD_BLOCK_MAX;
+        zstd_par_go = zstd_par_gate();
         if (!zstd_window_open(window + (zstd_dict_on ? zstd_dict_size : 0)))
                 return false;
 
@@ -1636,6 +2712,15 @@ static bool zstd_frame(void)
 zstd_frame_blocks:
         checksum = zstd_checksum_on;
         frame_start = zstd_frame_begin;
+
+        {
+                bipolar const par = zstd_par_frame();
+
+                if (!par)
+                        return false;
+                if (par == 1)
+                        goto zstd_frame_trailer;
+        }
 
         for (;;)
         {
@@ -6284,7 +7369,25 @@ static bipolar zstd_deflate_mem(p8 address_to src, positive src_len,
         return (bipolar)zstd_output.used;
 }
 
-#ifndef ZSTD_CORE_ONLY
+#ifdef ZSTD_CORE_ONLY
+static bool zstd_par_file_size(bipolar fd, positive address_to size)
+{
+        (void)fd;
+        (void)size;
+        return false;
+}
+#else
+
+static bool zstd_par_file_size(bipolar fd, positive address_to size)
+{
+        file_facts facts;
+
+        if (file_look_code((positive)fd, (string_address)"", AT_EMPTY_PATH, address_of facts) != 0 ||
+            (facts.mode & MODE_FORMAT) != MODE_FILE || !facts.size)
+                return false;
+        address_to size = facts.size;
+        return true;
+}
 
 static b32 zstd_status;
 static bool zstd_cli_ultra;

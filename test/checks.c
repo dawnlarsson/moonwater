@@ -82695,6 +82695,7 @@ b32 main(void)
 #include "../src/lib.util.c"
 #include "../src/moonwater/spark.c"
 #define ZSTD_CORE_ONLY
+#define ZSTD_PAR_AUDIT
 #include "../src/sh/zstd.c"
 #undef ZSTD_CORE_ONLY
 #define SHARED_counted
@@ -83709,11 +83710,276 @@ static fn row_mask(void)
 }
 
 /*
-        The two kernels the pool's decoder is made of, each against its model:
-        zstd_sequences_decode (a block's sequence bitstream into records) against
-        zstd_sequences_decode_reference and zstd_sequences_exec (the copies) against
-        zstd_sequences_exec_reference.
+        A frame on the pool against the same frame in the serial decoder, and
+        both kernels against their models. Every block a job decodes is held
+        to zstd_sequences_decode_reference (the records, the totals, the
+        largest offset, where the stand-ins end, the repeat offsets left and
+        the answer) and every block exec copies to zstd_sequences_exec_reference
+        (the bytes of the block). The frames come from the encoder at many
+        levels over data of every shape, are cut and mutated, and the pool's
+        answer -- bytes, count and reason -- must be the serial decoder's.
 */
+static b32 par_audited, par_exec_audited, par_decode_bad, par_exec_bad;
+
+static fn par_audit_decode(const zstd_seq_decode_job address_to before,
+                           const zstd_seq_decode_job address_to after, bipolar result)
+{
+        zstd_seq_decode_job model = *before;
+        p32 address_to const out = memory_take(12 * before->nseq + 16);
+        bool same = out != null;
+
+        __atomic_fetch_add(address_of par_audited, 1, __ATOMIC_RELAXED);
+        if (same)
+        {
+                bipolar want;
+
+                model.out = out;
+                want = zstd_sequences_decode_reference(address_of model);
+                same = (want == 0) == (result == 0);
+                if (same && !want)
+                        same = after->max_off == model.max_off && after->sym_end == model.sym_end &&
+                               after->sum_ll == model.sum_ll && after->sum_ml == model.sum_ml &&
+                               after->rep[0] == model.rep[0] && after->rep[1] == model.rep[1] &&
+                               after->rep[2] == model.rep[2] &&
+                               !memory_compare(out, after->out, 12 * before->nseq);
+        }
+        if (!same)
+                __atomic_fetch_add(address_of par_decode_bad, 1, __ATOMIC_RELAXED);
+        memory_give(out);
+}
+
+static fn par_audit_exec(p8 address_to out, p8 address_to lits, p32 address_to recs, positive nseq)
+{
+        positive total = 0;
+        p8 address_to copy;
+
+        for (positive i = 0; i < nseq; i++)
+                total += (positive)recs[3 * i] + recs[3 * i + 1];
+        copy = memory_take(total + 1);
+        __atomic_fetch_add(address_of par_exec_audited, 1, __ATOMIC_RELAXED);
+        if (!copy)
+        {
+                __atomic_fetch_add(address_of par_exec_bad, 1, __ATOMIC_RELAXED);
+                return;
+        }
+        memory_copy(copy, out, total);
+        {
+                zstd_seq_exec_job job = {out, lits, recs, nseq};
+
+                zstd_sequences_exec_reference(address_of job);
+        }
+        if (memory_compare(copy, out, total))
+                __atomic_fetch_add(address_of par_exec_bad, 1, __ATOMIC_RELAXED);
+        memory_give(copy);
+}
+
+/* Data of every shape a block can be made of, in stretches: random bytes
+   (raw blocks), runs (RLE blocks), words, records, copies at distances from
+   one to seventy thousand and zeros with noise. */
+static fn par_data(p8 address_to dst, positive n, p32 seed)
+{
+        static const positive reach[] = {1, 2, 3, 5, 8, 13, 40, 200, 3000, 70000};
+        positive at = 0;
+        p32 random = seed | 1;
+
+        while (at < n)
+        {
+                positive stretch = 4096 + (XORSHIFT32(random) >> 8) % 90000;
+                p8 const kind = (p8)((XORSHIFT32(random) >> 5) % 7);
+                positive period = 24 + (random >> 9) % 70;
+
+                if (stretch > n - at)
+                        stretch = n - at;
+                for (positive i = 0; i < stretch; i++, at++)
+                {
+                        XORSHIFT32(random);
+                        if (kind == 0)
+                                dst[at] = (p8)(random >> 11);
+                        else if (kind == 1)
+                                dst[at] = 'q';
+                        else if (kind == 2)
+                                dst[at] = (p8)('a' + (random >> 8) % 6 + ((random >> 16) % 5 == 0 ? 20 : 0));
+                        else if (kind == 3)
+                                dst[at] = (p8)(i % period < 6 ? (random >> 9) % 4 + i % period * 16 : 'k');
+                        else if (kind == 4)
+                                dst[at] = (random >> 12) % 61 ? 0 : (p8)(random >> 20);
+                        else
+                        {
+                                positive back = reach[(random >> 7) % array_count(reach)];
+
+                                dst[at] = at > back && (random & 7) ? dst[at - back] : (p8)(random >> 14);
+                        }
+                }
+        }
+}
+
+static bipolar par_encode(p8 address_to src, positive n, p8 address_to dst, positive cap, b32 level)
+{
+        zstd_params params;
+        bool ok;
+
+        zstd_output.bytes = dst;
+        zstd_output.room = cap;
+        zstd_output.used = 0;
+        zstd_out_fd = -1;
+        zstd_level_params(level, 0, 0, address_of params);
+        ok = zstd_encode_start(address_of params, true) && zstd_encode_write(src, n) &&
+             zstd_encode_end();
+        zstd_output.bytes = null;
+        return ok ? (bipolar)zstd_output.used : -1;
+}
+
+typedef struct
+{
+        bipolar n;
+        string_address why;
+} par_result;
+
+static par_result par_decode_frame(p8 address_to frame, positive len, p8 address_to dst,
+                                   positive cap, positive width)
+{
+        par_result r;
+
+        parallel_reset(width);
+        zstd_par_least = width > 1 ? 0 : ZSTD_PAR_LEAST;
+        memory_fill(dst, 0xcc, cap);
+        r.n = zstd_inflate(frame, len, dst, cap);
+        r.why = zstd_why;
+        parallel_reset(0);
+        zstd_par_least = ZSTD_PAR_LEAST;
+        return r;
+}
+
+static bool par_same_text(string_address a, string_address b)
+{
+        return is_null(a) ? is_null(b) : !is_null(b) && !string_compare_max(a, b, 200);
+}
+
+/* The two decoders on one frame: the same count, the same bytes (whole
+   buffer, so nothing is written that the serial decoder does not write) and
+   the same reason. */
+static bool par_agree(p8 address_to frame, positive len, p8 address_to a, p8 address_to b, positive cap)
+{
+        par_result const serial = par_decode_frame(frame, len, a, cap, 1);
+        par_result const pooled = par_decode_frame(frame, len, b, cap, 4);
+
+        return serial.n == pooled.n && par_same_text(serial.why, pooled.why) &&
+               !memory_compare(a, b, cap);
+}
+
+#define PAR_MAX (1u << 20)
+static p8 par_src[PAR_MAX], par_frame[PAR_MAX + 4096], par_copy[PAR_MAX + 4096];
+static p8 par_out_a[PAR_MAX + 4096], par_out_b[PAR_MAX + 4096];
+
+/* Frames at every level over every shape of data, whole, with the models
+   watching the pool's kernels. */
+static fn par_frames(void)
+{
+        static const b32 levels[] = {1, 2, 3, 4, 5, 7, 9, 12, 15, 19};
+        positive agreed = 0;
+        positive tried = 0;
+        bool good = true;
+
+        zstd_par_audit_decode = par_audit_decode;
+        zstd_par_audit_exec = par_audit_exec;
+        for (positive l = 0; l < array_count(levels); l++)
+                for (positive seed = 1; seed <= 3; seed++)
+                {
+                        positive const n = (l < 7 ? 700000 : 300000) + seed * 41111;
+                        bipolar packed;
+
+                        par_data(par_src, n, (p32)(seed * 2654435761u + l));
+                        packed = par_encode(par_src, n, par_frame, sizeof(par_frame), levels[l]);
+                        if (packed <= 0)
+                                continue;
+                        tried++;
+                        good &= par_agree(par_frame, (positive)packed, par_out_a, par_out_b, n + 64) &&
+                                !memory_compare(par_out_b, par_src, n);
+                        agreed++;
+                }
+        zstd_par_audit_decode = null;
+        zstd_par_audit_exec = null;
+        check("frames of every level and shape decode alike on the pool and serially, to their input",
+              good && agreed == tried && tried >= 24);
+        check("the pool decoded blocks the models looked at", par_audited > 100 && par_exec_audited > 100);
+        check("the decode kernel is its model on every block", !par_decode_bad);
+        check("exec is its model on every block", !par_exec_bad);
+}
+
+/* The same frames cut short and with bytes changed: whatever the serial
+   decoder writes and says, the pool writes and says. */
+static fn par_damage(void)
+{
+        static const b32 levels[] = {1, 3, 7, 12};
+        p32 random = 0x2545f491u;
+        positive agreed = 0;
+        positive tried = 0;
+
+        for (positive l = 0; l < array_count(levels); l++)
+        {
+                positive const n = 450000;
+                bipolar packed;
+
+                par_data(par_src, n, (p32)(l * 977 + 5));
+                packed = par_encode(par_src, n, par_frame, sizeof(par_frame), levels[l]);
+                if (packed <= 0)
+                        continue;
+                for (positive trial = 0; trial < 160; trial++)
+                {
+                        positive len = (positive)packed;
+
+                        memory_copy(par_copy, par_frame, len);
+                        XORSHIFT32(random);
+                        if (trial % 4 == 0)
+                                len = 6 + random % (len - 6);
+                        else
+                                for (positive k = 0; k <= trial % 3; k++)
+                                {
+                                        //      Half the changes land where a block's header, literal
+                                        //      header and sequence modes are: the first bytes of a block.
+                                        positive at = 6 + XORSHIFT32(random) % (len - 6);
+
+                                        if (trial % 2)
+                                                at &= ~(positive)0x1ffff, at += 6 + (random >> 17) % 40;
+                                        if (at < len)
+                                                par_copy[at] ^= (p8)(1u << (random >> 27) % 8);
+                                }
+                        tried++;
+                        agreed += par_agree(par_copy, len, par_out_a, par_out_b, n + 64);
+                }
+        }
+        check("damaged and cut frames decode to the same bytes and reasons on the pool and serially",
+              agreed == tried && tried >= 400);
+}
+
+/* Several frames and a skippable one in a row, a trailing byte, an empty
+   frame: the frame loop around the pool's path. */
+static fn par_streams(void)
+{
+        positive const n = 600000;
+        bipolar one;
+        bipolar two;
+        positive len;
+        static const p8 skippable[] = {0x50, 0x2a, 0x4d, 0x18, 0x03, 0, 0, 0, 1, 2, 3};
+
+        par_data(par_src, n, 99);
+        one = par_encode(par_src, n, par_frame, PAR_MAX / 2, 3);
+        two = par_encode(par_src, n / 2, par_frame + one, PAR_MAX / 2, 1);
+        if (one <= 0 || two <= 0)
+        {
+                check("the frames for the stream checks are made", false);
+                return;
+        }
+        len = (positive)(one + two);
+        check("two frames in a row decode alike", par_agree(par_frame, len, par_out_a, par_out_b, n + n / 2 + 64));
+        memory_copy(par_frame + len, skippable, sizeof(skippable));
+        check("frames and a skippable frame decode alike",
+              par_agree(par_frame, len + sizeof(skippable), par_out_a, par_out_b, n + n / 2 + 64));
+        par_frame[len] = 0x7f;
+        check("a trailing byte is refused alike", par_agree(par_frame, len + 1, par_out_a, par_out_b, n + n / 2 + 64));
+        check("a missing last byte is refused alike", par_agree(par_frame, len - 1, par_out_a, par_out_b, n + n / 2 + 64));
+}
+
 /* Random tables for the decode kernel: counts that fill 2^log, with
    low-probability symbols now and then, drawn so offsets are mostly repeats
    and small codes; or one symbol and no log. */
@@ -84009,6 +84275,9 @@ b32 main(void)
         job_widths();
         fast_parse();
         row_mask();
+        par_frames();
+        par_damage();
+        par_streams();
         par_decode_kernel();
         par_exec_kernel();
 #if X64
@@ -84027,6 +84296,7 @@ b32 main(void)
                 roundtrip();
                 pull_block_shapes();
                 dictionaries();
+                par_frames();
                 par_decode_kernel();
                 cpu_hash_probed = probed;
                 cpu_has_mulx = mulx;

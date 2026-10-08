@@ -10010,7 +10010,7 @@ pub bool parallel_ordered(parallel_emit_job job, parallel_sink sink,
                         atomic_inc(address_of run.limit_word);
 
                         if (atomic_load(address_of run.claimers_waiting))
-                                thread_wake(address_of run.limit_word, 1 << 30);
+                                thread_wake(address_of run.limit_word, 1);
 
                         continue;
                 }

@@ -39270,6 +39270,46 @@ def harness_compression(argv):
                         check(label + '/zstd/corrupt-level-' + level + '/' + kind,
                               kind not in missed, missed.get(kind, ''))
 
+            # A frame big enough for the pool (a regular file of two MiB of
+            # input or more, read where it lies) against the same frame through
+            # a pipe, which only the serial decoder reads: the same bytes, the
+            # same status and the same silence or complaint, whole, cut short,
+            # with bytes changed, and as two frames in a row.
+            pool_text = b''.join(p.read_bytes() for p in sorted((HARNESS_ROOT / 'src').rglob('*.c')))[:20000000]
+            pool_rng = random.Random(0x5EED5)
+            with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as pool_dir:
+                pool_dir = Path(pool_dir)
+                for level in ('3', '9'):
+                    frame = call([refs['zstd'], '-q', '-T1', '-' + level, '-c'], pool_text).stdout
+                    check('zstd/pool/level-%s frame is big enough for the pool' % level, len(frame) > 2500000)
+                    cases = [('whole', frame), ('two', frame + frame),
+                             ('cut', frame[:len(frame) - 4001]), ('headless', frame[:9])]
+                    starts = [b[0] for b in zstd_blocks(frame)]
+                    for index in range(24):
+                        mutated = bytearray(frame)
+                        for _ in range(1 + index % 3):
+                            # Half the changes land in the first bytes of a block,
+                            # where its literals header and sequence modes are.
+                            at = pool_rng.randrange(6, len(mutated)) if index % 2 else pool_rng.choice(starts) + pool_rng.randrange(0, 40)
+                            if at < len(mutated):
+                                mutated[at] ^= 1 << pool_rng.randrange(8)
+                        cases.append(('mutant-%d' % index, bytes(mutated)))
+                    for label, _ in binaries:
+                        ours_zstd = runner + [str(farms[label] / 'zstd')]
+                        failures = []
+                        for name, data in cases:
+                            path = pool_dir / ('case-%s-%s.zst' % (level, name))
+                            path.write_bytes(data)
+                            on_file = call(ours_zstd + ['-dc', str(path)])
+                            through_pipe = call(ours_zstd + ['-dc'], data)
+                            if (on_file.returncode != through_pipe.returncode or on_file.stdout != through_pipe.stdout or
+                                    bool(on_file.stderr) != bool(through_pipe.stderr)):
+                                failures.append(name)
+                            if name in ('whole', 'two') and (on_file.returncode or on_file.stdout != (pool_text if name == 'whole' else pool_text * 2)):
+                                failures.append(name + ' (bytes)')
+                            path.unlink()
+                        check(label + '/zstd/pool/level-' + level + ' file against pipe', not failures, ' '.join(failures))
+
             # zstd levels and their options: every level from 1 to 19, 20-22
             # under --ultra, --fast, --long, --no-check, -T and --single-thread
             # write frames the reference and ours both decode to the input;
