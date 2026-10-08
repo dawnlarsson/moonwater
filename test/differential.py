@@ -21522,7 +21522,131 @@ def text_grep_many(farm):
     return passed, len(cases), notes
 
 
-TEXT_CHECKS = (text_grep_encoding, text_grep_engine, text_grep_many, text_file_failures, text_collation)
+#       A script of one command that works on a line only when a string is in
+#       it leaves the lines without the string to be copied across in one
+#       piece, and a substitution of one string for another is done for the
+#       lines the reader holds at once. The inputs put the string at the edges
+#       of every size of read (a pipe fed in odd pieces, a line longer than the
+#       reader's buffer, no last newline, a carriage return, a NUL, a file
+#       large enough for the pool) and the scripts ask the command, its
+#       negation, an address, a flag that makes it not apply, and the shapes
+#       it does not take, of GNU sed.
+_TEXT_SED_GATE_SCRIPTS = (
+    ("/needle/d",), ("-n", "/needle/p"), ("/needle/p",), ("/needle/!d",), ("-n", "/needle/!p"), ("/needle/!p",),
+    ("s/needle/N/",), ("s/needle/N/g",), ("-n", "s/needle/N/p"), ("s/ab/[&]/",), ("s/x/y/2",), ("/beta:0/d",),
+    ("/ab/s/b/B/",), ("/ab/!s/b/B/",), ("-n", "/a.b/p"), ("/a\\.b/d",), ("s/a.b/Z/g",), ("-E", "/(ab|cd)x/d"),
+    ("/NEEDLE/Id",), ("s/NEEDLE/n/I",), ("-n", "/Q/Ip"), ("s/\u00e9/e/",), ("/\u00e9/d",), ("-s", "/needle/d"),
+    ("/^$/d",), ("/x$/d",), ("/^needle/d",), ("s/^ab/AB/",), ("-n", "$p"), ("5d",), ("/needle/{p;d}",), ("y/ab/ba/",),
+    ("s/ab/XY/g",), ("s/,/;/g",), ("s/ /_/g",), ("s/needle//g",), ("s/a/aa/g",), ("s/aa/a/g",), ("-n", "s/ab/x/"),
+    ("s/ab/x\\ny/",), ("s/ab/\u00e9/g",), ("s/h//",), ("s/:/::/",), ("-e", "s/a/b/", "-e", "s/c/d/"), ("/c/s/a/b/g",),
+    ("/needle/q",), ("-n", "/needle/{=;p}"),
+)
+
+
+def text_sed_gate(farm):
+    import shutil
+    import subprocess
+    import tempfile
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    reference = shutil.which("sed", path=os.defpath)
+    candidate = Path(farm) / "sed"
+    if not reference or not candidate.exists():
+        return 0, 1, ["the sed cells need both a reference and a candidate sed"]
+    environment = dict(os.environ, LC_ALL="C")
+    rnd = random.Random(0x5ED6A7E)
+    needles = ("needle", "ab", "x", "beta:0", "Q", "\u00e9", "a.b")
+
+    def lines_of(count, density):
+        lines = []
+        for _ in range(count):
+            width = rnd.choice((0, 0, 1, 3, 10, 20, 20, 40, 120, 300))
+            line = "".join(rnd.choice("abcdefgh ,:.-") for _ in range(width))
+            if rnd.random() < density:
+                cut = rnd.randrange(len(line) + 1)
+                line = line[:cut] + rnd.choice(needles) + line[cut:]
+            if rnd.random() < 0.02:
+                line += "\r"
+            lines.append(line)
+        return lines
+
+    inputs = []
+    for density in (0.0, 0.01, 0.2, 1.0):
+        lines = lines_of(rnd.choice((60, 700, 4000)), density)
+        inputs.append((f"d{density}", ("\n".join(lines) + "\n").encode()))
+        inputs.append((f"d{density}-nonl", "\n".join(lines).encode()))
+    inputs.append(("nul", b"abc\0needle\nplain\n\0\nxx needle\n"))
+    inputs.append(("long", b"z" * 200000 + b"needle" + b"z" * 1000 + b"\n" + b"plain\n" * 50 + b"y" * 300000 + b"\n"))
+    inputs.append(("one", b"needle\n"))
+    big = lines_of(40000, 0.03)
+    inputs.append(("big", ("\n".join(big) + "\n").encode() * 6))
+
+    with tempfile.TemporaryDirectory(prefix="sed-gate-") as temporary:
+        root = Path(temporary)
+        for name, data in inputs:
+            (root / name).write_bytes(data)
+        cases = []
+        for name, data in inputs:
+            for script in _TEXT_SED_GATE_SCRIPTS:
+                cases.append((name, script, "file"))
+                if len(data) < 2000000:
+                    cases.append((name, script, "pipe"))
+        cases.append(("d0.2", ("/needle/d",), "files"))
+        cases.append(("d0.2", ("s/needle/N/g",), "files"))
+
+        def run(case):
+            name, script, how = case
+            answers = []
+            for binary in (reference, candidate):
+                command = [str(binary), *script]
+                if how == "pipe":
+                    child = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                             stderr=subprocess.PIPE, cwd=temporary, env=environment)
+                    data = (root / name).read_bytes()
+                    feeder_rnd = random.Random(len(data))
+
+                    def feed():
+                        try:
+                            at = 0
+                            while at < len(data):
+                                step = feeder_rnd.choice((1, 7, 100, 4096, 65536, 70000))
+                                child.stdin.write(data[at:at + step])
+                                child.stdin.flush()
+                                at += step
+                        except OSError:
+                            pass
+                        try:
+                            child.stdin.close()
+                        except OSError:
+                            pass
+
+                    feeder = threading.Thread(target=feed)
+                    feeder.start()
+                    out, err = child.stdout.read(), child.stderr.read()
+                    child.wait()
+                    feeder.join()
+                    answers.append((child.returncode, out, err))
+                else:
+                    operands = [name, "d0.2-nonl"] if how == "files" else [name]
+                    result = subprocess.run(command + operands, cwd=temporary, env=environment,
+                                            capture_output=True, timeout=60)
+                    answers.append((result.returncode, result.stdout, result.stderr))
+            return case, answers
+
+        passed, notes = 0, []
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for case, answers in pool.map(run, cases):
+                if answers[0][:2] == answers[1][:2]:
+                    passed += 1
+                elif len(notes) < 40:
+                    notes.append(f"sed {shlex.join(case[1])} ({case[0]}, {case[2]}): reference={answers[0][0]}"
+                                 f" ({len(answers[0][1])} bytes), candidate={answers[1][0]}"
+                                 f" ({len(answers[1][1])} bytes)")
+    return passed, len(cases), notes
+
+
+TEXT_CHECKS = (text_grep_encoding, text_grep_engine, text_grep_many, text_sed_gate, text_file_failures, text_collation)
 
 _TEXT_GREP_OPERANDS = (
     (), ("a.txt",), ("a.txt", "b.txt"), ("-",), ("missing",), ("dir",), ("tree",),

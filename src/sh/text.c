@@ -33626,6 +33626,263 @@ static bool sed_pieces_script(void)
         return true;
 }
 
+/*
+        Lines the script cannot touch.
+
+        A script of one command that does something to a line only when a
+        string is in it -- /re/d, /re/p, a substitution, with the regular
+        expression the command asks of the line -- leaves every line without
+        the string as it found it. The string is the longest one the
+        expression cannot match without (the compiler knows it for the search
+        grep hunts with), and the lines before the first that holds it are
+        found in one pass over what the reader has, where the cycle for each
+        costs four hundred instructions to learn the same. They are written
+        as they are (or not at all, for /re/!d) and the line that holds the
+        string takes the cycle as ever: nothing is done here that the cycle
+        does not do, and the pieces and the serial loop both begin their
+        round with it.
+
+        Where the string is in nearly every line the pass finds nothing to
+        skip, and the loop then goes that many lines without asking, twice as
+        many each time, so that a script it cannot help costs what it cost.
+*/
+static const_string sed_gate_text, sed_gate_replacement;
+static positive sed_gate_size, sed_gate_wait, sed_gate_backoff, sed_gate_replacement_length;
+static positive2 sed_gate_anchors;
+static bool sed_gate_on, sed_gate_icase, sed_gate_pass, sed_gate_literal, sed_gate_global;
+
+// Bytes a pass has to skip to have been worth the call: a line.
+#define SED_GATE_WORTH 1
+#define SED_GATE_BACKOFF_MAX 256
+
+static fn sed_gate_prepare(bool eligible)
+{
+        sed_gate_on = sed_gate_literal = false;
+        sed_gate_wait = sed_gate_backoff = 0;
+
+        if (!eligible || sed_command_count != 1)
+                return;
+
+        sed_command address_to command = sed_commands;
+        bool addressed = command->first_type == SED_ADDRESS_REGEX;
+        b32 program;
+
+        switch (command->kind)
+        {
+        case 's':
+                if (command->negate)
+                        return;
+
+                program = addressed ? command->first_regex : command->pattern;
+                sed_gate_pass = true;
+                break;
+        case 'd':
+                if (!addressed)
+                        return;
+
+                program = command->first_regex;
+                sed_gate_pass = !command->negate;
+                break;
+        case 'p':
+                if (!addressed || command->negate)
+                        return;
+
+                program = command->first_regex;
+                sed_gate_pass = true;
+                break;
+        default:
+                return;
+        }
+
+        if (program < 0 || sed_program_end_only[program] ||
+            !sed_programs[program].hints->literal_length)
+                return;
+
+        sed_gate_text = (const_string)sed_programs[program].hints->literal;
+        sed_gate_size = sed_programs[program].hints->literal_length;
+        sed_gate_anchors = sed_programs[program].hints->literal_anchors;
+        sed_gate_icase = (sed_programs[program].flags & RX_IGNORE_CASE) != 0;
+        sed_gate_on = true;
+
+        /*
+                A substitution of one string for another, to every line or
+                to the first of each (s/foo/bar/ and s/foo/bar/g), is done
+                for all the lines the reader holds in one pass: the string
+                is looked for across them, the line it is in is cut at it,
+                and the lines between are written as they are. The string
+                is ASCII, so no character of any locale is cut by it; the
+                replacement has no & or backslash in it; and there is no p
+                flag, which would write a line twice.
+        */
+        if (command->kind == 's' && !addressed && command->plain && command->which == 1 &&
+            !command->printing && (sed_programs[program].flags & RX_LITERAL_PROVES) &&
+            !sed_gate_icase)
+        {
+                bool ascii = true;
+
+                for (positive i = 0; i < sed_gate_size; i++)
+                        ascii = ascii && sed_gate_text[i] < 0x80 && sed_gate_text[i] != '\n';
+
+                sed_gate_replacement = sed_text + command->text;
+                sed_gate_replacement_length = command->replacement_length;
+                sed_gate_global = command->global;
+                sed_gate_literal = ascii;
+        }
+}
+
+// How many bytes of `lines`, which end in a delimiter, come before the first
+// line that holds the string.
+static inline INLINE positive sed_gate_inert(p8 address_to lines, positive length)
+{
+        string_address found = text_literal_find((string_address)lines, length, 0,
+                                                 sed_gate_text, sed_gate_size,
+                                                 sed_gate_icase, sed_gate_anchors);
+
+        if (!found)
+                return length;
+
+        p8 address_to before = memory_last_of(lines, '\n', (positive)((p8 address_to)found - lines));
+
+        return before ? (positive)(before + 1 - lines) : 0;
+}
+
+static inline INLINE bool sed_lit_put(parallel_output address_to output, p8 address_to bytes,
+                                      positive length)
+{
+        if (!output)
+        {
+                text_put(bytes, length);
+                return true;
+        }
+
+        return parallel_write(output, bytes, length);
+}
+
+// Whole lines, each ending in a delimiter, with the string replaced in each
+// that holds it: to a job's output, or to standard output when there is none.
+// False when a job's output would not grow.
+static inline INLINE bool sed_lit_lines(p8 address_to lines, positive length,
+                                        parallel_output address_to output)
+{
+        bool print = !sed_quiet;
+        positive at = 0;
+
+        while (at < length)
+        {
+                string_address found = text_literal_find((string_address)lines, length, at,
+                                                         sed_gate_text, sed_gate_size, false,
+                                                         sed_gate_anchors);
+
+                if (!found)
+                {
+                        if (print && !sed_lit_put(output, lines + at, length - at))
+                                return false;
+
+                        return true;
+                }
+
+                p8 address_to before = memory_last_of(lines + at, '\n',
+                                                      (positive)((p8 address_to)found - (lines + at)));
+                positive begin = before ? (positive)(before + 1 - lines) : at;
+
+                if (print && begin > at && !sed_lit_put(output, lines + at, begin - at))
+                        return false;
+
+                p8 address_to newline = memory_first_of((p8 address_to)found, '\n',
+                                                        length - (positive)((p8 address_to)found - lines));
+                positive stop = (positive)(newline - lines);
+                positive cursor = begin;
+
+                for (;;)
+                {
+                        positive hit = (positive)((p8 address_to)found - lines);
+
+                        if (print &&
+                            (!sed_lit_put(output, lines + cursor, hit - cursor) ||
+                             !sed_lit_put(output, (p8 address_to)sed_gate_replacement,
+                                          sed_gate_replacement_length)))
+                                return false;
+
+                        cursor = hit + sed_gate_size;
+
+                        if (!sed_gate_global)
+                                break;
+
+                        found = text_literal_find((string_address)lines, stop, cursor,
+                                                  sed_gate_text, sed_gate_size, false,
+                                                  sed_gate_anchors);
+
+                        if (!found)
+                                break;
+                }
+
+                if (print && !sed_lit_put(output, lines + cursor, stop + 1 - cursor))
+                        return false;
+
+                at = stop + 1;
+        }
+
+        return true;
+}
+
+// The serial loop's round: the lines the reader holds that come before the
+// first the string is in, written as they are or dropped, and gone.
+static __attribute__((noinline)) fn sed_gate_skip()
+{
+        // The model of GNU's stdio is followed a line at a time by the cycle
+        // until it has settled.
+        if (sed_gate_literal && unlikely(sed_output_state))
+                return;
+
+        if (!text_fill())
+                return;
+
+        p8 address_to at = text_input.buffer + text_input.position;
+        p8 address_to last = memory_last_of(at, text_delimiter,
+                                            text_input.filled - text_input.position);
+
+        if (!last)
+                return;
+
+        if (sed_gate_literal)
+        {
+                sed_lit_lines(at, (positive)(last + 1 - at), null);
+                text_input.position += (positive)(last + 1 - at);
+                return;
+        }
+
+        positive inert = sed_gate_inert(at, (positive)(last + 1 - at));
+
+        if (inert)
+        {
+                if (sed_gate_pass && !sed_quiet)
+                {
+                        if (unlikely(sed_output_state))
+                                for (positive from = 0; from < inert;)
+                                {
+                                        p8 address_to stop = memory_first_of(at + from, text_delimiter,
+                                                                             inert - from);
+
+                                        sed_output(at + from, (positive)(stop - (at + from)), true);
+                                        from = (positive)(stop + 1 - at);
+                                }
+                        else
+                                text_put(at, inert);
+                }
+
+                text_input.position += inert;
+        }
+
+        if (inert < SED_GATE_WORTH)
+        {
+                sed_gate_backoff = sed_gate_backoff
+                    ? min(sed_gate_backoff * 2, (positive)SED_GATE_BACKOFF_MAX) : 1;
+                sed_gate_wait = sed_gate_backoff;
+        }
+        else
+                sed_gate_backoff = 0;
+}
+
 static inline INLINE bool sed_pieces_put(parallel_output address_to output, p8 address_to bytes,
                                          positive length)
 {
@@ -33665,8 +33922,52 @@ static bool sed_pieces_emit(address_any context, positive index, p8 address_to l
         ctx.pattern = (sed_buffer){lines, 0, true, address_of stores[0]};
         ctx.work_store = address_of stores[1];
 
+        positive wait = 0, backoff = 0;
+
+        if (sed_gate_literal)
+        {
+                answered = sed_lit_lines(lines, length, output);
+                goto done;
+        }
+
         while (at < length)
         {
+                if (sed_gate_on)
+                {
+                        if (wait)
+                                wait--;
+                        else
+                        {
+                                positive inert = sed_gate_inert(lines + at, length - at);
+
+                                if (inert)
+                                {
+                                        if (sed_gate_pass && !sed_quiet)
+                                        {
+                                                p8 address_to to = parallel_reserve(output, inert);
+
+                                                if (!to)
+                                                        goto done;
+
+                                                memory_copy_apart(to, lines + at, inert);
+                                        }
+
+                                        at += inert;
+                                }
+
+                                if (inert < SED_GATE_WORTH)
+                                {
+                                        backoff = backoff ? min(backoff * 2, (positive)SED_GATE_BACKOFF_MAX) : 1;
+                                        wait = backoff;
+                                }
+                                else
+                                        backoff = 0;
+
+                                if (at >= length)
+                                        break;
+                        }
+                }
+
                 p8 address_to newline = memory_first_of(lines + at, '\n', length - at);
                 b32 pc = 0;
                 bool dropped = false;
@@ -34118,6 +34419,8 @@ static b32 text_sed()
 
         bool pieces_ok = !sed_null_data && sed_pieces_script();
 
+        sed_gate_prepare(pieces_ok);
+
         // -i edits files, and there is nothing to edit when the input is a
         // pipe. GNU says so and stops with four.
         // Every file w writes to is emptied before the first line is read,
@@ -34313,8 +34616,19 @@ static b32 text_sed()
                 if (pieces_ok)
                         sed_pieces_run();
 
-                while (sed_line_next())
+                for (;;)
                 {
+                        if (unlikely(sed_gate_on))
+                        {
+                                if (sed_gate_wait)
+                                        sed_gate_wait--;
+                                else
+                                        sed_gate_skip();
+                        }
+
+                        if (!sed_line_next())
+                                break;
+
                         sed_pattern.length = text_line_length;
                         sed_pattern.ended = text_line_ended;
                         sed_number++;
