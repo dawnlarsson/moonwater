@@ -1246,10 +1246,9 @@ static const argument_option process_timeout_options[] = {
         background job and which it means to stay unheard; ALRM and the
         signal asked for are taken whatever. Left to their defaults they
         ended timeout itself (kill -ALRM answered 142, a closed pipe 141) and
-        orphaned the command it was minding. SIGCHLD shares the signalfd only
-        so an old kernel without pidfd support still has an event to wake an
-        unlimited wait. One mask and one descriptor replace a handler per
-        signal.
+        orphaned the command it was minding. One mask and one descriptor
+        replace a handler per signal; the child's end is the pidfd, and
+        SIGCHLD in the set only adds a second event for it.
 */
 #define PROCESS_SIGNAL_ALARM 14
 /* script's relay set: HUP, INT, QUIT and TERM, and SIGCHLD to wake it. */
@@ -1288,138 +1287,136 @@ static positive process_timeout_relayed(b32 term)
         return term ? mask | (positive)1 << (term - 1) : mask;
 }
 
-/* Wait for one child until a monotonic deadline. pidfd+ppoll is the native
-   steady-state path: no handler, alarm signal, tick loop, or PID reuse race.
-   The WNOHANG loop exists only for kernels predating pidfd_open. */
+/* The deadline is a timerfd, armed once at an absolute monotonic time and
+   polled with the child's pidfd and the signal descriptor. A relative ppoll
+   of the time left woke about 100 us late on a 100 ms wait (the task's 50 us
+   timer slack and what is over it), where the absolute timer woke about 11
+   us late, and nothing here recomputes the time left on each pass. The
+   pidfd is checked before the timer, so a child that ended while this was
+   off the processor is reaped and never signalled, as coreutils reaps
+   before it suspends. */
+#define PROCESS_TIMER_CLOCK 1
+#define PROCESS_TIMER_ABSTIME 1
+
+typedef struct
+{
+        timespec interval;
+        timespec value;
+} process_itimerspec;
+
+static bipolar process_timeout_timer(positive deadline)
+{
+        process_itimerspec when = {
+            {0, 0},
+            {deadline / 1000000000, deadline % 1000000000}};
+        bipolar timer = system_call_2(syscall(timerfd_create),
+                                      PROCESS_TIMER_CLOCK, O_CLOEXEC);
+
+        if (timer < 0)
+                return -1;
+        if (system_call_4(syscall(timerfd_settime), (positive)timer,
+                          PROCESS_TIMER_ABSTIME, (positive)address_of when,
+                          0) < 0)
+        {
+                system_close(timer);
+                return -1;
+        }
+        return timer;
+}
+
+static bipolar process_timeout_wait_on(b32 child, bipolar pidfd,
+                                       bipolar signal_fd, bipolar timer,
+                                       positive address_to status,
+                                       b32 address_to forwarded)
+{
+        system_poll_descriptor waited[3];
+        positive descriptors = 0;
+        positive signal_index = positive_max;
+        positive timer_index = positive_max;
+
+        waited[descriptors++] =
+            (system_poll_descriptor){(b32)pidfd, SYSTEM_POLL_READ, 0};
+        if (signal_fd >= 0)
+        {
+                signal_index = descriptors;
+                waited[descriptors++] =
+                    (system_poll_descriptor){(b32)signal_fd, SYSTEM_POLL_READ, 0};
+        }
+        if (timer >= 0)
+        {
+                timer_index = descriptors;
+                waited[descriptors++] =
+                    (system_poll_descriptor){(b32)timer, SYSTEM_POLL_READ, 0};
+        }
+
+        for (;;)
+        {
+                for (positive i = 0; i < descriptors; i++)
+                        waited[i].returned = 0;
+
+                bipolar ready = system_poll_wait(waited, descriptors, null, null);
+
+                if (ready < 0)
+                {
+                        if (ready == UL_ERROR_INTERRUPTED)
+                                continue;
+                        return -1;
+                }
+
+                if (waited[0].returned)
+                        return system_wait4_retry(child, status, 0, null) < 0 ? -1 : 1;
+
+                if (signal_index != positive_max && waited[signal_index].returned)
+                {
+                        positive information[16];
+                        bipolar got = system_read_retry(
+                            (positive)signal_fd, information,
+                            sizeof(information));
+
+                        if (got < (bipolar)sizeof(p32))
+                                return got < 0 ? -1 : 0;
+
+                        b32 number = (b32)(p32)information[0];
+
+                        /* SIGCHLD is consumed here and the pidfd, ready at
+                           the same moment, answers on the next pass. */
+                        if (number != SIGCHLD)
+                        {
+                                address_to forwarded = number;
+                                return 2;
+                        }
+                        continue;
+                }
+
+                if (timer_index != positive_max && waited[timer_index].returned)
+                        return 0;
+        }
+}
+
+/* Wait for one child until a monotonic deadline (0: none). The pidfd is the
+   child's end; pidfd_open is required, as it is on every kernel this tree
+   builds for. */
 static bipolar process_timeout_wait(b32 child, bipolar pidfd, bipolar signal_fd,
                                     positive deadline,
                                     positive address_to status,
                                     b32 address_to forwarded)
 {
-        if (pidfd >= 0 || signal_fd >= 0)
+        bipolar timer = -1;
+        bipolar answer;
+
+        if (pidfd < 0)
+                return -1;
+        if (deadline)
         {
-                system_poll_descriptor waited[2];
-                positive descriptors = 0;
-                positive pid_index = positive_max;
-                positive signal_index = positive_max;
-
-                if (pidfd >= 0)
-                {
-                        pid_index = descriptors;
-                        waited[descriptors++] =
-                            (system_poll_descriptor){
-                                (b32)pidfd, SYSTEM_POLL_READ, 0};
-                }
-                if (signal_fd >= 0)
-                {
-                        signal_index = descriptors;
-                        waited[descriptors++] =
-                            (system_poll_descriptor){
-                                (b32)signal_fd, SYSTEM_POLL_READ, 0};
-                }
-
-                for (;;)
-                {
-                        timespec span;
-                        timespec address_to limit = null;
-
-                        if (deadline)
-                        {
-                                positive now = clock_monotonic_nanoseconds();
-                                /*      Overdue is not the same as still
-                                        running. A child that ended while this
-                                        was off the processor -- which a busy
-                                        machine can hold it for longer than
-                                        the whole grace period -- has its
-                                        descriptor ready this moment, and
-                                        asking costs a poll that waits for
-                                        nothing. coreutils reaps without
-                                        waiting before it suspends, for the
-                                        same reason, and so never kills a
-                                        command that had already gone. */
-                                positive left = now >= deadline
-                                                    ? 0 : deadline - now;
-                                span = (timespec){left / 1000000000,
-                                                  left % 1000000000};
-                                limit = address_of span;
-                        }
-
-                        for (positive i = 0; i < descriptors; i++)
-                                waited[i].returned = 0;
-                        bipolar ready = system_poll_wait(
-                            waited, descriptors, limit, null);
-
-                        if (!ready)
-                                return 0;
-                        if (ready < 0)
-                        {
-                                if (ready == UL_ERROR_INTERRUPTED)
-                                        continue;
-                                return -1;
-                        }
-
-                        if (pid_index != positive_max &&
-                            waited[pid_index].returned)
-                                return system_wait4_retry(child, status, 0,
-                                                          null) < 0 ? -1 : 1;
-
-                        if (signal_index != positive_max &&
-                            waited[signal_index].returned)
-                        {
-                                positive information[16];
-                                bipolar got = system_read_retry(
-                                    (positive)signal_fd, information,
-                                    sizeof(information));
-
-                                if (got < (bipolar)sizeof(p32))
-                                        return got < 0 ? -1 : 0;
-
-                                b32 number = (b32)(p32)information[0];
-
-                                if (number != SIGCHLD)
-                                {
-                                        address_to forwarded = number;
-                                        return 2;
-                                }
-
-                                /* pidfd and SIGCHLD can become ready in
-                                   either order. After consuming SIGCHLD, the
-                                   next poll observes the pidfd; without one,
-                                   the WNOHANG check below reaps it. */
-                                if (pidfd >= 0)
-                                        continue;
-
-                                bipolar reaped = system_wait4_retry(
-                                    child, status, 1, null);
-
-                                if (reaped == child)
-                                        return 1;
-                                if (reaped < 0)
-                                        return -1;
-                        }
-                }
-        }
-
-        if (!deadline)
-                return system_wait4_retry(child, status, 0, null) < 0 ? -1 : 1;
-
-        for (;;)
-        {
-                bipolar waited = system_wait4_retry(child, status, 1, null);
-
-                if (waited == child)
-                        return 1;
-                if (waited < 0)
+                timer = process_timeout_timer(deadline);
+                if (timer < 0)
                         return -1;
-
-                positive now = clock_monotonic_nanoseconds();
-
-                if (now >= deadline)
-                        return 0;
-
-                positive left = deadline - now;
-                process_nap_ns(left < 10000000 ? left : 10000000);
         }
+        answer = process_timeout_wait_on(child, pidfd, signal_fd, timer,
+                                         status, forwarded);
+        if (timer >= 0)
+                system_close(timer);
+        return answer;
 }
 
 static fn process_timeout_cleanup(bipolar pidfd, bipolar signal_fd,
