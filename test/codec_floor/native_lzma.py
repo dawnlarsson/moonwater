@@ -150,6 +150,7 @@ extern void deflate_tokens_count(void *job);
 extern void deflate_tokens_encode(void *job);
 extern void deflate_parse_fast(void *job);
 extern void deflate_parse_chain(void *job);
+extern void *lzma_tree_walk(void *job);
 extern const p8 deflate_symbol_tab[960];
 extern long zstd_sequences_encode(void *job);
 static bipolar system_read_retry(positive fd,void *p,positive n) { return read((int)fd,p,n); }
@@ -183,7 +184,7 @@ a=lib.index('#define ASM_CRC_BASIS(bit)');b=lib.index('__asm__(',a);head+=lib[a:
 for name in ('hash_crc32_tab','hash_crc64_tab','deflate_symbol_tab','zstd_sequence_tab'):
  a=lib.index('ASM_RODATA_OBJECT_BEGIN('+name);a=lib.index('\n',a)+1;b=lib.index('    ASM_OBJECT_END('+name,a)
  head+='__asm__(".section __TEXT,__const\\n.globl _'+name+'\\n.p2align 4\\n_'+name+':\\n"\n'+lib[a:b]+'".text\\n");\n'
-head+=subprocess.check_output(['python3','test/differential.py','--harness','native_extract','src/lib.c','hash_crc32','hash_crc64','lzma_range_shift','lzma_range_encode','lzma_range_decode','huffman_encode_back','huffman_lengths','huffman_codes','zstd_huffman_cells','zstd_fse_cells','zstd_huffman_codes','deflate_tokens_count','deflate_tokens_encode','deflate_parse_fast','deflate_parse_chain','zstd_sequences_encode','memory_span_byte','network_store_16','deflate_decode_span','lzma_decode_span','memory_common_prefix','memory_copy_match'],text=True)
+head+=subprocess.check_output(['python3','test/differential.py','--harness','native_extract','src/lib.c','hash_crc32','hash_crc64','lzma_range_shift','lzma_range_encode','lzma_range_decode','huffman_encode_back','huffman_lengths','huffman_codes','zstd_huffman_cells','zstd_fse_cells','zstd_huffman_codes','deflate_tokens_count','deflate_tokens_encode','deflate_parse_fast','deflate_parse_chain','lzma_tree_walk','zstd_sequences_encode','memory_span_byte','network_store_16','deflate_decode_span','lzma_decode_span','memory_common_prefix','memory_copy_match'],text=True)
 a=checks.index('static p64 floor_crc(');b=checks.index('#endif\n#ifdef BENCH_compression_floor',a)
 body=checks[a:b].replace('#ifdef CHECK_compression_floor','')
 # Darwin pages are 16 KiB; the LZMA span check sizes its guards by FLOOR_PAGE.

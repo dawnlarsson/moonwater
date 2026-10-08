@@ -2839,145 +2839,63 @@ static xz_found address_to xz_chain(xz_finder address_to e, p32 len_limit, p32 p
         }
 }
 
-/* The binary tree walks. Every loop value is a plain local and find and
-   skip are separate, so neither carries the other's state; that keeps the
-   walk in registers instead of spilling it to the stack. The walk is a
-   chain of misses (son is 8 bytes a dictionary position, past L3 from -6
-   up), and which child comes next hangs on a byte compare no predictor
-   gets right half the time, so both children's pairs and bytes are
-   fetched as soon as their node's pair arrives: the right one is then in
-   flight whichever way the branch goes. */
-static xz_found address_to xz_tree_find(p32 address_to son, p8 address_to cur, p32 pos,
-                                        p32 cur_match, p32 depth, p32 cyclic_pos,
-                                        p32 cyclic_size, p32 len_limit,
-                                        xz_found address_to matches, p32 len_best)
+/* The binary tree walks, lib.c's lzma_tree_walk. The walk is a chain of
+   misses (son is 8 bytes a dictionary position, past L3 from -6 up) and
+   which child comes next hangs on a byte compare no predictor gets right
+   half the time, so the routine picks the child, the slot to fill and the
+   two lengths with conditional moves, and reads a node's pair of children
+   as it arrives. Find writes the pairs of lengths and distances longer than
+   any before; skip changes the tree and nothing else. The job is lib.c's to
+   describe. */
+typedef struct
 {
-        p32 address_to ptr0 = son + ((positive)cyclic_pos << 1) + 1;
-        p32 address_to ptr1 = son + ((positive)cyclic_pos << 1);
-        p32 len0 = 0;
-        p32 len1 = 0;
+        p32 address_to son;
+        p8 address_to cur;
+        xz_found address_to matches;
+        positive pos;
+        positive cur_match;
+        positive depth;
+        positive cyclic_pos;
+        positive cyclic_size;
+        positive len_limit;
+        positive len_best;
+        positive find;
+} xz_tree_job;
 
-        for (;;)
-        {
-                p32 delta = pos - cur_match;
+_Static_assert(sizeof(xz_tree_job) == 88 &&
+               __builtin_offsetof(xz_tree_job, cur) == 8 &&
+               __builtin_offsetof(xz_tree_job, matches) == 16 &&
+               __builtin_offsetof(xz_tree_job, pos) == 24 &&
+               __builtin_offsetof(xz_tree_job, cur_match) == 32 &&
+               __builtin_offsetof(xz_tree_job, depth) == 40 &&
+               __builtin_offsetof(xz_tree_job, cyclic_pos) == 48 &&
+               __builtin_offsetof(xz_tree_job, cyclic_size) == 56 &&
+               __builtin_offsetof(xz_tree_job, len_limit) == 64 &&
+               __builtin_offsetof(xz_tree_job, len_best) == 72 &&
+               __builtin_offsetof(xz_tree_job, find) == 80 &&
+               sizeof(xz_found) == 8 && __builtin_offsetof(xz_found, dist) == 4,
+               "lzma_tree_walk's job layout");
 
-                if (depth-- == 0 || delta >= cyclic_size)
-                {
-                        *ptr0 = 0;
-                        *ptr1 = 0;
-                        return matches;
-                }
-                p32 at = cyclic_pos - delta;
-                at += delta > cyclic_pos ? cyclic_size : 0;
-                p32 address_to pair = son + ((positive)at << 1);
-                p8 address_to pb = cur - delta;
-                p32 len = len0 < len1 ? len0 : len1;
-                {
-                        p32 d0 = pos - pair[0];
-                        p32 d1 = pos - pair[1];
-                        p32 a0 = cyclic_pos - d0 + (d0 > cyclic_pos ? cyclic_size : 0);
-                        p32 a1 = cyclic_pos - d1 + (d1 > cyclic_pos ? cyclic_size : 0);
+static inline INLINE xz_found address_to xz_tree_find(p32 address_to son, p8 address_to cur,
+                                                      p32 pos, p32 cur_match, p32 depth,
+                                                      p32 cyclic_pos, p32 cyclic_size,
+                                                      p32 len_limit, xz_found address_to matches,
+                                                      p32 len_best)
+{
+        xz_tree_job job = {son, cur, matches, pos, cur_match, depth, cyclic_pos,
+                           cyclic_size, len_limit, len_best, 1};
 
-                        __builtin_prefetch(son + ((positive)a0 << 1));
-                        __builtin_prefetch(son + ((positive)a1 << 1));
-                        __builtin_prefetch(cur - d0 + len);
-                        __builtin_prefetch(cur - d1 + len);
-                }
-
-                if (pb[len] == cur[len])
-                {
-                        len = xz_common(pb, cur, len + 1, len_limit);
-                        if (len_best < len)
-                        {
-                                len_best = len;
-                                matches->len = len;
-                                matches->dist = delta - 1;
-                                matches++;
-                                if (len == len_limit)
-                                {
-                                        *ptr1 = pair[0];
-                                        *ptr0 = pair[1];
-                                        return matches;
-                                }
-                        }
-                }
-                if (pb[len] < cur[len])
-                {
-                        *ptr1 = cur_match;
-                        ptr1 = pair + 1;
-                        cur_match = *ptr1;
-                        len1 = len;
-                }
-                else
-                {
-                        *ptr0 = cur_match;
-                        ptr0 = pair;
-                        cur_match = *ptr0;
-                        len0 = len;
-                }
-        }
+        return (xz_found address_to)lzma_tree_walk(address_of job);
 }
 
-static fn xz_tree_skip(p32 address_to son, p8 address_to cur, p32 pos, p32 cur_match,
-                       p32 depth, p32 cyclic_pos, p32 cyclic_size, p32 len_limit)
+static inline INLINE fn xz_tree_skip(p32 address_to son, p8 address_to cur, p32 pos,
+                                     p32 cur_match, p32 depth, p32 cyclic_pos,
+                                     p32 cyclic_size, p32 len_limit)
 {
-        p32 address_to ptr0 = son + ((positive)cyclic_pos << 1) + 1;
-        p32 address_to ptr1 = son + ((positive)cyclic_pos << 1);
-        p32 len0 = 0;
-        p32 len1 = 0;
+        xz_tree_job job = {son, cur, null, pos, cur_match, depth, cyclic_pos,
+                           cyclic_size, len_limit, 0, 0};
 
-        for (;;)
-        {
-                p32 delta = pos - cur_match;
-
-                if (depth-- == 0 || delta >= cyclic_size)
-                {
-                        *ptr0 = 0;
-                        *ptr1 = 0;
-                        return;
-                }
-                p32 at = cyclic_pos - delta;
-                at += delta > cyclic_pos ? cyclic_size : 0;
-                p32 address_to pair = son + ((positive)at << 1);
-                p8 address_to pb = cur - delta;
-                p32 len = len0 < len1 ? len0 : len1;
-                {
-                        p32 d0 = pos - pair[0];
-                        p32 d1 = pos - pair[1];
-                        p32 a0 = cyclic_pos - d0 + (d0 > cyclic_pos ? cyclic_size : 0);
-                        p32 a1 = cyclic_pos - d1 + (d1 > cyclic_pos ? cyclic_size : 0);
-
-                        __builtin_prefetch(son + ((positive)a0 << 1));
-                        __builtin_prefetch(son + ((positive)a1 << 1));
-                        __builtin_prefetch(cur - d0 + len);
-                        __builtin_prefetch(cur - d1 + len);
-                }
-
-                if (pb[len] == cur[len])
-                {
-                        len = xz_common(pb, cur, len + 1, len_limit);
-                        if (len == len_limit)
-                        {
-                                *ptr1 = pair[0];
-                                *ptr0 = pair[1];
-                                return;
-                        }
-                }
-                if (pb[len] < cur[len])
-                {
-                        *ptr1 = cur_match;
-                        ptr1 = pair + 1;
-                        cur_match = *ptr1;
-                        len1 = len;
-                }
-                else
-                {
-                        *ptr0 = cur_match;
-                        ptr0 = pair;
-                        cur_match = *ptr0;
-                        len0 = len;
-                }
-        }
+        lzma_tree_walk(address_of job);
 }
 
 /* One find at read_pos: the matches in increasing length, their count. */

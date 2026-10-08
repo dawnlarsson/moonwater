@@ -514,6 +514,16 @@ cover('correctness_only', 'test/checks.c#CHECK_compression_floor', 'deflate_pars
       'literals that stop it where they bite; end-to-end gzip -2 to -9 timing on '
       'three corpora, with no isolated timing row',
       anchors={'deflate_parse_chain': 'floor_deflate_chain'})
+cover('correctness_only', 'test/checks.c#CHECK_compression_floor', 'lzma_tree_walk',
+      'the pairs written, the tree left and the place it stops of 1260 blocks '
+      '(random bytes, few symbols, copies of earlier bytes, runs, short periods) '
+      'against xz\'s binary tree walk written out a node at a time, finding and '
+      'skipping mixed, at links from 1 to 512, nices from 4 to 273, windows from '
+      '38 to 9001 positions that wrap many times and positions near the top of '
+      '32 bits, the block ending where the bytes the walk may read end against a '
+      'protected page; end-to-end xz -6 timing on three corpora, with no isolated '
+      'timing row',
+      anchors={'lzma_tree_walk': 'floor_lzma_walk'})
 cover('correctness_only', 'test/checks.c#CHECK_compression_floor', 'zstd_sequences_encode',
       'bit-exact against a bit-at-a-time model over random tables, every code '
       'and pending width, the output ending at a protected page, and the room '

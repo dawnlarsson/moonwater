@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        388 routines (366 public, 22 local), 379 of them on all three and 9 local to one.
+        389 routines (367 public, 22 local), 380 of them on all three and 9 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -199,6 +199,7 @@
           lzma_range_decode              public  yes     yes     yes
           lzma_range_encode              public  yes     yes     yes
           lzma_range_shift               public  yes     yes     yes
+          lzma_tree_walk                 public  yes     yes     yes
           md5_blocks                     public  yes     yes     yes
           memory                         public  yes     yes     yes
           memory_ascii_span              public  yes     yes     yes
@@ -1556,6 +1557,67 @@ typedef typeof(sizeof(0)) sized;
     "mv a4, t2\n   sub t3, s0, t1\n   sw t3, " DIST "(sp)\n   lwu t3, 56(a0)\n   bgeu a4, t3, .Ldpc_rv_r_" S "\n" \
     "slli t1, a1, 49\n   srli t1, t1, 48\n   add t1, t1, s2\n   lhu a1, 0(t1)\n   addi a3, a3, -1\n"          \
     "beqz a3, .Ldpc_rv_r_" S "\n   add t0, s1, a4\n   add t3, s0, a4\n   lbu a5, 0(t3)\n   j .Ldpc_rv_w_" S "\n"
+
+/* lzma_tree_walk's walk, arm64 (the contract is written with the x86-64 body). One level, expanded
+   where it is used. In: x0 son, x1 cur, x2 cur - pos, w3 the candidate position, x4 and x5 the
+   slots the left and right trees hang from, w6 and w7 the lengths agreed on either side, w8 the
+   longest length so far and x9 the matches (find only), w10 the window floor, w11 the key to the
+   cyclic index, w12 the size, w13 the limit, w14 the links left, w15 pos - 1. REC is run with the
+   length in w24 when it is under the limit, REC_END when it reaches it. The two eight-byte words
+   are xored for the place of the first difference (rbit, clz) and compared as byte-swapped numbers
+   for its order, and csel takes the rest, so nothing waits for a branch. */
+#define LZ_TREE_A64(ID, REC, REC_END)                                                                          \
+    ".Llzt_arm64_top" ID ":  cmp w3, w10\n   b.ls .Llzt_arm64_done" ID "\n   subs w14, w14, #1\n   b.lo .Llzt_arm64_done" ID "\n" \
+    "adds w16, w3, w11\n   add w17, w16, w12\n   csel w16, w17, w16, mi\n   add x16, x0, x16, lsl #3\n   ldp w19, w20, [x16]\n" \
+    "cmp w6, w7\n   csel w21, w6, w7, lo\n   ldr x22, [x1, x21]\n   add x23, x3, x21\n   ldr x23, [x2, x23]\n"        \
+    "eor x24, x22, x23\n   cbz x24, .Llzt_arm64_ext" ID "\n"                                                       \
+    ".Llzt_arm64_tail" ID ":  rbit x24, x24\n   clz x24, x24\n   add w24, w21, w24, lsr #3\n   cmp w24, w13\n   b.hs .Llzt_arm64_reached" ID "\n" \
+    REC                                                                                                            \
+    "rev x22, x22\n   rev x23, x23\n   cmp x23, x22\n   csel x17, x5, x4, lo\n   str w3, [x17]\n   add x17, x16, #4\n" \
+    "csel x5, x17, x5, lo\n   csel x4, x16, x4, hs\n   csel w3, w20, w19, lo\n   csel w7, w24, w7, lo\n"           \
+    "csel w6, w6, w24, lo\n   b .Llzt_arm64_top" ID "\n"                                                           \
+    ".Llzt_arm64_ext" ID ":  add w21, w21, #8\n"                                                                   \
+    ".Llzt_arm64_extl" ID ":  cmp w21, w13\n   b.hs .Llzt_arm64_reached" ID "\n   add x25, x1, x21\n   ldp x22, x25, [x25]\n" \
+    "add x26, x3, x21\n   add x26, x2, x26\n   ldp x23, x26, [x26]\n   eor x24, x22, x23\n   eor x17, x25, x26\n"     \
+    "orr x17, x24, x17\n   cbnz x17, .Llzt_arm64_extf" ID "\n   add w21, w21, #16\n   b .Llzt_arm64_extl" ID "\n"  \
+    ".Llzt_arm64_extf" ID ":  cbnz x24, .Llzt_arm64_tail" ID "\n   add w21, w21, #8\n   mov x22, x25\n   mov x23, x26\n" \
+    "eor x24, x22, x23\n   b .Llzt_arm64_tail" ID "\n"                                                             \
+    ".Llzt_arm64_reached" ID ":  mov w24, w13\n"                                                                   \
+    REC_END                                                                                                        \
+    "str w20, [x4]\n   str w19, [x5]\n   b .Llzt_arm64_ret" ID "\n"                                                \
+    ".Llzt_arm64_done" ID ":  str wzr, [x4]\n   str wzr, [x5]\n"                                                   \
+    ".Llzt_arm64_ret" ID ":\n"
+
+/* lzma_tree_walk's walk, riscv64 (the contract is written with the x86-64 body). One level, expanded
+   where it is used. In: a0 son, a1 cur, a2 cur - pos, a3 the candidate position, a4 and a5 the
+   slots the left and right trees hang from, a6 and a7 the lengths agreed on either side, s0 the
+   longest length so far and s1 the matches (find only), s2 the window floor, s3 the key to the
+   cyclic index, s4 the size, s5 the limit, s6 the links left, s7 pos - 1. REC is run with the
+   length in t3 and REC_END when it reaches the limit. Base RV64I does not promise a misaligned ld,
+   so the nodes are judged a byte at a time: the byte at the length both sides agree on, and the
+   bytes after it for as long as they agree, four to a turn of the loop, the limit tested a turn and
+   once more where they differ (the four may pass it). */
+#define LZ_TREE_RV(ID, REC, REC_END)                                                                           \
+    ".Llzt_rv_top" ID ":  bleu a3, s2, .Llzt_rv_done" ID "\n   beqz s6, .Llzt_rv_done" ID "\n   addi s6, s6, -1\n"      \
+    "addw t0, a3, s3\n   bgez t0, 1f\n   addw t0, t0, s4\n1:  slli t0, t0, 3\n   add t0, a0, t0\n"                    \
+    "mv t3, a6\n   bleu a6, a7, 2f\n   mv t3, a7\n2:  add t4, a1, t3\n   add t5, a3, t3\n   add t5, a2, t5\n"        \
+    "lbu t1, 0(t4)\n   lbu t2, 0(t5)\n   bne t1, t2, .Llzt_rv_diff" ID "\n"                                         \
+    ".Llzt_rv_ext" ID ":  addi t3, t3, 1\n   addi t4, t4, 1\n   addi t5, t5, 1\n"                                     \
+    ".Llzt_rv_ext4" ID ":  bgeu t3, s5, .Llzt_rv_reached" ID "\n   lbu t1, 0(t4)\n   lbu t2, 0(t5)\n   bne t1, t2, .Llzt_rv_diff" ID "\n" \
+    "lbu t1, 1(t4)\n   lbu t2, 1(t5)\n   bne t1, t2, .Llzt_rv_d1" ID "\n   lbu t1, 2(t4)\n   lbu t2, 2(t5)\n"       \
+    "bne t1, t2, .Llzt_rv_d2" ID "\n   lbu t1, 3(t4)\n   lbu t2, 3(t5)\n   bne t1, t2, .Llzt_rv_d3" ID "\n"        \
+    "addi t3, t3, 4\n   addi t4, t4, 4\n   addi t5, t5, 4\n   j .Llzt_rv_ext4" ID "\n"                                \
+    ".Llzt_rv_d3" ID ":  addi t3, t3, 1\n.Llzt_rv_d2" ID ":  addi t3, t3, 1\n.Llzt_rv_d1" ID ":  addi t3, t3, 1\n"      \
+    "bgeu t3, s5, .Llzt_rv_reached" ID "\n"                                                                          \
+    ".Llzt_rv_diff" ID ":\n"                                                                                       \
+    REC                                                                                                            \
+    "bltu t2, t1, .Llzt_rv_lt" ID "\n   sw a3, 0(a4)\n   mv a4, t0\n   lwu a3, 0(t0)\n   mv a6, t3\n   j .Llzt_rv_top" ID "\n" \
+    ".Llzt_rv_lt" ID ":  sw a3, 0(a5)\n   addi a5, t0, 4\n   lwu a3, 4(t0)\n   mv a7, t3\n   j .Llzt_rv_top" ID "\n"   \
+    ".Llzt_rv_reached" ID ":\n"                                                                                    \
+    REC_END                                                                                                        \
+    "lwu t1, 0(t0)\n   lwu t2, 4(t0)\n   sw t2, 0(a4)\n   sw t1, 0(a5)\n   j .Llzt_rv_ret" ID "\n"                  \
+    ".Llzt_rv_done" ID ":  sw zero, 0(a4)\n   sw zero, 0(a5)\n"                                                    \
+    ".Llzt_rv_ret" ID ":\n"
 
 
 #define asm_x64_add "add"
@@ -4024,6 +4086,39 @@ __asm__(
     "2:  mov %r9d, %ebx\n   mov %r13, %r9\n   sub %rax, %r9\n   mov %r9d, " DIST "\n"                          \
     "cmp 56(%rdi), %ebx\n   jae .Ldpc_x64_r_" S "\n   and $0x7fff, %esi\n   movzwl 0x30000(%r15,%rsi,2), %esi\n"   \
     "dec %ebp\n   jz .Ldpc_x64_r_" S "\n   mov -3(%r13,%rbx), %r8d\n   jmp .Ldpc_x64_w_" S "\n"
+
+/* lzma_tree_walk's walk, x86-64 (the contract is written with ASM_FUNC(lzma_tree_walk)). One level
+   of the descent is expanded where it is used, so the find and the skip have their own branches. In:
+   r8 son, r9 cur, rax cur - pos, esi the candidate position m, r12 and r13 the slots the left and
+   right trees hang from (ptr0, ptr1), ebx and ebp the lengths agreed on either side, r14d and r15
+   the longest length so far and the matches (find only); the stack holds the window floor (0), the
+   key to the cyclic index (8), the size (16), the limit (24), the links left (32) and pos - 1 (40).
+   REC is run with the length in r11d when it is under the limit, REC_END when it reaches it. The
+   direction is the unsigned compare of the byte-swapped words, so one compare gives the first
+   differing byte's order and the xor of the words its place; the next node, the slot to fill and the
+   two lengths are chosen by cmov and nothing waits for a branch. */
+#define LZ_TREE_X64(ID, REC, REC_END)                                                                          \
+    ".Llzt_x64_top" ID ":  cmp 0(%rsp), %esi\n   jbe .Llzt_x64_done" ID "\n   subl $1, 32(%rsp)\n   jb .Llzt_x64_done" ID "\n" \
+    "mov %esi, %ecx\n   add 8(%rsp), %ecx\n   mov 16(%rsp), %edx\n   lea (%rcx,%rdx), %edx\n   cmovs %edx, %ecx\n"   \
+    "lea (%r8,%rcx,8), %rcx\n   mov %ebx, %edx\n   cmp %ebp, %edx\n   cmova %ebp, %edx\n"                          \
+    "mov (%r9,%rdx), %r10\n   lea (%rsi,%rdx), %rdi\n   mov (%rax,%rdi), %rdi\n"                                   \
+    "mov %r10, %r11\n   xor %rdi, %r11\n   jz .Llzt_x64_ext" ID "\n"                                               \
+    ".Llzt_x64_tail" ID ":  bsf %r11, %r11\n   shr $3, %r11d\n   add %edx, %r11d\n   cmp 24(%rsp), %r11d\n   jae .Llzt_x64_reached" ID "\n" \
+    REC                                                                                                            \
+    "bswap %r10\n   bswap %rdi\n   cmp %r10, %rdi\n   mov %r12, %rdx\n   cmovb %r13, %rdx\n   mov %esi, (%rdx)\n"  \
+    "lea 4(%rcx), %rdi\n   cmovb %rdi, %r13\n   cmovae %rcx, %r12\n   mov (%rcx), %esi\n   cmovb 4(%rcx), %esi\n"   \
+    "cmovb %r11d, %ebp\n   cmovae %r11d, %ebx\n   jmp .Llzt_x64_top" ID "\n"                                      \
+    ".Llzt_x64_ext" ID ":  add $8, %edx\n"                                                                         \
+    ".Llzt_x64_extl" ID ":  cmp 24(%rsp), %edx\n   jae .Llzt_x64_reached" ID "\n   movdqu (%r9,%rdx), %xmm0\n"     \
+    "lea (%rsi,%rdx), %rdi\n   movdqu (%rax,%rdi), %xmm1\n   pcmpeqb %xmm1, %xmm0\n   pmovmskb %xmm0, %r10d\n"     \
+    "xor $0xffff, %r10d\n   jnz .Llzt_x64_extx" ID "\n   add $16, %edx\n   jmp .Llzt_x64_extl" ID "\n"            \
+    ".Llzt_x64_extx" ID ":  bsf %r10d, %r10d\n   and $-8, %r10d\n   add %r10d, %edx\n   mov (%r9,%rdx), %r10\n"   \
+    "lea (%rsi,%rdx), %rdi\n   mov (%rax,%rdi), %rdi\n   mov %r10, %r11\n   xor %rdi, %r11\n   jmp .Llzt_x64_tail" ID "\n" \
+    ".Llzt_x64_reached" ID ":  mov 24(%rsp), %r11d\n"                                                              \
+    REC_END                                                                                                        \
+    "mov (%rcx), %edx\n   mov 4(%rcx), %edi\n   mov %edi, (%r12)\n   mov %edx, (%r13)\n   jmp .Llzt_x64_ret" ID "\n" \
+    ".Llzt_x64_done" ID ":  movl $0, (%r12)\n   movl $0, (%r13)\n"                                                 \
+    ".Llzt_x64_ret" ID ":\n"
 
 
 //      The masked window: every size up to sixty four bytes in one mask.
@@ -12959,6 +13054,55 @@ __asm__(
     ".Ldpc_x64_e2:  cmp $258, %r9d\n   jbe .Ldpc_x64_e4\n   mov $258, %r9d\n.Ldpc_x64_e4:  pop %rdx\n   ret\n"
 #endif
     ASM_END(deflate_parse_chain)
+    /* lzma_tree_walk(job) is the descent of the binary tree match finder (xz's bt4) from one position:
+       the candidate at the root of the tree for the hash is compared with the bytes here, the tree
+       is cut into the two trees of the smaller and the larger and the walk goes on down the side the
+       bytes lie on, with the position put in at the root, until the links run out, the candidate is
+       out of the window, or a match reaches the limit (then the node's two children take the places
+       the position's would). In find mode every candidate that is longer than any before is written
+       as a (length, distance - 1) pair of u32, and the answer is the end of what was written; in skip
+       mode only the tree changes and the answer is zero. The same tree and the same pairs as xz.c's
+       C walk, which test/checks.c keeps as the model. The job, 88 bytes, none of it changed: son 0
+       (the tree, two u32 a position, indexed cyclically), cur 8 (the bytes at the position, 64
+       readable past the limit), matches 16, pos 24 (the position biased past the window, so zero is
+       always too far), cur_match 32 (the root's candidate), depth 40 (links to follow), cyclic_pos
+       48, cyclic_size 56, len_limit 64, len_best 72 (find: the length to beat), find 80 (1 find, 0
+       skip); all fields 8 bytes. A node is judged by the 8 bytes at the length both of its sides
+       agree on (the lesser of the two): the xor of the words says whether they are the same, and the
+       lowest byte of it where they differ; past 8 equal bytes, sixteen at a time (pcmpeqb, pmovmskb)
+       and then the 8 bytes with the first difference. The direction is the order of the words read
+       as big-endian numbers, so no byte is looked at twice. The C walk was 99 instructions a level
+       with a mispredict for the direction and another for the equal-byte test on three levels in
+       four; here the next node, the slot to fill and the two lengths are chosen by cmov, and
+       what is left is the exit of the descent. Measured through the finder alone at -6 (perf stat
+       on a 9950X, 16 MiB of each corpus, the descent a find or a skip at every position as the
+       parser makes them): user cycles text 18.65G to 14.54G (-22.0 percent, instructions -41,
+       branch misses 283M to 81M), source tar 7.07G to 6.09G (-13.8), binary tar 7.13G to 6.46G
+       (-9.4). A prefetch of both children (pairs and window bytes) as a node arrives was no
+       faster in cycles (+-2 percent) for 15 to 30 percent more instructions. Reads up to 15 bytes
+       past the limit, within the block's slack. */
+    ASM_FUNC(lzma_tree_walk)
+#ifdef KERNEL_MODE
+    ASM_RET
+#else
+    "push %rbx\n   push %rbp\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n   sub $56, %rsp\n"
+    "mov (%rdi), %r8\n   mov 8(%rdi), %r9\n   mov 16(%rdi), %r15\n   mov 24(%rdi), %r10\n   mov 32(%rdi), %esi\n"
+    "mov 40(%rdi), %rax\n   mov %rax, 32(%rsp)\n   mov 48(%rdi), %ecx\n   mov 56(%rdi), %edx\n   mov %edx, 16(%rsp)\n"
+    "mov %r10d, %eax\n   sub %edx, %eax\n   mov %eax, 0(%rsp)\n   mov %ecx, %eax\n   sub %r10d, %eax\n   mov %eax, 8(%rsp)\n"
+    "lea -1(%r10), %eax\n   mov %eax, 40(%rsp)\n   lea (%r8,%rcx,8), %r13\n   lea 4(%r13), %r12\n"
+    "mov 64(%rdi), %rax\n   mov %rax, 24(%rsp)\n   mov 72(%rdi), %r14d\n   mov %r9, %rax\n   sub %r10, %rax\n"
+    "xor %ebx, %ebx\n   xor %ebp, %ebp\n   cmpq $0, 80(%rdi)\n   je .Llzt_x64_skip\n"
+    LZ_TREE_X64("f",
+                  "mov 40(%rsp), %edx\n   sub %esi, %edx\n   cmp %r14d, %r11d\n   mov %r11d, (%r15)\n   mov %edx, 4(%r15)\n"
+                  "lea 8(%r15), %rdx\n   cmova %rdx, %r15\n   cmova %r11d, %r14d\n",
+                  "mov 40(%rsp), %edx\n   sub %esi, %edx\n   mov %r11d, (%r15)\n   mov %edx, 4(%r15)\n   add $8, %r15\n")
+    "mov %r15, %rax\n   jmp .Llzt_x64_out\n"
+    ".Llzt_x64_skip:\n"
+    LZ_TREE_X64("s", "", "")
+    "xor %eax, %eax\n"
+    ".Llzt_x64_out:  add $56, %rsp\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n" ASM_RET
+#endif
+    ASM_END(lzma_tree_walk)
     /* huffman_lengths(freq, n, length, limit): code lengths of at most
        limit (1..15) bits for n <= 288 counts summing below 2^22, 1 on
        success and 0 when the lengths cannot be limited. The symbols in use are sorted by count,
@@ -21142,6 +21286,31 @@ __asm__(
     "cmp x7, #0\n   csel w13, w13, wzr, eq\n   add w10, w10, w13\n   add w9, w9, w10\n   cmp w10, #16\n   b.eq .Ldpc_arm64_e1\n"
     ".Ldpc_arm64_e2:  cmp w9, #258\n   mov w10, #258\n   csel w5, w9, w10, ls\n   ldp x13, x17, [sp, #16]\n   ldp x9, x10, [sp], #32\n   ret\n"
     ASM_END(deflate_parse_chain)
+    // lzma_tree_walk (the job and the walk are described with the x86-64 body). The same steps in
+    // the registers arm64 has: the descent is thirty-odd instructions a level, a node's pair of
+    // children comes in one ldp, the two words are xored for the place of the first difference
+    // (rbit, clz) and compared byte-swapped (rev) for its order, and csel takes the next node, the
+    // slot to fill and the two lengths, so the level has no branch but its exits. A record of a longer
+    // match is stored whether or not it is one and the pointer moves by csel. Measured on an M2 Pro,
+    // native, against gcc 16.1 -O2 compiled from the same C (the compiler the product is built with),
+    // 16 MiB of each corpus through the finder at -6, seconds for the pass: text 5.28 to 3.81
+    // (-27.8 percent), source tar 1.99 to 1.49 (-24.9), binary tar 2.08 to 1.62 (-21.8); clang -O2
+    // compiled the C to within 5 percent of gcc's.
+    ASM_FUNC(lzma_tree_walk)
+    "stp x19, x20, [sp, #-64]!\n   stp x21, x22, [sp, #16]\n   stp x23, x24, [sp, #32]\n   stp x25, x26, [sp, #48]\n"
+    "ldr x1, [x0, #8]\n   ldr x9, [x0, #16]\n   ldr x10, [x0, #24]\n   ldr w3, [x0, #32]\n   ldr w14, [x0, #40]\n"
+    "ldr w11, [x0, #48]\n   ldr w12, [x0, #56]\n   ldr w13, [x0, #64]\n   ldr w8, [x0, #72]\n   ldr x17, [x0, #80]\n   ldr x0, [x0]\n"
+    "sub x2, x1, x10\n   add x5, x0, x11, lsl #3\n   add x4, x5, #4\n   sub w15, w10, #1\n   sub w16, w10, w12\n"
+    "sub w11, w11, w10\n   mov w10, w16\n   mov w6, wzr\n   mov w7, wzr\n   cbz x17, .Llzt_arm64_skip\n"
+    LZ_TREE_A64("f",
+                  "sub w17, w15, w3\n   stp w24, w17, [x9]\n   cmp w24, w8\n   add x17, x9, #8\n   csel x9, x17, x9, hi\n   csel w8, w24, w8, hi\n",
+                  "sub w17, w15, w3\n   stp w24, w17, [x9]\n   add x9, x9, #8\n")
+    "mov x0, x9\n   b .Llzt_arm64_out\n"
+    ".Llzt_arm64_skip:\n"
+    LZ_TREE_A64("s", "", "")
+    "mov x0, xzr\n"
+    ".Llzt_arm64_out:  ldp x25, x26, [sp, #48]\n   ldp x23, x24, [sp, #32]\n   ldp x21, x22, [sp, #16]\n   ldp x19, x20, [sp], #64\n" ASM_RET
+    ASM_END(lzma_tree_walk)
     /* See the x86_64 huffman_lengths contract. */
     ASM_FUNC(huffman_lengths)
     "stp x29, x30, [sp, #-96]!\n   mov x29, sp\n   stp x19, x20, [sp, #16]\n   stp x21, x22, [sp, #32]\n   stp x23, x24, [sp, #48]\n   stp x25, x26, [sp, #64]\n   stp x27, x28, [sp, #80]\n"
@@ -28985,6 +29154,28 @@ __asm__(
     ".Ldpc_rv_ex:  ld a1, 176(sp)\n   ld a2, 184(sp)\n" RV_CTZBYTE("t3", "t4", "t5", "a1", "a2") "   add t2, t2, t3\n"
     ".Ldpc_rv_ed:  ld a1, 144(sp)\n   ld a2, 152(sp)\n   ld a3, 160(sp)\n   jr t6\n"
     ASM_END(deflate_parse_chain)
+    // lzma_tree_walk (the job and the walk are described with the x86-64 body). Base RV64I does not
+    // promise a misaligned ld, so a node is judged by the byte at the length both its sides agree on
+    // and then the bytes after it while they match; the next node and the slot to fill are a branch,
+    // not a select (there is no conditional move). Measured under qemu-user, guest instructions a
+    // byte of input through the finder at -6 (two sizes differenced, 64 KiB apart) against gcc -O2
+    // -march=rv64imafd_zicsr_zicntr compiled from the same C: text 1686 to 900 (-46.6 percent),
+    // source tar 1291 to 761 (-41.1), binary tar 497 to 379 (-23.7); cycles unmeasured.
+    ASM_FUNC(lzma_tree_walk)
+    "addi sp, sp, -64\n   sd s0, 0(sp)\n   sd s1, 8(sp)\n   sd s2, 16(sp)\n   sd s3, 24(sp)\n   sd s4, 32(sp)\n   sd s5, 40(sp)\n   sd s6, 48(sp)\n   sd s7, 56(sp)\n"
+    "ld a1, 8(a0)\n   ld s1, 16(a0)\n   ld t0, 24(a0)\n   lwu a3, 32(a0)\n   ld s6, 40(a0)\n   ld t1, 48(a0)\n"
+    "ld s4, 56(a0)\n   ld s5, 64(a0)\n   ld s0, 72(a0)\n   ld t2, 80(a0)\n   ld a0, 0(a0)\n"
+    "sub a2, a1, t0\n   slli t3, t1, 3\n   add a5, a0, t3\n   addi a4, a5, 4\n   addi s7, t0, -1\n   sub s2, t0, s4\n"
+    "sub s3, t1, t0\n   li a6, 0\n   li a7, 0\n   beqz t2, .Llzt_rv_skip\n"
+    LZ_TREE_RV("f",
+                 "bleu t3, s0, 3f\n   sub t6, s7, a3\n   sw t3, 0(s1)\n   sw t6, 4(s1)\n   addi s1, s1, 8\n   mv s0, t3\n3:\n",
+                 "sub t6, s7, a3\n   sw s5, 0(s1)\n   sw t6, 4(s1)\n   addi s1, s1, 8\n")
+    "mv a0, s1\n   j .Llzt_rv_out\n"
+    ".Llzt_rv_skip:\n"
+    LZ_TREE_RV("s", "", "")
+    "li a0, 0\n"
+    ".Llzt_rv_out:  ld s0, 0(sp)\n   ld s1, 8(sp)\n   ld s2, 16(sp)\n   ld s3, 24(sp)\n   ld s4, 32(sp)\n   ld s5, 40(sp)\n   ld s6, 48(sp)\n   ld s7, 56(sp)\n   addi sp, sp, 64\n" ASM_RET
+    ASM_END(lzma_tree_walk)
     /* See the x86_64 huffman_lengths contract. */
     ASM_FUNC(huffman_lengths)
     "li t0, 10816\n   sub sp, sp, t0\n   li t0, 10736\n   add t0, sp, t0\n   sd s0, 0(t0)\n   sd s1, 8(t0)\n   sd s2, 16(t0)\n   sd s3, 24(t0)\n   sd s4, 32(t0)\n   sd s5, 40(t0)\n"
@@ -34827,6 +35018,9 @@ READS_WRITES(1) fn deflate_tokens_encode(address_any job);
 READS_WRITES(1) fn deflate_parse_fast(address_any job);
 /* gzip's chain levels' walk over a stretch of a block; 208-byte job, see the x86_64 assembly. */
 READS_WRITES(1) fn deflate_parse_chain(address_any job);
+/* xz's binary tree match finder: the descent from one position, finding (the pairs written, the end
+   of them returned) or skipping (zero); 88-byte job, see the x86_64 assembly. */
+READS_WRITES(1) address_any lzma_tree_walk(address_any job);
 /* Code lengths of at most limit bits for n <= 288 counts summing below
    2^22; 0 when they cannot be limited. */
 READS(1) WRITES(3) bool huffman_lengths(const p32 address_to freq, positive n,

@@ -115426,6 +115426,254 @@ static fn floor_zstd_sequences_encode(void)
         floor_zstd_sequences_encode_run();
 }
 
+/* lzma_tree_walk against xz's binary tree walk written out a node at a time
+   (the C it replaced): the pairs it finds, the tree it leaves and the
+   places it stops, from blocks of random bytes, of a few symbols, of copies
+   of earlier bytes, of runs and of short periods, every shape at depths from
+   one to 512, nices from 4 to 273, windows small enough to wrap many times
+   and positions near the top of 32 bits, finds and skips mixed, with the
+   block ending where the bytes the routine may read end against a
+   protected page. */
+static xz_found address_to floor_tree_find_model(p32 address_to son, p8 address_to cur, p32 pos,
+                                        p32 cur_match, p32 depth, p32 cyclic_pos,
+                                        p32 cyclic_size, p32 len_limit,
+                                        xz_found address_to matches, p32 len_best)
+{
+        p32 address_to ptr0 = son + ((positive)cyclic_pos << 1) + 1;
+        p32 address_to ptr1 = son + ((positive)cyclic_pos << 1);
+        p32 len0 = 0;
+        p32 len1 = 0;
+
+        for (;;)
+        {
+                p32 delta = pos - cur_match;
+
+                if (depth-- == 0 || delta >= cyclic_size)
+                {
+                        *ptr0 = 0;
+                        *ptr1 = 0;
+                        return matches;
+                }
+                p32 at = cyclic_pos - delta;
+                at += delta > cyclic_pos ? cyclic_size : 0;
+                p32 address_to pair = son + ((positive)at << 1);
+                p8 address_to pb = cur - delta;
+                p32 len = len0 < len1 ? len0 : len1;
+
+                if (pb[len] == cur[len])
+                {
+                        len = xz_common(pb, cur, len + 1, len_limit);
+                        if (len_best < len)
+                        {
+                                len_best = len;
+                                matches->len = len;
+                                matches->dist = delta - 1;
+                                matches++;
+                                if (len == len_limit)
+                                {
+                                        *ptr1 = pair[0];
+                                        *ptr0 = pair[1];
+                                        return matches;
+                                }
+                        }
+                }
+                if (pb[len] < cur[len])
+                {
+                        *ptr1 = cur_match;
+                        ptr1 = pair + 1;
+                        cur_match = *ptr1;
+                        len1 = len;
+                }
+                else
+                {
+                        *ptr0 = cur_match;
+                        ptr0 = pair;
+                        cur_match = *ptr0;
+                        len0 = len;
+                }
+        }
+}
+
+static fn floor_tree_skip_model(p32 address_to son, p8 address_to cur, p32 pos, p32 cur_match,
+                       p32 depth, p32 cyclic_pos, p32 cyclic_size, p32 len_limit)
+{
+        p32 address_to ptr0 = son + ((positive)cyclic_pos << 1) + 1;
+        p32 address_to ptr1 = son + ((positive)cyclic_pos << 1);
+        p32 len0 = 0;
+        p32 len1 = 0;
+
+        for (;;)
+        {
+                p32 delta = pos - cur_match;
+
+                if (depth-- == 0 || delta >= cyclic_size)
+                {
+                        *ptr0 = 0;
+                        *ptr1 = 0;
+                        return;
+                }
+                p32 at = cyclic_pos - delta;
+                at += delta > cyclic_pos ? cyclic_size : 0;
+                p32 address_to pair = son + ((positive)at << 1);
+                p8 address_to pb = cur - delta;
+                p32 len = len0 < len1 ? len0 : len1;
+
+                if (pb[len] == cur[len])
+                {
+                        len = xz_common(pb, cur, len + 1, len_limit);
+                        if (len == len_limit)
+                        {
+                                *ptr1 = pair[0];
+                                *ptr0 = pair[1];
+                                return;
+                        }
+                }
+                if (pb[len] < cur[len])
+                {
+                        *ptr1 = cur_match;
+                        ptr1 = pair + 1;
+                        cur_match = *ptr1;
+                        len1 = len;
+                }
+                else
+                {
+                        *ptr0 = cur_match;
+                        ptr0 = pair;
+                        cur_match = *ptr0;
+                        len0 = len;
+                }
+        }
+}
+
+
+static fn floor_lzma_walk(void)
+{
+        static const p32 nices[7] = {4, 5, 8, 16, 32, 64, 273};
+        static const p32 depths[8] = {1, 2, 3, 6, 16, 48, 130, 512};
+        static const p32 sizes[6] = {37, 100, 256, 1000, 3000, 9000};
+        p8 address_to pages = floor_pages(5);
+        static p32 hash_want[4096], hash_got[4096], son_want[2 * 9001 + 4], son_got[2 * 9001 + 4];
+        static xz_found found_want[XZ_MATCH_MAX + 2], found_got[XZ_MATCH_MAX + 2];
+        p32 random = 0x2f6e91b5u;
+        bool same = true, anything = false, longs = false;
+
+        if (!pages)
+        {
+                check("lzma tree walk agrees with the node at a time walk: pairs, tree, stopping place", false);
+                return;
+        }
+#define FLOOR_RANDOM() (random ^= random << 13, random ^= random >> 17, random ^= random << 5, random)
+        for (positive trial = 0; trial < 1260 && same; trial++)
+        {
+                positive n = 600 + FLOOR_RANDOM() % 5400;
+                p32 size = sizes[trial % 6] + 1;
+                p32 nice = nices[(trial / 6) % 7];
+                p32 depth = depths[(trial / 42) % 8];
+                p32 shape = (p32)(trial / 336);
+                p32 alphabet = 2 + FLOOR_RANDOM() % 5;
+                p32 offset = size + (trial % 5 == 4 ? 0xe0000000u : 0);
+                p8 address_to block = pages + FLOOR_PAGE * 4 - n - 15;
+                p32 cyclic_pos = 0;
+
+                //      The block ends 15 bytes short of the protected page: the routine reads no
+                //      further than that past the limit.
+                for (positive i = 0; i < n + 15; i++)
+                        block[i] = 0;
+                for (positive i = 0; i < n;)
+                {
+                        positive run = 1 + FLOOR_RANDOM() % 40;
+
+                        switch ((shape + (FLOOR_RANDOM() % 4 == 0 ? FLOOR_RANDOM() : 0)) % 5)
+                        {
+                        case 0:
+                                for (positive k = 0; k < run && i < n; k++)
+                                        block[i++] = (p8)(FLOOR_RANDOM() % alphabet);
+                                break;
+                        case 1:
+                                for (positive k = 0; k < run * 3 && i < n; k++)
+                                        block[i++] = (p8)alphabet;
+                                break;
+                        case 2:
+                        {
+                                positive back = 1 + FLOOR_RANDOM() % (i + 1);
+                                positive copy = run * (1 + FLOOR_RANDOM() % 12);
+
+                                for (positive k = 0; k < copy && i < n; k++, i++)
+                                        block[i] = i >= back ? block[i - back] : (p8)(FLOOR_RANDOM() % 3);
+                                break;
+                        }
+                        case 3:
+                        {
+                                positive period = 1 + FLOOR_RANDOM() % 9;
+
+                                for (positive k = 0; k < run * 4 && i < n; k++, i++)
+                                        block[i] = i >= period ? block[i - period] : (p8)(FLOOR_RANDOM() % 4);
+                                break;
+                        }
+                        default:
+                                for (positive k = 0; k < run && i < n; k++)
+                                        block[i++] = (p8)(FLOOR_RANDOM());
+                                break;
+                        }
+                }
+                memory_fill(hash_want, 0, sizeof(hash_want));
+                memory_fill(hash_got, 0, sizeof(hash_got));
+                memory_fill(son_want, 0xa5, sizeof(son_want));
+                memory_fill(son_got, 0xa5, sizeof(son_got));
+                for (positive i = 0; i < 2 * size; i++)
+                        son_want[i] = son_got[i] = 0;
+                for (positive at = 0; at + 4 <= n && same; at++)
+                {
+                        p32 pos = (p32)at + offset;
+                        p32 avail = (p32)(n - at);
+                        p32 limit = avail < nice ? avail : nice;
+                        p8 address_to cur = block + at;
+                        p32 h = (cur[0] * 0x9e3779b1u ^ cur[1] * 0x85ebca6bu ^ cur[2] * 0xc2b2ae35u ^ cur[3] * 0x27d4eb2fu) >> 20;
+                        p32 cur_match = hash_want[h];
+                        p32 best = 3 + FLOOR_RANDOM() % 3;
+                        bool find = FLOOR_RANDOM() % 4 != 0;
+
+                        if (best >= limit)
+                                best = limit - 1;
+                        hash_want[h] = hash_got[h] = pos;
+                        if (find)
+                        {
+                                xz_found address_to end_want;
+                                xz_found address_to end_got;
+
+                                memory_fill(found_want, 0xcc, sizeof(found_want));
+                                memory_fill(found_got, 0xcc, sizeof(found_got));
+                                end_want = floor_tree_find_model(son_want, cur, pos, cur_match, depth,
+                                                                 cyclic_pos, size, limit, found_want, best);
+                                end_got = (xz_found address_to)lzma_tree_walk(
+                                        address_of (xz_tree_job){son_got, cur, found_got, pos, cur_match, depth,
+                                                       cyclic_pos, size, limit, best, 1});
+                                same = same && end_got - found_got == end_want - found_want;
+                                for (positive k = 0; k < (positive)(end_want - found_want) && same; k++)
+                                        same = found_got[k].len == found_want[k].len &&
+                                               found_got[k].dist == found_want[k].dist;
+                                anything = anything || end_want > found_want;
+                                longs = longs || (end_want > found_want && end_want[-1].len == limit);
+                        }
+                        else
+                        {
+                                same = same && !lzma_tree_walk(address_of (xz_tree_job){son_got, cur, null, pos, cur_match, depth,
+                                                                              cyclic_pos, size, limit, 0, 0});
+                                floor_tree_skip_model(son_want, cur, pos, cur_match, depth, cyclic_pos, size, limit);
+                        }
+                        if (++cyclic_pos == size)
+                                cyclic_pos = 0;
+                        if (at % 64 == 0 || at + 5 > n)
+                                same = same && !memory_compare(son_got, son_want, sizeof(son_got));
+                }
+                same = same && !memory_compare(son_got, son_want, sizeof(son_got));
+        }
+#undef FLOOR_RANDOM
+        memory_free(pages, 5 * FLOOR_PAGE);
+        check("lzma tree walk agrees with the node at a time walk: pairs, tree, stopping place",
+              same && anything && longs);
+}
+
 #ifdef CHECK_compression_floor
 b32 main(void)
 {
@@ -115439,6 +115687,7 @@ b32 main(void)
         floor_deflate_tokens();
         floor_deflate_parse();
         floor_deflate_chain();
+        floor_lzma_walk();
         floor_huffman_lengths();
         floor_zstd_huffman_cells();
         floor_huffman_codes();
