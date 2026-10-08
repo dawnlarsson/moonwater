@@ -1566,7 +1566,8 @@ static bool rx_compile(rx_pool *pool, regex_program *out, string_address pattern
                 rx_edges(address_of c.program, root.first, root.last, hints->last_bytes, true);
                 c.program.flags |= RX_LAST_KNOWN;
         }
-        if (root.first && pool->nodes[root.first].kind == RX_BEGIN)
+        // Under M a ^ is also at each line's start, so the walk tries every start.
+        if (root.first && pool->nodes[root.first].kind == RX_BEGIN && !(policy & REGEX_LINE_ANCHORS))
                 c.program.flags |= RX_ANCHORED;
         rx_required_two(pool->nodes, root.first, hints->literal, address_of hints->literal_length,
                         hints->extra, address_of hints->extra_length);
@@ -3605,6 +3606,7 @@ static p8 rx_find(rx_match *match, const regex_program *program, p8 mode, bool c
         p8 result = rx_find_walk(match, program, mode, captures, bytes, length, start);
         if (result != RX_COMPLEX || mode != REGEX_LONGEST || captures ||
             (program->flags & RX_HAS_BACKREF) || program->boundary != REGEX_BOUNDARY_NONE ||
+            (program->policy & REGEX_LINE_ANCHORS) ||
             start > length || memory_first_of(bytes, 0, length))
                 return result;
         positive begin, finish;
@@ -3638,7 +3640,8 @@ static bool regex_test(const regex_program *program, string_address text, positi
         */
         p8 result = rx_find(&regex_match, &regex_current, REGEX_FIRST, false, text, length, 0);
         if (result == RX_COMPLEX && !(program->flags & RX_HAS_BACKREF) &&
-            !memory_first_of(text, 0, length) && regex_machine_holds(program, hints, true) &&
+            !(program->policy & REGEX_LINE_ANCHORS) && !memory_first_of(text, 0, length) &&
+            regex_machine_holds(program, hints, true) &&
             !regex_dfa_cache.failed)
         {
                 string_address hit = rx_dfa_scan(&regex_dfa_cache, text, text + length + 1);

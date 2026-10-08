@@ -13975,12 +13975,6 @@ static b32 text_fmt()
 #define PR_HEADER_LINES 5
 #define PR_FOOTER_LINES 5
 
-static bool pr_parse_positive(string_address value, positive address_to into)
-{
-        return text_unsigned_option(value, false, into) && address_to into;
-}
-
-
 enum
 {
         PR_OPEN,
@@ -32091,7 +32085,7 @@ static bool sed_line_across(b32 address_to i, b32 inputs)
 static bool sed_null_data;
 static bool sed_follow_symlinks;
 
-static b32 sed_compile_regex(string_address pattern, bool icase)
+static b32 sed_compile_regex(string_address pattern, bool icase, bool multiline)
 {
         // Refused when it runs rather than when it is read, because a script
         // whose input is empty never reaches the command that would complain.
@@ -32104,8 +32098,9 @@ static b32 sed_compile_regex(string_address pattern, bool icase)
                 return 0;
         }
 
+        // M: ^ and $ are also at the start and the end of each line in the space.
         if (!regex_compile(pattern, sed_extended, icase, true,
-                           text_regex_policy()))
+                           text_regex_policy() | (multiline ? REGEX_LINE_ANCHORS : 0)))
         {
                 sed_broken = true;
                 return 0;
@@ -32328,16 +32323,17 @@ static bool sed_parse_address(p8 address_to type, positive address_to line,
                 sed_at++;
                 sed_take_until(delimiter, pattern, sed_limit_piece);
 
-                bool icase = false;
+                bool icase = false, multiline = false;
 
                 while (sed_peek() == 'I' || sed_peek() == 'M')
                 {
                         icase = icase || sed_peek() == 'I';
+                        multiline = multiline || sed_peek() == 'M';
                         sed_at++;
                 }
 
                 address_to type = SED_ADDRESS_REGEX;
-                address_to which = sed_compile_regex(pattern, icase);
+                address_to which = sed_compile_regex(pattern, icase, multiline);
                 return true;
         }
 
@@ -32550,7 +32546,7 @@ static fn sed_parse()
                         sed_take_until(delimiter, pattern, sed_limit_piece);
 
                         positive have = sed_take_until(delimiter, replacement, sed_limit_piece);
-                        bool icase = false;
+                        bool icase = false, multiline = false;
 
                         command->references = 0;
                         for (positive c = 0; c < have; c++)
@@ -32623,7 +32619,7 @@ static fn sed_parse()
                                 else if (flag == 'i' || flag == 'I')
                                         icase = true;
                                 else if (flag == 'm' || flag == 'M')
-                                        (void)flag;
+                                        multiline = true;
                                 else if (byte_is_digit(flag))
                                 {
                                         if (numbered)
@@ -32662,7 +32658,7 @@ static fn sed_parse()
                         // has to have. An empty pattern is whichever regex
                         // ran last, so only the cycle can check it: GNU runs
                         // /\(a\)/s//\1x/ and refuses s//\1/ when it runs.
-                        command->pattern = sed_compile_regex(pattern, icase);
+                        command->pattern = sed_compile_regex(pattern, icase, multiline);
                         if (command->pattern >= 0 &&
                             command->references > sed_programs[command->pattern].groups)
                                 sed_broken = true;

@@ -4367,6 +4367,9 @@ def text_long_ab_lines():
 
 INPUTS["long_ab_lines"] = text_long_ab_lines()
 
+# Lines that begin with t, end in e, and are joined by N: the M flag's ^ and $.
+INPUTS["sed_multiline"] = b"one two\nthree\tfour\nfive\ntwelve\nt\n"
+
 #       A letter and the other cases it has outside ASCII: Latin-1, Greek, the
 #       final sigma, Cyrillic, the digraphs with a title case, the dotless
 #       and long forms. Each row runs under C.UTF-8, where grep -i, sed I and
@@ -22062,6 +22065,13 @@ _TEXT_SED_EXTRA = (
     *({"argv": (*flags, "-E", "-e", script % pattern), "stdin": "long_ab_lines"}
       for pattern in TEXT_REGEX_MACHINE
       for flags, script in ((("-n",), "/%s/p"), ((), "s/%s/[&]/"), ((), "s/%s/<&>/g"), ((), "s/%s/X/2"))),
+    #       The M flag reaches a ^ and a $ at the ends of the lines of a pattern
+    #       space: an s command and an address read it, and a pattern that
+    #       begins with ^ was taken to be at the buffer's start alone.
+    *({"argv": (*flags, "-e", script), "stdin": "sed_multiline"} for flags, script in (
+        ((), "N;s/^t/T/Mg"), ((), "N;s/^t/T/M"), ((), "N;s/o$/0/Mg"), ((), "N;s/e$/E/Mg"),
+        ((), "N;s/^/>/Mg"), ((), "$!N;s/^/>/Mg"), ((), "$!N;s/w$/W/M"), (("-n",), "N;/^t/Mp"),
+        (("-n",), "N;/e$/Ip"), ((), "N;s/x/y/Mg"), ((), "N;s/^t/T/g"))),
     #       Blocks past the thirty-second nesting were dropped from the table
     #       an unbalanced script jumped through, and a line address counted
     #       from the largest wrapped to a small one.
