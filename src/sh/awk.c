@@ -1220,6 +1220,13 @@ static p32 awk_record_epoch = 1;
 // original eager policy; otherwise fields not named here can remain spans.
 static positive awk_fields_fixed;
 static bool awk_fields_computed;
+// How many times the program writes each of those fields, and how many of
+// those are the argument of a print: a field that is only ever printed is
+// written out of the record as it lies, and is not made into a value of its
+// own for each record (awk_fields_valued is the ones that are).
+static p32 awk_field_uses[64], awk_field_prints[64];
+static positive awk_fields_valued;
+static bool awk_fields_settled;
 
 // Room for `more` pieces past the ones there are, once, for a loop that stores them.
 static fn awk_pieces_room(positive more)
@@ -1448,8 +1455,8 @@ static bool awk_paragraph_mode()
         return length == 0;
 }
 
-static fn awk_field_from_piece(awk_value address_to field,
-                               awk_text address_to record, awk_piece piece)
+static inline INLINE fn awk_field_from_piece(awk_value address_to field,
+                                             awk_text address_to record, awk_piece piece)
 {
         // A one-field record already is the exact immutable string wanted by
         // $1. Sharing it avoids an allocation and copy; assigning either
@@ -1475,6 +1482,16 @@ static positive awk_gate_size;
 static positive2 awk_gate_anchors;
 static bool awk_gate_on;
 static awk_text address_to awk_gate_tail;
+
+static COLD fn awk_fields_settle()
+{
+        awk_fields_settled = true;
+        awk_fields_valued = awk_fields_fixed;
+
+        for (positive f = 1; f < 64; f++)
+                if (awk_field_uses[f] && awk_field_uses[f] == awk_field_prints[f])
+                        awk_fields_valued &= ~((positive)1 << f);
+}
 
 static fn awk_split_record()
 {
@@ -1517,13 +1534,16 @@ static fn awk_split_record()
 
         bool eager = awk_fields_computed;
 
+        if (unlikely(!awk_fields_settled))
+                awk_fields_settle();
+
         if (!eager && awk_piece_count <= 63)
         {
                 positive all = awk_piece_count == 63
                                    ? positive_max - 1
                                    : (((positive)1 << (awk_piece_count + 1)) - 2);
 
-                eager = (awk_fields_fixed & all) == all;
+                eager = (awk_fields_fixed & all) == all && !(all & ~awk_fields_valued & awk_fields_fixed);
         }
 
         if (eager)
@@ -1539,7 +1559,7 @@ static fn awk_split_record()
         else
         {
                 // The fields the program names by number, and no others.
-                for (positive named = awk_fields_fixed; named; named &= named - 1)
+                for (positive named = awk_fields_valued; named; named &= named - 1)
                 {
                         positive i = bottom_bit_known(named);
 
@@ -4083,6 +4103,7 @@ static awk_node address_to awk_primary()
                         if (field)
                         {
                                 awk_fields_fixed |= (positive)1 << field;
+                                awk_field_uses[field]++;
                                 node->sub = 1;
                                 node->index = field;
                         }
@@ -4597,6 +4618,12 @@ static awk_node address_to awk_print_statement(bool formatted)
         }
 
         awk_print_depth--;
+
+        if (!formatted)
+                for (awk_node address_to one = node->a; one; one = one->next)
+                        if (one->kind == N_FIELD && one->sub)
+                                awk_field_prints[one->index]++;
+
         return node;
 }
 
@@ -6349,8 +6376,40 @@ static fn awk_do_print(awk_node address_to node)
                             ? null
                             : awk_text_hold(awk_special_text(awk_where_ofs));
 
+                        /*
+                                A field by number that no one has asked for
+                                yet is a piece of the record, and printing
+                                it is writing the piece: not a text made of
+                                it first, and a copy of that. What awk_field
+                                would make of it, without making it.
+                        */
+                        if (one->kind == N_FIELD && one->sub && one->index > 0 &&
+                            one->index <= awk_nf && !awk_record_stale &&
+                            awk_fields[one->index].epoch != awk_record_epoch)
+                        {
+                                awk_piece piece = awk_pieces[one->index - 1];
+                                awk_text address_to record = awk_to_text(address_of awk_fields[0]);
+
+                                if (ofs)
+                                {
+                                        awk_builder_put(address_of build, ofs->text, ofs->length);
+                                        awk_text_drop(ofs);
+                                }
+
+                                awk_builder_put(address_of build, record->text + piece.start,
+                                                piece.length);
+                                continue;
+                        }
+
                         awk_value_start(value);
-                        awk_eval(one, address_of value);
+
+                        // A field only printed is not made when the record is
+                        // split, so the slot is asked for by awk_field, which
+                        // makes it from its piece if it is not made.
+                        if (one->kind == N_FIELD && one->sub && one->index > 0)
+                                awk_value_copy(address_of value, awk_field(one->index));
+                        else
+                                awk_eval(one, address_of value);
 
                         awk_text address_to piece = awk_to_output_text(address_of value);
 

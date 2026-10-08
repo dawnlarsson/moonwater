@@ -21664,6 +21664,15 @@ _AWK_GATE_PROGRAMS = (
     ("BEGIN {RS=\"\\n\"} /needle/ {n++} END {print n+0}",), ("/needle/ {RS=\";\"}",),
     ("/needle/ || /ab/",), ("!/needle/",), ("NR==2 {print} /needle/",), ("/x/ {print FILENAME, FNR}",),
     ("/\u00e9/",), ("/needle/ {$2 = \"Z\"; print}",), ("/needle/ {print NF}",), ("END {print NR, FNR, NF}",),
+    #       A field that is only ever printed is written out of the record and
+    #       is not made when the record is split: first, second, beyond the
+    #       last, twice, with another way to the same field, after the record
+    #       or the field was changed, under a new FS, into a file.
+    ("{print $1}",), ("{print $2, $1}",), ("{print $1; print $1 + 1}",), ("{print $5, $1, $9}",),
+    ("{print $1; $1 = \"x\"; print $1, $0}",), ("{$3 = \"z\"; print $1, $3, $0}",), ("NF > 2 {print $3}",),
+    ("{print $1 > \"/dev/stderr\"}",), ("{print $0; print $1}",), ("{FS = \",\"; print $2}",), ("-F,", "{print $2, $1}"),
+    ("-F:", "{print $2; $0 = \"a b c\"; print $2}"), ("{print $1; NF = 2; print $2, $0}",), ("{print ($1), $2}",),
+    ("{ $0 = $2 \" q\"; print $1 }",), ("{sub(/a/, \"A\", $2); print $1, $2}",), ("{n = $1; print $2, n}",),
 )
 
 
@@ -21749,10 +21758,17 @@ def awk_gate(farm):
 
                     feeder = threading.Thread(target=feed)
                     feeder.start()
-                    out, err = child.stdout.read(), child.stderr.read()
+                    #       Both ends are read at once: a program that writes
+                    #       a megabyte to standard error would otherwise wait
+                    #       for the other end to be emptied for ever.
+                    complaints = []
+                    listener = threading.Thread(target=lambda: complaints.append(child.stderr.read()))
+                    listener.start()
+                    out = child.stdout.read()
+                    listener.join()
                     child.wait()
                     feeder.join()
-                    answers.append((child.returncode, out, err))
+                    answers.append((child.returncode, out, complaints[0]))
                 else:
                     operands = [name, "second", name] if how == "files" else [name]
                     result = subprocess.run(command + operands, cwd=temporary, env=environment,
