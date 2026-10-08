@@ -1,8 +1,15 @@
 # Production-function inventory seal; not a proof of review coverage or correctness.
+<<<<<<< HEAD
 sha256 7de0559ff4a52d41a927b524cf9f917a896916d96e65740c63c121eb66f4be9e
 c_functions 8703
 library_asm 396
 library_arch_bodies 1168
+=======
+sha256 344fbcf65716504a88b6aace66eda9ec756bd688262abd0fb762fb2d66733504
+c_functions 8705
+library_asm 395
+library_arch_bodies 1165
+>>>>>>> 23318d74 (Four diagnostics say what GNU says, where they were silent or worded otherwise: sort -o to a file whose write fails printed nothing and exited 2 (now "sort: fflush failed: NAME: No space left on device" and "sort: write error" when the output went out in one flush at close, "sort: write failed: NAME: ..." when a write failed mid-stream, as GNU prints each); sed -i on a missing input said "sed: NAME: No such file or directory" (now "sed: can't read NAME: ...", as the plain sed does); sed -i in a directory it cannot write said "cannot create private output" (now "couldn't open temporary file DIR/sedXXXXXX: Permission denied" with GNU's template, exit 4 as before); grep -R, following a link back to a directory it is inside of, skipped it without a word (now "grep: PATH: warning: recursive directory loop" on stderr, the status and the matches unchanged, as GNU). Probes against GNU on the box, parent (bf123048), this tree: sort -o /dev/full: parent silent, here identical to GNU (both wordings, and the mid-stream case checked against sort sbig.txt | sort -o /dev/full); sed -i nosuch.txt and the read-only directory: identical stderr to GNU (the temporary's random six are the template's XXXXXX here); grep -R on a link loop: parent silent, here the same warning GNU prints and the same stdout and exit 0. Rows owed for test/differential.py (no row added, zone rule): the sort -o /dev/full row, the sed -i nosuch row and the grep -R loop row, red on bf123048.)
 library_aliases 98
 canvas_asm 0
 canvas_arch_bodies 0

@@ -30453,7 +30453,13 @@ static fn grep_tree_enter(address_any context, address_any node_address,
 
                 for (grep_node address_to up = node->parent; up; up = up->parent)
                         if (up->known && up->device == device && up->inode == facts.inode)
+                        {
+                                // -s keeps the warning as it keeps the other file messages.
+                                if (!text_quiet_open)
+                                        string_diagnostic(&text_diagnostic, 0, (string_address)node->path,
+                                                          "warning: recursive directory loop");
                                 return;
+                        }
 
                 node->device = device;
                 node->inode = facts.inode;
@@ -34667,8 +34673,7 @@ static b32 text_sed()
 
                         if (looked < 0)
                         {
-                                string_diagnostic(&text_diagnostic, 0, name,
-                                                  file_reason(looked));
+                                text_file_failed(name, looked, false);
                                 if (directory >= 0)
                                         system_close(directory);
                                 text_status = 2;
@@ -34680,8 +34685,7 @@ static b32 text_sed()
                             O_PATH | O_NOFOLLOW);
                         if (original < 0)
                         {
-                                string_diagnostic(&text_diagnostic, 0, name,
-                                                  file_reason(original));
+                                text_file_failed(name, original, false);
                                 system_close(directory);
                                 text_status = 2;
                                 continue;
@@ -34747,12 +34751,35 @@ static b32 text_sed()
 
                         if (written < 0)
                         {
+                                // GNU's template: the directory the file is in, then
+                                // sed and six characters it fills in itself.
+                                static const char prefix[] = "couldn't open temporary file ";
+                                static const char stem[] = "sedXXXXXX";
+                                p8 subject[TEXT_PATH_MAX + sizeof(prefix) + sizeof(stem)];
+                                positive directory_length = string_length(name) - string_length(leaf);
+                                positive have = sizeof(prefix) - 1;
+
+                                memory_copy(subject, prefix, have);
+                                if (directory_length)
+                                {
+                                        memory_copy(subject + have, name, directory_length);
+                                        have += directory_length;
+                                }
+                                else
+                                {
+                                        subject[have++] = '.';
+                                        subject[have++] = '/';
+                                }
+                                memory_copy(subject + have, stem, sizeof(stem) - 1);
+                                have += sizeof(stem) - 1;
+                                subject[have] = '\0';
+
                                 text_close();
                                 system_close(original);
                                 system_close(directory);
                                 return text_done(string_diagnostic(
-                                    &text_diagnostic, 4, name,
-                                    "cannot create private output"));
+                                    &text_diagnostic, 4, (string_address)subject,
+                                    file_reason(written)));
                         }
 
                         text_out_to((positive)written);
@@ -41649,9 +41676,14 @@ static bool sort_output_open(string_address output, sort_writer address_to out)
 
 // The output, already opened when -o named one: the handle is what that
 // open answered.
+// The file -o named, for a write that fails when it is closed: standard
+// output's refusals are said by text_done, a file's are said here.
+static string_address sort_output_path;
+
 static bool sort_output_take(string_address output, bipolar handle,
                              sort_writer address_to out)
 {
+        sort_output_path = output;
         if (output)
         {
                 if (handle < 0)
@@ -41676,6 +41708,19 @@ static bool sort_output_take(string_address output, bipolar handle,
 static fn sort_output_close(sort_writer address_to out)
 {
         sort_writer_flush(out);
+
+        if (out->failed && sort_output_path)
+        {
+                // What the stdio call did is said as GNU says it: a failure
+                // that came at the flush of what was buffered is an fflush.
+                positive buffer = out->buffer ? out->buffer : TEXT_STDIO_PAGE;
+                bool buffered = out->error_offered < buffer;
+
+                text_complain("%s: %s failed: %s: %s\n", text_name,
+                              buffered ? "fflush" : "write", sort_output_path,
+                              file_reason(out->error ? out->error : -5));
+                text_complain("%s: write error\n", text_name);
+        }
 
         if (out->failed)
         {
