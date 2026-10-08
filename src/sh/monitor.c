@@ -1241,6 +1241,8 @@ static b32 monitor_sleep(p64 address_to span)
 static HOT b32 tools_monitor()
 {
         positive arguments = (positive)program_argument_count();
+
+        text_begin("monitor");
         p64 interval[2] = {0, 500000000};
         positive frames = 0;
 
@@ -1449,6 +1451,21 @@ static HOT b32 tools_monitor()
                 text_put_string("\033[?2026l");
                 text_flush();
                 count++;
+
+                /*      A frame that could not be written ends the monitor,
+                        as a closed pipe ends it by SIGPIPE when that signal
+                        is not ignored. Ignored (inherited from a parent that
+                        ignored it) or to a full disk, the write error was
+                        otherwise dropped and frames went on for ever. */
+                if (text_out_failed)
+                {
+                        failed_where = "write error";
+                        failed_why = file_reason(text_out_error
+                                                     ? text_out_error
+                                                     : -ERROR_INPUT_OUTPUT);
+                        status = 1;
+                        break;
+                }
 
                 if (frames && count >= frames)
                         break;

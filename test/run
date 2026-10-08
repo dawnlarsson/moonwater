@@ -6008,6 +6008,18 @@ lane_misc()
                         "$work/script-direct-policy.err"
         verdict script-direct-policy-refusal misc_failed 'direct hardened script did not preserve its parent-contract refusal'
 
+        #       monitor writes a frame a second and ends when its output
+        #       does. A closed pipe with SIGPIPE inherited as ignored (from a
+        #       parent that ignored it) and a full disk were both dropped
+        #       writes: the frames went on for ever, and timeout's 124 is
+        #       the only answer that says so.
+        timeout 10 sh -c "trap '' PIPE; \"$farm/monitor\" 0.1 | head -c 1 > /dev/null"
+        [ "$?" != 124 ]
+        verdict monitor-closed-pipe-ignored-pipe misc_failed 'monitor with SIGPIPE ignored ran on into a closed pipe'
+        timeout 10 "$farm/monitor" 0.1 > /dev/full 2> /dev/null
+        [ "$?" = 1 ]
+        verdict monitor-full-disk misc_failed 'monitor to a full disk did not end with status 1'
+
         if "$work/hardened-bin/bash" -c 'script --version >/dev/null' \
                 > /dev/null 2>&1; then
                 tally script-integrated-policy-path 1 1
