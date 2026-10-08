@@ -83,7 +83,15 @@ static positive awk_characters(string_address text, positive length)
 typedef struct
 {
         b32 refs;
+        // Whether the bytes are all ASCII, once anyone has asked: nought is
+        // not asked, one is ASCII and two is not. A text does not change
+        // after it is made, and a substr of a long string a character at a
+        // time read the whole of it for the answer every time.
+        b32 shape;
         positive length;
+        // How many bytes the block was made to hold, so that a text nobody
+        // else holds can be written over with the next record.
+        positive room;
         p8 text[1];
 } awk_text;
 
@@ -95,7 +103,15 @@ static inline INLINE bool awk_text_is(awk_text address_to text,
         return text->length == length && !memory_compare(text->text, bytes, length);
 }
 
-static awk_text awk_empty_text = {1000000000, 0, {0}};
+static bool awk_text_wide(awk_text address_to text)
+{
+        if (!text->shape)
+                text->shape = awk_wide(text->text, text->length) ? 2 : 1;
+
+        return text->shape == 2;
+}
+
+static awk_text awk_empty_text = {1000000000, 0, 0, 0, {0}};
 
 static awk_text address_to awk_text_room(positive length)
 {
@@ -103,7 +119,9 @@ static awk_text address_to awk_text_room(positive length)
             awk_size_add(length, sizeof(awk_text) + 8));
 
         made->refs = 1;
+        made->shape = 0;
         made->length = length;
+        made->room = length;
         made->text[length] = end;
         return made;
 }
@@ -139,6 +157,48 @@ static fn awk_text_drop(awk_text address_to which)
                 return;
 
         memory_give(which);
+}
+
+/*
+        The text of the record before this one, when nothing else holds it,
+        is kept for the next: a main loop made and freed a block and copied a
+        line twice a record, and the reader now writes the line over this one
+        where it can. Only the main input uses it (awk_reading_main), since
+        a getline from anywhere else hands its text on.
+*/
+static awk_text address_to awk_record_spare;
+static bool awk_reading_main;
+
+static awk_text address_to awk_text_record(string_address from, positive length)
+{
+        awk_text address_to spare = awk_record_spare;
+
+        if (!awk_reading_main || !length)
+                return awk_text_new(from, length);
+
+        if (spare)
+        {
+                awk_record_spare = null;
+
+                if (spare->room >= length)
+                {
+                        spare->length = length;
+                        spare->shape = 0;
+                        memory_copy_apart(spare->text, from, length);
+                        spare->text[length] = end;
+                        return spare;
+                }
+
+                awk_text_drop(spare);
+        }
+
+        // Room for a longer line than this one, so that the next is not a reallocation.
+        awk_text address_to made = awk_text_room(length < 160 ? 160 : length);
+
+        made->length = length;
+        memory_copy_apart(made->text, from, length);
+        made->text[length] = end;
+        return made;
 }
 
 /*
@@ -396,11 +456,7 @@ enum
         // been cached beside it since: still a number to a comparison and
         // to a test, where a value assigned to a field and read back after
         // the record was rebuilt used to turn into a string.
-        AWK_NUMERIC = 32,
-        // The splitter has recorded this field's span in awk_pieces, but no
-        // operation has needed its separately-owned value yet. Most awk
-        // programs touch only a few fields, so defer their copies until then.
-        AWK_FIELD_PENDING = 64
+        AWK_NUMERIC = 32
 };
 
 typedef struct
@@ -408,6 +464,9 @@ typedef struct
         decimal number;
         awk_text address_to text;
         p8 state;
+        // Only for the slots of the record's fields: the record that value was
+        // made for. A slot of an older record has not been read yet.
+        p32 epoch;
 } awk_value;
 
 static string_address awk_convfmt();
@@ -1137,10 +1196,33 @@ typedef struct
 static awk_piece address_to awk_pieces;
 static positive awk_piece_count;
 static positive awk_piece_room;
+// Which record the fields are of. A field slot made for an earlier one is
+// stale, and is made again from its piece when it is asked for, so that
+// splitting a record writes no slot at all: eleven fields of a line were
+// eleven stores of a value, eleven of which the program usually never read.
+static p32 awk_record_epoch = 1;
 // Constant fields named by the parsed program. A computed field needs the
 // original eager policy; otherwise fields not named here can remain spans.
 static positive awk_fields_fixed;
 static bool awk_fields_computed;
+
+// Room for `more` pieces past the ones there are, once, for a loop that stores them.
+static fn awk_pieces_room(positive more)
+{
+        if (unlikely(awk_piece_count + more > awk_piece_room))
+        {
+                positive bytes = awk_piece_room * sizeof(awk_piece);
+
+                if (awk_piece_count + more >= positive_max / sizeof(awk_piece) ||
+                    !memory_resize_reserve(
+                        address_of awk_pieces, address_of bytes,
+                        (awk_piece_count + more + 1) * sizeof(awk_piece),
+                        64 * sizeof(awk_piece)))
+                        awk_leave(string_diagnostic(&text_diagnostic, 2, null, "out of memory"));
+
+                awk_piece_room = bytes / sizeof(awk_piece);
+        }
+}
 
 static HOT fn awk_piece_add(positive start, positive length)
 {
@@ -1193,9 +1275,12 @@ static fn awk_split_pieces(string_address text, positive length, string_address 
                         positive found = memory_offsets_fields_blank(
                             awk_edges, text + at, length - at, '\n', AWK_EDGE_FIELDS);
 
+                        awk_pieces_room(found);
+
                         for (positive f = 0; f < found; f++)
-                                awk_piece_add(at + awk_edges[2 * f],
-                                              awk_edges[2 * f + 1] - awk_edges[2 * f]);
+                                awk_pieces[awk_piece_count++] = (awk_piece){
+                                    at + awk_edges[2 * f],
+                                    awk_edges[2 * f + 1] - awk_edges[2 * f]};
 
                         if (found < AWK_EDGE_FIELDS)
                                 break;
@@ -1249,11 +1334,13 @@ static fn awk_split_pieces(string_address text, positive length, string_address 
                                 cuts, text + from, length - from, separator[0],
                                 also, array_count(cuts));
 
+                        awk_pieces_room(found);
+
                         for (positive i = 0; i < found; i++)
                         {
                                 positive cut = from + cuts[i];
 
-                                awk_piece_add(start, cut - start);
+                                awk_pieces[awk_piece_count++] = (awk_piece){start, cut - start};
                                 start = cut + 1;
                         }
                         if (found < array_count(cuts))
@@ -1395,6 +1482,14 @@ static fn awk_split_record()
 
         awk_fields_reserve(awk_piece_count + 1);
 
+        // A new record: every slot is of an older one until it is made again.
+        if (unlikely(++awk_record_epoch == 0))
+        {
+                for (positive i = 0; i < awk_fields_room; i++)
+                        awk_fields[i].epoch = 0;
+                awk_record_epoch = 1;
+        }
+
         bool eager = awk_fields_computed;
 
         if (!eager && awk_piece_count <= 63)
@@ -1406,18 +1501,32 @@ static fn awk_split_record()
                 eager = (awk_fields_fixed & all) == all;
         }
 
-        for (positive i = 0; i < awk_piece_count; i++)
+        if (eager)
         {
-                awk_value address_to field = address_of awk_fields[i + 1];
+                for (positive i = 0; i < awk_piece_count; i++)
+                {
+                        awk_value address_to field = address_of awk_fields[i + 1];
 
-                if (eager || (i < 63 && (awk_fields_fixed & ((positive)2 << i))))
                         awk_field_from_piece(field, record, awk_pieces[i]);
-                else
-                        awk_value_set(field, null, 0, AWK_FIELD_PENDING);
+                        field->epoch = awk_record_epoch;
+                }
         }
+        else
+        {
+                // The fields the program names by number, and no others.
+                for (positive named = awk_fields_fixed; named; named &= named - 1)
+                {
+                        positive i = bottom_bit_known(named);
 
-        for (positive i = awk_piece_count + 1; i <= (positive)awk_nf; i++)
-                awk_value_clear(address_of awk_fields[i]);
+                        if (!i || i > awk_piece_count)
+                                continue;
+
+                        awk_value address_to field = address_of awk_fields[i];
+
+                        awk_field_from_piece(field, record, awk_pieces[i - 1]);
+                        field->epoch = awk_record_epoch;
+                }
+        }
 
         awk_nf = (b32)awk_piece_count;
         awk_set_global_number(awk_where_nf, (decimal)awk_nf);
@@ -1466,6 +1575,26 @@ static fn awk_record_set(string_address text, positive length)
         awk_split_record();
 }
 
+// The record a reader just made, owned by the caller, becomes $0 as it is:
+// the copy of it that awk_record_set makes, for a main loop that dropped
+// the original the line after, was an allocation and a copy a record.
+static fn awk_record_install(awk_text address_to record)
+{
+        awk_fields_reserve(1);
+
+        // The record it replaces, if it is all this record's own, is the room for the next.
+        awk_text address_to old = awk_fields[0].text;
+
+        if (old && old->refs == 1 && !awk_record_spare && old != record)
+        {
+                awk_fields[0].text = null;
+                awk_record_spare = old;
+        }
+
+        awk_set_input(address_of awk_fields[0], record);
+        awk_split_record();
+}
+
 static awk_value address_to awk_field(b32 which)
 {
         if (which < 0)
@@ -1489,12 +1618,13 @@ static awk_value address_to awk_field(b32 which)
 
         awk_value address_to field = address_of awk_fields[which];
 
-        if (field->state & AWK_FIELD_PENDING)
+        if (field->epoch != awk_record_epoch)
         {
                 awk_piece piece = awk_pieces[which - 1];
                 awk_text address_to record = awk_to_text(address_of awk_fields[0]);
 
                 awk_field_from_piece(field, record, piece);
+                field->epoch = awk_record_epoch;
         }
 
         return field;
@@ -1503,7 +1633,7 @@ static awk_value address_to awk_field(b32 which)
 static fn awk_fields_materialize()
 {
         for (b32 i = 1; i <= awk_nf; i++)
-                if (awk_fields[i].state & AWK_FIELD_PENDING)
+                if (awk_fields[i].epoch != awk_record_epoch)
                         awk_field(i);
 }
 
@@ -1512,7 +1642,10 @@ static fn awk_field_grow(b32 want)
         awk_fields_reserve((positive)want + 1);
 
         for (b32 i = awk_nf + 1; i <= want; i++)
+        {
                 awk_set_bytes(address_of awk_fields[i], "", 0);
+                awk_fields[i].epoch = awk_record_epoch;
+        }
 
         if (want > awk_nf)
         {
@@ -1548,7 +1681,10 @@ static fn awk_nf_written(b32 want)
                 awk_value_clear(address_of awk_fields[i]);
 
         for (b32 i = awk_nf + 1; i <= want; i++)
+        {
                 awk_set_bytes(address_of awk_fields[i], "", 0);
+                awk_fields[i].epoch = awk_record_epoch;
+        }
 
         awk_nf = want;
         awk_set_global_number(awk_where_nf, (decimal)awk_nf);
@@ -2189,7 +2325,7 @@ static b32 awk_read_record(awk_reader address_to which, awk_text address_to addr
                 stop -= memory_span_byte_reverse(which->data + which->at,
                                                  '\n', stop);
 
-                address_to into = awk_text_new(which->data + which->at, stop);
+                address_to into = awk_text_record(which->data + which->at, stop);
                 which->at += scan;
                 return true;
         }
@@ -2221,7 +2357,7 @@ static b32 awk_read_record(awk_reader address_to which, awk_text address_to addr
                 if (!scan && here >= which->filled)
                         return awk_reader_end(which);
 
-                address_to into = awk_text_new(which->data + which->at, scan);
+                address_to into = awk_text_record(which->data + which->at, scan);
                 which->at = here < which->filled ? here + 1 : here;
                 return true;
         }
@@ -2663,7 +2799,7 @@ static awk_text address_to awk_sprintf(string_address format, positive length,
                         {
                                 awk_text address_to text = awk_to_text(argument);
 
-                                if (awk_wide(text->text, text->length))
+                                if (awk_text_wide(text))
                                 {
                                         body = memory_utf8_span(text->text, text->length, 1).x;
                                         memory_copy(room, text->text, body);
@@ -2685,7 +2821,7 @@ static awk_text address_to awk_sprintf(string_address format, positive length,
                         body = text->length;
                         from_string = true;
 
-                        if (awk_wide(text->text, text->length))
+                        if (awk_text_wide(text))
                         {
                                 // A precision and a width count characters.
                                 if (precision >= 0)
@@ -4932,16 +5068,35 @@ static awk_text address_to awk_eval_text(awk_node address_to node)
         return value;
 }
 
+/*
+        A value a comparison can read where it lies: a variable, or a field
+        the program names by number. Neither can change while the other side
+        is looked at, since the other side is one of these or a constant.
+*/
+static inline INLINE awk_value address_to awk_borrowed(awk_node address_to node)
+{
+        if (node->kind == N_VARIABLE)
+                return address_of awk_cell_of(node->index)->value;
+
+        if (node->kind == N_FIELD && node->sub && node->index > 0 && node->index <= awk_nf)
+                return address_of awk_fields[node->index];
+
+        return null;
+}
+
 static bool awk_eval_compare(awk_node address_to node)
 {
         b32 order;
-        // A literal RHS cannot mutate the variable while it is borrowed.
-        // Other expressions keep owned snapshots and left-to-right order.
-        if (node->a->kind == N_VARIABLE && node->b->kind == N_NUMBER &&
-            awk_numeric_side(address_of awk_cell_of(node->a->index)->value))
-                order = awk_compare_numbers(
-                    awk_to_number(address_of awk_cell_of(node->a->index)->value),
-                    node->b->number);
+        // A literal RHS cannot mutate the variable while it is borrowed, and
+        // nor can another variable or field. Other expressions keep owned
+        // snapshots and left-to-right order.
+        awk_value address_to lhs = awk_borrowed(node->a);
+        awk_value address_to rhs = node->b->kind == N_NUMBER ? null : awk_borrowed(node->b);
+
+        if (lhs && (rhs || node->b->kind == N_NUMBER) && awk_numeric_side(lhs) &&
+            (!rhs || awk_numeric_side(rhs)))
+                order = awk_compare_numbers(awk_to_number(lhs),
+                                            rhs ? awk_to_number(rhs) : node->b->number);
         else
         {
                 awk_value left;
@@ -5372,6 +5527,18 @@ static fn awk_eval(awk_node address_to node, awk_value address_to out)
         {
                 awk_text address_to left = awk_eval_text(node->a);
                 awk_text address_to right = awk_eval_text(node->b);
+
+                // Nothing joined to a text is that text, which is what
+                // x = i "" and x = s "" are for: no block and no copies.
+                if (!right->length || !left->length)
+                {
+                        awk_text address_to kept = right->length ? right : left;
+
+                        awk_text_drop(kept == right ? left : right);
+                        awk_set_text(out, kept);
+                        return;
+                }
+
                 awk_text address_to made = awk_text_room(awk_size_add(left->length, right->length));
 
                 memory_copy_apart(made->text, left->text, left->length);
@@ -5529,7 +5696,7 @@ static awk_text address_to awk_replace(awk_text address_to subject, regex_progra
         positive last = TEXT_UNSET;
         // Past an empty match the next attempt is one character on, which in
         // a UTF-8 locale is a whole sequence and not its first byte.
-        bool wide = awk_wide(subject->text, subject->length);
+        bool wide = awk_text_wide(subject);
 
         address_to made = 0;
         awk_builder_start(address_of build);
@@ -5652,7 +5819,7 @@ static fn awk_builtin(awk_node address_to node, awk_value address_to out)
                 {
                         awk_text address_to record = awk_to_text(awk_field(0));
 
-                        awk_set_number(out, (decimal)(awk_wide(record->text, record->length)
+                        awk_set_number(out, (decimal)(awk_text_wide(record)
                                                           ? awk_characters(record->text, record->length)
                                                           : record->length));
                         return;
@@ -5674,7 +5841,7 @@ static fn awk_builtin(awk_node address_to node, awk_value address_to out)
 
                 awk_text address_to text = awk_eval_text(first);
 
-                awk_set_number(out, (decimal)(awk_wide(text->text, text->length)
+                awk_set_number(out, (decimal)(awk_text_wide(text)
                                                   ? awk_characters(text->text, text->length)
                                                   : text->length));
                 awk_text_drop(text);
@@ -5685,7 +5852,7 @@ static fn awk_builtin(awk_node address_to node, awk_value address_to out)
         {
                 awk_text address_to text = awk_eval_text(first);
                 decimal start = awk_truncate(awk_eval_number(second));
-                bool wide = awk_wide(text->text, text->length);
+                bool wide = awk_text_wide(text);
                 positive total = wide ? awk_characters(text->text, text->length) : text->length;
                 positive from;
                 positive want;
@@ -5875,7 +6042,7 @@ static fn awk_builtin(awk_node address_to node, awk_value address_to out)
                         positive begin = regex_slots[0];
                         positive length = regex_slots[1] - regex_slots[0];
 
-                        if (awk_wide(text->text, text->length))
+                        if (awk_text_wide(text))
                         {
                                 length = awk_characters(text->text + begin, length);
                                 begin = awk_characters(text->text, begin);
@@ -5950,7 +6117,7 @@ static fn awk_builtin(awk_node address_to node, awk_value address_to out)
                 awk_text address_to text = awk_eval_text(first);
 
                 // Characters past ASCII change case too where the locale is UTF-8.
-                if (awk_wide(text->text, text->length))
+                if (awk_text_wide(text))
                 {
                         awk_text address_to cased = awk_text_room(2 * text->length);
                         positive size = text_case_utf8(cased->text, text->text, text->length,
@@ -6640,7 +6807,9 @@ static b32 awk_main_next_record(awk_text address_to address_to into)
                 if (!awk_main_live && !awk_open_next_input())
                         return false;
 
+                awk_reading_main = true;
                 b32 answer = awk_read_record(address_of awk_main, into);
+                awk_reading_main = false;
                 if (answer > 0)
                 {
                         awk_set_global_number(awk_where_nr, awk_global_number(awk_where_nr) + 1);
@@ -6698,8 +6867,7 @@ static b32 awk_run_rules()
                         break;
                 }
 
-                awk_record_set(record->text, record->length);
-                awk_text_drop(record);
+                awk_record_install(record);
 
                 for (b32 i = 0; i < awk_rule_count; i++)
                 {
