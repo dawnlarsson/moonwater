@@ -58008,22 +58008,22 @@ def crypto_vectors_lines(seed):
 #       or, on x86_64, the feature bytes (and p384_multiply's two, which pick
 #       its mulx body the same way). Nothing the scalar or u reaches.
 CRYPTO_X25519_COUNTED = (
-    r'"cmpb \$0, cpu_hash_probed\(%rip\)\\n jne \.Lp384_multiply_probed\\n call cpu_hash_detect\\n"',
-    r'"cmpb \$0, cpu_has_mulx\(%rip\)\\n jne \.Lp384_multiply_mulx\\n"',
-    r'"cmpb \$0, cpu_hash_probed\(%rip\)\\n jne \.Lp256_multiply_probed\\n call cpu_hash_detect\\n"',
-    r'"cmpb \$0, cpu_has_mulx\(%rip\)\\n jne \.Lp256_multiply_mulx\\n"',
-    r'"cmpb \$0, cpu_hash_probed\(%rip\)\\n jne \.Lp384_square_probed\\n call cpu_hash_detect\\n"',
-    r'"cmpb \$0, cpu_has_mulx\(%rip\)\\n jne \.Lp384_square_mulx\\n"',
+    r'"(?:\.L\w+:\s+)?cmpb \$0, cpu_hash_probed\(%rip\)\\n jne \.Lp384_multiply_probed\\n call cpu_hash_detect\\n"',
+    r'"(?:\.L\w+:\s+)?cmpb \$0, cpu_has_mulx\(%rip\)\\n jne \.Lp384_multiply_mulx\\n"',
+    r'"(?:\.L\w+:\s+)?cmpb \$0, cpu_hash_probed\(%rip\)\\n jne \.Lp256_multiply_probed\\n call cpu_hash_detect\\n"',
+    r'"(?:\.L\w+:\s+)?cmpb \$0, cpu_has_mulx\(%rip\)\\n jne \.Lp256_multiply_mulx\\n"',
+    r'"(?:\.L\w+:\s+)?cmpb \$0, cpu_hash_probed\(%rip\)\\n jne \.Lp384_square_probed\\n call cpu_hash_detect\\n"',
+    r'"(?:\.L\w+:\s+)?cmpb \$0, cpu_has_mulx\(%rip\)\\n jne \.Lp384_square_mulx\\n"',
     r'"decq 520\(%rsp\)\\n\s+jns \.Lx25519_x64_" s "_step\\n"',
     r'"dec %ebp\\n\s+jnz \.Lx25519_x64_" s "_squares_" id "\\n"',
-    r'"cmpb \$0, cpu_hash_probed\(%rip\)\\n\s+jne \.Lx25519_x64_probed\\n"',
-    r'"cmpb \$0, cpu_has_mulx\(%rip\)\\n\s+je \.Lx25519_x64_mulq_step\\n"',
-    r'"subs x20, x20, #1\\n\s+b\.pl \.Lx25519_arm64_step\\n"',
+    r'"(?:\.L\w+:\s+)?cmpb \$0, cpu_hash_probed\(%rip\)\\n\s+jne \.Lx25519_x64_probed\\n\s+call cpu_hash_detect\\n"',
+    r'"(?:\.L\w+:\s+)?cmpb \$0, cpu_has_mulx\(%rip\)\\n\s+je \.Lx25519_x64_mulq_step\\n"',
+    r'"subs x20, x20, #1\\n\s+b\.pl \.Lx25519_arm64_step\\n',
     r'"subs x20, x20, #1\\n\s+b\.ne \.Lx25519_arm64_squares_" id "\\n"',
     r'stp xzr, xzr, \[x3\], #16\\n\s+subs x4, x4, #1\\n\s+b\.ne \.Lx25519_arm64_wipe\\n"',
-    r'"addi s0, s0, -1\\n\s+bgez s0, \.Lx25519_rv_step\\n"',
+    r'"addi s0, s0, -1\\n\s+bgez s0, \.Lx25519_rv_step\\n',
     r'"addi s0, s0, -1\\n\s+bnez s0, \.Lx25519_rv_squares_" id "\\n"',
-    r'addi t0, t0, 8\\n\s+bltu t0, t1, \.Lx25519_rv_wipe\\n"',
+    r'addi t0, t0, 8\\n\s+bltu t0, t1, \.Lx25519_rv_wipe\\n',
 )
 
 
