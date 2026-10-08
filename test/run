@@ -6020,6 +6020,40 @@ lane_misc()
         [ "$?" = 1 ]
         verdict monitor-full-disk misc_failed 'monitor to a full disk did not end with status 1'
 
+        #       script's logs. A timing file that cannot take a write is named
+        #       once and the session goes on: util-linux runs both lines and
+        #       exits as the command did, where this stopped the command at
+        #       its first line. Its operand refusals and its open failure are
+        #       worded as util-linux words them.
+        timeout 10 "$farm/script" -qc 'echo one; sleep 0.3; echo two' -T /dev/full \
+                "$work/typescript" > "$work/script-full.out" 2> "$work/script-full.err"
+        script_full=$?
+        [ "$script_full" = 0 ] &&
+                [ "$(tr '\n' '|' < "$work/script-full.out")" = 'one|two|' ] &&
+                grep -qx 'script: write failed: /dev/full: No space left on device' "$work/script-full.err"
+        verdict script-timing-full-continues misc_failed 'script stopped its command at a full timing file, or did not name it'
+        timeout 10 "$farm/script" -q "$work/first" "$work/second" -c true > /dev/null 2> "$work/script-args.err" < /dev/null
+        [ "$?" = 1 ] && grep -qx 'script: unexpected number of arguments' "$work/script-args.err"
+        verdict script-operand-count misc_failed 'script did not refuse two log operands the way util-linux does'
+        timeout 10 "$farm/script" -qc true -T /no/such/dir/t "$work/typescript" > /dev/null 2> "$work/script-open.err" < /dev/null
+        [ "$?" = 1 ] && grep -qx 'script: cannot open /no/such/dir/t: No such file or directory' "$work/script-open.err"
+        verdict script-timing-open misc_failed 'script did not say it cannot open its timing file'
+        #       A reader that has gone ends the session with SIGPIPE ignored,
+        #       as it does with it default: an endless command is not left
+        #       writing into a closed pipe.
+        timeout 10 sh -c "trap '' PIPE; \"$farm/script\" -qc yes /dev/null | head -c 100 > /dev/null"
+        [ "$?" != 124 ]
+        verdict script-closed-pipe-ignored misc_failed 'script with SIGPIPE ignored ran on into a closed pipe'
+
+        #       scriptreplay's two refusals, worded as util-linux words them.
+        "$farm/scriptreplay" > /dev/null 2> "$work/replay-none.err" < /dev/null
+        [ "$?" = 1 ] && grep -qx 'scriptreplay: timing file not specified' "$work/replay-none.err"
+        verdict scriptreplay-no-timing misc_failed 'scriptreplay without a timing file did not say so'
+        "$farm/scriptreplay" "$work/no/such/timing" > /dev/null 2> "$work/replay-open.err" < /dev/null
+        [ "$?" = 1 ] && grep -qx "scriptreplay: cannot open $work/no/such/timing: No such file or directory" "$work/replay-open.err"
+        verdict scriptreplay-timing-open misc_failed 'scriptreplay did not say it cannot open its timing file'
+
+
         if "$work/hardened-bin/bash" -c 'script --version >/dev/null' \
                 > /dev/null 2>&1; then
                 tally script-integrated-policy-path 1 1

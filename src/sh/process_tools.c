@@ -1785,20 +1785,31 @@ typedef struct
         p64 output_bytes;
 } process_script_state;
 
+/* A log that cannot be written is named once, where it fails, and then
+   left alone: the session it records goes on, the command is not stopped
+   for a full disk, and the status is the command's, as util-linux's is
+   (script -qc 'echo one; sleep 1; echo two' -T /dev/full ran both lines
+   and exited 0 after "script: write failed: /dev/full: ..."). */
 static bool process_script_log_write(process_script_log address_to log_file,
                                      address_any bytes, positive length)
 {
-        if (!log_file || !length)
+        if (!log_file || !length || log_file->failed)
                 return true;
-        if (log_file->failed)
-                return false;
-        if (system_write_all((positive)log_file->handle, bytes, length) !=
-            length)
+
+        system_write_result wrote =
+            system_write_all_checked((positive)log_file->handle, bytes, length);
+
+        if (wrote.bytes == length)
         {
-                log_file->failed = true;
-                return false;
+                log_file->bytes += length;
+                return true;
         }
-        log_file->bytes += length;
+        log_file->failed = true;
+        string_format(log_error, "script: write failed: %s: %s\n",
+                      log_file->path,
+                      file_reason(wrote.error ? wrote.error
+                                              : -ERROR_INPUT_OUTPUT));
+        log_flush();
         return true;
 }
 
@@ -2066,14 +2077,24 @@ static bool process_script_payload(process_script_state address_to state,
         process_script_log address_to destination = stream == 'O'
                                                         ? state->out
                                                         : state->in;
+        /*      A standard output that refuses what it is given for a reason
+                that is only a full disk or an I/O error is not the end of the
+                session either: util-linux goes on and says nothing, exiting as
+                the command did. A reader that has gone (EPIPE, with SIGPIPE
+                ignored, or a closed descriptor) ends it, as before: the
+                command is still there and would otherwise run for ever. */
         if (stream == 'O')
         {
-                if (system_write_all(1, bytes, length) != length)
+                system_write_result wrote =
+                    system_write_all_checked(1, bytes, length);
+
+                if (wrote.bytes != length &&
+                    (wrote.error == -ERROR_BROKEN_PIPE ||
+                     wrote.error == -ERROR_BAD_DESCRIPTOR))
                         return false;
                 state->output_bytes += length;
         }
-        if (!process_script_log_write(destination, bytes, length))
-                return false;
+        process_script_log_write(destination, bytes, length);
         return process_script_timing_line(state, stream, length);
 }
 
@@ -2503,22 +2524,21 @@ static b32 process_script()
         positive command_first = count;
         string_address positional = operands ? program_argument((b32)taking.first)
                                              : null;
-        if (command)
-        {
-                tools_refuse(separator + 1 < count || operands > 1, "script", "--command cannot be combined with -- command");
-        }
-        else if (separator < count)
-        {
-                // A bare -- with nothing after it means the shell itself.
-                tools_refuse(operands > 1, "script", "invalid command operands");
-                command_first = separator + 1;
-        }
-        else if (operands > 1)
-                return string_report(log_error, 1, "%s: %s\n", "script", "extra operand");
-
+        /*      util-linux's two refusals here, worded as it words them: a
+                command beside a -- program, and more operands than a log and
+                a command take (a log given both as an operand and by -O/-B/-I
+                counts as a second one). */
         bool has_io = (taking.flags & (FILE_FLAG('I') | FILE_FLAG('O') |
                                        FILE_FLAG('B'))) != 0;
-        tools_refuse(positional && has_io, "script", "positional log conflicts with explicit log");
+        if (command && separator + 1 < count)
+                return string_report(log_error, 1, "script: option --command and '-- program' are mutually exclusive\n"
+                                                   "Try 'script --help' for more information.\n");
+        if (operands > 1 || (positional && has_io))
+                return string_report(log_error, 1, "script: unexpected number of arguments\n"
+                                                   "Try 'script --help' for more information.\n");
+        // A bare -- with nothing after it means the shell itself.
+        if (separator < count && !command)
+                command_first = separator + 1;
         //      --log-timing and --timing name the same file by two spellings,
         //      and the reference refuses the pair rather than choosing.
         tools_refuse((taking.flags & FILE_FLAG('T')) && (taking.flags & FILE_FLAG('t')), "script", "options --log-timing and --timing cannot be combined");
@@ -2618,7 +2638,7 @@ static b32 process_script()
                             paths[i], state.append, state.force);
                         if (opened < 0)
                         {
-                                string_format(log_error, "script: %s: %s\n",
+                                string_format(log_error, "script: cannot open %s: %s\n",
                                               paths[i], file_reason(opened));
                                 goto close_logs;
                         }
@@ -2734,11 +2754,7 @@ static b32 process_script()
         close_flush = state.flush;
 close_logs:
         for (positive i = 0; i < array_count(state.logs); i++)
-        {
-                if (state.logs[i].failed)
-                        answer = 1;
                 process_script_log_close(state.logs + i, close_flush);
-        }
         return answer;
 }
 
@@ -3077,7 +3093,7 @@ static b32 process_scriptreplay()
         positive operand = taking.first;
         if (!timing_path)
         {
-                tools_refuse(operand >= argument_count, "scriptreplay", "missing timing file");
+                tools_refuse(operand >= argument_count, "scriptreplay", "timing file not specified");
                 timing_path = program_argument((b32)operand++);
         }
 
@@ -3165,7 +3181,7 @@ static b32 process_scriptreplay()
 
         process_replay_reader timing, output, input;
         bipolar opened = process_replay_open(address_of timing, timing_path);
-        refuse_if(opened < 0, 1, "scriptreplay: %s: %s\n", timing_path, file_reason(opened));
+        refuse_if(opened < 0, 1, "scriptreplay: cannot open %s: %s\n", timing_path, file_reason(opened));
         output.from.fd = input.from.fd = -1;
         if (out_path)
         {
