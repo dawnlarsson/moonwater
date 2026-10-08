@@ -84489,6 +84489,270 @@ static fn threaded(positive level)
               m == (bipolar)sizeof(src) && !memory_compare(back, src, sizeof(src)));
 }
 
+/*
+        One deflate stream on many cores. The pool's decode of a member held in
+        memory is held to the serial decoder's: the same bytes in the same order
+        whole, and when the pool gives it up (a damaged stream, a second member,
+        anything the scan or the chunks do not agree on) the serial decoder, run
+        from the start leaving unwritten what the pool wrote, ends with the same
+        bytes and the same reason as the serial decoder alone. The streams are
+        the encoder's at several levels over data that copies from far back
+        (so the chunks begin without their window), cut into chunks of 16 KiB
+        so there are many.
+*/
+#define GZ_MAX (3u << 20)
+static p8 gz_src[GZ_MAX], gz_packed[GZ_MAX + 65536], gz_copy[GZ_MAX + 65536];
+static p8 gz_a[2 * GZ_MAX], gz_b[2 * GZ_MAX];
+
+static fn gz_data(p8 address_to dst, positive n, p32 seed)
+{
+        static const positive reach[] = {1, 2, 3, 5, 8, 13, 40, 200, 3000, 20000, 32000};
+        positive at = 0;
+        p32 random = seed | 1;
+
+        while (at < n)
+        {
+                positive stretch = 3000 + (XORSHIFT32(random) >> 8) % 60000;
+                p8 const kind = (p8)((XORSHIFT32(random) >> 5) % 6);
+                positive period = 24 + (random >> 9) % 70;
+
+                if (stretch > n - at)
+                        stretch = n - at;
+                for (positive i = 0; i < stretch; i++, at++)
+                {
+                        XORSHIFT32(random);
+                        if (kind == 0)
+                                dst[at] = (p8)(random >> 11);
+                        else if (kind == 1)
+                                dst[at] = 'q';
+                        else if (kind == 2)
+                                dst[at] = (p8)('a' + (random >> 8) % 6);
+                        else if (kind == 3)
+                                dst[at] = (p8)(i % period < 6 ? (random >> 9) % 4 + i % period * 16 : 'k');
+                        else
+                        {
+                                positive back = reach[(random >> 7) % array_count(reach)];
+
+                                dst[at] = at > back && (random & 15) ? dst[at - back] : (p8)(random >> 14);
+                        }
+                }
+        }
+}
+
+static bipolar gz_memfd(const p8 address_to bytes, positive n)
+{
+        bipolar fd = (bipolar)system_call_2(syscall(memfd_create), (positive)"gzip pool", 0);
+
+        if (fd >= 0 && n && system_write_all((positive)fd, (p8 address_to)bytes, n) != (bipolar)n)
+                return -1;
+        system_seek(fd, 0, FILE_SEEK_SET);
+        return fd;
+}
+
+static positive gz_slurp(bipolar fd, p8 address_to into, positive cap)
+{
+        positive got = 0;
+
+        system_seek(fd, 0, FILE_SEEK_SET);
+        for (;;)
+        {
+                bipolar n = system_read_retry((positive)fd, into + got, cap - got);
+
+                if (n <= 0)
+                        break;
+                got += (positive)n;
+        }
+        return got;
+}
+
+typedef struct
+{
+        bool ok;
+        positive length;
+        string_address why;
+        bipolar pooled;
+} gz_answer;
+
+/* The member through the serial decoder alone, or through the pool first. */
+static gz_answer gz_decode(const p8 address_to member, positive len, p8 address_to into, bool pooled)
+{
+        gz_answer r = {false, 0, null, 0};
+        bipolar const in = gz_memfd(member, len);
+        bipolar const out = gz_memfd(null, 0);
+
+        if (in < 0 || out < 0)
+                return r;
+        gzip_skip = 0;
+        if (pooled)
+        {
+                r.pooled = gzip_parallel_mem(member, len, out);
+                if (r.pooled == 1)
+                {
+                        r.ok = true;
+                        r.length = gz_slurp(out, into, 2 * GZ_MAX);
+                        system_close((positive)in);
+                        system_close((positive)out);
+                        return r;
+                }
+                system_seek(in, 0, FILE_SEEK_SET);
+        }
+        r.ok = gzip_stream_serial(in, out);
+        gzip_skip = 0;
+        r.length = gz_slurp(out, into, 2 * GZ_MAX);
+        r.why = gzip_note;
+        system_close((positive)in);
+        system_close((positive)out);
+        return r;
+}
+
+static bool gz_same_note(string_address a, string_address b)
+{
+        return is_null(a) ? is_null(b) : !is_null(b) && !string_compare_max(a, b, 90);
+}
+
+static bool gz_agree(const p8 address_to member, positive len)
+{
+        gz_answer const alone = gz_decode(member, len, gz_a, false);
+        gz_answer const both = gz_decode(member, len, gz_b, true);
+
+        return alone.length == both.length && alone.ok == both.ok &&
+               (both.pooled == 1 || gz_same_note(alone.why, both.why)) &&
+               !memory_compare(gz_a, gz_b, alone.length);
+}
+
+static fn gz_pool(void)
+{
+        static const b32 levels[] = {1, 6, 9};
+        p32 random = 0x2545f491u;
+        positive pooled = 0;
+        positive total = 0;
+        positive whole = 0;
+        bool good = true;
+        bool good_whole = true;
+        bool good_cut = true;
+        bool good_more = true;
+        bool good_double = true;
+        bool good_flips = true;
+
+        parallel_reset(4);
+        gzip_par_least = 0;
+        gzip_par_chunk_least = 16384;
+        for (positive l = 0; l < array_count(levels); l++)
+                for (positive seed = 1; seed <= 3; seed++)
+                {
+                        positive const n = 900000 + seed * 100003;
+                        bipolar packed;
+                        gz_answer r;
+
+                        gz_data(gz_src, n, (p32)(seed * 2654435761u + l));
+                        packed = gzip_deflate_mem(gz_src, n, gz_packed, sizeof(gz_packed), levels[l]);
+                        if (packed <= 0)
+                                continue;
+                        r = gz_decode(gz_packed, (positive)packed, gz_b, true);
+                        total++;
+                        pooled += r.pooled == 1;
+                        whole += r.ok && r.length == n && !memory_compare(gz_b, gz_src, n);
+                        good_whole &= gz_agree(gz_packed, (positive)packed);
+                        //      Damage: bytes changed, the end cut, a byte more, two members.
+                        for (positive trial = 0; trial < 14; trial++)
+                        {
+                                positive cut = (positive)packed;
+
+                                memory_copy(gz_copy, gz_packed, cut);
+                                XORSHIFT32(random);
+                                if (trial % 7 == 0)
+                                        cut -= 1 + random % 2000;
+                                else if (trial % 7 == 1)
+                                {
+                                        gz_copy[cut++] = (p8)random;
+                                }
+                                else if (trial % 7 == 2 && cut * 2 < sizeof(gz_copy))
+                                {
+                                        memory_copy(gz_copy + cut, gz_packed, cut);
+                                        cut *= 2;
+                                }
+                                else
+                                        for (positive k = 0; k <= trial % 3; k++)
+                                                gz_copy[10 + XORSHIFT32(random) % (cut - 10)] ^=
+                                                    (p8)(1u << (random >> 27) % 8);
+                                if (trial % 7 == 0)
+                                        good_cut &= gz_agree(gz_copy, cut);
+                                else if (trial % 7 == 1)
+                                        good_more &= gz_agree(gz_copy, cut);
+                                else if (trial % 7 == 2)
+                                        good_double &= gz_agree(gz_copy, cut);
+                                else
+                                        good_flips &= gz_agree(gz_copy, cut);
+                        }
+                }
+        parallel_reset(0);
+        gzip_par_least = GZIP_PAR_LEAST;
+        gzip_par_chunk_least = (positive)1 << 20;
+        check("members at three levels decode on the pool to their input", total >= 9 && whole == total);
+        check("most of them take the pool's path to the end", pooled >= total - 1);
+        check("the pool and the serial decoder agree on whole members", good_whole);
+        check("the pool and the serial decoder agree on members cut short", good_cut);
+        check("the pool and the serial decoder agree on members with a byte after", good_more);
+        check("the pool and the serial decoder agree on two members in a row", good_double);
+        check("the pool and the serial decoder agree on members with bits flipped", good_flips);
+}
+
+/* A checksum of two runs joined, from the checksum of each. */
+static fn gz_combine(void)
+{
+        p32 random = 0x9e3779b9u;
+        bool good = true;
+
+        for (positive trial = 0; trial < 300; trial++)
+        {
+                positive const total = 1 + XORSHIFT32(random) % 5000;
+                positive const cut = (random >> 13) % (total + 1);
+                static p8 data[5000];
+                p32 whole;
+                p32 left;
+                p32 right;
+
+                for (positive i = 0; i < total; i++)
+                        data[i] = (p8)(XORSHIFT32(random) >> 9);
+                whole = ~hash_crc32(0xffffffffu, data, total);
+                left = ~hash_crc32(0xffffffffu, data, cut);
+                right = ~hash_crc32(0xffffffffu, data + cut, total - cut);
+                good &= gzip_par_combine(left, right, total - cut) == whole;
+        }
+        check("the checksum of two runs joined is the checksum of the whole", good);
+}
+
+/* The scan: random bytes have no block header in them, and the headers of a
+   member's dynamic blocks are found where they are. */
+static fn gz_scan(void)
+{
+        static p8 noise[1 << 20];
+        p32 random = 0x7f4a7c15u;
+        bipolar packed;
+        positive found = 0;
+        p64 at = 0;
+
+        for (positive i = 0; i < sizeof(noise); i++)
+                noise[i] = (p8)(XORSHIFT32(random) >> 11);
+        check("a megabyte of noise holds no dynamic block header",
+              gzip_par_find(noise, sizeof(noise), 0, (p64)sizeof(noise) * 8 - 64) == GZIP_NONE);
+        gz_data(gz_src, 800000, 4242);
+        packed = gzip_deflate_mem(gz_src, 800000, gz_packed, sizeof(gz_packed), 6);
+        check("a member to scan", packed > 0);
+        if (packed <= 0)
+                return;
+        while (at < (p64)packed * 8 - 640)
+        {
+                p64 const next = gzip_par_find(gz_packed, (positive)packed, at, (p64)packed * 8 - 640);
+
+                if (next == GZIP_NONE)
+                        break;
+                found++;
+                at = next + 1;
+        }
+        check("the scan finds the dynamic blocks of a member (and a few chances)", found >= 3);
+}
+
 b32 main(void)
 {
         members();
@@ -84497,6 +84761,9 @@ b32 main(void)
         every_level();
         threaded(6);
         threaded(GZIP_ULTRA);
+        gz_combine();
+        gz_scan();
+        gz_pool();
         return test_report(null);
 }
 #endif /* CHECK_gzip */

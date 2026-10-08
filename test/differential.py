@@ -58,6 +58,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import zlib
 import concurrent.futures
 
 # Run as a script this module is __main__, so a spec's "from differential
@@ -39453,6 +39454,59 @@ def harness_compression(argv):
                                 failures.append(name + ' (bytes)')
                             path.unlink()
                         check(label + '/zstd/pool/level-' + level + ' file against pipe', not failures, ' '.join(failures))
+
+            # The same for gzip: a member of four MiB or more in a regular file
+            # (a stream with nowhere to start but the front) is decoded on the
+            # pool by finding block starts and resolving the window each chunk
+            # lacks; through a pipe only the serial decoder reads it. Whole,
+            # two members in a row, cut short, with garbage after, with the
+            # trailer damaged and with bytes changed: the same status, bytes
+            # and silence either way, and the right bytes for the sound ones.
+            gz_rng = random.Random(0x6217)
+            gz_text = b''.join(f.read_bytes() for f in sorted(list((HARNESS_ROOT / 'src').rglob('*.c')) +
+                                                              list((HARNESS_ROOT / 'test').glob('*.c')) +
+                                                              list((HARNESS_ROOT / 'test').glob('*.py')) +
+                                                              [HARNESS_ROOT / 'test' / 'run']))[:36000000]
+            for level in ('6', '1'):
+                member = call([refs['gzip'], '-' + level, '-n', '-c'], gz_text).stdout
+                check('gzip/pool/level-%s member is big enough for the pool' % level, len(member) > 4300000)
+                # A member of stored blocks that holds a whole member inside: the
+                # scan finds the inner member's block starts, which are not this
+                # member's, and the decode is found out and goes the serial way.
+                nested = zlib.compressobj(0, zlib.DEFLATED, 31)
+                nested_member = nested.compress(member) + nested.flush()
+                gz_cases_extra = [('nested', nested_member)]
+                gz_cases = [('whole', member), ('two', member + member), ('cut', member[:len(member) - 3001]),
+                            ('no-trailer', member[:-8]), ('zeros-after', member + bytes(37)),
+                            ('junk-after', member + b'trailing junk'), ('bad-crc', member[:-8] + bytes(8)),
+                            ('bad-size', member[:-4] + b'\x01\x00\x00\x00')]
+                gz_cases += gz_cases_extra
+                for index in range(28):
+                    mutated = bytearray(member)
+                    for _ in range(1 + index % 3):
+                        mutated[gz_rng.randrange(10, len(mutated))] ^= 1 << gz_rng.randrange(8)
+                    gz_cases.append(('mutant-%d' % index, bytes(mutated)))
+                for label, _ in binaries:
+                    ours_gzip = runner + [str(farms[label] / 'gzip'), '-dc']
+                    failures = []
+                    with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as gz_dir:
+                        for name, data in gz_cases:
+                            path = Path(gz_dir) / ('case-%s-%s.gz' % (level, name))
+                            path.write_bytes(data)
+                            on_file = call(ours_gzip + [str(path)])
+                            through_pipe = call(ours_gzip, data)
+                            if (on_file.returncode != through_pipe.returncode or
+                                    on_file.stdout != through_pipe.stdout or
+                                    bool(on_file.stderr) != bool(through_pipe.stderr)):
+                                failures.append(name)
+                            if name == 'whole' and (on_file.returncode or on_file.stdout != gz_text):
+                                failures.append(name + ' (bytes)')
+                            if name == 'two' and (on_file.returncode or on_file.stdout != gz_text * 2):
+                                failures.append(name + ' (bytes)')
+                            if name == 'nested' and (on_file.returncode or on_file.stdout != member):
+                                failures.append(name + ' (bytes)')
+                            path.unlink()
+                    check(label + '/gzip/pool/level-' + level + ' file against pipe', not failures, ' '.join(failures))
 
             # zstd levels and their options: every level from 1 to 19, 20-22
             # under --ultra, --fast, --long, --no-check, -T and --single-thread

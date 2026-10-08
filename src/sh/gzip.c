@@ -1313,6 +1313,23 @@ typedef struct
         b32 failed;
 } gzip_sink;
 
+/* Bytes of the whole decode to leave unwritten: a decode run again from the
+   start after the pool's has written them. */
+static p64 gzip_skip;
+
+static bool gzip_write_out(bipolar out, const p8 address_to bytes, positive n)
+{
+        if (gzip_skip)
+        {
+                positive drop = gzip_skip < n ? (positive)gzip_skip : n;
+
+                gzip_skip -= drop;
+                bytes += drop;
+                n -= drop;
+        }
+        return out < 0 || !n || system_write_all((positive)out, (p8 address_to)bytes, n) == (bipolar)n;
+}
+
 static fn gzip_sink_signal(gzip_sink address_to k)
 {
         atomic_inc(address_of k->wake);
@@ -1336,9 +1353,7 @@ static fn gzip_sink_job(address_any context, positive index)
                                 return;
                         thread_wait(address_of k->wake, word);
                 }
-                if (k->length[slot] &&
-                    system_write_all((positive)k->out, k->bytes[slot], k->length[slot]) !=
-                        (bipolar)k->length[slot])
+                if (k->length[slot] && !gzip_write_out(k->out, k->bytes[slot], k->length[slot]))
                         atomic_exchange(address_of k->failed, 1);
                 atomic_exchange(address_of k->full[slot], 0);
                 gzip_sink_signal(k);
@@ -1358,8 +1373,963 @@ static fn gzip_sink_wait_empty(gzip_sink address_to k, positive slot)
         }
 }
 
+/*
+        One deflate stream on many cores. Nothing in a stream says where a
+        block begins, but a dynamic block's header is a lot to get right by
+        chance -- the type, 286 and 30 at most, a complete code for the code
+        lengths, the lengths themselves ending the literal/length code at a
+        symbol that stops a block, both codes complete -- so a scan over bit
+        positions finds the starts that are blocks, and those few that only
+        look like one are found out when the chunk before them does not end
+        where they begin, and the whole decode then goes the serial way.
+
+        A chunk is the blocks from one start to the next. Its first bytes may
+        be copies from the chunk before, whose last 32 KiB nobody has yet:
+        until the window the chunk builds is made of its own bytes it writes
+        16-bit values, a byte as itself and a byte it cannot know as 32768 and
+        the place in the unknown window, and it goes on in bytes from then on
+        with the ordinary kernel. The calling thread takes the chunks in
+        order, replaces the values that name the window with the bytes of the
+        window the chunk before left, joins the checksums (a checksum of a
+        concatenation is made from the two and the second's length) and writes.
+        What is written is written in whole 32 KiB steps until the end, as the
+        serial decoder holds its output back, so a stream that is damaged
+        anywhere is cut where the serial decoder would have cut it: the
+        serial decoder is run again from the start of the file, skipping the
+        bytes already written, and says what it says.
+*/
+#define GZIP_PAR_LEAST ((positive)4 << 20)
+/* A file under the first is decoded serially and no chunk is under the second
+   (test/checks.c lowers both to cut a small stream into many). Under three
+   threads the sink, the writes and a worker take turns on the cores. */
+static positive gzip_par_least = GZIP_PAR_LEAST;
+static positive gzip_par_chunk_least = (positive)1 << 20;
+#define GZIP_PAR_WIDTH 3
+#define GZIP_PAR_MARK 0x8000u
+#define GZIP_NONE (~(p64)0)
+
+/* The 64 bits starting at bit position at of a stream of size bytes, zero
+   past its end. */
+static inline INLINE p64 gzip_par_bits(const p8 address_to base, positive size, p64 at)
+{
+        positive byte = (positive)(at >> 3);
+        p64 word;
+
+        if (byte + 8 <= size)
+                word = memory_load_unaligned(p64, base + byte);
+        else
+        {
+                word = 0;
+                for (positive k = 0; k < 8 && byte + k < size; k++)
+                        word |= (p64)base[byte + k] << (8 * k);
+        }
+        return word >> (at & 7);
+}
+
+/* Whether lengths[0..n) make a complete code, or the one code of length 1
+   that deflate allows, or (for distances) none at all. */
+static bool gzip_par_code(const p8 address_to length, positive n, bool distance)
+{
+        p16 count[GZIP_MAXBITS + 1];
+        bipolar left = gzip_code_space((p8 address_to)length, n, GZIP_MAXBITS, count);
+        positive used = 0;
+
+        if (left < 0)
+                return false;
+        for (positive len = 1; len <= GZIP_MAXBITS; len++)
+                used += count[len];
+        if (!used)
+                return distance;
+        return !left || (used == 1 && count[1] == 1);
+}
+
+/* The first bit position in [from, limit) at which a dynamic block's header
+   parses to two codes, both complete (or a lone code of one bit) with a
+   symbol that ends the block; GZIP_NONE when there is none. A block that is
+   not dynamic is not found: the stored block whose length is its complement
+   is a coincidence every 64 K positions, and a fixed one has nothing to
+   check. */
+static p64 gzip_par_find(const p8 address_to base, positive size, p64 from, p64 limit)
+{
+        for (p64 at = from; at < limit; at++)
+        {
+                p64 const head = gzip_par_bits(base, size, at);
+                positive const hlit = (head >> 3) & 31;
+                positive const hdist = (head >> 8) & 31;
+                positive const hclen = ((head >> 13) & 15) + 4;
+                p8 pre[19];
+                p64 tail;
+                p64 cursor;
+                p8 lengths[GZIP_MAXLIT + GZIP_MAXDIST];
+                positive nlit;
+                positive ndist;
+                positive done = 0;
+                p8 last = 0;
+                p32 table[1 << GZIP_PRECODE_ROOT];
+
+                if (((head >> 1) & 3) != 2 || hlit > 29 || hdist > 29)
+                        continue;
+                /* The code-length code must be complete: the room each length
+                   takes of 128 is added up as they come, and random lengths
+                   overfill it within a few. */
+                memory_fill(pre, 0, sizeof(pre));
+                tail = gzip_par_bits(base, size, at + 17);
+                {
+                        bipolar room = 128;
+                        positive k;
+
+                        for (k = 0; k < hclen; k++)
+                        {
+                                positive const len = (tail >> (3 * k)) & 7;
+
+                                if (len)
+                                {
+                                        room -= 128 >> len;
+                                        if (room < 0)
+                                                break;
+                                }
+                                pre[gzip_clen_order[k]] = (p8)len;
+                        }
+                        if (k < hclen || room)
+                                continue;
+                }
+                p8 look = 0;
+
+                if (gzip_huffman_cells(table, pre, 19, GZIP_PRECODE_ROOT, 0, address_of look) < 0)
+                        continue;
+                nlit = hlit + 257;
+                ndist = hdist + 1;
+                cursor = at + 17 + 3 * hclen;
+                while (done < nlit + ndist)
+                {
+                        p64 const window = gzip_par_bits(base, size, cursor);
+                        p32 const cell = table[window & 127];
+                        positive const take = cell & 255;
+                        positive const symbol = cell >> 16;
+                        positive repeat;
+                        positive width;
+                        p8 fill;
+
+                        if ((cell & GZIP_CELL_EXCEPTIONAL) || !take || cursor + take > (p64)size * 8)
+                                break;
+                        cursor += take;
+                        if (symbol < 16)
+                        {
+                                lengths[done++] = (p8)symbol;
+                                last = (p8)symbol;
+                                continue;
+                        }
+                        width = symbol == 16 ? 2 : symbol == 17 ? 3 : 7;
+                        repeat = (positive)((window >> take) & (((p64)1 << width) - 1));
+                        cursor += width;
+                        if (symbol == 16)
+                        {
+                                if (!done)
+                                        break;
+                                repeat += 3;
+                                fill = last;
+                        }
+                        else
+                        {
+                                repeat += symbol == 17 ? 3 : 11;
+                                fill = 0;
+                        }
+                        if (done + repeat > nlit + ndist)
+                                break;
+                        memory_fill(lengths + done, fill, repeat);
+                        done += repeat;
+                        last = fill;
+                }
+                if (done != nlit + ndist || !lengths[256] ||
+                    !gzip_par_code(lengths, nlit, false) || !gzip_par_code(lengths + nlit, ndist, true))
+                        continue;
+                return at;
+        }
+        return GZIP_NONE;
+}
+
+/* The checksum of two runs joined, from the checksums of each and the
+   second's length (zlib's crc32_combine: the zeros of a length by squaring
+   the matrix of one zero bit). Both are finished sums, ~state. */
+static p32 gzip_par_times(const p32 address_to matrix, p32 vector)
+{
+        p32 sum = 0;
+
+        while (vector)
+        {
+                if (vector & 1)
+                        sum ^= *matrix;
+                vector >>= 1;
+                matrix++;
+        }
+        return sum;
+}
+
+static fn gzip_par_square(p32 address_to square, const p32 address_to matrix)
+{
+        for (positive n = 0; n < 32; n++)
+                square[n] = gzip_par_times(matrix, matrix[n]);
+}
+
+static p32 gzip_par_combine(p32 first, p32 second, p64 length)
+{
+        p32 even[32];
+        p32 odd[32];
+        p32 row = 1;
+
+        if (!length)
+                return first;
+        odd[0] = 0xedb88320u;
+        for (positive n = 1; n < 32; n++, row <<= 1)
+                odd[n] = row;
+        gzip_par_square(even, odd);
+        gzip_par_square(odd, even);
+        do
+        {
+                gzip_par_square(even, odd);
+                if (length & 1)
+                        first = gzip_par_times(even, first);
+                length >>= 1;
+                if (!length)
+                        break;
+                gzip_par_square(odd, even);
+                if (length & 1)
+                        first = gzip_par_times(odd, first);
+                length >>= 1;
+        } while (length);
+        return first ^ second;
+}
+
+/* One chunk: where it starts and must end, and what it made. */
+typedef struct
+{
+        p64 start;
+        p64 stop;
+        bool ok;
+        bool last;
+        bool marked;
+        p64 ended_at;
+        p16 address_to marks;
+        positive nmarks;
+        positive marks_room;
+        p8 address_to block;
+        positive room;
+        positive nbytes;
+        p32 crc;
+        /* The values as bytes once the window before the chunk is known, and
+           the sum of all the chunk's bytes. */
+        p8 address_to resolved;
+        p32 sum;
+} gzip_chunk;
+
+/* Where the decoder's next bit is, in bits from the start of the file. */
+static inline INLINE p64 gzip_par_position(const gzip_inflater address_to z)
+{
+        return (p64)z->input.at * 8 - z->count;
+}
+
+/* How much a chunk may make before the pool gives it up: a stream that
+   expands a thousandfold is one for the serial decoder, which holds 256 KiB. */
+#define GZIP_PAR_CAP ((positive)192 << 20)
+
+/* Room for want more values or bytes. */
+static bool gzip_par_marks_room(gzip_chunk address_to c, positive want)
+{
+        p16 address_to grown;
+        positive room;
+
+        if (c->nmarks + want <= c->marks_room)
+                return true;
+        if (c->nmarks + want > GZIP_PAR_CAP / sizeof(p16))
+                return false;
+        room = c->marks_room ? c->marks_room * 2 : (positive)1 << 18;
+        while (room < c->nmarks + want)
+                room *= 2;
+        grown = (p16 address_to)memory_resize(c->marks, room * sizeof(p16));
+        if (!grown)
+                return false;
+        c->marks = grown;
+        c->marks_room = room;
+        return true;
+}
+
+static bool gzip_par_bytes_room(gzip_chunk address_to c, positive want)
+{
+        p8 address_to grown;
+        positive room;
+
+        if (c->block && c->nbytes + want + GZIP_WINDOW <= c->room)
+                return true;
+        if (c->nbytes + want > GZIP_PAR_CAP)
+                return false;
+        room = c->room ? c->room * 2 : (positive)1 << 22;
+        while (room < c->nbytes + want + GZIP_WINDOW)
+                room *= 2;
+        grown = (p8 address_to)(c->block ? memory_resize(c->block, room) : memory_take(room));
+        if (!grown)
+                return false;
+        c->block = grown;
+        c->room = room;
+        return true;
+}
+
+/* A block's codes into 16-bit values: 1 the block ended, 0 the last 32 KiB made
+   are bytes and the rest of the block goes on in bytes, -1 failed. A copy from
+   before the chunk is the value 65536 less how far back it was. Once the chunk
+   has 32768 values the kernel takes the codes it can, and the exact decoder
+   below the rest. */
+static bipolar gzip_par_marked(gzip_inflater address_to z, gzip_chunk address_to c,
+                               positive address_to since)
+{
+        for (;;)
+        {
+                positive root;
+                positive take;
+                positive code;
+                positive length;
+                positive distance;
+                p32 cell;
+                positive ahead;
+
+                if (*since >= GZIP_WINDOW)
+                        return 0;
+                if (!gzip_par_marks_room(c, 16384 + 400))
+                        return gzip_inflate_fail(z, "gzip out of memory"), -1;
+                ahead = z->input.have - z->input.at;
+                if (c->nmarks >= GZIP_WINDOW && ahead >= GZIP_SPAN_IN)
+                {
+                        p8 address_to const out = (p8 address_to)(c->marks + c->nmarks);
+                        positive const old = c->nmarks;
+                        gzip_decode_job job = {
+                                z->bits, z->count, z->input.buf + z->input.at, z->input.buf + z->input.have,
+                                out, out + 2 * (16384 + 300), (p8 address_to)c->marks,
+                                z->litlen, z->offset, gzip_extra_masks, 0};
+
+                        deflate_decode_marked(address_of job);
+                        z->bits = job.bits;
+                        z->count = job.count;
+                        z->input.at = (positive)(job.next - z->input.buf);
+                        c->nmarks = (positive)((p16 address_to)job.out - c->marks);
+                        for (positive k = c->nmarks; k > old; k--)
+                                if (c->marks[k - 1] >= 256)
+                                {
+                                        *since = c->nmarks - k;
+                                        goto scanned;
+                                }
+                        *since += c->nmarks - old;
+scanned:
+                        if (job.status == 1)
+                                return 1;
+                        if (job.status)
+                                return gzip_inflate_fail(z, gzip_span_why[job.status]), -1;
+                        if (c->nmarks - old > 2000)
+                                continue;
+                }
+                if (!gzip_inflate_bits(z, 48))
+                        return -1;
+                if (z->count < z->look_lit)
+                        return gzip_inflate_fail(z, GZIP_WHY_EOF), -1;
+                cell = gzip_inflate_cell(z->litlen, z->bits, GZIP_LITLEN_ROOT, address_of root);
+                take = root + (cell & 255);
+                if (cell & GZIP_CELL_LITERAL)
+                {
+                        if (take > z->count)
+                                return gzip_inflate_fail(z, GZIP_WHY_EOF), -1;
+                        z->bits >>= take;
+                        z->count -= take;
+                        c->marks[c->nmarks++] = (p16)((cell >> 8) & 255);
+                        ++*since;
+                        continue;
+                }
+                if ((cell & (GZIP_CELL_EXCEPTIONAL | GZIP_CELL_END)) == GZIP_CELL_EXCEPTIONAL)
+                        return gzip_inflate_fail(z, GZIP_WHY_FORMAT), -1;
+                if (take > z->count)
+                        return gzip_inflate_fail(z, GZIP_WHY_EOF), -1;
+                z->bits >>= take;
+                z->count -= take;
+                if (cell & GZIP_CELL_END)
+                        return 1;
+                length = cell >> 16;
+                if (z->count < z->look_dist)
+                        return gzip_inflate_fail(z, GZIP_WHY_EOF), -1;
+                cell = gzip_inflate_cell(z->offset, z->bits, GZIP_OFFSET_ROOT, address_of root);
+                take = root + (cell & 255);
+                if (cell & GZIP_CELL_EXCEPTIONAL)
+                        return gzip_inflate_fail(z, GZIP_WHY_FORMAT), -1;
+                if (take > z->count)
+                        return gzip_inflate_fail(z, GZIP_WHY_EOF), -1;
+                code = root + ((cell >> 8) & 255);
+                distance = (cell >> 16) + ((z->bits >> code) & (((positive)1 << (take - code)) - 1));
+                z->bits >>= take;
+                z->count -= take;
+                for (positive k = 0; k < length; k++)
+                {
+                        bipolar from = (bipolar)c->nmarks - (bipolar)distance;
+                        p16 value = from >= 0 ? c->marks[from] : (p16)(65536 + from);
+
+                        c->marks[c->nmarks++] = value;
+                        *since = value >= 256 ? 0 : *since + 1;
+                }
+        }
+}
+
+/* A stored block's bytes as values. */
+static bipolar gzip_par_marked_stored(gzip_inflater address_to z, gzip_chunk address_to c,
+                                      positive address_to since)
+{
+        bipolar len;
+        bipolar nlen;
+
+        if (!gzip_inflate_align(z))
+                return -1;
+        len = gzip_inflate_get(z, 16);
+        nlen = gzip_inflate_get(z, 16);
+        if (len < 0 || nlen < 0)
+                return -1;
+        if ((p16)len != (p16)(~(p16)nlen))
+                return gzip_inflate_fail(z, GZIP_WHY_FORMAT), -1;
+        if (!gzip_par_marks_room(c, (positive)len))
+                return gzip_inflate_fail(z, "gzip out of memory"), -1;
+        if (z->input.have - z->input.at < (positive)len)
+                return gzip_inflate_fail(z, GZIP_WHY_EOF), -1;
+        for (positive k = 0; k < (positive)len; k++)
+                c->marks[c->nmarks++] = z->input.buf[z->input.at++];
+        *since += (positive)len;
+        return 1;
+}
+
+/* The block header at the decoder's bit, and its tables: the type (0 stored,
+   1 values to decode) or -1 failed. */
+static bipolar gzip_par_header(gzip_inflater address_to z)
+{
+        bipolar head = gzip_inflate_get(z, 3);
+
+        if (head < 0)
+                return -1;
+        z->block_last = head & 1;
+        if ((head >> 1) == 0)
+        {
+                z->stored_open = false;
+                z->block_kind = 0;
+                return 0;
+        }
+        if ((head >> 1) == 1 ? !gzip_inflate_fixed(z) : (head >> 1) == 2 ? !gzip_inflate_dynamic(z) : true)
+                return (head >> 1) == 3 ? (gzip_inflate_fail(z, GZIP_WHY_FORMAT), -1) : -1;
+        z->block_kind = 1;
+        return 1;
+}
+
+/* Decode one chunk of the file at base: from its start to its stop or its
+   final block. The chunk that begins the stream is bytes from the first; any
+   other is values until its window is its own bytes, then bytes. */
+static bool gzip_par_chunk(gzip_inflater address_to z, const p8 address_to base, positive size,
+                           gzip_chunk address_to c, bool first)
+{
+        positive since = 0;
+        bool bytes = first;
+        p32 crc = 0xffffffffu;
+
+        z->why = null;
+        z->input.buf = (p8 address_to)base;
+        z->input.room = size;
+        z->input.have = size;
+        z->input.eof = true;
+        z->input.at = (positive)(c->start >> 3);
+        z->bits = 0;
+        z->count = 0;
+        z->have_block = false;
+        z->stored_open = false;
+        z->fixed_loaded = false;
+        z->fill = 0;
+        z->taken = 0;
+        z->member_start = 0;
+        if ((c->start & 7) && gzip_inflate_get(z, c->start & 7) < 0)
+                return false;
+        c->marked = !first;
+        c->nmarks = 0;
+        c->nbytes = 0;
+        c->last = false;
+        for (;;)
+        {
+                if (!z->have_block)
+                {
+                        p64 const at = gzip_par_position(z);
+                        bipolar kind;
+
+                        if (c->stop != GZIP_NONE && at >= c->stop)
+                        {
+                                c->ended_at = at;
+                                c->ok = at == c->stop;
+                                break;
+                        }
+                        kind = gzip_par_header(z);
+                        if (kind < 0)
+                                return false;
+                        z->have_block = true;
+                        if (!bytes)
+                        {
+                                bipolar done = kind ? gzip_par_marked(z, c, address_of since)
+                                                    : gzip_par_marked_stored(z, c, address_of since);
+
+                                if (done < 0)
+                                        return false;
+                                if (done == 1)
+                                {
+                                        z->have_block = false;
+                                        if (z->block_last)
+                                        {
+                                                c->last = true;
+                                                c->ended_at = gzip_par_position(z);
+                                                c->ok = c->stop == GZIP_NONE || c->ended_at == c->stop;
+                                                break;
+                                        }
+                                        continue;
+                                }
+                        }
+                }
+                if (!bytes)
+                {
+                        /* The last 32 KiB made are bytes: they are the window. */
+                        bytes = true;
+                        if (!gzip_par_bytes_room(c, GZIP_DECODE_OUT + GZIP_DECODE_SLACK))
+                                return gzip_inflate_fail(z, "gzip out of memory"), false;
+                        for (positive k = 0; k < GZIP_WINDOW; k++)
+                                c->block[k] = (p8)c->marks[c->nmarks - GZIP_WINDOW + k];
+                        z->flushed = GZIP_WINDOW;
+                }
+                else if (first && !c->block)
+                        z->flushed = 0;
+                if (!gzip_par_bytes_room(c, GZIP_DECODE_OUT + GZIP_DECODE_SLACK))
+                        return gzip_inflate_fail(z, "gzip out of memory"), false;
+                z->out = c->block + GZIP_WINDOW + c->nbytes;
+                {
+                        bipolar done = z->block_kind ? gzip_inflate_codes(z) : gzip_inflate_stored(z);
+
+                        if (done < 0)
+                                return false;
+                        crc = hash_crc32(crc, z->out, z->fill);
+                        c->nbytes += z->fill;
+                        z->flushed += z->fill;
+                        z->fill = 0;
+                        if (done == 1)
+                        {
+                                z->have_block = false;
+                                if (z->block_last)
+                                {
+                                        c->last = true;
+                                        c->ended_at = gzip_par_position(z);
+                                        c->ok = c->stop == GZIP_NONE || c->ended_at == c->stop;
+                                        break;
+                                }
+                        }
+                }
+        }
+        c->crc = ~crc;
+        return c->ok;
+}
+
+typedef struct
+{
+        const p8 address_to base;
+        positive size;
+        gzip_chunk address_to chunk;
+        p64 address_to found;
+        p64 first;
+        p64 step;
+        p64 limit;
+        gzip_inflater address_to address_to slot;
+        /* The last 32 KiB each chunk made, for the chunk after it to resolve
+           its values with, and how many of them there are; ready says a
+           chunk's is there, wake is the word those waiting for one sleep on. */
+        p8 address_to window;
+        positive address_to window_have;
+        positive ring;
+        b32 address_to ready;
+        b32 wake;
+        /* The sink's: what is held back, the sum, where the last chunk ended. */
+        p8 held[GZIP_WINDOW];
+        positive held_n;
+        bipolar out;
+        p64 written;
+        p64 total;
+        p32 crc;
+        p64 ended_at;
+        bool last;
+} gzip_par_run;
+
+static fn gzip_par_find_job(address_any context, positive index)
+{
+        gzip_par_run address_to run = context;
+        p64 const from = run->first + (p64)index * run->step;
+
+        run->found[index] = gzip_par_find(run->base, run->size, from,
+                                          from + run->step < run->limit ? from + run->step : run->limit);
+}
+
+/* Chunk index has made its last 32 KiB (or failed to, and the chunks after it
+   are thrown away): the chunk after it may go on. */
+static fn gzip_par_publish(gzip_par_run address_to run, positive index, positive have)
+{
+        run->window_have[index % run->ring] = have;
+        atomic_exchange(address_of run->ready[index], 1);
+        atomic_inc(address_of run->wake);
+        thread_wake(address_of run->wake, 1 << 30);
+}
+
+static fn gzip_par_wait(gzip_par_run address_to run, positive index)
+{
+        for (;;)
+        {
+                b32 word = atomic_load(address_of run->wake);
+
+                if (atomic_load(address_of run->ready[index]))
+                        return;
+                thread_wait(address_of run->wake, word);
+        }
+}
+
+/* Values from..to of a chunk as bytes, from the 32 KiB before it. */
+static bool gzip_par_resolve(gzip_par_run address_to run, gzip_chunk address_to c, positive index,
+                             positive from, positive to)
+{
+        const p8 address_to window = run->window + ((index - 1) % run->ring) * GZIP_WINDOW;
+        positive const have = run->window_have[(index - 1) % run->ring];
+        positive k = from;
+
+        /* With the whole window there, a value is a byte or an index into it
+           and nothing needs checking; the decoder makes no other values. */
+        if (have == GZIP_WINDOW)
+        {
+                for (; k + 4 <= to; k += 4)
+                {
+                        p16 const a = c->marks[k];
+                        p16 const b = c->marks[k + 1];
+                        p16 const d = c->marks[k + 2];
+                        p16 const e = c->marks[k + 3];
+                        p8 const wa = window[a & 0x7fff];
+                        p8 const wb = window[b & 0x7fff];
+                        p8 const wd = window[d & 0x7fff];
+                        p8 const we = window[e & 0x7fff];
+
+                        c->resolved[k] = a & 0x8000 ? wa : (p8)a;
+                        c->resolved[k + 1] = b & 0x8000 ? wb : (p8)b;
+                        c->resolved[k + 2] = d & 0x8000 ? wd : (p8)d;
+                        c->resolved[k + 3] = e & 0x8000 ? we : (p8)e;
+                }
+        }
+        for (; k < to; k++)
+        {
+                p16 const v = c->marks[k];
+
+                if (v < 256)
+                        c->resolved[k] = (p8)v;
+                else if ((positive)(v - GZIP_PAR_MARK) >= GZIP_WINDOW - have)
+                        c->resolved[k] = window[v - GZIP_PAR_MARK];
+                else
+                        return false;
+        }
+        return true;
+}
+
+/* The last 32 KiB made through a chunk: its bytes, before them its values as
+   bytes, before them the last of the 32 KiB before it. */
+static fn gzip_par_compose(gzip_par_run address_to run, gzip_chunk address_to c, positive index)
+{
+        p8 address_to mine = run->window + (index % run->ring) * GZIP_WINDOW;
+        p8 address_to const before_window = run->window + ((index + run->ring - 1) % run->ring) * GZIP_WINDOW;
+        positive have = 0;
+        positive take;
+
+        take = c->nbytes < GZIP_WINDOW ? c->nbytes : GZIP_WINDOW;
+        memory_copy(mine + GZIP_WINDOW - take, c->block + GZIP_WINDOW + c->nbytes - take, take);
+        have = take;
+        if (have < GZIP_WINDOW && c->nmarks)
+        {
+                take = c->nmarks < GZIP_WINDOW - have ? c->nmarks : GZIP_WINDOW - have;
+                memory_copy(mine + GZIP_WINDOW - have - take, c->resolved + c->nmarks - take, take);
+                have += take;
+        }
+        if (have < GZIP_WINDOW && index && run->window_have[(index - 1) % run->ring])
+        {
+                positive const before = run->window_have[(index - 1) % run->ring];
+
+                take = before < GZIP_WINDOW - have ? before : GZIP_WINDOW - have;
+                memory_copy(mine + GZIP_WINDOW - have - take, before_window + GZIP_WINDOW - take, take);
+                have += take;
+        }
+        gzip_par_publish(run, index, have);
+}
+
+static fn gzip_par_job(address_any context, positive index, parallel_output address_to output)
+{
+        gzip_par_run address_to run = context;
+        positive slot = parallel_slot();
+        gzip_chunk address_to c = run->chunk + index;
+        bool published = false;
+
+        (void)output;
+        if (!run->slot[slot])
+                run->slot[slot] = gzip_inflater_new();
+        c->ok = false;
+        if (run->slot[slot])
+                gzip_par_chunk(run->slot[slot], run->base, run->size, c, index == 0);
+        if (c->ok && c->nbytes >= GZIP_WINDOW)
+        {
+                gzip_par_compose(run, c, index);
+                published = true;
+        }
+        if (index)
+                gzip_par_wait(run, index - 1);
+        if (c->ok && c->nmarks)
+        {
+                /* The values that are in the next window first, so the chunk
+                   after this one need not wait for the rest. */
+                positive const need = c->nbytes >= GZIP_WINDOW ? 0 : GZIP_WINDOW - c->nbytes;
+                positive const from = c->nmarks > need ? c->nmarks - need : 0;
+                p32 marks;
+
+                c->resolved = (p8 address_to)memory_take(c->nmarks);
+                if (!c->resolved || !index || !gzip_par_resolve(run, c, index, from, c->nmarks))
+                        c->ok = false;
+                if (c->ok && !published)
+                {
+                        gzip_par_compose(run, c, index);
+                        published = true;
+                }
+                if (c->ok && !gzip_par_resolve(run, c, index, 0, from))
+                        c->ok = false;
+                if (c->ok)
+                {
+                        marks = ~hash_crc32(0xffffffffu, c->resolved, c->nmarks);
+                        c->sum = c->nbytes ? gzip_par_combine(marks, c->crc, c->nbytes) : marks;
+                }
+                memory_give(c->marks);
+                c->marks = null;
+        }
+        else
+                c->sum = c->nbytes ? c->crc : 0;
+        if (c->ok && !published)
+                gzip_par_compose(run, c, index);
+        else if (!published)
+                gzip_par_publish(run, index, 0);
+}
+
+/* Write what is finished, but for the last bytes short of a 32 KiB step
+   unless the decode is over: a damaged stream would not have written them. */
+static bool gzip_par_emit(gzip_par_run address_to run, const p8 address_to bytes, positive n, bool finish)
+{
+        positive const total = run->held_n + n;
+        positive const give = finish ? total : total & ~(positive)GZIP_WMASK;
+
+        if (give >= run->held_n)
+        {
+                if (run->held_n && !gzip_write_out(run->out, run->held, run->held_n))
+                        return false;
+                if (give > run->held_n && !gzip_write_out(run->out, bytes, give - run->held_n))
+                        return false;
+                run->written += give;
+                memory_copy(run->held, bytes + (give - run->held_n), total - give);
+                run->held_n = total - give;
+        }
+        else
+        {
+                memory_copy(run->held + run->held_n, bytes, n);
+                run->held_n += n;
+        }
+        return true;
+}
+
+static fn gzip_par_release(gzip_chunk address_to c)
+{
+        memory_give(c->marks);
+        memory_give(c->block);
+        memory_give(c->resolved);
+        c->marks = null;
+        c->block = null;
+        c->resolved = null;
+}
+
+static bool gzip_par_sink(address_any context, positive index, address_any data, positive length)
+{
+        gzip_par_run address_to run = context;
+        gzip_chunk address_to c = run->chunk + index;
+        bool ok = false;
+
+        (void)data;
+        (void)length;
+        if (run->last || !c->ok || (index && c->start != run->ended_at))
+                goto done;
+        run->crc = gzip_par_combine(run->crc, c->sum, c->nmarks + c->nbytes);
+        if (c->nmarks && !gzip_par_emit(run, c->resolved, c->nmarks, false))
+                goto done;
+        if (c->nbytes && !gzip_par_emit(run, c->block + GZIP_WINDOW, c->nbytes, false))
+                goto done;
+        run->total += c->nmarks + c->nbytes;
+        run->ended_at = c->ended_at;
+        run->last = c->last;
+        ok = true;
+done:
+        gzip_par_release(c);
+        return ok;
+}
+
+/* The header of a member that has none of the optional parts but a name, a
+   comment or extra bytes: where the deflate stream begins, or 0. */
+static positive gzip_par_header_end(const p8 address_to base, positive size)
+{
+        positive at = 10;
+        p8 flags;
+
+        if (size < 18 || base[0] != GZIP_MAGIC0 || base[1] != GZIP_MAGIC1 || base[2] != GZIP_METHOD)
+                return 0;
+        flags = base[3];
+        if (flags & (0xe0 | GZIP_FHCRC))
+                return 0;
+        if (flags & GZIP_FEXTRA)
+        {
+                if (at + 2 > size)
+                        return 0;
+                at += 2 + (positive)base[at] + ((positive)base[at + 1] << 8);
+        }
+        for (p8 part = GZIP_FNAME; part <= GZIP_FCOMMENT; part <<= 1)
+                if (flags & part)
+                {
+                        while (at < size && base[at])
+                                at++;
+                        at++;
+                }
+        return at + 8 < size ? at : 0;
+}
+
+/* The deflate stream in the file held in memory at base, decoded on the pool
+   and written to out: 1 when all of it is written and its checksum and
+   length are right (the file is one member and nothing else), 0 when the file
+   is not for the pool and nothing is written, 2 when the pool's part failed
+   after bytes were written, gzip_skip of them, and the serial decoder is to
+   run again from the start of the file. */
+static bipolar gzip_parallel_mem(const p8 address_to base, positive size, bipolar out)
+{
+        gzip_par_run address_to run;
+        positive begin;
+        positive width = parallel_width();
+        positive count = 0;
+        positive chunk_bytes;
+        bipolar answer = 2;
+        bool ran;
+
+        if (width < GZIP_PAR_WIDTH || size < gzip_par_least)
+                return 0;
+        begin = gzip_par_header_end(base, size);
+        if (!begin)
+                return 0;
+        run = (gzip_par_run address_to)memory_take_zeroed(1, sizeof(gzip_par_run));
+        chunk_bytes = size / (4 * width);
+        if (chunk_bytes > ((positive)2 << 20))
+                chunk_bytes = (positive)2 << 20;
+        if (chunk_bytes < gzip_par_chunk_least)
+                chunk_bytes = gzip_par_chunk_least;
+        if (run)
+        {
+                positive nominal = (size - 8 - begin + chunk_bytes - 1) / chunk_bytes;
+
+                run->base = base;
+                run->size = size;
+                run->first = (p64)begin * 8 + (p64)chunk_bytes * 8;
+                run->step = (p64)chunk_bytes * 8;
+                run->limit = (p64)(size - 8) * 8;
+                run->out = out;
+                run->found = (p64 address_to)memory_take_zeroed(nominal + 1, sizeof(p64));
+                run->chunk = (gzip_chunk address_to)memory_take_zeroed(nominal + 2, sizeof(gzip_chunk));
+                run->slot = (gzip_inflater address_to address_to)memory_take_zeroed(parallel_slots(),
+                                                                                    sizeof(gzip_inflater address_to));
+                run->ring = 2 * width + 6;
+                run->window = (p8 address_to)memory_take_zeroed(run->ring, GZIP_WINDOW);
+                run->window_have = (positive address_to)memory_take_zeroed(run->ring, sizeof(positive));
+                run->ready = (b32 address_to)memory_take_zeroed(nominal + 2, sizeof(b32));
+                if (run->found && run->chunk && run->slot && run->window && run->window_have && run->ready)
+                {
+                        if (nominal > 1)
+                                parallel_for(gzip_par_find_job, run, nominal - 1, PARALLEL_SPREAD);
+                        run->chunk[0].start = (p64)begin * 8;
+                        count = 1;
+                        for (positive k = 0; k + 1 < nominal; k++)
+                                if (run->found[k] != GZIP_NONE && run->found[k] > run->chunk[count - 1].start)
+                                        run->chunk[count++].start = run->found[k];
+                        for (positive k = 0; k < count; k++)
+                                run->chunk[k].stop = k + 1 < count ? run->chunk[k + 1].start : GZIP_NONE;
+                }
+        }
+        if (!run || !count)
+                answer = 0;
+        else
+        {
+                run->crc = 0;
+                ran = parallel_ordered(gzip_par_job, gzip_par_sink, run, count, size);
+                if (ran && run->last)
+                {
+                        positive const tail = (positive)((run->ended_at + 7) >> 3);
+
+                        if (gzip_par_emit(run, run->held, 0, true))
+                        {
+                                if (tail + 8 == size &&
+                                    memory_load_unaligned(p32, base + tail) == run->crc &&
+                                    memory_load_unaligned(p32, base + tail + 4) == (p32)run->total)
+                                        answer = 1;
+                        }
+                }
+                gzip_skip = answer == 1 ? 0 : run->written;
+        }
+        if (run)
+        {
+                for (positive k = 0; k < count; k++)
+                        gzip_par_release(run->chunk + k);
+                for (positive k = 0; run->slot && k < parallel_slots(); k++)
+                        if (run->slot[k])
+                                gzip_inflater_free(run->slot[k]);
+                memory_give(run->window);
+                memory_give(run->window_have);
+                memory_give(run->ready);
+                memory_give(run->found);
+                memory_give(run->chunk);
+                memory_give(run->slot);
+                memory_give(run);
+        }
+        return answer;
+}
+
+/* Whether descriptor fd is a regular file read from its start, and its size. */
+static bool gzip_par_file_size(bipolar fd, positive address_to size);
+
+/* The same for the regular file open as in. */
+static bipolar gzip_parallel(bipolar in, bipolar out)
+{
+        positive size;
+        bipolar mapped;
+        bipolar answer;
+
+        if (in < 0 || parallel_width() < GZIP_PAR_WIDTH || !gzip_par_file_size(in, address_of size) ||
+            size < gzip_par_least || system_seek(in, 0, FILE_SEEK_CUR) != 0)
+                return 0;
+        mapped = system_call_6(syscall(mmap), 0, size, FILE_PROTECT_READ, FILE_MAP_PRIVATE,
+                               (positive)in, 0);
+        if (mapped < 0 && mapped > -4096)
+                return 0;
+        answer = gzip_parallel_mem((const p8 address_to)mapped, size, out);
+        system_call_2(syscall(munmap), (positive)mapped, size);
+        return answer;
+}
+
+#ifdef GZIP_CORE_ONLY
+static bool gzip_par_file_size(bipolar fd, positive address_to size)
+{
+        (void)fd;
+        (void)size;
+        return false;
+}
+#endif
+
 /* The whole stream from in to out (out < 0 tests without writing). */
-static bool gzip_stream_decode(bipolar in, bipolar out)
+static bool gzip_stream_serial(bipolar in, bipolar out)
 {
         gzip_inflater address_to z = (gzip_inflater address_to)gzip_pull_open(in, null, 0);
         gzip_sink sink = {0};
@@ -1392,9 +2362,7 @@ static bool gzip_stream_decode(bipolar in, bipolar out)
                                 break;
                         }
                 }
-                else if (out >= 0 && length &&
-                         system_write_all((positive)out, z->out - z->carry, length) !=
-                             (bipolar)length)
+                else if (length && !gzip_write_out(out, z->out - z->carry, length))
                 {
                         z->why = null;
                         ok = gzip_inflate_fail(z, "gzip write failed");
@@ -1466,6 +2434,27 @@ static bool gzip_stream_decode(bipolar in, bipolar out)
         gzip_garbage = ok && z->garbage;
         gzip_inflater_free(z);
         return ok;
+}
+
+/* The same, on the pool when the input is a regular file big enough and it
+   does not turn out to be anything but one sound member; else, or if the
+   pool's part fails, the serial decoder, from the start of the file and
+   leaving unwritten what the pool wrote. */
+static bool gzip_stream_decode(bipolar in, bipolar out)
+{
+        bipolar const pooled = gzip_parallel(in, out);
+
+        if (pooled == 1)
+        {
+                gzip_note = null;
+                gzip_note_more = null;
+                gzip_why = null;
+                gzip_garbage = false;
+                return true;
+        }
+        if (pooled == 2)
+                system_seek(in, 0, FILE_SEEK_SET);
+        return gzip_stream_serial(in, out);
 }
 
 static bipolar gzip_inflate_mem(p8 address_to src, positive src_len,
@@ -4012,6 +5001,17 @@ static bool gzip_decode_end(void)
 }
 
 #ifndef GZIP_CORE_ONLY
+
+static bool gzip_par_file_size(bipolar fd, positive address_to size)
+{
+        file_facts facts;
+
+        if (file_look_code((positive)fd, (string_address)"", AT_EMPTY_PATH, address_of facts) != 0 ||
+            (facts.mode & MODE_FORMAT) != MODE_FILE)
+                return false;
+        address_to size = facts.size;
+        return true;
+}
 
 /* One of gzip's messages, by its shape (see GZIP_WHY_EOF). */
 static fn gzip_say(string_address why)
