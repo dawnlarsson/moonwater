@@ -48286,6 +48286,8 @@ static bool kill_handled(string_address pid, bipolar number)
         return (mask >> (number - 1) & 1) != 0;
 }
 
+static COLD fn shell_diagnostic_where();
+
 static b32 file_kill()
 {
         positive count = (positive)program_argument_count();
@@ -48521,6 +48523,23 @@ static b32 file_kill()
                 if (!file_signed_decimal(word, address_of who) ||
                     who < b32_min || who > b32_max)
                 {
+                        //      The shells say what their own kill says for
+                        //      a word that is no pid: bash names the word
+                        //      and walks on, dash calls it an illegal number
+                        //      and reads no further (exec.c's kill job path
+                        //      says the same).
+                        if (kill_shell_spelling && !shell_bash_compat)
+                                return string_report(log_error, 2,
+                                                     "kill: Illegal number: %s\n",
+                                                     word + (string_get(word) == '-'));
+                        if (kill_shell_spelling)
+                        {
+                                shell_diagnostic_where();
+                                string_format(log_error, "kill: `%s': not a pid or valid job spec\n",
+                                              word);
+                                kill_err++;
+                                continue;
+                        }
                         string_format(log_error, "kill: cannot find process \"%s\"\n", word);
                         kill_err++;
                         continue;

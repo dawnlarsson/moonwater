@@ -11004,10 +11004,52 @@ def files_locale_names(farm):
     return passed, total, notes
 
 
+# Fail states the files tools answer as GNU does: a truncated or empty tar
+# archive, a find whose output cannot be written, a bash-named kill of a word
+# that is no pid, and ls -R under an address-space cap. Each check runs the
+# candidate in the farm against the reference on the same input and compares
+# the status and the first diagnostic line (the words the tool must say).
+
+def files_fail_first_line(run):
+    text = run.stderr.decode("utf-8", "replace")
+    return text.splitlines()[0] if text.strip() else ""
+
+
+def files_kill_bash_word(farm):
+    """The shell's kill names a word that is no pid the way bash does.
+
+    bash says "kill: `abc': not a pid or valid job spec" (status 1) and walks
+    on. The utility's own "cannot find process" is the wrong text inside the
+    shell.
+    """
+    import shutil
+    import subprocess
+
+    reference = shutil.which("bash", path="/usr/bin:/bin")
+    candidate = Path(farm) / "bash"
+    if not reference or not candidate.exists():
+        return 0, 1, ["kill word check needs bash on both sides and the shell as bash in the farm"]
+
+    won = total = 0
+    notes = []
+    for script in ("kill -9 abc", "kill abc"):
+        want = subprocess.run([reference, "-c", script], capture_output=True, timeout=60)
+        got = subprocess.run([str(candidate), "-c", script], capture_output=True, timeout=60)
+        total += 1
+        want_said = files_fail_first_line(want).split(": ", 2)[-1]
+        got_said = files_fail_first_line(got).split(": ", 2)[-1]
+        if got.returncode == want.returncode and got_said == want_said:
+            won += 1
+        else:
+            notes.append(f"{script}: reference {want.returncode} {want_said!r}, "
+                         f"candidate {got.returncode} {got_said!r}")
+    return won, total, notes
+
+
 FILES_CHECKS = (files_uname_identity, files_cp_into_self, files_locale_names, files_collation_ls, files_large_inputs, files_column_layout, files_xargs_parallel, files_zones, files_tar,
                 files_tar_formats,
                 files_find_terminal, files_zone_names, files_hostname_set, files_move_across,
-                files_address_cap)
+                files_address_cap, files_kill_bash_word)
 
 # ---- domain: misc (from spec_misc.py) ----
 
