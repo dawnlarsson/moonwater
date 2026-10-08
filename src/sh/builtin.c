@@ -14184,8 +14184,10 @@ static bipolar read_peeked(b32 descriptor, p8 address_to into, positive room, p8
         bipolar copied = system_call_4(syscall(tee), (positive)descriptor,
                                        (positive)read_peek_out, room, 0);
 
+        //      EINTR passes through: a caught signal that cut the tee short
+        //      is the read's to answer, not a reason to stop peeking.
         if (copied < 0)
-                return -1;
+                return copied == -4 ? copied : -1;
 
         if (!copied)
                 return 0;
@@ -14336,6 +14338,32 @@ static bool read_deadline(timespec span, timespec address_to deadline)
                 deadline->tv_nsec -= 1000000000;
         }
         return true;
+}
+
+/*
+        The kernel lets a timed sleep run up to the timer slack late, and the
+        default slack is 50 us: a 1 ms read -t came back 53 us late at the
+        median, which bash does too. The slack is lowered for the length of
+        one timed read and put back at its end, so a child started after it
+        keeps the default. Zero means the slack was not changed.
+*/
+#define READ_PR_GET_TIMERSLACK 30
+#define READ_PR_SET_TIMERSLACK 29
+static positive read_timer_slack_lower()
+{
+        bipolar before = system_call_1(syscall(prctl),
+                                       READ_PR_GET_TIMERSLACK);
+
+        if (before <= 0 || before == 1)
+                return 0;
+        system_call_2(syscall(prctl), READ_PR_SET_TIMERSLACK, 1);
+        return (positive)before;
+}
+
+static fn read_timer_slack_restore(positive before)
+{
+        if (before)
+                system_call_2(syscall(prctl), READ_PR_SET_TIMERSLACK, before);
 }
 
 /* Ready, expired, or a raw negative syscall error.  EINTR consumes none of
@@ -14492,6 +14520,8 @@ static string_address read_field(positive address_to cursor, bool remainder)
         return read_line + begin;
 }
 
+static fn trap_wait_restarting(bool restart);
+
 COLD fn shell_read(writer write, string_address input)
 {
         bool raw = false;
@@ -14506,6 +14536,7 @@ COLD fn shell_read(writer write, string_address input)
         bool timed = false;
         bool timed_out = false;
         timespec timeout;
+        bool named_descriptor = false;
         timespec deadline;
         p8 stop_at = '\n';
         bool exact = false;
@@ -14574,10 +14605,17 @@ COLD fn shell_read(writer write, string_address input)
 
                         if (!read_nonnegative(value, b32_max,
                                               address_of asked))
+                        {
+                                if (shell_bash_compat)
+                                        return shell_answered(1,
+                                            "read: %s: invalid file descriptor specification\n",
+                                            value);
                                 return shell_answered(1, "read: bad descriptor: %s\n",
                                            value);
+                        }
 
                         descriptor = (b32)asked;
+                        named_descriptor = true;
                 }
                 else if (which == 'n' || which == 'N')
                 {
@@ -14667,6 +14705,20 @@ COLD fn shell_read(writer write, string_address input)
         if (timed && !read_deadline(timeout, address_of deadline))
                 return shell_answer(read_result(true, false, false));
 
+        positive slack_before = timed ? read_timer_slack_lower() : 0;
+
+        /*
+                Dash ends a plain read that a caught signal interrupts, with
+                status 1, and runs the trap after it. The kernel restart that
+                SA_RESTART gives kept the read waiting for its input instead,
+                for as long as the input took to come. Bash is not interrupted:
+                its trap runs while the read waits and the read goes on.
+        */
+        bool interruptible = !timed && !shell_bash_compat;
+
+        if (interruptible)
+                trap_wait_restarting(false);
+
         if (hidden)
                 quieted = read_echo_off(descriptor, address_of quiet_held);
 
@@ -14721,6 +14773,9 @@ COLD fn shell_read(writer write, string_address input)
                         if (quieted)
                                 system_control(descriptor, PTY_TCSETS,
                                                address_of quiet_held);
+                        read_timer_slack_restore(slack_before);
+                        if (interruptible)
+                                trap_wait_restarting(true);
 
                         return shell_answered(2, "%s: no room\n", "read");
                 }
@@ -14745,7 +14800,13 @@ COLD fn shell_read(writer write, string_address input)
                 {
                         bipolar taken = read_peeked(descriptor, block, sizeof block, stop_at);
 
-                        if (taken < 0)
+                        //      A tee cut short by a caught signal is the
+                        //      read being interrupted, not a pipe that cannot
+                        //      be peeked: the byte-at-a-time read would just
+                        //      wait again, where dash returns at once.
+                        if (taken == -4 && interruptible)
+                                got = -4;
+                        else if (taken < 0)
                         {
                                 peeking = false;
                                 read_unpeekable_fd = (bipolar)descriptor;
@@ -14791,6 +14852,22 @@ COLD fn shell_read(writer write, string_address input)
                                         ended = true;
                                 else
                                         failed = true;
+
+                                //      Bash says why a descriptor it cannot
+                                //      read is refused; the failure alone
+                                //      left a silent status 1.
+                                if (shell_bash_compat && got == -ERROR_BAD_DESCRIPTOR)
+                                {
+                                        shell_diagnostic_where();
+                                        if (named_descriptor)
+                                                string_format(log_error,
+                                                    "read: %p: invalid file descriptor: Bad file descriptor\n",
+                                                    (positive)descriptor);
+                                        else
+                                                string_format(log_error,
+                                                    "read: %p: read error: Bad file descriptor\n",
+                                                    (positive)descriptor);
+                                }
                         }
                         else
                         {
@@ -14840,6 +14917,9 @@ COLD fn shell_read(writer write, string_address input)
 
         read_line[read_length] = end;
         read_literal[read_length] = 0;
+        read_timer_slack_restore(slack_before);
+        if (interruptible)
+                trap_wait_restarting(true);
 
         // Put the terminal back before any name is assigned: every path out
         // of here from now on is a return.

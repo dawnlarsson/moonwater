@@ -4370,6 +4370,10 @@ INPUTS["long_ab_lines"] = text_long_ab_lines()
 # Lines that begin with t, end in e, and are joined by N: the M flag's ^ and $.
 INPUTS["sed_multiline"] = b"one two\nthree\tfour\nfive\ntwelve\nt\n"
 
+#       The escape rows read these: a caret and a star, a bracket, a NUL between a and b,
+#       a backslash and x41 as text, a tab, and a line with an x41 in it.
+INPUTS["sed_escape_lines"] = b"a^a*\nA[ABx\na\x00b\nabc\nx41 \\x41\nfoo\tbar\nxg\n"
+
 #       A letter and the other cases it has outside ASCII: Latin-1, Greek, the
 #       final sigma, Cyrillic, the digraphs with a title case, the dotless
 #       and long forms. Each row runs under C.UTF-8, where grep -i, sed I and
@@ -20321,6 +20325,55 @@ def shell_delivered(generator, ways=("command", "stdin", "file")):
     return delivered
 
 
+def shell_lang_wait_stopped_kill(rng):
+    """A job stopped and then killed: wait answers the death, not the stop."""
+    return ("wait-stopped-kill", shell_ALL, shell_program(
+        "exec 2>/dev/null",
+        "sleep 2 &",
+        "p=$!",
+        "sleep 0.3",
+        "kill -STOP $p",
+        "sleep 0.3",
+        "kill -9 $p",
+        "wait $p",
+        "echo \"st=$?\""))
+
+
+def shell_lang_read_trap_interrupt(rng):
+    """A caught signal ends a blocked read in dash mode; bash reads on."""
+    return ("read-trap-interrupt", ("dash", "sh"), shell_program(
+        "exec 2>/dev/null",
+        "mkfifo rt.fifo",
+        "exec 3<>rt.fifo",
+        "( sleep 2; echo late > rt.fifo ) >/dev/null 2>&1 &",
+        "trap 'echo caught' USR1",
+        "( sleep 0.3; kill -USR1 $$ ) >/dev/null 2>&1 &",
+        "read x <&3",
+        "echo \"st=$? x=$x\"",
+        "exec 3<&-"))
+
+
+def shell_lang_read_bad_descriptor(rng):
+    """A descriptor read cannot use is named, as bash names it."""
+    return ("read-bad-descriptor", shell_BASH, shell_program(
+        "read x <&- 2>&1",
+        "echo \"st=$?\"",
+        "read -u 7 x 2>&1",
+        "echo \"st=$?\"",
+        "read -u abc x 2>&1",
+        "echo \"st=$?\""))
+
+
+def shell_lang_read_timed_wakeup(rng):
+    """A timed read on an idle descriptor times out with status 142 in bash."""
+    return ("read-timed-wakeup", shell_BASH, shell_program(
+        "mkfifo rw.fifo",
+        "exec 3<>rw.fifo",
+        "read -t 0.2 x <&3",
+        "echo \"st=$?\"",
+        "exec 3<&-"))
+
+
 SHELL_FAMILIES = (
     shell_delivered(shell_lex_quotes),
     shell_delivered(shell_lex_substitution),
@@ -20530,6 +20583,10 @@ SHELL_FAMILIES = (
     shell_lang_onecmd_input,
     shell_lang_process_redirection,
     shell_lang_trap_in_pipeline,
+    shell_lang_wait_stopped_kill,
+    shell_lang_read_trap_interrupt,
+    shell_lang_read_bad_descriptor,
+    shell_lang_read_timed_wakeup,
     shell_lang_errexit_functions,
     shell_lang_heredoc_expansion,
     shell_lang_arithmetic_edges,
@@ -22099,6 +22156,11 @@ _TEXT_GREP_EXTRA = (
     ("-o", "\\{,3\\}", "regex"), ("-o", "a\\{,3\\}", "regex"), ("-oE", "a{,2}", "regex"),
     ("-E", "(", "a.txt"), ("\\(", "a.txt"), ("[", "a.txt"), ("-E", "a{1", "a.txt"),
     ("-P", "a", "a.txt"), ("--perl-regexp", "a", "a.txt"),
+    #       A bracket of twenty thousand bytes and an -x pattern that long are
+    #       patterns, not "pattern too long": a joined pattern grows as it is given.
+    {"argv": ("-c", "-E", "-e", "[" + "a" * 20000 + "]"), "stdin": "long_ab_lines"},
+    {"argv": ("-c", "-x", "-e", "a" * 20000), "stdin": "long_ab_lines"},
+    {"argv": ("-c", "-e", "[" + "a" * 20000 + "]"), "stdin": "long_ab_lines"},
 )
 
 
@@ -22300,6 +22362,22 @@ _TEXT_SED_EXTRA = (
     ("-e", "s/a/X/w out", "-n", "-e", "s/b/Y/"), ("-n", "s/alpha/X/w /dev/stdout"),
     # R appends a line of any length; wide is one line of 65,537 bytes.
     ("-e", "R wide", "a.txt"), ("-e", "2R wide", "a.txt"),
+    #       sed's escapes \a \f \v \cX \dNNN \oNNN \xHH are GNU's in a pattern,
+    #       a replacement, a y set and the text of a, i and c. A byte an escape
+    #       makes keeps its meaning in a pattern (\x5e anchors, \x2a repeats),
+    #       is literal in a replacement, and a NUL it makes is a byte of the
+    #       pattern: each of these was a silent wrong answer before.
+    *({"argv": ("-e", script), "stdin": "sed_escape_lines"} for script in (
+        "s/\\x5e/X/", "s/a\\x2a/X/", "s/[\\x41]/X/g", "s/a\\x00b/X/", "s/\\x00/X/",
+        "s/b/\\x26\\x26/", "s/b/\\x5c1/", "s/a/\\cA/", "s/a/\\o103/", "s/a/\\d066/",
+        "s/a/x\\af\\vy/", "s/a/\\\\x41/", "s/\\\\x41/X/", "s/b/\\c\\\\/", "/\\x41/s/A/Y/",
+        "s/\\xg/X/", "y/abc/\\x41\\x42\\x43/")),
+    {"argv": ("-e", "a foo\\tbar"), "stdin": "sed_escape_lines"},
+    {"argv": ("-e", "a foo\\x41bar"), "stdin": "sed_escape_lines"},
+    {"argv": ("-e", "c\\x42"), "stdin": "sed_escape_lines"},
+    #       sed -i names the file it could not read as GNU does, and a file it
+    #       is asked to edit that is not there is "can't read", not a bare name.
+    ("-i", "s/a/b/", "missing"),
 )
 
 
@@ -23795,7 +23873,7 @@ TEXT_UTILITIES = (
                    "text_sort_zero_run", "edge_65536", "many_lines", "high", "text_names0", "text_random_lines",
                    "spaces", "edge_65535", "edge_65537", "text_utf8", "text_sort_general"),
             fixture="text", valid=_text_sort_valid,
-            extra=(("--nosuchflag",), ("-Q",), ("-n", "-h"), ("-h", "-n"), ("-n", "-V"), ("-V", "-n"), ("-h", "--sort=numeric"),
+            extra=(("--nosuchflag",), ("-o", "/dev/full"), ("-Q",), ("-n", "-h"), ("-h", "-n"), ("-n", "-V"), ("-V", "-n"), ("-h", "--sort=numeric"),
                    ("-k1nV",), ("-k1Q",), ("-k1,",), ("-k1.",), ("-k1.0",), ("-r", "-k1n"), ("-r", "-k1"), ("-r", "-k1b"),
                    ("-f", "-k1,1r"), ("-n", "-k1r"), ("-t", ":", "-k2"), ("-t", ":", "-k3"), ("-t", "", "-k1"), ("-t", "::", "-k1"),
                    ("-t", "\\t", "-k2"), ("-t", "\\0", "-k1"), ("-t", "\\", "-k1"), ("-k1,1", "-k2n"), ("-k2", "-k1"),
@@ -52957,8 +53035,7 @@ def tls_fuzz_run(label, corpus, source, max_len, extra=()):
         seed_bytes = dict(corpus) if isinstance(corpus, dict) else tls_fuzz_seeds(corpus)
         result["corpus"] = dict(original_seeds=len(seed_bytes), generated_seeds=0)
         if os.environ.get("MOONWATER_FUZZ_BOUNDARIES") == "1":
-            from network_cases import expand
-            seed_bytes, result["corpus"] = expand(seed_bytes, max_len)
+            seed_bytes, result["corpus"] = network_expand(seed_bytes, max_len)
         corpus_directory = (retained or work) / "corpus"
         seeds = tls_fuzz_write_seeds(seed_bytes, corpus_directory)
         if retained:
@@ -60345,7 +60422,7 @@ def harness_tls_fuzz(argv):
                       or "unknown",
         "test_sources_sha256": {
             name: hashlib.sha256((HERE / name).read_bytes()).hexdigest()
-            for name in ("differential.py", "network_cases.py", "network.py")},
+            for name in ("differential.py",)},
         "host": {"system": os.uname().sysname, "arch": os.uname().machine},
         "sanitizer": {
             "clang": clang,
@@ -79239,6 +79316,380 @@ def harness_bowl_matrix(argv):
                                env=dict(os.environ, PYTHONPATH=os.environ.get("PYTHONPATH", "")))
 
 
+def network_variants(data, max_len):
+    size = len(data)
+    cuts = set(range(min(size, 64)))
+    cuts.update(range(max(0, size - 16), size))
+    cuts.update(range(size) if size <= 512 else
+                (size * i // 64 for i in range(1, 64)))
+    for bit in range(max_len.bit_length()):
+        cuts.update((2 ** bit - 1, 2 ** bit, 2 ** bit + 1))
+    ordered = list(dict.fromkeys([size - 1, 0, size // 2] + sorted(cuts)))
+    truncations = (data[:cut] for cut in ordered if 0 <= cut < size and cut <= max_len)
+    suffixes = (data + suffix for suffix in
+                (b"\x00", b"\xff", b"\x00\xff", b"\x00" * 16)
+                if size + len(suffix) <= max_len)
+    # Byte and multi-byte length boundaries at header and trailer positions.
+    offsets = sorted(set(range(min(size, 64))) |
+                     set(range(max(0, size - 8), size)))
+    def replacements(width):
+        for offset in offsets:
+            if offset + width > size or size > max_len:
+                continue
+            maximum = (1 << (width * 8)) - 1
+            values = dict.fromkeys((maximum, 0, maximum // 2, maximum // 2 + 1,
+                                   min(size, maximum), min(size + 1, maximum),
+                                   1, 127, 128, 255, min(256, maximum), maximum - 1))
+            for value in values:
+                for order in ("big", "little") if width > 1 else ("big",):
+                    yield (data[:offset] + value.to_bytes(width, order) +
+                           data[offset + width:])
+
+    def integer_cases():
+        # Spread the early budget across integer widths rather than exhausting
+        # all byte values before reaching a multi-byte length/counter field.
+        for row in itertools.zip_longest(*(replacements(width) for width in (1, 2, 4, 8))):
+            for case in row:
+                if case is not None:
+                    yield case
+
+    for row in itertools.zip_longest(truncations, suffixes, integer_cases()):
+        for case in row:
+            if case is not None:
+                yield case
+
+
+def network_expand(seeds, max_len, limit=4096, byte_limit=64 * 1024 * 1024):
+    """Return originals plus at most limit unique variants and their census.
+
+    The byte cap applies to generated data; original fixtures are never
+    removed. Cap exhaustion is recorded rather than called exhaustive.
+    """
+    expanded = dict(seeds)
+    seen = set(seeds.values())
+    generators = [iter(network_variants(data, max_len))
+                  for _, data in sorted(seeds.items())]
+    count = used = 0
+    capped = False
+    while generators:
+        active = []
+        for generator in generators:
+            data = next(generator, None)
+            if data is None:
+                continue
+            active.append(generator)
+            if data in seen:
+                continue
+            if count >= limit or used + len(data) > byte_limit:
+                capped = True
+                break
+            seen.add(data)
+            count += 1
+            used += len(data)
+            name = "procedural_%06d.bin" % count
+            while name in expanded:
+                name = "_" + name
+            expanded[name] = data
+        if capped:
+            break
+        generators = active
+    return expanded, dict(original_seeds=len(seeds), generated_seeds=count,
+                         generated_bytes=used, capped=capped,
+                         variant_limit=limit, byte_limit=byte_limit)
+
+
+def harness_network_campaign(argv):
+    """Repeatable local ASan/UBSan network campaigns with procedural boundaries.
+
+        python3 test/differential.py --harness network_campaign --output DIR [--seeds 1 7 42] [--runs N] [--seconds N]
+    """
+    parser = argparse.ArgumentParser(prog="differential.py --harness network_campaign")
+    parser.add_argument("--output", required=True, type=Path,
+                        help="new directory for reports, logs, and replay corpora")
+    parser.add_argument("--seeds", nargs="+", type=int, default=[1, 7, 42])
+    parser.add_argument("--runs", type=int, default=200000)
+    parser.add_argument("--seconds", type=int, default=30,
+                        help="time budget per target (either run or time limit stops it)")
+    args = parser.parse_args(argv)
+    if args.runs < 1 or args.seconds < 1 or any(
+            not 1 <= seed <= 0xffffffff for seed in args.seeds):
+        parser.error("positive runs/seconds and seeds in 1..4294967295 required")
+    if len(set(args.seeds)) != len(args.seeds):
+        parser.error("seeds must be distinct")
+    output = args.output.resolve()
+    # A new directory prevents accidentally reporting stale campaign artifacts.
+    output.mkdir(parents=True, exist_ok=False)
+    reports = []
+    for seed in args.seeds:
+        run = output / ("seed-%d" % seed)
+        run.mkdir()
+        environment = dict(os.environ, PYTHONUNBUFFERED="1",
+                           MOONWATER_MSAN="0",
+                           MOONWATER_FUZZ_BOUNDARIES="1",
+                           MOONWATER_FUZZ_SEED=str(seed),
+                           MOONWATER_FUZZ_RUNS=str(args.runs),
+                           MOONWATER_FUZZ_SECONDS=str(args.seconds),
+                           MOONWATER_FUZZ_REPORT=str(run / "report.json"),
+                           MOONWATER_FUZZ_ARTIFACTS=str(run / "artifacts"))
+        print("network campaign seed %d: %s" % (seed, run), flush=True)
+        with (run / "campaign.log").open("w") as log:
+            done = subprocess.run([sys.executable, "test/differential.py",
+                                   "--harness", "tls_fuzz"], cwd=HARNESS_ROOT,
+                                  env=environment, stdout=log, stderr=subprocess.STDOUT)
+        entry = dict(seed=seed, exit=done.returncode, report=str(run / "report.json"))
+        try:
+            report = json.loads((run / "report.json").read_text())
+            invocations = [inv for target in report["targets"]
+                           for inv in target.get("invocations", [])]
+            entry["invocations"] = invocations
+            # Clean exit without evidence of execution must not count as coverage.
+            if done.returncode == 0 and (len(report["targets"]) != 14 or
+                    len(invocations) != 15 or any(
+                        inv.get("exit") != 0 or
+                        inv.get("metrics", {}).get("executed_units", 0) == 0 or
+                        inv.get("corpus", {}).get("generated_seeds", 0) == 0
+                        for inv in invocations)):
+                entry.update(exit=1, error="missing target execution or procedural evidence")
+        except (OSError, ValueError, KeyError) as error:
+            entry.update(exit=1, error="missing/invalid report: " + str(error))
+        reports.append(entry)
+        print("seed %d completed: exit %d" % (seed, entry["exit"]), flush=True)
+    codes = [report["exit"] for report in reports]
+    overall = 1 if any(code not in (0, 2) for code in codes) else (2 if 2 in codes else 0)
+    (output / "campaign.json").write_text(json.dumps(dict(
+        schema="moonwater.network_campaign.v1", runs=args.runs,
+        seconds=args.seconds, campaigns=reports, overall_exit=overall,
+        coverage_note="Counters cover hosted parser lifts. Kernel, drivers, live "
+                      "network integration, and all protocol states require separate tests."
+    ), indent=2) + "\n")
+    return overall
+
+
+
+
+def harness_network_integration(argv):
+    """Trace real loopback TLS, certificate, and downgrade paths into coverage.
+
+        python3 test/differential.py --harness network_integration --output DIR [--baseline DIR] [--against FILE]
+    """
+    parser = argparse.ArgumentParser(prog="differential.py --harness network_integration")
+    parser.add_argument("--output", required=True, type=Path,
+                        help="new directory for logs, retained binaries, and maps")
+    parser.add_argument("--baseline", type=Path,
+                        help="optional prior coverage directory to combine")
+    parser.add_argument("--against", type=Path,
+                        help="optional saved coverage JSON for delta reporting")
+    parser.add_argument("--mutations", type=int, default=500)
+    parser.add_argument("--schedules", type=int, default=60)
+    parser.add_argument("--timeout", type=int, default=1800)
+    args = parser.parse_args(argv)
+    if args.mutations < 1 or args.schedules < 1 or args.timeout < 60:
+        parser.error("positive mutations/schedules and timeout >= 60 required")
+    output = args.output.resolve()
+    output.mkdir(parents=True, exist_ok=False)
+    coverage = output / "coverage"
+    coverage.mkdir()
+    if args.baseline:
+        baseline = args.baseline.resolve()
+        for elf in baseline.glob("*.elf"):
+            record = elf.with_suffix(".map")
+            if not record.is_file():
+                continue
+            stem = "baseline-" + elf.name
+            shutil.copy2(elf, coverage / stem)
+            shutil.copy2(record, (coverage / stem).with_suffix(".map"))
+
+    rows = (
+        ("tls-chains", ["--harness", "tls_chains"]),
+        ("tls-mutations", ["--harness", "tls_peer", "--mutate", str(args.mutations)]),
+        ("tls-schedules", ["--harness", "tls_peer", "--schedule", str(args.schedules)]),
+        ("https-downgrade", ["--harness", "https_downgrade"]),
+    )
+    results = []
+    for label, arguments in rows:
+        environment = dict(os.environ, MOONWATER_INTEGRATION_COVERAGE=str(coverage),
+                           MOONWATER_INTEGRATION_LABEL=label, PYTHONUNBUFFERED="1")
+        began = time.monotonic()
+        log = output / (label + ".log")
+        print("network integration: " + label, flush=True)
+        try:
+            with log.open("w") as stream:
+                done = subprocess.run([sys.executable, "test/differential.py", *arguments],
+                                      cwd=HARNESS_ROOT, env=environment, stdout=stream,
+                                      stderr=subprocess.STDOUT, timeout=args.timeout)
+            code = done.returncode
+            timed_out = False
+        except subprocess.TimeoutExpired:
+            code = 1
+            timed_out = True
+        results.append(dict(name=label, exit=code, timed_out=timed_out,
+                            duration_seconds=round(time.monotonic() - began, 3),
+                            log=str(log)))
+
+    report = output / "coverage.json"
+    command = [sys.executable, "test/differential.py", "--harness", "coverage_report",
+               str(coverage), "--save", str(report), "--files", "src/net/"]
+    if args.against:
+        command += ["--against", str(args.against.resolve())]
+    covered = subprocess.run(command, cwd=HARNESS_ROOT, capture_output=True, text=True)
+    (output / "coverage.log").write_text(covered.stdout + covered.stderr)
+    codes = [row["exit"] for row in results]
+    overall = (1 if covered.returncode or any(code not in (0, 2) for code in codes)
+               else 2 if 2 in codes else 0)
+    summary = dict(schema="moonwater.network_integration.v1", results=results,
+                   coverage_exit=covered.returncode, overall_exit=overall,
+                   coverage_note="Trace-PC coverage includes retained loopback shell "
+                                 "binaries and an optional copied baseline; it does not "
+                                 "cover kernel or driver code.")
+    (output / "integration.json").write_text(json.dumps(summary, indent=2) + "\n")
+    print((output / "coverage.log").read_text(), end="")
+    return overall
+
+
+
+
+def harness_network_cases(argv):
+    """Generator guarantees and libFuzzer reporting, independent of parser results.
+
+        python3 test/differential.py --harness network_cases
+    """
+    del argv
+    import contextlib
+    import io
+    import unittest
+    from unittest import mock
+    import tempfile
+
+    differential = sys.modules[__name__]
+
+    class NetworkCases(unittest.TestCase):
+        def test_controls_determinism_and_uniqueness(self):
+            seeds = {"valid": b"abcdefgh", "empty": b""}
+            first, census = network_expand(seeds, 32, limit=200)
+            self.assertEqual((first, census), network_expand(seeds, 32, limit=200))
+            for name, data in seeds.items():
+                self.assertEqual(first[name], data)
+            self.assertEqual(len(set(first.values())), len(first))
+            self.assertEqual(len(first) - len(seeds), census["generated_seeds"])
+
+        def test_caps_and_round_robin(self):
+            seeds = {"a": b"abcdefgh", "b": b"12345678"}
+            cases, census = network_expand(seeds, 32, limit=2)
+            self.assertTrue(census["capped"])
+            self.assertEqual(census["generated_seeds"], 2)
+            self.assertIn(b"abcdefg", cases.values())
+            self.assertIn(b"1234567", cases.values())
+            cases, census = network_expand(seeds, 32, byte_limit=6)
+            self.assertEqual(cases, seeds)
+            self.assertTrue(census["capped"])
+
+        def test_lengths_truncations_and_integer_boundaries(self):
+            data = bytes(range(32))
+            cases = set(network_variants(data, 40))
+            self.assertTrue(all(len(case) <= 40 for case in cases))
+            for cut in range(32):
+                self.assertIn(data[:cut], cases)
+            for replacement in (b"\xff\xff", b"\x7f\x00", b"\x00\x7f",
+                                b"\xff\xff\xff\xff", b"\x00" * 4):
+                self.assertIn(replacement + data[len(replacement):], cases)
+            self.assertIn(data + b"\x00", cases)
+
+        def test_mutation_classes_survive_small_budget(self):
+            data = b"abcdefgh"
+            cases, _ = network_expand({"valid": data}, 32, limit=16)
+            self.assertIn(data[:-1], cases.values())
+            self.assertIn(data + b"\x00", cases.values())
+            for width in (1, 2, 4, 8):
+                self.assertIn(b"\xff" * width + data[width:], cases.values())
+
+        def test_empty_oversized_and_name_collision(self):
+            seeds = {"procedural_000001.bin": b"abcd", "empty": b""}
+            cases, census = network_expand(seeds, 2, limit=100)
+            self.assertEqual(cases["procedural_000001.bin"], b"abcd")
+            self.assertTrue(all(len(data) <= 2 for name, data in cases.items()
+                                if name not in seeds))
+            self.assertFalse(census["capped"])
+
+        def test_metrics_use_final_counters_and_do_not_invent_missing_data(self):
+            log = ("INFO: Loaded 1 PC tables (100 PCs):\n"
+                   "#10 INITED cov: 20 ft: 25\n#200 DONE cov: 40 ft: 55\n"
+                   "stat::number_of_executed_units: 200\nstat::peak_rss_mb: 45\n")
+            self.assertEqual(differential.tls_fuzz_metrics(log), dict(executed_units=200,
+                initialized_units=10, mutation_units=190, peak_rss_mb=45,
+                covered_edges=40, features=55, instrumented_pcs=100))
+            self.assertEqual(differential.tls_fuzz_metrics("NOT RUN"), {})
+
+        def test_script_subtest_distinguishes_missing_tool_and_broken_lift(self):
+            with mock.patch.object(differential.shutil, "which", return_value=None), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(differential.waterlink_script_scan(""), 2)
+            for probe_exit, expected in ((1, 2), (0, 1)):
+                results = [subprocess.CompletedProcess([], probe_exit, "", "probe")]
+                if probe_exit == 0:
+                    results.append(subprocess.CompletedProcess([], 1, "", "broken lift"))
+                with mock.patch.object(differential.shutil, "which", return_value="clang"), \
+                        mock.patch.object(differential.subprocess, "run", side_effect=results), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(differential.waterlink_script_scan(""), expected)
+
+        def test_waterlink_propagates_required_subtest_skip(self):
+            with mock.patch.object(differential, "harness_waterlink_sanitized",
+                                   return_value=(None, "")), \
+                    mock.patch.object(differential, "waterlink_script_scan", return_value=2):
+                self.assertEqual(differential.harness_waterlink_fuzz([]), 2)
+
+        def test_campaign_requires_execution_and_pins_asan_ubsan(self):
+            for exit_code, expected in ((0, 1), (2, 2)):
+                with tempfile.TemporaryDirectory() as directory:
+                    output = Path(directory) / "campaign"
+
+                    def fake_run(command, **options):
+                        environment = options["env"]
+                        self.assertEqual(environment["MOONWATER_MSAN"], "0")
+                        self.assertEqual(environment["MOONWATER_FUZZ_BOUNDARIES"], "1")
+                        Path(environment["MOONWATER_FUZZ_REPORT"]).write_text(
+                            json.dumps({"targets": []}))
+                        return subprocess.CompletedProcess(command, exit_code)
+
+                    with mock.patch.dict(differential.os.environ, {"MOONWATER_MSAN": "1"}), \
+                            mock.patch.object(differential.subprocess, "run", side_effect=fake_run), \
+                            contextlib.redirect_stdout(io.StringIO()):
+                        self.assertEqual(differential.harness_network_campaign(
+                            ["--output", str(output), "--seeds", "1", "--runs", "10",
+                             "--seconds", "1"]), expected)
+                    report = json.loads((output / "campaign.json").read_text())
+                    self.assertEqual(report["overall_exit"], expected)
+
+        def test_integration_shell_is_retained_with_its_coverage_map(self):
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                output = root / "work" / "shell"
+                output.parent.mkdir()
+                with mock.patch.dict(differential.os.environ, {
+                        "MOONWATER_INTEGRATION_COVERAGE": str(root / "coverage"),
+                        "MOONWATER_INTEGRATION_LABEL": "tls test"}), \
+                        mock.patch.object(differential.platform, "machine",
+                                          return_value="x86_64"), \
+                        mock.patch.object(differential.subprocess, "run",
+                                          return_value=subprocess.CompletedProcess([], 0, "", "")):
+                    command = differential.spark_shell_command("cc", output)
+                retained = Path(command[command.index("-o") + 1])
+                self.assertTrue(output.is_symlink())
+                self.assertEqual(output.resolve(), retained)
+                self.assertTrue(retained.with_suffix(".map").is_file())
+                self.assertEqual(retained.with_suffix(".map").stat().st_size, 64 * 1024 * 1024)
+                self.assertIn("-fsanitize-coverage=trace-pc", command)
+                self.assertTrue(retained.with_suffix(".o").as_posix() in command)
+
+
+
+    suite = unittest.defaultTestLoader.loadTestsFromTestCase(NetworkCases)
+    outcome = unittest.TextTestRunner(verbosity=0).run(suite)
+    write_tally("network-cases", outcome.testsRun - len(outcome.failures) - len(outcome.errors),
+                outcome.testsRun)
+    return 0 if outcome.wasSuccessful() else 1
+
+
 HARNESS_CHECKS = {
     "g_tables": harness_g_tables,
     "scale": harness_scale,
@@ -79261,6 +79712,9 @@ HARNESS_CHECKS = {
     "surface_coreutils_gap": harness_surface_coreutils_gap,
     "shell_functions": harness_shell_functions,
     "pure_stores": harness_pure_stores,
+    "network_cases": harness_network_cases,
+    "network_campaign": harness_network_campaign,
+    "network_integration": harness_network_integration,
     "audit_shell_functions": harness_audit_shell_functions,
     "canvas_lifetime": harness_canvas_lifetime,
     "canvas_hold": harness_canvas_hold,
@@ -83156,7 +83610,6 @@ PINNED = r"""
 {"candidate":[1,"e3b0c442","b92847f3"],"case":{"argv":["-e","a\\{1"],"fixture":"text","stdin":"text_regex"},"domain":"text","kind":"bug","list":"ledger","reason_id":"r252","utility":"grep"},
 {"candidate":[2,"e3b0c442","b92847f3"],"case":{"argv":["--files-with-matches","-A","2","--binary","--color=sometimes","--with-filename","--initial-tab","dir"],"fixture":"text"},"domain":"text","kind":"deliberate","list":"ledger","reason_id":"r254","utility":"grep"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","order":"records","status":2,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-r","-z","--files-with-matches","--color=sometimes","-b","-B8193","a.txt","b.txt"],"fixture":"text","stdin":"edge_65537"},"domain":"text","kind":"deliberate","list":"ledger","reason_id":"r254","utility":"grep"},
-{"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","order":"records","status":0,"stdout":"5fe86f02d994f4aeb7697adde3cdbab726c51701de6d8ff4786080490bf71ce9"},"case":{"argv":["-R","alpha","loop"],"fixture":"text","stdin":"text_regex"},"domain":"text","kind":"bug","list":"ledger","reason_id":"r253","utility":"grep"},
 {"candidate":[1,"e3b0c442","b92847f3"],"case":{"argv":["--files-with-matches","-L","-1","-m0","--exclude-dir=inner/","--initial-tab","words"],"fixture":"text","stdin":"nonl","tier":"pinned"},"domain":"text","kind":"bug","list":"ledger","reason_id":"h30352","reference":[1,"d0e2dc25","b92847f3"],"utility":"grep"},
 {"candidate":[1,"9a271f2a","b92847f3"],"case":{"argv":["--exclude-from=excludes_nonl","--count","-x","--no-filename","--with-filename","--binary","dir"],"fixture":"text","stdin":"edge_65535","tier":"pinned"},"domain":"text","kind":"bug","list":"ledger","reason_id":"h30352","reference":[1,"ffc94270","b92847f3"],"utility":"grep"},
 {"candidate":[0,"aeec1815","b92847f3"],"case":{"argv":["--word-regexp","-2","--text","-y","-f","-","-d","read","words"],"fixture":"text","stdin":"nul_lines","tier":"pinned"},"domain":"text","kind":"bug","list":"ledger","reason_id":"h30352","reference":[1,"e3b0c442","b92847f3"],"utility":"grep"},
@@ -83164,12 +83617,9 @@ PINNED = r"""
 {"candidate":[2,"e3b0c442","b92847f3"],"case":{"argv":["--color=sometimes","-v","--line-number","-Z","--devices=skip","-e","[a-]","two words"],"fixture":"text","stdin":"text_words"},"domain":"text","kind":"deliberate","list":"ledger","reason_id":"r254","utility":"grep"},
 {"candidate":[1,"ff646650","b92847f3"],"case":{"argv":["-Dread","-L","-e","(a)lph\\1.*gamma","-G","-y","-T","words"],"fixture":"text","stdin":"many_lines","tier":"pinned"},"domain":"text","kind":"bug","list":"ledger","reason_id":"hc1ec6","reference":[2,"e3b0c442","b92847f3"],"utility":"grep"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","order":"records","status":0,"stdout":"b834598c2aff88920e561734c88eb6bd18c700ac0fb1f0dbf07f7c43be5bf94b"},"case":{"argv":["-e","\\w\\+","-F","--dereference-recursive","--colour=always","-C","0","-1","two words"],"fixture":"text","stdin":"many_lines","tier":"pinned"},"domain":"text","kind":"bug","list":"ledger","reason_id":"h30352","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","order":"records","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"grep"},
-{"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","order":"records","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["--null","--files-with-matches","-R","--no-ignore-case","--include=a-b.txt","--word-regexp","big"],"fixture":"text","stdin":"long","tier":"pinned"},"domain":"text","kind":"bug","list":"ledger","reason_id":"h2024b","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","order":"records","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"grep"},
-{"candidate":[2,"e3b0c442","b92847f3"],"case":{"argv":["-e","^**","-b","-f","-","--initial-tab","-a","-B2","wide"],"fixture":"text","stdin":"edge_65537"},"domain":"text","kind":"bug","list":"ledger","reason_id":"r253","utility":"grep"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","order":"records","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-E","--extended-regexp","-e","(ab)+(a|bc)","-f","pats_empty","--file=pats","-i","--ignore-case","-y","-w","--word-regexp","-x","-v","--invert-match","-m","0","-b","-n","--line-buffered","-H","--with-filename","-h","--label=X","--only-matching","-q","--quiet","--silent","--binary-files=binary","-a","-dskip","-Dskip","-r","--recursive","--include=[!b]*","--exclude=*","--exclude-dir=tree","-L","--files-with-matches","--count","--initial-tab","-Z","-B1","--before-context=1","-A","1","-C2","-2","--group-separator=","--no-group-separator","--color=sometimes","--color","--colour=always","words"],"fixture":"text","stdin":"text_backtrack","tier":"pinned"},"domain":"text","kind":"bug","list":"ledger","reason_id":"h30352","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","order":"records","status":0,"stdout":"005634d881f6768f466456f0c8bc96adae89080621a4b9832d10029e8dd21cae"},"utility":"grep"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","order":"records","status":0,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["--basic-regexp","-e","^a\\{2,\\}$","--regexp=^$","-f","pats","--file=pats","--no-ignore-case","-y","-z","-v","-m","-1","-n","--line-number","--line-buffered","-H","--with-filename","--only-matching","-q","--binary-files=without-match","-a","--text","-d","recurse","-r","--recursive","--include=*","--exclude=a.txt","--exclude-from=excludes","--exclude-dir=inner","-L","-l","--files-with-matches","--count","-T","--initial-tab","-B0","-A2","-C","0","-1","-2","--group-separator=##","--color=auto","--color","-U","--binary","a.txt","b.txt"],"fixture":"text","stdin":"edge_65537"},"domain":"text","kind":"bug","list":"ledger","reason_id":"r253","reason_unverified":1,"utility":"grep"},
 {"candidate":[2,"e3b0c442","b92847f3"],"case":{"argv":["-z","--directories=skip","--binary","-o","--color=sometimes","--regexp=alpha","a.txt","b.txt"],"fixture":"text","stdin":"long","tier":"pinned"},"domain":"text","kind":"bug","list":"ledger","reason_id":"h82a8b","reference":[0,"1bbcade0","b92847f3"],"utility":"grep"},
-{"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","order":"records","status":0,"stdout":"da5762cce86c45aad1ab6497376ac3e9b6bec96563c06d83d2d85fc6acce316a"},"case":{"argv":["--basic-regexp","-R","-z","--color=auto","--initial-tab","-e","\\(a\\)lph\\1","loop"],"fixture":"text","stdin":"nonl"},"domain":"text","kind":"bug","list":"ledger","reason_id":"r253","utility":"grep"},
 {"candidate":[1,"e3b0c442","b92847f3"],"case":{"argv":["-G","--color","--line-regexp","--only-matching","--before-context=1","-e","(a)\\1|(b)\\2","binary"],"fixture":"text","stdin":"edge_65537","tier":"pinned"},"domain":"text","kind":"bug","list":"ledger","reason_id":"hc1ec6","reference":[2,"e3b0c442","b92847f3"],"utility":"grep"},
 {"candidate":[2,"e3b0c442","b92847f3"],"case":{"argv":["-h","--exclude=*","--files-without-match","--color=sometimes","--before-context=1","--null-data","dir"],"fixture":"text","stdin":"edge_65536","tier":"pinned"},"domain":"text","kind":"bug","list":"ledger","reason_id":"h82a8b","reference":[0,"1bbcade0","b92847f3"],"utility":"grep"},
 {"candidate":[0,"f9fb14e2","b92847f3"],"case":{"argv":["--word-regexp","-e","\\(ab\\|a\\)$","--line-number","-F","--no-filename","-y","regex"],"fixture":"text","stdin":"blanks"},"domain":"text","kind":"bug","list":"ledger","reason_id":"r253","utility":"grep"},
@@ -83185,11 +83635,9 @@ PINNED = r"""
 {"candidate":[1,"e3b0c442","b92847f3"],"case":{"argv":["-I","--file=pats","-E","-o","-s","-d","skip","link"],"fixture":"text","stdin":"long","tier":"pinned"},"domain":"text","kind":"bug","list":"ledger","reason_id":"h30352","reference":[0,"b6a98d9c","b92847f3"],"utility":"grep"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","order":"records","status":2,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-E","-e","delta|zeta","--regexp=^$","-f-","-i","--ignore-case","-y","-w","--word-regexp","--line-regexp","-z","--null-data","-s","--no-messages","-m0","--max-count=1","-b","--byte-offset","--line-buffered","--no-filename","--label=","--quiet","--binary-files=binary","--text","-I","-d","skip","--directories=skip","--recursive","--include=?.txt","--exclude=[^a]*","--exclude-dir=inner/","-L","--files-with-matches","-c","--count","-T","--initial-tab","--null","-B","8193","--before-context=1","--after-context=1","--context=1","--group-separator=--","--color=sometimes","--color","-U","a.txt","missing","b.txt"],"fixture":"text","stdin":"high"},"domain":"text","kind":"deliberate","list":"ledger","reason_id":"r254","utility":"grep"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","order":"records","status":1,"stdout":"634db486e4f7556dd1344697599919cc75147ba6a809bad6ec58de1fbe61268f"},"case":{"argv":["--file=pats","-e","[^abc]","-R","-E","-c","--no-group-separator","dir"],"fixture":"text","stdin":"edge_65537"},"domain":"text","kind":"bug","list":"ledger","reason_id":"r253","utility":"grep"},
-{"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","order":"records","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["--dereference-recursive","-q","-f","-","--with-filename","-G","-i","loop"],"fixture":"text","stdin":"mixed_case","tier":"pinned"},"domain":"text","kind":"bug","list":"ledger","reason_id":"h2024b","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","order":"records","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"grep"},
 {"candidate":[0,"6ff52414","b92847f3"],"case":{"argv":["--regexp=^$","-H","--only-matching","--ignore-case","-U","--after-context=1"],"fixture":"text","stdin":"text_regex","tier":"pinned"},"domain":"text","kind":"bug","list":"ledger","reason_id":"h30352","reference":[0,"e3b0c442","b92847f3"],"utility":"grep"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","order":"records","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-e","a\\{1","--only-matching","--line-number","--context=1","-w","-r","a.txt"],"fixture":"text","stdin":"words"},"domain":"text","kind":"bug","list":"ledger","reason_id":"r252","utility":"grep"},
 {"candidate":[2,"e3b0c442","b92847f3"],"case":{"argv":["--file=pats","--label=X","--color=sometimes","-w","-L","--null-data","link"],"fixture":"text","stdin":"edge_65536","tier":"pinned"},"domain":"text","kind":"bug","list":"ledger","reason_id":"h82a8b","reference":[0,"1bbcade0","b92847f3"],"utility":"grep"},
-{"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","order":"records","status":0,"stdout":"5fe86f02d994f4aeb7697adde3cdbab726c51701de6d8ff4786080490bf71ce9"},"case":{"argv":["--dereference-recursive","--group-separator=--","-e","[a-b]\\{3\\}","--before-context=1","--label=X","--invert-match","loop"],"fixture":"text","stdin":"text_backtrack","tier":"pinned"},"domain":"text","kind":"bug","list":"ledger","reason_id":"h2024b","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","order":"records","status":0,"stdout":"5fe86f02d994f4aeb7697adde3cdbab726c51701de6d8ff4786080490bf71ce9"},"utility":"grep"},
 {"candidate":[1,"e3b0c442","b92847f3"],"case":{"argv":["-m","0","--no-group-separator","--null","--file=pats","--directories=skip","-L"],"fixture":"text","stdin":"many_lines"},"domain":"text","kind":"bug","list":"ledger","reason_id":"r253","utility":"grep"},
 {"candidate":[2,"e3b0c442","b92847f3"],"case":{"argv":["--no-messages","-2","-e","^**","--no-ignore-case","--color=sometimes","--exclude-dir=tree","dir"],"fixture":"text","stdin":"text_regex"},"domain":"text","kind":"deliberate","list":"ledger","reason_id":"r254","utility":"grep"},
 {"candidate":[2,"e3b0c442","b92847f3"],"case":{"argv":["-E","--no-ignore-case","--files-without-match","--color=sometimes","--label=","-I","a.txt","b.txt"],"fixture":"text","stdin":"text_random_lines"},"domain":"text","kind":"deliberate","list":"ledger","reason_id":"r254","utility":"grep"},
@@ -83204,7 +83652,6 @@ PINNED = r"""
 {"candidate":[2,"e3b0c442","b92847f3"],"case":{"argv":["--color=sometimes","--line-buffered","--file=pats","--exclude=*","--exclude=three*","--no-ignore-case","link"],"fixture":"text","stdin":"text_regex","tier":"pinned"},"domain":"text","kind":"bug","list":"ledger","reason_id":"h82a8b","reference":[0,"1bbcade0","b92847f3"],"utility":"grep"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","order":"records","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["--dereference-recursive","-L","-c","--null-data","-f","pats_empty","-I","a.txt","missing","b.txt"],"fixture":"text","stdin":"nul_lines","tier":"pinned"},"domain":"text","kind":"bug","list":"ledger","reason_id":"h2024b","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","order":"records","status":2,"stdout":"ff6c40f3a036e8b89f0d3731a719f669f9972eab564868c657bf638d7c927b3b"},"utility":"grep"},
 {"candidate":[2,"1405e395","b92847f3"],"case":{"argv":["-e","*a","--line-number","-v","--no-ignore-case","-T","--file=pats","a.txt","missing","b.txt"],"fixture":"text","stdin":"edge_65537"},"domain":"text","kind":"bug","list":"ledger","reason_id":"r253","utility":"grep"},
-{"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","order":"records","status":0,"stdout":"fb5e0891bddbb39937aeca06f80c79adbf552880374eca58532d875a98bb794b"},"case":{"argv":["--line-buffered","-Z","-m100","-e","[^abc]","--dereference-recursive","--no-filename","loop"],"fixture":"text","stdin":"edge_65537"},"domain":"text","kind":"bug","list":"ledger","reason_id":"r253","utility":"grep"},
 {"candidate":[0,"9adbdb3e","b92847f3"],"case":{"argv":["-n","--context=1","-E","--directories=skip","--byte-offset","-e","(a|)ba+","-","a.txt"],"fixture":"text","stdin":"text_words"},"domain":"text","kind":"bug","list":"ledger","reason_id":"r253","utility":"grep"},
 {"candidate":[1,"e3b0c442","b92847f3"],"case":{"argv":["-e","^[a-c]a\\'"],"fixture":"text","stdin":"text_regex"},"domain":"text","kind":"bug","list":"ledger","reason_id":"r253","utility":"grep"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","order":"records","status":2,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-E","-e","a\\{4000\\}","--regexp=alpha","-f","-","-i","-z","--null-data","-s","--no-messages","--invert-match","-m100","--max-count=1","--byte-offset","--line-buffered","-H","--with-filename","-h","--no-filename","--label=X","-o","--only-matching","-q","--quiet","--silent","--binary-files=binary","-a","-d","read","-D","skip","--devices=skip","-R","--dereference-recursive","--include=a-b.txt","--exclude=three*","--exclude-from=excludes","--exclude-dir=tree","-L","--files-without-match","-l","-c","--count","-Z","-B0","-A","0","-C","2","--context=1","-1","--group-separator=##","--no-group-separator","--color=sometimes","-U","dangling"],"fixture":"text","stdin":"blanks","tier":"pinned"},"domain":"text","kind":"bug","list":"ledger","reason_id":"h82a8b","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","order":"records","status":0,"stdout":"005634d881f6768f466456f0c8bc96adae89080621a4b9832d10029e8dd21cae"},"utility":"grep"},
@@ -83213,7 +83660,6 @@ PINNED = r"""
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","order":"records","status":2,"stdout":"8501fd76cceaa79adc51345ad3849bfcc7946332d511d5ee0153ce9ef8ae0084"},"case":{"argv":["--after-context=1","--color=sometimes","--files-without-match","--byte-offset","-R","--colour=always","tree"],"fixture":"text","stdin":"high"},"domain":"text","kind":"deliberate","list":"ledger","reason_id":"r254","utility":"grep"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","order":"records","status":2,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["--color=sometimes","-drecurse","-R","-I","--line-regexp","--file=pats","two words"],"fixture":"text","stdin":"nonl","tier":"pinned"},"domain":"text","kind":"bug","list":"ledger","reason_id":"h82a8b","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","order":"records","status":0,"stdout":"005634d881f6768f466456f0c8bc96adae89080621a4b9832d10029e8dd21cae"},"utility":"grep"},
 {"candidate":[0,"4fdbc441","b92847f3"],"case":{"argv":["--invert-match","-e","(a)\\1|(b)\\2","-T","-2","--no-messages","--ignore-case","link"],"fixture":"text","stdin":"nonl"},"domain":"text","kind":"bug","list":"ledger","reason_id":"r252","utility":"grep"},
-{"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","order":"records","status":2,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["--recursive","-I","-f","-","--color=never","-e","\\Wa{2,}","-1","a.txt"],"fixture":"text","stdin":"long"},"domain":"text","kind":"bug","list":"ledger","reason_id":"r253","utility":"grep"},
 {"candidate":[1,"e3b0c442","b92847f3"],"case":{"argv":["-I","-G","-e","(a)\\1|(b)\\2","--regexp=a|b","-s","--before-context=1","a.txt","b.txt"],"fixture":"text","stdin":"edge_65537"},"domain":"text","kind":"bug","list":"ledger","reason_id":"r252","utility":"grep"},
 {"candidate":[0,"a01c24ea","b92847f3"],"case":{"argv":["-o","-E","-a","--file=pats","-A0","-1","-","a.txt"],"fixture":"text","stdin":"text_regex","tier":"pinned"},"domain":"text","kind":"bug","list":"ledger","reason_id":"h30352","reference":[0,"83fd1605","b92847f3"],"utility":"grep"},
 {"candidate":[2,"e3b0c442","b92847f3"],"case":{"argv":["--byte-offset","-q","--line-number","--color=sometimes","--file=pats","--only-matching","tree","a.txt"],"fixture":"text","stdin":"high"},"domain":"text","kind":"deliberate","list":"ledger","reason_id":"r254","utility":"grep"},

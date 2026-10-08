@@ -4206,7 +4206,7 @@ lane_net()
 #       report of toolchain, seeds, budget and exits written there.
 lane_fuzz()
 {
-        python3 -m unittest discover -s test -p test_network_cases.py || return 1
+        python3 test/differential.py --harness network_cases || return 1
         MOONWATER_FUZZ_BOUNDARIES=${MOONWATER_FUZZ_BOUNDARIES:-1} \
                 python3 test/differential.py --harness tls_fuzz
 }
@@ -5980,6 +5980,33 @@ lane_files()
         seq_closed=$?
         [ "$seq_full:$seq_closed" = 1:1 ]
         verdict seq-stops-at-refused-write files_failed 'seq into /dev/full returned $seq_full, to a closed descriptor $seq_closed'
+
+        #       du and find name the reason their output stopped, as GNU's
+        #       close_stdout does, at the first refused flush: a closed
+        #       descriptor and a pipe whose reader has gone, each with more
+        #       output than one buffer. The flush's errno was thrown away and
+        #       the message said "No space left on device" for both.
+        reason_tree="$work/reason-tree"
+        mkdir -p "$reason_tree"
+        reason_i=0
+        while [ "$reason_i" -lt 400 ]
+        do
+                : > "$reason_tree/file-with-a-long-name-$reason_i"
+                reason_i=$((reason_i + 1))
+        done
+        timeout 10 "$farm/du" -a "$reason_tree" >&- 2> "$work/du-closed.err"
+        du_closed=$?
+        ( trap '' PIPE; timeout 10 "$farm/du" -a "$reason_tree" 2> "$work/du-pipe.err" | true )
+        timeout 10 "$farm/find" "$reason_tree" >&- 2> "$work/find-closed.err"
+        find_closed=$?
+        ( trap '' PIPE; timeout 10 "$farm/find" "$reason_tree" 2> "$work/find-pipe.err" | true )
+        [ "$du_closed" = 1 ] &&
+                [ "$(cat "$work/du-closed.err")" = 'du: write error: Bad file descriptor' ] &&
+                [ "$(cat "$work/du-pipe.err")" = 'du: write error: Broken pipe' ] &&
+                [ "$find_closed" = 1 ] &&
+                grep -q '^find: write error: Bad file descriptor$' "$work/find-closed.err" &&
+                grep -q '^find: write error: Broken pipe$' "$work/find-pipe.err"
+        verdict du-find-say-the-reason files_failed 'du to a closed descriptor returned $du_closed, said [$(cat "$work/du-closed.err")]; du to a closed pipe said [$(cat "$work/du-pipe.err")]; find to a closed descriptor returned $find_closed, said [$(cat "$work/find-closed.err")]; find to a closed pipe said [$(cat "$work/find-pipe.err")]'
 
         printf 'old text\n' > "$work/cp-mode-regression/sed"
         chmod 4755 "$work/cp-mode-regression/sed"

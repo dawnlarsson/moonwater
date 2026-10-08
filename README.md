@@ -776,8 +776,8 @@ sh test/run bench --list        what there is to measure
 For a procedural network campaign with clang's libFuzzer, ASan and UBSan:
 
 ```
-python3 test/network.py --output /tmp/moonwater-network --seeds 1 7 42 --runs 200000 --seconds 30
-python3 -m unittest discover -s test -p test_network_cases.py
+python3 test/differential.py --harness network_campaign --output /tmp/moonwater-network --seeds 1 7 42 --runs 200000 --seconds 30
+python3 test/differential.py --harness network_cases
 ```
 
 The output directory must be new. Each seed runs all 14 existing targets:
@@ -803,7 +803,7 @@ matrix, 500 seeded hostile flights, 60 fragmented or cut delivery schedules,
 and HTTPS downgrade cases, while retaining each exact binary and map:
 
 ```
-python3 test/network_integration.py --output /tmp/moonwater-network-integration \
+python3 test/differential.py --harness network_integration --output /tmp/moonwater-network-integration \
   --baseline /tmp/moonwater-coverage --mutations 500 --schedules 60
 ```
 
@@ -841,8 +841,8 @@ and say so rather than pass quietly.
 
 The main test runner is `test/run`, with C checks and benchmarks in
 `test/checks.c` and procedural and differential harnesses in
-`test/differential.py`. The network campaign adds `test/network.py` and its
-bounded generator, `test/network_cases.py`. Each program is declared as a
+`test/differential.py`. The network campaign and its bounded generator are harnesses of
+`test/differential.py` (`network_campaign`, `network_cases`). Each program is declared as a
 grammar -- its options, values, operands and inputs -- and the engine runs the
 system's tool and ours on the same inputs, comparing status, output, effects on
 disk and diagnostics. Deliberate differences are pinned with a reason and fail

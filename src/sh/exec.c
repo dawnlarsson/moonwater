@@ -3946,7 +3946,12 @@ fn job_wait(writer write, string_address input)
                         }
                 }
 
-                if (!force && job_table[found].state == JOB_STOPPED)
+                /* A stop answers wait only under job control, where bash
+                   returns when a job changes status. Without it neither
+                   reference reports a stop: bash and dash wait for the exit,
+                   and so does this, since a stop read a moment before a
+                   SIGKILL answered 147 where they answer 137. */
+                if (!force && job_monitor() && job_table[found].state == JOB_STOPPED)
                 {
                         string_format(log_error,
                                       "wait: job %p is stopped\n",

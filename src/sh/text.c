@@ -24625,9 +24625,11 @@ static b32 text_uniq()
         several programs, because a line has to be tried against all of them
         anyway and the machine already knows how to choose a branch.
 */
-#define GREP_PATTERN_MAX 16384
-
-static p8 grep_pattern[GREP_PATTERN_MAX];
+// The joined pattern grows with what it is given, as GNU's does: a bracket of
+// twenty thousand bytes, or a -f file of two thousand expressions, is a
+// pattern like any other and not "pattern too long".
+static p8 address_to grep_pattern;
+static positive grep_pattern_room;
 static positive grep_pattern_length;
 static bool grep_pattern_any;
 // A pattern that ends in a backslash of its own is refused as GNU refuses
@@ -24742,9 +24744,25 @@ static bool grep_pattern_broken;
 static fn grep_many_add(string_address text, positive length, bool fixed,
                         bool extended);
 
+// One byte more than the pattern always has room, for the terminator the
+// compile is handed as a C string.
+static fn grep_pattern_grow(positive more)
+{
+        if (grep_pattern_broken)
+                return;
+        if (grep_pattern_length + more + 1 > grep_pattern_room &&
+            !array_store_reserve(grep_pattern, grep_pattern_room, grep_pattern_length,
+                                 grep_pattern_length + more + 1, 4096))
+                grep_pattern_broken = true;
+}
+
 #define grep_pattern_put(character)                                          \
-        fixed_store_byte(grep_pattern, grep_pattern_length,                  \
-                         grep_pattern_broken, character)
+        do                                                                   \
+        {                                                                    \
+                grep_pattern_grow(1);                                        \
+                if (!grep_pattern_broken)                                    \
+                        grep_pattern[grep_pattern_length++] = (p8)(character); \
+        } while (0)
 
 static fn grep_pattern_add(string_address text, positive length, bool fixed, bool extended)
 {
@@ -24818,7 +24836,9 @@ static fn grep_pattern_add(string_address text, positive length, bool fixed, boo
                 from = at + 1;
         }
 
-        grep_pattern[grep_pattern_length] = '\0';
+        grep_pattern_grow(0);
+        if (!grep_pattern_broken)
+                grep_pattern[grep_pattern_length] = '\0';
 }
 
 /*
@@ -30433,7 +30453,13 @@ static fn grep_tree_enter(address_any context, address_any node_address,
 
                 for (grep_node address_to up = node->parent; up; up = up->parent)
                         if (up->known && up->device == device && up->inode == facts.inode)
+                        {
+                                // -s keeps the warning as it keeps the other file messages.
+                                if (!text_quiet_open)
+                                        string_diagnostic(&text_diagnostic, 0, (string_address)node->path,
+                                                          "warning: recursive directory loop");
                                 return;
+                        }
 
                 node->device = device;
                 node->inode = facts.inode;
@@ -32084,11 +32110,11 @@ static bool sed_line_across(b32 address_to i, b32 inputs)
 static bool sed_null_data;
 static bool sed_follow_symlinks;
 
-static b32 sed_compile_regex(string_address pattern, bool icase, bool multiline)
+static b32 sed_compile_regex(string_address pattern, positive length, bool icase, bool multiline)
 {
         // Refused when it runs rather than when it is read, because a script
         // whose input is empty never reaches the command that would complain.
-        if (!pattern[0])
+        if (!length)
                 return -1;
 
         // A program is a table entry that grows with the script, as the commands do.
@@ -32103,15 +32129,15 @@ static b32 sed_compile_regex(string_address pattern, bool icase, bool multiline)
         }
 
         // M: ^ and $ are also at the start and the end of each line in the space.
-        if (!regex_compile(pattern, sed_extended, icase, true,
-                           text_regex_policy() | (multiline ? REGEX_LINE_ANCHORS : 0)))
+        if (!regex_compile_bytes(pattern, length, sed_extended, icase, true,
+                                 text_regex_policy() | (multiline ? REGEX_LINE_ANCHORS : 0)))
         {
                 sed_broken = true;
                 return 0;
         }
 
         regex_keep(sed_programs + sed_program_count);
-        sed_program_end_only[sed_program_count] = pattern[0] == '$' && !pattern[1];
+        sed_program_end_only[sed_program_count] = length == 1 && pattern[0] == '$';
         return sed_program_count++;
 }
 
@@ -32139,6 +32165,119 @@ static positive sed_limit_blocks, sed_open_blocks_room;
 static p8 address_to sed_append_kind;
 static b32 address_to sed_append_which;
 static positive sed_limit_appends, sed_append_kind_room, sed_append_which_room;
+
+/*
+        The escapes GNU sed reads in a regular expression, a replacement, a y
+        set and the text of a, i and c: \a \f \n \r \t \v, \cX (the
+        control of X), \dNNN (decimal, three digits), \oNNN (octal, three)
+        and \xHH (hexadecimal, two). Reads the one at `at`, a backslash, and
+        says how many bytes it spans; false when the pair is not one of these,
+        which the callers keep as it was.
+*/
+static bool sed_escape_value(string_address text, positive length, positive at,
+                             p8 address_to value, positive address_to used)
+{
+        if (at + 1 >= length)
+                return false;
+
+        p8 letter = text[at + 1];
+        positive base = letter == 'd' ? 10 : letter == 'o' ? 8 : letter == 'x' ? 16 : 0;
+
+        switch (letter)
+        {
+        case 'a': *value = 7; break;
+        case 'f': *value = 12; break;
+        case 'n': *value = '\n'; break;
+        case 'r': *value = '\r'; break;
+        case 't': *value = '\t'; break;
+        case 'v': *value = 11; break;
+        case 'c':
+                if (at + 2 >= length)
+                        return false;
+                // \c\\ is the control of a backslash, as GNU reads it.
+                if (text[at + 2] == '\\' && at + 3 < length && text[at + 3] == '\\')
+                {
+                        *value = '\\' ^ 0x40;
+                        *used = 4;
+                        return true;
+                }
+                *value = (p8)(byte_is_lower(text[at + 2]) ? text[at + 2] - 32 : text[at + 2]) ^ 0x40;
+                *used = 3;
+                return true;
+        case 'd':
+        case 'o':
+        case 'x':
+        {
+                positive limit = base == 16 ? 2 : 3;
+                positive digits = 0;
+                positive whole = 0;
+                positive next = at + 2;
+
+                while (next < length && digits < limit)
+                {
+                        p8 digit = text[next];
+                        positive value_of = byte_is_digit(digit) ? (positive)(digit - '0')
+                                            : base == 16 && byte_is_hexadecimal(digit)
+                                                ? (positive)((digit | 32) - 'a' + 10) : 99;
+                        if (value_of >= base)
+                                break;
+                        whole = whole * base + value_of;
+                        next++;
+                        digits++;
+                }
+
+                if (!digits)
+                        return false;
+                *value = (p8)whole;
+                *used = next - at;
+                return true;
+        }
+        default:
+                return false;
+        }
+
+        *used = 2;
+        return true;
+}
+
+/*
+        Expands the escapes above in place, a pattern or a replacement, and
+        returns its new length. A byte the escape makes is written as it is,
+        so in a pattern it keeps the meaning its character has there (\x2a is
+        a star, as GNU reads it); in a replacement a produced backslash or
+        ampersand is written escaped, so it stands for itself. Any other pair
+        is kept whole, which is what keeps \\x41 a backslash and then x41.
+*/
+static positive sed_escapes_expand(p8 address_to text, positive length, bool replacement)
+{
+        positive have = 0;
+
+        for (positive at = 0; at < length;)
+        {
+                p8 value;
+                positive used;
+
+                if (text[at] == '\\' && sed_escape_value(text, length, at, address_of value, address_of used))
+                {
+                        if (replacement && (value == '\\' || value == '&'))
+                                text[have++] = '\\';
+                        text[have++] = value;
+                        at += used;
+                        continue;
+                }
+
+                if (text[at] == '\\' && at + 1 < length)
+                {
+                        text[have++] = text[at++];
+                        text[have++] = text[at++];
+                        continue;
+                }
+
+                text[have++] = text[at++];
+        }
+
+        return have;
+}
 
 // Everything up to the next unescaped delimiter, with an escaped delimiter
 // becoming the character itself -- s,a\,b,x, has a comma in its pattern.
@@ -32202,6 +32341,16 @@ static positive sed_unescape(p8 address_to text, positive length)
 
         for (positive i = 0; i < length; i++)
         {
+                p8 value;
+                positive used;
+
+                if (text[i] == '\\' && sed_escape_value(text, length, i, address_of value, address_of used))
+                {
+                        text[have++] = value;
+                        i += used - 1;
+                        continue;
+                }
+
                 if (text[i] == '\\' && i + 1 < length)
                 {
                         p8 next = text[++i];
@@ -32325,7 +32474,8 @@ static bool sed_parse_address(p8 address_to type, positive address_to line,
                 }
 
                 sed_at++;
-                sed_take_until(delimiter, pattern, sed_limit_piece);
+                positive length = sed_take_until(delimiter, pattern, sed_limit_piece);
+                length = sed_escapes_expand(pattern, length, false);
 
                 bool icase = false, multiline = false;
 
@@ -32337,7 +32487,7 @@ static bool sed_parse_address(p8 address_to type, positive address_to line,
                 }
 
                 address_to type = SED_ADDRESS_REGEX;
-                address_to which = sed_compile_regex(pattern, icase, multiline);
+                address_to which = sed_compile_regex(pattern, length, icase, multiline);
                 return true;
         }
 
@@ -32547,9 +32697,11 @@ static fn sed_parse()
                         p8 address_to replacement = sed_piece_replacement;
 
                         sed_at++;
-                        sed_take_until(delimiter, pattern, sed_limit_piece);
+                        positive length = sed_take_until(delimiter, pattern, sed_limit_piece);
+                        length = sed_escapes_expand(pattern, length, false);
 
                         positive have = sed_take_until(delimiter, replacement, sed_limit_piece);
+                        have = sed_escapes_expand(replacement, have, true);
                         bool icase = false, multiline = false;
 
                         command->references = 0;
@@ -32662,7 +32814,7 @@ static fn sed_parse()
                         // has to have. An empty pattern is whichever regex
                         // ran last, so only the cycle can check it: GNU runs
                         // /\(a\)/s//\1x/ and refuses s//\1/ when it runs.
-                        command->pattern = sed_compile_regex(pattern, icase, multiline);
+                        command->pattern = sed_compile_regex(pattern, length, icase, multiline);
                         if (command->pattern >= 0 &&
                             command->references > sed_programs[command->pattern].groups)
                                 sed_broken = true;
@@ -32772,6 +32924,18 @@ static fn sed_parse()
 
                         while (sed_at < sed_script_length && sed_script[sed_at] != '\n')
                         {
+                                p8 value;
+                                positive used;
+
+                                if (sed_script[sed_at] == '\\' &&
+                                    sed_escape_value(sed_script, sed_script_length, sed_at,
+                                                     address_of value, address_of used))
+                                {
+                                        sed_text_byte(value);
+                                        sed_at += used;
+                                        continue;
+                                }
+
                                 if (sed_script[sed_at] == '\\' && sed_at + 1 < sed_script_length)
                                 {
                                         sed_at++;
@@ -34509,8 +34673,7 @@ static b32 text_sed()
 
                         if (looked < 0)
                         {
-                                string_diagnostic(&text_diagnostic, 0, name,
-                                                  file_reason(looked));
+                                text_file_failed(name, looked, false);
                                 if (directory >= 0)
                                         system_close(directory);
                                 text_status = 2;
@@ -34522,8 +34685,7 @@ static b32 text_sed()
                             O_PATH | O_NOFOLLOW);
                         if (original < 0)
                         {
-                                string_diagnostic(&text_diagnostic, 0, name,
-                                                  file_reason(original));
+                                text_file_failed(name, original, false);
                                 system_close(directory);
                                 text_status = 2;
                                 continue;
@@ -34589,12 +34751,35 @@ static b32 text_sed()
 
                         if (written < 0)
                         {
+                                // GNU's template: the directory the file is in, then
+                                // sed and six characters it fills in itself.
+                                static const char prefix[] = "couldn't open temporary file ";
+                                static const char stem[] = "sedXXXXXX";
+                                p8 subject[TEXT_PATH_MAX + sizeof(prefix) + sizeof(stem)];
+                                positive directory_length = string_length(name) - string_length(leaf);
+                                positive have = sizeof(prefix) - 1;
+
+                                memory_copy(subject, prefix, have);
+                                if (directory_length)
+                                {
+                                        memory_copy(subject + have, name, directory_length);
+                                        have += directory_length;
+                                }
+                                else
+                                {
+                                        subject[have++] = '.';
+                                        subject[have++] = '/';
+                                }
+                                memory_copy(subject + have, stem, sizeof(stem) - 1);
+                                have += sizeof(stem) - 1;
+                                subject[have] = '\0';
+
                                 text_close();
                                 system_close(original);
                                 system_close(directory);
                                 return text_done(string_diagnostic(
-                                    &text_diagnostic, 4, name,
-                                    "cannot create private output"));
+                                    &text_diagnostic, 4, (string_address)subject,
+                                    file_reason(written)));
                         }
 
                         text_out_to((positive)written);
@@ -40358,7 +40543,57 @@ static bool sort_memory(positive address_to total, positive address_to available
         return true;
 }
 
-static positive sort_default_budget()
+/*
+        The address space this process may still map under RLIMIT_AS, when it
+        has a limit: the limit less what is mapped now (VmSize, in kilobytes).
+        False when there is no limit. Every thread a sort starts maps eight
+        megabytes of its own, and the static arrays of the binary count too,
+        so a budget of half the limit left nothing for them and sort answered
+        "out of memory" where GNU sorted under the same cap.
+*/
+static bool sort_address_space(positive address_to free)
+{
+        positive limit[2];
+
+        if (system_call_4(syscall(prlimit64), 0, 9, 0, (positive)limit) < 0 ||
+            limit[0] == positive_max)
+                return false;
+
+        p8 text[2048];
+        bipolar handle = system_open_at(AT_FDCWD, "/proc/self/status", FILE_READ | O_CLOEXEC);
+        positive mapped = 0;
+
+        if (handle >= 0)
+        {
+                bipolar got = system_call_3(syscall(read), (positive)handle, (positive)text,
+                                            sizeof(text) - 1);
+                system_call_1(syscall(close), (positive)handle);
+
+                if (got > 0)
+                {
+                        text[got] = '\0';
+
+                        positive at = 0;
+
+                        while (at + 7 <= (positive)got && memory_compare(text + at, "VmSize:", 7))
+                                at++;
+                        if (at + 7 <= (positive)got)
+                        {
+                                at += 7;
+                                while (text[at] == ' ' || text[at] == '\t')
+                                        at++;
+                                while (byte_is_digit(text[at]))
+                                        mapped = mapped * 10 + (positive)(text[at++] - '0');
+                                mapped *= 1024;
+                        }
+                }
+        }
+
+        *free = limit[0] > mapped ? limit[0] - mapped : 0;
+        return true;
+}
+
+static positive sort_default_budget(positive address_space, bool limited)
 {
         positive size = positive_max;
         positive limit[2];
@@ -40373,6 +40608,11 @@ static positive sort_default_budget()
                 size = limit[0];
 
         size /= 2;
+
+        // Under an address-space limit, three eighths of what is left: the
+        // run, its line records and its write buffer each take a share.
+        if (limited && address_space / 8 * 3 < size)
+                size = address_space / 8 * 3;
 
         if (system_call_4(syscall(prlimit64), 0, 5, 0, (positive)limit) >= 0 &&
             limit[0] / 16 * 15 < size)
@@ -41436,9 +41676,14 @@ static bool sort_output_open(string_address output, sort_writer address_to out)
 
 // The output, already opened when -o named one: the handle is what that
 // open answered.
+// The file -o named, for a write that fails when it is closed: standard
+// output's refusals are said by text_done, a file's are said here.
+static string_address sort_output_path;
+
 static bool sort_output_take(string_address output, bipolar handle,
                              sort_writer address_to out)
 {
+        sort_output_path = output;
         if (output)
         {
                 if (handle < 0)
@@ -41464,6 +41709,19 @@ static fn sort_output_close(sort_writer address_to out)
 {
         sort_writer_flush(out);
 
+        if (out->failed && sort_output_path)
+        {
+                // What the stdio call did is said as GNU says it: a failure
+                // that came at the flush of what was buffered is an fflush.
+                positive buffer = out->buffer ? out->buffer : TEXT_STDIO_PAGE;
+                bool buffered = out->error_offered < buffer;
+
+                text_complain("%s: %s failed: %s: %s\n", text_name,
+                              buffered ? "fflush" : "write", sort_output_path,
+                              file_reason(out->error ? out->error : -5));
+                text_complain("%s: write error\n", text_name);
+        }
+
         if (out->failed)
         {
                 text_out_failed = true;
@@ -41487,7 +41745,19 @@ static b32 sort_inputs(string_address output)
         b32 inputs = text_input_count();
         sort_writer out;
 
-        sort_budget = sort_size ? sort_size : sort_default_budget();
+        positive address_space = 0;
+        bool limited = sort_address_space(address_of address_space);
+
+        // A thread per worker maps eight megabytes of its own, and under a
+        // limit those count against the same space as the run: sort goes on
+        // alone, as --parallel=1 does, and the budget leaves room for it.
+        if (limited)
+                sort_alone = true;
+        // An -S past what the limit leaves is cut to it, as GNU sort lets its
+        // buffer fall back when the memory is not there.
+        positive budget = sort_default_budget(address_space, limited);
+
+        sort_budget = sort_size && !(limited && sort_size > budget) ? sort_size : budget;
 
         for (b32 i = 0; i < inputs; i++)
         {
