@@ -1,6 +1,11 @@
 # Production-function inventory seal; not a proof of review coverage or correctness.
+<<<<<<< HEAD
 sha256 29a14f9b1262634f11b40c8a2bd403da82b54e88cd749614f065185da1c56c93
 c_functions 8692
+=======
+sha256 75ecf7d53e8dd3227a5a63dc9d451e346c2dfc00d317603445ff67e312db4741
+c_functions 8683
+>>>>>>> 0d08c771 (find -L and -follow report a loop of links as GNU's fts does: the dangling-link fallback in the tree walk took any failure to follow a link for a link, ELOOP included, so find . -follow -name loop1 on a two-link loop printed ./loop1 and exited 0 where GNU prints find: './loop1': Too many levels of symbolic links for each link of the loop and exits 1. Now only a target that is missing (ENOENT) is tested as the link, and every other failure goes through the walk's own message and status, as the serial walk already did. Held by the files lane's find rows: the loop cases (a self-link under -L, -follow and -H -L, as an operand and with a name) are added to the find utility's extra tier, red on 2fb2ee37 (336ee5007b75a226, the one row that differs) and green here, with 233 red rows on the parent and 233 here and none new. function_audit resealed.)
 library_asm 395
 library_arch_bodies 1165
 library_aliases 98

@@ -17553,8 +17553,11 @@ static fn find_tree_enter(address_any context, address_any node_address,
                                                       address_of facts);
 
                         /* -L follows links that have targets. A dangling
-                           link is still an entry and is tested as a link. */
-                        if (code < 0 && follow &&
+                           link (no entry at the end of it) is still an entry
+                           and is tested as a link; a loop of links or any
+                           other failure to follow one is reported, as GNU
+                           find's fts reports it. */
+                        if (code == -ERROR_NO_ENTRY && follow &&
                             file_look(directory, name, AT_SYMLINK_NOFOLLOW, address_of facts))
                                 code = 0;
                         if (code >= 0)

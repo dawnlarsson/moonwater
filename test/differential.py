@@ -6775,6 +6775,12 @@ files_FIND_ACTIONS = (
     ("-ok", "echo", "{}", "+"),
 )
 
+#       A link that loops on itself is an error to -L and -follow: GNU find
+#       reports it as ELOOP and exits 1, and does not take it for a link.
+files_FIND_LOOPS = (
+    (".", "-L", "-name", "loop"), (".", "-follow", "-name", "loop"), (".", "-L", "-type", "l"),
+    ("loop",), ("-L", "loop"), ("loop", "-follow"), (".", "-H", "-L", "-name", "loop"),
+)
 files_FIND_BROKEN = (
     ("-nonsense",), (".", "-nonsense"), (".", "(", "-name", "a.txt"), (".", "-name", "a.txt", ")"),
     (".", "-exec", "echo", "{}"), (".", "-name"), (".", "-name", "a.txt", "dir"), (".", "-o", "-name", "a.txt"),
@@ -7964,7 +7970,7 @@ FILES_UTILITIES = (
     Utility("find", options=(Option("-H"), Option("-L"), Option("-P"),
                              Option("-O", ("0", "1", "2", "3"), True)),
             operands=files_FIND_WALKED, stdin=("files_yes", "files_no"), fixture="files", stderr="exact",
-            normalize=files_listing, extra=files_find_expressions(360) + files_FIND_BROKEN + files_FIND_CARET,
+            normalize=files_listing, extra=files_find_expressions(360) + files_FIND_BROKEN + files_FIND_CARET + files_FIND_LOOPS,
             max_flags=2),
     Utility("stat", options=(Option("-L"), Option("-f"), Option("-t"), Option("--dereference"),
                              Option("--file-system"), Option("--terse"),
