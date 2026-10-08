@@ -5879,7 +5879,7 @@ static bool file_output_told(string_address program)
                 return true;
 
         string_format(log_error, "%s: write error: %s\n", program,
-                      file_reason(wrote.error ? wrote.error : -28));
+                      file_reason(wrote.error ? wrote.error : -(bipolar)log_failed()));
         return false;
 }
 
