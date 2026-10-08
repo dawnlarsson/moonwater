@@ -1126,9 +1126,12 @@ static fn job_marks_settle()
 
 static fn job_drop_at(positive at)
 {
+        positive number;
+
         if (at >= job_count)
                 return;
 
+        number = job_table[at].number;
         if (job_table[at].text)
                 memory_give(job_table[at].text);
 
@@ -1142,7 +1145,13 @@ static fn job_drop_at(positive at)
         array_remove(job_table, job_count, at);
         job_front = 0;
 
-        job_marks_settle();
+        /* The marks name jobs that are still here, so they can only move
+           when the job that went was one of them (or none is marked). Asking
+           job_find for both on every drop was a pass over the table for each
+           job, which waiting for ten thousand of them made a hundred million
+           compares. */
+        if (number == job_current || number == job_previous || !job_previous)
+                job_marks_settle();
 
         // A shell with no jobs left starts numbering again, which is what
         // makes the first job of the next command [1] rather than [57].
@@ -1394,6 +1403,7 @@ static positive job_started(bipolar address_to children, positive count,
                 return 0;
 
         entry = job_table + job_count++;
+        shell_wait_rows_changed = true;
         if (children[count - 1] > job_pid_high)
                 job_pid_high = children[count - 1];
 
@@ -1782,7 +1792,10 @@ fn job_reap()
 {
         job_child_news = false;
 
-        for (positive at = 0; at < shell_wait_count; at++)
+        /* The rows before shell_wait_front are done, so the sweep starts at
+           the first one that is not: a wait for each of ten thousand pids
+           walked every finished row to find the few still running. */
+        for (positive at = shell_wait_front; at < shell_wait_count; at++)
         {
                 shell_wait_entry address_to entry = shell_wait_table + at;
                 bipolar pid;
@@ -3531,9 +3544,9 @@ static b32 job_wait_job(positive found, string_address into,
         //      The last child's own wait word, so an exit code past 128 is
         //      filed as an exit and not as the signal it would spell.
         raw = answer > 128 ? (positive)(answer - 128) : (positive)answer << 8;
-        for (positive at = 0; at < shell_wait_count; at++)
-                if (shell_wait_table[at].job == last &&
-                    (shell_wait_table[at].flags & SHELL_WAIT_LAST) &&
+        for (positive at = shell_wait_find_job(last);
+             at < shell_wait_count && shell_wait_table[at].job == last; at++)
+                if ((shell_wait_table[at].flags & SHELL_WAIT_LAST) &&
                     (shell_wait_table[at].flags & SHELL_WAIT_DONE))
                         raw = shell_wait_table[at].status;
         if (forget && !address_to interrupted)
@@ -3744,7 +3757,10 @@ fn job_wait(writer write, string_address input)
                 {
                         positive at;
 
-                        for (at = 0; at < job_count; at++)
+                        /* The jobs before job_front are finished, which
+                           neither state waits for: the look starts there,
+                           not at the first of ten thousand finished jobs. */
+                        for (at = job_front; at < job_count; at++)
                                 if (job_table[at].state == JOB_RUNNING ||
                                     (force &&
                                      job_table[at].state == JOB_STOPPED))
@@ -3902,7 +3918,15 @@ fn job_wait(writer write, string_address input)
                                                         address_of interrupted,
                                                         shell_posix_on(),
                                                         false);
-                                job_prune();
+                                /* A job with no rows left is pruned; without a
+                                   row or a job made since the last prune there
+                                   is none, and pruning on every operand was a
+                                   pass over the table for each of them. */
+                                if (shell_wait_rows_changed)
+                                {
+                                        job_prune();
+                                        shell_wait_rows_changed = false;
+                                }
 
                                 if (interrupted)
                                         break;

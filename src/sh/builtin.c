@@ -12869,11 +12869,13 @@ HOT fn shell_test(writer write, string_address input)
                 }
         }
 
+
         value = test_expression();
 
         if (test_bad || test_at != test_stop)
         {
                 return_if(test_said, shell_answer(2));
+
 
                 return shell_refuse(
                     2, test_bad ? "%s: %s: unexpected operator\n"
@@ -20894,6 +20896,20 @@ static positive shell_wait_count HOT_STATE;
 static positive shell_wait_front HOT_STATE;
 static bipolar shell_wait_pid_high;
 
+/* Where each job's first row is: open addressing on the job, holding the
+   row plus one (zero is empty), so a wait for a pid finds its rows without
+   reading the table to them. It is valid while the rows stay where they are;
+   a drop or a compaction makes it stale, and the next look builds it again
+   from the rows. A job's rows are appended together, so the first is the
+   one a look needs. */
+static positive address_to shell_wait_slots;
+static positive shell_wait_slot_room;
+static bool shell_wait_slots_valid;
+
+/* Set when a row goes or a job starts, so the job table is pruned against
+   the rows at the next wait by pid and not on every one of them. */
+bool shell_wait_rows_changed;
+
 #define SHELL_WAIT_DONE 1
 #define SHELL_WAIT_LAST 2
 #define SHELL_WAIT_PIPEFAIL 4
@@ -20911,18 +20927,114 @@ static bool shell_background_reserve(positive count)
                                 shell_wait_count + count);
 }
 
-static PURE positive shell_wait_find_job_from(bipolar job, positive from)
+static fn shell_wait_slots_build()
 {
+        positive want = 16;
+        positive mask;
+
+        while (want < 2 * shell_wait_count)
+                want <<= 1;
+        if (want > shell_wait_slot_room)
+        {
+                if (shell_wait_slots)
+                        memory_give(shell_wait_slots);
+                shell_wait_slots = (positive address_to)memory_take(want * sizeof(positive));
+                shell_wait_slot_room = want;
+        }
+        if (!shell_wait_slots)
+        {
+                shell_wait_slot_room = 0;
+                return;
+        }
+        mask = shell_wait_slot_room - 1;
+        memory_fill(shell_wait_slots, 0, shell_wait_slot_room * sizeof(positive));
+
+        for (positive at = 0; at < shell_wait_count; at++)
+        {
+                positive slot = (positive)shell_wait_table[at].job * 0x9e3779b1u & mask;
+                bool present = false;
+
+                while (shell_wait_slots[slot])
+                {
+                        if (shell_wait_table[shell_wait_slots[slot] - 1].job == shell_wait_table[at].job)
+                        {
+                                present = true;
+                                break;
+                        }
+                        slot = (slot + 1) & mask;
+                }
+                if (!present)
+                        shell_wait_slots[slot] = at + 1;
+        }
+
+        shell_wait_slots_valid = true;
+}
+
+/* A row appended for a job whose first row the index does not hold yet. */
+static fn shell_wait_slot_add(bipolar job, positive row)
+{
+        positive mask;
+        positive slot;
+
+        if (!shell_wait_slots_valid)
+                return;
+        if (2 * shell_wait_count > shell_wait_slot_room)
+        {
+                shell_wait_slots_valid = false;
+                return;
+        }
+
+        mask = shell_wait_slot_room - 1;
+        slot = (positive)job * 0x9e3779b1u & mask;
+        while (shell_wait_slots[slot])
+        {
+                if (shell_wait_table[shell_wait_slots[slot] - 1].job == job)
+                        return;
+                slot = (slot + 1) & mask;
+        }
+        shell_wait_slots[slot] = row + 1;
+}
+
+static positive shell_wait_find_job(bipolar job)
+{
+        positive mask;
+        positive slot;
+
+        if (!shell_wait_slots_valid)
+                shell_wait_slots_build();
+        if (!shell_wait_slots_valid)
+        {
+                // No memory for the index: the rows themselves answer.
+                for (positive at = 0; at < shell_wait_count; at++)
+                        if (shell_wait_table[at].job == job)
+                                return at;
+                return shell_wait_count;
+        }
+
+        mask = shell_wait_slot_room - 1;
+        slot = (positive)job * 0x9e3779b1u & mask;
+        while (shell_wait_slots[slot])
+        {
+                positive at = shell_wait_slots[slot] - 1;
+
+                if (shell_wait_table[at].job == job)
+                        return at;
+                slot = (slot + 1) & mask;
+        }
+
+        return shell_wait_count;
+}
+
+static positive shell_wait_find_job_from(bipolar job, positive from)
+{
+        if (!from)
+                return shell_wait_find_job(job);
+
         for (positive at = from < shell_wait_count ? from : 0; at < shell_wait_count; at++)
                 if (shell_wait_table[at].job == job)
                         return at;
 
         return shell_wait_count;
-}
-
-static PURE positive shell_wait_find_job(bipolar job)
-{
-        return shell_wait_find_job_from(job, 0);
 }
 
 // Where the look for the next job's rows begins: wait with no operands has
@@ -20976,7 +21088,11 @@ static fn shell_wait_drop(bipolar job)
                         shell_wait_table[into++] = shell_wait_table[at];
 
         if (into != shell_wait_count)
+        {
                 shell_wait_front = 0;
+                shell_wait_slots_valid = false;
+                shell_wait_rows_changed = true;
+        }
         shell_wait_count = into;
 }
 
@@ -21011,6 +21127,7 @@ bool shell_background_started(bipolar address_to children, positive count,
         if (!shell_background_reserve(count))
                 return false;
 
+        shell_wait_rows_changed = true;
         for (positive at = 0; at < count; at++)
         {
                 shell_wait_entry address_to entry =
@@ -21021,6 +21138,8 @@ bool shell_background_started(bipolar address_to children, positive count,
                 entry->status = 0;
                 entry->flags = flags |
                                (at + 1 == count ? SHELL_WAIT_LAST : 0);
+                if (at == 0)
+                        shell_wait_slot_add(job, shell_wait_count - 1);
         }
 
         return true;
@@ -21032,6 +21151,8 @@ fn shell_background_child()
            cannot inherit is the parent's right to wait for those children. */
         shell_wait_count = 0;
         shell_wait_front = 0;
+        shell_wait_slots_valid = false;
+        shell_wait_rows_changed = true;
 }
 
 // The rows before the first that is not done.
@@ -21250,12 +21371,16 @@ COLD fn shell_wait(writer write, string_address input)
                                     (shell_wait_count - done) * sizeof(*shell_wait_table));
                         shell_wait_count -= done;
                         shell_wait_front = 0;
+                        shell_wait_slots_valid = false;
+                        shell_wait_rows_changed = true;
                         return shell_answer(answer);
                 }
         }
 
         shell_wait_count = 0;
         shell_wait_front = 0;
+        shell_wait_slots_valid = false;
+        shell_wait_rows_changed = true;
         shell_answer(0);
 }
 
