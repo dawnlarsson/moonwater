@@ -575,6 +575,9 @@ static b32 screen_term()
 #define INK_FRONT 0x000066cc
 #define INK_BARE 0x0022bb55
 
+// How long the keyboard demo runs: 240 turns of 25 ms, as it always has.
+#define SCREEN_WINDOW_LIFETIME 6000000000ll
+
 static void fill(struct window *window, unsigned int colour)
 {
         unsigned int *pixels = window_pixels(window);
@@ -632,12 +635,16 @@ static b32 screen_window()
         window_commit(bare);
 
         // Show what a keyboard says, in the titlebar of the window that has
-        // focus. Nothing is polled: keys arrive in the page.
-        for (int i = 0; i < 240; i++)
+        // focus. Nothing is polled: keys arrive in the page, and the window
+        // wakes for them. The demo runs for six seconds whatever wakes it.
+        positive until = clock_monotonic_nanoseconds() + SCREEN_WINDOW_LIFETIME;
+
+        for (;;)
         {
                 struct window_key key;
                 unsigned int typed = 0;
                 char line[] = "typed:  ";
+                positive now;
 
                 while (window_key(back, &key))
                         if ((key.flags & WINDOW_KEY_DOWN) && key.character >= ' ')
@@ -652,7 +659,11 @@ static b32 screen_window()
                         window_commit(back);
                 }
 
-                hold(0, 25000000);
+                now = clock_monotonic_nanoseconds();
+                if (now >= until)
+                        break;
+
+                window_wait(back, -1, (long)(until - now));
         }
 
         // Put one away and let the other cover its display.
@@ -679,6 +690,9 @@ static b32 screen_window()
 #define TEXT_COLUMNS_WANTED 60
 #define TEXT_ROWS_WANTED 18
 #define TYPED_MAX 46
+
+// How long the text window stays: 800 turns of 10 ms, as it always has.
+#define TEXT_LIFETIME 8000000000ll
 
 static unsigned int columns, rows;
 static char typed[TYPED_MAX];
@@ -771,10 +785,13 @@ static b32 screen_text()
         window->region = WINDOW_CENTRED;
         window_commit(window);
 
-        for (int tick = 0; tick < 800; tick++)
+        positive until = clock_monotonic_nanoseconds() + TEXT_LIFETIME;
+
+        for (;;)
         {
                 struct window_key key;
                 b32 changed = 0;
+                positive now;
 
                 if (window_regrid(window))
                 {
@@ -801,7 +818,14 @@ static b32 screen_text()
                 if (changed)
                         window_flush(window);
 
-                hold(0, 10000000);
+                // Asleep until a key, a new grid or the close request, and
+                // no longer than the time left: the window lives for the same
+                // eight seconds, counted on the clock rather than in naps.
+                now = clock_monotonic_nanoseconds();
+                if (now >= until)
+                        break;
+
+                window_wait(window, -1, (long)(until - now));
         }
 
         window_close(window);

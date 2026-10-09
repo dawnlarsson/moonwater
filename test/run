@@ -16490,6 +16490,42 @@ if len(runs) >= 2:
     out.append(("and the rest of its string never runs",
                 str(serial_text.count(b"stringran-on")), "0"))
 
+    #       The text window waits for its events, not for a nap. Two reads of
+    #       its own status file, with the uptime beside each, give the turns it
+    #       took between them: a nap every 10 ms was 99.7 a second on the box,
+    #       and the window's wait leaves what the compositor's refresh of its
+    #       page wakes, 25.2 a second there. The bound is 40 a second.
+    def shell_line(line):
+        shifted = {"&": "7", "!": "1", "$": "4", ">": "dot", '"': "apostrophe", "_": "minus"}
+        plain = {" ": "spc", ".": "dot", "/": "slash", "-": "minus", ";": "semicolon", "\n": "ret"}
+        for character in line:
+            if character.isupper():
+                chord("shift", character.lower())
+            elif character in shifted:
+                chord("shift", shifted[character])
+            else:
+                key(plain.get(character, character))
+
+    shell_line("text &\n")
+    time.sleep(1.0)
+    shell_line("cat /proc/uptime /proc/$!/status > /dev/ttyS0\n")
+    time.sleep(1.0)
+    shell_line("cat /proc/uptime /proc/$!/status > /dev/ttyS0")
+    time.sleep(1.5)
+    key("ret")
+    time.sleep(3.0)
+    idle_serial = open(work + "/serial", "rb").read().replace(b"\r", b"")
+    idle_rows = re.findall(rb"(?m)^(\d+\.\d+) \d+\.\d+\n.*?(?<!non)voluntary_ctxt_switches:\s*(\d+)", idle_serial, re.S)
+    turns_rate = -1.0
+    if len(idle_rows) >= 2:
+        (first_up, first_turns), (last_up, last_turns) = idle_rows[-2], idle_rows[-1]
+        span = float(last_up) - float(first_up)
+        if span > 0:
+            turns_rate = (int(last_turns) - int(first_turns)) / span
+    out.append(("the text window takes under 40 turns a second, not a nap each 10 ms",
+                "yes" if 0 <= turns_rate < 40 else "%.1f a second" % turns_rate, "yes"))
+    time.sleep(4.0)
+
     # A framed pixel window cannot grow beyond the mapping its client owns.
     # This used to maximize to desktop dimensions anyway, then compose read
     # those invented pixels past the end of the mapping. The window demo's
