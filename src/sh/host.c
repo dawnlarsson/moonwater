@@ -11448,11 +11448,16 @@ static b32 tune_hibernate_verb(string_address address_to arguments, positive cou
         rather than collecting more samples from it.
 
         No step lands before SNTP_WALL_LEAST, which is not a guess at what
-        clocks read but the date of this source: a clock set earlier than
-        the code that set it is wrong by construction, which is systemd's
-        TIME_EPOCH rule. Moving it forward with each release is what keeps
-        an answer from taking the clock back to when a revoked or expired
-        certificate was still good.
+        clocks read but the date of this source (MOONWATER_CLOCK_FLOOR in
+        net.c, where the certificate check reads the same floor): a clock
+        set earlier than the code that set it is wrong by construction,
+        which is systemd's TIME_EPOCH rule. Moving it forward with each
+        release is what keeps an answer from taking the clock back to when a
+        revoked or expired certificate was still good. And no step lands
+        before clock_trust_floor either, the latest time an authenticated
+        answer or this machine's own uptime ever put in /root/clock.good, so
+        a forged answer cannot take a machine back to a date it was already
+        past.
 
         SNTP_WALL_MOST ends that window at the last second sntp_load_stamp
         can read, 2104-02-26 09:42:23 UTC: a stamp whose high bit is set is
@@ -11536,13 +11541,16 @@ static b32 tune_hibernate_verb(string_address address_to arguments, positive cou
 #define SNTP_RATE_LIMITED (SNTP_ANSWER - 5)
 #define SNTP_UNCONFIRMED (SNTP_ANSWER - 6)
 #define SNTP_DENIED (SNTP_ANSWER - 7)
+//      The answer was earlier than this machine has already been: its build,
+//      or the last time it was sure (clock_trust_floor).
+#define SNTP_BELOW_FLOOR (SNTP_ANSWER - 8)
 #define SNTP_KISS_RATE 0x52415445u /* "RATE" */
 #define SNTP_KISS_DENY 0x44454e59u /* "DENY" */
 #define SNTP_KISS_RSTR 0x52535452u /* "RSTR" */
 #define SNTP_DELAY_MOST_NS ((bipolar)2 * (bipolar)SNTP_NANOSECONDS)
 #define SNTP_OFFSET_MOST_NS ((bipolar)24 * 3600 * (bipolar)SNTP_NANOSECONDS)
 #define SNTP_OFFSET_SYNCED_NS ((bipolar)2 * (bipolar)SNTP_NANOSECONDS)
-#define SNTP_WALL_LEAST 1788220800ll /* 2026-09-01 */
+#define SNTP_WALL_LEAST MOONWATER_CLOCK_FLOOR
 #define SNTP_WALL_MOST 4233462143ll  /* 2104-02-26 09:42:23, the era 1 stamp ends */
 #define SNTP_WALL_LEAST_NS \
         ((bipolar)SNTP_WALL_LEAST * (bipolar)SNTP_NANOSECONDS)
@@ -13838,6 +13846,8 @@ static string_address locale_auto_reason(bipolar status)
         case HTTP_NOT_YET:
         case HTTP_MISMATCH:
                 return (string_address) "TLS failed -- is the clock right?";
+        case HTTP_CLOCK:
+                return (string_address) "the clock is unset";
         case HTTP_STATUS:
                 return (string_address) "it answered with an error";
         case HTTP_MALFORMED:
@@ -14017,6 +14027,11 @@ static b32 locale_time_status(void)
         gmtime_r(address_of stamp, address_of broken);
         strftime(when, sizeof(when), "%Y-%m-%d %H:%M:%S", address_of broken);
         string_format(log, "  utc   %s\n", when);
+        if (stamp < 0 || (p64)stamp < clock_trust_floor())
+                host_say(log, "  clock unset: it reads earlier than this "
+                              "system's build or the last time it was sure, "
+                              "so certificates cannot be checked;\n"
+                              "  moonwater time sync sets it\n");
         host_say(log, "  ntp %s, %s\n", locale_switch_say(LOCALE_NTP_PATH),
                  locale_clock_synced() ? "synchronised" : "waiting");
         return 0;
@@ -14029,7 +14044,14 @@ static b32 locale_time_sync(void)
         locale_ntp_moved_ns = 0;
         locale_ntp_answered[0] = end;
         failed = locale_ntp_apply(true);
-        if (failed < 0 && locale_ntp_answered[0])
+        if (failed == SNTP_BELOW_FLOOR)
+                string_format(log, host_label "time: %s answered earlier than "
+                                   "this machine has already been (its build "
+                                   "or the last time it was sure), so the "
+                                   "clock was left alone; remove "
+                                   "/root/clock.good if that is wrong\n",
+                              locale_ntp_answered);
+        else if (failed < 0 && locale_ntp_answered[0])
                 string_format(log, host_label "time: %s answered, but the "
                                    "clock could not be set: %s\n",
                               locale_ntp_answered,
@@ -14401,6 +14423,8 @@ static bipolar locale_ntp_apply_offset(bipolar offset_ns, bipolar distance_ns)
                 return now;
         if (!sntp_target_ok(now, offset_ns, address_of target))
                 return SNTP_MALFORMED;
+        if (target < (bipolar)clock_trust_floor() * (bipolar)SNTP_NANOSECONDS)
+                return SNTP_BELOW_FLOOR;
 
         locale_ntp_first = !locale_ntp_synced;
         locale_ntp_discipline_words(offset_ns, locale_ntp_error_us(distance_ns),
@@ -14451,6 +14475,144 @@ static bipolar locale_ntp_apply_offset(bipolar offset_ns, bipolar distance_ns)
                 return failed;
         locale_clock_mark_synced(locale_ntp_error_us(distance_ns));
         return 0;
+}
+
+/*
+        The last time this machine knew for certain, kept in /root/clock.good
+        for the next boot's floor (clock_trust_floor, net.c).
+
+        What may be written is what no forged answer can have moved. After an
+        authenticated (NTS) answer, /run/moonwater/clock.auth holds the wall
+        second it set and the boot second it was set at, and the time now is
+        that wall second plus the boot seconds since: the machine's own
+        uptime, which no later step of the wall clock changes. With no such
+        answer this boot, the wall clock is not read at all: what is written
+        is the floor the boot began with (/run/moonwater/clock.base, kept once
+        a boot) plus the seconds the machine has run, which is a lower bound
+        on the time whatever any answer said, so no forgery, plain or not, can
+        put the floor ahead of the truth and lock the real time out; it lags
+        the truth by the time the machine spent switched off. The file only
+        ever goes forward, is written in place and never through a link, and
+        is written after every authenticated answer, every six hours of
+        uptime and when the machine stops.
+*/
+#define LOCALE_CLOCK_AUTH_PATH HOST_STATE "/clock.auth"
+#define LOCALE_CLOCK_BASE_PATH HOST_STATE "/clock.base"
+#define LOCALE_CLOCK_GOOD_EVERY ((p64)6 * 3600 * SNTP_NANOSECONDS)
+
+static p64 locale_clock_next;
+
+//      A decimal number of at most twelve digits at text + *at, moving *at
+//      past it; false when there is none.
+static bool locale_clock_number(string_address text, positive address_to at,
+                                p64 address_to value)
+{
+        p64 number = 0;
+        positive from = address_to at;
+
+        while (text[address_to at] >= '0' && text[address_to at] <= '9' &&
+               address_to at - from < 12)
+        {
+                number = number * 10 + (p64)(text[address_to at] - '0');
+                address_to at += 1;
+        }
+        if (address_to at == from)
+                return false;
+        address_to value = number;
+        return true;
+}
+
+//      What the authenticated answer puts the time at now, or 0; with
+//      elapsed, the boot seconds since it was given.
+static p64 locale_clock_authenticated_now(p64 address_to elapsed)
+{
+        p8 text[48];
+        positive at = 0;
+        p64 wall;
+        p64 booted;
+        p64 now_boot = system_clock_ns(HOST_CLOCK_BOOTTIME) / SNTP_NANOSECONDS;
+
+        host_read_word(LOCALE_CLOCK_AUTH_PATH, text, sizeof(text));
+        if (!locale_clock_number((string_address)text, address_of at, address_of wall) ||
+            text[at++] != ' ' ||
+            !locale_clock_number((string_address)text, address_of at, address_of booted) ||
+            text[at] || booted > now_boot)
+                return 0;
+        if (elapsed)
+                address_to elapsed = now_boot - booted;
+        return wall + (now_boot - booted);
+}
+
+//      The floor this boot started with, which /run/moonwater/clock.base
+//      keeps so that every process can ask, or 0.
+static p64 locale_clock_base(void)
+{
+        p8 text[24];
+        positive at = 0;
+        p64 value;
+
+        host_read_word(LOCALE_CLOCK_BASE_PATH, text, sizeof(text));
+        return locale_clock_number((string_address)text, address_of at, address_of value) &&
+                       !text[at]
+                   ? value : 0;
+}
+
+static fn locale_clock_base_keep(void)
+{
+        p8 text[24];
+        positive length;
+
+        if (locale_clock_base())
+                return;
+        host_state_ready();
+        length = positive_into(text, (positive)clock_trust_floor());
+        text[length++] = '\n';
+        (void)host_write_file(LOCALE_CLOCK_BASE_PATH, text, length, 0644, false);
+}
+
+static bool locale_clock_persist(bool sync)
+{
+        p64 floor = clock_trust_floor();
+        p64 value = locale_clock_authenticated_now(null);
+        p8 text[24];
+        positive length;
+
+        if (!value)
+        {
+                p64 base = locale_clock_base();
+
+                //      Nothing a forged answer can have moved: the floor the
+                //      boot started with and the seconds the machine has run
+                //      since.
+                if (!base)
+                        return false;
+                value = base + system_clock_ns(HOST_CLOCK_BOOTTIME) /
+                                   SNTP_NANOSECONDS;
+        }
+        if (value <= floor || value > CLOCK_GOOD_MOST)
+                return false;
+        length = positive_into(text, (positive)value);
+        text[length++] = '\n';
+        return host_write_file(CLOCK_GOOD_PATH, text, length, 0644, sync) >= 0;
+}
+
+//      Every six hours of uptime, from the machine loop; a minute later
+//      when there was nothing yet to keep.
+static fn locale_clock_keep(void)
+{
+        p64 now = system_clock_ns(HOST_CLOCK_BOOTTIME);
+
+        if (now < locale_clock_next)
+                return;
+        locale_clock_next = now + (locale_clock_persist(false)
+                                       ? LOCALE_CLOCK_GOOD_EVERY
+                                       : (p64)60 * SNTP_NANOSECONDS);
+}
+
+//      When the machine stops, from the shell that stops it.
+static fn host_clock_stop(void)
+{
+        (void)locale_clock_persist(true);
 }
 
 static bipolar locale_ntp_ask(string_address server, bool filter, bipolar most,
@@ -15110,6 +15272,9 @@ static fn locale_restore(void)
         locale_ntp_retry = LOCALE_NTP_RETRY_LEAST;
         locale_ntp_synced = 0;
         locale_ntp_every = LOCALE_NTP_AGAIN_FIRST;
+        //      The floor this boot began with, once a boot, from the disk's
+        //      /root when one was taken.
+        locale_clock_base_keep();
         locale_auto_next = 0;
         locale_auto_wait = LOCALE_AUTO_LEAST;
         //      Only the machine process asks the time. `moonwater boot` comes
@@ -15192,6 +15357,7 @@ static fn locale_recover(void)
         now = system_clock_ns(HOST_CLOCK_BOOTTIME);
         locale_ntp_keep(online, synced, now);
         locale_auto_keep(locale_ntp_on, synced, now, network);
+        locale_clock_keep();
 }
 
 /*
@@ -16767,6 +16933,7 @@ static string_address host_wipe_keep[] = {
     HOST_WIPE_KEEP(LOCALE_NTP_PATH),
     HOST_WIPE_KEEP(LOCALE_NTP_SERVER_PATH),
     HOST_WIPE_KEEP(LOCALE_NTP_SAMPLING_PATH),
+    HOST_WIPE_KEEP(CLOCK_GOOD_PATH),
     HOST_WIPE_KEEP(LOCALE_KEYBOARD_PATH),
     HOST_WIPE_KEEP(LOCALE_CANVAS_SCALE_PATH),
     HOST_WIPE_KEEP(LOCALE_CANVAS_MODES_PATH),

@@ -45875,8 +45875,8 @@ while True:
                 said[current] = line
         check("no server answered" in said.get("closed", "") and closed_ms < 1800,
               "time sync against a port nobody listens on is over at once", f"{closed_ms} ms: {said.get('closed')}")
-        least = int(re.search(r"#define SNTP_WALL_LEAST (\d+)ll",
-                              (HARNESS_ROOT / "src/sh/host.c").read_text()).group(1))
+        least = int(re.search(r"#define MOONWATER_CLOCK_FLOOR (\d+)ll",
+                              (HARNESS_ROOT / "src/net/net.c").read_text()).group(1))
         most = int(re.search(r"#define SNTP_WALL_MOST (\d+)ll",
                              (HARNESS_ROOT / "src/sh/host.c").read_text()).group(1))
         for number, spec in enumerate(specs):
@@ -45895,6 +45895,103 @@ while True:
                    "none" if "no server answered" in answer else answer)
             want = "taken" if taken else "rated" if rated else "denied" if denied else "none"
             check(got == want, f"time sync against {spec} is {want}", got)
+
+        # The clock's floor: the latest time this machine already knows it is
+        # past is /root/clock.good, and an answer earlier than it moves nothing.
+        # A file that is not a plain number of seconds from the build to the end
+        # of the NTP window is no floor at all. The same server answers the real
+        # time each round.
+        script = ("ip link set lo up\npython3 /tmp/ntpd.py &\nntp_server=$!\nsleep 1\n"
+                  "echo 127.0.0.1 > /root/ntp.server\necho off > /root/ntp.sampling\n"
+                  f"printf '%s' {shlex.quote(json.dumps(base))} > /tmp/ntp.spec\n")
+        floors = [("a day ahead", "$(( $(date +%s) + 86400 ))", "earlier than"),
+                  ("a minute ahead", "$(( $(date +%s) + 60 ))", "earlier than"),
+                  ("right now", "$(( $(date +%s) - 5 ))", "answered, but"),
+                  ("before the build", "1000000000", "answered, but"),
+                  ("past the NTP window", "4233462144", "answered, but"),
+                  ("text", "abc", "answered, but"),
+                  ("a number and text", "'1799999999 x'", "answered, but"),
+                  ("a sign", "-5", "answered, but"),
+                  ("blank", "''", "answered, but"),
+                  ("a huge number", "99999999999999999999", "answered, but")]
+        for number, (label, value, _) in enumerate(floors):
+            script += (f"echo '@@ floor{number}'; echo {value} > /root/clock.good\n"
+                       "timeout 20 /tmp/moonwater time sync 2>&1 | head -1\n")
+        #   A day ahead behind a link is no floor either.
+        script += ("echo '@@ floor-link'; rm -f /root/clock.good; "
+                   "echo $(( $(date +%s) + 86400 )) > /tmp/clock.aside; "
+                   "ln -s /tmp/clock.aside /root/clock.good\n"
+                   "timeout 20 /tmp/moonwater time sync 2>&1 | head -1\n")
+        script += ("rm -f /root/clock.good /tmp/clock.aside\nkill $ntp_server\n"
+                   "wait $ntp_server 2>/dev/null || true\n")
+        lines, finished = session(script)
+        check(finished, "the clock floor walk finished", "")
+        said = {}
+        current = None
+        for line in lines:
+            if line.startswith("@@ floor"):
+                current = line[8:]
+            elif current is not None and current not in said:
+                said[current] = line
+        for number, (label, _, want) in enumerate(floors):
+            check(want in said.get(str(number), ""),
+                  f"time sync with clock.good {label} says '{want}'", said.get(str(number), ""))
+        check("answered, but" in said.get("-link", ""),
+              "time sync with clock.good a day ahead behind a link says 'answered, but'",
+              said.get("-link", ""))
+
+        # Stopping the machine keeps the time: from an authenticated answer's
+        # record plus the uptime since (so a later forged step cannot move it),
+        # or from the floor the boot began with plus the uptime, never backwards,
+        # never through a link.
+        #   The shell's own poweroff, which syncs and then asks the kernel to stop
+        #   the machine: it is refused here, for want of the capability in the
+        #   host's namespace, and the time has been kept before it is asked.
+        script = ("mkdir -p /run/moonwater\nln -sf /tmp/moonwater /tmp/msh\n"
+                  "up=$(cut -d. -f1 /proc/uptime)\n"
+                  "echo \"$(( $(date +%s) - 30 )) $(( up > 30 ? up - 30 : 0 ))\" > /run/moonwater/clock.auth\n"
+                  "rm -f /root/clock.good\n"
+                  "echo '@@ stop'; timeout 20 /tmp/msh -c poweroff 2>&1 | tail -1\n"
+                  "echo \"@@good $(cat /root/clock.good) $(date +%s)\"\n"
+                  "echo $(( $(date +%s) + 5000 )) > /root/clock.good\n"
+                  "timeout 20 /tmp/msh -c poweroff >/dev/null 2>&1\n"
+                  "echo \"@@kept $(cat /root/clock.good) $(date +%s)\"\n"
+                  "rm -f /root/clock.good /run/moonwater/clock.auth\n"
+                  "echo $(( $(date +%s) - $(cut -d. -f1 /proc/uptime) - 100 )) > /run/moonwater/clock.base\n"
+                  "timeout 20 /tmp/msh -c poweroff >/dev/null 2>&1\n"
+                  "echo \"@@floor $(cat /root/clock.good) $(date +%s)\"\n"
+                  "rm -f /root/clock.good /run/moonwater/clock.base\n"
+                  "timeout 20 /tmp/msh -c poweroff >/dev/null 2>&1\n"
+                  "echo \"@@nobase $(cat /root/clock.good 2>/dev/null | head -c 12)\"\n"
+                  "rm -f /root/clock.good\n"
+                  "ln -s /tmp/victim /root/clock.good; echo untouched > /tmp/victim\n"
+                  "echo \"$(( $(date +%s) - 30 )) 0\" > /run/moonwater/clock.auth\n"
+                  "timeout 20 /tmp/msh -c poweroff >/dev/null 2>&1\n"
+                  "echo \"@@victim $(cat /tmp/victim)\"\n"
+                  "rm -f /root/clock.good /run/moonwater/clock.auth /tmp/victim\n")
+        lines, finished = session(script)
+        for line in lines:
+            parts = line.split()
+            if line.startswith("@@good "):
+                then, now = (int(parts[1]), int(parts[2])) if len(parts) == 3 else (None, None)
+                check(then is not None and now - 10 <= then <= now + 5,
+                      "poweroff writes the authenticated time plus the uptime to clock.good", line)
+            elif line.startswith("@@kept "):
+                check(len(parts) == 3 and int(parts[1]) >= int(parts[2]) + 4000,
+                      "poweroff never lowers clock.good", line)
+            elif line.startswith("@@floor "):
+                then, now = (int(parts[1]), int(parts[2])) if len(parts) == 3 else (None, None)
+                check(then is not None and now - 110 <= then <= now - 90,
+                      "without an authenticated answer the floor is the boot's floor plus the "
+                      "uptime, not the wall clock's", line)
+            elif line.startswith("@@nobase "):
+                check(len(parts) == 1, "with no answer and no boot floor nothing is written", line)
+            elif line.startswith("@@victim "):
+                check(parts[1:] == ["untouched"],
+                      "poweroff does not write through a link planted as clock.good", line)
+        check(finished and all(any(line.startswith(mark) for line in lines)
+                               for mark in ("@@good ", "@@kept ", "@@floor ", "@@nobase", "@@victim ")),
+              "the poweroff rows ran", lines[-6:])
 
         # Zones set at once leave a zone and its mode that go together, and
         # every writer says it took.
@@ -47919,6 +48016,27 @@ def harness_tls_chains(argv):
          {"distrust": True, "serve_root": True}),
         ("distrust-after: root served first, leaf issued after", 2, good_leaf,
          {"distrust": True, "root_first": True}),
+        # The clock's floor (net.c clock_trust_floor): a clock that reads earlier
+        # than the build, or than /root/clock.good says the machine has been, is
+        # unset, and no certificate date is judged against it. A file that is no
+        # floor (text, past the NTP window, before the build, trailing text, a
+        # link, absent) changes nothing.
+        ("clock below the build floor", 2, good_leaf, {"shell": "floor"}),
+        ("clock below the last known good time", 2, good_leaf,
+         {"shell": "good", "clock_good": "future"}),
+        ("clock above the last known good time", 2, good_leaf,
+         {"shell": "good", "clock_good": "past"}),
+        ("a last known good time that is text", 2, good_leaf,
+         {"shell": "good", "clock_good": "text"}),
+        ("a last known good time past the NTP window", 2, good_leaf,
+         {"shell": "good", "clock_good": "far"}),
+        ("a last known good time before the build", 2, good_leaf,
+         {"shell": "good", "clock_good": "old"}),
+        ("a last known good time with trailing text", 2, good_leaf,
+         {"shell": "good", "clock_good": "trailing"}),
+        ("a last known good time behind a link", 2, good_leaf,
+         {"shell": "good", "clock_good": "link"}),
+        ("no last known good time", 2, good_leaf, {"shell": "good", "clock_good": None}),
     )
     keys = (("P-256", ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1"]),
             ("P-384", ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:secp384r1"]),
@@ -47929,6 +48047,8 @@ def harness_tls_chains(argv):
     every_key = ("P-256", "P-384", "RSA-2048")
     #       This tree's policy where it is stricter than openssl, on purpose.
     DELIBERATE = {
+        "clock below the build floor": "a clock before the build is unset, not merely wrong",
+        "clock below the last known good time": "a clock before the last time it was sure is unset",
         "distrust-after: leaf issued a second after": "Mozilla's distrust-after date; openssl has none",
         "distrust-after: leaf issued long after": "Mozilla's distrust-after date; openssl has none",
         "distrust-after: leaf under the root, issued after": "Mozilla's distrust-after date; openssl has none",
@@ -47974,6 +48094,10 @@ def harness_tls_chains(argv):
         "DNS constraints leave an IP name alone",
         "a DNS constraint is compared without case",
         "two CAs' DNS constraints, the leaf inside both",
+        "clock above the last known good time", "a last known good time that is text",
+        "a last known good time past the NTP window", "a last known good time before the build",
+        "a last known good time with trailing text", "a last known good time behind a link",
+        "no last known good time",
     }
     #       Where wget accepts what OpenSSL refuses, each with its reason and
     #       with Go's crypto/x509 on wget's side of it.
@@ -48091,6 +48215,21 @@ def harness_tls_chains(argv):
             return 1
         (work / "distrust").mkdir()
         (work / "distrust" / "wget").symlink_to(work / "shell_distrust")
+        #   The same shell with a floor in 2100 (every clock is below it), and
+        #   with the last-known-good file where the harness can write it.
+        for variant, defines in (("floor", ("MOONWATER_CLOCK_FLOOR=4102444800ll",)),
+                                 ("good", ('CLOCK_GOOD_PATH="%s/clock.good"' % work,))):
+            if not any(m[3].get("shell") == variant and (not args.only or args.only in m[0])
+                       for m in mutations):
+                continue
+            built = subprocess.run(spark_shell_command(
+                args.cc, work / ("shell_" + variant), bench_anchor(work), defines),
+                cwd=HARNESS_ROOT, capture_output=True, text=True)
+            if built.returncode:
+                print(built.stderr[-3000:])
+                return 1
+            (work / variant).mkdir()
+            (work / variant / "wget").symlink_to(work / ("shell_" + variant))
 
         #   caIssuers locations are served from the work directory.
         import functools
@@ -48273,7 +48412,8 @@ def harness_tls_chains(argv):
                     server = threading.Thread(target=serve, daemon=True)
                     server.start()
                     fetched = subprocess.run(
-                        [str(work / ("distrust/wget" if change.get("distrust") else "wget")),
+                        [str(work / ((change.get("shell") or
+                                      ("distrust" if change.get("distrust") else ".")) + "/wget")),
                          "-q", "-O", "-", "https://127.0.0.1:%d/" %
                          listener.getsockname()[1]], capture_output=True, timeout=30,
                         env={"PATH": "/usr/bin:/bin", "HOME": str(work)})
@@ -48281,6 +48421,24 @@ def harness_tls_chains(argv):
                     listener.close()
                     return fetched
 
+                if "clock_good" in change:
+                    kept = work / "clock.good"
+                    now_s = int(time.time())
+                    kept.unlink(missing_ok=True)
+                    (work / "clock.aside").unlink(missing_ok=True)
+                    if change["clock_good"] == "link":
+                        #   A day ahead, but behind a link: no floor.
+                        (work / "clock.aside").write_text("%d\n" % (now_s + 86400))
+                        kept.symlink_to(work / "clock.aside")
+                    elif change["clock_good"] is not None:
+                        kept.write_text({"future": "%d\n" % (now_s + 86400),
+                                         "past": "%d\n" % (now_s - 86400),
+                                         "text": "soon\n",
+                                         #   SNTP_WALL_MOST + 1, the NTP window's end.
+                                         "far": "4233462144\n",
+                                         "old": "1000000000\n",
+                                         "trailing": "%d x\n" % (now_s + 86400)
+                                         }[change["clock_good"]])
                 fetched = fetch(context)
                 # The same chain over TLS 1.2, whose Certificate is relaid
                 # for the one chain check: the verdict may not move.
@@ -48316,9 +48474,19 @@ def harness_tls_chains(argv):
                     checks(fetched.returncode == 5,
                            "%s: wget refuses the certificate with status %d, not GNU wget's 5 (%s)" % (
                                name, fetched.returncode, said.strip()[:200]))
-                    checks(said == line + "\nTo connect to 127.0.0.1 insecurely, use "
-                                   "`--no-check-certificate'.\n",
-                           "%s: wget says %r, not %r" % (name, said[:200], line))
+                    if mutation.startswith("clock below"):
+                        #   Not a certificate's fault but the clock's: no
+                        #   date was judged, and the way out is to set it.
+                        line = ("ERROR: The system clock has not been set (it reads before "
+                                "this system was built), so the certificate of '127.0.0.1' "
+                                "cannot be checked.\nRun `moonwater time sync`, or set it "
+                                "with `date -s`. To connect to 127.0.0.1 insecurely, use "
+                                "`--no-check-certificate'.\n")
+                        checks(said == line, "%s: wget says %r, not %r" % (name, said[:300], line))
+                    else:
+                        checks(said == line + "\nTo connect to 127.0.0.1 insecurely, use "
+                                       "`--no-check-certificate'.\n",
+                               "%s: wget says %r, not %r" % (name, said[:200], line))
                     #   (A server whose own key usage forbids the ECDHE signature
                     #   never sends the certificate over 1.2: that is 4.)
                     checks((fetched12.returncode, fetched12.stderr) in (
@@ -49902,6 +50070,7 @@ typedef struct { positive began; positive budget; } network_deadline;
 #define TLS_EXPIRED (-3)
 #define TLS_NOT_YET (-4)
 #define TLS_MISMATCH (-5)
+#define TLS_CLOCK (-6)
 #define ENOSPC 28
 #define NETWORK_INTERRUPTED (-4)
 #define syscall(name) 0
@@ -51050,6 +51219,7 @@ static bipolar network_stream_read_some_for(bipolar h, p8 *into, positive room,
 #define TLS_EXPIRED (-3)
 #define TLS_NOT_YET (-4)
 #define TLS_MISMATCH (-5)
+#define TLS_CLOCK (-6)
 typedef struct
 {
         p8 *receive;
@@ -55183,12 +55353,15 @@ def tls_verify_chain_lift(net, now=None, aia=None):
         "static COLD bool tls_certificate_names_chain(").replace(
         "#include TLS_BENCH_ANCHOR\n", "")
     anchor_code += src_slice(net, "/* The last certificate served names its issuer.",
-                                "static COLD bool tls_date_now(p64 address_to value)")
+                                "/*\n        Whether the clock can be believed at all")
     if now:
         date = ("static bool tls_date_now(p64 address_to value)\n"
                 "{\n        address_to value = %s;\n        return true;\n}\n" % now)
     else:
-        date = "#include <time.h>\ntypedef struct tm tm;\n" + src_slice(
+        #   The floor is the clock's own business (tls_chains holds it); the
+        #   lift reads libc's clock as it is.
+        date = ("#include <time.h>\ntypedef struct tm tm;\n"
+                "static p64 clock_trust_floor(void) { return 0; }\n") + src_slice(
             net, "static COLD bool tls_date_now(p64 address_to value)",
             "static COLD bool tls_cert_current(")
     return (r"""
@@ -55196,6 +55369,7 @@ def tls_verify_chain_lift(net, now=None, aia=None):
 #define TLS_FAULT_EARLY 1
 #define TLS_FAULT_LATE 2
 #define TLS_FAULT_NAME 3
+#define TLS_FAULT_CLOCK 4
 typedef struct
 {
         bool check_cert;
@@ -55621,6 +55795,32 @@ int main(void)
                "tag %#x %r: this client says %r, RFC 5280 says %s" % (tag, text, answer, want))
     checks(accepted > 200, "only %d of %d samples are valid: the grammar reaches little" % (
         accepted, len(samples)))
+    # The clock's build floor (net.c MOONWATER_CLOCK_FLOOR, which host.c's SNTP
+    # names SNTP_WALL_LEAST) is the date of the source: not ahead of the
+    # machine's own clock, and in a git checkout not more than 120 days behind
+    # the newest commit, so it moves with releases. The last-known-good file's
+    # ceiling is the end of SNTP's window, the same number in both files.
+    floor = re.search(r"#define MOONWATER_CLOCK_FLOOR (\d+)ll", net)
+    checks(floor is not None, "net.c no longer defines MOONWATER_CLOCK_FLOOR")
+    if floor:
+        floor = int(floor.group(1))
+        checks(floor <= time.time(),
+               "MOONWATER_CLOCK_FLOOR %d is ahead of this machine's clock" % floor)
+        if (HARNESS_ROOT / ".git").exists() and shutil.which("git"):
+            stamp = subprocess.run(["git", "log", "-1", "--format=%ct"], cwd=HARNESS_ROOT,
+                                   capture_output=True, text=True)
+            if stamp.returncode == 0 and stamp.stdout.strip():
+                newest = int(stamp.stdout)
+                checks(newest - 120 * 86400 <= floor <= newest,
+                       "MOONWATER_CLOCK_FLOOR %d is not within 120 days before the newest "
+                       "commit %d" % (floor, newest))
+    host = (HARNESS_ROOT / "src/sh/host.c").read_text()
+    checks("#define SNTP_WALL_LEAST MOONWATER_CLOCK_FLOOR\n" in host,
+           "host.c's SNTP_WALL_LEAST is not the clock's floor")
+    most = re.search(r"#define SNTP_WALL_MOST (\d+)ll", host)
+    good_most = re.search(r"#define CLOCK_GOOD_MOST (\d+)ll", net)
+    checks(most and good_most and most.group(1) == good_most.group(1),
+           "net.c's CLOCK_GOOD_MOST is not host.c's SNTP_WALL_MOST")
     return checks.verdict("tls dates", "tls-dates")
 
 
@@ -56717,7 +56917,13 @@ def sntp_fuzz_source(host):
         sec(host, "#define LOCALE_TIMEX_ESTERROR", "static fn locale_clock_mark_synced("),
         sec(host, "static bool locale_ntp_first;", "static const char locale_ntp_fallback"),
     )
-    return SNTP_FUZZ_SHIM + "\n".join(parts) + SNTP_FUZZ_DRIVER
+    #   The window's near edge is the clock's build floor, which net.c holds.
+    floor = re.search(r"#define MOONWATER_CLOCK_FLOOR (\d+ll)",
+                      (HARNESS_ROOT / "src/net/net.c").read_text())
+    if not floor:
+        raise ValueError("MOONWATER_CLOCK_FLOOR is gone from net.c")
+    return (SNTP_FUZZ_SHIM + "#define MOONWATER_CLOCK_FLOOR " + floor.group(1) + "\n" +
+            "\n".join(parts) + SNTP_FUZZ_DRIVER)
 
 
 SNTP_ERA_DRIVER = r"""
@@ -56812,10 +57018,14 @@ def harness_sntp_era(argv):
     if SNTP_ERA_DRIVER not in source:
         print("  FAIL sntp era: the fuzz driver's text moved")
         return 1
-    least = int(re.search(r"#define SNTP_WALL_LEAST (\d+)ll", host).group(1))
+    #   The window's near edge is the clock's build floor, which net.c holds
+    #   and host.c names SNTP_WALL_LEAST.
+    least = int(re.search(r"#define MOONWATER_CLOCK_FLOOR (\d+)ll",
+                          (HARNESS_ROOT / "src/net/net.c").read_text()).group(1))
     most = int(re.search(r"#define SNTP_WALL_MOST (\d+)ll", host).group(1))
     instants = []
-    for text in ("2026-09-30 12:00:00", "2035-12-31 23:59:59", "2036-01-01 00:00:00",
+    for text in ("2026-09-30 12:00:00", "2026-10-02 12:00:00",
+                 "2035-12-31 23:59:59", "2036-01-01 00:00:00",
                  "2036-02-07 06:28:14", "2036-02-07 06:28:15", "2036-02-07 06:28:16",
                  "2036-02-07 06:28:17", "2037-06-01 00:00:00", "2038-01-19 03:14:07",
                  "2038-01-19 03:14:08", "2040-01-01 00:00:00", "2100-01-01 00:00:00",
