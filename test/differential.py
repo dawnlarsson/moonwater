@@ -11305,6 +11305,70 @@ def shell_chained_applet_stdin(farm):
         shutil.rmtree(work, ignore_errors=True)
 
 
+def shell_winch_at_prompt(farm):
+    """A resize while the shell waits at its prompt runs its WINCH trap, as bash does.
+
+    The shell is run on a pseudo-terminal that is its controlling terminal,
+    with a trap on WINCH set at the prompt; the window is resized (TIOCSWINSZ
+    on the master, which is what a resize does) and the trap's output must
+    appear before the shell is told to exit. Before the read at the prompt
+    let WINCH interrupt it, the kernel restarted the read and the trap ran only
+    after the next command, so a resize at an idle prompt printed nothing.
+    """
+    import fcntl
+    import select
+    import struct
+    import termios
+    import time
+
+    candidate = next((Path(farm) / name for name in ("sh", "shell", "ls", "cat", "true")
+                      if (Path(farm) / name).exists()), None)
+    if candidate is None or not sys.platform.startswith("linux"):
+        return 0, 1, ["needs the shell image in the farm and a Linux pty"]
+    master, slave = os.openpty()
+    fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+
+    def controlling():
+        os.setsid()
+        fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+
+    env = dict(os.environ, TERM="xterm-256color")
+    proc = subprocess.Popen([os.path.realpath(candidate)], stdin=slave, stdout=slave, stderr=slave,
+                            close_fds=True, preexec_fn=controlling, env=env)
+    os.close(slave)
+    got = bytearray()
+
+    def pump(seconds):
+        end = time.time() + seconds
+        while time.time() < end:
+            ready, _, _ = select.select([master], [], [], 0.05)
+            if ready:
+                try:
+                    chunk = os.read(master, 65536)
+                except OSError:
+                    return
+                if not chunk:
+                    return
+                got.extend(chunk)
+
+    try:
+        pump(1.0)
+        os.write(master, b"trap \"echo got-winch\" WINCH\n")
+        pump(1.0)
+        fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 100, 0, 0))
+        pump(1.0)
+        # The typed line also says got-winch, but only the trap's output is followed by a newline.
+        seen = b"got-winch\r\n" in bytes(got)
+        os.write(master, b"exit\n")
+        pump(1.0)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+        os.close(master)
+    return (1 if seen else 0), 1, ([] if seen else ["a resize at the prompt did not run the WINCH trap"])
+
+
 def shell_start_placement(farm):
     """The statics a shell start writes all sit on the first page of bss.
 
@@ -20438,6 +20502,7 @@ SHELL_CHECKS = (
     shell_start_placement,
     shell_true_false_programs,
     shell_chained_applet_stdin,
+    shell_winch_at_prompt,
     shell_glob_extended_bounded,
     shell_subscript_side_effects,
     shell_parse_scan_bounds,

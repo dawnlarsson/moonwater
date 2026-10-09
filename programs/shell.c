@@ -1214,9 +1214,32 @@ b32 main()
 
                 if (script_file)
                         input = exec_script_fd;
+                /*
+                        A resize while the shell waits at its prompt runs a
+                        WINCH trap then, as bash's does. The kernel restarts a
+                        read that a caught signal interrupted, so while a WINCH
+                        command trap is set, a terminal read takes WINCH without
+                        restarting: the read comes back -4, the trap runs, and the
+                        read goes on. No other signal changes.
+                */
+                bool window_wait = interactive && terminal_input && !script_file &&
+                                   trap_action((positive)SIGWINCH) &&
+                                   string_get(trap_action((positive)SIGWINCH));
+
+                if (window_wait)
+                        shell_catch_mode(SIGWINCH, false);
                 got = system_read_once(input, shell_buffer + held,
                                        shared_input && !seekable_input
                                           ? 1 : shell_buffer_room - 1 - held);
+                while (got == -4 && window_wait)
+                {
+                        exec_traps();
+                        got = system_read_once(input, shell_buffer + held,
+                                               shared_input && !seekable_input
+                                                  ? 1 : shell_buffer_room - 1 - held);
+                }
+                if (window_wait)
+                        shell_catch_mode(SIGWINCH, true);
 
                 if (got < 0 && script_file && shell_bash_compat)
                 {
