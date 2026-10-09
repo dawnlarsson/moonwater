@@ -69638,52 +69638,106 @@ static fn fetching_for_real(void)
         The exchange's confinement, as net_dhcp_apart's child meets it: the
         socket and the answer's pipe stay open and nothing else does, the
         answer's write is allowed, and a call beyond the exchange's own kills
-        the child with SIGSYS. qemu-user cannot filter itself, so there the
-        last step is NOT RUN rather than a pass.
+        the child with SIGSYS. And no filter is no exchange: where seccomp
+        answers ENOSYS -- a filter installed first that answers so, or
+        qemu-user, which cannot filter itself -- the confinement refuses. The
+        child says what it got to by its exit code: 3 refused, 4 a descriptor
+        left open, 5 a call that should have killed it did not, 6 the refusal
+        asked for, 7 no refusal.
 */
-static fn dhcp_confinement(void)
+#define DHCP_TEST_ALLOWED 0
+#define DHCP_TEST_NO_SECCOMP 3
+
+static b32 dhcp_confined_child(positive scenario, bipolar spare, p8 address_to said)
 {
         b32 ends[2];
         b32 status = 0;
-        p8 byte = 0;
-        bipolar spare = system_open_at(AT_FDCWD, "/", FILE_READ | O_CLOEXEC);
+        bipolar child;
 
-        check("DHCP confinement fixture opens",
-              spare >= 0 &&
-                  system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC) == 0);
-        if (spare < 0)
-                return;
-        bipolar child = system_fork();
+        address_to said = 0;
+        if (system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC) != 0)
+                return -1;
+        child = system_fork();
         if (child == 0)
         {
                 bipolar handle = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+                p8 byte = 1;
 
+                if (scenario == DHCP_TEST_NO_SECCOMP)
+                {
+                        //      seccomp answers ENOSYS from here on, as on a
+                        //      kernel built without it.
+                        dhcp_filter_step steps[] = {
+                            {0x20, 0, 0, 0},
+                            {0x15, 0, 1, (p32)syscall(seccomp)},
+                            {0x06, 0, 0, 0x00050000u | ENOSYS},
+                            {0x06, 0, 0, 0x7fff0000u}};
+                        struct
+                        {
+                                p16 count;
+                                dhcp_filter_step address_to steps;
+                        } filter = {4, steps};
+
+                        system_call_5(syscall(prctl), 38, 1, 0, 0, 0);
+                        system_call_3(syscall(seccomp), 1, 0,
+                                      (positive)address_of filter);
+                }
                 dhcp_apart = ends[1];
                 if (handle < 0 || !dhcp_confine((b32)handle))
-                        system_call_1(syscall(exit_group), 3);
+                        system_call_1(syscall(exit_group),
+                                      scenario == DHCP_TEST_NO_SECCOMP ? 6 : 3);
+                if (scenario == DHCP_TEST_NO_SECCOMP)
+                        system_call_1(syscall(exit_group), 7);
                 if (system_call_1(syscall(close), (positive)spare) != -EBADF ||
                     system_call_1(syscall(close), (positive)ends[0]) != -EBADF)
                         system_call_1(syscall(exit_group), 4);
-                byte = 1;
                 system_call_3(syscall(write), (positive)ends[1],
                               (positive)address_of byte, 1);
                 system_open_at(AT_FDCWD, "/", FILE_READ | O_CLOEXEC);
                 system_call_1(syscall(exit_group), 5);
         }
         system_close(ends[1]);
-        system_read_retry((positive)ends[0], address_of byte, 1);
+        while (child > 0)
+        {
+                p8 byte = 0;
+
+                if (system_read_retry((positive)ends[0], address_of byte, 1) != 1)
+                        break;
+                address_to said = byte;
+        }
         if (child > 0)
                 system_call_4(syscall(wait4), (positive)child,
                               (positive)address_of status, 0, 0);
         system_close(ends[0]);
-        system_close(spare);
-        check("the confined exchange keeps only its socket and pipe, and may answer",
-              child > 0 && byte == 1);
-        if (net_as_emulated() && status == 5 << 8)
+        return child > 0 ? status : -1;
+}
+
+static fn dhcp_confinement(void)
+{
+        p8 said = 0;
+        bipolar spare = system_open_at(AT_FDCWD, "/", FILE_READ | O_CLOEXEC);
+        b32 status;
+
+        check("DHCP confinement fixture opens", spare >= 0);
+        if (spare < 0)
+                return;
+        status = dhcp_confined_child(DHCP_TEST_NO_SECCOMP, spare, address_of said);
+        check("an exchange where seccomp answers ENOSYS refuses to run unfiltered",
+              status == 6 << 8);
+        status = dhcp_confined_child(DHCP_TEST_ALLOWED, spare, address_of said);
+        if (net_as_emulated())
+        {
+                check("under qemu-user, which cannot filter itself, the exchange refuses",
+                      status == 3 << 8);
                 log_direct(str("net: DHCP seccomp filter NOT RUN -- qemu-user\n"));
-        else
-                check("the confined exchange dies on a call outside its own",
-                      (status & 0x7f) == 31);
+                system_close(spare);
+                return;
+        }
+        check("the confined exchange keeps only its socket and pipe, and may answer",
+              said == 1);
+        check("the confined exchange dies on a call outside its own",
+              (status & 0x7f) == 31);
+        system_close(spare);
 }
 
 /*

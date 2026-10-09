@@ -12039,9 +12039,12 @@ static COLD bool dhcp_reacquisition_answer_matches(
         that link, which any host on it can send already, and one lease,
         which the parent judges as it would a packet.
 
-        Only that child is confined; the checks call dhcp_ask directly. A
-        kernel without seccomp (or qemu-user, which cannot filter itself)
-        leaves the child unprivileged but unfiltered rather than offline.
+        No filter is no exchange. A kernel that will not install one -- built
+        without SECCOMP_FILTER, which every Moonwater kernel has
+        (build_essentials), or qemu-user, which cannot filter itself -- gets
+        no DHCP from the child, which refuses before it reads a byte, rather
+        than parse hostile packets unfiltered. Only that child is confined;
+        the checks that call dhcp_ask directly leave dhcp_apart unset.
 */
 static b32 dhcp_apart = -1;
 
@@ -12109,7 +12112,7 @@ static COLD bool dhcp_confine(b32 handle)
 
         status = system_call_3(syscall(seccomp), 1 /* SET_MODE_FILTER */, 0,
                                (positive)address_of filter);
-        return status >= 0 || status == -ENOSYS;
+        return status >= 0;
 }
 
 static COLD bipolar dhcp_open(string_address device, p32 host, bool broadcast)
