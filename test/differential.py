@@ -52388,6 +52388,20 @@ def harness_wget_hostile(argv):
 
     GET = lambda target: b"GET " + target
     CASES = [
+        #   A redirect with nothing to follow is the server's answer: GNU wget
+        #   exits 8 ("Redirection (302) without location"; with an empty
+        #   Location it asks again for the same URL until its twenty run out,
+        #   which no row asks anyone to match), curl -L hands the body over.
+        case("a redirect with no Location is the server's answer",
+             answer(b"HTTP/1.1 302 Found\r\nContent-Length: 0\r\n\r\n"),
+             "http://127.0.0.1:PORT/x", [GET(b"/x")], code=8, refs=("wget", "curl"),
+             saved=None, message=b"Redirection (302) without location"),
+        case("a redirect with an empty Location is the server's answer",
+             answer(b"HTTP/1.1 302 Found\r\nLocation: \r\nContent-Length: 0\r\n\r\n"),
+             "http://127.0.0.1:PORT/x", [GET(b"/x")], code=8, refs=(), saved=None),
+        case("a Location too long to follow is named as it was, not as its sender",
+             hop(b"/" + b"a" * 3000), "http://127.0.0.1:PORT/x", [GET(b"/x")], code=1,
+             refs=(), saved=None, message=b"/aaaaaaaa"),
         case("a redirect loop stops", answer(redirect(b"/x")),
              "http://127.0.0.1:PORT/x", [GET(b"/x")] * 21, code=8, refs=(), saved=None,
              message=b"redirections exceeded"),

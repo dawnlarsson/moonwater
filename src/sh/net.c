@@ -800,6 +800,11 @@ static COLD b32 net_wget_failed(bipolar status, b32 code, p8 address_to where,
                                      file_reason(http_write_failure));
         case HTTP_STATUS:
                 refuse_if(code == 401, WGET_AUTH, "Username/Password Authentication Failed.\n");
+                //      wget follows every redirect it is given a place for.
+                if (http_response_is_redirect(code))
+                        return string_report(log_error, WGET_SERVER,
+                                             "ERROR: Redirection (%p) without "
+                                             "location.\n", (positive)code);
                 return string_report(log_error, WGET_SERVER,
                                      "wget: %w returned %p\n",
                                      writer_terminal_quoted_name, host,
