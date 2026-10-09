@@ -55010,13 +55010,30 @@ static fn fuzz_connection(const p8 *data, positive length)
                         if (tls->seq_read == TLS_AES_GCM_RECORD_LIMIT &&
                             tls->seq_write == TLS_AES_GCM_RECORD_LIMIT)
                         {
-                                p8 *span = null;
-                                positive more = 0;
-                                bipolar resumed = tls_lend_until(tls, 7, &span,
-                                                                  &more, null);
+                                /* Both counters at the limit is a spent
+                                   connection, whether a refused record spent
+                                   it or the near-limit starts ran out. What an
+                                   earlier, authenticated record left unread
+                                   is still the caller's; no later record may
+                                   add to it. */
+                                positive pending = tls->plain_used;
+                                positive drained = 0;
+                                bipolar resumed;
 
-                                if ((!resumed && more) ||
-                                    tls_write(tls, into, 1) != TLS_FAIL)
+                                for (int again = 0; again < 8; again++)
+                                {
+                                        p8 *span = null;
+                                        positive more = 0;
+
+                                        resumed = tls_lend_until(tls, 7, &span,
+                                                                  &more, null);
+                                        if (resumed || !more)
+                                                break;
+                                        drained += more;
+                                        if (drained > pending)
+                                                abort();
+                                }
+                                if (tls_write(tls, into, 1) != TLS_FAIL)
                                         abort();
                                 fuzz_offsets(tls);
                         }
