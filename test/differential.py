@@ -52679,8 +52679,8 @@ def harness_wget_hostile(argv):
                     level, name, server.lines, done.returncode, done.stderr[-120:]))
         rows = rows + first_hops
         #   The tight tiers' ceiling on a body that declared no length
-        #   (HTTP_UNDECLARED_MOST, 1 GiB) through the real program, to
-        #   /dev/null: exactly that much and then the close is a download,
+        #   (HTTP_UNDECLARED_MOST, 1 GiB) through the real program, to its
+        #   standard output: exactly that much and then the close is a download,
         #   one byte more is refused in so many words, and a chunk that would
         #   pass it is refused at its size line. The default takes all of it,
         #   as GNU wget does; CHECK_net holds that with a small ceiling, so
@@ -52689,7 +52689,10 @@ def harness_wget_hostile(argv):
             ceiling = 1 << 30
             block = b"z" * (1 << 20)
 
+            sent_total = [0]
+
             def bulk(head, count):
+                sent_total[0] = 0
                 listener = socket.socket()
                 listener.bind(("127.0.0.1", 0))
                 listener.listen(1)
@@ -52714,6 +52717,7 @@ def harness_wget_hostile(argv):
                             sent = block if left >= len(block) else block[:left]
                             peer.sendall(sent)
                             left -= len(sent)
+                            sent_total[0] += len(sent)
                     except OSError:
                         pass
                     finally:
@@ -52730,14 +52734,20 @@ def harness_wget_hostile(argv):
             for name, head, count, code in ceilings:
                 listener = bulk(head, count)
                 began = time.monotonic()
-                done = subprocess.run([str(farm / "wget"), "-q", "-O", "/dev/null",
+                #   Standard output thrown away: /dev/null belongs to nobody
+                #   in this user namespace, which -O refuses to write through.
+                done = subprocess.run([str(farm / "wget"), "-q", "-O", "-",
                                        "http://127.0.0.1:%d/big" % listener.getsockname()[1]],
-                                      capture_output=True, timeout=280, cwd=str(farm))
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                      timeout=280, cwd=str(farm))
+                took = time.monotonic() - began
                 listener.close()
+                #   The exact row is a download only if every byte went out.
                 good = done.returncode == code and (
-                    not code or b"with no length declared" in done.stderr)
-                print("NOTE %s %s: exit %d in %.1f s" % (level, name, done.returncode,
-                                                         time.monotonic() - began))
+                    not code or b"with no length declared" in done.stderr) and (
+                    code or sent_total[0] == count)
+                print("NOTE %s %s: exit %d, %d bytes sent, in %.1f s" % (
+                    level, name, done.returncode, sent_total[0], took))
                 if not good:
                     failures += 1
                     print("FAIL %s %s: exit %d (%s)" % (level, name, done.returncode,
