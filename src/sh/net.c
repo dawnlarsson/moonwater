@@ -1690,13 +1690,12 @@ static COLD p8 net_internet_prefer(void)
         a reply is: a usable lease with its timers in RFC 2131's order, and on
         renewal the address already held -- the child can say only what a
         server could have. A child that says nothing within the exchange's
-        own schedule is killed rather than waited for.
+        own schedule is killed rather than waited for. Before its answer an
+        acquiring child also says when a REQUEST of its goes out and when
+        that REQUEST's ACK window ends unanswered (dhcp_say), in the same
+        shape.
 */
-typedef struct
-{
-        bipolar status;
-        dhcp_lease lease;
-} net_dhcp_answer;
+typedef dhcp_answer net_dhcp_answer;
 
 /*
         The watcher's exchange is not allowed to be deaf.
@@ -1719,6 +1718,25 @@ static bool net_exchange_cut;
 #define NET_DHCP_WATCH_SECONDS 12
 #define NET_DHCP_TIMED_OUT (-10)
 #define NET_DHCP_INTERRUPTED (-11)
+
+/*
+        But not between a REQUEST and its ACK.
+
+        Once the REQUEST is out a server holds the offered address for this
+        client, and the ACK is a round trip away. A cut there threw the
+        exchange away all the same, and the next pass began a new transaction
+        whose DISCOVER the server had to answer again (measured in KVM with
+        a server that acknowledges a second after the REQUEST and a carrier
+        toggle on another NIC at 4.7 s: the exchange was killed, a second
+        DISCOVER went out at 5.2 s and the lease came at 6.47 s). So news,
+        the wake pipe, or the budget running out, while a REQUEST of the
+        child's is in its ACK window, wait NET_DHCP_ACK_GRACE_SECONDS more for
+        the child's answer, the news left unread to be acted on as soon as the
+        exchange ends; a window that ends unanswered ends the wait. When the
+        grace runs out the child is cut as before, and the address it asked
+        for is given back with a DHCPRELEASE, which nothing here will use.
+*/
+#define NET_DHCP_ACK_GRACE_SECONDS 2
 
 /*
         Link news may cut an exchange, but not again at once.
@@ -1809,11 +1827,12 @@ static COLD bipolar net_exchange_wait(bipolar answer,
 }
 
 /* What the child is asked to do: discover, renew with the server that gave
-   the lease, rebind with any, or decline the lease it names. */
+   the lease, rebind with any, or decline or release the lease it names. */
 #define NET_DHCP_DISCOVER 0
 #define NET_DHCP_RENEW 1
 #define NET_DHCP_REBIND 2
 #define NET_DHCP_DECLINE 3
+#define NET_DHCP_RELEASE 4
 
 static COLD bipolar net_dhcp_apart(string_address device, p8 address_to hardware,
                                    dhcp_lease address_to lease, p8 exchange,
@@ -1821,9 +1840,16 @@ static COLD bipolar net_dhcp_apart(string_address device, p8 address_to hardware
 {
         b32 ends[2];
         net_dhcp_answer answer = {DHCP_NO_SOCKET, *lease};
+        net_dhcp_answer requested = {DHCP_NO_SOCKET, {0}};
         network_deadline deadline;
+        network_deadline grace;
         bool renew = exchange == NET_DHCP_RENEW || exchange == NET_DHCP_REBIND;
-        bool heard;
+        bool giving = exchange == NET_DHCP_DECLINE || exchange == NET_DHCP_RELEASE;
+        bool heard = false;
+        bool pending = false;
+        //      What ended the wait: 1 nothing yet, 0 the budget, -2 the
+        //      wake pipe or link news.
+        bipolar ended = 1;
 
         bipolar child = system_child_fork(ends, O_CLOEXEC);
 
@@ -1836,9 +1862,12 @@ static COLD bipolar net_dhcp_apart(string_address device, p8 address_to hardware
                     renew ? dhcp_reacquire(device, hardware,
                                            address_of answer.lease,
                                            exchange == NET_DHCP_REBIND, wait)
-                    : exchange == NET_DHCP_DECLINE
-                        ? dhcp_decline(device, hardware, address_of answer.lease)
-                        : dhcp_ask(device, hardware, address_of answer.lease);
+                    : giving ? dhcp_give_back(device, hardware,
+                                              address_of answer.lease,
+                                              exchange == NET_DHCP_DECLINE
+                                                  ? DHCP_DECLINE
+                                                  : DHCP_RELEASE)
+                             : dhcp_ask(device, hardware, address_of answer.lease);
                 system_write_all((positive)dhcp_apart, address_of answer,
                                  sizeof answer);
                 system_call_1(syscall(exit_group), 0);
@@ -1846,31 +1875,74 @@ static COLD bipolar net_dhcp_apart(string_address device, p8 address_to hardware
 
         //      dhcp_ask's twenty attempts can each wait out a DISCOVER
         //      and a REQUEST, 150 s in all, after a CSPRNG that may take
-        //      a second; a renewal is its own wait, and a DECLINE is one
-        //      send after the same CSPRNG.
+        //      a second; a renewal is its own wait, and a DECLINE or a
+        //      RELEASE is one send after the same CSPRNG.
         bool watching = exchange == NET_DHCP_DISCOVER && net_wake_watch >= 0;
-        bipolar waited = -1;
 
-        heard = network_deadline_begin(address_of deadline,
-                                       renew ? wait + 5
-                                       : exchange == NET_DHCP_DECLINE ? 5
-                                       : watching ? NET_DHCP_WATCH_SECONDS
-                                                  : 180, 0) &&
-                (watching
-                     ? (waited = net_exchange_wait(ends[0], address_of deadline))
-                     : network_wait_readable_until(ends[0], address_of deadline)) > 0 &&
-                system_read_retry((positive)ends[0], address_of answer,
-                                  sizeof answer) == (bipolar)sizeof answer;
+        if (network_deadline_begin(address_of deadline,
+                                   renew ? wait + 5
+                                   : giving ? 5
+                                   : watching ? NET_DHCP_WATCH_SECONDS
+                                              : 180, 0))
+                for (;;)
+                {
+                        bipolar ready =
+                            ended <= 0 ? network_wait_readable_until(
+                                             ends[0], address_of grace)
+                            : watching ? net_exchange_wait(ends[0],
+                                                           address_of deadline)
+                                       : network_wait_readable_until(
+                                             ends[0], address_of deadline);
+
+                        if (ended > 0 && (ready == 0 || ready == -2))
+                        {
+                                ended = ready;
+                                if (pending &&
+                                    network_deadline_begin(
+                                        address_of grace,
+                                        NET_DHCP_ACK_GRACE_SECONDS, 0))
+                                        continue;
+                                break;
+                        }
+                        if (ready <= 0 ||
+                            system_read_retry((positive)ends[0], address_of answer,
+                                              sizeof answer) !=
+                                (bipolar)sizeof answer)
+                                break;
+                        //      Only an acquisition says how far it got.
+                        if (exchange == NET_DHCP_DISCOVER &&
+                            (answer.status == DHCP_REQUESTED ||
+                             answer.status == DHCP_UNANSWERED))
+                        {
+                                pending = answer.status == DHCP_REQUESTED;
+                                requested = answer;
+                                if (!pending && ended <= 0)
+                                        break;
+                                continue;
+                        }
+                        heard = true;
+                        break;
+                }
         system_child_reap(child, ends[0], true);
 
+        if (!heard && pending)
+                (void)net_dhcp_apart(device, hardware,
+                                     address_of requested.lease,
+                                     NET_DHCP_RELEASE, 0);
+        //      News that waited for the ACK waits for the conflict probe too
+        //      (net_arp_conflict), or it would cut that at once and throw the
+        //      lease away after all: the loop reads it as soon as the lease
+        //      is in place.
+        if (heard && ended == -2 && answer.status == DHCP_OK)
+                net_news_holdoff_until = net_seconds() + NET_NEWS_HOLDOFF_SECONDS;
         if (!heard)
         {
-                if (watching && waited == -2)
+                if (watching && ended == -2)
                         return net_exchange_was_cut();
-                return watching && waited == 0 ? NET_DHCP_TIMED_OUT
-                                               : DHCP_NO_SOCKET;
+                return watching && ended == 0 ? NET_DHCP_TIMED_OUT
+                                              : DHCP_NO_SOCKET;
         }
-        if (exchange == NET_DHCP_DECLINE)
+        if (giving)
                 return answer.status == DHCP_OK ? DHCP_OK : DHCP_NO_SOCKET;
         if (answer.status != DHCP_OK)
                 return answer.status == DHCP_NO_OFFER ||
@@ -2003,6 +2075,23 @@ static bool net_arp_claims(const p8 address_to packet, positive size,
                memory_compare(sender, hardware, 6);
 }
 
+/* An ARP request for target from sender (cooked, 28 bytes): a probe asks
+   from 0.0.0.0, an announcement from the address itself (RFC 5227 2.1.1,
+   2.3). */
+static COLD fn net_arp_request(p8 address_to into, const p8 address_to hardware,
+                               p32 sender, p32 target)
+{
+        memory_zero(into, NET_ARP_PACKET);
+        network_store_16(into, 1);
+        network_store_16(into + 2, ETH_P_IP);
+        into[4] = 6;
+        into[5] = 4;
+        network_store_16(into + 6, 1);
+        memory_copy(into + 8, hardware, 6);
+        network_store_32(into + 14, sender);
+        network_store_32(into + 24, target);
+}
+
 /* A packet socket of one ethertype on one interface: the cooked link header
    is the kernel's, the payload is ours. */
 static COLD bipolar net_packet_open(p32 index, p16 protocol)
@@ -2043,13 +2132,7 @@ static COLD bipolar net_arp_conflict(p32 index, p8 address_to hardware,
         if (handle < 0)
                 return -1;
         memory_fill(all.addr, 0xff, 6);
-        network_store_16(probe, 1);
-        network_store_16(probe + 2, ETH_P_IP);
-        probe[4] = 6;
-        probe[5] = 4;
-        network_store_16(probe + 6, 1);
-        memory_copy(probe + 8, hardware, 6);
-        network_store_32(probe + 24, address);
+        net_arp_request(probe, hardware, 0, address);
 
         for (positive attempt = 0; attempt < NET_ARP_PROBES; attempt++)
         {
@@ -2097,6 +2180,44 @@ static COLD bipolar net_arp_conflict(p32 index, p8 address_to hardware,
 failed:
         socket_close((b32)handle);
         return -1;
+}
+
+/*
+        Telling the neighbours (RFC 5227 2.3).
+
+        Once a new address is in place, two ARP announcements -- a request
+        for it, from it -- refresh every cache on the link that still maps it
+        to a station that held it before. The kernel's own (arp_notify) go
+        out when a link comes up or changes its hardware address, not when an
+        address is added. RFC 5227 spaces the two by two seconds, which the
+        watcher does not wait: the second follows a tenth of a second after
+        the first. A link that takes neither loses nothing it had.
+*/
+static COLD fn net_arp_announce(p32 index, const p8 address_to hardware,
+                                p32 address)
+{
+        p8 announcement[NET_ARP_PACKET];
+        socket_address_packet all = {
+            .family = AF_PACKET,
+            .protocol = network_order_16(ETH_P_ARP),
+            .index = index,
+            .halen = 6};
+        timespec apart = {0, 100000000};
+        bipolar handle = net_packet_open(index, ETH_P_ARP);
+
+        if (handle < 0)
+                return;
+        memory_fill(all.addr, 0xff, 6);
+        net_arp_request(announcement, hardware, address, address);
+        for (positive at = 0; at < 2; at++)
+        {
+                if (at)
+                        system_call_2(syscall(nanosleep), (positive)address_of apart,
+                                      0);
+                (void)socket_send((b32)handle, announcement, sizeof announcement,
+                                  0, address_of all, sizeof all);
+        }
+        socket_close((b32)handle);
 }
 
 static COLD b32 net_auto(b32 handle, net_holding address_to held)
@@ -2232,6 +2353,7 @@ static COLD b32 net_auto(b32 handle, net_holding address_to held)
         if (net_apply_lease(handle, search.index, search.name,
                             search.hardware, address_of lease, held, true))
                 return 1;
+        net_arp_announce(search.index, search.hardware, lease.address);
         /* Counted once the lease is taken, not before the exchange:
            bringing a link up can itself cost a carrier loss -- a PHY that
            starts by dropping the carrier it was registered with -- which
@@ -2568,7 +2690,8 @@ static COLD bipolar net_watch_events(b32 events, netlink_buffer address_to messa
         answered only for an address of the interface asked on (arp_ignore
         1), only when the asker is routed out of it (arp_filter 1), asked
         with the best local source (arp_announce 2), and announced when a
-        link comes up (arp_notify 1).
+        link comes up (arp_notify 1; a new address is announced by
+        net_arp_announce).
 */
 #if MOONWATER_STRICT_NET >= STRICT_SAFE
 static COLD fn net_sysctl(string_address path, string_address value)

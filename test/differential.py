@@ -62990,14 +62990,15 @@ int main(void)
 def harness_net_dhcp_exchange(argv):
     """The DHCP client's exchanges, run over a recorded socket seam.
 
-    Production dhcp_ask, dhcp_reacquire, dhcp_decline, dhcp_build and the
-    lease rules are lifted; the sockets, the packet socket an acquisition
-    reads, the clock budget, the entropy and the receive loop are scripted, so
-    the schedule of attempts, every wait, the REQUEST built from an OFFER, the
-    work allowance, the order the sockets open and close in, and each failure
-    of a send, an open or a timer can be asserted without a server, a root or
-    a second host. The expected numbers are written out here, not computed by
-    the code under test.
+    Production dhcp_ask, dhcp_reacquire, dhcp_give_back (DECLINE and
+    RELEASE), dhcp_say, dhcp_build and the lease rules are lifted; the
+    sockets, the packet socket an acquisition reads, the answer pipe, the clock
+    budget, the entropy and the receive loop are scripted, so the schedule of
+    attempts, every wait, the REQUEST built from an OFFER, the work allowance,
+    the order the sockets open and close in, what an exchange run apart says
+    down its pipe and when, and each failure of a send, an open or a timer can
+    be asserted without a server, a root or a second host. The expected
+    numbers are written out here, not computed by the code under test.
     """
     del argv
     checks = Checks()
@@ -63062,7 +63063,12 @@ static dhcp_lease offer_lease;
    closed, u the client socket closed. */
 static char order[64]; static int ordered;
 static void happened(char what) { if (ordered < 63) order[ordered++] = what; order[ordered] = 0; }
+/* The answer pipe of an exchange run apart, and what was said down it, with
+   the number of sends made when it was. */
+static b32 dhcp_apart = -1;
 static bipolar dhcp_frames = -1;
+static struct { dhcp_answer said; int after_sends; } records[64];
+static int recorded;
 
 static bool dhcp_transaction_early(p32 *transaction)
 { if (fail_random) return false; happened('T'); *transaction = 0x01020300u + (p32)++serial; return true; }
@@ -63074,6 +63080,14 @@ static bipolar dhcp_frames_open(string_address device)
 { (void)device; require(dhcp_frames < 0, "no packet socket left open"); if (fail_frames) return -1; happened('F'); frame_opens++; return 88; }
 static void dhcp_frames_close(void)
 { if (dhcp_frames >= 0) { require(dhcp_frames == 88, "close the packet socket opened"); happened('f'); frame_closes++; } dhcp_frames = -1; }
+static bipolar system_write_all(positive handle, const void *data, positive size)
+{
+    require((b32)handle == dhcp_apart && dhcp_apart >= 0, "a record goes only down the answer pipe");
+    require(size == sizeof(dhcp_answer), "one whole record at a time");
+    if (recorded < 64) { memcpy(&records[recorded].said, data, size); records[recorded].after_sends = sends; }
+    recorded++;
+    return (bipolar)size;
+}
 static bipolar socket_send(b32 handle, const void *data, positive size, b32 flags,
                            const socket_address_internet *to, positive tosize)
 {
@@ -63129,10 +63143,11 @@ static void reset(void)
     fail_random = fail_spread = fail_open = fail_frames = fail_begin_at_valid = false;
     fail_begin_at = fail_send_at = -1; spread_byte = 0;
     opens = closes = sends = begins = completes = receives = 0;
-    frame_opens = frame_closes = ordered = 0; order[0] = 0;
-    dhcp_frames = -1;
+    frame_opens = frame_closes = recorded = ordered = 0; order[0] = 0;
+    dhcp_apart = -1; dhcp_frames = -1;
     script_length = script_at = 0; complete_result = DHCP_OK;
     memset(sent, 0, sizeof sent); memset(budget, 0, sizeof budget);
+    memset(records, 0, sizeof records);
     offer_lease = (dhcp_lease){.address = 0x0a000015, .mask = 0xffffff00,
         .router = 0x0a000001, .nameserver = 0x0a000001, .server = 0x0a000002, .seconds = 3600};
 }
@@ -63226,12 +63241,34 @@ int main(void)
         check((sent[1].bytes[10] & 0x80) != 0 && sent[1].to.host == HOST_BROADCAST, "broadcast");
         check(!completed.rebinding && completed.transaction == network_load_32(sent[0].bytes + 4), "the same transaction");
         check(completed.seconds == 0 && completed.nanoseconds == 250000000, "an ACK gets at least a quarter second");
-        check(!strcmp(order, "TSFUuf"), "both sockets closed");
+        check(!strcmp(order, "TSFUuf") && recorded == 0, "both sockets closed, nothing said without a pipe");
+        /* Run apart, it says its REQUEST is out once the REQUEST has left,
+           naming the offer; a completion that answers says no more. */
+        reset(); dhcp_apart = 9; play(1); complete_result = finals[f].result;
+        check(dhcp_ask("x", hardware, &lease) == finals[f].expect, "the answer is the same apart");
+        check(recorded == 1 && records[0].said.status == DHCP_REQUESTED && records[0].after_sends == 2,
+              "one REQUESTED record, after the REQUEST left");
+        check(!memcmp(&records[0].said.lease, &offer_lease, sizeof offer_lease), "the record names the offer");
     }
     /* A silent server after the REQUEST: the next attempt discovers again. */
     reset(); play(1); complete_result = DHCP_NO_OFFER;
     check(dhcp_ask("x", hardware, &lease) == DHCP_NO_OFFER && completes == 1 && sends == 21, "a lost ACK is another DISCOVER");
     check(packet_kind(1) == DHCP_REQUEST && packet_kind(2) == DHCP_DISCOVER, "REQUEST then DISCOVER again");
+    /* Apart, the window that ended unanswered is said before that DISCOVER,
+       so a cut after it is not held for an ACK that is no longer awaited. */
+    reset(); dhcp_apart = 9; play(1); complete_result = DHCP_NO_OFFER;
+    check(dhcp_ask("x", hardware, &lease) == DHCP_NO_OFFER && sends == 21 && recorded == 2,
+          "REQUESTED then UNANSWERED");
+    check(records[0].said.status == DHCP_REQUESTED && records[1].said.status == DHCP_UNANSWERED &&
+          records[0].after_sends == 2 && records[1].after_sends == 2 &&
+          !memcmp(&records[1].said.lease, &offer_lease, sizeof offer_lease),
+          "the unanswered window is said before the next DISCOVER, naming the offer");
+    reset(); dhcp_apart = 9; play(1); fail_begin_at = 1; fail_begin_at_valid = true;
+    check(dhcp_ask("x", hardware, &lease) == DHCP_NO_OFFER && completes == 0 && recorded == 2 &&
+          records[1].said.status == DHCP_UNANSWERED, "a window that cannot start is unanswered");
+    reset(); dhcp_apart = 9; play(1); fail_send_at = 1;
+    check(dhcp_ask("x", hardware, &lease) == DHCP_NO_OFFER && recorded == 0,
+          "a REQUEST that never left says nothing");
     /* The ACK window of a later attempt is its own wait. */
     reset(); for (int i = 0; i < 13; i++) play(0);
     play(1); complete_result = DHCP_OK; spread_byte = 255;
@@ -63294,23 +63331,57 @@ int main(void)
 
     /* Giving an address back. */
     reset(); lease = held; lease.address = 0;
-    check(dhcp_decline("x", hardware, &lease) == DHCP_NO_OFFER && opens == 0, "nothing to decline");
+    check(dhcp_give_back("x", hardware, &lease, DHCP_DECLINE) == DHCP_NO_OFFER && opens == 0, "nothing to decline");
     reset(); lease = held; lease.server = 0;
-    check(dhcp_decline("x", hardware, &lease) == DHCP_NO_OFFER && opens == 0, "no server to tell");
+    check(dhcp_give_back("x", hardware, &lease, DHCP_DECLINE) == DHCP_NO_OFFER && opens == 0, "no server to tell");
     reset(); lease = held; fail_random = true;
-    check(dhcp_decline("x", hardware, &lease) == DHCP_NO_RANDOM && opens == 0, "a decline needs a transaction");
+    check(dhcp_give_back("x", hardware, &lease, DHCP_DECLINE) == DHCP_NO_RANDOM && opens == 0, "a decline needs a transaction");
     reset(); lease = held; fail_open = true;
-    check(dhcp_decline("x", hardware, &lease) == DHCP_NO_SOCKET && sends == 0, "a decline needs a socket");
+    check(dhcp_give_back("x", hardware, &lease, DHCP_DECLINE) == DHCP_NO_SOCKET && sends == 0, "a decline needs a socket");
     reset(); lease = held;
-    check(dhcp_decline("x", hardware, &lease) == DHCP_OK && sends == 1 && closes == 1, "a decline is one send");
+    check(dhcp_give_back("x", hardware, &lease, DHCP_DECLINE) == DHCP_OK && sends == 1 && closes == 1, "a decline is one send");
     check(packet_kind(0) == DHCP_DECLINE && sent[0].size == 300, "a DECLINE, 300 bytes");
     check(option_address(0, DHCP_OPTION_REQUESTED) == held.address && option_address(0, DHCP_OPTION_SERVER) == held.server,
           "it names the address and the server");
     check(!has_option(0, DHCP_OPTION_ASK), "and asks for nothing");
     check(sent[0].to.host == HOST_BROADCAST && sent[0].to.port == DHCP_SERVER_PORT && open_broadcast, "broadcast");
     check(network_load_32(sent[0].bytes + 12) == 0, "ciaddr zero");
+    check((sent[0].bytes[10] & 0x80) == 0, "flags zero");
     reset(); lease = held; fail_send_at = 0;
-    check(dhcp_decline("x", hardware, &lease) == DHCP_NO_SOCKET && closes == 1, "a refused decline is a failure");
+    check(dhcp_give_back("x", hardware, &lease, DHCP_DECLINE) == DHCP_NO_SOCKET && closes == 1, "a refused decline is a failure");
+
+    /* And an address asked for that nothing here will use (RFC 2131 table
+       5's DHCPRELEASE): ciaddr the address, option 54 the server, no
+       requested address, no parameter list, flags zero, a transaction of
+       its own, broadcast from no address. */
+    reset(); lease = held;
+    check(dhcp_give_back("x", hardware, &lease, DHCP_RELEASE) == DHCP_OK && opens == 1 && sends == 1 && closes == 1,
+          "a release is one send");
+    check(packet_kind(0) == DHCP_RELEASE && sent[0].size == 300, "a RELEASE, 300 bytes");
+    check(network_load_32(sent[0].bytes + 12) == held.address, "ciaddr is the address given back");
+    check(option_address(0, DHCP_OPTION_SERVER) == held.server && !has_option(0, DHCP_OPTION_REQUESTED),
+          "it names the server and asks for no address");
+    check(!has_option(0, DHCP_OPTION_ASK) && !has_option(0, DHCP_OPTION_LEASE), "nor for anything else");
+    check((sent[0].bytes[10] & 0x80) == 0 && network_load_32(sent[0].bytes + 16) == 0, "flags and yiaddr zero");
+    check(network_load_32(sent[0].bytes + 4) == 0x01020300u + (p32)serial, "a transaction of its own");
+    check(sent[0].to.host == HOST_BROADCAST && sent[0].to.port == DHCP_SERVER_PORT && open_broadcast &&
+          open_host == HOST_ANY, "broadcast, from no address");
+    reset(); lease = held; lease.address = 0;
+    check(dhcp_give_back("x", hardware, &lease, DHCP_RELEASE) == DHCP_NO_OFFER && opens == 0, "nothing to release");
+    reset(); lease = held; lease.server = 0;
+    check(dhcp_give_back("x", hardware, &lease, DHCP_RELEASE) == DHCP_NO_OFFER && opens == 0, "no server to release to");
+    reset(); lease = held; fail_random = true;
+    check(dhcp_give_back("x", hardware, &lease, DHCP_RELEASE) == DHCP_NO_RANDOM && opens == 0, "a release needs a transaction");
+    reset(); lease = held; fail_open = true;
+    check(dhcp_give_back("x", hardware, &lease, DHCP_RELEASE) == DHCP_NO_SOCKET && sends == 0, "a release needs a socket");
+    reset(); lease = held; fail_send_at = 0;
+    check(dhcp_give_back("x", hardware, &lease, DHCP_RELEASE) == DHCP_NO_SOCKET && closes == 1, "a refused release is a failure");
+    for (p8 kind = 0; kind < 16; kind++) {
+        if (kind == DHCP_DECLINE || kind == DHCP_RELEASE) continue;
+        reset(); lease = held;
+        check(dhcp_give_back("x", hardware, &lease, kind) == DHCP_NO_OFFER && opens == 0 && sends == 0,
+              "only a DECLINE or a RELEASE gives an address back");
+    }
 
     /* The timers of a lease: T1 < T2 < the lifetime, or the defaults. */
     p32 seconds_set[] = {1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 100, 3600, 86400, 0x7fffffff, 0x80000000u, 0xfffffffeu, 0xffffffffu};
@@ -63351,9 +63422,10 @@ int main(void)
         ul_c_function(net, "dhcp_address_unicast"),
         ul_c_function(net, "dhcp_prefix_clear"),
         ul_c_function(net, "dhcp_lease_usable"),
+        ul_c_function(net, "dhcp_say"),
         ul_c_function(net, "dhcp_ask"),
         ul_c_function(net, "dhcp_reacquire"),
-        ul_c_function(net, "dhcp_decline")))
+        ul_c_function(net, "dhcp_give_back")))
     source = source.replace("/* CONSTANTS */", constants).replace("/* PRODUCTION */", production)
     compiler = shutil.which("clang")
     if not compiler:
@@ -64502,7 +64574,7 @@ string_copy string_copy_max_end string_digits_checked string_digits_max
 string_equals string_first_of string_first_of_or_end string_get string_has_prefix
 string_is string_last_of string_length string_span_max string_span_without_set
 string_to_host system_call_1 system_call_2 system_call_3 system_call_5
-system_random_fill system_read_retry
+system_random_fill system_read_retry system_write_all
 """.split())
 
 
@@ -67334,7 +67406,7 @@ def harness_waterlink_noise(argv):
     return checks.verdict("waterlink noise:", "waterlink-noise")
 
 
-NET_NETEM_DHCP_SERVER = r"""import socket, struct, sys, time, threading
+NET_NETEM_DHCP_SERVER = r"""import os, socket, struct, sys, time, threading
 mode = sys.argv[1]
 OFFER_IP = "10.88.0.50"; BAD_IP = "10.88.0.66"; SERVER = "10.88.0.2"
 #   The pool: an address a client DECLINEs (RFC 2131 4.4.1) is marked in use
@@ -67365,7 +67437,9 @@ s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 s.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b"cb")
 s.bind(("0.0.0.0", 67))
 log = open(sys.argv[2], "a", buffering=1)
-seen_discover = 0; naked = False
+seen_discover = 0; naked = False; requests = 0; first_seen = {}
+#   hold: the scene's word that its link news is in, so the late ACK follows it.
+nudged = os.path.join(os.path.dirname(sys.argv[2]), "nudged")
 def send(pkt, delay=0.0):
     #   unicast: to the address offered, which a client without one never
     #   receives on a UDP socket (the scene gives the far end its MAC).
@@ -67378,20 +67452,28 @@ while True:
     if len(data) < 241 or data[0] != 1: continue
     xid, chaddr, opts = parse(data)
     t = opts.get(53, b"\0")[0]
-    if t == 4:
+    if t in (4, 7):
         asked = opts.get(50, b""); named = opts.get(54, b"")
-        log.write("%.3f rx type 4 xid %s req %s sid %s ciaddr %s flags %d ask %s\n" % (
-            time.time(), xid.hex(), socket.inet_ntoa(asked) if len(asked) == 4 else "-",
+        log.write("%.3f rx type %d xid %s req %s sid %s ciaddr %s flags %d ask %s\n" % (
+            time.time(), t, xid.hex(), socket.inet_ntoa(asked) if len(asked) == 4 else "-",
             socket.inet_ntoa(named) if len(named) == 4 else "-", socket.inet_ntoa(data[12:16]),
             struct.unpack("!H", data[10:12])[0], "yes" if 55 in opts else "-"))
-        if len(asked) == 4 and named == socket.inet_aton(SERVER):
+        if t == 4 and len(asked) == 4 and named == socket.inet_aton(SERVER):
             declined.add(socket.inet_ntoa(asked))
         continue
     log.write("%.3f rx type %d xid %s\n" % (time.time(), t, xid.hex()))
     if mode == "mute-watch": continue
     if t == 1:
         seen_discover += 1
+        first_seen.setdefault(xid, time.time())
         if mode == "drop3" and seen_discover <= 3: continue
+        #   hold: the OFFER waits for an attempt whose ACK window is a second
+        #   or more (2.8 s into a transaction, after the quarter-second ones),
+        #   and hold-silent for one whose window outlasts the grace (three
+        #   seconds or more, from 3.8 s). Counted by transaction: the watcher
+        #   may cut its first at once, for the news of its own start.
+        if mode == "hold" and time.time() - first_seen[xid] < 2.7: continue
+        if mode == "hold-silent" and time.time() - first_seen[xid] < 3.7: continue
         msgs = []
         if mode == "stale":  msgs.append(reply(bytes(a ^ 0xff for a in xid), chaddr, 2, BAD_IP))
         msgs.append(reply(xid, chaddr, 2, current()))
@@ -67399,8 +67481,21 @@ while True:
         for m in msgs:
             for _ in range(3 if mode == "dup" else 1): send(m, d)
     elif t == 3:
+        requests += 1
         if mode == "nak" and not naked:
             naked = True; send(reply(xid, chaddr, 6, "0.0.0.0")); continue
+        #   The first REQUEST answered once the scene's link news is in, or
+        #   never.
+        if mode == "hold-silent" and requests == 1: continue
+        if mode == "hold" and requests == 1:
+            def late(pkt=reply(xid, chaddr, 5, current())):
+                for _ in range(300):
+                    if os.path.exists(nudged): break
+                    time.sleep(0.01)
+                time.sleep(0.05)
+                s.sendto(pkt, ("255.255.255.255", 68))
+                log.write("%.3f tx late ack\n" % time.time())
+            threading.Thread(target=late, daemon=True).start(); continue
         msgs = []
         if mode == "stale": msgs.append(reply(bytes(a ^ 0xff for a in xid), chaddr, 5, BAD_IP))
         msgs.append(reply(xid, chaddr, 5, current()))
@@ -67571,6 +67666,63 @@ try:
             say(bool(after) and after[0] - declined_at >= 10.0,
                 "%s: the watcher waits ten seconds after a DECLINE before it asks again (%s)" % (
                     label, "%.2f s" % (after[0] - declined_at) if after else "no DISCOVER after it"))
+            watcher.kill()
+            watcher.wait()
+            sink.close()
+            client = subprocess.CompletedProcess([], 0 if address() == want else 1,
+                                                 open(top + "/watch.out").read(), "")
+        elif mode in ("hold", "hold-silent"):
+            #   Link news (an MTU change on the client's link) as soon as the
+            #   server has a REQUEST: the exchange is let finish. hold: the
+            #   ACK comes 0.6 s later and is taken, in the one transaction.
+            #   hold-silent: it never comes; after the grace the exchange is
+            #   cut, the address given back with a DHCPRELEASE, and the next
+            #   pass leases.
+            sink = open(top + "/watch.out", "w")
+            watcher = subprocess.Popen([top + "/ip", "watch"], env=env, stdin=subprocess.DEVNULL,
+                                       stdout=sink, stderr=sink)
+            procs.append(watcher)
+            nudged = None
+            while time.time() - began < 40 and address() != want:
+                if nudged is None and " rx type 3 " in dhcp_log():
+                    run("ip", "link", "set", "eth0", "mtu", "1400")
+                    nudged = time.time()
+                    open(top + "/nudged", "w").close()
+                time.sleep(0.02)
+            lines = dhcp_log().splitlines()
+            asked = sorted({line.split(" xid ")[1].split()[0] for line in lines
+                            if " rx type 1 " in line or " rx type 3 " in line})
+            #   The transactions from the first REQUEST on: the one the news
+            #   came into, and any the watcher began after cutting it.
+            first_request = next((at for at, line in enumerate(lines) if " rx type 3 " in line), len(lines))
+            after = sorted({line.split(" xid ")[1].split()[0] for line in lines[first_request:]
+                            if " rx type 1 " in line or " rx type 3 " in line})
+            releases = [line for line in lines if " rx type 7 " in line]
+            say(nudged is not None, "%s: link news came while a REQUEST waited for its ACK" % label)
+            if mode == "hold":
+                #   And before the ACK left, or the grace was never asked for.
+                acked = next((float(line.split()[0]) for line in lines if " tx late ack" in line), None)
+                say(nudged is not None and acked is not None and nudged < acked,
+                    "%s: the news came before the ACK was sent (%s)" % (
+                        label, "%.2f s before" % (acked - nudged)
+                        if nudged is not None and acked is not None else "no ACK sent"))
+            if mode == "hold":
+                say(len(after) == 1, "%s: the exchange the news came into was let finish, no transaction "
+                    "after its REQUEST (%s)" % (label, " ".join(after)))
+                say(not releases, "%s: nothing was given back (%d)" % (label, len(releases)))
+            else:
+                first = next((float(line.split()[0]) for line in lines if " rx type 3 " in line), None)
+                say(len(releases) == 1 and releases[0].split(" xid ")[1].split()[1:] ==
+                    ["req", "-", "sid", "10.88.0.2", "ciaddr", "10.88.0.50", "flags", "0", "ask", "-"],
+                    "%s: the REQUEST never answered is given back once, by a RELEASE naming the address "
+                    "in ciaddr and the server, asking for nothing (%s)" % (label, " | ".join(releases)))
+                say(bool(releases) and first is not None and
+                    1.5 <= float(releases[0].split()[0]) - first <= 4.0,
+                    "%s: after the grace, not at the news (%s)" % (
+                        label, "%.2f s" % (float(releases[0].split()[0]) - first)
+                        if releases and first is not None else "none"))
+                say(bool(releases) and releases[0].split(" xid ")[1].split()[0] not in asked,
+                    "%s: the RELEASE has a transaction id of its own" % label)
             watcher.kill()
             watcher.wait()
             sink.close()
@@ -67757,7 +67909,12 @@ def harness_net_netem(argv):
     does the same by itself, waiting at least ten seconds before it asks
     again. The replies are read off a packet socket: `ip auto` has to lease
     with rp_filter 1 and 2 on the client (read back from the namespace), and
-    from a server that unicasts its OFFER and ACK to the offered address.
+    from a server that unicasts its OFFER and ACK to the offered address. And
+    `ip watch` with link news the moment the server has a REQUEST: an ACK 0.6
+    s later is taken in the same transaction; one that never comes leaves
+    the exchange cut after the grace, the address given back by one
+    DHCPRELEASE (ciaddr the address, the server named, nothing asked), and a
+    lease from the next pass.
     `moonwater time sync` is the SNTP client, with `/root/ntp.server` naming
     the far end: it has to take a clean, tripled, late or once-dropped answer,
     take the right one of a forged reply (wrong origin, three hours off) and
@@ -67821,15 +67978,16 @@ def harness_net_netem(argv):
         #   asked on a clean wire.
         scenes += [("dhcp", mode, "", "0") for mode in ("conflict", "conflict-watch", "mute-watch")]
         #   The OFFER at rp_filter 1 and 2, which a UDP socket never gets
-        #   from a server it has no route to, and replies unicast to the
-        #   offered address, which it never gets either.
+        #   from a server it has no route to; replies unicast to the offered
+        #   address, which it never gets either; and link news between a
+        #   REQUEST and its ACK.
         scenes += [("dhcp", "clean", "", rp) for rp in ("1", "2")]
-        scenes += [("dhcp", "unicast", "", "0")]
+        scenes += [("dhcp", mode, "", "0") for mode in ("unicast", "hold", "hold-silent")]
         scenes += [("sntp", mode, netem, "0") for netem in impairments
                    for mode in ("clean", "dup", "spoof", "late", "drop2", "skewed", "kod")]
         checks = Checks()
         for kind, mode, netem, rp in scenes:
-            for leftover in ("dhcp.log", "ntp.log"):
+            for leftover in ("dhcp.log", "ntp.log", "nudged"):
                 (top / leftover).unlink(missing_ok=True)
             said = top / "said"
             with open(said, "wb") as sink:

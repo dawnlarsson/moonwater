@@ -11524,7 +11524,8 @@ static bipolar http_fetch_to(string_address start, bipolar dest, bool check_cert
         it, not because a test proved it here.
 
         The network watcher ARP-probes a newly acknowledged address before it
-        installs the lease and schedules dhcp_reacquire at half its lifetime.
+        installs the lease, announces it once it is in, and schedules
+        dhcp_reacquire at half its lifetime.
 */
 
 #define DHCP_CLIENT_PORT 68
@@ -11539,6 +11540,7 @@ static bipolar http_fetch_to(string_address start, bipolar dest, bool check_cert
 #define DHCP_DECLINE 4
 #define DHCP_ACK 5
 #define DHCP_NAK 6
+#define DHCP_RELEASE 7
 
 #define DHCP_OPTION_PAD 0
 #define DHCP_OPTION_MASK 1
@@ -11560,6 +11562,12 @@ static bipolar http_fetch_to(string_address start, bipolar dest, bool check_cert
 #define DHCP_NO_OFFER (-2)
 #define DHCP_REFUSED (-3)
 #define DHCP_NO_RANDOM (-4)
+//      Not outcomes: what the confined child says down its answer pipe
+//      while it still works (dhcp_say), so that whoever waits for the
+//      exchange knows when a server holds an address for this client --
+//      from the REQUEST until its ACK window is over -- and which one.
+#define DHCP_REQUESTED (-20)
+#define DHCP_UNANSWERED (-21)
 
 typedef struct
 {
@@ -11572,6 +11580,15 @@ typedef struct
         p32 renewal;
         p32 rebinding;
 } dhcp_lease;
+
+/* One record down the answer pipe of an exchange run apart: the outcome and
+   the lease once at the end, and before that DHCP_REQUESTED or
+   DHCP_UNANSWERED with the offer a REQUEST names. */
+typedef struct
+{
+        bipolar status;
+        dhcp_lease lease;
+} dhcp_answer;
 
 /* A transaction id is visible beside the client's public hardware address and
    is the only unpredictable field an off-path reply must guess. Prefer the
@@ -11711,13 +11728,14 @@ static COLD positive dhcp_build(p8 address_to into, positive room, p8 kind,
         //      What we would like to be told, which a server may ignore, and
         //      the end. Short packets are dropped by some servers and by some
         //      switches, so the 261 bytes at most written here are padded to
-        //      the length everything accepts. A DECLINE asks for nothing: RFC
-        //      2131's table 5 says it MUST NOT carry a parameter list.
+        //      the length everything accepts. A DECLINE or a RELEASE asks for
+        //      nothing: RFC 2131's table 5 says MUST NOT to a parameter list
+        //      in either.
         static const p8 ask[] = {DHCP_OPTION_ASK, 3, DHCP_OPTION_MASK,
                                  DHCP_OPTION_ROUTER, DHCP_OPTION_DNS,
                                  DHCP_OPTION_END};
 
-        if (kind == DHCP_DECLINE)
+        if (kind == DHCP_DECLINE || kind == DHCP_RELEASE)
                 into[at] = DHCP_OPTION_END;
         else
                 memory_copy(into + at, ask, sizeof ask);
@@ -12295,6 +12313,17 @@ static COLD bool dhcp_confine(b32 handle)
         return status >= 0;
 }
 
+/* Says how far the exchange has got to whoever waits for it apart
+   (DHCP_REQUESTED, DHCP_UNANSWERED), when somebody does. */
+static COLD fn dhcp_say(bipolar status, const dhcp_lease address_to lease)
+{
+        dhcp_answer said = {status, *lease};
+
+        if (dhcp_apart >= 0)
+                system_write_all((positive)dhcp_apart, address_of said,
+                                 sizeof said);
+}
+
 static COLD bipolar dhcp_open(string_address device, p32 host, bool broadcast)
 {
         bipolar handle = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
@@ -12756,11 +12785,20 @@ static bipolar dhcp_ask(string_address device, p8 address_to hardware,
                                    an answer that cannot exist. */
                                 break;
 
+                        //      A server now holds the offered address for
+                        //      this client until its ACK window is over:
+                        //      whoever waits for the exchange is told, so
+                        //      that link news lets the ACK come first.
+                        dhcp_say(DHCP_REQUESTED, lease);
+
                         //      An ACK is given at least the usual quarter.
                         if (!network_deadline_begin(
                                 address_of deadline, wait / 1000,
                                 (wait < 250 ? 250 : wait % 1000) * 1000000))
+                        {
+                                dhcp_say(DHCP_UNANSWERED, lease);
                                 break;
+                        }
 
                         status = dhcp_complete(
                             handle, packet, sizeof packet, transaction,
@@ -12772,6 +12810,7 @@ static bipolar dhcp_ask(string_address device, p8 address_to hardware,
                                 dhcp_frames_close();
                                 return status;
                         }
+                        dhcp_say(DHCP_UNANSWERED, lease);
                         break;
                 }
         }
@@ -12871,19 +12910,29 @@ done:
         and offers another. Without it the server offered the same address on
         every DISCOVER until its lease ran out, and the link had none.
 
-        Nothing answers a DECLINE, so this is one send, from the same confined
+        And giving back an address nobody here will use. An exchange the
+        watcher cut while its REQUEST was out and unanswered (net_dhcp_apart)
+        leaves a server holding the offered address for this client; RFC 2131
+        4.4.6's DHCPRELEASE hands it back, naming it in ciaddr and the server
+        in option 54 and asking for nothing. With no address configured to
+        send from it is broadcast, as the DECLINE is.
+
+        Nothing answers either, so each is one send, from the same confined
         child as the other exchanges: its filter already allows sendto.
+        `kind` is DHCP_DECLINE or DHCP_RELEASE.
 */
-static bipolar dhcp_decline(string_address device, p8 address_to hardware,
-                            const dhcp_lease address_to lease)
+static bipolar dhcp_give_back(string_address device, p8 address_to hardware,
+                              const dhcp_lease address_to lease, p8 kind)
 {
         p8 packet[300];
         p32 transaction;
         bipolar handle;
         bipolar sent;
         positive length;
+        bool declined = kind == DHCP_DECLINE;
 
-        if (!lease->address || !lease->server)
+        if (!lease->address || !lease->server ||
+            (!declined && kind != DHCP_RELEASE))
                 return DHCP_NO_OFFER;
         if (!dhcp_transaction_early(address_of transaction))
                 return DHCP_NO_RANDOM;
@@ -12895,8 +12944,9 @@ static bipolar dhcp_decline(string_address device, p8 address_to hardware,
             .family = AF_INET, .port = network_order_16(DHCP_SERVER_PORT),
             .host = network_order_32(HOST_BROADCAST)};
 
-        length = dhcp_build(packet, sizeof packet, DHCP_DECLINE, transaction,
-                            hardware, lease->address, lease->server, 0, false);
+        length = dhcp_build(packet, sizeof packet, kind, transaction, hardware,
+                            declined ? lease->address : 0, lease->server,
+                            declined ? 0 : lease->address, false);
         sent = socket_send((b32)handle, packet, length, 0, address_of where,
                            sizeof where);
         socket_close((b32)handle);
