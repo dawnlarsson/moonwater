@@ -8339,6 +8339,12 @@ same 'cursor waits'     '0,5'                    5 3 in 'abcde' cursor
 same 'then wraps'       '[abcde]|[f]|[]'         5 3 in 'abcdef' dump
 same 'off the bottom'   '[def]|[gh]'             3 2 in 'abcdefgh' dump
 same 'kept in the ring' '[abc]'                  3 2 in 'abcdefgh' back 1
+#       Backspace and cursor back start from the last column when the cursor is
+#       waiting to wrap there: one step back from it is the column before, the
+#       way xterm and the VT100 do it. Taking the wait as one column further on
+#       put the next character on the last column itself.
+same 'back from the wrap point' '[01234567X9]|[]'   10 2 in '0123456789\b' in 'X' dump
+same 'cursor back from the wrap point' '[01234567X9]|[]' 10 2 in '0123456789\e[1D' in 'X' dump
 
 group tab
 same 'all reset stops'       '0'                    20 3 tab_reset

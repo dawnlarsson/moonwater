@@ -1633,6 +1633,8 @@ static fn csi_final(unsigned int final)
                 column = a < COLUMNS - column ? column + a : COLUMNS - 1;
                 break;
         case 'D':
+                // From the wrap point the cursor is on the last column first.
+                column = min(column, COLUMNS - 1);
                 column = column > a ? column - a : 0;
                 break;
         case 'G':
@@ -2069,6 +2071,10 @@ static fn consume(unsigned int c)
                         column = 0;
                         break;
                 case '\b':
+                        // A cursor at COLUMNS is waiting to wrap: it is on the
+                        // last column, and back one from there.
+                        column = min(column, COLUMNS - 1);
+
                         if (column)
                                 column--;
                         break;
