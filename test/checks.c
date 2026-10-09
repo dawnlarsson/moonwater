@@ -68412,6 +68412,50 @@ static fn nts_ke_pieces(void)
 }
 
 /*
+        DNS over TLS's setting and the resolvers it asks (dns_tls harness
+        has the exchange): on, off and only as written, anything else the
+        tier's default -- off, and only at the tight tier, which this file is
+        built at too -- and the four public resolvers known to offer it.
+*/
+static fn dns_tls_pieces(void)
+{
+        check("dns.tls: on, off and only are what they say",
+              dns_tls_mode_of((string_address) "on") == DNS_TLS_ON &&
+                  dns_tls_mode_of((string_address) "off") == DNS_TLS_OFF &&
+                  dns_tls_mode_of((string_address) "only") == DNS_TLS_ONLY);
+        check("dns.tls: no word, or one it does not know, is the tier's default",
+              dns_tls_mode_of((string_address) "") == DNS_TLS_DEFAULT &&
+                  dns_tls_mode_of((string_address) "tls-only") == DNS_TLS_DEFAULT &&
+                  dns_tls_mode_of((string_address) "ON") == DNS_TLS_DEFAULT &&
+                  DNS_TLS_DEFAULT == (MOONWATER_STRICT_NET >= STRICT_TIGHT
+                                          ? DNS_TLS_ONLY : DNS_TLS_OFF));
+        check("the four public resolvers offer TLS, and nothing else is taken to",
+              dns_offers_tls(0x01010101u) && dns_offers_tls(0x01000001u) &&
+                  dns_offers_tls(0x09090909u) && dns_offers_tls(0x95707070u) &&
+                  !dns_offers_tls(0x08080808u) && !dns_offers_tls(0x0a000001u) &&
+                  !dns_offers_tls(0x01010102u) && !dns_offers_tls(0));
+        {
+                p8 udp[DNS_MAX_MESSAGE];
+                p8 small[DNS_HEADER + 4 + DNS_EDNS_LENGTH - 1];
+                bool mixed = false;
+                positive question = 0;
+                positive length = 0;
+
+                check("a request is the header, the name, A IN and the EDNS option",
+                      dns_build_request(udp, sizeof udp,
+                                        (string_address) "example.test", 0x1234,
+                                        &mixed, true, &question, &length) == 14 &&
+                          question == 18 && length == DNS_HEADER + 18 + DNS_EDNS_LENGTH &&
+                          udp[0] == 0x12 && udp[1] == 0x34 && udp[11] == 1 &&
+                          udp[DNS_HEADER + 18 + 2] == 41);
+                check("a request with no room is refused before anything is written",
+                      dns_build_request(small, sizeof small,
+                                        (string_address) "a", 1, &mixed, false,
+                                        &question, &length) < 0);
+        }
+}
+
+/*
         TLS 1.2, piece by piece. ServerHello rows: a 1.2 answer needs one of
         the two suites, the extended master secret and an empty
         renegotiation_info, may carry point formats holding uncompressed
@@ -71552,6 +71596,7 @@ b32 main(void)
         net_group(tls_ca_issuers_rules);
         net_group(tls_trust_anchor_chains);
         net_group(nts_ke_pieces);
+        net_group(dns_tls_pieces);
         net_group(tls12_pieces);
         net_group(redirect_urls);
         net_group(fetching_for_real);

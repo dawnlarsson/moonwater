@@ -78,6 +78,7 @@ moonwater ntp nts servers [NAME[:PORT]...|default]
 moonwater keyboard [LAYOUT|list|xkb]   us uk gb de se sv no nb dk fi fr es it [us]
 moonwater name [NEW|random]            what this machine is called, like space-wizard
 moonwater dns [ADDRESS...|auto]        up to three servers names are asked of, or the network's [auto]
+moonwater dns tls [on|off|only]        names over TLS to 1.1.1.1 and 9.9.9.9 first; only sends none in the clear [off]
 
 moonwater link                         who this machine is linked with, and what each may do
 moonwater link pair [NAME]             a code, and wait for the other machine to use it

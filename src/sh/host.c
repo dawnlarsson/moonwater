@@ -16748,6 +16748,36 @@ static b32 host_desktop(string_address address_to arguments, positive count)
         server of a network that named none, and where a lookup asks when the
         file names no server at all.
 */
+/*
+        moonwater dns tls [on|off|only]: whether names are asked over TLS
+        (the DNS over TLS comment in net.c says how). Kept in /root/dns.tls
+        and published in /run/moonwater/dns.tls, which the resolver reads,
+        so that a lookup by a user who cannot read /root follows it too; no
+        word kept is no published file, and then the tier's default holds.
+*/
+#define DNS_TLS_KEPT "/root/dns.tls"
+
+static fn dns_tls_publish(void)
+{
+        p8 word[16];
+
+        host_read_word(DNS_TLS_KEPT, word, sizeof(word));
+        if (!word[0])
+        {
+                (void)system_remove_at(AT_FDCWD, DNS_TLS_PATH, 0);
+                return;
+        }
+        host_state_ready();
+        (void)radio_write_word(DNS_TLS_PATH, (string_address)word);
+}
+
+static string_address dns_tls_word(positive mode)
+{
+        return mode == DNS_TLS_ON     ? (string_address) "on"
+               : mode == DNS_TLS_ONLY ? (string_address) "only"
+                                      : (string_address) "off";
+}
+
 static fn dns_say(bool label)
 {
         p32 servers[DNS_SERVERS_MAX];
@@ -16770,7 +16800,29 @@ static fn dns_say(bool label)
                 string_format(log, " " LOCALE_NEEDS_ROOT);
         else
                 string_format(log, "%s", net_dns_kept(kept) ? " (kept)" : " (the network's)");
-        host_say(log, "\n");
+        host_say(log, "\n%s tls %s\n", label ? host_label "dns" : "  dns",
+                 dns_tls_word(dns_tls_mode()));
+}
+
+static b32 dns_tls_verb(string_address address_to arguments, positive count)
+{
+        string_address word = count > 3 ? arguments[3] : null;
+
+        if (count == 3)
+        {
+                host_say(log, host_label "dns tls %s\n", dns_tls_word(dns_tls_mode()));
+                return 0;
+        }
+        return_if(count != 4 || (!string_equals(word, "on") &&
+                                 !string_equals(word, "off") &&
+                                 !string_equals(word, "only")),
+                  host_usage());
+        host_need_root();
+        if (host_save("dns tls", DNS_TLS_KEPT, word))
+                return 1;
+        dns_tls_publish();
+        host_say(log, host_label "dns tls %s\n", dns_tls_word(dns_tls_mode()));
+        return 0;
 }
 
 static b32 dns_set(string_address address_to words, positive count)
@@ -16828,6 +16880,7 @@ static fn dns_restore(void)
         p32 servers[DNS_SERVERS_MAX];
         positive count = net_dns_kept(servers);
 
+        dns_tls_publish();
         if (count)
                 (void)net_write_resolv_servers((string_address) "/etc/resolv.conf",
                                                servers, count);
@@ -16840,6 +16893,8 @@ static b32 host_dns(string_address address_to arguments, positive count)
                 dns_say(true);
                 return 0;
         }
+        if (string_equals(arguments[2], "tls"))
+                return dns_tls_verb(arguments, count);
         host_need_root();
         return count == 3 && string_equals(arguments[2], "auto") ? dns_auto()
                                                                  : dns_set(arguments + 2, count - 2);
@@ -17294,6 +17349,7 @@ static const host_row host_rows[] = {
     {null, "keyboard [LAYOUT|list|xkb]", "us uk gb de se sv no nb dk fi fr es it [us]", 'b'},
     {null, "name [NEW|random]", "what this machine is called, like space-wizard", 'b'},
     {null, "dns [ADDRESS...|auto]", "up to three servers names are asked of, or the network's [auto]", 'b'},
+    {null, "dns tls [on|off|only]", "names over TLS to 1.1.1.1 and 9.9.9.9 first; only sends none in the clear [off]", 'b'},
     {null, "link", "who this machine is linked with, and what each may do", 'f'},
     {null, "link [pair|NAME]", "machines linked by name, with a code", 'm'},
     {null, "link pair [NAME]", "a code, and wait for the other machine to use it", 'f'},
@@ -17654,6 +17710,7 @@ static string_address host_wipe_keep[] = {
     HOST_WIPE_KEEP(LOCALE_CANVAS_MODES_PATH),
     HOST_WIPE_KEEP(DESKTOP_PATH),
     HOST_WIPE_KEEP(NET_DNS_PATH),
+    HOST_WIPE_KEEP(DNS_TLS_KEPT),
     HOST_WIPE_KEEP(NAME_PATH),
     HOST_WIPE_KEEP(LINK_SWITCH_PATH),
     HOST_WIPE_KEEP(LINK_KEY_PATH),
