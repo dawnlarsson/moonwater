@@ -63021,7 +63021,7 @@ def harness_net_exhaustive_proof(argv):
             "http_address_public", "dhcp_mask_valid", "dhcp_prefix_of",
             "dhcp_address_unicast", "dhcp_prefix_clear", "dhcp_lease_timers",
             "tls_asn1_length", "tls_oid_content_der", "http_dot_segment",
-            "dhcp_walk")])
+            "dhcp_walk", "tls_date_value")])
     source = template.replace("/* BYTE_READER */", byte_reader_source()).replace(
         "/* PRODUCTION */", production)
     compiler = shutil.which("cc") or shutil.which("clang")
@@ -63046,7 +63046,9 @@ def harness_net_exhaustive_proof(argv):
                     "dots": 1 + (1 << 8) + (1 << 16) + (1 << 24) + (1 << 32) +
                             sum(6 ** n for n in range(5, 10)),
                     "timers": 1 << 32,
-                    "walk": 2 * sum(8 ** n for n in range(11))}
+                    "walk": 2 * sum(8 ** n for n in range(11)),
+                    "date": 80 * 100 * 100 + 100 ** 3 + 10000 + 2 * 100 ** 3 +
+                            256 * (17 + 13 * 256 + 17 + 15 * 256)}
         for proof, total in expected.items():
             if chosen and proof not in chosen:
                 continue
@@ -63216,6 +63218,52 @@ static int spec_walk(const p8 *b, unsigned n, dhcp_gathered *gathered, p8 *overl
         return -1;
 }
 
+/* RFC 5280 4.1.2.5: UTCTime YYMMDDHHMMSSZ for 1950-2049, GeneralizedTime
+   YYYYMMDDHHMMSSZ from 2050, seconds present, Z, no fractions; a Gregorian
+   date and a time of day without a leap second. */
+static bool spec_date(p8 tag, const p8 *text, positive length, p64 *value)
+{
+        unsigned width = tag == 0x17 ? 2 : tag == 0x18 ? 4 : 0;
+        if (!width || length != width + 11 || text[length - 1] != 'Z') return false;
+        unsigned digit[15];
+        for (unsigned i = 0; i < width + 10; i++) {
+                if (text[i] < '0' || text[i] > '9') return false;
+                digit[i] = text[i] - '0';
+        }
+        unsigned year = 0;
+        for (unsigned i = 0; i < width; i++) year = year * 10 + digit[i];
+        if (width == 2) year = year < 50 ? 2000 + year : 1900 + year;
+        else if (year < 2050) return false;
+        unsigned month = digit[width] * 10 + digit[width + 1];
+        unsigned day = digit[width + 2] * 10 + digit[width + 3];
+        unsigned hour = digit[width + 4] * 10 + digit[width + 5];
+        unsigned minute = digit[width + 6] * 10 + digit[width + 7];
+        unsigned second = digit[width + 8] * 10 + digit[width + 9];
+        bool leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+        unsigned days;
+        switch (month) {
+        case 1: case 3: case 5: case 7: case 8: case 10: case 12: days = 31; break;
+        case 4: case 6: case 9: case 11: days = 30; break;
+        case 2: days = leap ? 29 : 28; break;
+        default: return false;
+        }
+        if (day < 1 || day > days || hour > 23 || minute > 59 || second > 59) return false;
+        *value = ((((p64)year * 100 + month) * 100 + day) * 100 + hour) * 10000 +
+                 (p64)minute * 100 + second;
+        return true;
+}
+static void date_case(p8 tag, const p8 *text, positive length, unsigned long long *seen,
+                      unsigned long long *reached)
+{
+        p64 got = 0, want = 0;
+        bool accepted = tls_date_value(tag, (p8 *)text, length, &got);
+        bool expected = spec_date(tag, text, length, &want);
+        ++*seen;
+        *reached += accepted;
+        if (accepted != expected || (accepted && got != want))
+                fail("date", (unsigned long long)tag << 56 | length, accepted);
+}
+
 int main(int argc, char **argv)
 {
         const char *which = argv[1];
@@ -63311,6 +63359,70 @@ int main(int argc, char **argv)
                                 fail("timers", s, 0);
                         else
                                 reached++;
+                }
+        } else if (!strcmp(which, "date")) {
+                /* The date and the time of day are judged apart by the code
+                   (every field is read from its own two digits and checked on
+                   its own; only the day depends on the month and the year), so
+                   every date is run with a valid time, every time with a valid
+                   date, and every position with every byte. Slices split the
+                   GeneralizedTime years. */
+                for (p64 year = 2050 + 80 * slice / slices; year < 2050 + 80 * (slice + 1) / slices; year++)
+                        for (unsigned month = 0; month < 100; month++)
+                                for (unsigned day = 0; day < 100; day++) {
+                                        char text[16];
+                                        snprintf(text, sizeof text, "%04u%02u%02u120000Z",
+                                                 (unsigned)year, month, day);
+                                        date_case(0x18, (p8 *)text, 15, &seen, &reached);
+                                }
+                if (slice == 0) {
+                        for (unsigned year = 0; year < 100; year++)
+                                for (unsigned month = 0; month < 100; month++)
+                                        for (unsigned day = 0; day < 100; day++) {
+                                                char text[16];
+                                                snprintf(text, sizeof text, "%02u%02u%02u120000Z",
+                                                         year, month, day);
+                                                date_case(0x17, (p8 *)text, 13, &seen, &reached);
+                                        }
+                        /* Years 0000-2049 in GeneralizedTime: refused whatever
+                           the date. And 2050-9999 at the leap-year turns. */
+                        for (unsigned year = 0; year < 10000; year++) {
+                                char text[16];
+                                snprintf(text, sizeof text, "%04u0229235959Z", year);
+                                date_case(0x18, (p8 *)text, 15, &seen, &reached);
+                        }
+                } else if (slice == 1) {
+                        for (unsigned hour = 0; hour < 100; hour++)
+                                for (unsigned minute = 0; minute < 100; minute++)
+                                        for (unsigned second = 0; second < 100; second++) {
+                                                char text[16];
+                                                snprintf(text, sizeof text, "490228%02u%02u%02uZ",
+                                                         hour, minute, second);
+                                                date_case(0x17, (p8 *)text, 13, &seen, &reached);
+                                                snprintf(text, sizeof text, "20500228%02u%02u%02uZ",
+                                                         hour, minute, second);
+                                                date_case(0x18, (p8 *)text, 15, &seen, &reached);
+                                        }
+                } else if (slice == 2) {
+                        /* Every byte at every position, every length 0 to 16,
+                           every tag. */
+                        static const char *const valid[] = {"491231235959Z", "20500101000000Z"};
+                        for (unsigned which_tag = 0; which_tag < 256; which_tag++)
+                                for (unsigned v = 0; v < 2; v++) {
+                                        positive length = v ? 15 : 13;
+                                        for (positive cut = 0; cut <= 16; cut++) {
+                                                p8 text[16] = {0};
+                                                memcpy(text, valid[v], length);
+                                                date_case((p8)which_tag, text, cut, &seen, &reached);
+                                        }
+                                        for (positive at = 0; at < length; at++)
+                                                for (unsigned byte = 0; byte < 256; byte++) {
+                                                        p8 text[16];
+                                                        memcpy(text, valid[v], length);
+                                                        text[at] = (p8)byte;
+                                                        date_case((p8)which_tag, text, length, &seen, &reached);
+                                                }
+                                }
                 }
         } else if (!strcmp(which, "walk")) {
                 /* Every DHCP option region of up to ten bytes over the bytes
@@ -63684,6 +63796,98 @@ int main(void)
         return 0;
 }
 ''', ["http_dot_segment", "http_path_simplify"], ""),
+("tls_constraints", 18, r'''
+/* TYPEDEFS tls_cert */
+/* PRODUCTION */
+/* RFC 5280 4.2.1.9 in DER: SEQUENCE { cA BOOLEAN DEFAULT FALSE,
+   pathLenConstraint INTEGER (0..MAX) OPTIONAL }, nothing else and nothing
+   after it. DER leaves out a default, so cA is either absent or 01 01 FF; the
+   integer is minimal and not negative; a path length needs cA true. Lengths
+   are short-form here because no valid value reaches 128 bytes. */
+static bool spec_constraints(const p8 *v, positive n, bool *ca, bool *present, positive *path)
+{
+        *ca = false; *present = false; *path = 0;
+        if (n < 2 || v[0] != 0x30 || v[1] != n - 2) return false;
+        positive at = 2;
+        if (at < n && v[at] == 0x01) {
+                if (n - at < 3 || v[at + 1] != 1 || v[at + 2] != 0xff) return false;
+                *ca = true; at += 3;
+        }
+        if (at < n && v[at] == 0x02) {
+                if (n - at < 2) return false;
+                positive bytes = v[at + 1];
+                if (bytes == 0 || bytes > 8 || bytes > n - at - 2) return false;
+                const p8 *x = v + at + 2;
+                if (x[0] & 0x80) return false;
+                if (bytes > 1 && x[0] == 0 && !(x[1] & 0x80)) return false;
+                positive value = 0;
+                for (positive i = 0; i < bytes; i++) value = value << 8 | x[i];
+                *present = true; *path = value; at += 2 + bytes;
+        }
+        if (at != n) return false;
+        return !*present || *ca;
+}
+#define N 15
+int main(void)
+{
+        p8 value[N];
+        positive length = nondet_positive();
+        __CPROVER_assume(length <= N);
+        tls_cert cert;
+        memset(&cert, 0, sizeof cert);
+        bool ca, present; positive path;
+        bool expected = spec_constraints(value, length, &ca, &present, &path);
+        bool accepted = tls_parse_basic_constraints(value, length, &cert) == TLS_OK;
+        if (accepted && present && path > 255) REACHED();
+        assert(accepted == expected);
+        if (accepted)
+                assert(cert.ca == ca && cert.path_length_present == present &&
+                       (!present || cert.path_length == path));
+        return 0;
+}
+''', ["tls_asn1_length", "tls_asn1_enter", "tls_asn1_true", "tls_parse_basic_constraints"],
+ "#define TLS_OK 0\n#define TLS_FAIL (-1)\n#define CRYPTO_RSA_BYTES 1024\n"),
+("tls_key_usage", 8, r'''
+/* TYPEDEFS tls_cert */
+/* PRODUCTION */
+/* RFC 5280 4.2.1.3 in DER: a BIT STRING of the nine named bits, trailing
+   zero bits removed (so the unused count is exactly the trailing zeros of a
+   nonzero final octet), decipherOnly (bit 8) only beside keyAgreement (bit 4),
+   no bit past the ninth. */
+static bool spec_usage(const p8 *v, positive n, bool *sign, bool *cert_sign)
+{
+        if (n < 3 || v[0] != 0x03 || v[1] != n - 2 || v[1] > 3) return false;
+        positive bytes = v[1] - 1;
+        p8 unused = v[2];
+        const p8 *bits = v + 3;
+        if (!bytes || unused > 7) return false;
+        p8 last = bits[bytes - 1];
+        if (!last) return false;
+        unsigned zeros = 0;
+        while (!((last >> zeros) & 1)) zeros++;
+        if (zeros != unused) return false;
+        if (bytes == 2 && (bits[1] != 0x80 || !(bits[0] & 0x08))) return false;
+        *sign = bits[0] & 0x80; *cert_sign = bits[0] & 0x04;
+        return true;
+}
+#define N 6
+int main(void)
+{
+        p8 value[N];
+        positive length = nondet_positive();
+        __CPROVER_assume(length <= N);
+        tls_cert cert;
+        memset(&cert, 0, sizeof cert);
+        bool sign = false, cert_sign = false;
+        bool expected = spec_usage(value, length, &sign, &cert_sign);
+        bool accepted = tls_parse_key_usage(value, length, &cert) == TLS_OK;
+        if (accepted && sign && cert_sign) REACHED();
+        assert(accepted == expected);
+        if (accepted) assert(cert.digital_signature == sign && cert.key_cert_sign == cert_sign);
+        return 0;
+}
+''', ["tls_asn1_length", "tls_asn1_enter", "tls_parse_key_usage"],
+ "#define TLS_OK 0\n#define TLS_FAIL (-1)\n#define CRYPTO_RSA_BYTES 1024\n"),
 ]
 
 
@@ -63722,6 +63926,8 @@ def harness_net_bounded_proof(argv):
             if chosen and name not in chosen:
                 continue
             production = "\n".join(ul_c_function(net, function) for function in functions)
+            harness = re.sub(r"/\* TYPEDEFS ([\w ]+) \*/",
+                             lambda m: ul_c_typedefs(net, *m.group(1).split()), harness)
             source = common + extra + harness.replace("/* PRODUCTION */", production)
             unit = Path(temporary) / (name + ".c")
             unit.write_text(source)
@@ -63763,6 +63969,8 @@ NET_MUTATION_EQUIVALENT = {
     ("dhcp_lease_timers", 'return renewal && renewal < rebinding && rebinding < lease->seconds;', "<", 2): "After the defaults are applied every reachable state has 0 < renewal < rebinding < seconds (net_exhaustive_proof 'timers' proves the defaults for every lifetime, and the given pair is kept only when it already satisfies that), so a weaker conjunction is true wherever the original is.",
     ("dhcp_walk", "taken = before < 4 ? min(byte_reader_left(&value), 4 - before)", "<", 1):
         "At before == 4 the taken branch is min(left, 0) == 0, the other branch's value.",
+    ("tls_parse_key_usage", "if (unused > 7 || at >= stop)", "||", 1): 'With no bit octet the unused-count octet is read as the final one; for unused 0 it is zero (refused), and for 1 to 7 its trailing-zero count is below its value, so the canonical test refuses it as the original does.',
+    ("tls_parse_key_usage", "if (unused > 7 || at >= stop)", ">=", 1): 'With no bit octet the unused-count octet is read as the final one; for unused 0 it is zero (refused), and for 1 to 7 its trailing-zero count is below its value, so the canonical test refuses it as the original does.',
 }
 
 NET_MUTATION_FAMILIES = r"^(dns_|netlink_|http_|dhcp_|tls_|network_|net_)"
@@ -63875,7 +64083,10 @@ def harness_net_mutation(argv):
         (r"^tls_(public_suffix|suffix_in)$", ["public_suffixes", "tls_hostnames"]),
         (r"^tls_(host_match|general_name_match|name_allowed|dns_within|email_within)$",
          ["tls_hostnames", "tls_chains"]),
-        (r"^tls_(date_value|date_now|parse_validity)$", ["tls_dates", "tls_chains"]),
+        (r"^tls_date_value$", ["net_exhaustive_proof --slices 8 date", "tls_dates"]),
+        (r"^tls_parse_basic_constraints$", ["net_bounded_proof tls_constraints", "tls_chains"]),
+        (r"^tls_parse_key_usage$", ["net_bounded_proof tls_key_usage", "tls_chains"]),
+        (r"^tls_(date_now|parse_validity)$", ["tls_dates", "tls_chains"]),
         (r"^tls_", ["tls_der_fuzz", "tls_hs_fuzz", "tls_verify_fuzz", "tls_chains"]),
         (r"^netlink_(attributes|find_span|finding_take)$", ["net_bounded_proof netlink_find",
                                                             "netlink_fuzz"]),
