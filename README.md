@@ -71,6 +71,9 @@ moonwater timezone auto                from the network, one Cloudflare request
 moonwater ntp [on|off]                 set the clock from the network [on]
 moonwater ntp server [NAME|auto]       who is asked first: a name or address [auto]
 moonwater ntp sampling [on|off]        keep the lowest-delay sample of five [on]
+moonwater ntp nts [on|off|only]        authenticated time (RFC 8915) first; only refuses plain [on]
+moonwater ntp nts servers [NAME[:PORT]...|default]
+                                       who is asked for it, up to four
 
 moonwater keyboard [LAYOUT|list|xkb]   us uk gb de se sv no nb dk fi fr es it [us]
 moonwater name [NEW|random]            what this machine is called, like space-wizard
