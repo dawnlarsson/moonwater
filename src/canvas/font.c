@@ -23,10 +23,11 @@
             coverage    exact area: the signed area and cover of every edge
                         in every cell it crosses, a running sum along each
                         row, nonzero by the magnitude clamped at full
-            blending    in linear light through the sRGB transfer curve, with
-                        a contrast curve that thickens dark text the way
-                        linear blending thins it, and stem darkening for
-                        small text on request
+            blending    dark text in linear light through the sRGB transfer
+                        curve, with a contrast curve that thickens it the way
+                        linear blending thins it; light text toward a mix of
+                        the sRGB bytes, which linear blending would thicken;
+                        stem darkening for small text on request
             fitting     below hint_until pixels, the baseline, x-height and
                         cap height land on whole pixels by a piecewise
                         vertical map; nothing horizontal moves
@@ -290,7 +291,7 @@ typedef struct
         p32 hint_until;         // largest size in pixels that is fitted (24)
         p32 darken;             // darkening at small sizes, 1/64 pixel (12)
         p32 darken_until;       // size in pixels where it has faded out (32)
-        p32 contrast;           // dark text's contrast boost, 1/64 (64)
+        p32 contrast;           // dark text's contrast boost, 1/64 (128)
         bool linear;            // blend in linear light (true)
 
         p8 address_to atlas;
@@ -316,7 +317,7 @@ typedef struct
         bool clip, gather, overflow, track;
 
         p8 ramp[256];
-        p32 ramp_colour, ramp_contrast;
+        p32 ramp_colour, ramp_contrast, plain;
         bool ramp_ready;
 
         font_pairing pairs[FONT_PAIRS];
@@ -2586,14 +2587,22 @@ static font_bitmap font_cached(font_engine address_to e, const font_face address
 }
 
 /*
-        Blending. Coverage is light: a pixel half covered by white text on
-        black should give half the light, which is sRGB 188 and not 128. So
+        Blending. Coverage is light: a pixel half covered by black text on
+        white should give half the light, which is sRGB 188 and not 128. So
         both colours go into linear light, mix there by coverage, and come
-        back to the nearest byte. Mixing in linear light thins dark text on a
-        light ground, so dark text first passes its coverage through a
-        contrast curve, a(k + 1) / (ak + 1), with k falling to nothing as the
-        text's own lightness rises to three quarters: light text keeps its
-        coverage.
+        back to the nearest byte. But the eye reads lightness, not light, and
+        small text is mostly edge pixels: measured as ink -- lightness away
+        from the ground per em squared, against the same run at 48 px -- dark
+        text mixed in linear light reads 6 to 24 percent light at 8 to 16 px
+        (Inter, Plex Mono, Hack), and white text on black 18 to 61 percent
+        heavy. So dark text first passes its coverage through a contrast
+        curve, a(k + 1) / (ak + 1), k = 2 at full strength (within 10 percent
+        at every one of those sizes; k = 1 left it 16 percent light), falling
+        to nothing as the text's lightness rises to three quarters; and light
+        text moves, as its lightness rises from a half to three quarters, to
+        the plain mix of the sRGB bytes (white on black then reads within 16
+        percent; a contrast curve bent the other way, k = -0.45, took the
+        worst of it only from 1.41 to 1.23).
 
         The two tables are the program's, made once: 256 bytes into 16-bit
         light, and all 65536 lights back to the byte nearest in sRGB, that is
@@ -2651,7 +2660,7 @@ fn font_start(font_engine address_to e, p8 address_to atlas, p32 width, p32 heig
         e->hint_until = 24;
         e->darken = 12;
         e->darken_until = 32;
-        e->contrast = 64;
+        e->contrast = 128;
         e->linear = true;
         e->atlas = atlas;
         e->atlas_width = width > 0xffff ? 0xffff : width;
@@ -2667,7 +2676,9 @@ static fn font_ramp(font_engine address_to e, p32 colour)
         f32 light = (0.30f * (colour >> 16 & 255) + 0.59f * (colour >> 8 & 255) + 0.11f * (colour & 255)) / 255;
         f32 weight = 4 * (0.75f - light);
         f32 k = e->contrast / 64.0f * (weight < 0 ? 0 : weight > 1 ? 1 : weight);
+        f32 bright = 4 * (light - 0.5f);
 
+        e->plain = (p32)(64 * (bright < 0 ? 0 : bright > 1 ? 1 : bright) + 0.5f);
         for (p32 a = 0; a < 256; a++)
         {
                 f32 x = a / 255.0f;
@@ -2679,7 +2690,9 @@ static fn font_ramp(font_engine address_to e, p32 colour)
         e->ramp_ready = true;
 }
 
-//      One pixel: back and fore mixed by a of 255, channel by channel.
+//      One pixel: back and fore mixed by a of 255, channel by channel, in
+//      linear light; light text moves, by e->plain of 64, to the mix of the
+//      sRGB bytes themselves.
 static p32 font_mix(const font_engine address_to e, p32 back, p32 fore, p32 a)
 {
         p32 mixed = 0;
@@ -2687,9 +2700,11 @@ static p32 font_mix(const font_engine address_to e, p32 back, p32 fore, p32 a)
         for (p32 shift = 0; shift < 24; shift += 8)
         {
                 p32 b = back >> shift & 255, f = fore >> shift & 255;
+                p32 plain = (b * (255 - a) + f * a + 127) / 255;
                 p32 value = e->linear ? font_to_srgb[(font_to_linear[b] * (255 - a) + font_to_linear[f] * a + 127) / 255]
-                                      : (b * (255 - a) + f * a + 127) / 255;
+                                      : plain;
 
+                value = e->linear ? (value * (64 - e->plain) + plain * e->plain + 32) >> 6 : value;
                 mixed |= value << shift;
         }
         return mixed;

@@ -97763,7 +97763,8 @@ static fn check_layout(const font_face address_to one, const font_face address_t
 /*
         The sRGB tables: every byte survives the round trip, light is
         monotone, a blend at no coverage is the ground and at full the ink,
-        and half of white over black is 188, half the light.
+        half of black over white is 188, half the light, and half of white
+        over black 128, the light text's mix of the bytes.
 */
 static fn check_light()
 {
@@ -97782,7 +97783,10 @@ static fn check_light()
                 ends = ends && font_mix(&engine, s * 0x010101, 0x204060, 0) == s * 0x010101 &&
                        font_mix(&engine, s * 0x010101, 0x204060, 255) == 0x204060;
         check("blend: no coverage is the ground, full is the ink", ends);
-        check("blend: half of white over black is half the light", font_mix(&engine, 0, 0xffffff, 128) == 0xbcbcbc);
+        font_ramp(&engine, 0);
+        check("blend: half of black over white is half the light", font_mix(&engine, 0xffffff, 0, 127) == 0xbcbcbc);
+        font_ramp(&engine, 0xffffff);
+        check("blend: half of white over black is the bytes' mix", font_mix(&engine, 0, 0xffffff, 128) == 0x808080);
 
         const p32 address_to tones = font_tones(&engine, 0xdfe7ef, 0x101820);
         check("tones: the ends of a pair are its two colours", tones[0] == 0x101820 && tones[255] == 0xdfe7ef);
