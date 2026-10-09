@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        401 routines (378 public, 23 local), 391 of them on all three and 10 local to one.
+        402 routines (379 public, 23 local), 392 of them on all three and 10 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -232,6 +232,7 @@
           memory_fill_32                 public  yes     yes     yes
           memory_fill_64                 public  yes     yes     yes
           memory_fill_u32                public  yes     yes     yes
+          memory_fill_u32_rect           public  yes     yes     yes
           memory_fill_u64_aligned        public  yes     yes     yes
           memory_first_of                public  yes     yes     yes
           memory_first_of_ascii_case     public  yes     yes     yes
@@ -12711,6 +12712,39 @@ __asm__(
 #undef TR32_X64_LOOKUP
 
     //
+    //       memory_fill_u32_rect -- rdi into, rsi into_stride in words, rdx
+    //       width, rcx height, r8d value. A row of 16 or fewer is one masked
+    //       store with AVX-512 and two overlapping ones from 4 words up
+    //       without it; a wider row is 64 or 16 bytes a store, the last one
+    //       ending at the row's end, over the one before it, and without
+    //       AVX-512 a row of 208 or more is rep stosq. On a 9950X core (test/run
+    //       bench fill-rect), against a memory_fill_u32 a row: AVX-512 21-39%
+    //       for cells and slivers, 50% for a line's blank run, 73-97% for a
+    //       panel 1000 wide; SSE2 27-34% for cells and even from 208 words,
+    //       where both are rep stosq.
+    //
+    ASM_FUNC(memory_fill_u32_rect)
+    "test %rdx, %rdx\n   jz 9f\n   test %rcx, %rcx\n   jz 9f\n   shl $2, %rsi\n   lea (%rdi,%rdx,4), %r9\n"
+    ASM_NARROW("cpu_has_avx512", "5f")
+    "vpbroadcastd %r8d, %zmm0\n   cmp $16, %rdx\n   ja 2f\n   mov $0xffff, %eax\n   bzhi %edx, %eax, %eax\n   kmovw %eax, %k1\n"
+    "1:  vmovdqu32 %zmm0, (%rdi){%k1}\n   add %rsi, %rdi\n   dec %rcx\n   jnz 1b\n   vzeroupper\n" ASM_RET
+    "2:  mov %rdi, %rax\n"
+    "3:  vmovdqu32 %zmm0, (%rax)\n   add $64, %rax\n   lea 64(%rax), %r10\n   cmp %r9, %r10\n   jb 3b\n   vmovdqu32 %zmm0, -64(%r9)\n"
+    "add %rsi, %rdi\n   add %rsi, %r9\n   dec %rcx\n   jnz 2b\n   vzeroupper\n" ASM_RET
+    "5:  movd %r8d, %xmm0\n   pshufd $0, %xmm0, %xmm0\n   cmp $4, %rdx\n   jb 7f\n   cmp $208, %rdx\n   jae 10f\n"
+    "6:  mov %rdi, %rax\n"
+    "4:  movdqu %xmm0, (%rax)\n   add $16, %rax\n   lea 16(%rax), %r10\n   cmp %r9, %r10\n   jb 4b\n   movdqu %xmm0, -16(%r9)\n"
+    "add %rsi, %rdi\n   add %rsi, %r9\n   dec %rcx\n   jnz 6b\n" ASM_RET
+    "7:  mov %r8d, (%rdi)\n   mov %r8d, -4(%r9)\n   cmp $3, %rdx\n   jne 8f\n   mov %r8d, 4(%rdi)\n"
+    "8:  add %rsi, %rdi\n   add %rsi, %r9\n   dec %rcx\n   jnz 7b\n"
+    "9:  " ASM_RET
+    //  From 208 words a row, rep stosq, where memory_fill_u32 crosses over.
+    "10: mov %r8d, %eax\n   mov %rax, %r10\n   shl $32, %r10\n   or %r10, %rax\n   mov %rcx, %r11\n"
+    "11: mov %rdi, %r10\n   mov %rdx, %rcx\n   shr $1, %rcx\n   rep stosq\n   test $1, %dl\n   jz 12f\n   mov %eax, (%rdi)\n"
+    "12: lea (%r10,%rsi), %rdi\n   dec %r11\n   jnz 11b\n" ASM_RET
+    ASM_END(memory_fill_u32_rect)
+
+    //
     //       memory_sweep_coverage -- a row of coverage cells summed, made
     //       bytes and cleared: rdi into, rsi cells, rdx count, ecx sum.
     //
@@ -21961,6 +21995,23 @@ __asm__(
     "7:  madd x0, x8, x4, x9\n" ASM_RET
     ASM_END(memory_blend_u32_rect)
 
+    //       memory_fill_u32_rect: a row of four or more words is 32 bytes a
+    //       stp, then the last 16 ending at the row's end over what came
+    //       before; under four, its first and last words and the middle one
+    //       of three. On an M2 core, against a memory_fill_u32 a row: 34-50%
+    //       for cells and slivers, 72% for a line's blank run, 92-95% for a
+    //       panel 1000 wide. The x86_64 block carries the contract.
+    ASM_FUNC(memory_fill_u32_rect)
+    "cbz x2, 9f\n   cbz x3, 9f\n   lsl x1, x1, #2\n   dup v0.4s, w4\n   add x5, x0, x2, lsl #2\n   cmp x2, #4\n   b.lo 7f\n"
+    "1:  mov x6, x0\n   add x7, x0, #32\n   cmp x7, x5\n   b.hi 3f\n"
+    "2:  stp q0, q0, [x6], #32\n   add x7, x6, #32\n   cmp x7, x5\n   b.ls 2b\n"
+    "3:  add x7, x6, #16\n   cmp x7, x5\n   b.hi 4f\n   str q0, [x6]\n"
+    "4:  stur q0, [x5, #-16]\n   add x0, x0, x1\n   add x5, x5, x1\n   subs x3, x3, #1\n   b.ne 1b\n" ASM_RET
+    "7:  str w4, [x0]\n   stur w4, [x5, #-4]\n   cmp x2, #3\n   b.ne 8f\n   str w4, [x0, #4]\n"
+    "8:  add x0, x0, x1\n   add x5, x5, x1\n   subs x3, x3, #1\n   b.ne 7b\n"
+    "9:  " ASM_RET
+    ASM_END(memory_fill_u32_rect)
+
     //       memory_sweep_coverage: sixteen cells a turn in four vectors, each
     //       its own prefix sum by two ext against zero, the four joined by
     //       their last lanes, and the carry one add a turn; the byte by abs,
@@ -30271,6 +30322,29 @@ __asm__(
     "9:  mul a0, t4, a4\n   add a0, a0, t1\n   sub a0, a0, a2\n" ASM_RET
     ASM_END(memory_blend_u32_rect)
 
+    //       memory_fill_u32_rect: with V, vmv.v.x once and vse32 as many words
+    //       as a register group holds; without, four sw a turn on a moving
+    //       pointer. Guest instructions against a memory_fill_u32 a row, cells
+    //       to a line's blank run: 71-95% without V, 6-52% with it; cycles
+    //       unmeasured. The x86_64 block carries the contract.
+    ASM_FUNC(memory_fill_u32_rect)
+    "beqz a2, 9f\n   beqz a3, 9f\n   slli a1, a1, 2\n"
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t4, 2\n   beq t3, t4, 1f\n   bnez t3, 5f\n"
+    "addi sp, sp, -16\n   sd ra, 8(sp)\n   srli a1, a1, 2\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   addi sp, sp, 16\n   j memory_fill_u32_rect\n"
+    "1:  vsetvli t0, a2, e32, m8, ta, ma\n   vmv.v.x v8, a4\n"
+    "2:  mv t1, a0\n   mv t2, a2\n"
+    "3:  vsetvli t0, t2, e32, m8, ta, ma\n   vse32.v v8, (t1)\n   slli t3, t0, 2\n   add t1, t1, t3\n   sub t2, t2, t0\n   bnez t2, 3b\n"
+    "add a0, a0, a1\n   addi a3, a3, -1\n   bnez a3, 2b\n   ret\n"
+#endif
+    "5:  slli t5, a2, 2\n"
+    "6:  mv t1, a0\n   add t2, a0, t5\n   andi t3, a2, 3\n   slli t3, t3, 2\n   sub t3, t2, t3\n   beq t1, t3, 8f\n"
+    "7:  sw a4, 0(t1)\n   sw a4, 4(t1)\n   sw a4, 8(t1)\n   sw a4, 12(t1)\n   addi t1, t1, 16\n   bne t1, t3, 7b\n"
+    "8:  beq t1, t2, 4f\n   sw a4, 0(t1)\n   addi t1, t1, 4\n   j 8b\n"
+    "4:  add a0, a0, a1\n   addi a3, a3, -1\n   bnez a3, 6b\n"
+    "9:  " ASM_RET
+    ASM_END(memory_fill_u32_rect)
+
     //       memory_sweep_coverage: with V, as many cells as four registers
     //       hold, the prefix sum by vslideup of 1, 2, 4 ... lanes into a
     //       zeroed group and vadd, the carry added and taken from the last
@@ -37238,6 +37312,9 @@ positive memory_blend_u32_rect(p32 address_to into, positive into_stride,
                                const p8 address_to from, positive from_stride,
                                positive width, positive height,
                                const p32 address_to table);
+// height rows of width 32-bit words, into_stride words apart, set to value:
+// a cell's ground, a panel's. A zero width or height touches nothing.
+fn memory_fill_u32_rect(p32 address_to into, positive into_stride, positive width, positive height, p32 value);
 #endif
 // Remove every byte whose entry in a readable 256-byte table is nonzero, moving
 // the kept bytes to the front of the block in their order, and answer how many

@@ -2932,9 +2932,9 @@ b32 font_draw(font_engine address_to e, const font_face address_to const address
 static fn font_ground(const font_target address_to target, b32 left, b32 top, b32 right, b32 bottom,
                       p32 background)
 {
-        for (b32 row = top; row < bottom && left < right; row++)
-                memory_fill_u32(target->pixels + (positive)row * target->stride + left, (positive)(right - left),
-                                background & 0xffffff);
+        if (left < right && top < bottom)
+                memory_fill_u32_rect(target->pixels + (positive)top * target->stride + left, target->stride,
+                                     (positive)(right - left), (positive)(bottom - top), background & 0xffffff);
 }
 
 /*

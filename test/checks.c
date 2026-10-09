@@ -98166,6 +98166,56 @@ static fn check_blend()
 }
 
 /*
+        memory_fill_u32_rect: every width to 80 and rows of 127 to 300,
+        heights to 6, two strides, the last row against a page that faults,
+        the words between rows and before the first held to a canary; with
+        AVX-512 and without on x86_64, and the first riscv64 call.
+*/
+static fn check_fill_rect()
+{
+        static const positive wide[] = {127, 128, 129, 255, 256, 257, 300};
+        p32 address_to into = memory(4 * 4096);
+        bool guarded = into && system_call_3(syscall(mprotect), (positive)((p8 address_to)into + 3 * 4096), 4096, 0) == 0;
+
+        check("fill: a guard page", guarded);
+        if (!guarded)
+                return;
+#if RISCV64
+        cpu_has_vector = 0;
+        into[0] = into[1] = into[2] = into[3] = 1;
+        memory_fill_u32_rect(into, 2, 1, 2, 7);
+        check("fill: the first call asks for V and keeps its arguments",
+              into[0] == 7 && into[1] == 1 && into[2] == 7 && into[3] == 1 && cpu_has_vector != 0);
+#endif
+#if X64
+        p8 wide_on = cpu_has_avx512;
+        for (p32 tier = 0; tier < 2; tier++)
+        {
+                cpu_has_avx512 = tier ? 0 : wide_on;
+#endif
+                bool fine = true;
+                for (positive w = 0; w <= 80 + sizeof(wide) / sizeof(wide[0]) - 1; w++)
+                        for (positive width = w <= 80 ? w : wide[w - 81], height = 0; height <= (width > 80 ? 3u : 6u); height++)
+                                for (positive gap = 0; gap <= 37; gap += 37)
+                                {
+                                        positive stride = width + gap, span = height ? (height - 1) * stride + width : 0;
+                                        p32 address_to to = (p32 address_to)((p8 address_to)into + 3 * 4096) - span;
+
+                                        for (positive i = 0; i < span + 16; i++)
+                                                to[(b64)i - 16] = 0xdeadbeef;
+                                        memory_fill_u32_rect(to, stride, width, height, 0x00c0ffee + (p32)width);
+                                        for (b64 i = -16; i < (b64)span; i++)
+                                                fine = fine && to[i] == (i >= 0 && (positive)i % stride < width ? 0x00c0ffee + (p32)width
+                                                                                                                : 0xdeadbeef);
+                                }
+                check("fill: every word of the rectangle, nothing else", fine);
+#if X64
+        }
+        cpu_has_avx512 = wide_on;
+#endif
+}
+
+/*
         memory_sweep_coverage against the loop it replaces in font_raster:
         every count from 0 to 80 and runs of 127 to 1000, cells sparse as an
         outline leaves them and dense, sums that run past full both ways and
@@ -98366,6 +98416,7 @@ b32 main()
         check_drawing(&one, &two);
         check_translate();
         check_blend();
+        check_fill_rect();
         check_sweep();
 
         guarded = memory(9 * 4096);
@@ -107488,6 +107539,80 @@ b32 main(void)
         return 0;
 }
 #endif /* BENCH_blend_rect */
+
+#ifdef BENCH_fill_rect
+/* memory_fill_u32_rect against the loop it replaced in font_cell, a
+   memory_fill_u32 a row: blank terminal cells at 1080p and 4K (9 by 19, 16
+   by 35), a sliver (3 by 10), a blank run of a line (240 by 35) and a
+   panel (1000 by 20), in a 3840-pixel frame; on x86_64 with AVX-512 and
+   without. */
+#include "../src/lib.util.c"
+#define SHARED_bench_measure
+#include "checks.c"
+#undef SHARED_bench_measure
+
+#define TRIES 9
+
+static p32 frame[3840 * 40];
+
+__attribute__((noinline, noclone)) static fn former_fill(p32 address_to into, positive stride, positive width,
+                                                         positive height, p32 value)
+{
+        for (positive r = 0; r < height; r++)
+                memory_fill_u32(into + r * stride, width, value);
+}
+
+static p64 run(bool assembly, positive width, positive height, positive rounds)
+{
+        p64 start = get_cpu_time();
+
+        for (positive round = 0; round < rounds; round++)
+                for (positive cell = 0; cell < 16; cell++)
+                {
+                        p32 address_to into = frame + cell * width % (3840 - width);
+
+                        if (assembly)
+                                memory_fill_u32_rect(into, 3840, width, height, 0x101820 + (p32)round);
+                        else
+                                former_fill(into, 3840, width, height, 0x101820 + (p32)round);
+                }
+        return get_cpu_time() - start;
+}
+
+b32 main(void)
+{
+        static const positive shapes[][2] = {{3, 10}, {9, 19}, {16, 35}, {240, 35}, {1000, 20}};
+#if X64
+        p8 wide = cpu_has_avx512;
+        for (p32 tier = 0; tier < (wide ? 2u : 1u); tier++)
+        {
+                cpu_has_avx512 = tier ? 0 : wide;
+#endif
+                for (positive row = 0; row < sizeof(shapes) / sizeof(shapes[0]); row++)
+                {
+                        positive width = shapes[row][0], height = shapes[row][1];
+                        positive ratios[TRIES];
+                        positive rounds = 2000000 / (width * height * 16) + 1;
+
+                        BENCH_PAIRED_RUNS(ratios, former, assembly, width, height, rounds);
+                        string_format(log, "memory_fill_u32_rect %p by %p%s: paired median ASM/C %p.", width, height,
+#if X64
+                                      cpu_has_avx512 ? (string_address) " avx512" : (string_address) " sse2",
+#else
+                                      (string_address) "",
+#endif
+                                      ratios[TRIES / 2] / 100);
+                        positive_to_padded(log, ratios[TRIES / 2] % 100, 2, '0', 0);
+                        log("%\n", 2);
+                }
+#if X64
+        }
+        cpu_has_avx512 = wide;
+#endif
+        log_flush();
+        return 0;
+}
+#endif /* BENCH_fill_rect */
 
 #ifdef BENCH_sweep_coverage
 /* memory_sweep_coverage against the loop it replaced in font_raster, over

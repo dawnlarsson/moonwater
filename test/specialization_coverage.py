@@ -282,6 +282,9 @@ cover('folds_already', 'width', 'memory_blend_u32_rect',
       'the text engine hands it a glyph clipped to its target; widths and '
       'heights come from the glyph at run time, so no reachable call site '
       'passes a literal')
+cover('folds_already', 'width', 'memory_fill_u32_rect',
+      'the text engine hands it the parts of a cell its glyph leaves; their '
+      'sizes come from the grid and the glyph at run time')
 cover('folds_already', 'count', 'memory_sweep_coverage',
       'the rasteriser hands it a run of touched blocks whose length the '
       'outline decides at run time; no reachable call site passes a literal')

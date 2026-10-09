@@ -261,6 +261,9 @@ cover('direct_benchmark', 'test/checks.c#BENCH_translate_rect', 'memory_translat
 cover('direct_benchmark', 'test/checks.c#BENCH_blend_rect', 'memory_blend_u32_rect',
       'paired former-C/assembly timing over glyphs of UI text and a 4K heading '
       'laid on a known ground, both x86-64 bodies')
+cover('direct_benchmark', 'test/checks.c#BENCH_fill_rect', 'memory_fill_u32_rect',
+      'paired timing against a memory_fill_u32 a row over cells, a sliver, a '
+      'line of blank cells and a panel, with AVX-512 and without')
 cover('direct_benchmark', 'test/checks.c#BENCH_sweep_coverage', 'memory_sweep_coverage',
       'paired former-C/assembly timing over coverage runs of 8 to 400 cells, '
       'every x86-64 body')
