@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        397 routines (374 public, 23 local), 387 of them on all three and 10 local to one.
+        398 routines (375 public, 23 local), 388 of them on all three and 10 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -118,6 +118,7 @@
           canvas_cells_wide              public  yes     yes     yes
           canvas_glyph                   public  yes     yes     yes
           canvas_glyph2                  public  yes     yes     yes
+          canvas_glyph2_wide             public  yes     yes     yes
           canvas_glyph_wide              public  yes     yes     yes
           canvas_rect_fill               public  yes     yes     yes
           canvas_rect_fill_wide          public  yes     yes     yes
@@ -33435,6 +33436,19 @@ __asm__(
     "2:      add     %rsi, %rdi\n   dec     %r8\n   jnz     1b\n   vzeroupper\n"
     "9:      " ASM_RET
     ASM_END(canvas_glyph_wide)
+    ASM_FUNC(canvas_glyph2_wide)
+    "        test    %r8, %r8\n   jz      9f\n   shl     $2, %rsi\n   vmovd   %r9d, %xmm0\n   vpbroadcastd %xmm0, %ymm0       # the colour\n"
+    "        mov     $0x1010202040408080, %rax\n   vmovq   %rax, %xmm2\n   vpmovzxbd %xmm2, %ymm2       # columns 0-7: bits 0,0,1,1,2,2,3,3\n"
+    "        mov     $0x0101020204040808, %rax\n   vmovq   %rax, %xmm5\n   vpmovzxbd %xmm5, %ymm5       # columns 8-15: bits 4,4,5,5,6,6,7,7\n"
+    "1:      movzbl  (%rdx), %eax\n   add     %rcx, %rdx\n   test    %eax, %eax\n   jz      2f                      # a blank row, and most rows are\n"
+    "        vmovd   %eax, %xmm3\n   vpbroadcastd %xmm3, %ymm3\n"
+    "        vpand   %ymm2, %ymm3, %ymm4\n   vpcmpeqd %ymm2, %ymm4, %ymm4                # the left half of the source row's pixels\n"
+    "        vpand   %ymm5, %ymm3, %ymm6\n   vpcmpeqd %ymm5, %ymm6, %ymm6                # the right half\n"
+    "        vpmaskmovd %ymm0, %ymm4, (%rdi)\n   vpmaskmovd %ymm0, %ymm6, 32(%rdi)\n"
+    "        vpmaskmovd %ymm0, %ymm4, (%rdi,%rsi)\n   vpmaskmovd %ymm0, %ymm6, 32(%rdi,%rsi)\n"
+    "2:      lea     (%rdi,%rsi,2), %rdi\n   dec     %r8\n   jnz     1b\n   vzeroupper\n"
+    "9:      " ASM_RET
+    ASM_END(canvas_glyph2_wide)
     ASM_SIMD_SECTION_END
 );
 #elif ARM64
@@ -33709,6 +33723,24 @@ __asm__(
     "2:      add     x0, x0, x1\n   subs    x4, x4, #1\n   b.ne    1b\n"
     "9:      " ASM_RET
     ASM_END(canvas_glyph_wide)
+    ASM_FUNC(canvas_glyph2_wide)
+    "        cbz     x4, 9f\n   lsl     x1, x1, #2\n   dup     v0.4s, w5               // the colour\n"
+    "        mov     x7, #0x8080\n   movk    x7, #0x4040, lsl #16\n   movk    x7, #0x2020, lsl #32\n   movk    x7, #0x1010, lsl #48\n   fmov    d2, x7\n   uxtl    v2.8h, v2.8b\n"
+    "        uxtl    v3.4s, v2.4h\n   uxtl2   v4.4s, v2.8h\n"
+    "        mov     x7, #0x0808\n   movk    x7, #0x0404, lsl #16\n   movk    x7, #0x0202, lsl #32\n   movk    x7, #0x0101, lsl #48\n   fmov    d2, x7\n   uxtl    v2.8h, v2.8b\n"
+    "        uxtl    v5.4s, v2.4h\n   uxtl2   v6.4s, v2.8h\n"
+    "1:      ldrb    w6, [x2]\n   add     x2, x2, x3\n   cbz     w6, 2f                  // a blank row, and most rows are\n"
+    "        add     x7, x0, x1\n   dup     v7.4s, w6\n"
+    "        cmtst   v16.4s, v7.4s, v3.4s\n   cmtst   v17.4s, v7.4s, v4.4s\n   cmtst   v18.4s, v7.4s, v5.4s\n   cmtst   v19.4s, v7.4s, v6.4s\n"
+    "        ldp     q20, q21, [x0]\n   ldp     q22, q23, [x0, #32]\n"
+    "        bit     v20.16b, v0.16b, v16.16b\n   bit     v21.16b, v0.16b, v17.16b\n   bit     v22.16b, v0.16b, v18.16b\n   bit     v23.16b, v0.16b, v19.16b\n"
+    "        stp     q20, q21, [x0]\n   stp     q22, q23, [x0, #32]\n"
+    "        ldp     q20, q21, [x7]\n   ldp     q22, q23, [x7, #32]\n"
+    "        bit     v20.16b, v0.16b, v16.16b\n   bit     v21.16b, v0.16b, v17.16b\n   bit     v22.16b, v0.16b, v18.16b\n   bit     v23.16b, v0.16b, v19.16b\n"
+    "        stp     q20, q21, [x7]\n   stp     q22, q23, [x7, #32]\n"
+    "2:      add     x0, x0, x1\n   add     x0, x0, x1\n   subs    x4, x4, #1\n   b.ne    1b\n"
+    "9:      " ASM_RET
+    ASM_END(canvas_glyph2_wide)
     ASM_SIMD_SECTION_END
 );
 #elif RISCV64
@@ -34034,6 +34066,15 @@ __asm__(
     "2:      add     a0, a0, a1\n   addi    a4, a4, -1\n   bnez    a4, 1b\n"
     "9:      " ASM_RET
     ASM_END(canvas_glyph_wide)
+    ASM_FUNC(canvas_glyph2_wide)
+    "        beqz    a4, 9f\n   slli    a1, a1, 2\n   vsetivli zero, 16, e32, m4, ta, ma\n   vid.v   v4\n   vsrl.vi v4, v4, 1               # the bit a column shows: lane over two\n"
+    "        li      t0, 0x80\n   vmv.v.x v8, t0\n   vsrl.vv v8, v8, v4              # 0x80 >> (lane / 2)\n"
+    "        vmv.v.x v12, a5                 # the colour\n"
+    "1:      lbu     t1, 0(a2)\n   add     a2, a2, a3\n   beqz    t1, 2f                  # a blank row, and most rows are\n"
+    "        vand.vx v16, v8, t1\n   vmsne.vi v0, v16, 0\n   vse32.v v12, (a0), v0.t\n   add     t2, a0, a1\n   vse32.v v12, (t2), v0.t\n"
+    "2:      slli    t0, a1, 1\n   add     a0, a0, t0\n   addi    a4, a4, -1\n   bnez    a4, 1b\n"
+    "9:      " ASM_RET
+    ASM_END(canvas_glyph2_wide)
     ".option pop\n"
     ASM_SIMD_SECTION_END
 );

@@ -128,7 +128,7 @@ cover('correctness_only', 'test/checks.c#CHECK_canvas_cells', '''
 canvas_cell canvas_cell2 canvas_cells canvas_glyph canvas_glyph2
 canvas_rect_fill canvas_row_blit
 canvas_cell_wide canvas_cell2_wide canvas_cells_wide canvas_row_blit_wide
-canvas_rect_fill_wide canvas_glyph_wide
+canvas_rect_fill_wide canvas_glyph_wide canvas_glyph2_wide
 ''', 'the kernel-only Canvas pixel loops, lifted out of lib.c and linked '
      'into the canvas cells check, which compares what the compositor draws '
      'with them against a per-pixel reference; canvas_cell and canvas_cell2 '

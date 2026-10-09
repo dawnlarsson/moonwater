@@ -15166,7 +15166,7 @@ struct dirty_cell
         X(canvas_row_blit_wide) X(canvas_glyph) X(canvas_glyph2)              \
         X(canvas_glyph_wide) X(canvas_cell) X(canvas_cell2)                   \
         X(canvas_cell_wide) X(canvas_cell2_wide) X(canvas_cells)              \
-        X(canvas_cells_wide)
+        X(canvas_cells_wide) X(canvas_glyph2_wide)
 #define DIRTY_RECT(name)                                                       \
         extern fn kernel_##name(p32 address_to, positive, positive, positive, \
                                 p32) __attribute__((weak));
@@ -15190,6 +15190,7 @@ DIRTY_BLIT(canvas_row_blit_wide)
 DIRTY_GLYPH(canvas_glyph)
 DIRTY_GLYPH(canvas_glyph2)
 DIRTY_GLYPH(canvas_glyph_wide)
+DIRTY_GLYPH(canvas_glyph2_wide)
 DIRTY_CELL(canvas_cell)
 DIRTY_CELL(canvas_cell2)
 DIRTY_CELL(canvas_cell_wide)
@@ -16801,6 +16802,7 @@ static fn dirty_canvas(void)
                                 DIRTY_GLYPH_CASE(canvas_glyph)
                                 DIRTY_GLYPH_CASE(canvas_glyph2)
                                 DIRTY_GLYPH_CASE(canvas_glyph_wide)
+                                DIRTY_GLYPH_CASE(canvas_glyph2_wide)
                                 DIRTY_CELL_CASE(canvas_cell)
                                 DIRTY_CELL_CASE(canvas_cell2)
                                 DIRTY_CELL_CASE(canvas_cell_wide)
@@ -99360,6 +99362,7 @@ void canvas_row_blit_wide(u32 *,const u32 *,unsigned long,u32);
 void canvas_cells_wide(u32 *,unsigned long,const u8 *,const struct window_cell *,unsigned long,u32,u32);
 void canvas_rect_fill_wide(u32 *,unsigned long,unsigned long,unsigned long,u32);
 void canvas_glyph_wide(u32 *,unsigned long,const u8 *,unsigned long,unsigned long,u32);
+void canvas_glyph2_wide(u32 *,unsigned long,const u8 *,unsigned long,unsigned long,u32);
 // The ring reads the program's line lengths through the kernel's single-load
 // spelling; hosted, one load is all there is.
 #define READ_ONCE(a) (a)
@@ -99589,6 +99592,18 @@ static void check_wide_bodies(void) {
         for(unsigned i=0;i<4096;i++)want[i]=got[i]=i*2654435761u;
         canvas_glyph(want+align,pitch,bits,stride,rows,colors[trial%6]);
         canvas_glyph_wide(got+align,pitch,bits,stride,rows,colors[trial%6]);
+        check(!memcmp(got,want,sizeof(got)));
+    }
+    /* Scale two glyphs over the same picture: each source row covers two
+       rows of pixels, two pixels to a bit, and only the set bits may change. */
+    for(unsigned trial=0;trial<2048;trial++) {
+        unsigned rows=trial%9,stride=1+trial%3,pitch=16+trial%9,align=trial%4;
+        u8 bits[9*3];for(unsigned i=0;i<sizeof(bits);i++)bits[i]=(u8)(trial*53+i*89);
+        if(trial%5==0)bits[0]=0;
+        if(trial%7==0)bits[1]=0xff;
+        for(unsigned i=0;i<4096;i++)want[i]=got[i]=i*2246822519u;
+        canvas_glyph2(want+align,pitch,bits,stride,rows,colors[trial%6]);
+        canvas_glyph2_wide(got+align,pitch,bits,stride,rows,colors[trial%6]);
         check(!memcmp(got,want,sizeof(got)));
     }
     static u32 source[1100];

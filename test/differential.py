@@ -26372,7 +26372,8 @@ HARNESS_COREUTILS_9_11 = {
 CANVAS_ROUTINES = ("canvas_rect_fill", "canvas_row_blit", "canvas_glyph",
                    "canvas_glyph2", "canvas_cell", "canvas_cell2", "canvas_cells",
                    "canvas_cell_wide", "canvas_cell2_wide", "canvas_row_blit_wide",
-                   "canvas_cells_wide", "canvas_rect_fill_wide", "canvas_glyph_wide")
+                   "canvas_cells_wide", "canvas_rect_fill_wide", "canvas_glyph_wide",
+                   "canvas_glyph2_wide")
 
 
 def canvas_assembly(library, arch):
