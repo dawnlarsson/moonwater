@@ -62992,6 +62992,762 @@ int main(void)
     return checks.verdict("net dhcp exchange", "net-dhcp-exchange")
 
 
+def harness_net_exhaustive_proof(argv):
+    """Small security predicates of src/net/net.c, proved over their whole domains.
+
+    Each production function is compiled beside a specification written here
+    from the RFC or the policy its comment states, and the two are compared on
+    every input there is: every IPv4 address for the public-address rule, the
+    unicast rule and the mask rules; every address under every prefix length
+    for the lease's prefix rule; every four-byte DER length head at every
+    truncation; every OBJECT IDENTIFIER content of up to four bytes; every path
+    segment of up to four bytes and, over the six bytes it tells apart, up to
+    nine; every lease lifetime for the default renewal and rebinding times.
+    Agreement on all of them is a proof by exhaustion, of these functions
+    against these specifications; it says nothing about a function not named.
+
+        python3 test/differential.py --harness net_exhaustive_proof [--slices N]
+    """
+    slices = os.cpu_count() or 4
+    if argv[:1] == ["--slices"] and len(argv) > 1:
+        slices = int(argv[1])
+    checks = Checks()
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    template = TEMPLATE_NET_EXHAUSTIVE
+    production = "\n".join([ul_c_typedefs(net, "dhcp_lease", "dhcp_gathered")] + [
+        ul_c_function(net, name) for name in (
+            "http_address_public", "dhcp_mask_valid", "dhcp_prefix_of",
+            "dhcp_address_unicast", "dhcp_prefix_clear", "dhcp_lease_timers",
+            "tls_asn1_length", "tls_oid_content_der", "http_dot_segment",
+            "dhcp_walk")])
+    source = template.replace("/* BYTE_READER */", byte_reader_source()).replace(
+        "/* PRODUCTION */", production)
+    compiler = shutil.which("cc") or shutil.which("clang")
+    with tempfile.TemporaryDirectory(prefix="net-exhaustive-") as temporary:
+        unit = Path(temporary) / "proof.c"
+        binary = Path(temporary) / "proof"
+        unit.write_text(source)
+        built = subprocess.run([compiler, "-std=gnu11", "-O2", "-w", str(unit), "-o",
+                                str(binary)], capture_output=True, text=True)
+        guarded = Path(temporary) / "proof-asan"
+        if not built.returncode:
+            built = subprocess.run([compiler, "-std=gnu11", "-O1", "-w",
+                                    "-fsanitize=address,undefined",
+                                    "-fno-sanitize-recover=all", str(unit), "-o",
+                                    str(guarded)], capture_output=True, text=True)
+        checks(built.returncode == 0, "the exhaustive proofs compile")
+        if built.returncode:
+            print(built.stderr[-3000:])
+            return checks.verdict("net exhaustive proof", "net-exhaustive-proof")
+        expected = {"public": 1 << 32, "mask": 1 << 32, "clear": 33 << 32,
+                    "der": 5 << 32, "oid": (1 << 8) + (1 << 16) + (1 << 24) + (1 << 32),
+                    "dots": 1 + (1 << 8) + (1 << 16) + (1 << 24) + (1 << 32) +
+                            sum(6 ** n for n in range(5, 10)),
+                    "timers": 1 << 32,
+                    "walk": 2 * sum(8 ** n for n in range(11))}
+        for proof, total in expected.items():
+            started = time.monotonic()
+            program = guarded if proof == "walk" else binary
+            runs = [subprocess.Popen([str(program), proof, str(index), str(slices)],
+                                     stdout=subprocess.PIPE, text=True)
+                    for index in range(slices)]
+            seen = reached = 0
+            failed = []
+            for run in runs:
+                out, _ = run.communicate()
+                for line in out.splitlines():
+                    if line.startswith("FAIL"):
+                        failed.append(line)
+                    elif line.startswith(proof + " "):
+                        seen += int(line.split()[1])
+                        reached += int(line.split()[3])
+                failed += [] if run.returncode == 0 else ["exit %d" % run.returncode]
+            for line in failed[:6]:
+                print("  " + line)
+            print("  %-7s %d inputs, %d of them accepted, %.1f s" % (
+                proof, seen, reached, time.monotonic() - started))
+            checks(not failed and seen == total,
+                   "%s: every input agrees with its specification (%d of %d seen)" %
+                   (proof, seen, total))
+            checks(0 < reached < seen,
+                   "%s: both answers occur, so the agreement is not vacuous" % proof)
+    return checks.verdict("net exhaustive proof", "net-exhaustive-proof")
+
+
+TEMPLATE_NET_EXHAUSTIVE = r'''#include <stdint.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+typedef uint8_t p8; typedef uint16_t p16; typedef uint32_t p32; typedef uint64_t p64;
+typedef int8_t b8; typedef int32_t b32; typedef uint64_t positive; typedef int64_t bipolar;
+typedef void *address_any; typedef const char *string_address;
+#define address_to *
+#define address_of &
+#define null NULL
+#define COLD
+#define CONST
+#define PURE
+#define INLINE
+#define TLS_OK 0
+#define TLS_FAIL (-1)
+#define min(a, b) ((a) < (b) ? (a) : (b))
+#define DHCP_OPTION_PAD 0
+#define DHCP_OPTION_END 255
+#define DHCP_OPTION_OVERLOAD 52
+#define memory_copy memmove
+static positive memory_span_byte(const void *block, p8 byte, positive size)
+{ const p8 *at = block; positive i = 0; while (i < size && at[i] == byte) i++; return i; }
+/* BYTE_READER */
+/* PRODUCTION */
+
+static unsigned long failures;
+static void fail(const char *what, unsigned long long a, unsigned long long b)
+{
+        if (failures++ < 8)
+                printf("FAIL %s %llx %llx\n", what, a, b);
+}
+
+/* ---- the specifications, written from the RFCs and the stated policy ---- */
+static bool in_block(p32 ip, p32 net, unsigned bits)
+{ p32 mask = bits ? ~0u << (32 - bits) : 0; return (ip & mask) == net; }
+/* Not public: this network, 10/8, shared 100.64/10, loopback, link-local,
+   172.16/12, IETF protocol 192.0.0/24, 192.168/16, benchmarking 198.18/15,
+   multicast and reserved 224/3 (which holds the limited broadcast). */
+static bool spec_public(p32 ip)
+{
+        static const struct { p32 net; unsigned bits; } inside[] = {
+            {0x00000000, 8}, {0x0a000000, 8}, {0x64400000, 10}, {0x7f000000, 8},
+            {0xa9fe0000, 16}, {0xac100000, 12}, {0xc0000000, 24}, {0xc0a80000, 16},
+            {0xc6120000, 15}, {0xe0000000, 3}};
+        for (unsigned i = 0; i < sizeof inside / sizeof *inside; i++)
+                if (in_block(ip, inside[i].net, inside[i].bits)) return false;
+        return true;
+}
+static bool spec_mask(p32 m)
+{
+        if (!m) return true;
+        for (unsigned k = 1; k <= 32; k++) if (m == (p32)(~0ull << (32 - k))) return true;
+        return false;
+}
+static unsigned spec_prefix(p32 m) { unsigned n = 0; while (m) { n += m & 1; m >>= 1; } return n; }
+static bool spec_unicast(p32 a) { return !in_block(a, 0, 8) && !in_block(a, 0x7f000000, 8) && !in_block(a, 0xe0000000, 3); }
+static bool spec_prefix_clear(p32 addr, p32 mask)
+{
+        p32 m = mask ? mask : 0xffffff00u;
+        p64 lo = addr & m, hi = lo | (p32)~m;
+        /* the prefix's addresses, as an interval, against each block's */
+        if (lo <= 0x00ffffffu) return false;
+        if (lo <= 0x7fffffffu && hi >= 0x7f000000u) return false;
+        if (hi >= 0xe0000000u) return false;
+        return m >= 0xfffffffeu || (addr != lo && addr != hi);
+}
+/* DER definite length at the front of b[0..size): consumed and value, or -1. */
+static int spec_der_length(const p8 *b, unsigned size, unsigned *value)
+{
+        if (size < 1) return -1;
+        if (b[0] < 0x80) { *value = b[0]; return 1; }
+        unsigned n = b[0] & 0x7f;
+        if (n < 1 || n > 3 || size < 1 + n || b[1] == 0) return -1;
+        unsigned v = 0;
+        for (unsigned i = 0; i < n; i++) v = v << 8 | b[1 + i];
+        if (v < 0x80) return -1;
+        *value = v;
+        return 1 + n;
+}
+/* X.690 8.19: arcs in base 128, the last octet of each with bit 8 clear and
+   no arc starting 0x80; at least one octet; nothing after the last arc. */
+static bool spec_oid(const p8 *b, unsigned n)
+{
+        if (!n) return false;
+        unsigned at = 0;
+        while (at < n) {
+                if (b[at] == 0x80) return false;
+                while (b[at] & 0x80) { at++; if (at == n) return false; }
+                at++;
+        }
+        return true;
+}
+/* ".", "..", each dot spelled "." or "%2e" in either case; 0 otherwise. */
+static unsigned spec_dots(const char *s, unsigned n)
+{
+        unsigned dots = 0, at = 0;
+        while (at < n) {
+                if (s[at] == '.') at += 1;
+                else if (n - at >= 3 && s[at] == '%' && s[at + 1] == '2' && (s[at + 2] == 'e' || s[at + 2] == 'E')) at += 3;
+                else return 0;
+                dots++;
+        }
+        return dots == 1 || dots == 2 ? dots : 0;
+}
+
+/* RFC 2132 and 3396: options are code, length, value; PAD is one byte; END
+   ends the region and only PAD may follow it; a region that ends without END
+   is cut short; an option met twice is one option, its pieces joined, and of
+   it the first four bytes are kept; the overload option (52) is allowed once,
+   in the primary region, one byte long, 1 to 3. */
+static int spec_walk(const p8 *b, unsigned n, dhcp_gathered *gathered, p8 *overload)
+{
+        unsigned at = 0;
+        while (at < n) {
+                p8 code = b[at++];
+                if (code == 255) {
+                        for (; at < n; at++) if (b[at]) return -1;
+                        return 0;
+                }
+                if (code == 0) continue;
+                if (at >= n) return -1;
+                unsigned length = b[at++];
+                if (length > n - at) return -1;
+                if (code == 52) {
+                        if (!overload || *overload || length != 1 || !b[at] || b[at] > 3) return -1;
+                        *overload = b[at];
+                }
+                for (unsigned i = 0; i < length; i++) {
+                        if (gathered[code].length < 4) gathered[code].first[gathered[code].length] = b[at + i];
+                        gathered[code].length++;
+                }
+                at += length;
+        }
+        return -1;
+}
+
+int main(int argc, char **argv)
+{
+        const char *which = argv[1];
+        p64 slice = strtoull(argv[2], 0, 10), slices = strtoull(argv[3], 0, 10);
+        p64 from = (0x100000000ull * slice) / slices, to = (0x100000000ull * (slice + 1)) / slices;
+        unsigned long long seen = 0, reached = 0;
+
+        if (!strcmp(which, "public")) {
+                for (p64 ip = from; ip < to; ip++, seen++)
+                {
+                        bool public = http_address_public((p32)ip);
+                        reached += public;
+                        if (public != spec_public((p32)ip)) fail("public", ip, 0);
+                }
+        } else if (!strcmp(which, "mask")) {
+                for (p64 m = from; m < to; m++, seen++) {
+                        bool ok = dhcp_mask_valid((p32)m);
+                        reached += ok;
+                        if (ok != spec_mask((p32)m)) fail("mask", m, ok);
+                        if (ok && m && dhcp_prefix_of((p32)m) != spec_prefix((p32)m)) fail("prefix", m, 0);
+                        if (dhcp_address_unicast((p32)m) != spec_unicast((p32)m)) fail("unicast", m, 0);
+                }
+                if (!slice && dhcp_prefix_of(0) != 24) fail("prefix of zero", 0, 0);
+        } else if (!strcmp(which, "clear")) {
+                for (p64 addr = from; addr < to; addr++)
+                        for (unsigned k = 1; k <= 33; k++, seen++) {
+                                /* 1 to 32 bits, and 33 for the mask a server
+                                   left out, which the lease reads as /24. */
+                                p32 mask = k == 33 ? 0 : (p32)(~0ull << (32 - k));
+                                bool clear = dhcp_prefix_clear((p32)addr, mask);
+                                reached += clear;
+                                if (clear != spec_prefix_clear((p32)addr, mask))
+                                        fail("prefix_clear", addr, mask);
+                        }
+        } else if (!strcmp(which, "der")) {
+                for (p64 word = from; word < to; word++)
+                        for (unsigned size = 0; size <= 4; size++, seen++) {
+                                p8 b[4] = {(p8)(word >> 24), (p8)(word >> 16), (p8)(word >> 8), (p8)word};
+                                positive at = 0, length = 0;
+                                unsigned value = 0;
+                                int want = spec_der_length(b, size, &value);
+                                bipolar got = tls_asn1_length(b, size, &at, &length);
+                                reached += got == TLS_OK;
+                                if ((got == TLS_OK) != (want >= 0) ||
+                                    (want >= 0 && (at != (positive)want || length != value)))
+                                        fail("der length", word, size);
+                        }
+        } else if (!strcmp(which, "oid")) {
+                for (p64 word = from; word < to; word++)
+                        for (unsigned n = 1; n <= 4; n++) {
+                                if (n < 4 && (word >> (8 * n))) continue;  /* shorter strings once */
+                                p8 b[4];
+                                for (unsigned i = 0; i < n; i++) b[i] = (p8)(word >> (8 * (n - 1 - i)));
+                                seen++;
+                                bool oid = tls_oid_content_der(b, n);
+                                reached += oid;
+                                if (oid != spec_oid(b, n)) fail("oid", word, n);
+                        }
+                if (!slice && tls_oid_content_der((p8 *)"", 0)) fail("empty oid", 0, 0);
+        } else if (!strcmp(which, "dots")) {
+                /* Every string of up to four bytes, then longer ones over the
+                   bytes the function tells apart: '.', '%', '2', 'e', 'E' and
+                   one stand-in for every other byte. */
+                for (p64 word = from; word < to; word++)
+                        for (unsigned n = 0; n <= 4; n++) {
+                                if (n < 4 && (word >> (8 * n))) continue;
+                                char s[4];
+                                for (unsigned i = 0; i < n; i++) s[i] = (char)(word >> (8 * (n - 1 - i)));
+                                seen++;
+                                positive dots = http_dot_segment(s, n);
+                                reached += dots != 0;
+                                if (dots != spec_dots(s, n)) fail("dots", word, n);
+                        }
+                if (!slice) {
+                        static const char alphabet[] = ".%2eEx";
+                        for (unsigned n = 5; n <= 9; n++) {
+                                unsigned long total = 1;
+                                for (unsigned i = 0; i < n; i++) total *= 6;
+                                for (unsigned long code = 0; code < total; code++, seen++) {
+                                        char s[9]; unsigned long c = code;
+                                        for (unsigned i = 0; i < n; i++) { s[i] = alphabet[c % 6]; c /= 6; }
+                                        if (http_dot_segment(s, n) != spec_dots(s, n)) fail("dots long", code, n);
+                                }
+                        }
+                }
+        } else if (!strcmp(which, "timers")) {
+                for (p64 s = from; s < to; s++, seen++) {
+                        if (s < 3) continue;
+                        p32 renewal = (p32)(s / 2), rebinding = (p32)(s - (s + 7) / 8);
+                        if (!(renewal && renewal < rebinding && rebinding < s)) fail("default timers", s, 0);
+                        dhcp_lease lease = {.seconds = (p32)s};
+                        if (!dhcp_lease_timers(&lease) || lease.renewal != renewal || lease.rebinding != rebinding)
+                                fail("timers", s, 0);
+                        else
+                                reached++;
+                }
+        } else if (!strcmp(which, "walk")) {
+                /* Every DHCP option region of up to ten bytes over the bytes
+                   dhcp_walk tells apart: PAD 0, END 255, the overload code 52,
+                   two other codes (1 and 3, so two buckets are told apart),
+                   and lengths and overload values 0, 1, 2, 3 and 4 and one
+                   long length (9). Any other byte acts as one of these in
+                   every position it can stand in. Each region is a buffer of
+                   exactly its size, so a read past it is caught (the walk
+                   build runs under AddressSanitizer). */
+                static const p8 alphabet[] = {0, 1, 2, 3, 4, 52, 255, 9};
+                p64 total = 0;
+                for (unsigned n = 0; n <= 10; n++) total += 1ull << (3 * n);
+                p64 begin = total * slice / slices, finish = total * (slice + 1) / slices, code = 0;
+                for (unsigned n = 0; n <= 10; n++)
+                        for (p64 index = 0; index < 1ull << (3 * n); index++, code++) {
+                                if (code < begin || code >= finish) continue;
+                                p8 *region = malloc(n ? n : 1);
+                                p64 c = index;
+                                for (unsigned i = 0; i < n; i++) { region[i] = alphabet[c & 7]; c >>= 3; }
+                                for (int primary = 0; primary < 2; primary++) {
+                                        dhcp_gathered got[256], want[256];
+                                        p8 overload = 0, want_overload = 0;
+                                        memset(got, 0, sizeof got);
+                                        memset(want, 0, sizeof want);
+                                        bipolar result = dhcp_walk(region, n, got, primary ? &overload : NULL);
+                                        int expected = spec_walk(region, n, want, primary ? &want_overload : NULL);
+                                        seen++;
+                                        reached += !result && primary && overload;
+                                        if ((result == 0) != (expected == 0) ||
+                                            (!result && (overload != want_overload ||
+                                                         memcmp(got, want, sizeof got))))
+                                                fail("dhcp walk", index, n);
+                                }
+                                free(region);
+                        }
+        } else {
+                printf("unknown proof %s\n", which);
+                return 2;
+        }
+        printf("%s %llu %lu %llu\n", which, seen, failures, reached);
+        return failures != 0;
+}
+'''
+
+
+NET_PROOF_SHIM = r'''
+#include <stdint.h>
+#include <stdbool.h>
+#include <string.h>
+#include <stdlib.h>
+#include <assert.h>
+typedef uint8_t p8; typedef uint16_t p16; typedef uint32_t p32; typedef uint64_t p64;
+typedef int8_t b8; typedef int32_t b32; typedef uint64_t positive; typedef int64_t bipolar;
+typedef void *address_any; typedef char *string_address; typedef const char *const_string;
+#define address_to *
+#define address_of &
+#define null NULL
+#define end ((p8)0)
+#define fn void
+#define COLD
+#define CONST
+#define PURE
+#define INLINE
+#define MOONWATER_STRICT_NET 1
+#define STRICT_TIGHT 2
+#define min(a, b) ((a) < (b) ? (a) : (b))
+#define max(a, b) ((a) > (b) ? (a) : (b))
+#define memory_copy_apart memcpy
+#define memory_copy memmove
+#define memory_compare memcmp
+#define memory_fill(at, v, n) memset((at), (int)(v), (n))
+#define memory_zero(at, n) memset((at), 0, (n))
+#define string_get(s) (*(const unsigned char *)(s))
+#define string_is(s, c) (*(s) == (c))
+/* A proof that holds because nothing reached its assertions proves nothing:
+   each harness marks the outcome it is about, and a second run built with
+   NET_PROOF_REACH has to reach it. */
+#ifdef NET_PROOF_REACH
+#define REACHED() assert(!"reached")
+#else
+#define REACHED() ((void)0)
+#endif
+positive nondet_positive(void); p8 nondet_p8(void); p16 nondet_p16(void);
+p32 nondet_p32(void); _Bool nondet_bool(void); int nondet_int(void);
+/* What the parsers ask of lib.c, written as the contracts lib.c's routines
+   keep (their own checks hold the assembly to them). */
+static address_any memory_first_of(address_any block, int value, positive size)
+{ p8 *at = block; for (positive i = 0; i < size; i++) if (at[i] == (p8)value) return at + i; return NULL; }
+static positive string_length(const void *s) { const char *at = s; positive n = 0; while (at[n]) n++; return n; }
+static positive memory_span_without_byte(address_any block, p8 byte, positive size)
+{ p8 *found = memory_first_of(block, byte, size); return found ? (positive)(found - (p8 *)block) : size; }
+static positive memory_text_span(const void *block, positive size)
+{ const p8 *at = block; positive i = 0;
+  while (i < size && (at[i] == '\t' || (at[i] >= ' ' && at[i] != 127))) i++; return i; }
+static positive string_span_max(const char *s, positive bound, const b8 *set)
+{ positive i = 0; while (i < bound && s[i] && set[(p8)s[i]]) i++; return i; }
+static positive string_span_without_set(const char *s, const char *set)
+{ positive i = 0; while (s[i] && !strchr(set, s[i])) i++; return i; }
+static b32 memory_compare_ascii_case(const void *one, const void *two, positive n)
+{ const p8 *a = one, *b = two;
+  for (positive i = 0; i < n; i++) { p8 x = a[i], y = b[i];
+    if (x >= 'A' && x <= 'Z') x |= 32; if (y >= 'A' && y <= 'Z') y |= 32;
+    if (x != y) return 1; } return 0; }
+static bool byte_is_alnum(p8 b) { return (b >= '0' && b <= '9') || ((b | 32) >= 'a' && (b | 32) <= 'z'); }
+static bool byte_is_alpha(p8 b) { return (b | 32) >= 'a' && (b | 32) <= 'z'; }
+static bool byte_is_digit(p8 b) { return b >= '0' && b <= '9'; }
+static bool byte_is_blank(p8 b) { return b == ' ' || b == '\t'; }
+static bool byte_is_control(p8 b) { return b < 32 || b == 127; }
+static positive digit_known(p8 c, positive base)
+{ positive v = c >= '0' && c <= '9' ? c - '0' : (c | 32) >= 'a' && (c | 32) <= 'z' ? 10 + (c | 32) - 'a' : base;
+  return v < base ? v : base; }
+static bool string_digits_checked(string_address *text, positive base, positive *value)
+{ string_address at = *text; positive got = 0; bool any = false;
+  while (1) { positive d = digit_known(string_get(at), base); positive scaled;
+    if (d >= base) break;
+    if (__builtin_mul_overflow(got, base, &scaled) || __builtin_add_overflow(scaled, d, &got)) return false;
+    at++; any = true; }
+  if (!any) return false; *text = at; *value = got; return true; }
+static b8 string_set_blanks[256] = {[' '] = 1, ['\t'] = 1};
+static b8 string_set_http_token[256] = {['0' ... '9'] = 1, ['A' ... 'Z'] = 1, ['a' ... 'z'] = 1,
+    ['!'] = 1, ['#'] = 1, ['$'] = 1, ['%'] = 1, ['&'] = 1, ['\''] = 1, ['*'] = 1, ['+'] = 1,
+    ['-'] = 1, ['.'] = 1, ['^'] = 1, ['_'] = 1, ['`'] = 1, ['|'] = 1, ['~'] = 1};
+static address_any memory_search(const void *block, positive size, const void *needle, positive n)
+{ const p8 *h = block; if (!n || n > size) return NULL;
+  for (positive i = 0; i + n <= size; i++) if (!memcmp(h + i, needle, n)) return (address_any)(h + i);
+  return NULL; }
+'''
+
+# (name, unwind, harness C, production function names, extra C before production)
+NET_PROOFS = [
+("byte_reader", 6, r'''
+/* Any sequence of reads, on a buffer of any length: every byte a read hands
+   back lies inside the buffer, and a failed reader stays failed and empty. */
+int main(void)
+{
+        positive length = nondet_positive();
+        __CPROVER_assume(length < ((positive)1 << 40));
+        p8 *buffer = malloc(length);
+        __CPROVER_assume(buffer != NULL);
+        byte_reader reader = byte_reader_open(buffer, length);
+        for (int step = 0; step < 4; step++)
+        {
+                bool failed = !byte_reader_ok(&reader);
+                positive left = byte_reader_left(&reader);
+                const p8 *here = reader.bytes;
+                positive count = nondet_positive();
+                int kind = nondet_int();
+                if (kind == 0) {
+                        const p8 *taken = byte_reader_take(&reader, count);
+                        if (taken) { REACHED(); assert(!failed && count <= left && taken == here);
+                                     assert(reader.left == left - count); }
+                        else assert(!byte_reader_ok(&reader) && !byte_reader_left(&reader));
+                } else if (kind == 1) {
+                        byte_reader window = byte_reader_window(&reader, count);
+                        assert(window.left <= left);
+                        if (byte_reader_ok(&window) && window.left)
+                                assert(window.bytes >= buffer && window.bytes + window.left <= buffer + length);
+                } else if (kind == 2) {
+                        byte_reader window = byte_reader_vector16(&reader);
+                        if (byte_reader_ok(&window) && window.left)
+                                assert(window.bytes >= buffer && window.bytes + window.left <= buffer + length);
+                } else if (kind == 3) {
+                        (void)byte_reader_u32(&reader);
+                } else {
+                        (void)byte_reader_u8(&reader);
+                }
+                if (failed) assert(!byte_reader_ok(&reader) && !byte_reader_left(&reader));
+                if (byte_reader_ok(&reader) && reader.left)
+                        assert(reader.bytes >= buffer && reader.bytes + reader.left <= buffer + length);
+                assert(reader.left <= left);
+        }
+        return 0;
+}
+''', [], ""),
+("byte_store", 2, r'''
+/* An append of any length to a store of any room writes inside the room. */
+int main(void)
+{
+        positive room = nondet_positive(), used = nondet_positive(), length = nondet_positive();
+        __CPROVER_assume(room < 64 && length < 64);
+        p8 *bytes = malloc(room ? room : 1), *data = malloc(length ? length : 1);
+        __CPROVER_assume(bytes && data);
+        byte_store store = {bytes, room, used};
+        bool ok = byte_store_append_exact(&store, data, length);
+        if (ok) { REACHED(); assert(used <= room && length <= room - used && store.used == used + length); }
+        else assert(store.used == used);
+        return 0;
+}
+''', [], ""),
+("dns_copy_name", 18, r'''
+#define DNS_MALFORMED (-3)
+#define DNS_NAME_MAX 255
+#define DNS_POINTER_HOPS 127
+/* PRODUCTION */
+#define N 7
+int main(void)
+{
+        p8 message[N], into[64];
+        positive size = nondet_positive(), at = nondet_positive(), room = nondet_positive();
+        positive ended = 7, pointers = nondet_positive();
+        bool shared = nondet_bool();
+        __CPROVER_assume(size <= N && at <= N + 1 && room <= 64);
+        positive before = pointers;
+        bipolar got = dns_copy_name(message, size, at, into, room, &ended,
+                                    shared ? &pointers : null);
+        if (got >= 0) {
+                if (got > 4) REACHED();
+                assert(got >= 1 && got <= DNS_NAME_MAX && (positive)got <= room);
+                assert(into[got - 1] == 0);
+                assert(ended > at && ended <= size);
+                assert(!shared || pointers <= before);
+        }
+        return 0;
+}
+''', ["dns_copy_name"], ""),
+("tls_asn1", 6, r'''
+/* PRODUCTION */
+#define N 8
+int main(void)
+{
+        p8 bytes[N];
+        positive size = nondet_positive(), at = nondet_positive(), stop = 0, length = 0;
+        p8 tag = nondet_p8(); p8 *value = NULL;
+        __CPROVER_assume(size <= N && at <= N + 1);
+        positive start = at;
+        int which = nondet_int();
+        if (which == 0) {
+                if (tls_asn1_enter(bytes, size, tag, &at, &stop) == TLS_OK) {
+                        if (stop > at) REACHED();
+                        assert(start < at && at <= stop && stop <= size);
+                }
+        } else if (which == 1) {
+                if (tls_asn1_skip(bytes, size, &at) == TLS_OK)
+                        assert(start < at && at <= size);
+        } else {
+                if (tls_asn1_take(bytes, size, tag, &at, &value, &length) == TLS_OK)
+                        assert(value == bytes + start && length == at - start && at <= size);
+        }
+        return 0;
+}
+''', ["tls_asn1_length", "tls_asn1_enter", "tls_asn1_skip", "tls_asn1_take"], "#define TLS_OK 0\n#define TLS_FAIL (-1)\n"),
+("netlink_find", 14, r'''
+/* PRODUCTION */
+#define N 24
+int main(void)
+{
+        p8 bytes[N];
+        positive length = nondet_positive(), size = 99;
+        p16 type = nondet_p16();
+        __CPROVER_assume(length <= N);
+        p8 *value = netlink_find_span(bytes, length, type, &size);
+        if (value) {
+                if (size) REACHED();
+                assert(value >= bytes && size <= length && value + size <= bytes + length);
+        }
+        return 0;
+}
+''', ["netlink_attributes", "netlink_finding_take", "netlink_find_span"],
+ "#define NLA_TYPE_MASK 0x3fff\n#define netlink_align(value) (((value) + 3) & ~(positive)3)\n"
+ "typedef struct { p16 length; p16 type; } netlink_attribute;\n"
+ "typedef bool (*netlink_attribute_visitor)(p16 type, p8 *value, positive size, address_any context);\n"
+ "typedef struct { p16 type; address_any value; positive size; } netlink_finding;\n"),
+("http_head", 12, r'''
+/* PRODUCTION */
+#define N 10
+int main(void)
+{
+        p8 bytes[N];
+        positive size = nondet_positive();
+        __CPROVER_assume(size <= N);
+        bipolar header = http_header_end(bytes, size);
+        if (header >= 0) {
+                assert(header >= 2 && (positive)header <= size);
+                assert(bytes[header - 1] == '\n' && bytes[header - 2] == '\n' ||
+                       (header >= 4 && bytes[header - 1] == '\n' && bytes[header - 2] == '\r'));
+        }
+        http_response response = {.code = nondet_bool() ? 200 : 301};
+        http_framing_fields fields;
+        if (http_response_fields(bytes, size, &response, &fields)) {
+                REACHED();
+                assert(size >= 1 && bytes[size - 1] == '\n');
+                if (fields.transfer) assert((p8 *)fields.transfer >= bytes &&
+                        (p8 *)fields.transfer + fields.transfer_size <= bytes + size);
+                if (fields.length) assert((p8 *)fields.length >= bytes &&
+                        (p8 *)fields.length + fields.length_size <= bytes + size);
+                if (response.location) assert((p8 *)response.location >= bytes &&
+                        (p8 *)response.location + response.location_length <= bytes + size);
+        }
+        return 0;
+}
+''', ["http_header_end", "http_token_byte", "http_field_name", "http_line_valid",
+      "http_response_is_redirect", "http_response_fields"],
+ "typedef struct { b32 code; p8 body_kind; positive body_length; string_address location; positive location_length; } http_response;\n"
+ "typedef struct { string_address transfer; string_address length; positive transfer_size; positive length_size; } http_framing_fields;\n"),
+("http_chunk", 17, r'''
+/* PRODUCTION */
+#define N 10
+int main(void)
+{
+        p8 line[N];
+        positive length = nondet_positive(), chunk = 12345;
+        __CPROVER_assume(length <= N);
+        bipolar got = http_chunk_line(line, length, &chunk);
+        if (got == HTTP_OK) { if (chunk) REACHED(); assert(length >= 2 && line[length - 1] == '\n'); }
+        else assert(chunk == 12345);
+        bipolar trailer = http_trailer_line(line, length);
+        assert(trailer == 1 || trailer == 0 || trailer == HTTP_MALFORMED);
+        return 0;
+}
+''', ["http_token_byte", "http_field_name", "http_line_valid", "http_chunk_extensions_valid",
+      "http_chunk_line", "http_trailer_line"], "#define HTTP_OK 0\n#define HTTP_MALFORMED (-5)\n"),
+("http_url", 14, r'''
+/* PRODUCTION */
+#define N 10
+int main(void)
+{
+        char url[N + 1];
+        url[N] = 0;
+        p8 host[8];
+        p16 port = 1234;
+        string_address path = NULL;
+        bool tls = nondet_bool();
+        positive room = nondet_positive();
+        __CPROVER_assume(room <= sizeof host);
+        if (http_split_into(url, host, room, &port, &path, &tls) == HTTP_OK) {
+                positive length = strlen((char *)host);
+                if (port != 80 && port != 443) REACHED();
+                assert(length >= 1 && length < room);
+                for (positive i = 0; i < length; i++) assert(http_host_byte(host[i]));
+                assert(port >= 1);
+                if (__CPROVER_same_object(path, url))
+                        assert(path >= url && path <= url + N);
+                else
+                        assert(path[0] == '/' && !path[1]);
+        }
+        return 0;
+}
+''', ["http_host_byte", "http_scheme_length", "http_web_scheme", "http_split_into"],
+ "#define HTTP_OK 0\n#define HTTP_BAD_URL (-1)\n#define HTTP_SCHEME (-12)\n#define HTTP_PORT 80\n"
+ "#define HTTP_HTTPS_PORT 443\n#define HTTP_URL_MAX 2048\n"),
+("http_path", 12, r'''
+/* PRODUCTION */
+#define N 8
+static bool dot_free(const p8 *path, positive length)
+{
+        positive at = 0;
+        while (at < length) {
+                positive start = at + 1, stop = start;
+                while (stop < length && path[stop] != '/') stop++;
+                if (http_dot_segment((string_address)path + start, stop - start)) return false;
+                at = stop;
+        }
+        return true;
+}
+int main(void)
+{
+        p8 path[N + 1], copy[N + 1];
+        path[N] = 0;
+        __CPROVER_assume(path[0] == '/');
+        for (int i = 0; i < N; i++) __CPROVER_assume(path[i] != '?' && path[i] != '#');
+        positive before = strlen((char *)path);
+        http_path_simplify(path);
+        positive after = strlen((char *)path);
+        if (after < before) REACHED();
+        assert(after <= before && after >= 1 && path[0] == '/');
+        assert(dot_free(path, after));
+        memcpy(copy, path, N + 1);
+        http_path_simplify(copy);
+        assert(!memcmp(copy, path, after + 1));
+        return 0;
+}
+''', ["http_dot_segment", "http_path_simplify"], ""),
+]
+
+
+def harness_net_bounded_proof(argv):
+    """Bounded model checking of the network parsers with CBMC.
+
+    For every input up to each proof's size -- every byte, every length, every
+    starting offset and room a caller may pass -- CBMC proves that the
+    production function reads and writes only inside its objects, has no
+    pointer or signed overflow, terminates within the stated number of loop
+    iterations (an unwinding assertion, not a cut-off), and keeps the property
+    the proof asserts: a DNS name of at most 255 bytes ending in its root inside
+    the message, an ASN.1 value inside its parent, a netlink attribute inside
+    its datagram, a response field inside the head, a URL's host of host bytes
+    only, a path with no dot segment left that a second pass leaves alone. The
+    byte reader and the byte store are proved for buffers of any length.
+
+    The parsers call lib.c through the contracts written in NET_PROOF_SHIM;
+    lib.c's own checks hold its routines to them. A bound is a bound: a proof
+    for messages of up to N bytes is not one for longer messages, though the
+    reader and store proofs, which every parser reads and writes through, are
+    not bounded. Needs cbmc on PATH or in MOONWATER_CBMC; NOT RUN without it.
+
+        python3 test/differential.py --harness net_bounded_proof [NAME...]
+    """
+    cbmc = os.environ.get("MOONWATER_CBMC") or shutil.which("cbmc")
+    if not cbmc or not Path(cbmc).exists():
+        print("net bounded proof: NOT RUN -- needs cbmc (set MOONWATER_CBMC)")
+        return 2
+    checks = Checks()
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    chosen = set(argv)
+    common = NET_PROOF_SHIM + byte_reader_source() + byte_store_source()
+    with tempfile.TemporaryDirectory(prefix="net-bounded-") as temporary:
+        for name, unwind, harness, functions, extra in NET_PROOFS:
+            if chosen and name not in chosen:
+                continue
+            production = "\n".join(ul_c_function(net, function) for function in functions)
+            source = common + extra + harness.replace("/* PRODUCTION */", production)
+            unit = Path(temporary) / (name + ".c")
+            unit.write_text(source)
+            started = time.monotonic()
+            ran = subprocess.run(
+                [cbmc, str(unit), "--bounds-check", "--pointer-check",
+                 "--pointer-overflow-check", "--signed-overflow-check",
+                 "--unwind", str(unwind), "--unwinding-assertions",
+                 "--object-bits", "12"],
+                capture_output=True, text=True, timeout=3600)
+            proved = "VERIFICATION SUCCESSFUL" in ran.stdout
+            failed = [line for line in ran.stdout.splitlines() if ": FAILURE" in line]
+            reach = subprocess.run(
+                [cbmc, str(unit), "-D", "NET_PROOF_REACH", "--unwind", str(unwind),
+                 "--object-bits", "12", "--stop-on-fail"],
+                capture_output=True, text=True, timeout=3600)
+            reached = "VERIFICATION FAILED" in reach.stdout and '!"reached"' in reach.stdout
+            print("  %-14s %s, %s, in %.0f s" % (
+                name, "proved" if proved else "NOT proved",
+                "its outcome reached" if reached else "its outcome NOT reached",
+                time.monotonic() - started))
+            for line in failed[:6]:
+                print("    " + line.strip())
+            if not proved and not failed:
+                print(ran.stdout[-1500:] + ran.stderr[-1500:])
+            checks(proved, "%s: memory safety, termination and its property hold for every input in bound" % name)
+            checks(reached, "%s: the outcome the proof is about is reachable, so the proof is not vacuous" % name)
+    return checks.verdict("net bounded proof", "net-bounded-proof")
+
+
 def harness_net_math_proof(argv):
     """Machine-check finite arithmetic lemmas used by src/net/net.c."""
     del argv
@@ -63405,7 +64161,7 @@ def harness_security_hygiene(argv):
                 "http_fuzz", "http_urls", "wifi_eapol_fuzz", "wifi_scan_fuzz", "wifi_key_state",
                 "bowl_sig_fuzz", "wget_mutation", "wget_hostile", "sntp_era", "net_netem",
                 "net_dependency_closure", "net_math_proof", "net_clock_fault", "net_wait_states", "net_parser_work_states",
-                "net_dhcp_exchange", "net_lease_transitions",
+                "net_dhcp_exchange", "net_lease_transitions", "net_exhaustive_proof", "net_bounded_proof",
                 "protected_links", "hostile_strings", "state_cuts")
     for name in security + ("tls_verify_fuzz",):
         checks(name in HARNESS_CHECKS, "differential.py: %s is not registered" % name)
@@ -81512,6 +82268,8 @@ HARNESS_CHECKS = {
     "net_wait_states": harness_net_wait_states,
     "net_parser_work_states": harness_net_parser_work_states,
     "net_dhcp_exchange": harness_net_dhcp_exchange,
+    "net_exhaustive_proof": harness_net_exhaustive_proof,
+    "net_bounded_proof": harness_net_bounded_proof,
     "net_lease_transitions": harness_net_lease_transitions,
     "net_math_proof": harness_net_math_proof,
     "wire_constants": harness_wire_constants,
