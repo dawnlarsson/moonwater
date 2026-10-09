@@ -46792,6 +46792,80 @@ while True:
     return checks.verdict("moonwater cli", "moonwater-cli")
 
 
+def harness_moonwater_lock(argv):
+    """A moonwater command that waits for the machine's lock lets go at once.
+
+    In the cli harness's sandbox a holder takes /run/moonwater/lock and keeps
+    it for 280 to 302 ms (the hold moves, so the waiter's poll phase does
+    too); `moonwater bind init remove zzz` starts 50 ms in, takes the lock
+    only after the holder lets go, refuses (the line is not there) and writes
+    nothing. The lag is the time from the holder's release to the command's
+    exit: the wake and the command's own work after the lock, which is the
+    same on every run. A waiter that polls every 10 ms adds its phase to
+    that, a median near 5 ms on the box; one that hears the holder's close
+    adds almost nothing. The median of fifteen has to come in under the bound.
+    """
+    import platform
+    import statistics
+    import tempfile
+    parser = argparse.ArgumentParser(prog="differential.py --harness moonwater_lock")
+    parser.add_argument("--shell", required=True)
+    args = parser.parse_args(argv)
+    if platform.system() != "Linux":
+        print("moonwater lock: NOT RUN -- Linux namespaces")
+        return 2
+    probe = subprocess.run(["unshare", "-Urmnu", "--fork", "true"], capture_output=True)
+    if probe.returncode:
+        print("moonwater lock: NOT RUN -- no unprivileged user namespaces here")
+        return 2
+
+    #       The bound sits between what a 10 ms poll costs (a median of 4.6 to
+    #       5.0 ms over fifteen, on the box) and what a watch costs (a median
+    #       of 0.3 ms): the parent fails it and the watch passes it.
+    bound_ms = 2.0
+    script = """python3 - <<'PYEOF'
+import fcntl, os, subprocess, time
+os.makedirs("/run/moonwater", exist_ok=True)
+for trial in range(15):
+    hold = 0.280 + ((trial * 37) % 23) / 1000
+    held = open("/run/moonwater/lock", "a+")
+    fcntl.flock(held, fcntl.LOCK_EX)
+    child = subprocess.Popen(["/tmp/moonwater", "bind", "init", "remove", "zzz"],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+    time.sleep(hold)
+    released = time.time_ns()
+    fcntl.flock(held, fcntl.LOCK_UN)
+    held.close()
+    code = child.wait()
+    ended = time.time_ns()
+    print("LAG %d %.3f" % (code, (ended - released) / 1e6))
+PYEOF
+"""
+    checks = Checks()
+
+    def check(ok, what, detail=""):
+        checks(ok, what + ("" if ok else " -- " + str(detail)[:600]))
+
+    with tempfile.TemporaryDirectory(prefix="moonwater-lock-") as temporary:
+        sandbox, private_dev, session, say, answers = moonwater_sandbox(args.shell, Path(temporary))
+        lines, finished = session(script)
+        laps = [line.split() for line in lines if line.startswith("LAG ")]
+        lags = [float(lap[2]) for lap in laps]
+        codes = [int(lap[1]) for lap in laps]
+        check(finished and len(lags) == 15 and set(codes) == {1},
+              "the waiter gets the lock after the holder lets go and is refused", (finished, codes, lines[-4:]))
+        if lags:
+            median = statistics.median(lags)
+            print("  lag ms, median %.2f, p90 %.2f, lags %s" % (
+                median, sorted(lags)[int(len(lags) * 0.9)], " ".join("%.2f" % x for x in lags)))
+            check(median < bound_ms,
+                  f"a waiter wakes within {bound_ms:g} ms of the release (median of {len(lags)})",
+                  f"median {median:.2f} ms, lags {sorted(round(x, 2) for x in lags)}")
+
+    return checks.verdict("moonwater lock", "moonwater-lock")
+
+
 def harness_moonwater_script(argv):
     """Every verb as the machine script runs it: root, no terminal, standard
     input /dev/null (or closed, or a pipe nobody writes to), in the cli
@@ -79853,6 +79927,7 @@ HARNESS_CHECKS = {
     "host_writes": harness_host_writes,
     "net_sysctl": harness_net_sysctl,
     "moonwater_cli": harness_moonwater_cli,
+    "moonwater_lock": harness_moonwater_lock,
     "moonwater_script": harness_moonwater_script,
     "machine_reap": harness_machine_reap,
     "tls_chains": harness_tls_chains,

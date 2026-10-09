@@ -792,9 +792,39 @@ static fn host_input_none(void)
 static bipolar host_held = -1;
 static positive host_held_count;
 
+/*
+        A holder lets go by closing the lock file (after the flock that frees
+        it, and the kernel closes it when the holder exits), and a close after
+        a write or a read is an event on a watch of the file. So a command that
+        cannot have the lock waits on that watch for the time it has left, and
+        not on a timer that wakes every 10 ms to ask again. The watch stands
+        before each try, so a release that lands between a try and the wait is
+        already queued and the wait returns at once. Where no watch can be
+        made, the wait is the poll it was.
+*/
+#define HOST_LOCK_EVENTS (0x010 | 0x008 | 0x02000000)
+
+static bipolar host_lock_watch(void)
+{
+        bipolar notify = system_call_1(syscall(inotify_init1), O_CLOEXEC | O_NONBLOCK);
+
+        if (notify < 0)
+                return -1;
+        if (system_call_3(syscall(inotify_add_watch), (positive)notify,
+                          (positive)HOST_LOCK, HOST_LOCK_EVENTS) < 0)
+        {
+                system_close((positive)notify);
+                return -1;
+        }
+        return notify;
+}
+
 static bool host_acquire(void)
 {
-        p64 waited = 0;
+        bipolar handle;
+        bipolar notify = -1;
+        bipolar locked;
+        p64 started;
 
         if (host_held_count)
         {
@@ -802,28 +832,76 @@ static bool host_acquire(void)
                 return true;
         }
 
+        host_state_ready();
+        // Not through a link: the lock is made where it is named. A lock that
+        // cannot be opened at all has nobody to exclude, as it never had.
+        handle = system_open_at_mode(AT_FDCWD, HOST_LOCK,
+                                     FILE_READ_WRITE | FILE_CREATE |
+                                         O_NOFOLLOW | O_CLOEXEC,
+                                     0600);
+        if (handle < 0)
+        {
+                host_held = handle;
+                host_held_count = 1;
+                return true;
+        }
+
+        // The one descriptor is kept for the whole wait: closing it would be
+        // an event on the watch, and the wait would hear its own try.
+        started = system_clock_ns(HOST_CLOCK_BOOTTIME);
         for (;;)
         {
-                bipolar handle = host_lock(HOST_LOCK, false);
+                locked = system_call_2(syscall(flock), (positive)handle,
+                                       RADIO_LOCK_EX | RADIO_LOCK_NB);
+                if (locked != -EAGAIN)
+                        break;
 
-                if (handle >= 0 || handle != -EAGAIN)
-                {
-                        host_held = handle;
-                        host_held_count = 1;
-                        return true;
-                }
+                if (notify < 0 && (notify = host_lock_watch()) >= 0)
+                        continue;
+
+                p64 waited = system_clock_ns(HOST_CLOCK_BOOTTIME) - started;
 
                 if (waited >= HOST_LOCK_WAIT_NS)
                 {
+                        if (notify >= 0)
+                                system_close((positive)notify);
+                        system_close((positive)handle);
                         host_say(log_error, host_label "another moonwater command is changing "
                                                        "this machine's settings or disks; "
                                                        "try again in a moment\n");
                         return false;
                 }
 
-                host_pause(HOST_LOCK_POLL_NS);
-                waited += HOST_LOCK_POLL_NS;
+                if (notify < 0)
+                {
+                        host_pause(HOST_LOCK_POLL_NS);
+                        continue;
+                }
+
+                p64 left = HOST_LOCK_WAIT_NS - waited;
+                timespec span = {left / 1000000000, left % 1000000000};
+
+                if (descriptor_wait_readable(notify, address_of span, null) > 0)
+                {
+                        p8 drained[256];
+
+                        while (system_read_once((positive)notify, drained, sizeof(drained)) > 0)
+                                ;
+                }
         }
+
+        if (notify >= 0)
+                system_close((positive)notify);
+        if (locked < 0)
+        {
+                // Not held and not refused: as host_lock's error, the lock is
+                // taken as nobody's to exclude.
+                system_close((positive)handle);
+                handle = locked;
+        }
+        host_held = handle;
+        host_held_count = 1;
+        return true;
 }
 
 static fn host_release(void)
