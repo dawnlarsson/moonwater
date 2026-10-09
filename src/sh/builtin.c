@@ -17486,7 +17486,13 @@ __asm__(
 
 static const shell_tool shell_tools[] HOT_RODATA = {
 #define SHELL_TOOL_KEEP(name, function) {#name, function},
+#pragma push_macro("true")
+#pragma push_macro("false")
+#undef true
+#undef false
 #include "tools.inc"
+#pragma pop_macro("true")
+#pragma pop_macro("false")
 #undef SHELL_TOOL_KEEP
     {null, null},
 };
@@ -17518,20 +17524,38 @@ static const shell_tool shell_tools[] HOT_RODATA = {
 static const p8 shell_tool_key[][2] HOT_RODATA __attribute__((aligned(8))) = {
 #define SHELL_TOOL_KEEP(name, function) \
         {(p8)(#name)[0], (p8)(sizeof(#name) - 1)},
+#pragma push_macro("true")
+#pragma push_macro("false")
+#undef true
+#undef false
 #include "tools.inc"
+#pragma pop_macro("true")
+#pragma pop_macro("false")
 #undef SHELL_TOOL_KEEP
 };
 
 //      Every name's hash, in table order, for the index to be filled from.
 static const positive shell_tool_hash[] = {
 #define SHELL_TOOL_KEEP(name, function) NAME_HASH(#name),
+#pragma push_macro("true")
+#pragma push_macro("false")
+#undef true
+#undef false
 #include "tools.inc"
+#pragma pop_macro("true")
+#pragma pop_macro("false")
 #undef SHELL_TOOL_KEEP
 };
 
 #define SHELL_TOOL_KEEP(name, function) \
         _Static_assert(sizeof(#name) <= 16, #name " is longer than NAME_HASH reads");
+#pragma push_macro("true")
+#pragma push_macro("false")
+#undef true
+#undef false
 #include "tools.inc"
+#pragma pop_macro("true")
+#pragma pop_macro("false")
 #undef SHELL_TOOL_KEEP
 
 #undef SHELL_TOOL

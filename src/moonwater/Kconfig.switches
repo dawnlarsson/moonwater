@@ -136,6 +136,10 @@ config MOONWATER_TOOL_FACTOR
     bool "factor"
     default MOONWATER_TOOLS_ALL
 
+config MOONWATER_TOOL_FALSE
+    bool "false"
+    default MOONWATER_TOOLS_ALL
+
 config MOONWATER_TOOL_FETCH
     bool "fetch"
     default MOONWATER_TOOLS_ALL
@@ -410,6 +414,10 @@ config MOONWATER_TOOL_TOUCH
 
 config MOONWATER_TOOL_TR
     bool "tr"
+    default MOONWATER_TOOLS_ALL
+
+config MOONWATER_TOOL_TRUE
+    bool "true"
     default MOONWATER_TOOLS_ALL
 
 config MOONWATER_TOOL_TRUNCATE

@@ -42652,6 +42652,21 @@ static bool sleep_read(string_address text, p64 address_to seconds,
         return true;
 }
 
+/* true and false as programs. The shell has them as builtins, but a program
+   of that name -- timeout 1 true, xargs false, a PATH entry -- reaches the
+   multicall as argv[0], and before these were tools the shell read its stdin
+   as a script: `echo abc | true` ran abc and exited 127. --help and
+   --version are the tool table's meta rules, as for every other tool. */
+static b32 file_true()
+{
+        return 0;
+}
+
+static b32 file_false()
+{
+        return 1;
+}
+
 static b32 file_sleep()
 {
         positive count = (positive)program_argument_count();

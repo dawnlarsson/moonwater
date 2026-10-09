@@ -11236,6 +11236,39 @@ SHELL_START_WRITERS = (
 )
 
 
+def shell_true_false_programs(farm):
+    """true and false run as programs of their own names, and ignore their input.
+
+    They are builtins of the shell, not tools of the multicall, so a program
+    named true or false reached the shell itself, which read its stdin as a
+    script: `echo abc | true` ran abc and exited 127. As tools they exit 0 and 1
+    whatever arrives on stdin, and print nothing.
+    """
+    import tempfile
+
+    candidate = next((Path(farm) / name for name in ("sh", "shell", "ls", "cat", "true")
+                      if (Path(farm) / name).exists()), None)
+    if candidate is None:
+        return 0, 1, ["the farm holds no link to the shell image"]
+    image = os.path.realpath(candidate)
+    work = tempfile.mkdtemp(prefix="true-false-")
+    try:
+        for name in ("true", "false"):
+            os.symlink(image, os.path.join(work, name))
+        cases = (("true", b"abc\n", 0), ("false", b"abc\n", 1), ("true", b"", 0), ("false", b"", 1))
+        passed = 0
+        notes = []
+        for name, data, want in cases:
+            done = subprocess.run([os.path.join(work, name)], input=data, capture_output=True, timeout=10)
+            if done.returncode == want and done.stdout == b"":
+                passed += 1
+            else:
+                notes.append(f"{name} with stdin {data!r}: status {done.returncode}, want {want}, stdout {done.stdout[:40]!r}")
+        return passed, len(cases), notes
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def shell_start_placement(farm):
     """The statics a shell start writes all sit on the first page of bss.
 
@@ -20367,6 +20400,7 @@ def shell_parse_nesting(farm):
 SHELL_CHECKS = (
     shell_restricted_function_import,
     shell_start_placement,
+    shell_true_false_programs,
     shell_glob_extended_bounded,
     shell_subscript_side_effects,
     shell_parse_scan_bounds,
