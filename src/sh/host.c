@@ -5530,6 +5530,8 @@ static b32 host_bios(string_address address_to arguments, positive count)
 #define NL80211_CMD_SET_STATION 18
 #define NL80211_CMD_NEW_STATION 19
 #define NL80211_CMD_CONNECT 46
+#define NL80211_CMD_AUTHENTICATE 37
+#define NL80211_CMD_ASSOCIATE 38
 #define NL80211_CMD_DEAUTHENTICATE 39
 #define NL80211_CMD_DISASSOCIATE 40
 #define NL80211_CMD_DISCONNECT 48
@@ -5555,6 +5557,7 @@ static b32 host_bios(string_address address_to arguments, positive count)
 #define NL80211_ATTR_REASON_CODE 54
 #define NL80211_ATTR_KEY_TYPE 55
 #define NL80211_ATTR_TIMED_OUT 65
+#define NL80211_ATTR_USE_MFP 66
 #define NL80211_ATTR_STA_FLAGS2 67
 #define NL80211_ATTR_CONTROL_PORT 68
 #define NL80211_ATTR_PRIVACY 70
@@ -5567,6 +5570,7 @@ static b32 host_bios(string_address address_to arguments, positive count)
 #define NL80211_REKEY_DATA_KEK 1
 #define NL80211_REKEY_DATA_KCK 2
 #define NL80211_REKEY_DATA_REPLAY_CTR 3
+#define NL80211_ATTR_AUTH_DATA 156
 #define NL80211_ATTR_SCAN_FLAGS 158
 #define NL80211_ATTR_SPLIT_WIPHY_DUMP 174
 #define NL80211_ATTR_EXT_FEATURES 217
@@ -5577,13 +5581,16 @@ static b32 host_bios(string_address address_to arguments, positive count)
 #define NL80211_IFTYPE_P2P_CLIENT 8
 #define NL80211_SCAN_FLAG_FLUSH 2
 #define NL80211_AUTHTYPE_OPEN 0
+#define NL80211_AUTHTYPE_SAE 4
+#define NL80211_MFP_REQUIRED 1
 #define NL80211_WPA_VERSION_2 2
 #define NL80211_KEYTYPE_GROUP 0
 #define NL80211_KEYTYPE_PAIRWISE 1
 #define NL80211_STA_FLAG_AUTHORIZED 1
 #define NL80211_EXT_FEATURE_4WAY_HANDSHAKE_STA_PSK 15
 #define WLAN_CIPHER_CCMP 0x000fac04u
-#define WLAN_AKM_PSK 0x000fac02u
+#define WLAN_CIPHER_BIP_CMAC_128 0x000fac06u
+#define WLAN_SUITE_IEEE 0x000fac00u
 #define NL80211_CONNECT_SECONDS 20
 #define WIFI_EAPOL_SECONDS 8
 #define WIFI_EAPOL_HDR 99
@@ -5949,8 +5956,18 @@ static COLD bool wifi_psk(p8 address_to ssid, positive ssid_length,
         return true;
 }
 
+/*
+        The PTK of a handshake: the PMK over the two addresses and the two
+        nonces, each pair smaller first. PSK (suite 2) takes 802.11i's
+        PRF-512 of HMAC-SHA1, all 64 bytes of it; PSK-SHA256 (6) and SAE (8)
+        take the KDF of 802.11-2016 12.7.1.7.2, HMAC-SHA-256 of a counter
+        from 1, the label, the data and the length in bits, 384 bits of it.
+        Either way the KCK, the KEK and the TK are its first three sixteen
+        bytes.
+*/
 static COLD fn wifi_ptk(p8 address_to pmk, p8 address_to ap, p8 address_to sta,
-                   p8 address_to anonce, p8 address_to snonce, p8 address_to ptk)
+                   p8 address_to anonce, p8 address_to snonce, p8 address_to ptk,
+                   p8 akm)
 {
         p8 label[] = "Pairwise key expansion";
         p8 data[6 + 6 + 32 + 32];
@@ -5988,6 +6005,30 @@ static COLD fn wifi_ptk(p8 address_to pmk, p8 address_to ap, p8 address_to sta,
         memory_copy(data + 6, max_mac, 6);
         memory_copy(data + 12, min_nonce, 32);
         memory_copy(data + 44, max_nonce, 32);
+        if (akm != 2)
+        {
+                p8 block[2 + 22 + 76 + 2];
+                p8 sum[32];
+
+                memory_fill(ptk, 0, 64);
+                for (which = 1; used < 48; which++)
+                {
+                        block[0] = (p8)which;
+                        block[1] = 0;
+                        memory_copy(block + 2, label, 22);
+                        memory_copy(block + 24, data, 76);
+                        //      384, little endian.
+                        block[100] = 0x80;
+                        block[101] = 0x01;
+                        crypto_hmac_sha256(pmk, 32, block, sizeof(block), sum);
+                        memory_copy(ptk + used, sum, used + 32 > 48 ? 48 - used : 32);
+                        used += 32;
+                }
+                crypto_forget(block, sizeof(block));
+                crypto_forget(sum, sizeof(sum));
+                crypto_forget(data, sizeof(data));
+                return;
+        }
         memory_copy(input, label, 22);
         input[22] = 0;
         memory_copy(input + 23, data, 76);
@@ -6003,9 +6044,241 @@ static COLD fn wifi_ptk(p8 address_to pmk, p8 address_to ap, p8 address_to sta,
         crypto_forget(hash, sizeof(hash));
 }
 
-static const p8 wifi_rsn_ie[] = {0x30, 0x14, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04,
-                                 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04, 0x01, 0x00,
-                                 0x00, 0x0f, 0xac, 0x02, 0x00, 0x00};
+/* The key descriptor version an access point's key frames carry for a key
+   management suite: 2 (HMAC-SHA1-128) for PSK, 3 (AES-128-CMAC) for
+   PSK-SHA256, and 0, "as the suite defines", for SAE, whose MIC is the CMAC
+   all the same. */
+static COLD p8 wifi_key_version(p8 akm)
+{
+        return akm == 2 ? 2 : akm == 8 ? 0 : 3;
+}
+
+/*
+        What an access point's RSN element offers, as far as a join cares:
+        its key management suites, management frame protection, the group
+        cipher and the pairwise set, each a mask, and whether its RSN
+        extension element takes SAE's hash-to-element. The kernel keeps two
+        frames of an access point, its latest (a probe response anybody can
+        send in its name) and its last beacon, and a join takes what either
+        offers: a forged frame that takes an offer away -- protection, WPA3,
+        hash-to-element -- would have the join ask for less, while one that
+        adds an offer costs a join that a forger can stop anyway. Message 3
+        of the handshake is then held to the elements read here
+        (wifi_eapol_step).
+*/
+#define WIFI_AKM_PSK 1
+#define WIFI_AKM_PSK_SHA256 2
+#define WIFI_AKM_SAE 4
+#define WIFI_AKM_OTHER 8
+#define WIFI_PMF_CAPABLE 1
+#define WIFI_PMF_REQUIRED 2
+#define WIFI_CIPHER_CCMP 1
+#define WIFI_CIPHER_TKIP 2
+#define WIFI_CIPHER_OTHER 4
+
+typedef struct
+{
+        p8 akms;
+        p8 pmf;
+        p8 group;
+        p8 pairwise;
+        p8 h2e;
+} wifi_rsn_caps;
+
+static COLD fn wifi_caps_merge(wifi_rsn_caps address_to into, const wifi_rsn_caps address_to from)
+{
+        into->akms |= from->akms;
+        into->pmf |= from->pmf;
+        into->group |= from->group;
+        into->pairwise |= from->pairwise;
+        into->h2e |= from->h2e;
+}
+
+/*
+        What a saved network has taught the join, or its owner has said of
+        it (radio_rules): an access point by its name offered management
+        frame protection; it was joined with WPA3; its owner lets the tight
+        tier join it with WPA2.
+*/
+#define WIFI_RULE_PMF 1
+#define WIFI_RULE_SAE 2
+#define WIFI_RULE_WPA2 4
+
+/* A join's refusals of its own, which it makes having chosen an access
+   point and before it sends anything, and the one message 3 can bring:
+   below every errno and every -1000-R reason a join reports. */
+#define WIFI_REFUSE_TKIP (-70001)
+#define WIFI_REFUSE_CIPHER (-70002)
+#define WIFI_REFUSE_PMF_GONE (-70003)
+#define WIFI_REFUSE_SAE_GONE (-70004)
+#define WIFI_REFUSE_NO_PMF (-70005)
+#define WIFI_REFUSE_WPA2 (-70006)
+#define WIFI_REFUSE_KEY_ONLY (-70007)
+#define WIFI_REFUSE_SUITE (-70008)
+#define WIFI_REFUSE_SAE_BUDGET (-70009)
+#define WIFI_REFUSE_ELEMENTS (-70010)
+#define WIFI_REFUSE_FIRST WIFI_REFUSE_ELEMENTS
+#define WIFI_REFUSE_LAST WIFI_REFUSE_TKIP
+
+/* What a join asks of an access point: the key management suite (2, 6 or
+   8), the protection it asks for, and the PSK suite it may try when WPA3
+   came to nothing for a reason that is not the password, or 0. */
+typedef struct
+{
+        p8 akm;
+        p8 pmf;
+        p8 fallback;
+} wifi_plan;
+
+/*
+        The join's choice for an access point that offers caps, at a tier,
+        for a saved network with rules, whose secret is a passphrase or a
+        key of 64 hex digits (key_only, which is a PMK and no SAE password).
+        0 with the plan, or the refusal.
+
+          ciphers   CCMP for the group and among the pairwise ones, or
+                    nothing: TKIP (WPA1, and the group cipher of a mixed
+                    WPA/WPA2 network) is broken
+          memory    an access point of a name that once offered protection
+                    is never joined without it, and one joined with WPA3
+                    is never joined with WPA2: a twin that offers less is
+                    what a forged deauthentication, or a password guessed
+                    from a captured handshake, needs
+          WPA3      whenever it is offered and there is a password for it,
+                    with protection required, and WPA2 after it only when
+                    that is offered too, the memory allows it and the tier
+                    does
+          WPA2      PSK-SHA256 when it is offered with protection, else
+                    PSK; protection asked for whenever it is offered, as
+                    required, since the kernel takes no optional form from a
+                    driver with no connect of its own
+          tight     protection always, and WPA2 only for a network whose
+                    owner said so (WIFI_RULE_WPA2)
+*/
+static COLD bipolar wifi_join_plan(positive tier, const wifi_rsn_caps address_to caps,
+                                   p8 rules, bool key_only, wifi_plan address_to plan)
+{
+        bool tight = tier >= STRICT_TIGHT;
+        bool pmf = caps->pmf != 0;
+        bool sae = (caps->akms & WIFI_AKM_SAE) && !key_only;
+        p8 psk = (caps->akms & WIFI_AKM_PSK_SHA256) && (pmf || !(caps->akms & WIFI_AKM_PSK))
+                     ? 6
+                 : caps->akms & WIFI_AKM_PSK ? 2
+                                             : 0;
+
+        memory_fill(plan, 0, sizeof(*plan));
+        if (!(caps->group & WIFI_CIPHER_CCMP) || (caps->group & ~WIFI_CIPHER_CCMP) ||
+            !(caps->pairwise & WIFI_CIPHER_CCMP))
+                return (caps->group | caps->pairwise) & WIFI_CIPHER_TKIP ? WIFI_REFUSE_TKIP
+                                                                         : WIFI_REFUSE_CIPHER;
+        if (!sae && !psk)
+                return caps->akms & WIFI_AKM_SAE ? WIFI_REFUSE_KEY_ONLY : WIFI_REFUSE_SUITE;
+        if ((rules & WIFI_RULE_PMF) && !pmf)
+                return WIFI_REFUSE_PMF_GONE;
+        if ((rules & WIFI_RULE_SAE) && !sae)
+                return caps->akms & WIFI_AKM_SAE ? WIFI_REFUSE_KEY_ONLY : WIFI_REFUSE_SAE_GONE;
+        if (sae)
+        {
+                plan->akm = 8;
+                plan->pmf = WIFI_PMF_CAPABLE | WIFI_PMF_REQUIRED;
+                if (psk && !(rules & WIFI_RULE_SAE) &&
+                    (!tight || (pmf && (rules & WIFI_RULE_WPA2))))
+                        plan->fallback = psk;
+                return 0;
+        }
+        if (tight && !pmf)
+                return WIFI_REFUSE_NO_PMF;
+        if (tight && !(rules & WIFI_RULE_WPA2))
+                return WIFI_REFUSE_WPA2;
+        plan->akm = psk;
+        plan->pmf = pmf ? WIFI_PMF_CAPABLE | WIFI_PMF_REQUIRED : 0;
+        return 0;
+}
+
+/* The RSN element a station offers, in the association request and again
+   in message 2, which the access point compares with it: CCMP for both
+   ciphers and the one key management suite asked for; with protection,
+   the capable and required bits, the PMKID when there is one (SAE's) and
+   BIP-CMAC-128 as the group management cipher. With no protection it is
+   the element the join always sent. */
+static COLD positive wifi_rsn_build(p8 address_to out, p8 akm, p8 pmf, const p8 address_to pmkid)
+{
+        static const p8 head[] = {0x30, 0x14, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04,
+                                  0x01, 0x00, 0x00, 0x0f, 0xac, 0x04, 0x01, 0x00,
+                                  0x00, 0x0f, 0xac};
+        positive at = sizeof(head);
+
+        memory_copy(out, head, sizeof(head));
+        out[at++] = akm;
+        out[at++] = (p8)((pmf & WIFI_PMF_CAPABLE ? 0x80 : 0) | (pmf & WIFI_PMF_REQUIRED ? 0x40 : 0));
+        out[at++] = 0;
+        if (!(pmf & WIFI_PMF_CAPABLE))
+                return at;
+        out[at++] = pmkid ? 1 : 0;
+        out[at++] = 0;
+        if (pmkid)
+        {
+                memory_copy(out + at, pmkid, 16);
+                at += 16;
+        }
+        out[at++] = 0x00;
+        out[at++] = 0x0f;
+        out[at++] = 0xac;
+        out[at++] = 0x06;
+        out[1] = (p8)(at - 2);
+        return at;
+}
+
+/*
+        The access point's RSN element and RSN extension element as the
+        frames a join chose it from showed them, whole, element id and
+        length first: [0] its latest frame's, [1] its last beacon's where
+        the kernel kept that apart. A handshake's message 3 carries the
+        access point's own, under the MIC of a key only it and this station
+        have: one that matches neither is not what the join was decided
+        from, which a forged beacon or probe response that took an offer
+        away makes, and it is refused (802.11-2020 12.7.6.4, as
+        wpa_supplicant refuses it).
+*/
+#define WIFI_ELEMENT_ROOM (2 + 255)
+
+typedef struct
+{
+        p8 rsn[2][WIFI_ELEMENT_ROOM];
+        p8 rsnx[2][WIFI_ELEMENT_ROOM];
+        p16 rsn_length[2];
+        p16 rsnx_length[2];
+} wifi_seen;
+
+/* Whether an element of message 3 is one of the two seen (none, when
+   neither frame had one). */
+static COLD bool wifi_seen_one(p8 (address_to seen)[WIFI_ELEMENT_ROOM],
+                               const p16 address_to lengths, const p8 address_to got,
+                               positive length)
+{
+        if (!lengths[0] && !lengths[1])
+                return !length;
+        for (positive at = 0; at < 2; at++)
+                if (lengths[at] && lengths[at] == length && !memory_compare(seen[at], got, length))
+                        return true;
+        return false;
+}
+
+/* Whether message 3's RSN element is one the access point showed, and its
+   RSN extension element too, or none where neither frame had one: an
+   extension element stripped from what the station saw would have it hunt
+   for the password element where the access point takes hash-to-element.
+   A join that saw no RSN element at all (no scan could be had) has nothing
+   to hold it to. */
+static COLD bool wifi_seen_matches(wifi_seen address_to seen, const p8 address_to rsn,
+                                   positive rsn_length, const p8 address_to rsnx,
+                                   positive rsnx_length)
+{
+        if (!seen->rsn_length[0] && !seen->rsn_length[1])
+                return true;
+        return wifi_seen_one(seen->rsn, seen->rsn_length, rsn, rsn_length) &&
+               wifi_seen_one(seen->rsnx, seen->rsnx_length, rsnx, rsnx_length);
+}
 
 static COLD bool nl80211_ext_bit(p8 address_to bits, positive length, positive which)
 {
@@ -6132,6 +6405,27 @@ static COLD bipolar nl80211_new_key(nl80211 address_to session, p32 index, p8 id
                                 null, null);
 }
 
+/* The group management key of an access point that protects its management
+   frames: BIP-CMAC-128 under key id 4 or 5, its packet number the six bytes
+   at seq. */
+static COLD bipolar nl80211_new_igtk(nl80211 address_to session, p32 index, p8 idx,
+                                     p8 address_to key, p8 address_to seq)
+{
+        netlink_buffer request = {0};
+        p32 sequence = netlink_sequence_take();
+        p32 cipher = WLAN_CIPHER_BIP_CMAC_128;
+
+        if (!nl80211_begin(address_of request, session->family, NL80211_CMD_NEW_KEY,
+                           NLM_REQUEST | NLM_ACK, sequence))
+                return -1;
+        nl80211_attribute_u32(address_of request, NL80211_ATTR_IFINDEX, index);
+        netlink_attribute_add(address_of request, NL80211_ATTR_KEY_DATA, key, 16);
+        netlink_attribute_add(address_of request, NL80211_ATTR_KEY_IDX, address_of idx, 1);
+        nl80211_attribute_u32(address_of request, NL80211_ATTR_KEY_CIPHER, cipher);
+        netlink_attribute_add(address_of request, NL80211_ATTR_KEY_SEQ, seq, 6);
+        return netlink_transact(session->handle, address_of request, sequence, null, null);
+}
+
 static COLD bipolar nl80211_authorize(nl80211 address_to session, p32 index,
                                  p8 address_to mac)
 {
@@ -6185,12 +6479,25 @@ typedef struct
         p8 pending[64];
         p8 gtk[4][16];
         p8 gtk_installed; // one bit per driver slot; zero bytes are a valid key
+        p8 igtk[2][16];
+        p8 igtk_installed; // bit 0 key id 4, bit 1 key id 5, as gtk_installed
         p8 replay[8];
         p8 answered;
         bool replay_set;
         bool installed;
         bool pending_set;
         bool nonce_used;
+        //      What was asked of the access point: the suite (2, 6 or 8), the
+        //      key descriptor version its frames carry, protection, and the
+        //      RSN element (with the RSN extension element after it for
+        //      hash-to-element) that the association request and message 2
+        //      carry.
+        p8 akm;
+        p8 version;
+        p8 pmf;
+        p8 rsn[48];
+        p8 rsn_length;
+        wifi_seen seen;
 } wifi_link;
 
 static COLD fn wifi_link_close(wifi_link address_to link)
@@ -6218,11 +6525,12 @@ static COLD positive wifi_eapol_length(p8 address_to frame, positive got)
         return length;
 }
 
-/* HMAC-SHA1-128 over the frame with its MIC field zero: written into the
-   frame, or compared in constant time with the MIC it carries, which is
-   left in place so that another key can be tried. */
-static COLD bool wifi_eapol_mic(p8 address_to kck, p8 address_to frame, positive length,
-                                bool check)
+/* The frame's MIC with its MIC field zero, HMAC-SHA1-128 for PSK and
+   AES-128-CMAC for PSK-SHA256 and SAE: written into the frame, or compared
+   in constant time with the MIC it carries, which is left in place so that
+   another key can be tried. */
+static COLD bool wifi_eapol_mic(const wifi_link address_to link, p8 address_to kck,
+                                p8 address_to frame, positive length, bool check)
 {
         p8 hash[20];
         p8 carried[16];
@@ -6230,21 +6538,25 @@ static COLD bool wifi_eapol_mic(p8 address_to kck, p8 address_to frame, positive
 
         memory_copy(carried, frame + 81, 16);
         memory_fill(frame + 81, 0, 16);
-        crypto_hmac(DIGEST_SHA1, 20, kck, 16, frame, length, hash);
+        if (link->akm == 2)
+                crypto_hmac(DIGEST_SHA1, 20, kck, 16, frame, length, hash);
+        else
+                crypto_aes_cmac(kck, frame, length, hash);
         same = crypto_same(carried, hash, 16);
         memory_copy(frame + 81, check ? carried : hash, 16);
         crypto_forget(hash, sizeof(hash));
         return same;
 }
 
-/* A key frame to the access point: its key information, the replay
-   counter it answers, the SNonce and RSN element for message 2, and its
-   MIC under kck. The key length is 0, as wpa_supplicant sends for RSN. */
+/* A key frame to the access point: its key information with the link's
+   descriptor version, the replay counter it answers, the SNonce and RSN
+   element for message 2, and its MIC under kck. The key length is 0, as
+   wpa_supplicant sends for RSN. */
 static COLD bipolar wifi_eapol_reply(wifi_link address_to link, p8 address_to kck,
                                      p16 info, p8 address_to replay, bool nonce)
 {
-        p8 frame[WIFI_EAPOL_HDR + sizeof(wifi_rsn_ie)];
-        positive length = WIFI_EAPOL_HDR + (nonce ? sizeof(wifi_rsn_ie) : 0);
+        p8 frame[WIFI_EAPOL_HDR + sizeof(link->rsn)];
+        positive length = WIFI_EAPOL_HDR + (nonce ? link->rsn_length : 0);
         socket_address_packet to = {.family = AF_PACKET,
                                     .protocol = network_order_16(ETH_P_PAE),
                                     .index = link->index,
@@ -6256,53 +6568,100 @@ static COLD bipolar wifi_eapol_reply(wifi_link address_to link, p8 address_to kc
         frame[1] = 3;
         network_store_16(frame + 2, (p16)(length - 4));
         frame[4] = 2;
-        network_store_16(frame + 5, info);
+        network_store_16(frame + 5, (p16)((info & ~7) | link->version));
         memory_copy(frame + 9, replay, 8);
         if (nonce)
         {
                 memory_copy(frame + 17, link->snonce, 32);
-                network_store_16(frame + 97, (p16)sizeof(wifi_rsn_ie));
-                memory_copy(frame + 99, wifi_rsn_ie, sizeof(wifi_rsn_ie));
+                network_store_16(frame + 97, link->rsn_length);
+                memory_copy(frame + 99, link->rsn, link->rsn_length);
         }
-        wifi_eapol_mic(kck, frame, length, false);
+        wifi_eapol_mic(link, kck, frame, length, false);
         memory_copy(to.addr, link->bssid, 6);
         sent = socket_send(link->eapol, frame, length, 0, address_of to, sizeof(to));
         crypto_forget(frame, sizeof(frame));
         return sent == (bipolar)length ? 0 : -1;
 }
 
-/* The GTK out of key data wrapped under the KEK: 1 with it, 0 when the
-   data unwraps and holds none, -1 when it does not unwrap. */
+/* What key data holds that a station takes: the first GTK and its id, the
+   first IGTK (key id 4 or 5, its packet number then the key), and the
+   access point's own RSN element and RSN extension element, whole. */
+typedef struct
+{
+        p8 gtk[16];
+        p8 gtk_id;
+        p8 igtk[6 + 16];
+        p8 igtk_id;
+        p8 rsn[WIFI_ELEMENT_ROOM];
+        p8 rsnx[WIFI_ELEMENT_ROOM];
+        p16 rsn_length;
+        p16 rsnx_length;
+} wifi_key_data;
+
+/* Key data wrapped under the KEK, into what: 1 with a GTK, 0 when the data
+   unwraps and holds none, -1 when it does not unwrap. Each kind is the
+   first of it; a GTK or IGTK element of any other length is no key. */
 static COLD bipolar wifi_gtk_take(p8 address_to kek, p8 address_to data, positive length,
-                                  p8 address_to gtk, p8 address_to idx)
+                                  wifi_key_data address_to what)
 {
         p8 plain[CRYPTO_WRAP_MOST];
         positive size = 0;
         bipolar found = 0;
         byte_reader reader;
 
+        memory_fill(what, 0, sizeof(*what));
         if (!crypto_aes_key_unwrap(kek, data, length, plain, address_of size))
                 return -1;
         reader = byte_reader_open(plain, size);
         while (byte_reader_left(&reader))
         {
+                byte_reader whole = reader;
                 p8 kind = byte_reader_u8(&reader);
                 byte_reader element = byte_reader_vector8(&reader);
+                positive span = byte_reader_left(&element);
 
                 if (!byte_reader_ok(&reader))
                         break;
+                //      The access point's elements, as they are, to be held
+                //      to what its beacon said.
+                if ((kind == 0x30 && !what->rsn_length) ||
+                    (kind == 0xf4 && !what->rsnx_length))
+                {
+                        p8 address_to into = kind == 0x30 ? what->rsn : what->rsnx;
+
+                        memory_copy(into, byte_reader_take(&whole, 2 + span), 2 + span);
+                        if (kind == 0x30)
+                                what->rsn_length = (p16)(2 + span);
+                        else
+                                what->rsnx_length = (p16)(2 + span);
+                        continue;
+                }
+                if (kind != 0xdd || span < 4)
+                        continue;
                 //      The GTK KDE: 00-0F-AC:1, the key id, a reserved
                 //      byte, then a CCMP key of sixteen bytes.
-                if (kind == 0xdd && byte_reader_left(&element) == 4 + 2 + 16 &&
-                    byte_reader_u32(&element) == 0x000fac01)
+                if (span == 4 + 2 + 16 && byte_reader_u32(&element) == 0x000fac01 && !found)
                 {
                         p8 key_id = byte_reader_u8(&element);
 
                         (void)byte_reader_u8(&element);
-                        address_to idx = (p8)(key_id & 3);
-                        memory_copy(gtk, byte_reader_take(&element, 16), 16);
+                        what->gtk_id = (p8)(key_id & 3);
+                        memory_copy(what->gtk, byte_reader_take(&element, 16), 16);
                         found = 1;
-                        break;
+                }
+                //      The IGTK KDE: 00-0F-AC:9, the key id (4 or 5, two
+                //      bytes little endian), the six byte packet number the
+                //      key starts at, and a BIP-CMAC-128 key of sixteen bytes.
+                else if (span == 4 + 2 + 6 + 16 && byte_reader_u32(&element) == 0x000fac09 &&
+                         !what->igtk_id)
+                {
+                        p16 key_id = byte_reader_u16le(&element);
+
+                        if (key_id == 4 || key_id == 5)
+                        {
+                                memory_copy(what->igtk, byte_reader_take(&element, 22), 22);
+                                what->igtk_id = (p8)key_id;
+                        }
                 }
         }
         crypto_forget(plain, sizeof(plain));
@@ -6342,7 +6701,11 @@ static COLD fn wifi_rekey_offload(wifi_link address_to link)
         makes a pending PTK, which replaces the installed one once a message
         3 carrying the same ANonce checks under it. A key already in is not
         put in again when a message is resent: that reinstallation is the
-        one KRACK used to reset the nonces.
+        one KRACK used to reset the nonces. The group management key of a
+        link with protection is held the same way. A fresh message 3 whose
+        RSN elements are not what the access point showed when it was
+        chosen is a downgrade, and is neither answered nor keyed:
+        WIFI_REFUSE_ELEMENTS.
 */
 static COLD bipolar wifi_eapol_step(wifi_link address_to link, p8 address_to frame,
                                     positive got)
@@ -6352,12 +6715,12 @@ static COLD bipolar wifi_eapol_step(wifi_link address_to link, p8 address_to fra
         bool pairwise = (info & WIFI_KEY_PAIRWISE) != 0;
         bool fresh = false;
         p8 address_to kck = null;
-        p8 gtk[16];
-        p8 idx = 0;
+        wifi_key_data what;
+        p8 idx;
         bipolar found;
         bipolar failed = 0;
 
-        if (!length || (info & 7) != 2 || !(info & WIFI_KEY_ACK) ||
+        if (!length || (info & 7) != link->version || !(info & WIFI_KEY_ACK) ||
             (info & WIFI_KEY_REQUEST) ||
             (link->replay_set && memory_compare(frame + 9, link->replay, 8) <= 0))
                 return 0;
@@ -6372,7 +6735,7 @@ static COLD bipolar wifi_eapol_step(wifi_link address_to link, p8 address_to fra
                 link->nonce_used = true;
                 memory_copy(link->anonce, frame + 17, 32);
                 wifi_ptk(link->pmk, link->bssid, link->sta, link->anonce, link->snonce,
-                         link->pending);
+                         link->pending, link->akm);
                 link->pending_set = true;
                 if (link->answered < 255)
                         link->answered++;
@@ -6385,7 +6748,7 @@ static COLD bipolar wifi_eapol_step(wifi_link address_to link, p8 address_to fra
         if (!pairwise)
         {
                 if (link->installed && (info & WIFI_KEY_SECURE) &&
-                    wifi_eapol_mic(link->ptk, frame, length, true))
+                    wifi_eapol_mic(link, link->ptk, frame, length, true))
                         kck = link->ptk;
         }
         else if (info & WIFI_KEY_INSTALL)
@@ -6393,21 +6756,28 @@ static COLD bipolar wifi_eapol_step(wifi_link address_to link, p8 address_to fra
                 //      The pending key for a new handshake's message 3; the
                 //      installed one for a message 3 resent after it.
                 fresh = link->pending_set && !memory_compare(frame + 17, link->anonce, 32) &&
-                        wifi_eapol_mic(link->pending, frame, length, true);
+                        wifi_eapol_mic(link, link->pending, frame, length, true);
                 if (fresh)
                         kck = link->pending;
-                else if (link->installed && wifi_eapol_mic(link->ptk, frame, length, true))
+                else if (link->installed && wifi_eapol_mic(link, link->ptk, frame, length, true))
                         kck = link->ptk;
         }
         if (!kck)
                 return 0;
 
-        found = wifi_gtk_take(kck + 16, frame + 99, network_load_16(frame + 97), gtk,
-                              address_of idx);
+        found = wifi_gtk_take(kck + 16, frame + 99, network_load_16(frame + 97),
+                              address_of what);
+        idx = what.gtk_id;
         if (found < 0 || (!pairwise && !found))
         {
-                crypto_forget(gtk, sizeof(gtk));
+                crypto_forget(address_of what, sizeof(what));
                 return 0;
+        }
+        if (fresh && !wifi_seen_matches(address_of link->seen, what.rsn, what.rsn_length,
+                                        what.rsnx, what.rsnx_length))
+        {
+                crypto_forget(address_of what, sizeof(what));
+                return WIFI_REFUSE_ELEMENTS;
         }
         /* A failed group-key install is retried under the same replay
            counter. Do not acknowledge or consume it until the driver has
@@ -6438,18 +6808,35 @@ static COLD bipolar wifi_eapol_step(wifi_link address_to link, p8 address_to fra
         //      counter. Each key id also keeps its own last key.
         if (!failed && found && (fresh || !pairwise) &&
             (!(link->gtk_installed & (1u << idx)) ||
-             memory_compare(gtk, link->gtk[idx], 16)))
+             memory_compare(what.gtk, link->gtk[idx], 16)))
         {
                 failed = nl80211_new_key(address_of link->session, link->index, idx,
-                                         NL80211_KEYTYPE_GROUP, null, gtk, 16, frame + 65,
+                                         NL80211_KEYTYPE_GROUP, null, what.gtk, 16, frame + 65,
                                          6, true);
                 if (!failed)
                 {
-                        memory_copy(link->gtk[idx], gtk, 16);
+                        memory_copy(link->gtk[idx], what.gtk, 16);
                         link->gtk_installed |= (p8)(1u << idx);
                 }
         }
-        crypto_forget(gtk, sizeof(gtk));
+        //      The group management key, for the broadcast deauthentication
+        //      and disassociation frames of an access point that protects
+        //      them: only on a link that asked for protection, once per key
+        //      id and key, and before the group handshake is answered, as
+        //      the group key is.
+        if (!failed && link->pmf && what.igtk_id && (fresh || !pairwise) &&
+            (!(link->igtk_installed & (1u << (what.igtk_id - 4))) ||
+             memory_compare(what.igtk + 6, link->igtk[what.igtk_id - 4], 16)))
+        {
+                failed = nl80211_new_igtk(address_of link->session, link->index, what.igtk_id,
+                                          what.igtk + 6, what.igtk);
+                if (!failed)
+                {
+                        memory_copy(link->igtk[what.igtk_id - 4], what.igtk + 6, 16);
+                        link->igtk_installed |= (p8)(1u << (what.igtk_id - 4));
+                }
+        }
+        crypto_forget(address_of what, sizeof(what));
         if (!failed && !pairwise)
         {
                 failed = wifi_eapol_reply(link, kck, 0x0302, frame + 9, false);
@@ -6662,7 +7049,9 @@ static COLD fn radio_keeper_stop(void)
 static COLD fn radio_avoid_add(p8 address_to bssid);
 
 /* The link roamed: the station is another access point's, with a handshake
-   of its own to come. What was held of the last one is no key for it. */
+   of its own to come. What was held of the last one is no key for it, and
+   what the last one showed of itself is not what this one shows: a roam the
+   driver made on its own has no elements to hold the next message 3 to. */
 static COLD fn wifi_roam(wifi_link address_to link, p8 address_to to)
 {
         memory_copy(link->bssid, to, 6);
@@ -6670,6 +7059,9 @@ static COLD fn wifi_roam(wifi_link address_to link, p8 address_to to)
         crypto_forget(link->pending, sizeof(link->pending));
         crypto_forget(link->gtk, sizeof(link->gtk));
         link->gtk_installed = 0;
+        crypto_forget(link->igtk, sizeof(link->igtk));
+        link->igtk_installed = 0;
+        memory_fill(address_of link->seen, 0, sizeof(link->seen));
         memory_fill(link->replay, 0, sizeof(link->replay));
         link->replay_set = false;
         link->installed = false;
@@ -6973,14 +7365,15 @@ static COLD bipolar nl80211_wait_associated(nl80211 address_to session, p32 sequ
 static COLD bipolar nl80211_connect(nl80211 address_to session, p32 index,
                                p8 address_to ssid, positive ssid_length,
                                p8 address_to pmk, bool offload, p8 address_to bssid,
-                               p32 frequency)
+                               p32 frequency, const wifi_link address_to link)
 {
         netlink_buffer request = {0};
         p32 sequence = netlink_sequence_take();
         p32 open = NL80211_AUTHTYPE_OPEN;
         p32 version = NL80211_WPA_VERSION_2;
         p32 ccmp = WLAN_CIPHER_CCMP;
-        p32 psk = WLAN_AKM_PSK;
+        p32 psk = WLAN_SUITE_IEEE | link->akm;
+        p32 mfp = NL80211_MFP_REQUIRED;
         bipolar sent;
 
         scope_exit(netlink_forget(address_of request));
@@ -7022,7 +7415,14 @@ static COLD bipolar nl80211_connect(nl80211 address_to session, p32 index,
                    it, and the four-way handshake never began. The same bytes
                    go in message 2, which the access point compares to these. */
                 netlink_attribute_add(address_of request, NL80211_ATTR_IE,
-                                      (address_any)wifi_rsn_ie, sizeof(wifi_rsn_ie));
+                                      (address_any)link->rsn, link->rsn_length);
+                /* Management frame protection, which the kernel takes as
+                   required or not at all: a driver with no connect of its
+                   own (mac80211's kind) refuses the optional form outright.
+                   Asked for, the kernel drops a deauthentication or
+                   disassociation frame that is not protected. */
+                if (link->pmf)
+                        nl80211_attribute_u32(address_of request, NL80211_ATTR_USE_MFP, mfp);
                 if (offload)
                         netlink_attribute_add(address_of request, NL80211_ATTR_PMK, pmk,
                                               32);
@@ -7038,6 +7438,1080 @@ static COLD bipolar nl80211_connect(nl80211 address_to session, p32 index,
         if (sent < 0)
                 return sent;
         return sequence;
+}
+
+/*
+        WPA3-Personal's SAE (802.11-2020 12.4, RFC 7664's dragonfly) over
+        the NIST P-256 group, group 19, on net.c's field and point routines.
+        On the wire a scalar is 32 big-endian bytes and an element is x then
+        y, 32 bytes each.
+
+        The password element is found one of two ways. Hash-to-element
+        (12.4.4.2.3) makes a point PT of the network's name and the password
+        once, by two simplified SWU maps, with no loop and no branch on
+        anything the password decides; it is used whenever the access point
+        says it takes it, in its RSN extension element, which is every 6 GHz
+        network and every one set to it alone. Hunting and pecking
+        (12.4.4.2.2) is the method every WPA3 station has, used for the
+        rest: every pass of the hunt is worked out whole, forty of them at
+        least however early one lands, and the one that counts is kept by
+        mask, which is the Dragonblood advice that the first implementations
+        lacked.
+*/
+#define WIFI_SAE_GROUP 19
+#define WIFI_SAE_PASSES 40
+#define WIFI_SAE_PASSES_MOST 255
+#define WIFI_SAE_SECONDS 10
+#define WIFI_SAE_TOKEN_MOST 64
+#define WIFI_SAE_TOKEN_STATUS 76
+#define WIFI_SAE_H2E_STATUS 126
+#define WIFI_SAE_TOKEN_EXTENSION 93
+
+typedef struct
+{
+        p8 pwe[64];
+        p8 rand[32];
+        p8 scalar[32];
+        p8 element[64];
+        p8 peer_scalar[32];
+        p8 peer_element[64];
+        p8 kck[32];
+        p8 pmk[32];
+        p8 pmkid[16];
+} wifi_sae;
+
+/* 802.11's KDF-Hash-Length with SHA-256, for a length that is a whole
+   number of hashes: HMAC of a counter from 1 (two bytes, little endian),
+   the label, the context and the length in bits. */
+static COLD fn wifi_sae_kdf(p8 address_to key, positive key_length, string_address label,
+                            p8 address_to context, positive context_length,
+                            p8 address_to out, positive bits)
+{
+        p8 block[2 + 24 + 64 + 2];
+        positive label_length = string_length(label);
+        positive length = 2 + label_length + context_length + 2;
+
+        for (positive at = 0; at * 256 < bits; at++)
+        {
+                block[0] = (p8)(at + 1);
+                block[1] = 0;
+                memory_copy(block + 2, label, label_length);
+                memory_copy(block + 2 + label_length, context, context_length);
+                block[length - 2] = (p8)bits;
+                block[length - 1] = (p8)(bits >> 8);
+                crypto_hmac_sha256(key, key_length, block, length, out + at * 32);
+        }
+        crypto_forget(block, sizeof(block));
+}
+
+/* (p + 1) / 4, the exponent that takes a square root of a square of this
+   field: p is 3 mod 4. */
+static COLD fn wifi_sae_root_exponent(p64 address_to exponent)
+{
+        p64 carry = 1;
+
+        for (positive i = 0; i < 4; i++)
+                exponent[i] = (crypto_p256_p[i] >> 2) | (i < 3 ? crypto_p256_p[i + 1] << 62 : 0);
+        for (positive i = 0; i < 4; i++)
+        {
+                p64 sum = exponent[i] + carry;
+
+                carry = sum < carry;
+                exponent[i] = sum;
+        }
+}
+
+/* The two addresses, the higher first. */
+static COLD fn wifi_sae_addresses(const p8 address_to first, const p8 address_to second,
+                                  p8 address_to key)
+{
+        bool higher = memory_compare(first, second, 6) > 0;
+
+        memory_copy(key, higher ? first : second, 6);
+        memory_copy(key + 6, higher ? second : first, 6);
+}
+
+/*
+        The password element by hunting and pecking, for the password and
+        the two addresses: pwd-seed is HMAC-SHA-256 of the password and a
+        counter under the addresses, pwd-value the KDF of it; the first
+        value under p that is the x of a point is kept, with the y whose low
+        bit is the seed's. Every pass is worked out in full, and the first
+        that lands is kept by mask.
+*/
+static COLD bool wifi_sae_pwe(p8 address_to password, positive password_length,
+                              p8 address_to first, p8 address_to second, p8 address_to pwe)
+{
+        p8 key[12];
+        p8 data[64 + 1];
+        p8 seed[32];
+        p8 value[32];
+        p8 p_bytes[32];
+        p64 x[CRYPTO_FE_MAX], y[CRYPTO_FE_MAX], y2[CRYPTO_FE_MAX], b[CRYPTO_FE_MAX];
+        p64 root[CRYPTO_FE_MAX], square[CRYPTO_FE_MAX], zero[CRYPTO_FE_MAX];
+        p64 negative_y[CRYPTO_FE_MAX], exponent[CRYPTO_FE_MAX], scratch[CRYPTO_FE_MAX];
+        p64 kept_x[CRYPTO_FE_MAX], kept_y[CRYPTO_FE_MAX];
+        p64 found = 0;
+        bool done = false;
+
+        if (password_length > 64)
+                return false;
+        wifi_sae_addresses(first, second, key);
+        crypto_fe_store_be(p_bytes, crypto_p256_p, 4);
+        crypto_fe_load_be(b, crypto_p256_b_be, 4);
+        crypto_fe_mul(b, b, crypto_p256_field.square, &crypto_p256_field);
+        memory_fill(zero, 0, sizeof(zero));
+        wifi_sae_root_exponent(exponent);
+        memory_fill(kept_x, 0, sizeof(kept_x));
+        memory_fill(kept_y, 0, sizeof(kept_y));
+        memory_copy(data, password, password_length);
+        for (positive pass = 1; pass <= WIFI_SAE_PASSES_MOST && !done; pass++)
+        {
+                p64 below;
+                p64 residue;
+                p64 lands;
+                p64 odd;
+
+                data[password_length] = (p8)pass;
+                crypto_hmac_sha256(key, 12, data, password_length + 1, seed);
+                wifi_sae_kdf(seed, 32, "SAE Hunting and Pecking", p_bytes, 32, value, 256);
+                crypto_fe_load_be(x, value, 4);
+                below = crypto_fe_subtract_raw(scratch, x, crypto_p256_p, 4);
+                //      y^2 = x^3 - 3x + b, in Montgomery form.
+                crypto_fe_mul(x, x, crypto_p256_field.square, &crypto_p256_field);
+                crypto_fe_sqr(square, x, &crypto_p256_field);
+                crypto_fe_mul(y2, square, x, &crypto_p256_field);
+                crypto_fe_sub(y2, y2, x, &crypto_p256_field);
+                crypto_fe_sub(y2, y2, x, &crypto_p256_field);
+                crypto_fe_sub(y2, y2, x, &crypto_p256_field);
+                crypto_fe_add(y2, y2, b, &crypto_p256_field);
+                crypto_fe_power(root, y2, exponent, &crypto_p256_field);
+                crypto_fe_sqr(square, root, &crypto_p256_field);
+                crypto_fe_sub(scratch, square, y2, &crypto_p256_field);
+                residue = crypto_fe_zero_bit(scratch, 4);
+                lands = below & residue & (found ^ 1);
+                //      The y whose low bit, as a plain integer, is the seed's.
+                crypto_fe_mul(y, root, crypto_unit, &crypto_p256_field);
+                odd = y[0] & 1;
+                crypto_fe_sub(negative_y, zero, root, &crypto_p256_field);
+                crypto_fe_select(root, root, negative_y, 4, odd ^ (p64)(seed[31] & 1));
+                crypto_fe_select(kept_x, kept_x, x, 4, lands);
+                crypto_fe_select(kept_y, kept_y, root, 4, lands);
+                found |= lands;
+                done = found && pass >= WIFI_SAE_PASSES;
+        }
+        crypto_fe_mul(kept_x, kept_x, crypto_unit, &crypto_p256_field);
+        crypto_fe_mul(kept_y, kept_y, crypto_unit, &crypto_p256_field);
+        crypto_fe_store_be(pwe, kept_x, 4);
+        crypto_fe_store_be(pwe + 32, kept_y, 4);
+        crypto_forget(data, sizeof(data));
+        crypto_forget(seed, sizeof(seed));
+        crypto_forget(value, sizeof(value));
+        crypto_forget(x, sizeof(x));
+        crypto_forget(y, sizeof(y));
+        crypto_forget(y2, sizeof(y2));
+        crypto_forget(root, sizeof(root));
+        crypto_forget(square, sizeof(square));
+        crypto_forget(negative_y, sizeof(negative_y));
+        crypto_forget(scratch, sizeof(scratch));
+        crypto_forget(kept_x, sizeof(kept_x));
+        crypto_forget(kept_y, sizeof(kept_y));
+        return found != 0;
+}
+
+/* A scalar from 1 to the group order less one, as 32 bytes. */
+static COLD bool wifi_sae_scalar(p8 address_to out)
+{
+        p64 limbs[CRYPTO_FE_MAX];
+        bool good = false;
+
+        for (positive tries = 0; tries < 64 && !good; tries++)
+        {
+                if (system_random_fill(out, 32, 0) < 0)
+                        break;
+                good = crypto_scalar_from_int_be(limbs, out, 32, crypto_p256_n, 4);
+        }
+        crypto_forget(limbs, sizeof(limbs));
+        return good;
+}
+
+/* out = (a + b) mod the group order, all as 32 bytes. */
+static COLD fn wifi_sae_scalar_add(p8 address_to out, const p8 address_to a,
+                                   const p8 address_to b)
+{
+        p64 x[CRYPTO_FE_MAX], y[CRYPTO_FE_MAX];
+
+        crypto_fe_load_be(x, a, 4);
+        crypto_fe_load_be(y, b, 4);
+        crypto_fe_add(x, x, y, &crypto_p256_order);
+        crypto_fe_store_be(out, x, 4);
+        crypto_forget(x, sizeof(x));
+        crypto_forget(y, sizeof(y));
+}
+
+/* k times the point (x then y), as bytes; false when it is infinity. */
+static COLD bool wifi_sae_multiply(p8 address_to out, const p8 address_to k,
+                                   const p8 address_to point)
+{
+        crypto_point base, result;
+        p64 x[CRYPTO_FE_MAX], y[CRYPTO_FE_MAX], scalar[CRYPTO_FE_MAX];
+        bool finite;
+
+        crypto_fe_load_be(x, point, 4);
+        crypto_fe_load_be(y, point + 32, 4);
+        crypto_fe_load_be(scalar, k, 4);
+        crypto_point_set_xy(&base, x, y, &crypto_p256_field);
+        crypto_point_scalar_private(&result, &base, scalar, null);
+        finite = !crypto_fe_is_zero(result.z, 4);
+        crypto_point_affine(&result);
+        crypto_fe_store_be(out, result.x, 4);
+        crypto_fe_store_be(out + 32, result.y, 4);
+        crypto_forget(scalar, sizeof(scalar));
+        crypto_forget(&base, sizeof(base));
+        crypto_forget(&result, sizeof(result));
+        return finite;
+}
+
+/* The commit: scalar = (rand + mask) mod r, which is neither zero nor one,
+   and element = the inverse of mask * PWE. */
+static COLD bool wifi_sae_commit(wifi_sae address_to sae)
+{
+        p8 mask[32];
+        p8 product[64];
+        p64 y[CRYPTO_FE_MAX], zero[CRYPTO_FE_MAX];
+        bool good = false;
+
+        memory_fill(zero, 0, sizeof(zero));
+        for (positive tries = 0; tries < 16 && !good; tries++)
+        {
+                p8 high = 0;
+
+                if (!wifi_sae_scalar(sae->rand) || !wifi_sae_scalar(mask))
+                        break;
+                wifi_sae_scalar_add(sae->scalar, sae->rand, mask);
+                for (positive at = 0; at < 31; at++)
+                        high |= sae->scalar[at];
+                good = (high || sae->scalar[31] > 1) && wifi_sae_multiply(product, mask, sae->pwe);
+        }
+        if (good)
+        {
+                crypto_fe_load_be(y, product + 32, 4);
+                crypto_fe_sub(y, zero, y, &crypto_p256_field);
+                memory_copy(sae->element, product, 32);
+                crypto_fe_store_be(sae->element + 32, y, 4);
+        }
+        crypto_forget(mask, sizeof(mask));
+        crypto_forget(product, sizeof(product));
+        crypto_forget(y, sizeof(y));
+        return good;
+}
+
+/* Whether the access point's commit is one to take, by what costs nothing:
+   its scalar is above one and under the order, its element is a point of
+   the curve, and the two are not our own sent back (a reflection). */
+static COLD bool wifi_sae_commit_good(const wifi_sae address_to sae, const p8 address_to scalar,
+                                      const p8 address_to element)
+{
+        p64 limbs[CRYPTO_FE_MAX];
+
+        if (!crypto_scalar_from_int_be(limbs, scalar, 32, crypto_p256_n, 4) ||
+            (limbs[0] == 1 && !limbs[1] && !limbs[2] && !limbs[3]))
+                return false;
+        if (!crypto_point_is_on_curve(element, element + 32, &crypto_p256_field,
+                                      crypto_p256_b_be))
+                return false;
+        return memory_compare(scalar, sae->scalar, 32) || memory_compare(element, sae->element, 64);
+}
+
+/*
+        The access point's commit taken in, which is where the cost is: two
+        scalar multiplications. The shared secret K = rand * (peer-scalar *
+        PWE + peer-element), of which only the x goes on: keyseed is its
+        HMAC-SHA-256 under a key of zeros, the KCK and the PMK are the KDF
+        of that over the sum of the two scalars, and the PMKID is the sum's
+        high 128 bits. False when a point on the way is infinity.
+*/
+static COLD bool wifi_sae_take(wifi_sae address_to sae, const p8 address_to scalar,
+                               const p8 address_to element)
+{
+        p8 shared[64], sum_point[64], term[64], keyseed[32], zeros[32], sum[32], keys[64];
+        crypto_point first, second, total;
+        p64 x[CRYPTO_FE_MAX], y[CRYPTO_FE_MAX];
+        bool good;
+
+        memory_fill(zeros, 0, sizeof(zeros));
+        memory_copy(sae->peer_scalar, scalar, 32);
+        memory_copy(sae->peer_element, element, 64);
+        if (!wifi_sae_multiply(term, scalar, sae->pwe))
+                return false;
+        crypto_fe_load_be(x, term, 4);
+        crypto_fe_load_be(y, term + 32, 4);
+        crypto_point_set_xy(&first, x, y, &crypto_p256_field);
+        crypto_fe_load_be(x, element, 4);
+        crypto_fe_load_be(y, element + 32, 4);
+        crypto_point_set_xy(&second, x, y, &crypto_p256_field);
+        crypto_point_add(&total, &first, &second);
+        if (crypto_fe_is_zero(total.z, 4))
+                return false;
+        crypto_point_affine(&total);
+        crypto_fe_store_be(sum_point, total.x, 4);
+        crypto_fe_store_be(sum_point + 32, total.y, 4);
+        good = wifi_sae_multiply(shared, sae->rand, sum_point);
+        if (good)
+        {
+                crypto_hmac_sha256(zeros, 32, shared, 32, keyseed);
+                wifi_sae_scalar_add(sum, sae->scalar, scalar);
+                wifi_sae_kdf(keyseed, 32, "SAE KCK and PMK", sum, 32, keys, 512);
+                memory_copy(sae->kck, keys, 32);
+                memory_copy(sae->pmk, keys + 32, 32);
+                memory_copy(sae->pmkid, sum, 16);
+        }
+        crypto_forget(shared, sizeof(shared));
+        crypto_forget(sum_point, sizeof(sum_point));
+        crypto_forget(term, sizeof(term));
+        crypto_forget(keyseed, sizeof(keyseed));
+        crypto_forget(keys, sizeof(keys));
+        crypto_forget(&first, sizeof(first));
+        crypto_forget(&second, sizeof(second));
+        crypto_forget(&total, sizeof(total));
+        return good;
+}
+
+/* CN(KCK, counter, scalar, element, peer-scalar, peer-element): the two
+   sides' confirms are the one computation with the roles swapped. */
+static COLD fn wifi_sae_confirm(const p8 address_to kck, const p8 address_to counter,
+                                const p8 address_to scalar, const p8 address_to element,
+                                const p8 address_to other_scalar,
+                                const p8 address_to other_element, p8 address_to out)
+{
+        p8 block[2 + 32 + 64 + 32 + 64];
+
+        memory_copy(block, counter, 2);
+        memory_copy(block + 2, scalar, 32);
+        memory_copy(block + 34, element, 64);
+        memory_copy(block + 98, other_scalar, 32);
+        memory_copy(block + 130, other_element, 64);
+        crypto_hmac_sha256((p8 address_to)kck, 32, block, sizeof(block), out);
+}
+
+/* A small number in Montgomery form. */
+static COLD fn wifi_sae_small(p64 address_to out, p64 value)
+{
+        memory_fill(out, 0, 4 * sizeof(p64));
+        out[0] = value;
+        crypto_fe_mul(out, out, crypto_p256_field.square, &crypto_p256_field);
+}
+
+/* Forty-eight big-endian bytes modulo p, as a plain integer: the high
+   sixteen times 2^256 (which is what the conversion to Montgomery form
+   multiplies by) plus the low thirty-two brought under p once. */
+static COLD fn wifi_sae_reduce(p64 address_to out, const p8 address_to bytes)
+{
+        p64 high[CRYPTO_FE_MAX], low[CRYPTO_FE_MAX], under[CRYPTO_FE_MAX];
+        p64 less;
+
+        memory_fill(high, 0, sizeof(high));
+        high[0] = network_load_64(bytes + 8);
+        high[1] = network_load_64(bytes);
+        crypto_fe_load_be(low, bytes + 16, 4);
+        less = crypto_fe_subtract_raw(under, low, crypto_p256_p, 4);
+        crypto_fe_select(low, under, low, 4, less);
+        crypto_fe_mul(high, high, crypto_p256_field.square, &crypto_p256_field);
+        crypto_fe_add(out, high, low, &crypto_p256_field);
+        crypto_forget(high, sizeof(high));
+        crypto_forget(low, sizeof(low));
+        crypto_forget(under, sizeof(under));
+}
+
+/* RFC 9380's simplified SWU map of u, a plain integer under p, to a point
+   of the curve, as plain x and y: Z = -10, the two candidates and their
+   squares chosen by mask, the square root by the exponent (p + 1) / 4, and
+   the sign of y taken from the low bit of u. */
+static COLD fn wifi_sae_sswu(p64 address_to x_out, p64 address_to y_out, const p64 address_to u)
+{
+        const crypto_field address_to f = &crypto_p256_field;
+        p64 um[4], u2[4], t1[4], t2[4], m[4], t[4], z[4], a[4], b[4], zero[4], one[4];
+        p64 x1a[4], x1b[4], x1[4], x2[4], gx1[4], gx2[4], y1[4], v[4], x[4], y[4], ny[4];
+        p64 exponent[4];
+        p64 is_zero, is_square, odd;
+
+        wifi_sae_root_exponent(exponent);
+        memory_fill(zero, 0, sizeof(zero));
+        memory_copy(one, f->one, sizeof(one));
+        wifi_sae_small(t1, 10);
+        crypto_fe_sub(z, zero, t1, f);
+        wifi_sae_small(t1, 3);
+        crypto_fe_sub(a, zero, t1, f);
+        crypto_fe_load_be(b, crypto_p256_b_be, 4);
+        crypto_fe_mul(b, b, f->square, f);
+
+        crypto_fe_mul(um, u, f->square, f);
+        //      m = z^2 u^4 + z u^2, and t = 1 / m (zero for zero).
+        crypto_fe_sqr(u2, um, f);
+        crypto_fe_mul(t1, z, u2, f);
+        crypto_fe_sqr(t2, t1, f);
+        crypto_fe_add(m, t1, t2, f);
+        crypto_fe_inv(t, m, f);
+        //      x1 = b / (z a) when m is zero, else (-b / a) (1 + t).
+        crypto_fe_mul(t1, z, a, f);
+        crypto_fe_inv(t1, t1, f);
+        crypto_fe_mul(x1a, b, t1, f);
+        crypto_fe_sub(t1, zero, b, f);
+        crypto_fe_inv(t2, a, f);
+        crypto_fe_mul(t1, t1, t2, f);
+        crypto_fe_add(t2, one, t, f);
+        crypto_fe_mul(x1b, t1, t2, f);
+        is_zero = crypto_fe_zero_bit(m, 4);
+        crypto_fe_select(x1, x1b, x1a, 4, is_zero);
+        //      gx1 = x1^3 + a x1 + b; x2 = z u^2 x1; gx2 likewise.
+        crypto_fe_sqr(t1, x1, f);
+        crypto_fe_mul(t1, t1, x1, f);
+        crypto_fe_mul(t2, a, x1, f);
+        crypto_fe_add(t1, t1, t2, f);
+        crypto_fe_add(gx1, t1, b, f);
+        crypto_fe_mul(t1, z, u2, f);
+        crypto_fe_mul(x2, t1, x1, f);
+        crypto_fe_sqr(t1, x2, f);
+        crypto_fe_mul(t1, t1, x2, f);
+        crypto_fe_mul(t2, a, x2, f);
+        crypto_fe_add(t1, t1, t2, f);
+        crypto_fe_add(gx2, t1, b, f);
+        //      Whichever of gx1 and gx2 is a square gives the point.
+        crypto_fe_power(y1, gx1, exponent, f);
+        crypto_fe_sqr(t1, y1, f);
+        crypto_fe_sub(t1, t1, gx1, f);
+        is_square = crypto_fe_zero_bit(t1, 4);
+        crypto_fe_select(v, gx2, gx1, 4, is_square);
+        crypto_fe_select(x, x2, x1, 4, is_square);
+        crypto_fe_power(y, v, exponent, f);
+        //      The y whose low bit is u's.
+        crypto_fe_mul(t1, y, crypto_unit, f);
+        odd = t1[0] & 1;
+        crypto_fe_sub(ny, zero, y, f);
+        crypto_fe_select(y, y, ny, 4, odd ^ (u[0] & 1));
+        crypto_fe_mul(x_out, x, crypto_unit, f);
+        crypto_fe_mul(y_out, y, crypto_unit, f);
+        crypto_forget(um, sizeof(um));
+        crypto_forget(u2, sizeof(u2));
+        crypto_forget(t1, sizeof(t1));
+        crypto_forget(t2, sizeof(t2));
+        crypto_forget(m, sizeof(m));
+        crypto_forget(t, sizeof(t));
+        crypto_forget(x1, sizeof(x1));
+        crypto_forget(x1a, sizeof(x1a));
+        crypto_forget(x1b, sizeof(x1b));
+        crypto_forget(x2, sizeof(x2));
+        crypto_forget(gx1, sizeof(gx1));
+        crypto_forget(gx2, sizeof(gx2));
+        crypto_forget(y1, sizeof(y1));
+        crypto_forget(v, sizeof(v));
+        crypto_forget(x, sizeof(x));
+        crypto_forget(y, sizeof(y));
+        crypto_forget(ny, sizeof(ny));
+}
+
+/* PT for a network's name and a password: HKDF-Extract of the password
+   salted by the name, two HKDF-Expands to 48 bytes ("SAE Hash to Element
+   u1 P1" and "u2 P2"), each reduced by p and mapped, and the sum of the
+   two points, as x then y. */
+static COLD bool wifi_sae_pt(p8 address_to ssid, positive ssid_length, p8 address_to password,
+                             positive password_length, p8 address_to pt)
+{
+        p8 seed[32];
+        p8 value[48];
+        p64 u[CRYPTO_FE_MAX], x[CRYPTO_FE_MAX], y[CRYPTO_FE_MAX];
+        crypto_point point[2], total;
+        bool good = true;
+
+        crypto_hkdf_extract(ssid, ssid_length, password, password_length, seed);
+        for (positive which = 0; which < 2; which++)
+        {
+                string_address label = which ? (string_address) "SAE Hash to Element u2 P2"
+                                             : (string_address) "SAE Hash to Element u1 P1";
+
+                good &= crypto_hkdf_expand(seed, (p8 address_to)label, 25, value, 48);
+                wifi_sae_reduce(u, value);
+                wifi_sae_sswu(x, y, u);
+                crypto_point_set_xy(&point[which], x, y, &crypto_p256_field);
+        }
+        crypto_point_add(&total, &point[0], &point[1]);
+        good &= !crypto_fe_is_zero(total.z, 4);
+        crypto_point_affine(&total);
+        crypto_fe_store_be(pt, total.x, 4);
+        crypto_fe_store_be(pt + 32, total.y, 4);
+        crypto_forget(seed, sizeof(seed));
+        crypto_forget(value, sizeof(value));
+        crypto_forget(u, sizeof(u));
+        crypto_forget(x, sizeof(x));
+        crypto_forget(y, sizeof(y));
+        crypto_forget(point, sizeof(point));
+        crypto_forget(&total, sizeof(total));
+        return good;
+}
+
+/* The element of two stations from PT: PT times HKDF-Extract under 32
+   zeros of the higher address then the lower, brought to 1 .. r - 1 (one
+   subtraction, since a hash is under twice r - 1, then one more). */
+static COLD bool wifi_sae_pwe_from_pt(const p8 address_to pt, const p8 address_to first,
+                                      const p8 address_to second, p8 address_to pwe)
+{
+        p8 key[12];
+        p8 zeros[32];
+        p8 value[32];
+        p64 v[CRYPTO_FE_MAX], below[CRYPTO_FE_MAX], one[CRYPTO_FE_MAX], diff[CRYPTO_FE_MAX];
+        p64 less;
+        p64 carry = 1;
+        bool good;
+
+        wifi_sae_addresses(first, second, key);
+        memory_fill(zeros, 0, sizeof(zeros));
+        crypto_hkdf_extract(zeros, 32, key, 12, value);
+        crypto_fe_load_be(v, value, 4);
+        memory_fill(one, 0, sizeof(one));
+        one[0] = 1;
+        crypto_fe_subtract_raw(below, crypto_p256_n, one, 4);
+        less = crypto_fe_subtract_raw(diff, v, below, 4);
+        crypto_fe_select(v, diff, v, 4, less);
+        for (positive i = 0; i < 4; i++)
+        {
+                p64 sum = v[i] + carry;
+
+                carry = sum < carry;
+                v[i] = sum;
+        }
+        crypto_fe_store_be(value, v, 4);
+        good = wifi_sae_multiply(pwe, value, pt);
+        crypto_forget(value, sizeof(value));
+        crypto_forget(v, sizeof(v));
+        return good;
+}
+
+/*
+        One authentication frame of the exchange, as an access point sent
+        it: its transaction and status, and what the two it reads say.
+
+          commit (1), status 0 or 126   the group; for group 19, the scalar
+                                        and the element, then only whole
+                                        elements (an identifier, rejected
+                                        groups)
+          token asked for (1, 76)        the group, then the token: the rest
+                                        of the frame, or with
+                                        hash-to-element a token container
+                                        (255, n, 93, token)
+          confirm (2), status 0          the send-confirm and the confirm,
+                                        and nothing after them
+          any other status              nothing more
+
+        False for a frame that is no SAE authentication frame from bssid
+        (transmitter and network both), that is cut short or runs on past
+        what it says it is, or whose token is empty or over
+        WIFI_SAE_TOKEN_MOST.
+*/
+typedef struct
+{
+        p16 transaction;
+        p16 status;
+        p16 group;
+        p16 send_confirm;
+        const p8 address_to scalar;
+        const p8 address_to element;
+        const p8 address_to confirm;
+        const p8 address_to token;
+        positive token_length;
+} wifi_sae_frame;
+
+static COLD bool wifi_sae_frame_read(const p8 address_to frame, positive size,
+                                     const p8 address_to bssid, bool h2e,
+                                     wifi_sae_frame address_to out)
+{
+        byte_reader reader = byte_reader_open(frame, size);
+        p16 control = byte_reader_u16le(&reader);
+        const p8 address_to transmitter;
+        const p8 address_to network;
+        p16 algorithm;
+
+        memory_fill(out, 0, sizeof(*out));
+        (void)byte_reader_skip(&reader, 2 + 6);
+        transmitter = byte_reader_take(&reader, 6);
+        network = byte_reader_take(&reader, 6);
+        (void)byte_reader_skip(&reader, 2);
+        algorithm = byte_reader_u16le(&reader);
+        out->transaction = byte_reader_u16le(&reader);
+        out->status = byte_reader_u16le(&reader);
+        //      A management frame of the authentication subtype, not
+        //      protected, from the access point and in its network.
+        if (!byte_reader_ok(&reader) || (control & 0x40ff) != 0x00b0 || algorithm != 3 ||
+            memory_compare(transmitter, bssid, 6) || memory_compare(network, bssid, 6))
+                return false;
+        if (out->transaction == 1 &&
+            (out->status == 0 || out->status == WIFI_SAE_H2E_STATUS))
+        {
+                out->group = byte_reader_u16le(&reader);
+                if (out->group != WIFI_SAE_GROUP)
+                        return byte_reader_ok(&reader);
+                out->scalar = byte_reader_take(&reader, 32);
+                out->element = byte_reader_take(&reader, 64);
+                while (byte_reader_ok(&reader) && byte_reader_left(&reader))
+                {
+                        (void)byte_reader_u8(&reader);
+                        (void)byte_reader_vector8(&reader);
+                }
+                return byte_reader_ok(&reader);
+        }
+        if (out->transaction == 1 && out->status == WIFI_SAE_TOKEN_STATUS)
+        {
+                out->group = byte_reader_u16le(&reader);
+                if (h2e)
+                {
+                        byte_reader container;
+
+                        if (byte_reader_u8(&reader) != 255)
+                                return false;
+                        container = byte_reader_vector8(&reader);
+                        if (byte_reader_u8(&container) != WIFI_SAE_TOKEN_EXTENSION ||
+                            !byte_reader_end(&reader))
+                                return false;
+                        reader = container;
+                }
+                out->token_length = byte_reader_left(&reader);
+                out->token = byte_reader_take(&reader, out->token_length);
+                return byte_reader_ok(&reader) && out->token_length &&
+                       out->token_length <= WIFI_SAE_TOKEN_MOST;
+        }
+        if (out->transaction == 2 && !out->status)
+        {
+                out->send_confirm = byte_reader_u16le(&reader);
+                out->confirm = byte_reader_take(&reader, 32);
+                return byte_reader_ok(&reader) && byte_reader_end(&reader);
+        }
+        return out->transaction == 1 || out->transaction == 2;
+}
+
+/* A commit as the body of an authentication frame: transaction 1, status
+   0 (126 when the exchange uses hash-to-element), the group, the token an
+   access point asked for, the scalar and the element. The token goes
+   before the scalar, or, for hash-to-element, after the element in a
+   container element of its own. */
+static COLD positive wifi_sae_commit_body(const wifi_sae address_to sae, const p8 address_to token,
+                                          positive token_length, p8 address_to out, bool h2e)
+{
+        positive at = 0;
+
+        out[at++] = 1, out[at++] = 0;
+        out[at++] = h2e ? WIFI_SAE_H2E_STATUS : 0, out[at++] = 0;
+        out[at++] = WIFI_SAE_GROUP, out[at++] = 0;
+        if (token_length && !h2e)
+        {
+                memory_copy(out + at, token, token_length);
+                at += token_length;
+        }
+        memory_copy(out + at, sae->scalar, 32);
+        memory_copy(out + at + 32, sae->element, 64);
+        at += 96;
+        if (token_length && h2e)
+        {
+                out[at++] = 255;
+                out[at++] = (p8)(1 + token_length);
+                out[at++] = WIFI_SAE_TOKEN_EXTENSION;
+                memory_copy(out + at, token, token_length);
+                at += token_length;
+        }
+        return at;
+}
+
+/*
+        The exchange's state as the access point's frames move it, one
+        netlink message at a time. What it costs is bounded however many
+        frames come, from the access point or in its name: at most
+        WIFI_SAE_FRAMES_MOST authentication events are read; a commit is
+        checked for what costs nothing (wifi_sae_commit_good) and only one,
+        the first that passes, is taken, at two scalar multiplications;
+        one token round; and the first confirm decides. A commit that does
+        not pass, a confirm before any commit, and a frame from anyone else
+        are passed over. A refusal, the link sent away and the kernel's
+        timeout end it: -111 before our confirm went, -13 after it (the
+        password, as the access point saw it), -110 for the timeout. body
+        is a frame to send when the message is read, or nothing.
+*/
+#define WIFI_SAE_FRAMES_MOST 64
+
+typedef struct
+{
+        wifi_sae address_to sae;
+        const p8 address_to bssid;
+        p32 index;
+        p16 family;
+        p32 port;
+        bool h2e;
+        positive frames;
+        bool token_sent;
+        bool taken;
+        bool done;
+        bipolar result;
+        p8 body[2 + 2 + 2 + WIFI_SAE_TOKEN_MOST + 96 + 3];
+        positive body_length;
+} wifi_sae_turn;
+
+static COLD bool wifi_sae_end(wifi_sae_turn address_to turn, bipolar result)
+{
+        turn->done = true;
+        turn->result = result;
+        return false;
+}
+
+static COLD bool wifi_sae_news(netlink_header address_to header, address_any context)
+{
+        wifi_sae_turn address_to turn = (wifi_sae_turn address_to)context;
+        wifi_sae_frame read;
+        p8 address_to frame;
+        positive size = 0;
+        p8 command;
+
+        if (turn->done)
+                return false;
+        if (header->type == NLMSG_IS_ERROR)
+                return header->port == turn->port && netlink_status(header, true) < 0
+                           ? wifi_sae_end(turn, turn->taken ? -13 : -111)
+                           : true;
+        if (header->type != turn->family ||
+            nl80211_find_u32(header, NL80211_ATTR_IFINDEX, 0) != turn->index)
+                return true;
+        command = nl80211_command(header);
+        if (command == NL80211_CMD_DEAUTHENTICATE || command == NL80211_CMD_DISASSOCIATE)
+                return wifi_sae_end(turn, turn->taken ? -13 : -111);
+        if (command != NL80211_CMD_AUTHENTICATE)
+                return true;
+        if (++turn->frames > WIFI_SAE_FRAMES_MOST)
+                return wifi_sae_end(turn, -111);
+        if (nl80211_attr(header, NL80211_ATTR_TIMED_OUT))
+                return wifi_sae_end(turn, -110);
+        frame = (p8 address_to)netlink_find(header, GENL_HEADER, NL80211_ATTR_FRAME,
+                                            address_of size);
+        if (!frame || !wifi_sae_frame_read(frame, size, turn->bssid, turn->h2e, address_of read))
+                return true;
+        if (read.transaction == 1 && read.status == WIFI_SAE_TOKEN_STATUS)
+        {
+                //      Anti-clogging: the same commit again with the token
+                //      it asked for, once.
+                if (turn->token_sent || turn->taken)
+                        return wifi_sae_end(turn, -111);
+                turn->token_sent = true;
+                turn->body_length = wifi_sae_commit_body(turn->sae, read.token, read.token_length,
+                                                         turn->body, turn->h2e);
+                return true;
+        }
+        if (read.transaction == 1 && (!read.status || read.status == WIFI_SAE_H2E_STATUS))
+        {
+                //      One commit is taken in; before it, a commit of the
+                //      other method is a refusal of ours.
+                if (turn->taken)
+                        return true;
+                if (read.status != (turn->h2e ? WIFI_SAE_H2E_STATUS : 0))
+                        return wifi_sae_end(turn, -111);
+                if (read.group != WIFI_SAE_GROUP ||
+                    !wifi_sae_commit_good(turn->sae, read.scalar, read.element))
+                        return true;
+                turn->taken = true;
+                if (!wifi_sae_take(turn->sae, read.scalar, read.element))
+                        return wifi_sae_end(turn, -111);
+                turn->body[0] = 2, turn->body[1] = 0, turn->body[2] = 0, turn->body[3] = 0;
+                turn->body[4] = 1, turn->body[5] = 0;
+                wifi_sae_confirm(turn->sae->kck, turn->body + 4, turn->sae->scalar,
+                                 turn->sae->element, turn->sae->peer_scalar,
+                                 turn->sae->peer_element, turn->body + 6);
+                turn->body_length = 6 + 32;
+                return true;
+        }
+        if (read.transaction == 2 && !read.status)
+        {
+                p8 counter[2];
+                p8 want[32];
+                bool same;
+
+                if (!turn->taken)
+                        return true;
+                counter[0] = (p8)read.send_confirm;
+                counter[1] = (p8)(read.send_confirm >> 8);
+                wifi_sae_confirm(turn->sae->kck, counter, turn->sae->peer_scalar,
+                                 turn->sae->peer_element, turn->sae->scalar,
+                                 turn->sae->element, want);
+                same = crypto_same(want, read.confirm, 32);
+                crypto_forget(want, sizeof(want));
+                return wifi_sae_end(turn, same ? 0 : -13);
+        }
+        return read.status ? wifi_sae_end(turn, turn->taken ? -13 : -111) : true;
+}
+
+/*
+        The work SAE asks of the station before the access point has proved
+        anything: the password element (a hunt of forty passes or more, or
+        PT and its multiple), a commit and, once its commit comes, two
+        scalar multiplications more. Anybody in range can make a join start
+        it again and again -- a twin of the name that refuses every commit,
+        a refusal forged in the real one's name -- so the exchanges are
+        counted, in /run/moonwater/wifi.sae, by the boot clock: at most
+        WIFI_SAE_PEER_MOST with one access point and WIFI_SAE_ALL_MOST with
+        all of them in any WIFI_SAE_WINDOW_MS. One over is refused before
+        any of the work, as WIFI_REFUSE_SAE_BUDGET, which the machine's pass
+        waits on as it waits on a wrong password.
+*/
+#define RADIO_SAE_PATH NET_STATE_DIR "/wifi.sae"
+#define WIFI_SAE_WINDOW_MS 60000u
+#define WIFI_SAE_PEER_MOST 6
+#define WIFI_SAE_ALL_MOST 24
+
+typedef struct
+{
+        p8 bssid[6];
+        p8 unused[2];
+        p64 at;
+} wifi_sae_spent;
+
+static COLD bool wifi_sae_budget(const p8 address_to bssid)
+{
+        wifi_sae_spent list[WIFI_SAE_ALL_MOST + 1];
+        bipolar got = file_read_once_at(AT_FDCWD, RADIO_SAE_PATH, list + 1,
+                                        WIFI_SAE_ALL_MOST * sizeof(list[0]));
+        positive count = got > 0 ? (positive)got / sizeof(list[0]) : 0;
+        p64 now = system_clock_ns(HOST_CLOCK_BOOTTIME) / 1000000;
+        positive kept = 1;
+        positive peer = 0;
+
+        for (positive at = 1; at <= count; at++)
+                if (list[at].at <= now && now - list[at].at < WIFI_SAE_WINDOW_MS)
+                {
+                        peer += !memory_compare(list[at].bssid, bssid, 6);
+                        list[kept++] = list[at];
+                }
+        if (peer >= WIFI_SAE_PEER_MOST || kept > WIFI_SAE_ALL_MOST)
+                return false;
+        memory_fill(list, 0, sizeof(list[0]));
+        memory_copy(list[0].bssid, bssid, 6);
+        list[0].at = now;
+        host_state_ready();
+        host_write_file(RADIO_SAE_PATH, (p8 address_to)list, kept * sizeof(list[0]), 0600, false);
+        return true;
+}
+
+static COLD bipolar nl80211_authenticate(nl80211 address_to session, p32 index,
+                                         p8 address_to ssid, positive ssid_length,
+                                         p8 address_to bssid, p32 frequency,
+                                         p8 address_to data, positive data_length)
+{
+        netlink_buffer request = {0};
+        p32 sequence = netlink_sequence_take();
+        p32 type = NL80211_AUTHTYPE_SAE;
+        bipolar sent;
+
+        scope_exit(netlink_forget(address_of request));
+        if (!nl80211_begin(address_of request, session->family, NL80211_CMD_AUTHENTICATE,
+                           NLM_REQUEST, sequence))
+                return -1;
+        nl80211_attribute_u32(address_of request, NL80211_ATTR_IFINDEX, index);
+        nl80211_attribute_u32(address_of request, NL80211_ATTR_WIPHY_FREQ, frequency);
+        netlink_attribute_add(address_of request, NL80211_ATTR_MAC, bssid, 6);
+        netlink_attribute_add(address_of request, NL80211_ATTR_SSID, ssid, ssid_length);
+        nl80211_attribute_u32(address_of request, NL80211_ATTR_AUTH_TYPE, type);
+        netlink_attribute_add(address_of request, NL80211_ATTR_AUTH_DATA, data, data_length);
+        if (request.failed)
+                return -1;
+        sent = socket_send(session->handle, request.bytes, request.used, 0, 0, 0);
+        return sent < 0 ? sent : 0;
+}
+
+/* The next datagram of mlme news, through visit, before the deadline: 1
+   when one was read, 0 at the deadline, negative when the socket failed. */
+static COLD bipolar wifi_mlme_next(nl80211 address_to session,
+                                   const network_deadline address_to deadline,
+                                   netlink_visitor visit, address_any context,
+                                   p32 address_to port)
+{
+        for (;;)
+        {
+                netlink_buffer reply = {0};
+                bipolar got = network_wait_readable_until(session->handle, deadline);
+
+                if (got <= 0)
+                        return got;
+                got = netlink_receive(session->handle, address_of reply, port);
+                if (got == NETWORK_INTERRUPTED || got == NETWORK_TRY_AGAIN)
+                {
+                        netlink_forget(address_of reply);
+                        continue;
+                }
+                if (got >= 0)
+                        netlink_each(address_of reply, visit, context);
+                netlink_forget(address_of reply);
+                return got < 0 ? got : 1;
+        }
+}
+
+/*
+        The SAE exchange with the access point bssid, through the kernel's
+        authentication command, as wpa_supplicant runs it for a driver of
+        mac80211's kind, which has no connect of its own for SAE: each
+        commit and confirm body goes in NL80211_CMD_AUTHENTICATE (the
+        transaction and status first, the algorithm left to the kernel), and
+        the access point's frames come back as events of that command on the
+        socket the commands go out on. A command is sent without waiting for
+        its acknowledgement, since a transaction that reads to it throws the
+        frame events it passes away; an error for it still comes, and is a
+        refusal. 0 with the PMK and PMKID in sae, else as wifi_sae_news says.
+*/
+static COLD bipolar wifi_sae_exchange(nl80211 address_to session, p32 index, p8 address_to ssid,
+                                      positive ssid_length, p8 address_to bssid,
+                                      p32 frequency, wifi_sae address_to sae, bool h2e)
+{
+        wifi_sae_turn turn = {.sae = sae, .bssid = bssid, .index = index,
+                              .family = session->family, .h2e = h2e};
+        network_deadline deadline;
+        bipolar failed;
+
+        turn.body_length = wifi_sae_commit_body(sae, null, 0, turn.body, h2e);
+        failed = nl80211_authenticate(session, index, ssid, ssid_length, bssid, frequency,
+                                      turn.body, turn.body_length);
+        turn.body_length = 0;
+        if (failed < 0 || !network_deadline_begin(address_of deadline, WIFI_SAE_SECONDS, 0))
+                return failed < 0 ? failed : -1;
+        while (!turn.done)
+        {
+                failed = wifi_mlme_next(session, address_of deadline, wifi_sae_news,
+                                        address_of turn, address_of turn.port);
+                if (failed <= 0)
+                        return failed < 0 ? failed : -110;
+                //      What the datagram asked for, unless it also ended the
+                //      exchange in a refusal.
+                if (turn.body_length && (!turn.done || !turn.result))
+                {
+                        failed = nl80211_authenticate(session, index, ssid, ssid_length, bssid,
+                                                      frequency, turn.body, turn.body_length);
+                        turn.body_length = 0;
+                        if (failed < 0)
+                                return failed;
+                }
+        }
+        return turn.result;
+}
+
+/* The status of an association response from bssid: false for a frame that
+   is not one, or is cut short. */
+static COLD bool wifi_assoc_status_read(const p8 address_to frame, positive size,
+                                        const p8 address_to bssid, p16 address_to status)
+{
+        byte_reader reader = byte_reader_open(frame, size);
+        p16 control = byte_reader_u16le(&reader);
+        const p8 address_to transmitter;
+
+        (void)byte_reader_skip(&reader, 2 + 6);
+        transmitter = byte_reader_take(&reader, 6);
+        (void)byte_reader_skip(&reader, 6 + 2 + 2);
+        address_to status = byte_reader_u16le(&reader);
+        return byte_reader_ok(&reader) &&
+               ((control & 0x40ff) == 0x0010 || (control & 0x40ff) == 0x0030) &&
+               !memory_compare(transmitter, bssid, 6);
+}
+
+typedef struct
+{
+        const p8 address_to bssid;
+        p32 index;
+        p16 family;
+        p32 port;
+        positive frames;
+        bool done;
+        bipolar result;
+} wifi_assoc_turn;
+
+static COLD bool wifi_assoc_news(netlink_header address_to header, address_any context)
+{
+        wifi_assoc_turn address_to turn = (wifi_assoc_turn address_to)context;
+        p8 address_to frame;
+        positive size = 0;
+        p16 status = 0;
+        p8 command;
+
+        if (turn->done)
+                return false;
+        if (header->type == NLMSG_IS_ERROR)
+        {
+                if (header->port != turn->port || netlink_status(header, true) >= 0)
+                        return true;
+                turn->done = true;
+                turn->result = -111;
+                return false;
+        }
+        if (header->type != turn->family ||
+            nl80211_find_u32(header, NL80211_ATTR_IFINDEX, 0) != turn->index)
+                return true;
+        command = nl80211_command(header);
+        if (command == NL80211_CMD_DEAUTHENTICATE || command == NL80211_CMD_DISASSOCIATE ||
+            (command == NL80211_CMD_ASSOCIATE && ++turn->frames > WIFI_SAE_FRAMES_MOST))
+                turn->result = -111;
+        else if (command != NL80211_CMD_ASSOCIATE)
+                return true;
+        else if (nl80211_attr(header, NL80211_ATTR_TIMED_OUT))
+                turn->result = -110;
+        else
+        {
+                frame = (p8 address_to)netlink_find(header, GENL_HEADER, NL80211_ATTR_FRAME,
+                                                    address_of size);
+                if (!frame || !wifi_assoc_status_read(frame, size, turn->bssid, address_of status))
+                        return true;
+                turn->result = status ? -111 : 0;
+        }
+        turn->done = true;
+        return false;
+}
+
+/* The association that follows a finished exchange: the RSN element (with
+   the PMKID the exchange made, and the RSN extension element after it for
+   hash-to-element), the cipher and key management suites, and protected
+   management frames required. */
+static COLD bipolar nl80211_associate(nl80211 address_to session, p32 index, p8 address_to ssid,
+                                      positive ssid_length, p8 address_to bssid,
+                                      p32 frequency, const wifi_link address_to link)
+{
+        netlink_buffer request = {0};
+        p32 sequence = netlink_sequence_take();
+        p32 version = NL80211_WPA_VERSION_2;
+        p32 ccmp = WLAN_CIPHER_CCMP;
+        p32 akm = WLAN_SUITE_IEEE | link->akm;
+        p32 mfp = NL80211_MFP_REQUIRED;
+        wifi_assoc_turn turn = {.bssid = bssid, .index = index, .family = session->family};
+        network_deadline deadline;
+        bipolar sent;
+
+        scope_exit(netlink_forget(address_of request));
+        if (!nl80211_begin(address_of request, session->family, NL80211_CMD_ASSOCIATE,
+                           NLM_REQUEST, sequence))
+                return -1;
+        nl80211_attribute_u32(address_of request, NL80211_ATTR_IFINDEX, index);
+        netlink_attribute_add(address_of request, NL80211_ATTR_MAC, bssid, 6);
+        netlink_attribute_add(address_of request, NL80211_ATTR_SSID, ssid, ssid_length);
+        nl80211_attribute_u32(address_of request, NL80211_ATTR_WIPHY_FREQ, frequency);
+        netlink_attribute_add(address_of request, NL80211_ATTR_IE, (address_any)link->rsn,
+                              link->rsn_length);
+        netlink_attribute_add(address_of request, NL80211_ATTR_PRIVACY, null, 0);
+        nl80211_attribute_u32(address_of request, NL80211_ATTR_WPA_VERSIONS, version);
+        nl80211_attribute_u32(address_of request, NL80211_ATTR_CIPHER_SUITES_PAIRWISE, ccmp);
+        nl80211_attribute_u32(address_of request, NL80211_ATTR_CIPHER_SUITE_GROUP, ccmp);
+        nl80211_attribute_u32(address_of request, NL80211_ATTR_AKM_SUITES, akm);
+        nl80211_attribute_u32(address_of request, NL80211_ATTR_USE_MFP, mfp);
+        netlink_attribute_add(address_of request, NL80211_ATTR_CONTROL_PORT, null, 0);
+        if (request.failed)
+                return -1;
+        sent = socket_send(session->handle, request.bytes, request.used, 0, 0, 0);
+        if (sent < 0 || !network_deadline_begin(address_of deadline, NL80211_CONNECT_SECONDS, 0))
+                return sent < 0 ? sent : -1;
+        while (!turn.done)
+        {
+                bipolar got = wifi_mlme_next(session, address_of deadline, wifi_assoc_news,
+                                             address_of turn, address_of turn.port);
+
+                if (got <= 0)
+                        return got < 0 ? got : -110;
+        }
+        return turn.result;
 }
 
 /* Whether the wireless interface has a station: a station the kernel could
@@ -7061,23 +8535,91 @@ static COLD bool nl80211_associated(void)
 static COLD bipolar radio_bss_choose(nl80211 address_to session, p32 index,
                                      p8 address_to ssid, positive ssid_length, bool secured,
                                      p8 address_to bssid, p32 address_to frequency,
-                                     bool force);
+                                     bool force, p8 rules, bool key_only,
+                                     wifi_rsn_caps address_to caps, wifi_seen address_to seen);
+static COLD p8 radio_rules_get(p8 address_to ssid, positive ssid_length);
+static COLD fn radio_rules_put(p8 address_to ssid, positive ssid_length, p8 mask, p8 what);
+
+/*
+        WPA3 with the access point chosen: the exchange counted against its
+        budget, the password element (hash-to-element when the access point
+        takes it, the hunt otherwise), the commit and the exchange, the
+        association with the PMKID it made, and the four-way handshake on
+        its PMK. The EAPOL socket is opened before the association, since
+        message 1 follows it by a few milliseconds.
+*/
+static COLD bipolar wifi_sae_join(wifi_link address_to link, p8 address_to ssid,
+                                  positive ssid_length, p8 address_to pass, positive pass_length,
+                                  p8 address_to bssid, p32 frequency, bool h2e)
+{
+        wifi_sae sae;
+        bipolar failed;
+        bool made;
+
+        scope_exit(crypto_forget(address_of sae, sizeof(sae)));
+        memory_fill(address_of sae, 0, sizeof(sae));
+        if (!wifi_sae_budget(bssid))
+                return WIFI_REFUSE_SAE_BUDGET;
+        if (link->eapol < 0)
+        {
+                failed = net_packet_open(link->index, ETH_P_PAE);
+                if (failed < 0)
+                        return failed;
+                link->eapol = (b32)failed;
+        }
+        nl80211_disconnect(address_of link->session, link->index);
+        memory_fill(link->bssid, 0, 6);
+        if (h2e)
+        {
+                p8 point[64];
+
+                made = wifi_sae_pt(ssid, ssid_length, pass, pass_length, point) &&
+                       wifi_sae_pwe_from_pt(point, link->sta, bssid, sae.pwe);
+                crypto_forget(point, sizeof(point));
+        }
+        else
+                made = wifi_sae_pwe(pass, pass_length, link->sta, bssid, sae.pwe);
+        if (!made || !wifi_sae_commit(address_of sae))
+                return -1;
+        failed = wifi_sae_exchange(address_of link->session, link->index, ssid, ssid_length,
+                                   bssid, frequency, address_of sae, h2e);
+        if (failed)
+                return failed;
+        memory_copy(link->pmk, sae.pmk, 32);
+        link->rsn_length = (p8)wifi_rsn_build(link->rsn, 8, link->pmf, sae.pmkid);
+        //      The RSN extension element, in the association request and in
+        //      message 2 alike: bit 5, hash-to-element.
+        if (h2e)
+        {
+                link->rsn[link->rsn_length++] = 244;
+                link->rsn[link->rsn_length++] = 1;
+                link->rsn[link->rsn_length++] = 0x20;
+        }
+        failed = nl80211_associate(address_of link->session, link->index, ssid, ssid_length,
+                                   bssid, frequency, link);
+        if (failed)
+                return failed;
+        memory_copy(link->bssid, bssid, 6);
+        return wifi_mac_set(link->sta) ? wifi_handshake(link) : -1;
+}
 
 /*
         A join, into link: on success the link keeps its sockets and keys for
         the keeper, with a four-way handshake of its own where it needs one.
-        -113 when a scan heard no network by this name. The password is the
-        one the key is made of, and it is made only once an access point is
-        chosen, since a network that is not there is not worth the four
-        thousand rounds. force asks for a scan whenever the cache has no
-        access point to join; the machine's own pass leaves that to what a
-        scan for the name found lately (radio_bss_choose).
+        -113 when a scan heard no network by this name. What it asks of the
+        access point it chose is wifi_join_plan's, at this build's tier and
+        with what the saved network has taught it; a refusal of the plan's
+        is made before anything is sent. A PSK is made only once an access
+        point is chosen and asks for one, since a network that is not there,
+        or that is joined with WPA3, is not worth the four thousand rounds.
+        force asks for a scan whenever the cache has no access point to join;
+        the machine's own pass leaves that to what a scan for the name found
+        lately (radio_bss_choose).
 */
 static COLD bipolar nl80211_join(p8 address_to ssid, positive ssid_length, p8 address_to pass,
                                  positive pass_length, bool force, wifi_link address_to link)
 {
         nl80211_iface iface;
-        p8 pmk[32];
         p8 chosen[6];
         p32 frequency = 0;
         bipolar picked = -1;
@@ -7086,11 +8628,18 @@ static COLD bipolar nl80211_join(p8 address_to ssid, positive ssid_length, p8 ad
         bipolar sequence;
         bool offload = false;
         bool secured = pass_length != 0;
+        bool key_only = pass_length == 64;
+        bool keyed = false;
         bool kept = false;
+        p8 rules = 0;
+        wifi_rsn_caps caps;
+        wifi_plan plan;
 
         wifi_link_close(link);
         scope_exit(if (!kept) wifi_link_close(link));
         memory_fill(chosen, 0, 6);
+        memory_fill(address_of caps, 0, sizeof(caps));
+        memory_fill(address_of plan, 0, sizeof(plan));
         //      Whatever keeps the last link's keys goes first: its EAPOL
         //      socket would hear this join's message 1 as a rekey.
         radio_keeper_stop();
@@ -7113,23 +8662,83 @@ static COLD bipolar nl80211_join(p8 address_to ssid, positive ssid_length, p8 ad
         else
                 wifi_link_mac((string_address)iface.name, link->sta);
 
+        if (secured)
+                rules = radio_rules_get(ssid, ssid_length);
         picked = radio_bss_choose(address_of link->session, iface.index, ssid, ssid_length,
-                                  secured, chosen, address_of frequency, force);
+                                  secured, chosen, address_of frequency, force, rules, key_only,
+                                  address_of caps, address_of link->seen);
         if (!picked)
                 return -113;
 
+        link->akm = 2;
         if (secured)
         {
-                if (!wifi_psk(ssid, ssid_length, pass, pass_length, pmk))
-                        return -22;
-                memory_copy(link->pmk, pmk, 32);
-                offload = nl80211_psk_offload(address_of link->session, iface.wiphy);
+                //      With no scan to read the access point from, what the
+                //      network taught stands in for its elements: WPA2, with
+                //      protection where it offered that once. WPA3 needs an
+                //      access point to send its exchange to, and there is none.
+                if (picked < 0)
+                {
+                        caps.akms = rules & WIFI_RULE_SAE ? 0 : WIFI_AKM_PSK;
+                        caps.pmf = rules & (WIFI_RULE_PMF | WIFI_RULE_SAE) ? WIFI_PMF_CAPABLE : 0;
+                        caps.group = WIFI_CIPHER_CCMP;
+                        caps.pairwise = WIFI_CIPHER_CCMP;
+                }
+                failed = wifi_join_plan(MOONWATER_STRICT_NET, address_of caps, rules, key_only,
+                                        address_of plan);
+                if (failed < 0)
+                {
+                        radio_avoid_add(picked > 0 ? chosen : null);
+                        return failed;
+                }
+                link->akm = plan.akm;
+                link->pmf = plan.pmf;
         }
 
-        //      The driver's own four-way handshake first where it has one;
-        //      if that fails, once more with this one.
+        //      WPA3 first where it is the plan, and WPA2 after it only where
+        //      the plan allows that and the exchange came to nothing for a
+        //      reason that is not the password; then the driver's own
+        //      four-way handshake where it has one, and if that fails, once
+        //      more with this one.
         for (;;)
         {
+                link->version = wifi_key_version(link->akm);
+                if (secured && link->akm == 8)
+                {
+                        failed = wifi_sae_join(link, ssid, ssid_length, pass, pass_length, chosen,
+                                               frequency, caps.h2e != 0);
+                        if (failed && failed != -13 && failed != WIFI_REFUSE_ELEMENTS &&
+                            plan.fallback)
+                        {
+                                //      A new association, and none of the
+                                //      last one's handshake.
+                                link->akm = plan.fallback;
+                                link->pmf = caps.pmf ? WIFI_PMF_CAPABLE | WIFI_PMF_REQUIRED : 0;
+                                plan.fallback = 0;
+                                link->answered = 0;
+                                link->replay_set = link->installed = false;
+                                link->pending_set = link->nonce_used = false;
+                                link->gtk_installed = link->igtk_installed = 0;
+                                memory_fill(link->replay, 0, sizeof(link->replay));
+                                if (link->eapol >= 0)
+                                        socket_close(link->eapol);
+                                link->eapol = -1;
+                                continue;
+                        }
+                        break;
+                }
+                link->rsn_length = (p8)wifi_rsn_build(link->rsn, link->akm, link->pmf, null);
+                if (secured && !keyed)
+                {
+                        if (!wifi_psk(ssid, ssid_length, pass, pass_length, link->pmk))
+                        {
+                                failed = -22;
+                                break;
+                        }
+                        keyed = true;
+                        offload = link->akm == 2 &&
+                                  nl80211_psk_offload(address_of link->session, iface.wiphy);
+                }
                 if (secured && !offload && link->eapol < 0)
                 {
                         failed = net_packet_open(iface.index, ETH_P_PAE);
@@ -7140,8 +8749,8 @@ static COLD bipolar nl80211_join(p8 address_to ssid, positive ssid_length, p8 ad
                 nl80211_disconnect(address_of link->session, iface.index);
                 memory_fill(link->bssid, 0, 6);
                 sequence = nl80211_connect(address_of link->session, iface.index, ssid,
-                                           ssid_length, secured ? pmk : null, offload,
-                                           picked > 0 ? chosen : null, frequency);
+                                           ssid_length, secured ? link->pmk : null, offload,
+                                           picked > 0 ? chosen : null, frequency, link);
                 failed = sequence < 0 ? sequence
                                       : nl80211_wait_associated(address_of link->session,
                                                                 (p32)sequence, iface.index,
@@ -7165,8 +8774,18 @@ static COLD bipolar nl80211_join(p8 address_to ssid, positive ssid_length, p8 ad
                                 : picked > 0          ? chosen
                                                       : null);
         }
+        else if (secured)
+        {
+                //      What this join has taught the network: an access point
+                //      by its name protects its management frames, and WPA3
+                //      is what it is joined with.
+                p8 learned = (link->pmf && caps.pmf ? WIFI_RULE_PMF : 0) |
+                             (link->akm == 8 ? WIFI_RULE_SAE : 0);
+
+                if (learned & ~rules)
+                        radio_rules_put(ssid, ssid_length, learned, learned);
+        }
         kept = !failed;
-        crypto_forget(pmk, sizeof(pmk));
         return failed;
 }
 
@@ -7461,6 +9080,109 @@ static bipolar radio_wifi_save(radio_network address_to networks, positive count
         }
 
         return host_write_file(NET_WIFI_LIST, text, used, 0600, true);
+}
+
+/*
+        What each saved network has taught the join, or its owner has said
+        of it, beside the list in /root/wifi.rules: a line "WORD NAME" for
+        each, the word one of radio_rule_words. pmf: an access point of the
+        name offered management frame protection, and one that does not is
+        never joined; sae: it was joined with WPA3, and is never joined with
+        WPA2 again; wpa2: its owner lets the tight tier join it with WPA2
+        (moonwater wifi add SSID - wpa2). The first two are learnt, by a join
+        that worked, and forgotten with the network or when it is added again
+        with another password, which is its owner saying that it changed; the
+        third is what the last add of it said. A name has no line feed, and
+        the first space ends the word.
+*/
+#define RADIO_RULES_PATH "/root/wifi.rules"
+#define RADIO_RULES_ROOM 4096
+
+static const string_address radio_rule_words[] = {
+    (string_address) "pmf", (string_address) "sae", (string_address) "wpa2"};
+
+/* The rule a line says, as its bit, for the name; 0 for none. */
+static p8 radio_rule_of(const p8 address_to line, positive length, const p8 address_to ssid,
+                        positive ssid_length)
+{
+        for (positive bit = 0; bit < 3; bit++)
+        {
+                positive word = string_length(radio_rule_words[bit]);
+
+                if (length == word + 1 + ssid_length &&
+                    !memory_compare(line, radio_rule_words[bit], word) && line[word] == ' ' &&
+                    !memory_compare(line + word + 1, ssid, ssid_length))
+                        return (p8)(1u << bit);
+        }
+        return 0;
+}
+
+static COLD p8 radio_rules_get(p8 address_to ssid, positive ssid_length)
+{
+        p8 text[RADIO_RULES_ROOM];
+        bipolar got = host_read_state(RADIO_RULES_PATH, text, sizeof(text));
+        positive at = 0;
+        positive start;
+        positive length;
+        p8 rules = 0;
+
+        while (got > 0 && host_line_next(text, (positive)got, address_of at, address_of start,
+                                         address_of length))
+                rules |= radio_rule_of(text + start, length, ssid, ssid_length);
+        return rules;
+}
+
+/* The rules of ssid made what in the bits of mask, the others kept as they
+   are; and the lines of a name no longer saved are dropped, which keeps the
+   file to the saved networks' three each. */
+static COLD fn radio_rules_put(p8 address_to ssid, positive ssid_length, p8 mask, p8 what)
+{
+        p8 text[RADIO_RULES_ROOM];
+        p8 kept[RADIO_RULES_ROOM];
+        radio_network networks[RADIO_WIFI_MOST];
+        positive count = radio_wifi_load(networks, RADIO_WIFI_MOST, null);
+        bipolar got = host_read_state(RADIO_RULES_PATH, text, sizeof(text));
+        p8 rules = 0;
+        positive at = 0;
+        positive used = 0;
+        positive start;
+        positive length;
+
+        while (got > 0 && host_line_next(text, (positive)got, address_of at, address_of start,
+                                         address_of length))
+        {
+                bool saved = false;
+                p8 rule = radio_rule_of(text + start, length, ssid, ssid_length);
+
+                rules |= rule;
+                if (rule)
+                        continue;
+                for (positive one = 0; one < count && !saved; one++)
+                        saved = radio_rule_of(text + start, length, networks[one].ssid,
+                                              networks[one].ssid_length) != 0;
+                if (saved && used + length + 1 <= sizeof(kept))
+                {
+                        memory_copy(kept + used, text + start, length);
+                        used += length;
+                        kept[used++] = '\n';
+                }
+        }
+        crypto_forget(networks, sizeof(networks));
+        rules = (p8)((rules & ~mask) | (what & mask));
+        for (positive bit = 0; bit < 3; bit++)
+        {
+                positive word = string_length(radio_rule_words[bit]);
+
+                if (!(rules & (1u << bit)) || used + word + 1 + ssid_length + 1 > sizeof(kept))
+                        continue;
+                memory_copy(kept + used, radio_rule_words[bit], word);
+                used += word;
+                kept[used++] = ' ';
+                memory_copy(kept + used, ssid, ssid_length);
+                used += ssid_length;
+                kept[used++] = '\n';
+        }
+        host_write_file(RADIO_RULES_PATH, kept, used, 0600, true);
 }
 
 /* ---- wifi: why there is nothing to join with ---- */
@@ -7979,20 +9701,23 @@ enum
         RADIO_EAP,
         RADIO_TKIP,
         RADIO_PMF,
-        RADIO_FT256,
+        RADIO_FT,
 };
 
 static const string_address radio_security_words[] = {
     (string_address) "open", (string_address) "WEP",    (string_address) "WPA",
     (string_address) "WPA2", (string_address) "WPA2/3", (string_address) "WPA3",
     (string_address) "OWE",  (string_address) "802.1X", (string_address) "TKIP",
-    (string_address) "PMF",  (string_address) "FT/256",
+    (string_address) "PMF",  (string_address) "FT/EXT",
 };
 
-/* Whether moonwater can join what a network asks for. */
+/* Whether moonwater can join what a network asks for: open, WPA2 (PSK or
+   PSK-SHA256), WPA3 (SAE) or both, with protected management frames or
+   without. */
 static bool radio_security_joinable(p8 security)
 {
-        return security == RADIO_OPEN || security == RADIO_WPA2 || security == RADIO_WPA23;
+        return security == RADIO_OPEN || security == RADIO_WPA2 || security == RADIO_WPA23 ||
+               security == RADIO_WPA3 || security == RADIO_PMF;
 }
 
 typedef struct
@@ -8013,6 +9738,8 @@ typedef struct
         p32 frequency;
         p32 seen;
         p8 bssid[6];
+        //      What its two frames offer a join, together (wifi_rsn_caps).
+        wifi_rsn_caps caps;
 } radio_heard;
 
 typedef struct
@@ -8023,18 +9750,28 @@ typedef struct
         bool any;
 } radio_air;
 
-#define RADIO_RSN_CCMP 0x000fac04u
-#define RADIO_RSN_MFPR 0x0040u
+/* A cipher suite as wifi_rsn_caps keeps it. */
+static p8 radio_cipher_bit(p32 suite)
+{
+        return suite == 0x000fac04u   ? WIFI_CIPHER_CCMP
+               : suite == 0x000fac02u ? WIFI_CIPHER_TKIP
+                                      : WIFI_CIPHER_OTHER;
+}
 
-/* What an RSN element asks of a station. What the join can answer is one
-   thing: key management 00-0F-AC:2, CCMP as the group cipher and among the
-   pairwise ones, and no demand for protected management frames (its RSN
-   element carries capabilities of zero). A network that asks for WPA2 and
-   something besides is a class of its own, with the thing it asks for as
-   its name, because the kernel would refuse the join after its whole
-   timeout: TKIP or any other cipher but CCMP, PMF where the capabilities
-   require it, and FT or SHA-256 key management with no plain PSK. */
-static p8 radio_rsn_security(p8 address_to element, positive length)
+/*
+        What an RSN element asks of a station, as a class for a scan's row,
+        and into caps what it offers a join. The join answers PSK (00-0F-AC:2),
+        PSK-SHA256 (6) and SAE (8), with CCMP as the group cipher and among
+        the pairwise ones, with protected management frames or without. A
+        network that asks for something else is a class of its own, with the
+        thing it asks for as its name: TKIP or any other cipher but CCMP, and
+        FT or the extended-key SAE suites with nothing the join answers
+        beside them. An element cut short, or one that names no key
+        management the join knows, is WPA2 with what it did say: what is
+        not there is what the join always asked, CCMP and PSK.
+*/
+static p8 radio_rsn_security(p8 address_to element, positive length,
+                             wifi_rsn_caps address_to caps)
 {
         byte_reader reader = byte_reader_open(element, length);
         byte_reader pairwise;
@@ -8042,12 +9779,15 @@ static p8 radio_rsn_security(p8 address_to element, positive length)
         positive which;
         p32 group;
         p16 capabilities = 0;
-        bool ccmp = false, psk = false, other = false, sae = false, eap = false;
-        bool owe = false;
+        bool psk = false, sae = false, ft = false, eap = false, owe = false;
 
+        memory_fill(caps, 0, sizeof(*caps));
+        caps->group = WIFI_CIPHER_CCMP;
+        caps->pairwise = WIFI_CIPHER_CCMP;
+        caps->akms = WIFI_AKM_PSK;
         //      The version and the group cipher, then the pairwise ciphers
         //      and the key management suites, each a count and that many
-        //      four byte suites. What is cut short says WPA2.
+        //      four byte suites, then the capabilities.
         (void)byte_reader_skip(&reader, 2);
         group = byte_reader_u32(&reader);
         count = byte_reader_u16le(&reader);
@@ -8055,48 +9795,72 @@ static p8 radio_rsn_security(p8 address_to element, positive length)
         count = byte_reader_u16le(&reader);
         if (!byte_reader_ok(&reader))
                 return RADIO_WPA2;
+        caps->group = radio_cipher_bit(group);
+        caps->pairwise = 0;
+        caps->akms = 0;
         while (byte_reader_left(&pairwise) >= 4)
-                ccmp |= byte_reader_u32(&pairwise) == RADIO_RSN_CCMP;
+                caps->pairwise |= radio_cipher_bit(byte_reader_u32(&pairwise));
         for (which = 0; which < count && byte_reader_left(&reader) >= 4; which++)
         {
                 p32 oui = byte_reader_u24(&reader);
                 p8 suite = byte_reader_u8(&reader);
 
                 if (oui != 0x000fac)
-                        continue;
-                if (suite == 2)
+                        caps->akms |= WIFI_AKM_OTHER;
+                else if (suite == 2 || suite == 6)
+                {
                         psk = true;
-                else if (suite == 4 || suite == 6)
-                        other = true;
-                else if (suite == 8 || suite == 9 || suite == 24 || suite == 25)
+                        caps->akms |= suite == 2 ? WIFI_AKM_PSK : WIFI_AKM_PSK_SHA256;
+                }
+                else if (suite == 8)
+                {
                         sae = true;
-                else if (suite == 18)
-                        owe = true;
+                        caps->akms |= WIFI_AKM_SAE;
+                }
                 else
-                        eap = true;
+                {
+                        ft |= suite == 4 || suite == 9 || suite == 24 || suite == 25;
+                        owe |= suite == 18;
+                        eap |= suite != 4 && suite != 9 && suite != 24 && suite != 25 &&
+                               suite != 18;
+                        caps->akms |= WIFI_AKM_OTHER;
+                }
         }
         if (which == count && byte_reader_left(&reader) >= 2)
                 capabilities = byte_reader_u16le(&reader);
+        caps->pmf = (p8)((capabilities & 0x0080 ? WIFI_PMF_CAPABLE : 0) |
+                         (capabilities & 0x0040 ? WIFI_PMF_REQUIRED : 0));
 
-        if (!psk && !other)
-                return sae ? RADIO_WPA3 : owe ? RADIO_OWE : eap ? RADIO_EAP : RADIO_WPA2;
-        if (!psk)
-                return sae ? RADIO_WPA3 : RADIO_FT256;
-        if (group != RADIO_RSN_CCMP || !ccmp)
+        if (!psk && !sae && (ft || owe || eap))
+                return ft ? RADIO_FT : owe ? RADIO_OWE : RADIO_EAP;
+        if (!psk && !sae)
+        {
+                caps->akms |= WIFI_AKM_PSK;
+                psk = true;
+        }
+        if (caps->group != WIFI_CIPHER_CCMP || !(caps->pairwise & WIFI_CIPHER_CCMP))
                 return RADIO_TKIP;
-        if (capabilities & RADIO_RSN_MFPR)
+        if (!psk)
+                return RADIO_WPA3;
+        if (caps->pmf & WIFI_PMF_REQUIRED)
                 return RADIO_PMF;
         return sae ? RADIO_WPA23 : RADIO_WPA2;
 }
 
 /* What the elements of one frame ask of a station: the first RSN element's
-   key management, else a WPA vendor element, else what the capability's
-   privacy bit says. */
-static p8 radio_ies_security(p8 address_to elements, positive size, p16 capability)
+   class, else a WPA vendor element, else what the capability's privacy bit
+   says; and into caps what the first RSN element offers, with whether the
+   first RSN extension element takes SAE's hash-to-element (bit 5 of its
+   first byte). */
+static p8 radio_ies_security(p8 address_to elements, positive size, p16 capability,
+                             wifi_rsn_caps address_to caps)
 {
         byte_reader ies = byte_reader_open(elements, elements ? size : 0);
-        bool wpa = false;
+        bool wpa = false, rsn = false, extension = false;
+        p8 security = RADIO_OPEN;
+        p8 h2e = 0;
 
+        memory_fill(caps, 0, sizeof(*caps));
         while (byte_reader_left(&ies))
         {
                 p8 id = byte_reader_u8(&ies);
@@ -8105,12 +9869,51 @@ static p8 radio_ies_security(p8 address_to elements, positive size, p16 capabili
 
                 if (!byte_reader_ok(&ies))
                         break;
-                if (id == 48)
-                        return radio_rsn_security((p8 address_to)byte_reader_here(&data), span);
-                if (id == 221 && span >= 4 && byte_reader_u32(&data) == 0x0050f201)
+                if (id == 48 && !rsn)
+                {
+                        rsn = true;
+                        security = radio_rsn_security((p8 address_to)byte_reader_here(&data),
+                                                      span, caps);
+                }
+                else if (id == 244 && !extension)
+                {
+                        extension = true;
+                        h2e = span && (byte_reader_u8(&data) & 0x20) ? 1 : 0;
+                }
+                else if (id == 221 && span >= 4 && byte_reader_u32(&data) == 0x0050f201)
                         wpa = true;
         }
+        if (rsn)
+        {
+                caps->h2e = h2e;
+                return security;
+        }
         return wpa ? RADIO_WPA : (capability & 0x10) ? RADIO_WEP : RADIO_OPEN;
+}
+
+/* The first element of id in a frame's elements, whole, into out: its
+   length, 0 for none or one cut short. */
+static positive radio_ies_element(p8 address_to elements, positive size, p8 id,
+                                  p8 address_to out)
+{
+        byte_reader ies = byte_reader_open(elements, elements ? size : 0);
+
+        while (byte_reader_left(&ies))
+        {
+                byte_reader whole = ies;
+                p8 kind = byte_reader_u8(&ies);
+                byte_reader data = byte_reader_vector8(&ies);
+                positive span = byte_reader_left(&data);
+
+                if (!byte_reader_ok(&ies))
+                        break;
+                if (kind == id)
+                {
+                        memory_copy(out, byte_reader_take(&whole, 2 + span), 2 + span);
+                        return 2 + span;
+                }
+        }
+        return 0;
 }
 
 /* One access point of a scan dump: false for a message that is not one. */
@@ -8124,7 +9927,7 @@ static bool radio_bss_read(netlink_header address_to header, radio_heard address
         byte_reader ies;
         p8 address_to beacon;
         positive beacon_size = 0;
-        bool rsn = false, wpa = false, named = false;
+        bool named = false;
         p16 capability = 0;
 
         if (nl80211_command(header) != NL80211_CMD_NEW_SCAN_RESULTS)
@@ -8195,24 +9998,58 @@ static bool radio_bss_read(netlink_header address_to header, radio_heard address
                                 one->ssid_length = (p8)span;
                         }
                 }
-                else if (id == 48 && !rsn)
-                {
-                        rsn = true;
-                        one->security = radio_rsn_security(
-                            (p8 address_to)byte_reader_here(&data), span);
-                }
-                else if (id == 221 && span >= 4 &&
-                         byte_reader_u32(&data) == 0x0050f201)
-                        wpa = true;
         }
-        if (!rsn)
-                one->security = wpa ? RADIO_WPA : (capability & 0x10) ? RADIO_WEP : RADIO_OPEN;
-        one->beacon_security = beacon && beacon != elements
-                                   ? radio_ies_security(beacon, beacon_size, capability)
-                                   : one->security;
+        one->security = radio_ies_security(elements, elements ? size : 0, capability,
+                                           address_of one->caps);
+        one->beacon_security = one->security;
+        if (beacon && beacon != elements)
+        {
+                wifi_rsn_caps beaconed;
+
+                one->beacon_security = radio_ies_security(beacon, beacon_size, capability,
+                                                          address_of beaconed);
+                wifi_caps_merge(address_of one->caps, address_of beaconed);
+        }
         one->joinable = radio_security_joinable(one->security) ||
                         radio_security_joinable(one->beacon_security);
         return true;
+}
+
+/* The access point's RSN element and RSN extension element as each of its
+   two frames showed them (wifi_seen), from the same message radio_bss_read
+   read it from. */
+static fn radio_bss_seen(netlink_header address_to header, wifi_seen address_to seen)
+{
+        positive length = 0;
+        positive size = 0;
+        positive beacon_size = 0;
+        p8 address_to bss = (p8 address_to)netlink_find(header, GENL_HEADER, NL80211_ATTR_BSS,
+                                                        address_of length);
+        p8 address_to elements;
+        p8 address_to beacon;
+
+        memory_fill(seen, 0, sizeof(*seen));
+        if (!bss)
+                return;
+        elements = (p8 address_to)netlink_find_span(bss, length,
+                                                    NL80211_BSS_INFORMATION_ELEMENTS,
+                                                    address_of size);
+        beacon = (p8 address_to)netlink_find_span(bss, length, NL80211_BSS_BEACON_IES,
+                                                  address_of beacon_size);
+        if (!elements)
+        {
+                elements = beacon;
+                size = beacon_size;
+        }
+        seen->rsn_length[0] = (p16)radio_ies_element(elements, size, 48, seen->rsn[0]);
+        seen->rsnx_length[0] = (p16)radio_ies_element(elements, size, 244, seen->rsnx[0]);
+        if (beacon && beacon != elements)
+        {
+                seen->rsn_length[1] = (p16)radio_ies_element(beacon, beacon_size, 48,
+                                                             seen->rsn[1]);
+                seen->rsnx_length[1] = (p16)radio_ies_element(beacon, beacon_size, 244,
+                                                              seen->rsnx[1]);
+        }
 }
 
 /* Keep one row per name and, when the bounded display is full, the strongest
@@ -8449,11 +10286,12 @@ static fn radio_air_dump(nl80211 address_to session, p32 index, netlink_visitor 
         names at all is a passive one, a tenth of a second or more on every
         channel -- and flushed, so the list after it holds what answered
         and nothing the cache kept from before. For a join, only the 2.4
-        and 5 GHz channels: a network at 6 GHz asks for WPA3, which the
-        join cannot give, and its channels are all listened to rather than
+        and 5 GHz channels: those at 6 GHz are all listened to rather than
         asked, which on a radio with that band made the whole scan outlast
-        the five seconds it is given. A radio refuses a list with a channel
-        it has none of, at once, so the join asks for the widest list first
+        the five seconds it is given, so a network at 6 GHz alone (WPA3 with
+        hash-to-element, which the join has) is not one a join finds. A
+        radio refuses a list with a channel it has none of, at once, so the
+        join asks for the widest list first
         (channel 14, 144 and 169 to 177 as well, where a regulatory domain
         has them), then for the list most radios take, then for the whole
         scan.
@@ -8726,13 +10564,20 @@ typedef struct
         bool found;
         bool secured;
         bool fits;
+        //      What the saved network has taught the join, whether its secret
+        //      is a key of 64 hex digits, and the best's elements as seen.
+        p8 rules;
+        bool key_only;
+        wifi_seen seen;
 } radio_pick;
 
 /* Whether what an access point's frame asks of a station is what a saved
-   network wants: WPA2 for one with a password, nothing for one without. */
+   network wants: WPA2 or WPA3 for one with a password, nothing for one
+   without. */
 static bool radio_security_fits(bool secured, p8 security)
 {
-        return secured ? security == RADIO_WPA2 || security == RADIO_WPA23
+        return secured ? security == RADIO_WPA2 || security == RADIO_WPA23 ||
+                             security == RADIO_WPA3 || security == RADIO_PMF
                        : security == RADIO_OPEN;
 }
 
@@ -8761,9 +10606,19 @@ static bool radio_pick_seen(netlink_header address_to header, address_any contex
         //      probe response as well as a beacon, and any station can send
         //      one in the real access point's name without an RSN element:
         //      what its last beacon asked counts as well, so one forged
-        //      response does not push the real one out behind a twin.
+        //      response does not push the real one out behind a twin. And
+        //      of a secured one, what the join's plan would refuse: a twin
+        //      that offers less than the network taught it (protection,
+        //      WPA3) is exactly what a downgrade needs, and goes last.
         fits = radio_security_fits(pick->secured, one.security) ||
                radio_security_fits(pick->secured, one.beacon_security);
+        if (pick->secured && fits)
+        {
+                wifi_plan plan;
+
+                fits = wifi_join_plan(MOONWATER_STRICT_NET, address_of one.caps, pick->rules,
+                                      pick->key_only, address_of plan) == 0;
+        }
         if (pick->found && (fits < pick->fits ||
                             (fits == pick->fits &&
                              (until > pick->until ||
@@ -8773,6 +10628,7 @@ static bool radio_pick_seen(netlink_header address_to header, address_any contex
         pick->found = true;
         pick->until = until;
         pick->fits = fits;
+        radio_bss_seen(header, address_of pick->seen);
         return true;
 }
 
@@ -8795,17 +10651,23 @@ static bool radio_scan_declined;
         out of range was scanned for, five seconds of it, again for every
         network and every pass. 1 with one
         chosen, 0 when the scan, or the one a moment ago, heard none by this
-        name, -1 when no scan could be had: the join then goes by name.
+        name, -1 when no scan could be had: the join then goes by name. With
+        one chosen, caps is what it offers and seen what it showed.
 */
 static COLD bipolar radio_bss_choose(nl80211 address_to session, p32 index,
                                      p8 address_to ssid, positive ssid_length, bool secured,
                                      p8 address_to bssid, p32 address_to frequency,
-                                     bool force)
+                                     bool force, p8 rules, bool key_only,
+                                     wifi_rsn_caps address_to caps, wifi_seen address_to seen)
 {
         radio_scan_declined = false;
         radio_avoid avoid[RADIO_AVOID_MOST];
-        radio_pick pick = {
-            .ssid = ssid, .ssid_length = ssid_length, .avoid = avoid, .secured = secured};
+        radio_pick pick = {.ssid = ssid,
+                           .ssid_length = ssid_length,
+                           .avoid = avoid,
+                           .secured = secured,
+                           .rules = rules,
+                           .key_only = key_only};
         bipolar heard = 1;
         bool scanned = false;
 
@@ -8829,6 +10691,8 @@ static COLD bipolar radio_bss_choose(nl80211 address_to session, p32 index,
                 return heard > 0 ? 0 : -1;
         memory_copy(bssid, pick.best.bssid, 6);
         address_to frequency = pick.best.frequency;
+        address_to caps = pick.best.caps;
+        address_to seen = pick.seen;
         return 1;
 }
 
@@ -8957,7 +10821,38 @@ static string_address radio_join_words(bipolar failed)
                : failed == -62  ? (string_address) "did not begin the handshake"
                : failed == -121 ? (string_address) "stopped answering in the handshake"
                : failed == -113 ? (string_address) "is not in range"
-                                : (string_address) "could not be joined";
+               : failed == WIFI_REFUSE_TKIP
+                   ? (string_address) "uses TKIP (WPA1), which is broken and never joined; "
+                                      "set the access point to WPA2 or WPA3 with AES (CCMP)"
+               : failed == WIFI_REFUSE_CIPHER
+                   ? (string_address) "uses a cipher other than AES (CCMP), which moonwater "
+                                      "does not offer"
+               : failed == WIFI_REFUSE_PMF_GONE
+                   ? (string_address) "no longer offers management frame protection, which it "
+                                      "did (an impostor or a changed access point; wifi remove "
+                                      "and add it again to accept that)"
+               : failed == WIFI_REFUSE_SAE_GONE
+                   ? (string_address) "no longer offers WPA3, which it was joined with (an "
+                                      "impostor or a changed access point; wifi remove and add "
+                                      "it again to accept that)"
+               : failed == WIFI_REFUSE_NO_PMF
+                   ? (string_address) "does not protect its management frames, which this "
+                                      "machine requires"
+               : failed == WIFI_REFUSE_WPA2
+                   ? (string_address) "offers WPA2 alone, which this machine joins only for a "
+                                      "network saved with wpa2 (moonwater wifi add SSID - wpa2)"
+               : failed == WIFI_REFUSE_KEY_ONLY
+                   ? (string_address) "asks for WPA3, which needs the password itself and not a "
+                                      "key of 64 hex digits"
+               : failed == WIFI_REFUSE_SUITE
+                   ? (string_address) "asks for key management moonwater does not offer"
+               : failed == WIFI_REFUSE_SAE_BUDGET
+                   ? (string_address) "was asked for WPA3 more often than a minute allows; it is "
+                                      "tried again later"
+               : failed == WIFI_REFUSE_ELEMENTS
+                   ? (string_address) "showed other security in its handshake than in its "
+                                      "beacon (an impostor, or a downgrade on the way)"
+                   : (string_address) "could not be joined";
 }
 
 /* A join's failure that is the network's doing, which radio_join_words
@@ -8965,7 +10860,9 @@ static string_address radio_join_words(bipolar failed)
 static bool radio_join_said(bipolar failed)
 {
         return failed == -110 || failed == -111 || failed == -13 || failed == -62 ||
-               failed == -121 || failed == -113 || (failed <= -1000 && failed > -1000 - 65536);
+               failed == -121 || failed == -113 ||
+               (failed >= WIFI_REFUSE_FIRST && failed <= WIFI_REFUSE_LAST) ||
+               (failed <= -1000 && failed > -1000 - 65536);
 }
 
 /*
@@ -9057,15 +10954,18 @@ static fn radio_last_set(string_address ssid, bipolar failed)
 }
 
 /* Milliseconds the machine's own pass leaves the network that failed this
-   way alone, from the time it did: only a network that was not there or
-   refused the password is waited on, three seconds the first time and twice
-   as long each, to a minute. */
+   way alone, from the time it did: only a network that was not there,
+   refused the password or was refused by the join's own rules (which no
+   pass will change, and each of which a scan found) is waited on, three
+   seconds the first time and twice as long each, to a minute. */
 static p64 radio_join_wait(const radio_last address_to last)
 {
         positive doubled = last->count > 1 ? last->count - 1 : 0;
         p64 wait;
 
-        if ((last->failed != -113 && last->failed != -13) || !last->at)
+        if ((last->failed != -113 && last->failed != -13 &&
+             (last->failed < WIFI_REFUSE_FIRST || last->failed > WIFI_REFUSE_LAST)) ||
+            !last->at)
                 return 0;
         wait = (p64)3000 << (doubled > 5 ? 5 : doubled);
         return wait > 60000 ? 60000 : wait;
@@ -9398,8 +11298,24 @@ static bipolar radio_wifi_store(string_address ssid, string_address pass,
         return failed;
 }
 
+/* What a network that asks for what the join cannot give is told, after
+   "asks for": TKIP (and WPA, whose cipher it is) is broken and the fix is at
+   the access point; the rest are not built. */
+static fn radio_unjoinable(p8 address_to into, positive room, p8 security)
+{
+        bool broken = security == RADIO_WPA || security == RADIO_TKIP;
+
+        radio_line(into, room,
+                   security == RADIO_WPA ? (string_address) "WPA (TKIP)"
+                                         : radio_security_words[security],
+                   broken ? (string_address) ", which is broken and never joined; set the "
+                                             "access point to WPA2 or WPA3 with AES (CCMP)"
+                          : (string_address) ", which moonwater cannot join yet",
+                   null, null, null);
+}
+
 /* Everything of `wifi add` that happens with the radio lock held. */
-static b32 radio_wifi_enter(string_address ssid, string_address pass)
+static b32 radio_wifi_enter(string_address ssid, string_address pass, bool wpa2)
 {
         radio_air air;
         radio_heard address_to heard = null;
@@ -9416,6 +11332,12 @@ static b32 radio_wifi_enter(string_address ssid, string_address pass)
         if (stored == -EFBIG)
                 return host_refuse("%s is too long to change here\n", NET_WIFI_LIST);
         return_if(stored < 0, host_fail(NET_WIFI_LIST, stored));
+        //      What the network taught the join stands while its password
+        //      does; whether WPA2 is let through the tight tier is what
+        //      this add says.
+        radio_rules_put((p8 address_to)ssid, string_length(ssid),
+                        (p8)((same ? 0 : WIFI_RULE_PMF | WIFI_RULE_SAE) | WIFI_RULE_WPA2),
+                        wpa2 ? WIFI_RULE_WPA2 : 0);
 
         switched = radio_switch(NET_WIFI_POWER, RADIO_RFKILL_WLAN, true, true);
 
@@ -9437,9 +11359,10 @@ static b32 radio_wifi_enter(string_address ssid, string_address pass)
                         return switched;
                 }
                 if (!heard->joinable)
-                        return host_refuse("saved, but it asks for %s, which "
-                                           "moonwater cannot join yet\n",
-                                           radio_security_words[heard->security]);
+                {
+                        radio_unjoinable(why, sizeof(why), heard->security);
+                        return host_refuse("saved, but it asks for %s\n", why);
+                }
                 if (heard->security != RADIO_OPEN && !pass_length)
                         return host_refuse("saved with no password, but it "
                                            "asks for one\n");
@@ -9476,7 +11399,7 @@ static b32 radio_wifi_enter(string_address ssid, string_address pass)
         return switched;
 }
 
-static b32 radio_wifi_add(string_address ssid, string_address pass)
+static b32 radio_wifi_add(string_address ssid, string_address pass, bool wpa2)
 {
         positive ssid_length = string_length(ssid);
         positive pass_length = pass ? string_length(pass) : 0;
@@ -9499,7 +11422,7 @@ static b32 radio_wifi_add(string_address ssid, string_address pass)
                 join to make its own. */
         lock = radio_lock(true);
         return_if(lock < 0, host_fail("wifi", lock));
-        result = radio_wifi_enter(ssid, pass);
+        result = radio_wifi_enter(ssid, pass, wpa2);
         //      The password is forgotten before the keeper is forked, which
         //      would carry it in its memory for as long as it lives, and the
         //      keeper is started before the lock is let go, so that nothing
@@ -9555,6 +11478,10 @@ static b32 radio_wifi_forget(string_address ssid)
         count--;
         crypto_forget(address_of networks[count], sizeof(networks[count]));
 
+        //      Its rules first: a remove cut between the two leaves the
+        //      network saved, and the next remove does both.
+        radio_rules_put((p8 address_to)ssid, string_length(ssid),
+                        WIFI_RULE_PMF | WIFI_RULE_SAE | WIFI_RULE_WPA2, 0);
         failed = radio_wifi_save(networks, count);
         crypto_forget(networks, sizeof(networks));
         return_if(failed < 0, host_fail(NET_WIFI_LIST, failed));
@@ -9744,10 +11671,11 @@ static b32 radio_wifi_status(void)
 
                 radio_display(name, sizeof(name), last.ssid, string_length(last.ssid));
                 if (heard && !heard->joinable)
-                        string_format(log, host_label "not joined: %s asks for %s, which "
-                                                      "moonwater cannot join yet\n",
-                                      (string_address)name,
-                                      radio_security_words[heard->security]);
+                {
+                        radio_unjoinable(why, sizeof(why), heard->security);
+                        string_format(log, host_label "not joined: %s asks for %s\n",
+                                      (string_address)name, (string_address)why);
+                }
                 else if (heard)
                         string_format(log, host_label "not joined: %s %s\n",
                                       (string_address)name, radio_join_words(last.failed));
@@ -10134,16 +12062,21 @@ static b32 host_wifi(string_address address_to arguments, positive count)
                 return power ? radio_wifi_on(true)
                              : radio_done(radio_wifi_off(true), "wifi off");
         }
-        if (string_equals(word, "add") && count >= 4 && count <= 5)
+        if (string_equals(word, "add") && count >= 4 && count <= 6)
         {
                 p8 pass[256];
                 positive length;
+                //      wpa2 after the password, or after - : the network may
+                //      be joined with WPA2 where the tight tier asks for WPA3.
+                bool wpa2 = count == 6;
 
+                return_if(wpa2 && !string_equals(arguments[5], (string_address) "wpa2"),
+                          host_usage());
                 //      A password in the argument is in ps and in the
                 //      history of any shell that does not know this verb;
                 //      the tight tier refuses the form, and anywhere it is
                 //      taken a person at a terminal is told the other.
-                return_if(MOONWATER_STRICT_NET >= STRICT_TIGHT && count == 5 &&
+                return_if(MOONWATER_STRICT_NET >= STRICT_TIGHT && count >= 5 &&
                               !string_equals(arguments[4], (string_address) "-"),
                           host_refuse("a password on the command line is "
                                       "refused: give it on standard input "
@@ -10173,7 +12106,7 @@ static b32 host_wifi(string_address address_to arguments, positive count)
                         memory_copy(pass, arguments[4], length + 1);
                         crypto_forget(arguments[4], length);
                 }
-                return radio_wifi_add(arguments[3], pass);
+                return radio_wifi_add(arguments[3], pass, wpa2);
         }
         if (string_equals(word, "remove") && count == 4)
         {
@@ -16398,8 +18331,9 @@ static const host_row host_rows[] = {
     {null, "bios [reboot]", "whether firmware setup is on offer; reboot goes", 'b'},
     {null, "wired [on|off]", "the wired links; off keeps them down", 'b'},
     {null, "wifi [on|off]", "the radio, saved networks and those in range", 'b'},
-    {null, "wifi add SSID [PASSWORD|-]", "remember a network and join it; asks for", 'b'},
-    {null, "", "the password, - reads it from stdin", 'b'},
+    {null, "wifi add SSID [PASSWORD|-] [wpa2]", "remember a network and join it; asks for", 'b'},
+    {null, "", "the password, - reads it from stdin; wpa2 lets", 'b'},
+    {null, "", "a tight tier join it without WPA3", 'b'},
     {null, "wifi remove SSID", "forget a saved network, and leave it", 'b'},
     {null, "bluetooth [on|off]", "the radio and the remembered devices", 'b'},
     {null, "bluetooth add NAME", "keep a device's name; the radio goes on for what pairs", 'b'},
@@ -16756,6 +18690,7 @@ static b32 host_answer(bool update, string_address disk)
 static string_address host_wipe_keep[] = {
     HOST_WIPE_KEEP(HOST_MACHINE_SCRIPT),
     HOST_WIPE_KEEP(NET_WIFI_LIST),
+    HOST_WIPE_KEEP(RADIO_RULES_PATH),
     HOST_WIPE_KEEP(NET_WIFI_POWER),
     HOST_WIPE_KEEP(NET_WIRED_POWER),
     HOST_WIPE_KEEP(NET_BLUETOOTH_LIST),

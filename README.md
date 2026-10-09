@@ -56,8 +56,9 @@ moonwater bios [reboot]                whether firmware setup is on offer; reboo
 
 moonwater wired [on|off]               the wired links; off keeps them down
 moonwater wifi [on|off]                the radio, saved networks and those in range
-moonwater wifi add SSID [PASSWORD|-]   remember a network and join it; asks for
-                                       the password, - reads it from stdin
+moonwater wifi add SSID [PASSWORD|-] [wpa2]  remember a network and join it; asks for
+                                       the password, - reads it from stdin; wpa2 lets
+                                       a tight tier join it without WPA3
 moonwater wifi remove SSID             forget a saved network, and leave it
 moonwater bluetooth [on|off]           the radio and the remembered devices
 moonwater bluetooth add NAME           keep a device's name; the radio goes on for what pairs
@@ -141,13 +142,19 @@ wired to the hardware and cannot be bound.
 **Wifi.** Bare `moonwater wifi` lists networks strongest first (`*` joined,
 `+` saved). When wifi cannot work it says why in one line -- no hardware, no
 driver, missing firmware, rfkill, switched off, or why the last join failed.
-Open and WPA2 (including WPA2/WPA3 mixed) networks can be joined, WPA2 with
-CCMP and plain PSK, no protected management frames required; WPA2 that asks
-for TKIP (`TKIP`), for PMF (`PMF`) or for FT or PSK-SHA256 key management
-(`FT/256`), WPA3-only, 802.1X and WEP networks are saved but not tried, and
-are listed under those names. The machine's own rejoin leaves a network that was
-not there, or refused the password, alone for three seconds, then twice as long
-each time to a minute, and scans for it at most every thirty seconds. A password on the command line
+Open, WPA2 (PSK and PSK-SHA256) and WPA3 networks can be joined, WPA3 whenever
+a network offers it, with CCMP, and with protected management frames whenever
+the access point offers them, so a spoofed deauthentication does not end the
+link (`PMF` in the list is a network that requires them). A network that once
+offered protection, or was joined with WPA3, is not joined again without it
+until `wifi remove` or an add with another password. TKIP (`TKIP`, `WPA`) is
+refused with a reason that says what to change; FT and the extended-key WPA3
+suites (`FT/EXT`), 802.1X and WEP networks are saved but not tried, and are
+listed under those names. The tight network tier requires protected management
+frames and joins WPA2 only for a network saved with `wpa2`. The machine's own
+rejoin leaves a network that was not there, refused the password or was refused
+by those rules alone for three seconds, then twice as long each time to a
+minute, and scans for it at most every thirty seconds. A password on the command line
 shows in `ps`, so leave it off or pipe it with `-`. The image carries the
 firmware its wifi and bluetooth drivers load, fetched from linux-firmware at a
 pinned commit and checked against pinned SHA-256s; no blob is in this
@@ -687,7 +694,7 @@ have only `sec_exec_hardened` and `sec_build_hardened`.
 | `sec_lockdown` (kernel) | integrity lockdown from boot, signed modules only, Landlock | confidentiality lockdown |
 | `sec_files` | `STRICT_FILES` 2 and find without `-delete` or `-fprint*` | 3 |
 | `sec_text` | `STRICT_TEXT` 2 | 3 |
-| `sec_net` | `STRICT_NET` 2 and no `wget` or `fetch` | 3 |
+| `sec_net` | `STRICT_NET` 2 and no `wget` or `fetch`; wifi with protected management frames always, and WPA2 only for a network saved with `wpa2` | 3 |
 | `sec_host` | `STRICT_HOST` 2: a disk is asked about, `kptr_restrict` 2, io_uring refused, Yama 2, widest mmap randomisation | 3: no module loads, no ptrace attach (Yama 3), `hidepid` on /proc, the data partition `nosuid`, `/dev/shm` `noexec` |
 | `sec_bowl` | `STRICT_BOWL` 2 | 3 |
 | `sec_exec` | Floodlight sealed with every command-making switch off | (none) |
