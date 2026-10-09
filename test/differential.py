@@ -51193,6 +51193,15 @@ static bool network_deadline_left(const network_deadline *d, positive *s,
         *n = d->budget % 1000000000UL;
         return d->began && d->budget;
 }
+static bool network_deadline_begin_within(network_deadline *d, positive s,
+                                          positive n, const network_deadline *outer)
+{
+        if (!network_deadline_begin(d, s, n))
+                return false;
+        if (outer && outer->budget < d->budget)
+                d->budget = outer->budget;
+        return !outer || outer->began;
+}
 
 /* Every request this client writes: one request line and four fields, each
    ended by CRLF, a blank line, and no other CR, LF or control. */

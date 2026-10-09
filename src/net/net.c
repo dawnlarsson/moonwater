@@ -9509,6 +9509,12 @@ static bipolar tls_read_until(
 //      the close, or chunked -- written as it arrives: 1 GiB. GNU wget takes
 //      such a body until the peer stops, which the default does too.
 #define HTTP_UNDECLARED_MOST ((positive)1 << 30)
+//      STRICT_TIGHT's budget for a whole fetch -- every hop of a redirect
+//      chain and the body -- where the default, as GNU wget, times each hop
+//      alone: one head wait and one body wait. Zero for none.
+#define HTTP_CHAIN_SECONDS                                                   \
+        (MOONWATER_STRICT_NET >= STRICT_TIGHT                                \
+             ? (positive)(HTTP_HEAD_SECONDS + HTTP_BODY_SECONDS) : 0)
 
 #define HTTP_OK 0
 #define HTTP_BAD_URL (-1)
@@ -10573,7 +10579,7 @@ static bipolar http_response_head(
     http_link address_to link, p8 address_to head, positive room,
     positive address_to used, positive address_to header,
     http_response address_to response, positive seconds, positive nanoseconds,
-    bool incomplete_is_malformed)
+    bool incomplete_is_malformed, const network_deadline address_to outer)
 {
         network_deadline deadline;
         /* Carried across the reads: the head is walked once in total rather
@@ -10583,7 +10589,9 @@ static bipolar http_response_head(
         positive searched = 0;
 
         address_to used = 0;
-        if (!network_deadline_begin(address_of deadline, seconds, nanoseconds))
+        //      A redirect chain's own deadline, when it has one, holds this.
+        if (!network_deadline_begin_within(address_of deadline, seconds,
+                                           nanoseconds, outer))
                 return HTTP_NO_REPLY;
 
         for (;;)
@@ -11612,22 +11620,29 @@ typedef struct
         positive undeclared_most;
         //      HEAD, not GET: whether the resource is there, and no body.
         bool head;
+        //      The whole fetch, every hop's head and the body, in one budget,
+        //      or zero for none: the tight tier's is one head wait and one
+        //      body wait (HTTP_CHAIN_SECONDS), where the default, as GNU wget,
+        //      times each hop alone.
+        positive chain_seconds;
 } http_manners;
 
 static const http_manners http_manners_fetch = {
     (string_address)"dawning", '0', false, false, true,
-    HTTP_HEAD_SECONDS, HTTP_BODY_SECONDS, HTTP_FETCH_MAX, 0, false};
+    HTTP_HEAD_SECONDS, HTTP_BODY_SECONDS, HTTP_FETCH_MAX, 0, false, HTTP_CHAIN_SECONDS};
 static const http_manners http_manners_wget = {
     (string_address)"Wget", '1', true, true, false,
     HTTP_HEAD_SECONDS, HTTP_BODY_SECONDS, HTTP_FETCH_MAX,
-    MOONWATER_STRICT_NET >= STRICT_TIGHT ? HTTP_UNDECLARED_MOST : 0, false};
+    MOONWATER_STRICT_NET >= STRICT_TIGHT ? HTTP_UNDECLARED_MOST : 0, false,
+    HTTP_CHAIN_SECONDS};
 //      wget --spider: wget's manners, asking HEAD at every hop as GNU wget
 //      does, and reading no body however the head frames one.
 static const http_manners http_manners_spider = {
     (string_address)"Wget", '1', true, true, false,
-    HTTP_HEAD_SECONDS, HTTP_BODY_SECONDS, HTTP_FETCH_MAX, 0, true};
+    HTTP_HEAD_SECONDS, HTTP_BODY_SECONDS, HTTP_FETCH_MAX, 0, true, HTTP_CHAIN_SECONDS};
 static const http_manners http_manners_zone = {
-    (string_address)"Moonwater", '1', false, true, false, 10, 10, 4096, 0, false};
+    (string_address)"Moonwater", '1', false, true, false, 10, 10, 4096, 0, false,
+    MOONWATER_STRICT_NET >= STRICT_TIGHT ? 20 : 0};
 
 /* The head of the response a fetch ended on, for the caller that reads a
    header of it. */
@@ -11657,6 +11672,8 @@ static bipolar http_run(string_address start, const http_manners address_to how,
         http_buffer whole = {0};
         positive hop;
         bool secure = false;
+        //      The tight tier's budget for the whole fetch; began zero for none.
+        network_deadline chain = {0};
 #if MOONWATER_STRICT_NET >= STRICT_TIGHT
         bool reached_public = false;
 #endif
@@ -11665,6 +11682,9 @@ static bipolar http_run(string_address start, const http_manners address_to how,
         if (string_length(start) >= sizeof url)
                 return HTTP_BAD_URL;
         string_copy(url, start);
+        if (how->chain_seconds &&
+            !network_deadline_begin(address_of chain, how->chain_seconds, 0))
+                return HTTP_NO_REPLY;
 
         for (hop = 0; hop < HTTP_HOPS; hop++)
         {
@@ -11679,6 +11699,15 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                 http_response response;
                 positive header = 0;
                 positive used = 0;
+
+                positive left[2];
+
+                if (chain.began &&
+                    !network_deadline_left(address_of chain, left, left + 1))
+                {
+                        status = HTTP_NO_REPLY;
+                        goto done;
+                }
 
                 /* The request is built before any name is looked up or any
                    connection opened: a Location this client cannot put on
@@ -11736,7 +11765,8 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                         status = http_response_head(
                             address_of link, head, sizeof head, address_of used,
                             address_of header, address_of response,
-                            how->head_seconds, 0, how->head_cut_is_malformed);
+                            how->head_seconds, 0, how->head_cut_is_malformed,
+                            chain.began ? address_of chain : null);
                 if (!status && code)
                         address_to code = response.code;
                 if (!status && head_out)
@@ -11820,8 +11850,9 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                            on one, and a large file over a slow link is not an
                            attack. */
                         if ((into || MOONWATER_STRICT_NET >= STRICT_TIGHT) &&
-                            !network_deadline_begin(address_of body.deadline,
-                                                    how->body_seconds, 0))
+                            !network_deadline_begin_within(
+                                address_of body.deadline, how->body_seconds, 0,
+                                chain.began ? address_of chain : null))
                                 status = HTTP_NO_REPLY;
                         else
                                 status =

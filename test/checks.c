@@ -59032,7 +59032,7 @@ static fn http_header_deadlines(void)
                                           address_of link, head, sizeof head,
                                           address_of used, address_of header,
                                           address_of response, 0, 100000000,
-                                          false) == HTTP_NO_REPLY);
+                                          false, null) == HTTP_NO_REPLY);
                         }
                         socket_close(pair[0]);
                         if (child > 0)
@@ -69946,6 +69946,90 @@ static fn fetching_for_real(void)
 }
 
 /*
+        A redirect chain held to one budget: a server that answers every hop
+        a redirect after 300 ms, and a client whose manners give the whole
+        fetch a second. The chain stops on the clock, well before its twenty
+        redirects (six seconds) run out; with no budget it would take them
+        all, which is the default's GNU behaviour and is not waited for here.
+*/
+static fn http_chain_deadline(void)
+{
+        socket_address_internet where;
+        p32 size = sizeof where;
+        b32 one = 1;
+        bipolar listening = socket_new(AF_INET, SOCK_STREAM, 0);
+        bipolar child;
+        p8 url[64];
+        positive began;
+        positive took;
+        bipolar status;
+        b32 code = 0;
+        http_manners chained = http_manners_wget;
+
+        check("the chain deadline's listener opens", listening >= 0);
+        if (listening < 0)
+                return;
+        socket_option_set((b32)listening, SOL_SOCKET, SO_REUSEADDR, address_of one,
+                          sizeof one);
+        memory_fill(address_of where, 0, sizeof where);
+        where.family = AF_INET;
+        where.host = network_order_32(HOST_LOOPBACK);
+        if (socket_bind((b32)listening, address_of where, sizeof where) ||
+            socket_listen((b32)listening, 8) ||
+            socket_name((b32)listening, address_of where, address_of size))
+        {
+                check("the chain deadline's listener binds", false);
+                socket_close((b32)listening);
+                return;
+        }
+        child = system_fork();
+        if (child == 0)
+        {
+                static const p8 again[] = "HTTP/1.1 302 Found\r\nLocation: /again\r\n"
+                                          "Content-Length: 0\r\n\r\n";
+                p8 said[512];
+
+                for (positive hop = 0; hop < HTTP_HOPS; hop++)
+                {
+                        timespec pause = {0, 300000000};
+                        bipolar taken = socket_accept((b32)listening, 0, 0, 0);
+
+                        if (taken < 0)
+                                break;
+                        socket_receive((b32)taken, said, sizeof said, 0, 0, 0);
+                        system_call_2(syscall(nanosleep), (positive)address_of pause, 0);
+                        system_write_all((positive)taken, again, sizeof again - 1);
+                        socket_shutdown((b32)taken, SHUT_BOTH);
+                        socket_close((b32)taken);
+                }
+                system_call_1(syscall(exit_group), 0);
+        }
+        check("the chain deadline's server starts", child > 0);
+        if (child > 0)
+        {
+                memory_copy(url, "http://127.0.0.1:", 17);
+                url[17 + positive_into(url + 17, network_order_16(where.port))] = end;
+                chained.chain_seconds = 1;
+                began = clock_monotonic_nanoseconds();
+                status = http_run((string_address)url, address_of chained, false, -1,
+                                  null, address_of code, null, null);
+                took = clock_monotonic_nanoseconds() - began;
+                check("a redirect chain stops on its whole budget, not its hop count",
+                      status == HTTP_NO_REPLY && took < 3000000000u);
+                system_call_2(syscall(kill), (positive)child, SIGKILL);
+                system_wait4_retry((b32)child, null, 0, null);
+        }
+        socket_close((b32)listening);
+        check("only the tight tiers give a fetch one budget",
+              http_manners_wget.chain_seconds ==
+                      (MOONWATER_STRICT_NET >= STRICT_TIGHT
+                           ? (positive)(HTTP_HEAD_SECONDS + HTTP_BODY_SECONDS) : 0) &&
+                  http_manners_spider.chain_seconds == http_manners_wget.chain_seconds &&
+                  http_manners_zone.chain_seconds ==
+                      (MOONWATER_STRICT_NET >= STRICT_TIGHT ? 20 : 0));
+}
+
+/*
         The exchange's confinement, as net_dhcp_apart's child meets it: the
         socket and the answer's pipe stay open and nothing else does, the
         answer's write is allowed, and a call beyond the exchange's own kills
@@ -71604,6 +71688,7 @@ b32 main(void)
         net_group(tls12_pieces);
         net_group(redirect_urls);
         net_group(fetching_for_real);
+        net_group(http_chain_deadline);
         net_group(leasing);
         net_group(dhcp_confinement);
         net_group(dhcp_reacquisition_state_matrix);
