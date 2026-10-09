@@ -32440,6 +32440,7 @@ call-frame lifetime are covered separately by harness shell_functions.
     start = source.index('typedef struct\n{\n        b32 kind;', source.index('One node shape'))
     types = source[start:source.index('#define PARSE_WORD_LITERAL')]
     engine = source[source.index('/* Retained bodies own independent ranges'):]
+    types, engine = shell_source_plain(types), shell_source_plain(engine)
     reserve = 'static b32 parse_keep_reserve(positive arena, b32 count, b32 floor)\n{'
     assert engine.count(reserve) == 1
     engine = engine.replace(reserve, reserve + '\n        if ((b32)arena == injected_failure) return -1;')
@@ -32626,7 +32627,7 @@ call-frame lifetime are covered separately by harness shell_functions.
     binary = out / 'retention'
     unit.write_text(code)
     command = shlex.split(os.environ.get('CC', 'cc')) + [
-        '-std=c11', '-Wall', '-Wextra', '-Werror', '-O1', '-g',
+        '-std=c11', '-Wall', '-Wextra', '-Wno-sign-compare', '-Werror', '-O1', '-g',
         '-fsanitize=address,undefined', str(unit), '-o', str(binary)]
     build = subprocess.run(command, capture_output=True, text=True)
     (out / 'build.log').write_text(build.stdout + build.stderr)
@@ -33437,7 +33438,7 @@ int main(void)
 def shell_source_plain(text):
     """A shell source as a slice compiled on its own sees it: HOT_STATE is a
     section attribute from lib.c for the spark link, and no slice brings it."""
-    return text.replace(' HOT_STATE;', ';')
+    return text.replace(' HOT_STATE;', ';').replace(' HOT_STATE = ', ' = ')
 
 
 def harness_floodlight(argv):
