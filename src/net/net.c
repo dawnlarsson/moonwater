@@ -454,7 +454,13 @@ static COLD bipolar netlink_receive_one(b32 handle,
         }
 
         if (!size || (positive)size > NETLINK_DATAGRAM_MAX)
+        {
+                /* Left queued it would be the next peek too, and the socket
+                   would refuse every reply behind it. */
+                (void)socket_receive(handle, null, 0, MSG_DONTWAIT, 0, 0);
+                buffer->used = 0;
                 return -1;
+        }
 
         if (!net_room(buffer, (positive)size + 64))
                 return -1;
@@ -1742,10 +1748,12 @@ static COLD bipolar dns_answer_address(p8 address_to message, positive size,
 
 /* The transaction id and exact echoed question are the reply identity.  UDP
    uses this predicate to discard raced junk within the original deadline;
-   TCP has one framed reply and treats an identity mismatch as malformed. */
+   TCP has one framed reply and treats an identity mismatch as malformed.
+   Folded compares the question under ASCII case, which is how a server that
+   does not keep the case it was sent echoes it. */
 static COLD bool dns_reply_identity(
     p8 address_to reply, positive size, p16 id,
-    p8 address_to request, positive question_length)
+    p8 address_to request, positive question_length, bool folded)
 {
         byte_reader reader = byte_reader_open(reply, size);
         p16 asked = byte_reader_u16(&reader);
@@ -1757,8 +1765,10 @@ static COLD bool dns_reply_identity(
         (void)byte_reader_skip(&reader, 6);
         question = byte_reader_take(&reader, question_length);
         return byte_reader_ok(&reader) && asked == id && questions == 1 &&
-               !memory_compare(question, request + DNS_HEADER,
-                               question_length);
+               !(folded ? memory_compare_ascii_case(question, request + DNS_HEADER,
+                                                    question_length)
+                        : memory_compare(question, request + DNS_HEADER,
+                                         question_length));
 }
 
 /* Walk every declared resource record, including sections this IPv4 resolver
@@ -1809,7 +1819,7 @@ static COLD bipolar dns_reply_result(
         positive available = size > DNS_MAX_MESSAGE ? DNS_MAX_MESSAGE : size;
 
         if (!dns_reply_identity(reply, available, id, request,
-                                question_length))
+                                question_length, false))
                 return DNS_MALFORMED;
 
         {
@@ -2087,26 +2097,6 @@ static COLD fn dns_bind_random_port(b32 handle)
         }
 }
 
-//      The reply matches what was sent except in case: the same id, one
-//      question, the same bytes under ASCII case folding.
-static COLD bool dns_reply_identity_folded(
-    p8 address_to reply, positive size, p16 id,
-    p8 address_to request, positive question_length)
-{
-        byte_reader reader = byte_reader_open(reply, size);
-        p16 asked = byte_reader_u16(&reader);
-        p16 questions;
-        const p8 address_to question;
-
-        (void)byte_reader_skip(&reader, 2);
-        questions = byte_reader_u16(&reader);
-        (void)byte_reader_skip(&reader, 6);
-        question = byte_reader_take(&reader, question_length);
-        return byte_reader_ok(&reader) && asked == id && questions == 1 &&
-               !memory_compare_ascii_case(question, request + DNS_HEADER,
-                                          question_length);
-}
-
 /*
         One question asked, and the first address in the answer.
 
@@ -2242,14 +2232,14 @@ static COLD bipolar dns_query_once(p32 server, p16 port, string_address name,
                 available = (positive)got > sizeof reply
                     ? sizeof reply : (positive)got;
                 if (!dns_reply_identity(reply, available, id, request,
-                                        question_length))
+                                        question_length, false))
                 {
                         //      Right id, the question in another case: a
                         //      server that does not keep the case it is
                         //      sent. Say so; the caller asks once more.
-                        if (mixed && dns_reply_identity_folded(
+                        if (mixed && dns_reply_identity(
                                          reply, available, id, request,
-                                         question_length))
+                                         question_length, true))
                         {
                                 failure = DNS_CASE_FOLDED;
                                 goto failed;
@@ -8923,13 +8913,6 @@ static COLD bipolar tls_post_handshake_append_until(
         return TLS_OK;
 }
 
-static COLD bipolar tls_post_handshake_append(tls_conn address_to tls,
-                                             p8 address_to fragment,
-                                             positive length)
-{
-        return tls_post_handshake_append_until(tls, fragment, length, null);
-}
-
 /* A TLS 1.2 Certificate is the list alone, each entry without
    extensions. Laid out again as TLS 1.3's -- an empty context, two empty
    extension bytes after each certificate -- in into, which has room for
@@ -9467,15 +9450,6 @@ refused:
         return TLS_FAIL;
 }
 
-static bipolar tls_borrow(tls_conn address_to tls, positive room,
-                          p8 address_to address_to span,
-                          positive address_to got, positive seconds,
-                          positive nanoseconds)
-{
-        return tls_take(tls, room, span, got, null, seconds, nanoseconds,
-                        false);
-}
-
 static bipolar tls_borrow_within(
     tls_conn address_to tls, positive room, p8 address_to address_to span,
     positive address_to got, positive seconds, positive nanoseconds,
@@ -9492,12 +9466,6 @@ static bipolar tls_lend_until(
     positive address_to got, const network_deadline address_to deadline)
 {
         return tls_take(tls, room, span, got, deadline, 0, 0, true);
-}
-
-static bipolar tls_lend(tls_conn address_to tls, positive room,
-                        p8 address_to address_to span, positive address_to got)
-{
-        return tls_lend_until(tls, room, span, got, null);
 }
 
 static bipolar tls_read_until(
@@ -9796,33 +9764,6 @@ static bool http_line_valid(p8 address_to line, positive stop, bool field)
 {
         return field ? http_field_name(line, stop) >= 0
                      : memory_text_span(line, stop) == stop;
-}
-
-static bool http_header_block_valid(p8 address_to bytes, positive size)
-{
-        positive at = 0;
-        bool status = true;
-
-        while (at < size)
-        {
-                positive line = at;
-                positive stop = at + memory_span_without_byte(
-                    bytes + at, '\n', size - at);
-
-                if (stop == size)
-                        return false;
-                at = stop + 1;
-                if (stop > line && bytes[stop - 1] == '\r')
-                        stop--;
-
-                if (stop == line)
-                        return !status && at == size;
-                if (!http_line_valid(bytes + line, stop - line, !status))
-                        return false;
-                status = false;
-        }
-
-        return false;
 }
 
 //      One header's value, by name, without regard to its case.

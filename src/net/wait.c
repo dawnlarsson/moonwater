@@ -217,20 +217,6 @@ static bipolar network_receive_next(
         }
 }
 
-/* What is already queued, taken without waiting; an interrupted receive
-   is asked again, and NETWORK_TRY_AGAIN says nothing was there. */
-static bipolar network_stream_read_now(bipolar handle, p8 address_to into,
-                                       positive length)
-{
-        bipolar got;
-
-        do
-                got = socket_receive((b32)handle, into, length, MSG_DONTWAIT,
-                                     null, 0);
-        while (got == NETWORK_INTERRUPTED);
-        return got;
-}
-
 /* Deadline-bound stream reads must not enter a blocking read merely because
    one byte was ready: a peer could then trickle the rest forever under the
    socket's renewing idle timeout. Poll the absolute budget and consume only
@@ -315,27 +301,6 @@ static bool network_stream_read_all(
                 if (got <= 0 || (positive)got > length - used)
                         return false;
                 used += (positive)got;
-        }
-
-        return true;
-}
-
-static bool network_stream_send_all(bipolar handle, p8 address_to data,
-                                    positive length)
-{
-        positive sent = 0;
-
-        while (sent < length)
-        {
-                bipolar wrote = socket_send((b32)handle, data + sent,
-                                            length - sent, MSG_NOSIGNAL,
-                                            null, 0);
-
-                if (wrote == NETWORK_INTERRUPTED)
-                        continue;
-                if (wrote <= 0 || (positive)wrote > length - sent)
-                        return false;
-                sent += (positive)wrote;
         }
 
         return true;

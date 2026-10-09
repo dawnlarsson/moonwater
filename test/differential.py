@@ -26096,12 +26096,16 @@ static positive memory_text_span(const void *block, positive size)
                 i++;
         return i;
 }
+#ifndef memory_zero
 static void memory_zero(void *into, positive size)
 {
         if (size)
                 memset(into, 0, size);
 }
+#endif
+#ifndef max
 #define max(a, b) ((a) > (b) ? (a) : (b))
+#endif
 static positive digit_known(p8 character, positive base)
 {
         positive v;
@@ -61314,12 +61318,23 @@ int main(void)
     http_framing = sec(
         net,
         "static PURE bipolar http_header_end(",
-        "static bipolar http_unchunk(p8 address_to bytes, positive size);")
+        "/* Status and body framing have one interpretation in both clients.")
+
+    #   What the head checks ask of http_response_fields: the grammar alone.
+    http_head_valid = r"""
+static bool http_header_block_valid(p8 *bytes, positive size)
+{
+        http_response response = {.code = 200};
+        http_framing_fields fields;
+
+        return http_response_fields(bytes, size, &response, &fields);
+}
+"""
 
     http_clean_source = base_shim + r"""
 #define HTTP_OK 0
 #define HTTP_MALFORMED (-5)
-""" + http_framing + r"""
+""" + http_framing + http_head_valid + r"""
 static int failures;
 
 static void expect_chunk(const char *label, const char *line, int want_ok,
@@ -61428,7 +61443,7 @@ int main(void)
         '#include <sanitizer/msan_interface.h>\n' + base_shim + r"""
 #define HTTP_OK 0
 #define HTTP_MALFORMED (-5)
-""" + http_framing + r"""
+""" + http_framing + http_head_valid + r"""
 int main(void)
 {
         /* Claim a full header block; poison the unread tail so the line walk
@@ -61971,6 +61986,148 @@ int main(void)
     return checks.verdict("msan net", "msan-net")
 
 
+def harness_net_lease_transitions(argv):
+    """Production lease installation/rollback/release over a recorded kernel seam.
+    Covers route conflicts and failures without root or network namespaces.
+    """
+    del argv
+    host = (HARNESS_ROOT / "src/sh/net.c").read_text()
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    source = r'''
+#include <stdint.h>
+#include <stdbool.h>
+#include <string.h>
+#include <stdio.h>
+#include <errno.h>
+typedef uint8_t p8;
+typedef uint32_t p32;
+typedef int32_t b32;
+typedef uint64_t positive;
+typedef int64_t bipolar;
+typedef char *string_address;
+#define address_to *
+#define address_of &
+#define fn void
+#define COLD
+#define CONST
+#define null NULL
+#define min(a,b) ((a) < (b) ? (a) : (b))
+#define memory_fill memset
+#define memory_copy memcpy
+#define memory_compare memcmp
+static void string_format(int writer, const char *format, ...) { (void)writer; (void)format; }
+static int net_out, writer_terminal_name;
+static string_address net_host_text(p8 *into, p32 host) { (void)host; return (char *)into; }
+#define IFNAME_SIZE 16
+#define DNS_SERVERS_MAX 3
+#define NETLINK_ROUTE_ONLINK 4
+#define RTM_NEWROUTE 24
+#define NLM_REQUEST 1
+#define NLM_ACK 4
+#define NLM_CREATE 1024
+#define NLM_EXCLUSIVE 512
+#define NLM_REPLACE 256
+#define ERROR_NO_ENTRY ENOENT
+#define ERROR_NO_PROCESS ESRCH
+#define ERROR_NO_DEVICE ENODEV
+typedef struct { p32 address, mask, router, nameserver, server, seconds, renewal, rebinding; } dhcp_lease;
+typedef struct { p32 index, host; p8 prefix; bool leased; positive others;
+                 p32 other_host[8]; p8 other_prefix[8]; } netlink_lease_search;
+static int new_route_status, fail_old_address, fail_old_route, foreign_deletes;
+static bool old_route, new_route;
+static positive net_seconds(void) { return 100; }
+static void net_flush(void) {}
+static bipolar net_refused(string_address doing, bipolar status) { (void)doing; return status; }
+static bipolar net_write_resolv(p32 server) { (void)server; return 0; }
+static void net_dns_lease_note(p32 server) { (void)server; }
+static positive net_resolver_choose(p32 server, p32 *servers) { servers[0] = server; return 1; }
+static bipolar net_write_resolv_servers(string_address path, p32 *servers, positive count)
+{ (void)path; (void)servers; (void)count; return 0; }
+static void string_copy_max_end(p8 *into, string_address from, positive most)
+{ strncpy((char *)into, from, most); into[most] = 0; }
+static bipolar netlink_leases_on(b32 handle, netlink_lease_search *found)
+{ (void)handle; (void)found; return 0; }
+static bipolar netlink_address_lease(b32 handle, p32 index, p32 host, p8 prefix,
+                                    p32 seconds, bool exclusive)
+{ (void)handle; (void)index; (void)host; (void)prefix; (void)seconds; (void)exclusive; return 0; }
+static bipolar netlink_address_delete(b32 handle, p32 index, p32 host, p8 prefix)
+{
+        (void)handle; (void)index; (void)prefix;
+        if (host == 0x0a000002 && fail_old_address) { fail_old_address = 0; return -EIO; }
+        return 0;
+}
+static bipolar netlink_route_change(b32 handle, int type, int flags, p32 dest,
+                                    p8 bits, p32 gateway, p32 index, p8 extra)
+{
+        (void)handle; (void)type; (void)flags; (void)dest; (void)bits; (void)index; (void)extra;
+        if (gateway == 0x0a000001) { old_route = true; return 0; }
+        if (!new_route_status) new_route = true;
+        return new_route_status;
+}
+static bipolar netlink_route_delete(b32 handle, p32 dest, p8 bits, p32 gateway, p32 index)
+{
+        (void)handle; (void)dest; (void)bits; (void)index;
+        if (gateway == 0x0a000001) {
+                if (fail_old_route) { fail_old_route = 0; return -EACCES; }
+                old_route = false;
+        } else {
+                if (new_route_status == -EEXIST) foreign_deletes++;
+                new_route = false;
+        }
+        return 0;
+}
+'''
+    source += src_slice(host, "/*\n        What this machine is holding, and since when.",
+                        "/* The lease clock")
+    source += src_slice(net, "static CONST COLD p8 dhcp_prefix_of(",
+                        "static COLD fn dhcp_lease_merge(")
+    source += src_slice(host, "static COLD bool net_change_gone(",
+                        "static COLD bool net_wired_off(")
+    source += r'''
+int main(void)
+{
+        int checks = 0, failures = 0;
+#define expect(ok, text) do { checks++; if (!(ok)) { failures++; \
+        printf("  FAIL conflict %d fault %d: %s\n", conflict, fault, text); } } while (0)
+        for (int conflict = 0; conflict < 2; conflict++)
+        for (int fault = 0; fault < 3; fault++) {
+                net_holding held = {.index = 7, .address_owned = true, .route_owned = true,
+                    .lease = {.address = 0x0a000002, .mask = 0xffffff00,
+                              .router = 0x0a000001, .seconds = 600}};
+                net_holding before = held;
+                dhcp_lease lease = held.lease;
+                p8 hardware[6] = {0};
+                lease.address++;
+                lease.router = 0x0a000004;
+                new_route_status = conflict ? -EEXIST : 0;
+                fail_old_address = fault == 1;
+                fail_old_route = fault == 2;
+                old_route = true;
+                new_route = conflict;
+                foreign_deletes = 0;
+                b32 result = net_apply_lease(1, 7, "test0", hardware, &lease, &held, false);
+                expect((result != 0) == (fault != 0), "I/O failure reaches the caller");
+                if (fault) {
+                        expect(!memcmp(&held, &before, sizeof held), "rollback keeps the prior lease");
+                        expect(old_route && new_route == (bool)conflict,
+                               "rollback restores owned objects and preserves the foreign route");
+                } else {
+                        expect(held.route_owned == !conflict,
+                               "deleting the old route cannot acquire the conflicting route");
+                        expect(net_holding_release(1, &held) == 0,
+                               "the resulting lease can be released");
+                        expect(new_route == (bool)conflict,
+                               "release removes only a route the client installed");
+                }
+                expect(!foreign_deletes, "no delete targets the foreign route");
+        }
+        printf("net-lease-transitions %d/%d\n", checks - failures, checks);
+        return failures != 0;
+}
+'''
+    return run_sanitized("net-lease-transitions", source, None)
+
+
 def harness_net_clock_fault(argv):
     """Compile wait.c over a hostile monotonic clock and inject clock jumps."""
     del argv
@@ -62472,6 +62629,1129 @@ int main(void)
     return checks.verdict("net parser work states", "net-parser-work-states")
 
 
+def harness_net_dhcp_exchange(argv):
+    """The DHCP client's exchanges, run over a recorded socket seam.
+
+    Production dhcp_ask, dhcp_reacquire, dhcp_decline, dhcp_build and the lease
+    rules are lifted; the socket, the clock budget, the entropy and the receive
+    loop are scripted, so the schedule of attempts, every wait, the REQUEST
+    built from an OFFER, the work allowance and each failure of a send, an open
+    or a timer can be asserted without a server, a root or a second host. The
+    expected numbers are written out here, not computed by the code under test.
+    """
+    del argv
+    checks = Checks()
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    wait = (HARNESS_ROOT / "src/net/wait.c").read_text()
+    source = r'''
+#include <stdint.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+typedef uint64_t positive;
+typedef int64_t bipolar;
+typedef uint8_t p8;
+typedef uint16_t p16;
+typedef uint32_t p32;
+typedef int32_t b32;
+typedef char *string_address;
+#define address_to *
+#define address_of &
+#define COLD
+#define CONST
+#define null NULL
+#define AF_INET 2
+#define NETWORK_DISCARD_MAX 64
+#define HOST_ANY 0x00000000u
+#define HOST_BROADCAST 0xffffffffu
+#define network_order_16(v) ((p16)(v))
+#define network_order_32(v) ((p32)(v))
+#define memory_fill(at, v, n) memset((at), (int)(v), (n))
+#define memory_copy(to, from, n) memcpy((to), (from), (n))
+typedef uint64_t p64;
+typedef struct { p16 family; p16 port; p32 host; p64 pad; } socket_address_internet;
+typedef struct { positive began, budget; } network_deadline;
+/* CONSTANTS */
+static void network_store_16(p8 *b, p16 v) { b[0] = (p8)(v >> 8); b[1] = (p8)v; }
+static void network_store_32(p8 *b, p32 v)
+{ b[0] = (p8)(v >> 24); b[1] = (p8)(v >> 16); b[2] = (p8)(v >> 8); b[3] = (p8)v; }
+static p32 network_load_32(const p8 *b)
+{ return (p32)b[0] << 24 | (p32)b[1] << 16 | (p32)b[2] << 8 | b[3]; }
+
+static void require(bool ok, const char *what)
+{ if (!ok) { fprintf(stderr, "FAIL %s\n", what); abort(); } }
+
+/* The seam. */
+static bool fail_random, fail_spread, fail_open, fail_begin_at_valid;
+static int fail_begin_at, fail_send_at;
+static p8 spread_byte;
+static int opens, closes, sends, begins, completes, receives, serial;
+static p32 open_host; static bool open_broadcast;
+static struct { p8 bytes[300]; positive size; socket_address_internet to; bool has_to; } sent[64];
+static struct { positive seconds, nanoseconds; } budget[128];
+static bipolar complete_result;
+static struct { bool rebinding; p32 peer; positive seconds, nanoseconds; p32 transaction; } completed;
+static struct { int kind; } script[200];
+static int script_length, script_at;
+static dhcp_lease offer_lease;
+
+static bool dhcp_transaction_early(p32 *transaction)
+{ if (fail_random) return false; *transaction = 0x01020300u + (p32)++serial; return true; }
+static bipolar system_random_fill(void *into, positive size, int nonblocking)
+{ (void)nonblocking; if (fail_spread) return -1; memset(into, spread_byte, size); return 0; }
+static bipolar dhcp_open(string_address device, p32 host, bool broadcast)
+{ (void)device; if (fail_open) return -1; opens++; open_host = host; open_broadcast = broadcast; return 77; }
+static bipolar socket_send(b32 handle, const void *data, positive size, b32 flags,
+                           const socket_address_internet *to, positive tosize)
+{
+    (void)flags; (void)tosize; require(handle == 77, "send on the opened socket");
+    if (sends == fail_send_at) { sends++; return -1; }
+    if (sends < 64) {
+        memcpy(sent[sends].bytes, data, size < 300 ? size : 300);
+        sent[sends].size = size; sent[sends].has_to = to != NULL;
+        if (to) sent[sends].to = *to;
+    }
+    sends++;
+    return (bipolar)size;
+}
+static void socket_close(b32 handle) { require(handle == 77, "close the opened socket"); closes++; }
+static bool network_deadline_begin(network_deadline *deadline, positive seconds, positive nanoseconds)
+{
+    if (begins == fail_begin_at && fail_begin_at_valid) { begins++; return false; }
+    if (begins < 128) { budget[begins].seconds = seconds; budget[begins].nanoseconds = nanoseconds; }
+    begins++; deadline->began = 1; deadline->budget = 1; return true;
+}
+/* 0 nothing, 1 usable OFFER, 2 unusable OFFER, 3 an ACK where an OFFER belongs, 4 NAK */
+static bool dhcp_receive(bipolar handle, p8 *packet, positive room, p32 transaction,
+                         p8 *hardware, dhcp_lease *lease, p8 *kind,
+                         const socket_address_internet *expected_peer, bool any_peer_host,
+                         socket_address_internet *accepted_peer, positive *remaining,
+                         const network_deadline *deadline)
+{
+    (void)handle; (void)packet; (void)room; (void)transaction; (void)hardware;
+    (void)expected_peer; (void)any_peer_host; (void)accepted_peer; (void)deadline;
+    require(remaining != NULL, "the allowance is passed down");
+    receives++;
+    int next = script_at < script_length ? script[script_at++].kind : 0;
+    if (!next) return false;
+    *lease = offer_lease;
+    if (next == 2) lease->seconds = 0;
+    *kind = next == 3 ? DHCP_ACK : next == 4 ? DHCP_NAK : DHCP_OFFER;
+    return true;
+}
+static bipolar dhcp_complete(bipolar handle, p8 *packet, positive room, p32 transaction,
+                             p8 *hardware, dhcp_lease *lease, socket_address_internet *peer,
+                             bool rebinding, const network_deadline *deadline)
+{
+    (void)handle; (void)packet; (void)room; (void)hardware; (void)lease; (void)deadline;
+    completes++;
+    completed.rebinding = rebinding; completed.peer = peer->host; completed.transaction = transaction;
+    completed.seconds = budget[begins - 1].seconds; completed.nanoseconds = budget[begins - 1].nanoseconds;
+    return complete_result;
+}
+/* PRODUCTION */
+
+static void reset(void)
+{
+    fail_random = fail_spread = fail_open = fail_begin_at_valid = false;
+    fail_begin_at = fail_send_at = -1; spread_byte = 0;
+    opens = closes = sends = begins = completes = receives = 0;
+    script_length = script_at = 0; complete_result = DHCP_OK;
+    memset(sent, 0, sizeof sent); memset(budget, 0, sizeof budget);
+    offer_lease = (dhcp_lease){.address = 0x0a000015, .mask = 0xffffff00,
+        .router = 0x0a000001, .nameserver = 0x0a000001, .server = 0x0a000002, .seconds = 3600};
+}
+static void play(int kind) { script[script_length++].kind = kind; }
+static const p8 *option(const p8 *packet, p8 code, positive *length)
+{
+    for (positive at = DHCP_HEAD + 4; at < 300 && packet[at] != DHCP_OPTION_END;) {
+        if (packet[at] == DHCP_OPTION_PAD) { at++; continue; }
+        if (packet[at] == code) { *length = packet[at + 1]; return packet + at + 2; }
+        at += 2 + packet[at + 1];
+    }
+    return NULL;
+}
+static p8 packet_kind(int index)
+{ positive length = 0; const p8 *kind = option(sent[index].bytes, DHCP_OPTION_TYPE, &length);
+  require(kind && length == 1, "the message type is present"); return *kind; }
+static p32 option_address(int index, p8 code)
+{ positive length = 0; const p8 *value = option(sent[index].bytes, code, &length);
+  if (!value) return 0; require(length == 4, "an address option is four bytes"); return network_load_32(value); }
+static bool has_option(int index, p8 code) { positive length; return option(sent[index].bytes, code, &length) != NULL; }
+
+static positive expected_wait(int attempt, p8 spread)
+{
+    if (attempt == 0) return 50;
+    if (attempt < 12) return 250;
+    return (positive)(attempt - 11) * 2000 + (positive)spread * 2000 / 255 - 1000;
+}
+
+int main(void)
+{
+    p8 hardware[6] = {2, 0, 0, 0, 0, 7};
+    dhcp_lease lease;
+    unsigned long checks = 0;
+#define check(ok, what) do { checks++; require((ok), what); } while (0)
+
+    /* Silence: twenty DISCOVERs, each its own wait, one socket. */
+    p8 spreads[] = {0, 1, 128, 254, 255};
+    for (unsigned s = 0; s < sizeof spreads; s++) {
+        reset(); spread_byte = spreads[s];
+        check(dhcp_ask("x", hardware, &lease) == DHCP_NO_OFFER, "silence ends without an offer");
+        check(opens == 1 && closes == 1, "one socket, closed once");
+        check(sends == 20 && begins == 20 && receives == 20, "twenty attempts");
+        for (int i = 0; i < 20; i++) {
+            positive wait = expected_wait(i, spreads[s]);
+            check(packet_kind(i) == DHCP_DISCOVER, "a DISCOVER each attempt");
+            check(sent[i].has_to && sent[i].to.host == HOST_BROADCAST && sent[i].to.port == DHCP_SERVER_PORT,
+                  "to the broadcast address, server port");
+            check((sent[i].bytes[10] & 0x80) != 0, "asking for a broadcast reply");
+            check(sent[i].size == 300, "a 300 byte packet");
+            check(network_load_32(sent[i].bytes + 4) == network_load_32(sent[0].bytes + 4), "one transaction id");
+            check(budget[i].seconds == wait / 1000 && budget[i].nanoseconds == wait % 1000 * 1000000,
+                  "the wait of this attempt");
+        }
+        check(open_host == HOST_ANY && open_broadcast, "bound to any address, broadcast allowed");
+    }
+    /* No entropy for the spread: the middle of it. */
+    reset(); fail_spread = true;
+    check(dhcp_ask("x", hardware, &lease) == DHCP_NO_OFFER && sends == 20, "no spread, same twenty");
+    check(budget[12].seconds * 1000 + budget[12].nanoseconds / 1000000 == expected_wait(12, 128),
+          "a refused spread draws the middle");
+    /* No transaction id, no socket. */
+    reset(); fail_random = true;
+    check(dhcp_ask("x", hardware, &lease) == DHCP_NO_RANDOM && opens == 0 && sends == 0, "no entropy");
+    reset(); fail_open = true;
+    check(dhcp_ask("x", hardware, &lease) == DHCP_NO_SOCKET && sends == 0 && closes == 0, "no socket");
+
+    /* An OFFER is answered by one REQUEST that names it. */
+    struct { bipolar result; bipolar expect; int sends_after; } finals[] = {
+        {DHCP_OK, DHCP_OK, 2}, {DHCP_REFUSED, DHCP_REFUSED, 2}, {DHCP_NO_SOCKET, DHCP_NO_SOCKET, 2}};
+    for (unsigned f = 0; f < 3; f++) {
+        reset(); play(1); complete_result = finals[f].result;
+        check(dhcp_ask("x", hardware, &lease) == finals[f].expect, "the exchange's answer is returned");
+        check(sends == finals[f].sends_after && completes == 1 && closes == 1 && opens == 1, "DISCOVER, REQUEST, one completion");
+        check(packet_kind(0) == DHCP_DISCOVER && packet_kind(1) == DHCP_REQUEST, "DISCOVER then REQUEST");
+        check(option_address(1, DHCP_OPTION_REQUESTED) == 0x0a000015, "the offered address is asked for");
+        check(option_address(1, DHCP_OPTION_SERVER) == 0x0a000002, "from the server that offered it");
+        check(network_load_32(sent[1].bytes + 12) == 0, "ciaddr stays zero");
+        check((sent[1].bytes[10] & 0x80) != 0 && sent[1].to.host == HOST_BROADCAST, "broadcast");
+        check(!completed.rebinding && completed.transaction == network_load_32(sent[0].bytes + 4), "the same transaction");
+        check(completed.seconds == 0 && completed.nanoseconds == 250000000, "an ACK gets at least a quarter second");
+    }
+    /* A silent server after the REQUEST: the next attempt discovers again. */
+    reset(); play(1); complete_result = DHCP_NO_OFFER;
+    check(dhcp_ask("x", hardware, &lease) == DHCP_NO_OFFER && completes == 1 && sends == 21, "a lost ACK is another DISCOVER");
+    check(packet_kind(1) == DHCP_REQUEST && packet_kind(2) == DHCP_DISCOVER, "REQUEST then DISCOVER again");
+    /* The ACK window of a later attempt is its own wait. */
+    reset(); for (int i = 0; i < 13; i++) play(0);
+    play(1); complete_result = DHCP_OK; spread_byte = 255;
+    check(dhcp_ask("x", hardware, &lease) == DHCP_OK, "an offer at a late attempt");
+    /* attempt 13 waits (13 - 11) * 2000 + 2000 - 1000 = 5000 ms. */
+    check(completed.seconds == 5 && completed.nanoseconds == 0, "the ACK window follows the attempt's wait");
+    /* A REQUEST that cannot leave, or a window that cannot start, is no exchange. */
+    reset(); play(1); fail_send_at = 1;
+    check(dhcp_ask("x", hardware, &lease) == DHCP_NO_OFFER && completes == 0 && sends == 21, "a refused REQUEST ends the attempt");
+    reset(); play(1); fail_begin_at = 1; fail_begin_at_valid = true;
+    check(dhcp_ask("x", hardware, &lease) == DHCP_NO_OFFER && completes == 0, "no window, no completion");
+    /* What is not a usable OFFER is rejected against the allowance. */
+    int junk[] = {2, 3, 4};
+    for (unsigned j = 0; j < 3; j++) {
+        for (int count = 62; count <= 66; count++) {
+            reset();
+            for (int i = 0; i < count; i++) play(junk[j]);
+            play(1); complete_result = DHCP_OK;
+            check(dhcp_ask("x", hardware, &lease) == DHCP_OK, "the offer is taken in the end");
+            /* 64 rejections are allowed, the 65th ends the attempt: the usable
+               offer is then read in the next one. */
+            check(packet_kind(sends - 1) == DHCP_REQUEST, "the last send is the REQUEST");
+            check(sends == (count <= 64 ? 2 : 3), "the allowance is per attempt and exactly 64");
+        }
+    }
+
+    /* Keeping an address. */
+    dhcp_lease held = {.address = 0x0a000015, .mask = 0xffffff00, .router = 0x0a000001,
+                       .nameserver = 0x0a000001, .server = 0x0a000002, .seconds = 3600};
+    reset(); lease = held;
+    check(dhcp_reacquire("x", hardware, &lease, false, 0) == DHCP_NO_OFFER && opens == 0, "no time to wait, no exchange");
+    reset(); lease = held; lease.seconds = 0;
+    check(dhcp_reacquire("x", hardware, &lease, false, 5) == DHCP_NO_OFFER && opens == 0, "a lease that is no lease");
+    reset(); lease = held; fail_random = true;
+    check(dhcp_reacquire("x", hardware, &lease, false, 5) == DHCP_NO_RANDOM && opens == 0, "renewal needs entropy");
+    reset(); lease = held; fail_open = true;
+    check(dhcp_reacquire("x", hardware, &lease, true, 5) == DHCP_NO_SOCKET && sends == 0, "renewal needs a socket");
+    for (int rebinding = 0; rebinding < 2; rebinding++) {
+        reset(); lease = held; complete_result = DHCP_OK;
+        check(dhcp_reacquire("x", hardware, &lease, rebinding, 7) == DHCP_OK, "the answer is returned");
+        check(opens == 1 && closes == 1 && sends == 1 && completes == 1, "one REQUEST, one completion");
+        check(open_host == held.address && open_broadcast == (bool)rebinding, "bound to the held address");
+        check(packet_kind(0) == DHCP_REQUEST, "a REQUEST");
+        check(network_load_32(sent[0].bytes + 12) == held.address, "ciaddr is the held address");
+        check(!has_option(0, DHCP_OPTION_REQUESTED) && !has_option(0, DHCP_OPTION_SERVER), "no requested address or server id");
+        check(sent[0].to.host == (rebinding ? HOST_BROADCAST : held.server) && sent[0].to.port == DHCP_SERVER_PORT, "unicast to the server, broadcast when rebinding");
+        check(((sent[0].bytes[10] & 0x80) != 0) == (bool)rebinding, "the broadcast flag follows rebinding");
+        check(completed.rebinding == (bool)rebinding && completed.peer == held.server, "the server is the expected peer");
+        check(completed.seconds == 7 && completed.nanoseconds == 0, "the caller's wait");
+    }
+    for (int kind = 0; kind < 3; kind++) {
+        bipolar results[] = {DHCP_OK, DHCP_REFUSED, DHCP_NO_OFFER};
+        reset(); lease = held; complete_result = results[kind];
+        check(dhcp_reacquire("x", hardware, &lease, false, 3) == results[kind], "the completion's answer passes through");
+    }
+    reset(); lease = held; fail_send_at = 0;
+    check(dhcp_reacquire("x", hardware, &lease, false, 3) == DHCP_NO_SOCKET && completes == 0 && closes == 1, "a refused send");
+    reset(); lease = held; fail_begin_at = 0; fail_begin_at_valid = true;
+    check(dhcp_reacquire("x", hardware, &lease, false, 3) == DHCP_NO_OFFER && completes == 0 && closes == 1, "no window");
+
+    /* Giving an address back. */
+    reset(); lease = held; lease.address = 0;
+    check(dhcp_decline("x", hardware, &lease) == DHCP_NO_OFFER && opens == 0, "nothing to decline");
+    reset(); lease = held; lease.server = 0;
+    check(dhcp_decline("x", hardware, &lease) == DHCP_NO_OFFER && opens == 0, "no server to tell");
+    reset(); lease = held; fail_random = true;
+    check(dhcp_decline("x", hardware, &lease) == DHCP_NO_RANDOM && opens == 0, "a decline needs a transaction");
+    reset(); lease = held; fail_open = true;
+    check(dhcp_decline("x", hardware, &lease) == DHCP_NO_SOCKET && sends == 0, "a decline needs a socket");
+    reset(); lease = held;
+    check(dhcp_decline("x", hardware, &lease) == DHCP_OK && sends == 1 && closes == 1, "a decline is one send");
+    check(packet_kind(0) == DHCP_DECLINE && sent[0].size == 300, "a DECLINE, 300 bytes");
+    check(option_address(0, DHCP_OPTION_REQUESTED) == held.address && option_address(0, DHCP_OPTION_SERVER) == held.server,
+          "it names the address and the server");
+    check(!has_option(0, DHCP_OPTION_ASK), "and asks for nothing");
+    check(sent[0].to.host == HOST_BROADCAST && sent[0].to.port == DHCP_SERVER_PORT && open_broadcast, "broadcast");
+    check(network_load_32(sent[0].bytes + 12) == 0, "ciaddr zero");
+    reset(); lease = held; fail_send_at = 0;
+    check(dhcp_decline("x", hardware, &lease) == DHCP_NO_SOCKET && closes == 1, "a refused decline is a failure");
+
+    /* The timers of a lease: T1 < T2 < the lifetime, or the defaults. */
+    p32 seconds_set[] = {1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 100, 3600, 86400, 0x7fffffff, 0x80000000u, 0xfffffffeu, 0xffffffffu};
+    for (unsigned s = 0; s < sizeof seconds_set / sizeof *seconds_set; s++)
+        for (unsigned a = 0; a < 12; a++)
+            for (unsigned b = 0; b < 12; b++) {
+                p32 total = seconds_set[s];
+                p32 values[12] = {0, 1, 2, total / 2 - 1, total / 2, total / 2 + 1, total - 2, total - 1, total,
+                                  total + 1, 0x7fffffff, 0xffffffffu};
+                p32 given_renewal = values[a], given_rebinding = values[b];
+                dhcp_lease timed = {.seconds = total, .renewal = given_renewal, .rebinding = given_rebinding};
+                bool ok = dhcp_lease_timers(&timed);
+                if (total < 3) {
+                    check(ok && !timed.renewal && !timed.rebinding, "a lease under three seconds keeps no timers");
+                    continue;
+                }
+                p32 default_renewal = total / 2, default_rebinding = total - (p32)(((uint64_t)total + 7) / 8);
+                p32 renewal = given_renewal ? given_renewal : default_renewal;
+                p32 rebinding = given_rebinding ? given_rebinding : default_rebinding;
+                if (!(renewal && renewal < rebinding && rebinding < total)) { renewal = default_renewal; rebinding = default_rebinding; }
+                check(ok && timed.renewal == renewal && timed.rebinding == rebinding, "timers are given or default, in order");
+                check(timed.renewal < timed.rebinding && timed.rebinding < total, "and always strictly ordered");
+            }
+    dhcp_lease none = {.seconds = 0, .renewal = 5, .rebinding = 9};
+    check(!dhcp_lease_timers(&none) && none.renewal == 5, "a zero lifetime is refused and left alone");
+    check(!dhcp_lease_timers(NULL), "no lease, no timers");
+
+    printf("dhcp exchange %lu/%lu\n", checks, checks);
+    return 0;
+}
+'''
+    constants = ul_c_span(net, r"^#define DHCP_CLIENT_PORT", r"^static bool dhcp_transaction_early")
+    production = "\n".join((
+        ul_c_function(wait, "network_discard_one"),
+        ul_c_function(net, "dhcp_mask_valid"),
+        ul_c_function(net, "dhcp_lease_timers"),
+        ul_c_function(net, "dhcp_build"),
+        ul_c_function(net, "dhcp_address_unicast"),
+        ul_c_function(net, "dhcp_prefix_clear"),
+        ul_c_function(net, "dhcp_lease_usable"),
+        ul_c_function(net, "dhcp_ask"),
+        ul_c_function(net, "dhcp_reacquire"),
+        ul_c_function(net, "dhcp_decline")))
+    source = source.replace("/* CONSTANTS */", constants).replace("/* PRODUCTION */", production)
+    compiler = shutil.which("clang")
+    if not compiler:
+        print("net dhcp exchange: NOT RUN -- needs clang with ASan/UBSan")
+        return 2
+    with tempfile.TemporaryDirectory(prefix="net-dhcp-exchange-") as temporary:
+        unit = Path(temporary) / "exchange.c"
+        binary = Path(temporary) / "exchange"
+        unit.write_text(source)
+        built = subprocess.run([compiler, "-std=gnu11", "-O1", "-g", "-w",
+                                "-fsanitize=address,undefined", str(unit),
+                                "-o", str(binary)], capture_output=True, text=True)
+        checks(built.returncode == 0, "production DHCP exchanges compile over the seam")
+        if built.returncode:
+            print(built.stderr[-3000:])
+        else:
+            ran = subprocess.run([str(binary)], capture_output=True, text=True, timeout=120)
+            print("  " + ran.stdout.strip()) if ran.stdout.strip() else None
+            if ran.returncode:
+                print(ran.stderr[-3000:])
+            tally = re.search(r"dhcp exchange (\d+)/(\d+)", ran.stdout)
+            checks(ran.returncode == 0 and tally is not None,
+                   "every DHCP exchange, wait, packet field and failure matches the written expectation")
+    return checks.verdict("net dhcp exchange", "net-dhcp-exchange")
+
+
+def harness_net_exhaustive_proof(argv):
+    """Small security predicates of src/net/net.c, proved over their whole domains.
+
+    Each production function is compiled beside a specification written here
+    from the RFC or the policy its comment states, and the two are compared on
+    every input there is: every IPv4 address for the public-address rule, the
+    unicast rule and the mask rules; every address under every prefix length
+    for the lease's prefix rule; every four-byte DER length head at every
+    truncation; every OBJECT IDENTIFIER content of up to four bytes; every path
+    segment of up to four bytes and, over the six bytes it tells apart, up to
+    nine; every lease lifetime for the default renewal and rebinding times.
+    Agreement on all of them is a proof by exhaustion, of these functions
+    against these specifications; it says nothing about a function not named.
+
+        python3 test/differential.py --harness net_exhaustive_proof [--slices N] [PROOF...]
+    """
+    slices = os.cpu_count() or 4
+    if argv[:1] == ["--slices"] and len(argv) > 1:
+        slices = int(argv[1])
+        argv = argv[2:]
+    chosen = set(argv)
+    checks = Checks()
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    template = TEMPLATE_NET_EXHAUSTIVE
+    production = "\n".join([ul_c_typedefs(net, "dhcp_lease", "dhcp_gathered")] + [
+        ul_c_function(net, name) for name in (
+            "http_address_public", "dhcp_mask_valid", "dhcp_prefix_of",
+            "dhcp_address_unicast", "dhcp_prefix_clear", "dhcp_lease_timers",
+            "tls_asn1_length", "tls_oid_content_der", "http_dot_segment",
+            "dhcp_walk")])
+    source = template.replace("/* BYTE_READER */", byte_reader_source()).replace(
+        "/* PRODUCTION */", production)
+    compiler = shutil.which("cc") or shutil.which("clang")
+    with tempfile.TemporaryDirectory(prefix="net-exhaustive-") as temporary:
+        unit = Path(temporary) / "proof.c"
+        binary = Path(temporary) / "proof"
+        unit.write_text(source)
+        built = subprocess.run([compiler, "-std=gnu11", "-O2", "-w", str(unit), "-o",
+                                str(binary)], capture_output=True, text=True)
+        guarded = Path(temporary) / "proof-asan"
+        if not built.returncode:
+            built = subprocess.run([compiler, "-std=gnu11", "-O1", "-w",
+                                    "-fsanitize=address,undefined",
+                                    "-fno-sanitize-recover=all", str(unit), "-o",
+                                    str(guarded)], capture_output=True, text=True)
+        checks(built.returncode == 0, "the exhaustive proofs compile")
+        if built.returncode:
+            print(built.stderr[-3000:])
+            return checks.verdict("net exhaustive proof", "net-exhaustive-proof")
+        expected = {"public": 1 << 32, "mask": 1 << 32, "clear": 33 << 32,
+                    "der": 5 << 32, "oid": (1 << 8) + (1 << 16) + (1 << 24) + (1 << 32),
+                    "dots": 1 + (1 << 8) + (1 << 16) + (1 << 24) + (1 << 32) +
+                            sum(6 ** n for n in range(5, 10)),
+                    "timers": 1 << 32,
+                    "walk": 2 * sum(8 ** n for n in range(11))}
+        for proof, total in expected.items():
+            if chosen and proof not in chosen:
+                continue
+            started = time.monotonic()
+            program = guarded if proof == "walk" else binary
+            runs = [subprocess.Popen([str(program), proof, str(index), str(slices)],
+                                     stdout=subprocess.PIPE, text=True)
+                    for index in range(slices)]
+            seen = reached = 0
+            failed = []
+            for run in runs:
+                out, _ = run.communicate()
+                for line in out.splitlines():
+                    if line.startswith("FAIL"):
+                        failed.append(line)
+                    elif line.startswith(proof + " "):
+                        seen += int(line.split()[1])
+                        reached += int(line.split()[3])
+                failed += [] if run.returncode == 0 else ["exit %d" % run.returncode]
+            for line in failed[:6]:
+                print("  " + line)
+            print("  %-7s %d inputs, %d of them accepted, %.1f s" % (
+                proof, seen, reached, time.monotonic() - started))
+            checks(not failed and seen == total,
+                   "%s: every input agrees with its specification (%d of %d seen)" %
+                   (proof, seen, total))
+            checks(0 < reached < seen,
+                   "%s: both answers occur, so the agreement is not vacuous" % proof)
+    return checks.verdict("net exhaustive proof", "net-exhaustive-proof")
+
+
+TEMPLATE_NET_EXHAUSTIVE = r'''#include <stdint.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+typedef uint8_t p8; typedef uint16_t p16; typedef uint32_t p32; typedef uint64_t p64;
+typedef int8_t b8; typedef int32_t b32; typedef uint64_t positive; typedef int64_t bipolar;
+typedef void *address_any; typedef const char *string_address;
+#define address_to *
+#define address_of &
+#define null NULL
+#define COLD
+#define CONST
+#define PURE
+#define INLINE
+#define TLS_OK 0
+#define TLS_FAIL (-1)
+#define min(a, b) ((a) < (b) ? (a) : (b))
+#define DHCP_OPTION_PAD 0
+#define DHCP_OPTION_END 255
+#define DHCP_OPTION_OVERLOAD 52
+#define memory_copy memmove
+static positive memory_span_byte(const void *block, p8 byte, positive size)
+{ const p8 *at = block; positive i = 0; while (i < size && at[i] == byte) i++; return i; }
+/* BYTE_READER */
+/* PRODUCTION */
+
+static unsigned long failures;
+static void fail(const char *what, unsigned long long a, unsigned long long b)
+{
+        if (failures++ < 8)
+                printf("FAIL %s %llx %llx\n", what, a, b);
+}
+
+/* ---- the specifications, written from the RFCs and the stated policy ---- */
+static bool in_block(p32 ip, p32 net, unsigned bits)
+{ p32 mask = bits ? ~0u << (32 - bits) : 0; return (ip & mask) == net; }
+/* Not public: this network, 10/8, shared 100.64/10, loopback, link-local,
+   172.16/12, IETF protocol 192.0.0/24, 192.168/16, benchmarking 198.18/15,
+   multicast and reserved 224/3 (which holds the limited broadcast). */
+static bool spec_public(p32 ip)
+{
+        static const struct { p32 net; unsigned bits; } inside[] = {
+            {0x00000000, 8}, {0x0a000000, 8}, {0x64400000, 10}, {0x7f000000, 8},
+            {0xa9fe0000, 16}, {0xac100000, 12}, {0xc0000000, 24}, {0xc0a80000, 16},
+            {0xc6120000, 15}, {0xe0000000, 3}};
+        for (unsigned i = 0; i < sizeof inside / sizeof *inside; i++)
+                if (in_block(ip, inside[i].net, inside[i].bits)) return false;
+        return true;
+}
+static bool spec_mask(p32 m)
+{
+        if (!m) return true;
+        for (unsigned k = 1; k <= 32; k++) if (m == (p32)(~0ull << (32 - k))) return true;
+        return false;
+}
+static unsigned spec_prefix(p32 m) { unsigned n = 0; while (m) { n += m & 1; m >>= 1; } return n; }
+static bool spec_unicast(p32 a) { return !in_block(a, 0, 8) && !in_block(a, 0x7f000000, 8) && !in_block(a, 0xe0000000, 3); }
+static bool spec_prefix_clear(p32 addr, p32 mask)
+{
+        p32 m = mask ? mask : 0xffffff00u;
+        p64 lo = addr & m, hi = lo | (p32)~m;
+        /* the prefix's addresses, as an interval, against each block's */
+        if (lo <= 0x00ffffffu) return false;
+        if (lo <= 0x7fffffffu && hi >= 0x7f000000u) return false;
+        if (hi >= 0xe0000000u) return false;
+        return m >= 0xfffffffeu || (addr != lo && addr != hi);
+}
+/* DER definite length at the front of b[0..size): consumed and value, or -1. */
+static int spec_der_length(const p8 *b, unsigned size, unsigned *value)
+{
+        if (size < 1) return -1;
+        if (b[0] < 0x80) { *value = b[0]; return 1; }
+        unsigned n = b[0] & 0x7f;
+        if (n < 1 || n > 3 || size < 1 + n || b[1] == 0) return -1;
+        unsigned v = 0;
+        for (unsigned i = 0; i < n; i++) v = v << 8 | b[1 + i];
+        if (v < 0x80) return -1;
+        *value = v;
+        return 1 + n;
+}
+/* X.690 8.19: arcs in base 128, the last octet of each with bit 8 clear and
+   no arc starting 0x80; at least one octet; nothing after the last arc. */
+static bool spec_oid(const p8 *b, unsigned n)
+{
+        if (!n) return false;
+        unsigned at = 0;
+        while (at < n) {
+                if (b[at] == 0x80) return false;
+                while (b[at] & 0x80) { at++; if (at == n) return false; }
+                at++;
+        }
+        return true;
+}
+/* ".", "..", each dot spelled "." or "%2e" in either case; 0 otherwise. */
+static unsigned spec_dots(const char *s, unsigned n)
+{
+        unsigned dots = 0, at = 0;
+        while (at < n) {
+                if (s[at] == '.') at += 1;
+                else if (n - at >= 3 && s[at] == '%' && s[at + 1] == '2' && (s[at + 2] == 'e' || s[at + 2] == 'E')) at += 3;
+                else return 0;
+                dots++;
+        }
+        return dots == 1 || dots == 2 ? dots : 0;
+}
+
+/* RFC 2132 and 3396: options are code, length, value; PAD is one byte; END
+   ends the region and only PAD may follow it; a region that ends without END
+   is cut short; an option met twice is one option, its pieces joined, and of
+   it the first four bytes are kept; the overload option (52) is allowed once,
+   in the primary region, one byte long, 1 to 3. */
+static int spec_walk(const p8 *b, unsigned n, dhcp_gathered *gathered, p8 *overload)
+{
+        unsigned at = 0;
+        while (at < n) {
+                p8 code = b[at++];
+                if (code == 255) {
+                        for (; at < n; at++) if (b[at]) return -1;
+                        return 0;
+                }
+                if (code == 0) continue;
+                if (at >= n) return -1;
+                unsigned length = b[at++];
+                if (length > n - at) return -1;
+                if (code == 52) {
+                        if (!overload || *overload || length != 1 || !b[at] || b[at] > 3) return -1;
+                        *overload = b[at];
+                }
+                for (unsigned i = 0; i < length; i++) {
+                        if (gathered[code].length < 4) gathered[code].first[gathered[code].length] = b[at + i];
+                        gathered[code].length++;
+                }
+                at += length;
+        }
+        return -1;
+}
+
+int main(int argc, char **argv)
+{
+        const char *which = argv[1];
+        p64 slice = strtoull(argv[2], 0, 10), slices = strtoull(argv[3], 0, 10);
+        p64 from = (0x100000000ull * slice) / slices, to = (0x100000000ull * (slice + 1)) / slices;
+        unsigned long long seen = 0, reached = 0;
+
+        if (!strcmp(which, "public")) {
+                for (p64 ip = from; ip < to; ip++, seen++)
+                {
+                        bool public = http_address_public((p32)ip);
+                        reached += public;
+                        if (public != spec_public((p32)ip)) fail("public", ip, 0);
+                }
+        } else if (!strcmp(which, "mask")) {
+                for (p64 m = from; m < to; m++, seen++) {
+                        bool ok = dhcp_mask_valid((p32)m);
+                        reached += ok;
+                        if (ok != spec_mask((p32)m)) fail("mask", m, ok);
+                        if (ok && m && dhcp_prefix_of((p32)m) != spec_prefix((p32)m)) fail("prefix", m, 0);
+                        if (dhcp_address_unicast((p32)m) != spec_unicast((p32)m)) fail("unicast", m, 0);
+                }
+                if (!slice && dhcp_prefix_of(0) != 24) fail("prefix of zero", 0, 0);
+        } else if (!strcmp(which, "clear")) {
+                for (p64 addr = from; addr < to; addr++)
+                        for (unsigned k = 1; k <= 33; k++, seen++) {
+                                /* 1 to 32 bits, and 33 for the mask a server
+                                   left out, which the lease reads as /24. */
+                                p32 mask = k == 33 ? 0 : (p32)(~0ull << (32 - k));
+                                bool clear = dhcp_prefix_clear((p32)addr, mask);
+                                reached += clear;
+                                if (clear != spec_prefix_clear((p32)addr, mask))
+                                        fail("prefix_clear", addr, mask);
+                        }
+        } else if (!strcmp(which, "der")) {
+                for (p64 word = from; word < to; word++)
+                        for (unsigned size = 0; size <= 4; size++, seen++) {
+                                p8 b[4] = {(p8)(word >> 24), (p8)(word >> 16), (p8)(word >> 8), (p8)word};
+                                positive at = 0, length = 0;
+                                unsigned value = 0;
+                                int want = spec_der_length(b, size, &value);
+                                bipolar got = tls_asn1_length(b, size, &at, &length);
+                                reached += got == TLS_OK;
+                                if ((got == TLS_OK) != (want >= 0) ||
+                                    (want >= 0 && (at != (positive)want || length != value)))
+                                        fail("der length", word, size);
+                        }
+        } else if (!strcmp(which, "oid")) {
+                for (p64 word = from; word < to; word++)
+                        for (unsigned n = 1; n <= 4; n++) {
+                                if (n < 4 && (word >> (8 * n))) continue;  /* shorter strings once */
+                                p8 b[4];
+                                for (unsigned i = 0; i < n; i++) b[i] = (p8)(word >> (8 * (n - 1 - i)));
+                                seen++;
+                                bool oid = tls_oid_content_der(b, n);
+                                reached += oid;
+                                if (oid != spec_oid(b, n)) fail("oid", word, n);
+                        }
+                if (!slice && tls_oid_content_der((p8 *)"", 0)) fail("empty oid", 0, 0);
+        } else if (!strcmp(which, "dots")) {
+                /* Every string of up to four bytes, then longer ones over the
+                   bytes the function tells apart: '.', '%', '2', 'e', 'E' and
+                   one stand-in for every other byte. */
+                for (p64 word = from; word < to; word++)
+                        for (unsigned n = 0; n <= 4; n++) {
+                                if (n < 4 && (word >> (8 * n))) continue;
+                                char s[4];
+                                for (unsigned i = 0; i < n; i++) s[i] = (char)(word >> (8 * (n - 1 - i)));
+                                seen++;
+                                positive dots = http_dot_segment(s, n);
+                                reached += dots != 0;
+                                if (dots != spec_dots(s, n)) fail("dots", word, n);
+                        }
+                if (!slice) {
+                        static const char alphabet[] = ".%2eEx";
+                        for (unsigned n = 5; n <= 9; n++) {
+                                unsigned long total = 1;
+                                for (unsigned i = 0; i < n; i++) total *= 6;
+                                for (unsigned long code = 0; code < total; code++, seen++) {
+                                        char s[9]; unsigned long c = code;
+                                        for (unsigned i = 0; i < n; i++) { s[i] = alphabet[c % 6]; c /= 6; }
+                                        if (http_dot_segment(s, n) != spec_dots(s, n)) fail("dots long", code, n);
+                                }
+                        }
+                }
+        } else if (!strcmp(which, "timers")) {
+                for (p64 s = from; s < to; s++, seen++) {
+                        if (s < 3) continue;
+                        p32 renewal = (p32)(s / 2), rebinding = (p32)(s - (s + 7) / 8);
+                        if (!(renewal && renewal < rebinding && rebinding < s)) fail("default timers", s, 0);
+                        dhcp_lease lease = {.seconds = (p32)s};
+                        if (!dhcp_lease_timers(&lease) || lease.renewal != renewal || lease.rebinding != rebinding)
+                                fail("timers", s, 0);
+                        else
+                                reached++;
+                }
+        } else if (!strcmp(which, "walk")) {
+                /* Every DHCP option region of up to ten bytes over the bytes
+                   dhcp_walk tells apart: PAD 0, END 255, the overload code 52,
+                   two other codes (1 and 3, so two buckets are told apart),
+                   and lengths and overload values 0, 1, 2, 3 and 4 and one
+                   long length (9). Any other byte acts as one of these in
+                   every position it can stand in. Each region is a buffer of
+                   exactly its size, so a read past it is caught (the walk
+                   build runs under AddressSanitizer). */
+                static const p8 alphabet[] = {0, 1, 2, 3, 4, 52, 255, 9};
+                p64 total = 0;
+                for (unsigned n = 0; n <= 10; n++) total += 1ull << (3 * n);
+                p64 begin = total * slice / slices, finish = total * (slice + 1) / slices, code = 0;
+                for (unsigned n = 0; n <= 10; n++)
+                        for (p64 index = 0; index < 1ull << (3 * n); index++, code++) {
+                                if (code < begin || code >= finish) continue;
+                                p8 *region = malloc(n ? n : 1);
+                                p64 c = index;
+                                for (unsigned i = 0; i < n; i++) { region[i] = alphabet[c & 7]; c >>= 3; }
+                                for (int primary = 0; primary < 2; primary++) {
+                                        dhcp_gathered got[256], want[256];
+                                        p8 overload = 0, want_overload = 0;
+                                        memset(got, 0, sizeof got);
+                                        memset(want, 0, sizeof want);
+                                        bipolar result = dhcp_walk(region, n, got, primary ? &overload : NULL);
+                                        int expected = spec_walk(region, n, want, primary ? &want_overload : NULL);
+                                        seen++;
+                                        reached += !result && primary && overload;
+                                        if ((result == 0) != (expected == 0) ||
+                                            (!result && (overload != want_overload ||
+                                                         memcmp(got, want, sizeof got))))
+                                                fail("dhcp walk", index, n);
+                                }
+                                free(region);
+                        }
+        } else {
+                printf("unknown proof %s\n", which);
+                return 2;
+        }
+        printf("%s %llu %lu %llu\n", which, seen, failures, reached);
+        return failures != 0;
+}
+'''
+
+
+NET_PROOF_SHIM = r'''
+#include <stdint.h>
+#include <stdbool.h>
+#include <string.h>
+#include <stdlib.h>
+#include <assert.h>
+typedef uint8_t p8; typedef uint16_t p16; typedef uint32_t p32; typedef uint64_t p64;
+typedef int8_t b8; typedef int32_t b32; typedef uint64_t positive; typedef int64_t bipolar;
+typedef void *address_any; typedef char *string_address; typedef const char *const_string;
+#define address_to *
+#define address_of &
+#define null NULL
+#define end ((p8)0)
+#define fn void
+#define COLD
+#define CONST
+#define PURE
+#define INLINE
+#define MOONWATER_STRICT_NET 1
+#define STRICT_TIGHT 2
+#define min(a, b) ((a) < (b) ? (a) : (b))
+#define max(a, b) ((a) > (b) ? (a) : (b))
+#define memory_copy_apart memcpy
+#define memory_copy memmove
+#define memory_compare memcmp
+#define memory_fill(at, v, n) memset((at), (int)(v), (n))
+#define memory_zero(at, n) memset((at), 0, (n))
+#define string_get(s) (*(const unsigned char *)(s))
+#define string_is(s, c) (*(s) == (c))
+/* A proof that holds because nothing reached its assertions proves nothing:
+   each harness marks the outcome it is about, and a second run built with
+   NET_PROOF_REACH has to reach it. */
+#ifdef NET_PROOF_REACH
+#define REACHED() assert(!"reached")
+#else
+#define REACHED() ((void)0)
+#endif
+positive nondet_positive(void); p8 nondet_p8(void); p16 nondet_p16(void);
+p32 nondet_p32(void); _Bool nondet_bool(void); int nondet_int(void);
+/* What the parsers ask of lib.c, written as the contracts lib.c's routines
+   keep (their own checks hold the assembly to them). */
+static address_any memory_first_of(address_any block, int value, positive size)
+{ p8 *at = block; for (positive i = 0; i < size; i++) if (at[i] == (p8)value) return at + i; return NULL; }
+static positive string_length(const void *s) { const char *at = s; positive n = 0; while (at[n]) n++; return n; }
+static positive memory_span_without_byte(address_any block, p8 byte, positive size)
+{ p8 *found = memory_first_of(block, byte, size); return found ? (positive)(found - (p8 *)block) : size; }
+static positive memory_text_span(const void *block, positive size)
+{ const p8 *at = block; positive i = 0;
+  while (i < size && (at[i] == '\t' || (at[i] >= ' ' && at[i] != 127))) i++; return i; }
+static positive string_span_max(const char *s, positive bound, const b8 *set)
+{ positive i = 0; while (i < bound && s[i] && set[(p8)s[i]]) i++; return i; }
+static positive string_span_without_set(const char *s, const char *set)
+{ positive i = 0; while (s[i] && !strchr(set, s[i])) i++; return i; }
+static b32 memory_compare_ascii_case(const void *one, const void *two, positive n)
+{ const p8 *a = one, *b = two;
+  for (positive i = 0; i < n; i++) { p8 x = a[i], y = b[i];
+    if (x >= 'A' && x <= 'Z') x |= 32; if (y >= 'A' && y <= 'Z') y |= 32;
+    if (x != y) return 1; } return 0; }
+static bool byte_is_alnum(p8 b) { return (b >= '0' && b <= '9') || ((b | 32) >= 'a' && (b | 32) <= 'z'); }
+static bool byte_is_alpha(p8 b) { return (b | 32) >= 'a' && (b | 32) <= 'z'; }
+static bool byte_is_digit(p8 b) { return b >= '0' && b <= '9'; }
+static bool byte_is_blank(p8 b) { return b == ' ' || b == '\t'; }
+static bool byte_is_control(p8 b) { return b < 32 || b == 127; }
+static positive digit_known(p8 c, positive base)
+{ positive v = c >= '0' && c <= '9' ? c - '0' : (c | 32) >= 'a' && (c | 32) <= 'z' ? 10 + (c | 32) - 'a' : base;
+  return v < base ? v : base; }
+static bool string_digits_checked(string_address *text, positive base, positive *value)
+{ string_address at = *text; positive got = 0; bool any = false;
+  while (1) { positive d = digit_known(string_get(at), base); positive scaled;
+    if (d >= base) break;
+    if (__builtin_mul_overflow(got, base, &scaled) || __builtin_add_overflow(scaled, d, &got)) return false;
+    at++; any = true; }
+  if (!any) return false; *text = at; *value = got; return true; }
+static b8 string_set_blanks[256] = {[' '] = 1, ['\t'] = 1};
+static b8 string_set_http_token[256] = {['0' ... '9'] = 1, ['A' ... 'Z'] = 1, ['a' ... 'z'] = 1,
+    ['!'] = 1, ['#'] = 1, ['$'] = 1, ['%'] = 1, ['&'] = 1, ['\''] = 1, ['*'] = 1, ['+'] = 1,
+    ['-'] = 1, ['.'] = 1, ['^'] = 1, ['_'] = 1, ['`'] = 1, ['|'] = 1, ['~'] = 1};
+static address_any memory_search(const void *block, positive size, const void *needle, positive n)
+{ const p8 *h = block; if (!n || n > size) return NULL;
+  for (positive i = 0; i + n <= size; i++) if (!memcmp(h + i, needle, n)) return (address_any)(h + i);
+  return NULL; }
+'''
+
+# (name, unwind, harness C, production function names, extra C before production)
+NET_PROOFS = [
+("byte_reader", 6, r'''
+/* Any sequence of reads, on a buffer of any length: every byte a read hands
+   back lies inside the buffer, and a failed reader stays failed and empty. */
+int main(void)
+{
+        positive length = nondet_positive();
+        __CPROVER_assume(length < ((positive)1 << 40));
+        p8 *buffer = malloc(length);
+        __CPROVER_assume(buffer != NULL);
+        byte_reader reader = byte_reader_open(buffer, length);
+        for (int step = 0; step < 4; step++)
+        {
+                bool failed = !byte_reader_ok(&reader);
+                positive left = byte_reader_left(&reader);
+                const p8 *here = reader.bytes;
+                positive count = nondet_positive();
+                int kind = nondet_int();
+                if (kind == 0) {
+                        const p8 *taken = byte_reader_take(&reader, count);
+                        if (taken) { REACHED(); assert(!failed && count <= left && taken == here);
+                                     assert(reader.left == left - count); }
+                        else assert(!byte_reader_ok(&reader) && !byte_reader_left(&reader));
+                } else if (kind == 1) {
+                        byte_reader window = byte_reader_window(&reader, count);
+                        assert(window.left <= left);
+                        if (byte_reader_ok(&window) && window.left)
+                                assert(window.bytes >= buffer && window.bytes + window.left <= buffer + length);
+                } else if (kind == 2) {
+                        byte_reader window = byte_reader_vector16(&reader);
+                        if (byte_reader_ok(&window) && window.left)
+                                assert(window.bytes >= buffer && window.bytes + window.left <= buffer + length);
+                } else if (kind == 3) {
+                        (void)byte_reader_u32(&reader);
+                } else {
+                        (void)byte_reader_u8(&reader);
+                }
+                if (failed) assert(!byte_reader_ok(&reader) && !byte_reader_left(&reader));
+                if (byte_reader_ok(&reader) && reader.left)
+                        assert(reader.bytes >= buffer && reader.bytes + reader.left <= buffer + length);
+                assert(reader.left <= left);
+        }
+        return 0;
+}
+''', [], ""),
+("byte_store", 2, r'''
+/* An append of any length to a store of any room writes inside the room. */
+int main(void)
+{
+        positive room = nondet_positive(), used = nondet_positive(), length = nondet_positive();
+        __CPROVER_assume(room < 64 && length < 64);
+        p8 *bytes = malloc(room ? room : 1), *data = malloc(length ? length : 1);
+        __CPROVER_assume(bytes && data);
+        byte_store store = {bytes, room, used};
+        bool ok = byte_store_append_exact(&store, data, length);
+        if (ok) { REACHED(); assert(used <= room && length <= room - used && store.used == used + length); }
+        else assert(store.used == used);
+        return 0;
+}
+''', [], ""),
+("dns_copy_name", 18, r'''
+#define DNS_MALFORMED (-3)
+#define DNS_NAME_MAX 255
+#define DNS_POINTER_HOPS 127
+/* PRODUCTION */
+#define N 7
+int main(void)
+{
+        p8 message[N], into[64];
+        positive size = nondet_positive(), at = nondet_positive(), room = nondet_positive();
+        positive ended = 7, pointers = nondet_positive();
+        bool shared = nondet_bool();
+        __CPROVER_assume(size <= N && at <= N + 1 && room <= 64);
+        positive before = pointers;
+        bipolar got = dns_copy_name(message, size, at, into, room, &ended,
+                                    shared ? &pointers : null);
+        if (got >= 0) {
+                if (got > 4) REACHED();
+                assert(got >= 1 && got <= DNS_NAME_MAX && (positive)got <= room);
+                assert(into[got - 1] == 0);
+                assert(ended > at && ended <= size);
+                assert(!shared || pointers <= before);
+        }
+        return 0;
+}
+''', ["dns_copy_name"], ""),
+("tls_asn1", 6, r'''
+/* PRODUCTION */
+#define N 8
+int main(void)
+{
+        p8 bytes[N];
+        positive size = nondet_positive(), at = nondet_positive(), stop = 0, length = 0;
+        p8 tag = nondet_p8(); p8 *value = NULL;
+        __CPROVER_assume(size <= N && at <= N + 1);
+        positive start = at;
+        int which = nondet_int();
+        if (which == 0) {
+                if (tls_asn1_enter(bytes, size, tag, &at, &stop) == TLS_OK) {
+                        if (stop > at) REACHED();
+                        assert(start < at && at <= stop && stop <= size);
+                }
+        } else if (which == 1) {
+                if (tls_asn1_skip(bytes, size, &at) == TLS_OK)
+                        assert(start < at && at <= size);
+        } else {
+                if (tls_asn1_take(bytes, size, tag, &at, &value, &length) == TLS_OK)
+                        assert(value == bytes + start && length == at - start && at <= size);
+        }
+        return 0;
+}
+''', ["tls_asn1_length", "tls_asn1_enter", "tls_asn1_skip", "tls_asn1_take"], "#define TLS_OK 0\n#define TLS_FAIL (-1)\n"),
+("netlink_find", 14, r'''
+/* PRODUCTION */
+#define N 24
+int main(void)
+{
+        p8 bytes[N];
+        positive length = nondet_positive(), size = 99;
+        p16 type = nondet_p16();
+        __CPROVER_assume(length <= N);
+        p8 *value = netlink_find_span(bytes, length, type, &size);
+        if (value) {
+                if (size) REACHED();
+                assert(value >= bytes && size <= length && value + size <= bytes + length);
+        }
+        return 0;
+}
+''', ["netlink_attributes", "netlink_finding_take", "netlink_find_span"],
+ "#define NLA_TYPE_MASK 0x3fff\n#define netlink_align(value) (((value) + 3) & ~(positive)3)\n"
+ "typedef struct { p16 length; p16 type; } netlink_attribute;\n"
+ "typedef bool (*netlink_attribute_visitor)(p16 type, p8 *value, positive size, address_any context);\n"
+ "typedef struct { p16 type; address_any value; positive size; } netlink_finding;\n"),
+("http_head", 12, r'''
+/* PRODUCTION */
+#define N 10
+int main(void)
+{
+        p8 bytes[N];
+        positive size = nondet_positive();
+        __CPROVER_assume(size <= N);
+        bipolar header = http_header_end(bytes, size);
+        if (header >= 0) {
+                assert(header >= 2 && (positive)header <= size);
+                assert(bytes[header - 1] == '\n' && bytes[header - 2] == '\n' ||
+                       (header >= 4 && bytes[header - 1] == '\n' && bytes[header - 2] == '\r'));
+        }
+        http_response response = {.code = nondet_bool() ? 200 : 301};
+        http_framing_fields fields;
+        if (http_response_fields(bytes, size, &response, &fields)) {
+                REACHED();
+                assert(size >= 1 && bytes[size - 1] == '\n');
+                if (fields.transfer) assert((p8 *)fields.transfer >= bytes &&
+                        (p8 *)fields.transfer + fields.transfer_size <= bytes + size);
+                if (fields.length) assert((p8 *)fields.length >= bytes &&
+                        (p8 *)fields.length + fields.length_size <= bytes + size);
+                if (response.location) assert((p8 *)response.location >= bytes &&
+                        (p8 *)response.location + response.location_length <= bytes + size);
+        }
+        return 0;
+}
+''', ["http_header_end", "http_token_byte", "http_field_name", "http_line_valid",
+      "http_response_is_redirect", "http_response_fields"],
+ "typedef struct { b32 code; p8 body_kind; positive body_length; string_address location; positive location_length; } http_response;\n"
+ "typedef struct { string_address transfer; string_address length; positive transfer_size; positive length_size; } http_framing_fields;\n"),
+("http_chunk", 17, r'''
+/* PRODUCTION */
+#define N 10
+int main(void)
+{
+        p8 line[N];
+        positive length = nondet_positive(), chunk = 12345;
+        __CPROVER_assume(length <= N);
+        bipolar got = http_chunk_line(line, length, &chunk);
+        if (got == HTTP_OK) { if (chunk) REACHED(); assert(length >= 2 && line[length - 1] == '\n'); }
+        else assert(chunk == 12345);
+        bipolar trailer = http_trailer_line(line, length);
+        assert(trailer == 1 || trailer == 0 || trailer == HTTP_MALFORMED);
+        return 0;
+}
+''', ["http_token_byte", "http_field_name", "http_line_valid", "http_chunk_extensions_valid",
+      "http_chunk_line", "http_trailer_line"], "#define HTTP_OK 0\n#define HTTP_MALFORMED (-5)\n"),
+("http_url", 14, r'''
+/* PRODUCTION */
+#define N 10
+int main(void)
+{
+        char url[N + 1];
+        url[N] = 0;
+        p8 host[8];
+        p16 port = 1234;
+        string_address path = NULL;
+        bool tls = nondet_bool();
+        positive room = nondet_positive();
+        __CPROVER_assume(room <= sizeof host);
+        if (http_split_into(url, host, room, &port, &path, &tls) == HTTP_OK) {
+                positive length = strlen((char *)host);
+                if (port != 80 && port != 443) REACHED();
+                assert(length >= 1 && length < room);
+                for (positive i = 0; i < length; i++) assert(http_host_byte(host[i]));
+                assert(port >= 1);
+                if (__CPROVER_same_object(path, url))
+                        assert(path >= url && path <= url + N);
+                else
+                        assert(path[0] == '/' && !path[1]);
+        }
+        return 0;
+}
+''', ["http_host_byte", "http_scheme_length", "http_web_scheme", "http_split_into"],
+ "#define HTTP_OK 0\n#define HTTP_BAD_URL (-1)\n#define HTTP_SCHEME (-12)\n#define HTTP_PORT 80\n"
+ "#define HTTP_HTTPS_PORT 443\n#define HTTP_URL_MAX 2048\n"),
+("http_path", 12, r'''
+/* PRODUCTION */
+#define N 8
+static bool dot_free(const p8 *path, positive length)
+{
+        positive at = 0;
+        while (at < length) {
+                positive start = at + 1, stop = start;
+                while (stop < length && path[stop] != '/') stop++;
+                if (http_dot_segment((string_address)path + start, stop - start)) return false;
+                at = stop;
+        }
+        return true;
+}
+int main(void)
+{
+        p8 path[N + 1], copy[N + 1];
+        path[N] = 0;
+        __CPROVER_assume(path[0] == '/');
+        for (int i = 0; i < N; i++) __CPROVER_assume(path[i] != '?' && path[i] != '#');
+        positive before = strlen((char *)path);
+        http_path_simplify(path);
+        positive after = strlen((char *)path);
+        if (after < before) REACHED();
+        assert(after <= before && after >= 1 && path[0] == '/');
+        assert(dot_free(path, after));
+        memcpy(copy, path, N + 1);
+        http_path_simplify(copy);
+        assert(!memcmp(copy, path, after + 1));
+        return 0;
+}
+''', ["http_dot_segment", "http_path_simplify"], ""),
+]
+
+
+def harness_net_bounded_proof(argv):
+    """Bounded model checking of the network parsers with CBMC.
+
+    For every input up to each proof's size -- every byte, every length, every
+    starting offset and room a caller may pass -- CBMC proves that the
+    production function reads and writes only inside its objects, has no
+    pointer or signed overflow, terminates within the stated number of loop
+    iterations (an unwinding assertion, not a cut-off), and keeps the property
+    the proof asserts: a DNS name of at most 255 bytes ending in its root inside
+    the message, an ASN.1 value inside its parent, a netlink attribute inside
+    its datagram, a response field inside the head, a URL's host of host bytes
+    only, a path with no dot segment left that a second pass leaves alone. The
+    byte reader and the byte store are proved for buffers of any length.
+
+    The parsers call lib.c through the contracts written in NET_PROOF_SHIM;
+    lib.c's own checks hold its routines to them. A bound is a bound: a proof
+    for messages of up to N bytes is not one for longer messages, though the
+    reader and store proofs, which every parser reads and writes through, are
+    not bounded. Needs cbmc on PATH or in MOONWATER_CBMC; NOT RUN without it.
+
+        python3 test/differential.py --harness net_bounded_proof [NAME...]
+    """
+    cbmc = os.environ.get("MOONWATER_CBMC") or shutil.which("cbmc")
+    if not cbmc or not Path(cbmc).exists():
+        print("net bounded proof: NOT RUN -- needs cbmc (set MOONWATER_CBMC)")
+        return 2
+    checks = Checks()
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    chosen = set(argv)
+    common = NET_PROOF_SHIM + byte_reader_source() + byte_store_source()
+    with tempfile.TemporaryDirectory(prefix="net-bounded-") as temporary:
+        for name, unwind, harness, functions, extra in NET_PROOFS:
+            if chosen and name not in chosen:
+                continue
+            production = "\n".join(ul_c_function(net, function) for function in functions)
+            source = common + extra + harness.replace("/* PRODUCTION */", production)
+            unit = Path(temporary) / (name + ".c")
+            unit.write_text(source)
+            started = time.monotonic()
+            ran = subprocess.run(
+                [cbmc, str(unit), "--bounds-check", "--pointer-check",
+                 "--pointer-overflow-check", "--signed-overflow-check",
+                 "--unwind", str(unwind), "--unwinding-assertions",
+                 "--object-bits", "12"],
+                capture_output=True, text=True, timeout=3600)
+            proved = "VERIFICATION SUCCESSFUL" in ran.stdout
+            failed = [line for line in ran.stdout.splitlines() if ": FAILURE" in line]
+            reach = subprocess.run(
+                [cbmc, str(unit), "-D", "NET_PROOF_REACH", "--unwind", str(unwind),
+                 "--object-bits", "12", "--stop-on-fail"],
+                capture_output=True, text=True, timeout=3600)
+            reached = "VERIFICATION FAILED" in reach.stdout and '!"reached"' in reach.stdout
+            print("  %-14s %s, %s, in %.0f s" % (
+                name, "proved" if proved else "NOT proved",
+                "its outcome reached" if reached else "its outcome NOT reached",
+                time.monotonic() - started))
+            for line in failed[:6]:
+                print("    " + line.strip())
+            if not proved and not failed:
+                print(ran.stdout[-1500:] + ran.stderr[-1500:])
+            checks(proved, "%s: memory safety, termination and its property hold for every input in bound" % name)
+            checks(reached, "%s: the outcome the proof is about is reachable, so the proof is not vacuous" % name)
+    return checks.verdict("net bounded proof", "net-bounded-proof")
+
+
 def harness_net_math_proof(argv):
     """Machine-check finite arithmetic lemmas used by src/net/net.c."""
     del argv
@@ -62882,9 +64162,10 @@ def harness_security_hygiene(argv):
     security = ("tls_chains", "https_downgrade", "http_response_framing",
                 "tls_der_fuzz", "tls_hs_fuzz", "tls_fuzz", "msan_net", "pathname_race",
                 "dhcp_fuzz", "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "tls_peer",
-                "http_fuzz", "http_urls", "wifi_eapol_fuzz", "wifi_scan_fuzz",
+                "http_fuzz", "http_urls", "wifi_eapol_fuzz", "wifi_scan_fuzz", "wifi_key_state",
                 "bowl_sig_fuzz", "wget_mutation", "wget_hostile", "sntp_era", "net_netem",
                 "net_dependency_closure", "net_math_proof", "net_clock_fault", "net_wait_states", "net_parser_work_states",
+                "net_dhcp_exchange", "net_lease_transitions", "net_exhaustive_proof", "net_bounded_proof",
                 "protected_links", "hostile_strings", "state_cuts")
     for name in security + ("tls_verify_fuzz",):
         checks(name in HARNESS_CHECKS, "differential.py: %s is not registered" % name)
@@ -62948,6 +64229,17 @@ def harness_security_hygiene(argv):
             line = text.count("\n", 0, call.start()) + 1
             if path.name != "wait.c" or "static bool" not in text[call.start() - 12:call.start()]:
                 unbounded.append("%s:%d" % (path.relative_to(HARNESS_ROOT), line))
+    #   TLS_BENCH_ANCHOR trusts one more root and lets a fetch reach 127/8, so
+    #   only harness builds may define it; the image build and the lanes' own
+    #   shell never do, and the tight tier keeps no such hook.
+    benched = [str(path.relative_to(HARNESS_ROOT))
+               for path in [HARNESS_ROOT / "build.sh", HARNESS_ROOT / "test/run"] +
+               sorted(path for path in (HARNESS_ROOT / "src/build").rglob("*")
+                      if path.is_file()) +
+               sorted(path for path in (HARNESS_ROOT / "kernel").rglob("*")
+                      if path.is_file() and path.stat().st_size < 1_000_000)
+               if path.is_file() and "TLS_BENCH_" in path.read_text(errors="replace")]
+    checks(not benched, "a production build names TLS_BENCH_*: " + ", ".join(benched))
     checks(not blocking, "a blocking socket_receive in the network sources: " + ", ".join(blocking))
     checks(not unbounded,
            "network_stream_send_all has no deadline; use network_stream_send_all_for or _until: "
@@ -67891,6 +69183,9 @@ static p8 fz_sta_tk[16], fz_sta_gtk[4][16];
 static positive fz_sta_tk_when, fz_sta_gtk_when[4];
 static bool fz_sta_tk_set, fz_sta_gtk_set[4], fz_authorized;
 static int fz_installs;
+static bipolar fz_key_error;
+static bipolar fz_send_error;
+static p8 fz_gtk_draws;
 static const p8 fz_ap[6] = {2, 0, 0, 0, 1, 0}, fz_sta[6] = {2, 0, 0, 0, 2, 0};
 
 static bipolar socket_send(b32 handle, const void *data, positive size, b32 flags,
@@ -67905,6 +69200,8 @@ static bipolar socket_send(b32 handle, const void *data, positive size, b32 flag
         memcpy(fz_sent, data, size);
         fz_sent_length = size;
         fz_sends++;
+        if (fz_send_error)
+                return fz_send_error;
         return (bipolar)size;
 }
 
@@ -67959,10 +69256,12 @@ static bipolar nl80211_new_key(nl80211 *session, p32 index, p8 idx, p32 type, p8
         (void)session, (void)index, (void)seq;
         if (key_length != 16)
                 abort();
+        if (fz_key_error)
+                return fz_key_error;
         fz_installs++;
         if (type == NL80211_KEYTYPE_PAIRWISE)
         {
-                when = fz_made_when(0, key);
+                when = fz_made_when(4, key);
                 if (idx || !mac || memcmp(mac, fz_ap, 6) || group_default || !when ||
                     (fz_sta_tk_set && (!memcmp(key, fz_sta_tk, 16) || when <= fz_sta_tk_when)))
                         abort();
@@ -67971,7 +69270,7 @@ static bipolar nl80211_new_key(nl80211 *session, p32 index, p8 idx, p32 type, p8
                 fz_sta_tk_when = when;
                 return 0;
         }
-        when = idx && idx <= 3 ? fz_made_when(idx, key) : 0;
+        when = idx <= 3 ? fz_made_when(idx, key) : 0;
         if (!when || mac || seq_length != 6 || !group_default ||
             (fz_sta_gtk_set[idx] &&
              (!memcmp(key, fz_sta_gtk[idx], 16) || when <= fz_sta_gtk_when[idx])))
@@ -68071,6 +69370,7 @@ static bool fz_held_moved(const wifi_link *before)
         return memcmp(before->replay, fz_link.replay, 8) ||
                before->replay_set != fz_link.replay_set ||
                before->installed != fz_link.installed ||
+               before->gtk_installed != fz_link.gtk_installed ||
                memcmp(before->ptk, fz_link.ptk, 64) || memcmp(before->gtk, fz_link.gtk, 64);
 }
 
@@ -68171,12 +69471,10 @@ static positive fz_key_data(p8 *out, const p8 *kek, bool rsn)
 
 static void fz_new_gtk(void)
 {
-        static p8 turn;
-
         fz_take(fz_ap_gtk, 16);
-        fz_ap_gtk[0] ^= ++turn;
+        fz_ap_gtk[0] ^= ++fz_gtk_draws;
         fz_ap_gtk[1] ^= 0x5a;
-        fz_ap_gtk_idx = fz_ap_gtk_idx == 1 ? 2 : 1;
+        fz_ap_gtk_idx = (fz_ap_gtk_idx + 1) & 3;
         fz_made_add(fz_ap_gtk_idx, fz_ap_gtk);
 }
 
@@ -68198,6 +69496,9 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
         fz_sta_tk_set = fz_authorized = fz_pending_bent = false;
         fz_made_count = fz_order = fz_sta_tk_when = 0;
         fz_installs = 0;
+        fz_key_error = 0;
+        fz_send_error = 0;
+        fz_gtk_draws = 0;
         fz_draws = 0;
         memset(fz_sta_gtk_set, 0, sizeof fz_sta_gtk_set);
         memset(fz_sta_gtk_when, 0, sizeof fz_sta_gtk_when);
@@ -68231,7 +69532,7 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                 else if (op == 1 && fz_pending_set)     /* message 3 */
                 {
                         memcpy(fz_ap_tk, fz_pending + 32, 16);
-                        fz_made_add(0, fz_ap_tk);
+                        fz_made_add(4, fz_ap_tk);
                         fz_made_add(fz_ap_gtk_idx, fz_ap_gtk);
                         fz_replay++;
                         n = fz_key_data(wrapped, fz_pending + 16, true);
@@ -68418,7 +69719,7 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
 
                         //      The key data, element by element: what the
                         //      station must take is the first GTK KDE whose
-                        //      key id is not 0, before anything cut short.
+                        //      key id is in 0..3, before anything cut short.
                         n = 0;
                         for (positive item = 0; item < items && !cut; item++)
                         {
@@ -68445,7 +69746,7 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                                         if (body > 16)
                                                 plain[n + 16] = fz_byte();
                                         n += body;
-                                        if (kind == 0 && (id & 3) && !want)
+                                        if (kind == 0 && !want)
                                         {
                                                 want = true;
                                                 want_idx = id & 3;
@@ -68543,7 +69844,7 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                                 memcpy(fz_ap_tk, fz_pending + 32, 16);
                                 if (unwraps)
                                 {
-                                        fz_made_add(0, fz_ap_tk);
+                                        fz_made_add(4, fz_ap_tk);
                                         if (want)
                                                 fz_made_add(want_idx, want_key);
                                 }
@@ -68643,6 +69944,147 @@ def wifi_eapol_fuzz_source(net, host, checks):
     return "\n".join((crypto, "#include <ctype.h>", WIFI_EAPOL_FUZZ_SHIM, derive, link,
                       "static void wifi_rekey_offload(wifi_link *link);", step, take,
                       WIFI_EAPOL_FUZZ_DRIVER))
+
+
+def harness_wifi_key_state(argv):
+    """Authenticated GTK install/retry/roam transitions in all four key slots.
+    Uses the EAPOL production lift and real MIC/key-wrap crypto under ASan/UBSan;
+    records driver calls so a missing install cannot pass by comparing zero bytes.
+    """
+    del argv
+    clang = shutil.which("clang")
+    if not clang:
+        print("wifi key state: NOT RUN -- needs clang with ASan/UBSan")
+        return 2
+    host = (HARNESS_ROOT / "src/sh/host.c").read_text()
+    source = wifi_eapol_fuzz_source((HARNESS_ROOT / "src/net/net.c").read_text(),
+                                   host, (HARNESS_ROOT / "test/checks.c").read_text())
+    source += src_slice(host, "static COLD fn wifi_roam(",
+                        "static COLD fn wifi_keep(")
+    source += r'''
+static int state_checks, state_failures;
+static void state_check(bool ok, const char *what, int idx, int zero, int pairwise)
+{
+        state_checks++;
+        if (!ok) {
+                state_failures++;
+                printf("  FAIL slot %d zero %d pairwise %d: %s\n", idx, zero, pairwise, what);
+        }
+}
+static bipolar state_gtk(bool pairwise)
+{
+        p8 frame[512], wrapped[128];
+        positive n = fz_key_data(wrapped, fz_ptk + 16, pairwise);
+        fz_replay++;
+        n = fz_frame(frame, pairwise ? 0x13ca : 0x1382,
+                     pairwise ? fz_anonce : 0, wrapped, n, fz_ptk);
+        return fz_deliver(frame, n);
+}
+int main(void)
+{
+        for (int idx = 0; idx < 4; idx++)
+        for (int zero = 0; zero < 2; zero++)
+        for (int pairwise = 0; pairwise < 2; pairwise++) {
+                (void)LLVMFuzzerTestOneInput(NULL, 0);
+                memset(fz_ptk, 0x42, sizeof fz_ptk);
+                memset(fz_anonce, 0x24, sizeof fz_anonce);
+                memcpy(fz_link.anonce, fz_anonce, 32);
+                memcpy(fz_link.pending, fz_ptk, 64);
+                memcpy(fz_link.ptk, fz_ptk, 64);
+                fz_link.pending_set = pairwise;
+                fz_link.installed = !pairwise;
+                fz_ap_gtk_idx = idx;
+                memset(fz_ap_gtk, zero ? 0 : 0x35, sizeof fz_ap_gtk);
+                fz_made_add(4, fz_ptk + 32);
+                fz_made_add(idx, fz_ap_gtk);
+                state_check(state_gtk(pairwise) == (pairwise ? 1 : 2) &&
+                            fz_sta_gtk_set[idx] && !memcmp(fz_sta_gtk[idx], fz_ap_gtk, 16),
+                            "first GTK is installed", idx, zero, pairwise);
+                int installs = fz_installs;
+                state_check(state_gtk(pairwise) == (pairwise ? 1 : 2) &&
+                            fz_installs == installs,
+                            "retransmission never reinstalls a key", idx, zero, pairwise);
+                fz_ap_gtk[7] ^= 1;
+                fz_made_add(idx, fz_ap_gtk);
+                state_check(state_gtk(false) == 2 && fz_installs == installs + 1 &&
+                            !memcmp(fz_sta_gtk[idx], fz_ap_gtk, 16),
+                            "changed GTK replaces the installed key", idx, zero, pairwise);
+
+                /* Roaming drops the old driver's keys. Receiving identical
+                   bytes from the next AP must install them in its new slot. */
+                wifi_roam(&fz_link, (p8 *)fz_ap);
+                memset(fz_sta_gtk_set, 0, sizeof fz_sta_gtk_set);
+                fz_sta_tk_set = fz_authorized = false;
+                memset(fz_ap_gtk, 0, sizeof fz_ap_gtk);
+                fz_made_add(idx, fz_ap_gtk);
+                memcpy(fz_link.pending, fz_ptk, 64);
+                memcpy(fz_link.anonce, fz_anonce, 32);
+                fz_link.pending_set = true;
+                fz_made_add(4, fz_ptk + 32);
+                state_check(!fz_link.gtk_installed && state_gtk(true) == 1 && fz_sta_gtk_set[idx],
+                            "roaming clears installed-key state", idx, zero, pairwise);
+
+                /* A driver refusal cannot make an empty slot look installed.
+                   Test group rekey, independently of pairwise installation. */
+                wifi_roam(&fz_link, (p8 *)fz_ap);
+                memset(fz_sta_gtk_set, 0, sizeof fz_sta_gtk_set);
+                memcpy(fz_link.ptk, fz_ptk, 64);
+                fz_link.installed = true;
+                fz_key_error = -5;
+                state_check(state_gtk(false) == -5 && !fz_sta_gtk_set[idx] &&
+                            !fz_link.gtk_installed && !fz_link.replay_set,
+                            "driver refusal fails the transition", idx, zero, pairwise);
+                fz_key_error = 0;
+                fz_replay--;
+                state_check(state_gtk(false) == 2 && fz_sta_gtk_set[idx],
+                            "same-counter retry after refusal installs", idx, zero, pairwise);
+
+                /* If the key went in but its acknowledgement did not go
+                   out, the same frame is answered without reinstalling it. */
+                wifi_roam(&fz_link, (p8 *)fz_ap);
+                memset(fz_sta_gtk_set, 0, sizeof fz_sta_gtk_set);
+                memcpy(fz_link.ptk, fz_ptk, 64);
+                fz_link.installed = true;
+                fz_send_error = -5;
+                installs = fz_installs;
+                state_check(state_gtk(false) == -1 && fz_sta_gtk_set[idx] &&
+                            fz_link.gtk_installed && !fz_link.replay_set,
+                            "reply refusal leaves the installed key retryable",
+                            idx, zero, pairwise);
+                fz_send_error = 0;
+                fz_replay--;
+                state_check(state_gtk(false) == 2 && fz_installs == installs + 1,
+                            "reply retry does not reinstall the key",
+                            idx, zero, pairwise);
+        }
+        printf("wifi key state %d/%d\n", state_checks - state_failures, state_checks);
+        return state_failures != 0;
+}
+'''
+    with tempfile.TemporaryDirectory(prefix="wifi-key-state-") as temporary:
+        unit = Path(temporary) / "state.c"
+        binary = unit.with_suffix("")
+        unit.write_text(source)
+        built = subprocess.run([clang, "-O1", "-g", "-fsanitize=address,undefined",
+                                "-fno-sanitize-recover=all", str(unit), "-o", str(binary)],
+                               capture_output=True, text=True, timeout=120)
+        if built.returncode:
+            print(built.stderr[-2000:], file=sys.stderr)
+            return 1
+        ran = subprocess.run(
+            [str(binary)], capture_output=True, text=True, timeout=30,
+            env=dict(os.environ,
+                     ASAN_OPTIONS="detect_leaks=0:halt_on_error=1",
+                     UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=0"))
+        print(ran.stdout, end="")
+        print(ran.stderr, end="", file=sys.stderr)
+        tally = re.search(r"wifi key state (\d+)/(\d+)", ran.stdout)
+        if tally:
+            write_tally("wifi-key-state", *tally.groups())
+        elif not ran.stderr:
+            print("wifi key state: test exited %d without a tally" % ran.returncode,
+                  file=sys.stderr)
+        return 1 if ran.returncode or not tally else 0
 
 
 def wifi_eapol_fuzz_seeds():
@@ -74668,6 +76110,7 @@ static void state_post(p64 now)
 static positive state_fill_one(struct waterlink_link *link, p64 now, p8 *into)
 {
         bool alone = false;
+        bool due = waterlink_wake(link, now) <= now;
         positive used;
 
         static p8 marks[WATERLINK_PAYLOAD];
@@ -74675,7 +76118,11 @@ static positive state_fill_one(struct waterlink_link *link, p64 now, p8 *into)
         memset(marks, 0xa5, WATERLINK_PAYLOAD);
         memset(state_fill, 0xa5, WATERLINK_PAYLOAD);
         used = waterlink_fill(link, state_fill, now, &alone);
-        if (used > WATERLINK_PAYLOAD ||
+        /* An empty fill may consume a loss timer and move the next wake into
+           the future. It only spins the service if the link remains due at
+           the same clock. The simulator used to hide that by advancing time. */
+        if ((due && !used && waterlink_wake(link, now) <= now) ||
+            used > WATERLINK_PAYLOAD ||
             memcmp(state_fill + used, marks, WATERLINK_PAYLOAD - used))
                 abort();
         if (used && into)
@@ -80805,6 +82252,7 @@ HARNESS_CHECKS = {
     "tls_verify_fuzz": harness_tls_verify_fuzz,
     "sntp_fuzz": harness_sntp_fuzz,
     "wifi_eapol_fuzz": harness_wifi_eapol_fuzz,
+    "wifi_key_state": harness_wifi_key_state,
     "wifi_scan_fuzz": harness_wifi_scan_fuzz,
     "bowl_sig_fuzz": harness_bowl_sig_fuzz,
     "wget_mutation": harness_wget_mutation,
@@ -80823,6 +82271,10 @@ HARNESS_CHECKS = {
     "net_clock_fault": harness_net_clock_fault,
     "net_wait_states": harness_net_wait_states,
     "net_parser_work_states": harness_net_parser_work_states,
+    "net_dhcp_exchange": harness_net_dhcp_exchange,
+    "net_exhaustive_proof": harness_net_exhaustive_proof,
+    "net_bounded_proof": harness_net_bounded_proof,
+    "net_lease_transitions": harness_net_lease_transitions,
     "net_math_proof": harness_net_math_proof,
     "wire_constants": harness_wire_constants,
     "net_dependency_closure": harness_net_dependency_closure,

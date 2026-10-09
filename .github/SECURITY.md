@@ -173,7 +173,7 @@ never a pass.
 
 Run `sh test/run <lane>` or `python3 test/differential.py --harness <name>`.
 `net_dependency_closure`, `net_math_proof`, `net_clock_fault`, `net_wait_states`,
-`net_parser_work_states` and `security_hygiene` start `lane_net`; a new shared primitive in `net.c` fails the
+`net_parser_work_states`, `net_lease_transitions` and `security_hygiene` start `lane_net`; a new shared primitive in `net.c` fails the
 closure gate until it is reviewed, and `security_hygiene` fails when a harness
 named here is not registered. Evidence is for one build and environment, not a
 certification. `MOONWATER_REQUIRE_ARCHES=1 MW_UBSAN=1 sh test/run net` makes
@@ -184,13 +184,13 @@ ARM64 and RISC-V mandatory with UBSan trapping.
 | Bytes, memory | `byte_reader` cursors (`security_hygiene` forbids listed parsers from indexing their input); `MSG_TRUNC`; guard pages (`codec`, `socket`, `standard`); ASan/UBSan fuzz `sh test/run fuzz`; MSan `sh test/run msan`; `net_math_proof` (DHCP masks, AES field and S-box, HKDF counter, netlink widths); `net_wait_states` (1,613,472 send/read and 4,302,592 writev schedules, 15,360 nested-deadline boundaries, ASan/UBSan) | `tls_parse_cert` index reads are guarded by hand and fuzzed; no corpus beyond generated seeds |
 | Netlink | sender, port, sequence, alignment, multipart, `NETLINK_DISCARD_MAX`; `netlink_fuzz` | nested attributes beyond the bounded fuzz |
 | DNS | exact question, ID, peer; per-query source port, 0x20, EDNS0 with fallbacks; own resolver first; `DNS_DISCARD_MAX`; `dns_fuzz`, `sh test/run net`; a validated TC reply keeps the full query deadline for TCP, while only the UDP EDNS trial is capped at one second | independent packet oracle |
-| DHCPv4 | xid, MAC, server and OFFER-peer binding; option overload, END and zero padding; lease sanity; ARP probes before install, and a DHCPDECLINE (RFC 2131 4.4.1) with a ten-second hold-off for an address another station answers for; watcher cut once per link news; `dhcp_fuzz`, `sh test/run netem net machine` | DHCP over a raw socket (`rp_filter`); the DECLINE is checked as a built packet and through its confined child, never against a live server |
+| DHCPv4 | xid, MAC, server and OFFER-peer binding; option overload, END and zero padding; lease sanity; ARP probes before install, and a DHCPDECLINE (RFC 2131 4.4.1) with a ten-second hold-off for an address another station answers for; watcher cut once per link news; route ownership and rollback fault matrix (`net_lease_transitions`); `dhcp_fuzz`, `sh test/run netem net machine` | DHCP over a raw socket (`rp_filter`); the DECLINE is checked as a built packet and through its confined child, never against a live server |
 | SNTP | 64-bit nonce, peer, mode, stratum, timing, exactly 48 bytes at the tight tier; each sample its own wait; `sntp_fuzz`, `sntp_era` (2036, 2038, 2104), `sh test/run netem machine` | unauthenticated; NTS is a separate branch |
 | HTTP, URL | `localhost` and `*.localhost` reach 127.0.0.1 without a resolver (RFC 6761; `wget_hostile` with a stub resolver, curl held to the same rows); host spellings named against GNU wget and curl; the scheme rule at both tiers (`http_urls`); sink-side validation of host, target, headers; userinfo, schemes, fragments refused; one framing reading; redirect and HTTPS-downgrade bounds; body deadline; per-hop host, address, SNI and Host identity; `http_response_framing` (with `http.client` and curl), `wget_mutation` and `wget_hostile` (GNU wget and curl as live oracles), `https_downgrade`, `http_fuzz` | CNAME, multi-address and interface-scope identity; `inet_aton` shorthands (`0x7f.1`, `127.1`) are names here and addresses to wget and curl (decision); SNTP, logger and Waterlink peers still ask DNS for localhost; the tight tier bounds each hop, not the redirect chain |
 | TLS, X.509 | transcript, Finished, AEAD, record sequence, state ordering; strict DER; CertificateEntry extensions refused; delivery schedules and FIN/RST cuts (`tls_peer --schedule`); SAN and name constraints, key usage, EKU, dates; chains against OpenSSL and Go `crypto/x509`; record nonce coverage over every value in every sequence byte lane and guarded unaligned buffers; record-header coverage over every 16-bit length and 8-bit type; `tls_chains` (also wget's status and words for each refusal), `tls_hostnames`, `tls_dates`, `public_suffixes`, `anchors`, `tls_peer`, `tls_der_fuzz`, `tls_hs_fuzz`, `tls_verify_fuzz`; `x509_corpus` by hand over 643 hosts | name constraints in more shapes |
 | Crypto | OpenSSL vectors and every `lib.c` architecture body: `crypto_vectors` (`--wycheproof DIR` by hand), `crypto_fuzz` | none known |
-| Wi-Fi | RSN, EAPOL-Key, replay counters, source address, scan parsing; the strongest 64 names kept and the associated row never evicted; one BSS donates every field of a row; `wifi_scan_fuzz`, `wifi_eapol_fuzz`, `wifi_air` | management-frame protection and WPA3 (separate branch); a forger outranking every retained row |
-| Waterlink | Noise handshake, cookie, replay window, grants, revocation; mDNS reads Internet class only, RCODE zero, TTL nonzero, an SRV with a non-root target and a nonzero port, exposes only a PTR and SRV intersection, and shares a packet-sized compression-pointer budget across every name; the reply and answer budgets move only after a successful send; `IP_MULTICAST_IF` failure refuses the send; a source holds at most `LINK_GREET_SOURCE` of the 16 greeting slots; legacy verifier migration is all-write plus `fsync`, and until it succeeds the listener stays off while commands keep the groups (their save is the scrub); every elapsed time is ordered first; `sh test/run waterlink link`, `waterlink_sanitized`, `waterlink_fuzz` (MSan with `MOONWATER_MSAN=1`) | handshake flood under netem; address rotation reaches the global greeting ceiling |
+| Wi-Fi | RSN, EAPOL-Key, replay counters, source address, scan parsing; all four GTK slots, zero-valued first keys, driver refusal/retry and roam reset (`wifi_key_state`); the strongest 64 names kept and the associated row never evicted; one BSS donates every field of a row; `wifi_scan_fuzz`, `wifi_eapol_fuzz`, `wifi_air` | management-frame protection and WPA3 (separate branch); a forger outranking every retained row |
+| Waterlink | Noise handshake, cookie, replay window, grants, revocation; mDNS reads Internet class only, RCODE zero, TTL nonzero, an SRV with a non-root target and a nonzero port, exposes only a PTR and SRV intersection, and shares a packet-sized compression-pointer budget across every name; the reply and answer budgets move only after a successful send; `IP_MULTICAST_IF` failure refuses the send; a source holds at most `LINK_GREET_SOURCE` of the 16 greeting slots; legacy verifier migration is all-write plus `fsync`, and until it succeeds the listener stays off while commands keep the groups (their save is the scrub); every elapsed time is ordered first; `waterlink_fuzz` rejects a wake/fill cycle that remains immediately due without output; `sh test/run waterlink link`, `waterlink_sanitized`, `waterlink_fuzz` (MSan with `MOONWATER_MSAN=1`) | handshake flood under netem; address rotation reaches the global greeting ceiling |
 | Saved state | wifi and bluetooth lists written beside themselves and renamed, opened nonblocking, regular files only; no hash of a group secret on disk; `sh test/run cli link` | |
 | Secrets, boot choice | `history_secret_line` rows including what the denylist does not see (`CHECK_bowl`); `link group NAME -` and `wifi add` at a terminal (`moonwater_cli`, `link`); the tight tier's refusal of both argument forms (`CHECK_bowl` again at `MOONWATER_STRICT` 2); `host_link_external`, `host_disk_external` failing closed and `host_lone_taken` (`CHECK_bowl`); a fixed NVMe install still taken and another build still asked about (`install` lane) | a USB install in a guest (found only when it enumerates before the census, racy in QEMU); the `removable` files of a real PCI port need hardware |
 | Terminal, JSON reader | `term_fuzz` (grid, write cuts, resizes, keys, pointer between writes; the cursor stays on the grid; it fails on a planted clamp bug) and `bowl_json_fuzz`, ASan/UBSan, smoke in `term` and `bowl` | KERNEL_MODE emulator build, MSan |
@@ -267,6 +267,33 @@ drains and chunk-output reads are nonblocking. A denied local send therefore
 fails a check instead of leaving the security lane asleep on a byte that can
 never arrive.
 
+`sh test/run proof` (named only) holds proofs, not samples.
+`net_exhaustive_proof` compares production predicates with specifications
+written from the RFCs and the stated policy on every input of their domains:
+`http_address_public` on all 2^32 addresses; `dhcp_mask_valid`,
+`dhcp_prefix_of` and `dhcp_address_unicast` on all 2^32 values;
+`dhcp_prefix_clear` on every address under every prefix length and the omitted
+mask (141,733,920,768 cases); `tls_asn1_length` on every four-byte head at every
+truncation; `tls_oid_content_der` up to four bytes; `http_dot_segment` up to four
+bytes, and up to nine over the bytes it tells apart; the default lease timers
+for every lifetime; and `dhcp_walk` against an RFC 2132/3396 walker for every
+region of up to ten bytes over the bytes it tells apart, under ASan. Each
+reports how many inputs were accepted and fails if either answer never occurs.
+`net_bounded_proof` has CBMC prove memory safety, no pointer or signed
+overflow, termination by unwinding assertion and a stated property for every
+input up to a bound: `byte_reader` for buffers of any length and `byte_store`
+for any append (every parser reads and writes through these), `dns_copy_name`
+(7 bytes), the ASN.1 helpers (8), netlink attribute finding (24),
+`http_header_end` with `http_response_fields` (10), the chunk-size and trailer
+lines (10), `http_split_into` (10) and `http_path_simplify` (8: no dot segment
+is left and a second pass changes nothing). Every proof is run again with its
+outcome marked, so an outcome no input reaches fails as vacuous. The lib.c
+routines the parsers call stand in as the contracts written in the harness.
+Not proved: the X.509 parser and chain builder, the TLS handshake state machine,
+`http_run`, DNS answer selection and the DHCP client's packet reader beyond its
+option walk; those rest on fuzzing, differential oracles and the mutation pass
+recorded with the change that added this lane.
+
 ## Ceilings
 
 Exact-limit and one-over rows live in `CHECK_net` (`test/checks.c`, with the
@@ -315,10 +342,11 @@ architecture gate above. CI is parked (`workflow_dispatch` only).
 
 ## Open
 
-- **Separate branches:** NTS and a clock floor (`feature/clock-floor`,
-  `feature/nts`); WPA3 and 802.11w (`feature/wpa3-pmf-sae`); DNS over TLS
-  (`feature/dns-over-tls`); DHCP over a raw socket (`feature/dhcp-packet-socket-acd`);
-  wget and curl parity of defaults (`feature/wget-curl-parity`).
+- **Closed, unmerged work:** NTS (#18) and the clock floor of #17 (a floor,
+  SNTP_WALL_LEAST, is in the SNTP client); WPA3 and 802.11w (#19); DNS over TLS
+  (#20); DHCP over a raw socket (#21); wget and curl parity of defaults (#22).
+  Their branches are gone; each pull request keeps its head
+  (`git fetch origin pull/N/head`).
 - **No change planned:** plain SNTP is accepted anywhere the build and clock
   window allow; a forged clock step before the SNTP window is undone only by
   authenticated time; HEAD is not exercised; a response cut inside its status

@@ -54758,6 +54758,193 @@ static fn netlink_nonblocking_retries(void)
                 }
 }
 
+/*
+        Which datagrams complete a transaction. Only the kernel's reply to this
+        request does: its sequence and its port together. A datagram that
+        carries one and not the other is somebody else's, and so is one from
+        a socket that is not the kernel. Each is drawn and dropped, at most
+        NETWORK_DISCARD_MAX of them, and the walk gives up on the next.
+*/
+static fn netlink_reply_matching(void)
+{
+        struct { netlink_header header; b32 error; } stranger = {
+            .header = {.length = sizeof stranger, .type = NLMSG_IS_ERROR,
+                       .sequence = 55},
+            .error = -EPERM};
+        const struct { p32 port, sequence; } strangers[] = {
+            {9, 55}, {0, 56}, {9, 56}, {0xffffffffu, 55}, {0, 0}};
+
+        for (positive row = 0; row < array_count(strangers); row++)
+        {
+                b32 pair[2];
+                netlink_buffer request = {0}, reply = {0};
+                netlink_header done = {.length = NETLINK_HEADER,
+                    .type = NLMSG_IS_DONE, .sequence = 55};
+                p8 left[NETLINK_HEADER];
+                bipolar opened = system_call_4(syscall(socketpair), AF_UNIX,
+                                                SOCK_DGRAM, 0, (positive)pair);
+
+                check("netlink matching fixture opens", opened == 0);
+                if (opened)
+                        continue;
+                stranger.header.port = strangers[row].port;
+                stranger.header.sequence = strangers[row].sequence;
+                check("a stranger's reply and the real one queue",
+                      socket_send(pair[1], address_of stranger, sizeof stranger,
+                                  0, null, 0) == sizeof stranger &&
+                          socket_send(pair[1], address_of done, sizeof done, 0,
+                                      null, 0) == sizeof done);
+                check("a reply with the wrong port or sequence does not end the walk",
+                      netlink_begin(address_of request, RTM_GETLINK,
+                                    NLM_REQUEST, 55, 0) &&
+                          netlink_walk(pair[0], address_of request, 55,
+                                       address_of reply, null, null) == 0);
+                check("the walk drew the stranger and its own reply",
+                      socket_receive(pair[0], left, sizeof left, MSG_DONTWAIT,
+                                     null, null) == NETWORK_TRY_AGAIN);
+                netlink_forget(address_of request);
+                netlink_forget(address_of reply);
+                socket_close(pair[0]);
+                socket_close(pair[1]);
+        }
+
+        /* The allowance: NETWORK_DISCARD_MAX strangers are dropped and the
+           real reply after them still answers; one more and the walk ends. */
+        for (positive count = NETWORK_DISCARD_MAX - 1;
+             count <= NETWORK_DISCARD_MAX + 1; count++)
+        {
+                b32 pair[2];
+                netlink_buffer request = {0}, reply = {0};
+                netlink_header done = {.length = NETLINK_HEADER,
+                    .type = NLMSG_IS_DONE, .sequence = 55};
+                netlink_header other = {.length = NETLINK_HEADER,
+                    .type = RTM_NEWLINK, .sequence = 56};
+                bool queued = true;
+                bipolar opened = system_call_4(syscall(socketpair), AF_UNIX,
+                                                SOCK_DGRAM, 0, (positive)pair);
+
+                check("netlink allowance fixture opens", opened == 0);
+                if (opened)
+                        continue;
+                for (positive at = 0; at < count; at++)
+                        queued &= socket_send(pair[1], address_of other,
+                            sizeof other, 0, null, 0) == sizeof other;
+                queued &= socket_send(pair[1], address_of done, sizeof done, 0,
+                                      null, 0) == sizeof done;
+                check("the strangers and the real reply queue", queued);
+                check("strangers up to the allowance are dropped, one more ends the walk",
+                      netlink_begin(address_of request, RTM_GETLINK,
+                                    NLM_REQUEST, 55, 0) &&
+                          netlink_walk(pair[0], address_of request, 55,
+                                       address_of reply, null, null) ==
+                              (count <= NETWORK_DISCARD_MAX ? 0 : -1));
+                netlink_forget(address_of request);
+                netlink_forget(address_of reply);
+                socket_close(pair[0]);
+                socket_close(pair[1]);
+        }
+
+        /* A reply that is not from the kernel, or an empty datagram, is no
+           reply at all. */
+        {
+                b32 pair[2];
+                netlink_buffer reply = {0};
+                p8 nothing = 0;
+                netlink_header whole = {.length = NETLINK_HEADER,
+                    .type = NLMSG_IS_DONE, .sequence = 55};
+                bipolar opened = system_call_4(syscall(socketpair), AF_UNIX,
+                                                SOCK_DGRAM, 0, (positive)pair);
+
+                check("netlink empty-datagram fixture opens", opened == 0);
+                if (!opened)
+                {
+                        check("an empty datagram is refused",
+                              socket_send(pair[1], address_of nothing, 0, 0,
+                                          null, 0) == 0 &&
+                                  netlink_receive_one(pair[0], address_of reply,
+                                                      false) == -1);
+                        check("a whole one after it is read",
+                              socket_send(pair[1], address_of whole, sizeof whole,
+                                          0, null, 0) == sizeof whole &&
+                                  netlink_receive_one(pair[0], address_of reply,
+                                                      false) == sizeof whole &&
+                                  reply.used == sizeof whole);
+                        netlink_forget(address_of reply);
+                        socket_close(pair[0]);
+                        socket_close(pair[1]);
+                }
+        }
+
+        /* A datagram sender is the kernel only when it says it is netlink and
+           port zero, in an address of the whole size. */
+        {
+                socket_address_netlink source = {.family = AF_NETLINK, .port = 0};
+
+                check("the kernel as sender is accepted",
+                      netlink_source_is_kernel(address_of source, sizeof source));
+                source.family = AF_INET;
+                check("another family at port zero is refused",
+                      !netlink_source_is_kernel(address_of source, sizeof source));
+                source.family = AF_NETLINK;
+                source.port = 1;
+                check("port one is a process, not the kernel",
+                      !netlink_source_is_kernel(address_of source, sizeof source));
+                source.port = 0xffffffffu;
+                check("the largest port is refused",
+                      !netlink_source_is_kernel(address_of source, sizeof source));
+        }
+}
+
+/* netlink_each: a visitor that says stop ends the walk without failing it, a
+   cut or short message fails it, and what came before the cut was visited. */
+static bool netlink_count_all(netlink_header address_to header,
+                              address_any context)
+{
+        (void)header;
+        (*(positive address_to)context)++;
+        return true;
+}
+
+static fn netlink_each_stops(void)
+{
+        netlink_header one = {.length = NETLINK_HEADER, .type = RTM_NEWLINK};
+        p8 bytes[NETLINK_HEADER * 3];
+        netlink_buffer reply = {bytes, sizeof bytes, sizeof bytes, false};
+        positive visited = 0;
+
+        memory_copy(bytes, address_of one, NETLINK_HEADER);
+        memory_copy(bytes + NETLINK_HEADER, address_of one, NETLINK_HEADER);
+        memory_copy(bytes + 2 * NETLINK_HEADER, address_of one, NETLINK_HEADER);
+        check("every message of a datagram is visited",
+              netlink_each(address_of reply, netlink_count_all,
+                           address_of visited) && visited == 3);
+        visited = 0;
+        check("a visitor that stops is no failure and sees no more",
+              netlink_each(address_of reply, netlink_stop_after_first,
+                           address_of visited) && visited == 1);
+        visited = 0;
+        ((netlink_header address_to)(bytes + 2 * NETLINK_HEADER))->length =
+            2 * NETLINK_HEADER;
+        check("a message longer than what arrived fails the datagram after those before it",
+              !netlink_each(address_of reply, netlink_count_all,
+                            address_of visited) && visited == 2);
+        visited = 0;
+        ((netlink_header address_to)(bytes + 2 * NETLINK_HEADER))->length =
+            NETLINK_HEADER;
+        ((netlink_header address_to)(bytes + NETLINK_HEADER))->length =
+            NETLINK_HEADER - 1;
+        check("a length under its own header fails the datagram",
+              !netlink_each(address_of reply, netlink_count_all,
+                            address_of visited) && visited == 1);
+        visited = 0;
+        ((netlink_header address_to)(bytes + NETLINK_HEADER))->length =
+            NETLINK_HEADER;
+        reply.used = 2 * NETLINK_HEADER + NETLINK_HEADER - 1;
+        check("bytes after the last whole header are no message",
+              netlink_each(address_of reply, netlink_count_all,
+                           address_of visited) && visited == 2);
+}
+
 static fn error_frames(void)
 {
         b32 pair[2];
@@ -54941,6 +55128,381 @@ static fn link_candidates(void)
                       look.found != kinds[at].skipped);
                 netlink_forget(&message);
         }
+}
+
+/*
+        Which link a lease is looked for on, and whether it is wireless.
+        Messages are built the way the kernel writes them and fed to the
+        visitor in the order a dump would bring them.
+*/
+typedef struct
+{
+        string_address name;
+        p32 index;
+        p32 flags;
+        p16 kind;
+        //      0 nothing, 1 link info of kind "wlan", 2 link info of kind
+        //      "bridge", 3 the wireless extension attribute, 4 kind "wla"
+        p8 wireless;
+        positive hardware_width;
+        positive downs_width;
+} link_spec;
+
+static bool link_feed(netlink_visitor visit, address_any context,
+                      const link_spec address_to spec)
+{
+        netlink_buffer message = {0};
+        p8 hardware[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+        p32 downs = 9;
+        bool built = netlink_begin(&message, RTM_NEWLINK, 0, 1,
+                                   sizeof(netlink_link)) &&
+                     netlink_attribute_add(&message, IFLA_IFNAME, spec->name,
+                                           string_length(spec->name) + 1);
+        bool wanted;
+
+        if (spec->hardware_width)
+                built &= netlink_attribute_add(&message, IFLA_ADDRESS, hardware,
+                                               spec->hardware_width);
+        if (spec->downs_width)
+                built &= netlink_attribute_add(&message, IFLA_CARRIER_DOWN_COUNT,
+                                               &downs, spec->downs_width);
+        if (spec->wireless == 1 || spec->wireless == 2 || spec->wireless == 4)
+        {
+                positive nested = netlink_nested_begin(&message, IFLA_LINKINFO);
+
+                built &= netlink_attribute_add(
+                    &message, IFLA_INFO_KIND,
+                    spec->wireless == 1 ? "wlan" : spec->wireless == 4 ? "wla"
+                                                                       : "bridge",
+                    spec->wireless == 1 ? 4 : spec->wireless == 4 ? 3 : 6);
+                netlink_nested_end(&message, nested);
+        }
+        if (spec->wireless == 3)
+                built &= netlink_attribute_add(&message, IFLA_WIRELESS, hardware, 4);
+        check("a synthetic link builds", built && !message.failed);
+        if (!built)
+        {
+                netlink_forget(&message);
+                return false;
+        }
+        netlink_link address_to link = netlink_body(&message);
+
+        link->index = spec->index;
+        link->kind = spec->kind;
+        link->flags = spec->flags;
+        wanted = visit((netlink_header address_to)message.bytes, context);
+        netlink_forget(&message);
+        return wanted;
+}
+
+static bool link_see(netlink_search address_to search,
+                     const link_spec address_to spec)
+{
+        return link_feed(netlink_link_seen, search, spec);
+}
+
+static fn link_choice(void)
+{
+        static const link_spec wired_idle = {"eth0", 1, 0, NETLINK_LINK_ETHER, 0, 6, 4};
+        static const link_spec wired_up = {"eth1", 2, IFF_RUNNING, NETLINK_LINK_ETHER, 0, 6, 4};
+        static const link_spec wifi_up = {"wlan0", 3, IFF_RUNNING, NETLINK_LINK_ETHER, 1, 6, 4};
+        static const link_spec wifi_idle = {"wlan1", 4, 0, NETLINK_LINK_ETHER, 1, 6, 4};
+        static const link_spec wired_up_later = {"eth2", 5, IFF_RUNNING, NETLINK_LINK_ETHER, 0, 6, 4};
+        static const link_spec wifi_up_later = {"wlan2", 6, IFF_RUNNING, NETLINK_LINK_ETHER, 1, 6, 4};
+
+        /* Carrier beats none, in either order; with both, prefer decides, and
+           with no preference the first stays. */
+        static const struct
+        {
+                p8 prefer;
+                const link_spec *first, *second;
+                p32 expect;
+        } orders[] = {
+            {NETLINK_PREFER_ANY, &wired_idle, &wired_up, 2},
+            {NETLINK_PREFER_ANY, &wired_up, &wired_idle, 2},
+            {NETLINK_PREFER_ANY, &wired_up, &wired_up_later, 2},
+            {NETLINK_PREFER_ANY, &wifi_up, &wired_up, 3},
+            {NETLINK_PREFER_ANY, &wired_up, &wifi_up, 2},
+            {NETLINK_PREFER_WIRED, &wifi_up, &wired_up, 2},
+            {NETLINK_PREFER_WIRED, &wired_up, &wifi_up, 2},
+            {NETLINK_PREFER_WIRED, &wired_up, &wired_up_later, 2},
+            {NETLINK_PREFER_WIRED, &wifi_up, &wifi_up_later, 3},
+            {NETLINK_PREFER_WIRED, &wired_idle, &wifi_up, 3},
+            {NETLINK_PREFER_WIRED, &wifi_up, &wired_idle, 3},
+            {NETLINK_PREFER_WIFI, &wired_up, &wifi_up, 3},
+            {NETLINK_PREFER_WIFI, &wifi_up, &wired_up, 3},
+            {NETLINK_PREFER_WIFI, &wifi_up, &wifi_up_later, 3},
+            {NETLINK_PREFER_WIFI, &wired_up, &wired_up_later, 2},
+            {NETLINK_PREFER_WIFI, &wifi_idle, &wired_up, 2},
+            {NETLINK_PREFER_WIFI, &wired_up, &wifi_idle, 2},
+        };
+
+        for (positive row = 0; row < array_count(orders); row++)
+        {
+                netlink_search search = {.skip_loopback = true,
+                                         .prefer = orders[row].prefer};
+
+                check("a dump keeps walking while it looks for the best link",
+                      link_see(&search, orders[row].first) &&
+                          link_see(&search, orders[row].second));
+                check("the best link wins by carrier, then by preference, then by order",
+                      search.found && search.index == orders[row].expect);
+        }
+
+        /* No wired links when the caller says so. */
+        {
+                netlink_search search = {.skip_loopback = true, .skip_wired = true};
+
+                link_see(&search, &wired_up);
+                check("a wired link is no candidate when wired is off", !search.found);
+                link_see(&search, &wifi_idle);
+                check("a wireless one is", search.found && search.wireless &&
+                                               search.index == 4);
+        }
+
+        /* The skip list is exactly skip_count long, and at most eight. */
+        for (positive count = 0; count <= 8; count++)
+        {
+                netlink_search search = {.skip_loopback = true, .skip_count = (p8)count,
+                                         .skip = {3, 4, 5, 6, 7, 8, 9, 2}};
+                link_spec at = wired_up;
+
+                at.index = 2;
+                link_see(&search, &at);
+                check("an index on the skip list is skipped, one past its count is not",
+                      search.found == (count < 8));
+        }
+        {
+                netlink_search search = {.skip_loopback = true, .skip_count = 1,
+                                         .skip = {5}};
+                link_spec at = wired_up;
+
+                at.index = 0;
+                link_see(&search, &at);
+                check("only skip_count entries are compared", search.found);
+        }
+        {
+                netlink_search search = {.skip_loopback = true, .skip_count = 9,
+                                         .skip = {1, 2, 3, 4, 5, 6, 7, 8}};
+                link_spec at = wired_up;
+
+                at.index = 9;
+                link_see(&search, &at);
+                check("the skip list is never read past its eight", search.found);
+        }
+
+        /* By name: the one named, only, and the first of it. */
+        {
+                netlink_search search = {.wanted = "wlan0"};
+
+                check("a link looked for by name is not another, and the dump goes on",
+                      link_see(&search, &wired_up) && !search.found);
+                check("it is taken when named, and the dump stops",
+                      !link_see(&search, &wifi_up) && search.found &&
+                          search.wireless && search.index == 3);
+                link_see(&search, &wifi_up_later);
+                check("a second of the name changes nothing",
+                      search.index == 3);
+        }
+
+        /* What the message says of its link. */
+        {
+                static const struct { positive hardware, downs; bool has, counted; } widths[] = {
+                    {6, 4, true, true}, {4, 8, false, false}, {8, 2, false, false},
+                    {0, 0, false, false}, {6, 0, true, false}, {0, 4, false, true}};
+
+                for (positive row = 0; row < array_count(widths); row++)
+                {
+                        netlink_search search = {.skip_loopback = true};
+                        link_spec at = wired_up;
+
+                        at.hardware_width = widths[row].hardware;
+                        at.downs_width = widths[row].downs;
+                        link_see(&search, &at);
+                        check("a hardware address is taken at six bytes and no other length",
+                              search.found && search.has_hardware == widths[row].has &&
+                                  (!widths[row].has ||
+                                   !memory_compare(search.hardware, "\1\2\3\4\5\6", 6)));
+                        check("the carrier count is taken at four bytes and no other length",
+                              search.carrier_counted == widths[row].counted &&
+                                  (!widths[row].counted || search.carrier_downs == 9));
+                }
+        }
+        {
+                static const struct { string_address name; p8 how; bool wireless; } kinds[] = {
+                    {"eth0", 0, false}, {"eth0", 1, true}, {"eth0", 2, false},
+                    {"eth0", 3, true}, {"eth0", 4, false}, {"wl0", 0, true},
+                    {"wlan0", 0, true}, {"wifi0", 0, true}, {"w0", 0, false},
+                    {"wx0", 0, false}, {"awifi", 0, false}};
+
+                for (positive row = 0; row < array_count(kinds); row++)
+                {
+                        netlink_search search = {.skip_loopback = true};
+                        link_spec at = wired_up;
+
+                        at.name = kinds[row].name;
+                        at.wireless = kinds[row].how;
+                        link_see(&search, &at);
+                        check("a link is wireless by its kind, its extension or its name",
+                              search.found && search.wireless == kinds[row].wireless);
+                }
+        }
+        {
+                netlink_search search = {.skip_loopback = true};
+                link_spec loopback = wired_up;
+
+                loopback.flags |= IFF_LOOPBACK;
+                link_see(&search, &loopback);
+                check("loopback is never a candidate", !search.found);
+        }
+}
+
+/* The wired links, as `moonwater wired` lists them: Ethernet that is not
+   loopback and not wireless, in the order met, a handful at most. */
+static fn wired_listing(void)
+{
+        netlink_wired wired = {0};
+        link_spec spec = {"eth0", 1, IFF_RUNNING, NETLINK_LINK_ETHER, 0, 6, 0};
+        link_spec loopback = {"lo", 1, IFF_LOOPBACK | IFF_RUNNING, NETLINK_LINK_ETHER, 0, 0, 0};
+        link_spec tunnel = {"tun0", 2, IFF_RUNNING, 65534, 0, 0, 0};
+        link_spec radio = {"hwsim0", 3, IFF_RUNNING, NETLINK_LINK_ETHER, 3, 6, 0};
+        link_spec station = {"wlan0", 4, IFF_RUNNING, NETLINK_LINK_ETHER, 1, 6, 0};
+        link_spec bridge = {"br0", 5, 0, NETLINK_LINK_ETHER, 2, 6, 0};
+
+        check("a link walk goes on after each link",
+              link_feed(netlink_wired_seen, &wired, &loopback) &&
+                  link_feed(netlink_wired_seen, &wired, &tunnel) &&
+                  link_feed(netlink_wired_seen, &wired, &radio) &&
+                  link_feed(netlink_wired_seen, &wired, &station));
+        check("loopback, other framings and wireless links are not wired",
+              wired.count == 0);
+        check("an Ethernet link of kind bridge is wired",
+              link_feed(netlink_wired_seen, &wired, &bridge) && wired.count == 1 &&
+                  wired.link[0].index == 5 && wired.link[0].flags == 0 &&
+                  !string_compare_max(wired.link[0].name, "br0", 4));
+        for (positive at = 0; at < NETLINK_WIRED_MOST + 3; at++)
+        {
+                p8 name[IFNAME_SIZE] = "eth";
+
+                name[3] = (p8)('a' + at);
+                name[4] = 0;
+                spec.name = (string_address)name;
+                spec.index = 10 + (p32)at;
+                link_feed(netlink_wired_seen, &wired, &spec);
+        }
+        check("at most a handful are listed",
+              wired.count == NETLINK_WIRED_MOST);
+        check("in the order met, with their flags",
+              wired.link[1].index == 10 && wired.link[1].flags == IFF_RUNNING &&
+                  !string_compare_max(wired.link[1].name, "etha", 5) &&
+                  wired.link[NETLINK_WIRED_MOST - 1].index ==
+                      10 + NETLINK_WIRED_MOST - 2);
+}
+
+/*
+        The addresses on a link that this client put there: protocol dhcp, a
+        local address, the link asked about, IPv4. The one asked after is a
+        lease; the others are kept, up to a handful.
+*/
+static fn lease_stamps(void)
+{
+        netlink_lease_search search;
+        netlink_buffer message = {0};
+        bool built = true;
+
+        static const struct
+        {
+                p8 family;
+                p32 index;
+                p8 prefix;
+                int proto;          /* -1 no attribute */
+                positive proto_size;
+                p32 host;
+                positive local_size; /* 0 no attribute */
+                bool leased;
+                positive others;
+        } rows[] = {
+            {AF_INET, 7, 24, IFA_PROTO_DHCP, 1, 0x0a000005, 4, true, 0},
+            {AF_INET, 7, 16, IFA_PROTO_DHCP, 1, 0x0a000005, 4, false, 1},
+            {AF_INET, 7, 24, IFA_PROTO_DHCP, 1, 0x0a000006, 4, false, 1},
+            {AF_INET, 8, 24, IFA_PROTO_DHCP, 1, 0x0a000005, 4, false, 0},
+            {10, 7, 24, IFA_PROTO_DHCP, 1, 0x0a000005, 4, false, 0},
+            {AF_INET, 7, 24, 3, 1, 0x0a000005, 4, false, 0},
+            {AF_INET, 7, 24, IFA_PROTO_DHCP, 2, 0x0a000005, 4, false, 0},
+            {AF_INET, 7, 24, -1, 0, 0x0a000005, 4, false, 0},
+            {AF_INET, 7, 24, IFA_PROTO_DHCP, 1, 0x0a000005, 3, false, 0},
+            {AF_INET, 7, 24, IFA_PROTO_DHCP, 1, 0x0a000005, 0, false, 0},
+        };
+
+        for (positive row = 0; row < array_count(rows); row++)
+        {
+                p8 proto = (p8)rows[row].proto;
+                p32 host = network_order_32(rows[row].host);
+                netlink_address address_to body;
+
+                memory_fill(address_of search, 0, sizeof search);
+                search.index = 7;
+                search.host = 0x0a000005;
+                search.prefix = 24;
+                built = netlink_begin(&message, RTM_NEWADDR, 0, 1,
+                                      sizeof(netlink_address));
+                if (rows[row].proto >= 0)
+                        built &= netlink_attribute_add(&message, IFA_PROTO, &proto,
+                                                       rows[row].proto_size);
+                if (rows[row].local_size)
+                        built &= netlink_attribute_add(&message, IFA_LOCAL, &host,
+                                                       rows[row].local_size);
+                check("a synthetic address builds", built);
+                if (!built)
+                        break;
+                body = netlink_body(&message);
+                body->family = rows[row].family;
+                body->index = rows[row].index;
+                body->prefix = rows[row].prefix;
+                check("an address is a lease of this client only when it says so, whole",
+                      netlink_lease_seen((netlink_header address_to)message.bytes,
+                                         &search) &&
+                          search.leased == rows[row].leased &&
+                          search.others == rows[row].others);
+                if (rows[row].others)
+                        check("another lease is remembered with its prefix",
+                              search.other_host[0] == rows[row].host &&
+                                  search.other_prefix[0] == rows[row].prefix);
+                netlink_forget(&message);
+        }
+
+        /* A handful of others, in the order met, and no more. */
+        memory_fill(address_of search, 0, sizeof search);
+        search.index = 7;
+        search.host = 0x0a000005;
+        search.prefix = 24;
+        for (positive at = 0; at < NETLINK_LEASES_MAX + 3; at++)
+        {
+                p8 proto = IFA_PROTO_DHCP;
+                p32 host = network_order_32(0x0a000100 + (p32)at);
+                netlink_address address_to body;
+
+                built = netlink_begin(&message, RTM_NEWADDR, 0, 1,
+                                      sizeof(netlink_address)) &&
+                        netlink_attribute_add(&message, IFA_PROTO, &proto, 1) &&
+                        netlink_attribute_add(&message, IFA_LOCAL, &host, 4);
+                check("a synthetic address builds", built);
+                if (!built)
+                        break;
+                body = netlink_body(&message);
+                body->family = AF_INET;
+                body->index = 7;
+                body->prefix = (p8)(16 + at);
+                netlink_lease_seen((netlink_header address_to)message.bytes, &search);
+                netlink_forget(&message);
+        }
+        check("only a handful of other leases are kept", search.others == NETLINK_LEASES_MAX);
+        for (positive at = 0; at < NETLINK_LEASES_MAX; at++)
+                check("and in the order they came",
+                      search.other_host[at] == 0x0a000100 + at &&
+                          search.other_prefix[at] == 16 + at);
+        check("the one asked about was none of them", !search.leased);
+        netlink_forget(&message);
 }
 
 static fn talking(void)
@@ -55727,7 +56289,7 @@ static fn dns_tcp_test_server(bipolar datagram, bipolar listening,
         if (which == DNS_TCP_OVERSIZED)
         {
                 network_store_16(frame, DNS_MAX_MESSAGE + 1);
-                network_stream_send_all(stream, frame, sizeof frame);
+                network_stream_send_all_for(stream, frame, sizeof frame, 5, 0);
         }
         else
         {
@@ -55737,38 +56299,38 @@ static fn dns_tcp_test_server(bipolar datagram, bipolar listening,
                 {
                         timespec pause = {1, 200000000};
 
-                        network_stream_send_all(stream, frame, 1);
+                        network_stream_send_all_for(stream, frame, 1, 5, 0);
                         system_call_2(syscall(nanosleep),
                                       (positive)address_of pause, 0);
-                        network_stream_send_all(stream, frame + 1, 1);
-                        network_stream_send_all(stream, reply, length);
+                        network_stream_send_all_for(stream, frame + 1, 1, 5, 0);
+                        network_stream_send_all_for(stream, reply, length, 5, 0);
                 }
                 else if (which == DNS_TCP_SPLIT)
                 {
-                        network_stream_send_all(stream, frame, 1);
-                        network_stream_send_all(stream, frame + 1, 1);
-                        network_stream_send_all(stream, reply, 3);
-                        network_stream_send_all(stream, reply + 3, length - 3);
+                        network_stream_send_all_for(stream, frame, 1, 5, 0);
+                        network_stream_send_all_for(stream, frame + 1, 1, 5, 0);
+                        network_stream_send_all_for(stream, reply, 3, 5, 0);
+                        network_stream_send_all_for(stream, reply + 3, length - 3, 5, 0);
                 }
                 else if (which == DNS_TCP_SHORT)
                 {
-                        network_stream_send_all(stream, frame, sizeof frame);
-                        network_stream_send_all(stream, reply, length / 2);
+                        network_stream_send_all_for(stream, frame, sizeof frame, 5, 0);
+                        network_stream_send_all_for(stream, reply, length / 2, 5, 0);
                 }
                 else if (which == DNS_TCP_DEADLINE)
                 {
                         timespec pause = {0, 700000000};
 
-                        network_stream_send_all(stream, frame, 1);
+                        network_stream_send_all_for(stream, frame, 1, 5, 0);
                         system_call_2(syscall(nanosleep),
                                       (positive)address_of pause, 0);
-                        network_stream_send_all(stream, frame + 1, 1);
-                        network_stream_send_all(stream, reply, length);
+                        network_stream_send_all_for(stream, frame + 1, 1, 5, 0);
+                        network_stream_send_all_for(stream, reply, length, 5, 0);
                 }
                 else
                 {
-                        network_stream_send_all(stream, frame, sizeof frame);
-                        network_stream_send_all(stream, reply, length);
+                        network_stream_send_all_for(stream, frame, sizeof frame, 5, 0);
+                        network_stream_send_all_for(stream, reply, length, 5, 0);
                 }
         }
 
@@ -56496,6 +57058,17 @@ static bool http_response_framing_harness_case(
 }
 
 //      The URL, the headers and the chunk framing -- all of it pure.
+//      The grammar of a head and nothing else: what http_response_fields
+//      makes of it under a 200, which keeps no Location.
+static bool http_header_block_valid(p8 address_to bytes, positive size)
+{
+        http_response response = {.code = 200};
+        http_framing_fields fields;
+
+        return http_response_fields(bytes, size, address_of response,
+                                    address_of fields);
+}
+
 static fn fetching(void)
 {
         p8 name[64];
@@ -57926,8 +58499,8 @@ static fn network_stream_send_timeout(void)
                 bipolar reset = system_signal_action(
                     13, address_of default_action, null, 8);
                 positive began = clock_monotonic_nanoseconds();
-                bool sent = network_stream_send_all(
-                    pair[0], payload, payload_size);
+                bool sent = network_stream_send_all_for(
+                    pair[0], payload, payload_size, 0, 100000000);
                 positive elapsed = clock_monotonic_nanoseconds() - began;
 
                 socket_close(pair[0]);
@@ -58437,8 +59010,8 @@ static fn http_tcp_latency_policy(void)
                                                SOCK_CLOEXEC | SOCK_NONBLOCK);
                 p8 bytes[2];
                 network_deadline deadline;
-                bool sent = network_stream_send_all(handle, (p8 address_to)"F", 1) &&
-                            network_stream_send_all(handle, (p8 address_to)"R", 1);
+                bool sent = network_stream_send_all_for(handle, (p8 address_to)"F", 1, 5, 0) &&
+                            network_stream_send_all_for(handle, (p8 address_to)"R", 1, 5, 0);
 
                 check("consecutive small TCP writes retain exact stream bytes",
                       peer >= 0 && sent &&
@@ -59264,8 +59837,8 @@ static fn tls_key_update_write_deadlines(void)
                         net_clock_step = 1000000;
                         deadline = (network_deadline){1000000, 5000000};
                         status = relative
-                            ? tls_borrow(address_of receiver, 1, address_of span,
-                                         address_of got, 0, 5000000)
+                            ? tls_borrow_within(address_of receiver, 1, address_of span,
+                                         address_of got, 0, 5000000, null)
                             : tls_take(address_of receiver, 1, address_of span,
                                        address_of got, address_of deadline, 0, 0, false);
                         check("KeyUpdate backpressure and EINTR cannot escape the read deadline",
@@ -59383,13 +59956,13 @@ static fn tls_lending_and_fatal_states(void)
                                 (p8 address_to)"ok", 2, receiver.receive + at);
                 receiver.receive_end = receiver.receive_high = at;
                 check("a fatal TLS protocol refusal spends both record keys",
-                      tls_lend(address_of receiver, 2, address_of span,
-                               address_of got) == TLS_FAIL &&
+                      tls_lend_until(address_of receiver, 2, address_of span,
+                               address_of got, null) == TLS_FAIL &&
                           receiver.seq_read == TLS_AES_GCM_RECORD_LIMIT &&
                           receiver.seq_write == TLS_AES_GCM_RECORD_LIMIT);
                 check("buffered data cannot reopen a fatally refused TLS stream",
-                      tls_lend(address_of receiver, 2, address_of span,
-                               address_of got) == TLS_FAIL);
+                      tls_lend_until(address_of receiver, 2, address_of span,
+                               address_of got, null) == TLS_FAIL);
                 net_send_calls = 0;
                 check("a fatally refused TLS stream cannot send application data",
                       tls_write(address_of receiver, (p8 address_to)"no", 2) ==
@@ -59428,12 +60001,12 @@ static fn tls_unexpected_type_matrix(void)
                                     (p8 address_to)"ok", 2, receiver.receive + at);
                                 receiver.receive_end = receiver.receive_high = at;
                                 check("every unexpected TLS record type is a permanent refusal",
-                                      tls_lend(address_of receiver, 2, address_of span,
-                                               address_of got) == TLS_FAIL &&
+                                      tls_lend_until(address_of receiver, 2, address_of span,
+                                               address_of got, null) == TLS_FAIL &&
                                           receiver.seq_read == TLS_AES_GCM_RECORD_LIMIT &&
                                           receiver.seq_write == TLS_AES_GCM_RECORD_LIMIT &&
-                                          tls_lend(address_of receiver, 2, address_of span,
-                                                   address_of got) == TLS_FAIL);
+                                          tls_lend_until(address_of receiver, 2, address_of span,
+                                                   address_of got, null) == TLS_FAIL);
                                 tls_forget(address_of sender);
                                 tls_forget(address_of receiver);
                         }
@@ -59515,7 +60088,7 @@ static fn network_stream_interruption_deadlines(void)
                               net_recv_interruptions && net_recv_eintr_hit);
                 net_io_faults_clear();
                 check("a timed-out interrupted read leaves data for recovery",
-                      network_stream_read_now(pair[0], address_of byte, 1) == 1 &&
+                      socket_receive((b32)pair[0], address_of byte, 1, MSG_DONTWAIT, null, 0) == 1 &&
                               byte == 'x');
         }
         net_io_faults_clear();
@@ -60390,8 +60963,8 @@ static fn network_stream_sigpipe(void)
                 positive default_action[4] = {0, 0, 0, 0};
                 bipolar reset = system_signal_action(
                     13, address_of default_action, null, 8);
-                bool sent = network_stream_send_all(
-                    pair[0], (p8 address_to)"x", 1);
+                bool sent = network_stream_send_all_for(
+                    pair[0], (p8 address_to)"x", 1, 5, 0);
 
                 socket_close(pair[0]);
                 system_call_1(syscall(exit_group), reset < 0 ? 3
@@ -60423,7 +60996,7 @@ static bool tls_post_handshake_valid(p8 address_to messages,
 
         memory_fill(tls, 0, TLS_CONN_HEAD);
         tls->handle = -1;
-        valid = tls_post_handshake_append(tls, messages, length) == TLS_OK &&
+        valid = tls_post_handshake_append_until(tls, messages, length, null) == TLS_OK &&
                 !tls->post_handshake_used;
         tls_forget(tls);
         return valid;
@@ -60540,8 +61113,8 @@ static fn tls_closure_boundaries(void)
                         receiver.encrypted = true;
                         receiver.application = true;
                         check("TLS forged and genuine records queue",
-                              network_stream_send_all(pair[1], forged,
-                                                      sizeof forged) &&
+                              network_stream_send_all_for(pair[1], forged,
+                                                      sizeof forged, 5, 0) &&
                                   tls_send_enc(address_of sender, TLS_CT_APP,
                                                data, sizeof data) == TLS_OK);
                         check("TLS forged record is refused",
@@ -60579,8 +61152,8 @@ static fn tls_closure_boundaries(void)
                         receiver.encrypted = true;
                         receiver.application = true;
                         check("TLS forged CCS and genuine record queue",
-                              network_stream_send_all(pair[1], forged,
-                                                      sizeof forged) &&
+                              network_stream_send_all_for(pair[1], forged,
+                                                      sizeof forged, 5, 0) &&
                                   tls_send_enc(address_of sender, TLS_CT_APP,
                                                data, sizeof data) == TLS_OK);
                         check("TLS CCS after the application keys is refused",
@@ -63510,11 +64083,11 @@ static fn tls_post_handshake_framing(void)
                 memory_fill(tls, 0, TLS_CONN_HEAD);
                 tls->handle = -1;
                 check("a fragmented post-handshake ticket is held",
-                      tls_post_handshake_append(tls, ticket, 7) == TLS_OK &&
+                      tls_post_handshake_append_until(tls, ticket, 7, null) == TLS_OK &&
                           tls->post_handshake_used == 7);
                 check("a fragmented post-handshake ticket is reassembled",
-                      tls_post_handshake_append(tls, ticket + 7,
-                                                sizeof ticket - 7) == TLS_OK &&
+                      tls_post_handshake_append_until(tls, ticket + 7,
+                                                sizeof ticket - 7, null) == TLS_OK &&
                           !tls->post_handshake_used);
                 tls_forget(tls);
         }
@@ -63579,10 +64152,10 @@ static fn tls_post_handshake_framing(void)
                 tls->handle = -1;
                 tls->seq_read = 9;
                 check("a KeyUpdate split across records is held",
-                      tls_post_handshake_append(tls, key_update, 3) == TLS_OK &&
+                      tls_post_handshake_append_until(tls, key_update, 3, null) == TLS_OK &&
                           tls->seq_read == 9);
                 check("a KeyUpdate split across records rekeys when whole",
-                      tls_post_handshake_append(tls, key_update + 3, 2) ==
+                      tls_post_handshake_append_until(tls, key_update + 3, 2, null) ==
                               TLS_OK &&
                           !tls->seq_read &&
                           memory_compare(tls->s_ap_traffic, zeros, 32) &&
@@ -63591,7 +64164,7 @@ static fn tls_post_handshake_framing(void)
                 tls->handle = -1;
                 key_update[4] = 1;
                 check("a KeyUpdate asking for one cannot be answered unsent",
-                      tls_post_handshake_append(tls, key_update, 5) == TLS_FAIL);
+                      tls_post_handshake_append_until(tls, key_update, 5, null) == TLS_FAIL);
                 key_update[4] = 0;
                 tls_forget(tls);
         }
@@ -69500,6 +70073,83 @@ static fn leasing(void)
                               dhcp_read(packet, DHCP_HEAD + 14, 0xdeadbeef,
                                         hardware, address_of lease,
                                         address_of kind) < 0);
+
+                        p8 trial[1024];
+
+                        /* Every value of the control names the regions it
+                           walks, 1 the file and 2 the server name, 3 both,
+                           and no others: a region it does not name may hold
+                           anything, one it does must end in END. 0 and 4 name
+                           nothing the RFC defines. */
+                        for (positive value = 0; value <= 4; value++)
+                                for (positive ends = 0; ends < 4; ends++)
+                                {
+                                        bool file_walked = value == 1 || value == 3;
+                                        bool name_walked = value == 2 || value == 3;
+                                        bool file_ends = ends & 1;
+                                        bool name_ends = ends & 2;
+                                        bool expected = value >= 1 && value <= 3 &&
+                                            (!file_walked || file_ends) &&
+                                            (!name_walked || name_ends);
+
+                                        memory_fill(trial, 0, sizeof trial);
+                                        trial[0] = 2;
+                                        trial[1] = 1;
+                                        trial[2] = 6;
+                                        network_store_32(trial + 4, 0xdeadbeef);
+                                        network_store_32(trial + 16, 0x0a00020f);
+                                        memory_copy(trial + 28, hardware, 6);
+                                        network_store_32(trial + DHCP_HEAD,
+                                                         DHCP_COOKIE);
+                                        trial[DHCP_HEAD + 4] = DHCP_OPTION_TYPE;
+                                        trial[DHCP_HEAD + 5] = 1;
+                                        trial[DHCP_HEAD + 6] = DHCP_OFFER;
+                                        trial[DHCP_HEAD + 7] = DHCP_OPTION_OVERLOAD;
+                                        trial[DHCP_HEAD + 8] = 1;
+                                        trial[DHCP_HEAD + 9] = (p8)value;
+                                        trial[DHCP_HEAD + 10] = DHCP_OPTION_END;
+                                        //      A region that ends is END and then
+                                        //      padding; one that does not is
+                                        //      options that run off its end.
+                                        memory_fill(trial + DHCP_FILE,
+                                                    file_ends ? 0 : 1,
+                                                    DHCP_HEAD - DHCP_FILE);
+                                        memory_fill(trial + DHCP_SNAME,
+                                                    name_ends ? 0 : 1,
+                                                    DHCP_FILE - DHCP_SNAME);
+                                        if (file_ends)
+                                                trial[DHCP_FILE] = DHCP_OPTION_END;
+                                        if (name_ends)
+                                                trial[DHCP_SNAME] = DHCP_OPTION_END;
+                                        check("DHCP overload walks the regions its value names and no others",
+                                              (dhcp_read(trial, DHCP_HEAD + 11,
+                                                         0xdeadbeef, hardware,
+                                                         address_of lease,
+                                                         address_of kind) == 0) ==
+                                                  expected);
+                                }
+
+                        /* The hardware type and address length each have to
+                           be Ethernet's, alone. */
+                        for (positive wrong = 0; wrong < 4; wrong++)
+                        {
+                                memory_fill(trial, 0, sizeof trial);
+                                trial[0] = 2;
+                                trial[1] = wrong & 1 ? 6 : 1;
+                                trial[2] = wrong & 2 ? 4 : 6;
+                                network_store_32(trial + 4, 0xdeadbeef);
+                                network_store_32(trial + 16, 0x0a00020f);
+                                memory_copy(trial + 28, hardware, 6);
+                                network_store_32(trial + DHCP_HEAD, DHCP_COOKIE);
+                                trial[DHCP_HEAD + 4] = DHCP_OPTION_TYPE;
+                                trial[DHCP_HEAD + 5] = 1;
+                                trial[DHCP_HEAD + 6] = DHCP_OFFER;
+                                trial[DHCP_HEAD + 7] = DHCP_OPTION_END;
+                                check("a reply is read only for Ethernet in both its type and length",
+                                      (dhcp_read(trial, DHCP_HEAD + 8, 0xdeadbeef,
+                                                 hardware, address_of lease,
+                                                 address_of kind) == 0) == !wrong);
+                        }
                         packet[DHCP_HEAD + 10] = DHCP_OPTION_END;
                         packet[DHCP_FILE] = DHCP_OPTION_OVERLOAD;
                         packet[DHCP_FILE + 1] = 1;
@@ -70555,9 +71205,14 @@ b32 main(void)
         net_group(attribute_growth);
         net_group(userspace_source_progress);
         net_group(error_frames);
+        net_group(netlink_reply_matching);
+        net_group(netlink_each_stops);
         net_group(netlink_multipart_identity);
         net_group(netlink_nonblocking_retries);
         net_group(link_candidates);
+        net_group(link_choice);
+        net_group(wired_listing);
+        net_group(lease_stamps);
         net_group(talking);
         net_group(resolving);
         net_group(resolving_edges);

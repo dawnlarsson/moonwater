@@ -89,7 +89,7 @@ export TEST_TALLY
 #       fuzz an hour a target, msan a clang with MemorySanitizer, ring0 an
 #       image and a machine that boots it, best one built with
 #       kernel/profile/sec_sanitize.
-asked_lanes="wifi fuzz msan ring0 tier scale desktop chrome"
+asked_lanes="wifi fuzz msan proof ring0 tier scale desktop chrome"
 
 lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep"
 
@@ -175,6 +175,7 @@ describe()
         wifi)     echo "networks in the air of a machine with simulated radios, joined and listed" ;;
         fuzz)     echo "every network libFuzzer target for an hour each, or a release report" ;;
         msan)     echo "the net wire parsers under MemorySanitizer" ;;
+        proof)    echo "the network parsers proved: whole-domain exhaustion and CBMC bounded model checking" ;;
         ring0)    echo "a hostile program's windows, ioctls, images and log lines against a booted kernel, and what its sanitizers say" ;;
         tier)     echo "a security tier's image, booted: the sysctls init wrote, the mount flags, lockdown, the W+X check and the IOMMU the tier asked for (MOONWATER_TIER names the tier)" ;;
         scale)    echo "every tool against the host's own from a kilobyte to a gigabyte and from one entry to a million: a loss, a cliff, a refusal or a super-linear step fails (NOT RUN off Linux or without the host tools)" ;;
@@ -4034,6 +4035,8 @@ lane_net()
         python3 test/differential.py --harness net_clock_fault || return 1
         python3 test/differential.py --harness net_wait_states || return 1
         python3 test/differential.py --harness net_parser_work_states || return 1
+        python3 test/differential.py --harness net_dhcp_exchange || return 1
+        python3 test/differential.py --harness net_lease_transitions || return 1
         python3 test/differential.py --harness net_math_proof || return 1
         python3 test/differential.py --harness wire_constants || return 1
         python3 test/differential.py --harness net_dependency_closure || return 1
@@ -4135,6 +4138,12 @@ lane_net()
         2) note "sntp_fuzz: skipped (soft) -- does not downgrade net" ;;
         *) net_outcome=1 ;;
         esac
+        python3 test/differential.py --harness wifi_key_state
+        case $? in
+        0) ;;
+        2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
+        *) net_outcome=1 ;;
+        esac
         python3 test/differential.py --harness wifi_eapol_fuzz
         case $? in
         0) ;;
@@ -4226,6 +4235,23 @@ lane_fuzz()
 #       netlink_fuzz runs. Needs Linux clang's -fsanitize=memory; NOT RUN
 #       without it.
 lane_msan() { MOONWATER_MSAN=1 python3 test/differential.py --harness msan_net; }
+#       Proofs of the network parsers, run only when named. net_exhaustive_proof
+#       compares small security predicates with their specifications on every
+#       input there is (every IPv4 address, every prefix of every address, every
+#       DER length head, ...); net_bounded_proof has CBMC prove memory safety,
+#       termination and a stated property of each parser for every input up to
+#       its bound. cbmc comes from PATH or MOONWATER_CBMC; without it the
+#       bounded half is NOT RUN, which does not fail the lane.
+lane_proof()
+{
+        python3 test/differential.py --harness net_exhaustive_proof || return 1
+        python3 test/differential.py --harness net_bounded_proof
+        case $? in
+        0) ;;
+        2) note "net_bounded_proof: skipped (soft) -- no cbmc" ;;
+        *) return 1 ;;
+        esac
+}
 #       The bowl checks again at the tight tier (MOONWATER_STRICT 2), host
 #       architecture only: the argument forms of a password and a group
 #       secret are refused there and nowhere else.
