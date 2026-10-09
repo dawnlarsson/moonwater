@@ -1438,6 +1438,11 @@ static COLD bipolar netlink_leases_on(b32 handle,
 
 #define DNS_MAX_MESSAGE 4096
 #define DNS_CNAME_HOPS 16
+/* Shared by every name in one section, or across all CNAME selection passes.
+   A 4 KiB reply cannot buy 127 decompression jumps per record per pass. The
+   three framing sections and answer selection together spend at most 16,384
+   pointer jumps; otherwise-valid excessive compression is refused. */
+#define DNS_WORK_POINTERS DNS_MAX_MESSAGE
 //      A wire name is at most 255 bytes, so at most 127 labels, and no
 //      encoder needs more jumps than a name has labels.
 #define DNS_NAME_MAX 255
@@ -1515,14 +1520,15 @@ static COLD bipolar dns_write_name(p8 address_to into, positive room, string_add
         the jumps are counted too. A name longer than 255 bytes is refused
         whatever the room (RFC 1035 3.1). The spelling is kept as sent; DNS
         names compare without regard to ASCII case. A caller that reads many
-        names out of one message may pass steps, the labels and pointers they
-        may take between them, which each one taken lowers; a name that would
-        take one more is refused.
+        names out of one message may pass pointers, the compression jumps they
+        may take between them. A successfully expanded name subtracts its
+        jumps together; a name that would take one more is refused. Ordinary
+        uncompressed labels do no shared-budget work.
 */
 static COLD bipolar dns_copy_name(p8 address_to message, positive size,
                              positive at, p8 address_to into, positive room,
                              positive address_to ended,
-                             positive address_to steps)
+                             positive address_to pointers)
 {
         byte_reader reader = byte_reader_open(message, size);
         byte_store name = {into, min(room, (positive)DNS_NAME_MAX), 0};
@@ -1539,10 +1545,8 @@ static COLD bipolar dns_copy_name(p8 address_to message, positive size,
                 p8 length = byte_reader_u8(&reader);
                 const p8 address_to label;
 
-                if (!byte_reader_ok(&reader) || (steps && !address_to steps))
+                if (!byte_reader_ok(&reader))
                         return DNS_MALFORMED;
-                if (steps)
-                        address_to steps -= 1;
 
                 if ((length & 0xc0) == 0xc0)
                 {
@@ -1576,6 +1580,12 @@ static COLD bipolar dns_copy_name(p8 address_to message, positive size,
 
                 if (!length)
                 {
+                        if (pointers)
+                        {
+                                if (address_to pointers < jumps)
+                                        return DNS_MALFORMED;
+                                address_to pointers -= jumps;
+                        }
                         if (!address_to ended)
                                 address_to ended = ceiling -
                                                    byte_reader_left(&reader);
@@ -1619,9 +1629,10 @@ static COLD bipolar dns_answer_address(p8 address_to message, positive size,
         p8 wanted[256];
         p8 alias[256];
         positive ended;
+        positive pointers = DNS_WORK_POINTERS;
         bipolar wanted_length = dns_copy_name(message, size, question_at,
                                               wanted, sizeof wanted,
-                                              address_of ended, null);
+                                              address_of ended, address_of pointers);
 
         if (wanted_length < 0)
                 return DNS_MALFORMED;
@@ -1646,7 +1657,7 @@ static COLD bipolar dns_answer_address(p8 address_to message, positive size,
                         //      at moves on to where the owner name ended.
                         bipolar owner_length = dns_copy_name(
                             message, size, at, owner, sizeof owner, address_of at,
-                            null);
+                            address_of pointers);
                         byte_reader tail = dns_message_at(message, size, at);
                         byte_reader data;
                         positive data_length;
@@ -1690,7 +1701,7 @@ static COLD bipolar dns_answer_address(p8 address_to message, positive size,
 
                                 alias_length = dns_copy_name(
                                     message, size, at, alias, sizeof alias,
-                                    address_of target_end, null);
+                                    address_of target_end, address_of pointers);
 
                                 if (alias_length < 0 ||
                                     target_end != at + data_length)
@@ -1756,12 +1767,18 @@ static COLD bool dns_reply_identity(
 static COLD bipolar dns_records_end(p8 address_to message, positive size,
                                positive at, positive count)
 {
+        positive pointers = DNS_WORK_POINTERS;
+
         for (positive record = 0; record < count; record++)
         {
-                bipolar ended = dns_skip_name(message, size, at);
+                p8 owner[256];
+                positive ended;
+                bipolar length = dns_copy_name(message, size, at, owner,
+                                                sizeof owner, address_of ended,
+                                                address_of pointers);
                 byte_reader tail;
 
-                if (ended < 0)
+                if (length < 0)
                         return DNS_MALFORMED;
                 //      The type, class and time to live, then the data
                 //      behind its length.
@@ -2117,6 +2134,10 @@ static COLD bipolar dns_query_once(p32 server, p16 port, string_address name,
         positive left[2];
         network_deadline deadline = *budget;
 
+        if (edns && deadline.budget >
+                        DNS_EDNS_PROBE_SECONDS * NETWORK_NANOSECONDS)
+                deadline.budget = DNS_EDNS_PROBE_SECONDS * NETWORK_NANOSECONDS;
+
         /*
                 A machine with no RDRAND and no virtio-rng seeds the kernel's
                 generator from interrupts, which an idle box or guest can take
@@ -2263,7 +2284,7 @@ static COLD bipolar dns_query_once(p32 server, p16 port, string_address name,
                 return dns_retry_tcp(address_of where, request,
                                      request_length, id,
                                      question_length, found,
-                                     address_of deadline);
+                                     budget);
         return failure;
 
 failed:
@@ -2291,15 +2312,8 @@ static COLD bipolar dns_resolve_at(p32 server, p16 port, string_address name,
 
         for (positive attempt = 0; attempt < 3; attempt++)
         {
-                network_deadline probe = budget;
-
-                if (edns && probe.budget >
-                                DNS_EDNS_PROBE_SECONDS * NETWORK_NANOSECONDS)
-                        probe.budget = DNS_EDNS_PROBE_SECONDS *
-                                       NETWORK_NANOSECONDS;
                 status = dns_query_once(server, port, name, found, mixed, edns,
-                                        edns ? address_of probe
-                                             : address_of budget);
+                                        address_of budget);
                 if (status == DNS_CASE_FOLDED && mixed)
                         mixed = false;
                 else if (status == DNS_FORMAT_ERROR && edns)
@@ -5394,6 +5408,7 @@ static bool crypto_rsa_pss_sha256(p8 address_to n_bytes, positive n_length,
 #endif
 #define TLS_HS_MAX 16384
 #define TLS_HANDSHAKE_SECONDS 30
+#define TLS_WRITE_SECONDS 30
 #define TLS_OK 0
 #define TLS_FAIL (-1)
 #define TLS_EOF 1
@@ -5641,17 +5656,35 @@ static COLD fn tls_traffic_keys(p8 address_to traffic,
 /* RFC 8446 5.3: the sequence number, big-endian, xored into the IV's end. */
 static fn tls_nonce(p8 address_to iv, p64 seq, p8 address_to nonce)
 {
-        memory_copy(nonce, iv, 12);
-        for (positive i = 0; i < 8; i++)
-                nonce[11 - i] ^= (p8)(seq >> (8 * i));
+        /* The first word is the fixed salt. The sequence occupies the final
+           big-endian word, so xor it as one value: besides spelling RFC
+           8446 directly, this avoids eight checked byte writes per record.
+           The unaligned helpers fold to ordinary loads/stores on x86 and
+           AArch64 and safe byte operations on the RV64 floor. */
+        memory_store_unaligned(p32, nonce,
+                               memory_load_unaligned(p32, iv));
+        network_store_64(nonce + 4, network_load_64(iv + 4) ^ seq);
 }
 
 static fn tls_record_header(p8 address_to header, p8 type, positive length)
 {
-        header[0] = type;
-        header[1] = 0x03;
-        header[2] = 0x03;
-        network_store_16(header + 3, (p16)length);
+        p32 word = (p32)type << 24 | 0x00030300u |
+                   (p32)((p16)length >> 8);
+
+        /* This runs for every record. Keeping the swap and unaligned store
+           here lets x86 and AArch64 fold them into two instructions instead
+           of calling lib.c's general packet-field routine. */
+#if RISCV64
+        /* GCC lowers the builtin byte swap to __bswapsi2 at the IMAFD
+           floor, and this freestanding program has no libgcc. lib.c's
+           packet store is the compact bytewise body for that machine. */
+        network_store_32(header, word);
+#elif defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+        memory_store_unaligned(p32, header, word);
+#else
+        memory_store_unaligned(p32, header, __builtin_bswap32(word));
+#endif
+        header[4] = (p8)length;
 }
 
 /* RFC 5246 6.2.3.3: a TLS 1.2 record's additional data is its sequence
@@ -5706,13 +5739,18 @@ static positive tls_seal(tls_conn address_to tls, p8 inner_type,
 
 /* A record leaves in one send: sent in pieces, everything after the first
    piece waits under Nagle for the peer to acknowledge it. */
-static bipolar tls_send_enc(tls_conn address_to tls, p8 inner_type,
-                            p8 address_to body, positive length)
+static bipolar tls_send_enc_until(tls_conn address_to tls, p8 inner_type,
+                                  p8 address_to body, positive length,
+                                  const network_deadline address_to deadline)
 {
         p8 record[5 + TLS12_RECORD_MAX];
         positive sealed = tls_seal(tls, inner_type, body, length, record);
 
-        if (!sealed || !network_stream_send_all(tls->handle, record, sealed))
+        if (!sealed || !(deadline
+                ? network_stream_send_all_until(tls->handle, record, sealed,
+                                                deadline)
+                : network_stream_send_all_for(tls->handle, record, sealed,
+                                               TLS_WRITE_SECONDS, 0)))
         {
                 /* A prefix may already be on the wire. No later record can
                    safely continue that stream or undo the spent sequence. */
@@ -5720,6 +5758,12 @@ static bipolar tls_send_enc(tls_conn address_to tls, p8 inner_type,
                 return TLS_FAIL;
         }
         return TLS_OK;
+}
+
+static bipolar tls_send_enc(tls_conn address_to tls, p8 inner_type,
+                            p8 address_to body, positive length)
+{
+        return tls_send_enc_until(tls, inner_type, body, length, null);
 }
 
 /* Open a record where it lies. The inner type is its last nonzero byte;
@@ -5861,12 +5905,12 @@ static bipolar tls_next_record(tls_conn address_to tls, p8 address_to type,
                            encrypted records and fixes legacy_record_version
                            at TLS 1.2 for every server record. */
                         if (!tls_record_version_valid(header))
-                                return TLS_FAIL;
+                                goto refused;
                         payload_length = network_load_16(header + 3);
                         if (!payload_length ||
                             payload_length > (tls->tls12 ? TLS12_RECORD_MAX
                                                          : TLS_RECORD_MAX))
-                                return TLS_FAIL;
+                                goto refused;
                         if (have - 5 >= payload_length)
                                 break;
                 }
@@ -5925,9 +5969,9 @@ static bipolar tls_next_record(tls_conn address_to tls, p8 address_to type,
         return TLS_OK;
 
 refused:
-        /* A record refused past its header is fatal (RFC 8446 5.2, 6): the
-           read keys are spent, so no record behind it ever opens. */
-        tls->seq_read = TLS_AES_GCM_RECORD_LIMIT;
+        /* A refused record is fatal (RFC 8446 5.2, 6): neither direction
+           can continue, and no record behind it ever opens. */
+        tls->seq_read = tls->seq_write = TLS_AES_GCM_RECORD_LIMIT;
         return TLS_FAIL;
 }
 
@@ -8559,7 +8603,8 @@ static COLD bipolar tls_check_finished(tls_conn address_to tls, p8 address_to ve
    OpenSSL's and curl's clients answer when they hold none. The flight is
    sealed into out and leaves in one send. */
 static COLD bipolar tls_send_finished(tls_conn address_to tls,
-                                      p8 address_to out)
+                                      p8 address_to out,
+                                      const network_deadline address_to deadline)
 {
         p8 msg[36] = {TLS_HS_FINISHED, 0, 0, 32};
         p8 none[8] = {TLS_HS_CERTIFICATE, 0, 0, 4};
@@ -8573,8 +8618,8 @@ static COLD bipolar tls_send_finished(tls_conn address_to tls,
         tls_finished_mac(tls, tls->c_hs_traffic, msg + 4);
         at += tls_seal(tls, TLS_CT_HANDSHAKE, msg, sizeof msg, out + at);
         crypto_forget(msg, sizeof msg);
-        return network_stream_send_all(tls->handle, out, at) ? TLS_OK
-                                                             : TLS_FAIL;
+        return network_stream_send_all_until(tls->handle, out, at, deadline)
+                   ? TLS_OK : TLS_FAIL;
 }
 
 /* A signature by the leaf's key over message under a scheme the
@@ -8792,16 +8837,24 @@ static COLD fn tls_update_traffic(p8 address_to secret,
 
 /* Send a KeyUpdate under the current write key, then write under the
    next. Asking the peer to update too is how the read side is rekeyed. */
-static COLD bipolar tls_key_update(tls_conn address_to tls, bool ask)
+static COLD bipolar tls_key_update_until(
+    tls_conn address_to tls, bool ask,
+    const network_deadline address_to deadline)
 {
         p8 message[5] = {TLS_HS_KEY_UPDATE, 0, 0, 1, (p8)ask};
 
-        if (tls_send_enc(tls, TLS_CT_HANDSHAKE, message, sizeof message))
+        if (tls_send_enc_until(tls, TLS_CT_HANDSHAKE, message, sizeof message,
+                               deadline))
                 return TLS_FAIL;
         tls_update_traffic(tls->c_ap_traffic, address_of tls->c_gcm, tls->c_iv,
                            address_of tls->seq_write);
         tls->update_asked |= ask;
         return TLS_OK;
+}
+
+static COLD bipolar tls_key_update(tls_conn address_to tls, bool ask)
+{
+        return tls_key_update_until(tls, ask, null);
 }
 
 /* This client does not resume sessions, but servers commonly send tickets:
@@ -8810,9 +8863,9 @@ static COLD bipolar tls_key_update(tls_conn address_to tls, bool ask)
    has to end its record, since the key changes after it (RFC 8446 5.1),
    and its one byte is 0 or 1. Every other post-handshake message fails
    rather than leaving keys or authentication silently stale. */
-static COLD bipolar tls_post_handshake_append(tls_conn address_to tls,
-                                              p8 address_to fragment,
-                                              positive length)
+static COLD bipolar tls_post_handshake_append_until(
+    tls_conn address_to tls, p8 address_to fragment, positive length,
+    const network_deadline address_to deadline)
 {
         p8 address_to held = tls->post_handshake;
         positive address_to held_length = address_of tls->post_handshake_used;
@@ -8847,7 +8900,8 @@ static COLD bipolar tls_post_handshake_append(tls_conn address_to tls,
                                            address_of tls->s_gcm, tls->s_iv,
                                            address_of tls->seq_read);
                         tls->update_asked = false;
-                        if (held[at + 4] && tls_key_update(tls, false))
+                        if (held[at + 4] &&
+                            tls_key_update_until(tls, false, deadline))
                                 return TLS_FAIL;
                 }
                 else if (!tls_new_session_ticket_valid(held + at + 4,
@@ -8867,6 +8921,13 @@ static COLD bipolar tls_post_handshake_append(tls_conn address_to tls,
         }
 
         return TLS_OK;
+}
+
+static COLD bipolar tls_post_handshake_append(tls_conn address_to tls,
+                                             p8 address_to fragment,
+                                             positive length)
+{
+        return tls_post_handshake_append_until(tls, fragment, length, null);
 }
 
 /* A TLS 1.2 Certificate is the list alone, each entry without
@@ -9028,7 +9089,8 @@ static COLD bipolar tls_flight_message(tls_conn address_to tls,
    and each IV is its salt before eight zero bytes that tls_nonce fills with
    the sequence. */
 static COLD bipolar tls12_client_flight(tls_conn address_to tls,
-                                        p8 address_to out)
+                                        p8 address_to out,
+                                        const network_deadline address_to deadline)
 {
         static const p8 no_certificate[7] = {TLS_HS_CERTIFICATE, 0, 0, 3};
         static const p8 change[6] = {TLS_CT_CCS, 3, 3, 0, 1, 1};
@@ -9077,7 +9139,8 @@ static COLD bipolar tls12_client_flight(tls_conn address_to tls,
         sealed = tls_seal(tls, TLS_CT_HANDSHAKE, finished, sizeof finished,
                           out + at);
         crypto_forget(finished, sizeof finished);
-        return sealed && network_stream_send_all(tls->handle, out, at + sealed)
+        return sealed && network_stream_send_all_until(
+                             tls->handle, out, at + sealed, deadline)
                    ? TLS_OK
                    : TLS_FAIL;
 }
@@ -9107,7 +9170,7 @@ static COLD bipolar tls12_handshake(tls_conn address_to tls, p8 address_to hs,
                     !tls_server_flight_step(address_of flight, hs[0]) ||
                     tls_flight_message(tls, hs, length, out))
                         return TLS_FAIL;
-        if (used != length || tls12_client_flight(tls, out) ||
+        if (used != length || tls12_client_flight(tls, out, deadline) ||
             tls_next_record(tls, address_of type, address_of record,
                             address_of record_length, deadline) ||
             type != TLS_CT_CCS)
@@ -9157,7 +9220,8 @@ static COLD bipolar tls_handshake(
                         goto done;
                 tls_transcript_add(tls, out + 5, out_length);
                 tls_record_header(out, TLS_CT_HANDSHAKE, out_length);
-                if (!network_stream_send_all(tls->handle, out, 5 + out_length) ||
+                if (!network_stream_send_all_until(tls->handle, out,
+                                                    5 + out_length, deadline) ||
                     tls_handshake_next(tls, hs, address_of used,
                                        address_of length, address_of seen_ccs,
                                        deadline))
@@ -9222,7 +9286,7 @@ static COLD bipolar tls_handshake(
                 goto done;
 
         tls_derive_app_keys(tls);
-        if (tls_send_finished(tls, out))
+        if (tls_send_finished(tls, out, deadline))
                 goto done;
         tls_use_app_keys(tls);
         status = TLS_OK;
@@ -9283,8 +9347,8 @@ static bipolar tls_write(tls_conn address_to tls, p8 address_to data,
    *span points into the receive buffer and stays valid until a later read on
    this connection receives; *got of zero is close_notify, and stays so. Given
    a deadline, every wait shares it. Given seconds or nanoseconds instead, a
-   deadline that long starts the first time a wait is needed, so records
-   already whole in the buffer are opened without asking the clock. Neither
+   deadline that long starts the first time a wait or control record needs
+   it, so ordinary data already whole in the buffer stays clock-free. Neither
    renews: tickets, empty records and partial records all spend one budget.
    hold never receives: when the next record is not yet whole it answers
    TLS_AGAIN, so a writer can gather every record already here while the
@@ -9304,6 +9368,9 @@ static bipolar tls_take(tls_conn address_to tls, positive room,
         positive length = 0;
         bipolar status;
 
+        if (deadline &&
+            !network_deadline_left(deadline, left, left + 1))
+                return TLS_FAIL;
         if (tls->plain_used)
         {
                 positive take = min(room, tls->plain_used);
@@ -9331,9 +9398,9 @@ static bipolar tls_take(tls_conn address_to tls, positive room,
                                 return TLS_AGAIN;
                         if (!waiting)
                         {
-                                if (!network_deadline_begin(address_of patience,
-                                                            seconds,
-                                                            nanoseconds))
+                                if (!network_deadline_begin_within(
+                                        address_of patience, seconds,
+                                        nanoseconds, deadline))
                                         return TLS_FAIL;
                                 deadline = address_of patience;
                                 waiting = true;
@@ -9348,24 +9415,39 @@ static bipolar tls_take(tls_conn address_to tls, positive room,
                 }
                 if (status)
                         return TLS_FAIL;
+                /* A buffered control record may request a write before any
+                   receive wait. Start the relative budget before that write,
+                   while ordinary buffered application data stays clock-free. */
+                if ((type == TLS_CT_HANDSHAKE || !length ||
+                     (tls->seq_read >= TLS_KEY_UPDATE_AT && !tls->update_asked &&
+                      !tls->tls12)) && (!waiting || (!deadline && hold)))
+                {
+                        if (!network_deadline_begin_within(address_of patience,
+                                waiting ? TLS_WRITE_SECONDS : seconds,
+                                waiting ? 0 : nanoseconds, deadline))
+                                goto refused;
+                        deadline = address_of patience;
+                        waiting = true;
+                }
                 /* TLS 1.2 after its handshake has only renegotiation to
                    say in handshake messages, and that is refused. */
                 if (type == TLS_CT_HANDSHAKE)
                 {
                         if (tls->tls12 ||
-                            tls_post_handshake_append(tls, inner, length))
-                                return TLS_FAIL;
+                            tls_post_handshake_append_until(tls, inner, length,
+                                                            deadline))
+                                goto refused;
                         crypto_forget(inner, length);
                 }
                 else if (type != TLS_CT_APP || tls->post_handshake_used)
-                        return TLS_FAIL;
+                        goto refused;
                 /* Half way to the read key's limit, a TLS 1.3 peer is asked
                    for a KeyUpdate, once; its answer starts the count over.
                    TLS 1.2 has no rekeying without renegotiation, so its keys
                    run to the limit. */
                 if (tls->seq_read >= TLS_KEY_UPDATE_AT && !tls->update_asked &&
-                    !tls->tls12 && tls_key_update(tls, true))
-                        return TLS_FAIL;
+                    !tls->tls12 && tls_key_update_until(tls, true, deadline))
+                        goto refused;
                 if (type == TLS_CT_HANDSHAKE || !length)
                         continue;
                 if (room > length)
@@ -9376,6 +9458,13 @@ static bipolar tls_take(tls_conn address_to tls, positive room,
                 tls->plain_used = length - room;
                 return TLS_OK;
         }
+
+refused:
+        /* A semantic protocol error, or a failed mandatory response after
+           rekeying, is fatal. Buffered later records must never resurrect
+           the connection or publish application data under spent state. */
+        tls->seq_read = tls->seq_write = TLS_AES_GCM_RECORD_LIMIT;
+        return TLS_FAIL;
 }
 
 static bipolar tls_borrow(tls_conn address_to tls, positive room,
@@ -9387,12 +9476,28 @@ static bipolar tls_borrow(tls_conn address_to tls, positive room,
                         false);
 }
 
+static bipolar tls_borrow_within(
+    tls_conn address_to tls, positive room, p8 address_to address_to span,
+    positive address_to got, positive seconds, positive nanoseconds,
+    const network_deadline address_to deadline)
+{
+        return tls_take(tls, room, span, got, deadline, seconds, nanoseconds,
+                        false);
+}
+
 /* The next application data already whole in the receive buffer, lent
    without receiving; TLS_AGAIN when none is. */
+static bipolar tls_lend_until(
+    tls_conn address_to tls, positive room, p8 address_to address_to span,
+    positive address_to got, const network_deadline address_to deadline)
+{
+        return tls_take(tls, room, span, got, deadline, 0, 0, true);
+}
+
 static bipolar tls_lend(tls_conn address_to tls, positive room,
                         p8 address_to address_to span, positive address_to got)
 {
-        return tls_take(tls, room, span, got, null, 0, 0, true);
+        return tls_lend_until(tls, room, span, got, null);
 }
 
 static bipolar tls_read_until(
@@ -10219,7 +10324,8 @@ static bipolar http_link_write(http_link address_to link, p8 address_to data,
         if (link->tls)
                 return tls_write(address_of link->session, data, length)
                            ? HTTP_NO_REPLY : HTTP_OK;
-        return network_stream_send_all(link->handle, data, length)
+        return network_stream_send_all_for(link->handle, data, length,
+                                            HTTP_IDLE_SECONDS, 0)
                    ? HTTP_OK : HTTP_NO_REPLY;
 }
 
@@ -10424,8 +10530,10 @@ static bipolar http_body_borrow(http_body address_to body, positive room,
                 if (!http_body_wait(body, address_of seconds,
                                     address_of nanoseconds))
                         return HTTP_NO_REPLY;
-                return tls_borrow(address_of body->link->session, room, data,
-                                  got, seconds, nanoseconds)
+                return tls_borrow_within(address_of body->link->session,
+                                  room, data, got, seconds, nanoseconds,
+                                  body->deadline.began ? address_of body->deadline
+                                                       : null)
                            ? HTTP_NO_REPLY : HTTP_OK;
         }
 
@@ -10451,16 +10559,37 @@ typedef struct
 */
 static bipolar http_write_failure;
 
-/* Write every span, resuming after partial progress; as with
-   system_write_all, a zero or negative result ends it. */
+/* Write every span, resuming after partial progress. Interruption starts
+   one absolute retry budget; ordinary output needs no clock. A syscall
+   which itself blocks on a disk or pipe is not preempted by that budget. */
 static bool http_write_spans(bipolar dest, http_span address_to spans,
                              positive count, positive total)
 {
+        network_deadline patience = {0};
+
         while (total)
         {
+                positive left[2];
+
+                if (patience.began && !network_deadline_left(
+                        address_of patience, left, left + 1))
+                {
+                        http_write_failure = NETWORK_INTERRUPTED;
+                        return false;
+                }
                 bipolar wrote = (bipolar)system_call_3(
                     syscall(writev), (positive)dest, (positive)spans, count);
 
+                if (wrote == NETWORK_INTERRUPTED)
+                {
+                        if (!patience.began && !network_deadline_begin(
+                                address_of patience, HTTP_IDLE_SECONDS, 0))
+                        {
+                                http_write_failure = NETWORK_INTERRUPTED;
+                                return false;
+                        }
+                        continue;
+                }
                 if (wrote <= 0 || (positive)wrote > total)
                 {
                         http_write_failure = wrote < 0 ? wrote
@@ -10495,6 +10624,11 @@ static bipolar http_copy(http_body address_to body, bipolar dest, positive want,
         {
                 p8 address_to data = null;
                 positive got = 0;
+                positive left[2];
+
+                if (body->deadline.began && !network_deadline_left(
+                        address_of body->deadline, left, left + 1))
+                        return HTTP_NO_REPLY;
 
                 if (http_body_borrow(body, want, address_of data,
                                      address_of got))
@@ -10535,10 +10669,12 @@ static bipolar http_copy(http_body address_to body, bipolar dest, positive want,
                         {
                                 p8 address_to more = null;
                                 positive more_got = 0;
-                                bipolar lent = tls_lend(
+                                bipolar lent = tls_lend_until(
                                     address_of body->link->session,
                                     want - total, address_of more,
-                                    address_of more_got);
+                                    address_of more_got,
+                                    body->deadline.began ? address_of body->deadline
+                                                         : null);
 
                                 if (lent == TLS_AGAIN || (!lent && !more_got))
                                         break;
@@ -11099,7 +11235,8 @@ static COLD positive tls_aia_fetch(const p8 address_to url, positive length,
         handle = http_stream_open(ip, port, TLS_AIA_SECONDS);
         if (handle < 0)
                 return 0;
-        if (network_stream_send_all(handle, request, sent))
+        if (network_stream_send_all_until(handle, request, sent,
+                                           address_of deadline))
                 for (;;)
                 {
                         bipolar got;
@@ -12086,9 +12223,13 @@ static COLD bool dhcp_receive(bipolar handle, p8 address_to packet, positive roo
                          const socket_address_internet address_to expected_peer,
                          bool any_peer_host,
                          socket_address_internet address_to accepted_peer,
+                         positive address_to remaining,
                          const network_deadline address_to deadline)
 {
-        positive discarded = 0;
+        positive own_remaining = NETWORK_DISCARD_MAX;
+
+        if (!remaining)
+                remaining = address_of own_remaining;
 
         for (;;)
         {
@@ -12110,7 +12251,7 @@ static COLD bool dhcp_receive(bipolar handle, p8 address_to packet, positive roo
                                 *accepted_peer = peer;
                         return true;
                 }
-                if (discarded++ == NETWORK_DISCARD_MAX)
+                if (!network_discard_one(remaining))
                         return false;
         }
 }
@@ -12128,17 +12269,17 @@ static COLD bipolar dhcp_complete(bipolar handle, p8 address_to packet,
 {
         dhcp_lease answer;
         p8 kind = 0;
-        positive discarded = 0;
+        positive remaining = NETWORK_DISCARD_MAX;
 
         while (dhcp_receive(handle, packet, room, transaction, hardware,
                             address_of answer, address_of kind, peer,
-                            rebinding, null, deadline))
+                            rebinding, null, address_of remaining, deadline))
                 if (dhcp_reacquisition_answer_matches(kind, address_of answer,
                                                       lease, rebinding) &&
                     (kind == DHCP_NAK ||
                      dhcp_lease_take(lease, address_of answer)))
                         return kind == DHCP_ACK ? DHCP_OK : DHCP_REFUSED;
-                else if (discarded++ == NETWORK_DISCARD_MAX)
+                else if (!network_discard_one(address_of remaining))
                         break;
 
         return DHCP_NO_OFFER;
@@ -12215,7 +12356,7 @@ static bipolar dhcp_ask(string_address device, p8 address_to hardware,
         {
                 p8 kind = 0;
                 network_deadline deadline;
-                positive discarded = 0;
+                positive remaining = NETWORK_DISCARD_MAX;
 
                 /*
                         A quarter second apart while it matters.
@@ -12265,11 +12406,12 @@ static bipolar dhcp_ask(string_address device, p8 address_to hardware,
                                     address_of any_server,
                                     true,
                                     address_of selected_peer,
+                                    address_of remaining,
                                     address_of deadline))
                 {
                         if (kind != DHCP_OFFER || !dhcp_lease_usable(lease))
                         {
-                                if (discarded++ == NETWORK_DISCARD_MAX)
+                                if (!network_discard_one(address_of remaining))
                                         break;
                                 continue;
                         }
