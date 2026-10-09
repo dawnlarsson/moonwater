@@ -110,6 +110,12 @@ behind it: `moonwater dns ADDRESS...` keeps up to three of your own instead
 (`/root/dns`, written to `/etc/resolv.conf` now, at every boot and at every
 lease), and `dns auto` goes back. 1.1.1.1 is written only for a network whose
 lease names no resolver, and is asked by a lookup only when the file names none.
+`moonwater dns tls on` asks wget's, fetch's and `host`'s names over TLS (port
+853) of the resolvers known to offer it, 1.1.1.1, 1.0.0.1, 9.9.9.9 and
+149.112.112.112 (the ones `dns` names, or else all four), and falls back to the
+plain lookup within two seconds; `only` sends no name in the clear. It is off by
+default: a captive portal or a first lease with the clock unset would charge
+every lookup the two seconds.
 
 Commands given to `moonwater` run as root through the shell, as if typed.
 `bind init` runs in the background and keeps each command's output in
@@ -157,14 +163,27 @@ firmware its wifi and bluetooth drivers load, fetched from linux-firmware at a
 pinned commit and checked against pinned SHA-256s; no blob is in this
 repository.
 
-**Time.** NTP runs from boot until turned off, walking several public servers
-until the kernel reports the clock synchronised. NTP sampling takes five
-samples a query and keeps the one with the fastest round trip, RFC 5905's clock
-filter, so a queueing spike never sets the clock; it also asks three servers
-and believes the one with the least root distance among those whose answers
-agree, so one wrong server cannot set it either. A server named in
-`/root/ntp.server` is asked first, but a step past two seconds still needs a
-second server to agree when the clock already has a plausible wall time. The
+**Time.** NTP runs from boot until turned off. It asks Network Time Security
+servers first (RFC 8915: `time.cloudflare.com`, `nts.netnod.se`,
+`ptbtime1.ptb.de`, or those `moonwater ntp nts servers` names), whose answers
+are authenticated, and falls back to several public pool servers, whose
+answers are not, only when none can be reached; `moonwater ntp` says which set
+the clock last, and `moonwater ntp nts only` refuses the pool altogether. NTP
+sampling takes five samples a query and keeps the one with the fastest round
+trip, RFC 5905's clock filter, so a queueing spike never sets the clock; it
+also asks three servers and believes the one with the least root distance
+among those whose answers agree, so one wrong server cannot set it either. A
+server named in `/root/ntp.server` is asked first, and alone, in plain (unless
+NTS is only), but a step past two seconds still needs a second server to agree
+when the clock already has a plausible wall time. The clock has a floor: the
+date of the source this was built from, or the latest time the machine knew
+for certain (`/root/clock.good`, an authenticated answer's time or the floor
+the boot began with plus the seconds since, written forward only), whichever
+is later. A clock below it is unset, not wrong: certificates are not judged
+against it (`wget` says so and names `moonwater time sync`), no answer earlier
+than it is taken, and the NTS key establishment, until an answer has been
+authenticated this boot, is judged as of the floor, which is how an unset or
+wrong clock gets set. The
 timezone is auto until set by hand: on each new network the machine makes one
 HTTPS request to Cloudflare and takes the zone it reports, at most once every
 three minutes. There is no zoneinfo directory: each of tzdata's 420 zones maps
@@ -691,7 +710,7 @@ have only `sec_exec_hardened` and `sec_build_hardened`.
 | `sec_lockdown` (kernel) | integrity lockdown from boot, signed modules only, Landlock | confidentiality lockdown |
 | `sec_files` | `STRICT_FILES` 2 and find without `-delete` or `-fprint*` | 3 |
 | `sec_text` | `STRICT_TEXT` 2 | 3 |
-| `sec_net` | `STRICT_NET` 2 and no `wget` or `fetch` | 3 |
+| `sec_net` | `STRICT_NET` 2 and no `wget` or `fetch`; time from NTS only and names over DNS over TLS only, unless `/root/ntp.nts` or `/root/dns.tls` says otherwise | 3 |
 | `sec_host` | `STRICT_HOST` 2: a disk is asked about, `kptr_restrict` 2, io_uring refused, Yama 2, widest mmap randomisation | 3: no module loads, no ptrace attach (Yama 3), `hidepid` on /proc, the data partition `nosuid`, `/dev/shm` `noexec` |
 | `sec_bowl` | `STRICT_BOWL` 2 | 3 |
 | `sec_exec` | Floodlight sealed with every command-making switch off | (none) |

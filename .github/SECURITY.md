@@ -18,8 +18,10 @@ never a pass.
 2. **Off-path network:** forged traffic, cannot see the live exchange.
    Transaction entropy and exact reply identity stop it.
 3. **On-path or same-link:** observes, injects, replays, delays, reorders,
-   truncates, suppresses. TLS authenticates HTTPS; plain DNS, DHCPv4 and SNTP
-   do not, so their endpoint and nonce checks stop only off-path forgery.
+   truncates, suppresses. TLS authenticates HTTPS, NTS (RFC 8915) the time
+   when an NTS server is reachable, and DNS over TLS the names when it is set;
+   DHCPv4, plain DNS and plain SNTP do not, so their endpoint and nonce checks
+   stop only off-path forgery.
 4. **Hostile service:** owns the connected endpoint and streams bytes and
    timing forever. Bounds and absolute deadlines contain it.
 
@@ -35,7 +37,9 @@ never a pass.
 - A datagram reply matches its family, peer, transaction and echoed request
   fields before it changes state, and, at the tight tier, is exactly the size of
   the one shape the client parses (the default reads the first 48 bytes of a
-  longer SNTP reply, as ntpd and chrony do).
+  longer SNTP reply, as ntpd and chrony do; an NTS reply is longer by design,
+  is parsed whole at every tier and believed only when its authenticator opens,
+  and one that fills its 1,280-byte room is cut and is noise).
 - Security transactions use the initialized kernel CSPRNG or do not happen.
 - Text is validated again at the sink that serializes or executes it.
 - Failure publishes no partial output, keeps no stale authenticated state,
@@ -51,7 +55,65 @@ never a pass.
 - **Two tiers.** The default behaves as GNU wget and curl do. `MOONWATER_STRICT`
   at the tight tier holds RFC 9110 and RFC 3986: 204/205 framing, an explicit
   `http://` or `https://` for every URL, no redirect from public into private
-  space, a whole-body deadline on streams.
+  space, a whole-body deadline on streams. For time and names the tight net
+  tier (`MOONWATER_STRICT_NET` 2 and 3, the `sec_net_hardened` and
+  `sec_net_locked` profiles) defaults to NTS only and DNS over TLS only: no
+  plain time is taken and no name leaves in the clear unless root's
+  `/root/ntp.nts` or `/root/dns.tls` says otherwise (a written word wins over
+  the tier). The cost is a machine that has no clock until an NTS server
+  answers (TCP 4460 and UDP 123 to Cloudflare, Netnod or PTB, or the servers
+  named), and whose wget, fetch, `host` and zone question resolve nothing
+  until then: the DNS over TLS certificate is judged against the clock, and
+  NTS's own names are asked in plain, so the one bootstraps the other.
+  `nts_mode_of` and `dns_tls_mode_of` are the two lines that choose, and
+  CHECK_net (built at both tiers), `nts` and `dns_tls` hold them.
+- **The clock has a floor.** A clock earlier than `MOONWATER_CLOCK_FLOOR` (the
+  date of the source, net.c, which the SNTP client names `SNTP_WALL_LEAST`;
+  `tls_dates` holds it not ahead of the machine's clock and within 120 days of
+  the newest commit) or than `/root/clock.good` (the latest time the machine
+  knew for certain) is unset, not wrong: certificates are not judged against it
+  (wget says so in its own words, status 5, and names `moonwater time sync`),
+  `moonwater time` says so, and no NTP answer earlier than the floor is taken. A
+  `clock.good` that is not a plain file holding a decimal number of seconds
+  between the floor and the end of the NTP window (2104) is ignored, so a
+  damaged or planted one can only fail to help; deleting it is always safe. It
+  is a lower bound nothing forged can move: an authenticated answer's own time
+  (kept as the wall second it set and the boot second, so a later step of the
+  wall clock changes nothing), or else the floor the boot began with plus the
+  seconds since, never the wall clock; it is written every six hours of uptime
+  and when the machine stops, forward only, never through a link, and `wipe
+  yes` keeps it. A program that cannot read `/root` judges by the build's floor.
+- **NTS is asked first; plain SNTP is the marked fallback.** The NTS-KE
+  connection is the TLS 1.3 client with ALPN `ntske/1` (1.3 alone on offer)
+  and the RFC 8446 exporter; the AEAD is AES-SIV-CMAC-256 on the tree's own
+  AES. The one connection whose certificate is not judged by the clock is the
+  key establishment, until an authenticated answer has been taken this boot: it
+  is judged as of the floor with `notBefore` not asked (an RTC two years out
+  reads every certificate expired), as chrony's `nocerttimecheck` does but with
+  the floor for `notAfter`. An authenticated answer is believed anywhere the
+  window puts it; a step past two seconds on a set clock takes two NTS servers.
+  With no NTS server reachable the pool is asked, marked plain in `moonwater
+  ntp`, never written to the floor, and refused when it puts the clock further
+  from this boot's NTS time than 5 s and 1000 ppm; `moonwater ntp nts only`
+  refuses plain time altogether, a server named in `/root/ntp.server` included.
+  NTS-D1: `AEAD_AES_128_GCM_SIV` is not offered (RFC 8915 makes SIV-CMAC
+  mandatory and every public server has it). NTS-D2: plain NTP stays the
+  default fallback at the default tier, 1:1 with a machine without NTS; a
+  network that blocks TCP 4460 costs one try and two minutes without another.
+- **DNS over TLS is off by default (DOT-D1).** `moonwater dns tls on` asks the
+  resolvers known to offer it (1.1.1.1, 1.0.0.1, 9.9.9.9, 149.112.112.112: the
+  ones resolv.conf names, or else all four) over TLS on 853 first and falls
+  back to UDP within two seconds of the first try; `only` sends no name in the
+  clear, the network's own resolver included, so a name only that resolver
+  knows does not resolve. The certificate is checked as for https, the
+  resolver's address against an iPAddress name. A captive portal answers or
+  drops 853 and a first lease arrives with the clock unset, both an ordinary
+  first minute, which a default should not charge two seconds a lookup for.
+  Only the HTTP client and `host` follow it; NTS, SNTP, a caIssuers fetch,
+  hostid, logger and waterlink ask in plain (a clock cannot wait for names
+  that need it, and a lookup inside a handshake opens no handshake). The word
+  is kept in `/root/dns.tls` and published in `/run/moonwater/dns.tls`, so a
+  lookup by a user who cannot read `/root` follows it too.
 - **TLS:** no revocation (OCSP, CRL, CT), as default wget and curl. SAN only,
   no common-name fallback. 120 Mozilla roots as keys, `distrust-after` dates
   enforced. DNSSEC out of scope: the resolver is a stub that trusts the
@@ -158,7 +220,7 @@ never a pass.
 - **Root is not a wall:** hardening against a hostile root is out of scope.
 - **Ring 0:** no `crypto_`, `tls_` or X.509 code is in the include graph of
   `src/moonwater/core.c`; `net.c` is userspace only.
-- **Residual:** DHCPv4, DNS and SNTP cannot defeat an on-path peer. C cannot
+- **Residual:** DHCPv4, plain DNS and plain SNTP cannot defeat an on-path peer. C cannot
   prove ownership or bounds; guard pages, sanitizers, fuzzing, fault injection
   and three architectures compensate. Limits stop one connection from growing
   without bound, not a distributed flood.
@@ -183,12 +245,12 @@ ARM64 and RISC-V mandatory with UBSan trapping.
 | --- | --- | --- |
 | Bytes, memory | `byte_reader` cursors (`security_hygiene` forbids listed parsers from indexing their input); `MSG_TRUNC`; guard pages (`codec`, `socket`, `standard`); ASan/UBSan fuzz `sh test/run fuzz`; MSan `sh test/run msan`; `net_math_proof` (DHCP masks, AES field and S-box, HKDF counter, netlink widths); `net_wait_states` (1,613,472 send/read and 4,302,592 writev schedules, 15,360 nested-deadline boundaries, ASan/UBSan) | `tls_parse_cert` index reads are guarded by hand and fuzzed; no corpus beyond generated seeds |
 | Netlink | sender, port, sequence, alignment, multipart, `NETLINK_DISCARD_MAX`; `netlink_fuzz` | nested attributes beyond the bounded fuzz |
-| DNS | exact question, ID, peer; per-query source port, 0x20, EDNS0 with fallbacks; own resolver first; `DNS_DISCARD_MAX`; `dns_fuzz`, `sh test/run net`; a validated TC reply keeps the full query deadline for TCP, while only the UDP EDNS trial is capped at one second | independent packet oracle |
+| DNS | exact question, ID, peer; per-query source port, 0x20, EDNS0 with fallbacks; own resolver first; `DNS_DISCARD_MAX`; `dns_fuzz`, `sh test/run net`; a validated TC reply keeps the full query deadline for TCP, while only the UDP EDNS trial is capped at one second; DNS over TLS as a setting (`dns_tls`: 18 rows of setting, leaf, port, clock and tier against a resolver on 1.1.1.1 and the network's own on 10.0.0.1 in a namespace; the setting and the four resolvers in CHECK_net at both tiers) | independent packet oracle; with DNS over TLS off (the default tier's default) an on-path peer can still forge an answer, and with `on` an attacker who blocks 853 gets the plain query; NTS, SNTP, hostid, logger, waterlink and caIssuers names are always plain |
 | DHCPv4 | xid, MAC, server and OFFER-peer binding; option overload, END and zero padding; lease sanity; ARP probes before install, and a DHCPDECLINE (RFC 2131 4.4.1) with a ten-second hold-off for an address another station answers for; watcher cut once per link news; route ownership and rollback fault matrix (`net_lease_transitions`); `dhcp_fuzz`, `sh test/run netem net machine` | DHCP over a raw socket (`rp_filter`); the DECLINE is checked as a built packet and through its confined child, never against a live server |
-| SNTP | 64-bit nonce, peer, mode, stratum, timing, exactly 48 bytes at the tight tier; each sample its own wait; `sntp_fuzz`, `sntp_era` (2036, 2038, 2104), `sh test/run netem machine` | unauthenticated; NTS is a separate branch |
+| SNTP, NTS | 64-bit nonce, peer, mode, stratum, timing, exactly 48 bytes at the tight tier; each sample its own wait; `sntp_fuzz`, `sntp_era` (2036, 2038, 2104), `sh test/run netem machine`; NTS (RFC 8915): the AES-SIV-CMAC-256 AEAD against RFC 5297 and OpenSSL (`crypto_vectors`, 41 vectors on three machines, constant instruction counts and data addresses for six secrets), 904 NTS replies built independently and refused for every changed byte and every cut, the key-establishment parser over 26 shapes and every cut length (CHECK_net), `nts_fuzz`, and the client against chrony 4.8's NTS server and against servers that are wrong (`nts`, 92 rows: key establishment counted, torn and linked state, every tampered, cut, replayed, stripped or dropped reply, NTSN, no ALPN, TLS 1.2, a wrong or expired certificate, noise, silence, a private time server, the floor's judgement, `only` and `off`, the tight tier's default); the floor and `clock.good` in `tls_chains`, `tls_dates` and `moonwater_cli` | `nts` needs a chronyd built with NTS (`MOONWATER_CHRONYD`) and is NOT RUN without one; with no NTS server reachable the default tier takes plain NTP between the floor and 2104 (a day once the clock is set, two seconds once synchronised) |
 | HTTP, URL | `localhost` and `*.localhost` reach 127.0.0.1 without a resolver (RFC 6761; `wget_hostile` with a stub resolver, curl held to the same rows); host spellings named against GNU wget and curl; the scheme rule at both tiers (`http_urls`); sink-side validation of host, target, headers; userinfo, schemes, fragments refused; one framing reading; redirect and HTTPS-downgrade bounds; body deadline; per-hop host, address, SNI and Host identity; `http_response_framing` (with `http.client` and curl), `wget_mutation` and `wget_hostile` (GNU wget and curl as live oracles), `https_downgrade`, `http_fuzz` | CNAME, multi-address and interface-scope identity; `inet_aton` shorthands (`0x7f.1`, `127.1`) are names here and addresses to wget and curl (decision); SNTP, logger and Waterlink peers still ask DNS for localhost; the tight tier bounds each hop, not the redirect chain |
 | TLS, X.509 | transcript, Finished, AEAD, record sequence, state ordering; strict DER; CertificateEntry extensions refused; delivery schedules and FIN/RST cuts (`tls_peer --schedule`); SAN and name constraints, key usage, EKU, dates; chains against OpenSSL and Go `crypto/x509`; record nonce coverage over every value in every sequence byte lane and guarded unaligned buffers; record-header coverage over every 16-bit length and 8-bit type; `tls_chains` (also wget's status and words for each refusal), `tls_hostnames`, `tls_dates`, `public_suffixes`, `anchors`, `tls_peer`, `tls_der_fuzz`, `tls_hs_fuzz`, `tls_verify_fuzz`; `x509_corpus` by hand over 643 hosts | name constraints in more shapes |
-| Crypto | OpenSSL vectors and every `lib.c` architecture body: `crypto_vectors` (`--wycheproof DIR` by hand), `crypto_fuzz` | none known |
+| Crypto | OpenSSL vectors and every `lib.c` architecture body: `crypto_vectors` (`--wycheproof DIR` by hand; AES-SIV-CMAC-256 against RFC 5297's own bytes), `crypto_fuzz` | none known |
 | Wi-Fi | RSN, EAPOL-Key, replay counters, source address, scan parsing; all four GTK slots, zero-valued first keys, driver refusal/retry and roam reset (`wifi_key_state`); the strongest 64 names kept and the associated row never evicted; one BSS donates every field of a row; `wifi_scan_fuzz`, `wifi_eapol_fuzz`, `wifi_air` | management-frame protection and WPA3 (separate branch); a forger outranking every retained row |
 | Waterlink | Noise handshake, cookie, replay window, grants, revocation; mDNS reads Internet class only, RCODE zero, TTL nonzero, an SRV with a non-root target and a nonzero port, exposes only a PTR and SRV intersection, and shares a packet-sized compression-pointer budget across every name; the reply and answer budgets move only after a successful send; `IP_MULTICAST_IF` failure refuses the send; a source holds at most `LINK_GREET_SOURCE` of the 16 greeting slots; legacy verifier migration is all-write plus `fsync`, and until it succeeds the listener stays off while commands keep the groups (their save is the scrub); every elapsed time is ordered first; `waterlink_fuzz` rejects a wake/fill cycle that remains immediately due without output; `sh test/run waterlink link`, `waterlink_sanitized`, `waterlink_fuzz` (MSan with `MOONWATER_MSAN=1`) | handshake flood under netem; address rotation reaches the global greeting ceiling |
 | Saved state | wifi and bluetooth lists written beside themselves and renamed, opened nonblocking, regular files only; no hash of a group secret on disk; `sh test/run cli link` | |
@@ -304,7 +366,9 @@ ledger at the top of its section).
 | DNS | message `DNS_MAX_MESSAGE`; label 63, name 255; `DNS_CNAME_HOPS` 16; `DNS_WORK_POINTERS` 4,096 compression jumps per framing section and across answer-selection passes, at most 16,384 per reply; `DNS_DISCARD_MAX` 64; `DNS_SERVERS_MAX` 3 |
 | DHCP | `NETWORK_DISCARD_MAX` 64 rejected datagrams per OFFER or ACK phase, shared across packet syntax/peer and lease-state rejection; caller room |
 | Netlink | `NETLINK_DISCARD_MAX` 64 unrelated datagrams per transaction; 16 MiB datagram |
-| SNTP | `SNTP_DISCARD_MAX` 64 non-terminal receives per exchange |
+| SNTP | `SNTP_DISCARD_MAX` 64 non-terminal receives per exchange, an NTS reply that does not authenticate counted among them |
+| NTS | `NTS_KE_ROOM` 4,096 bytes of key-establishment reply in `NTS_KE_SECONDS` (6 s for connection, handshake and reply); `NTS_COOKIES` 8 of at most `NTS_COOKIE_MAX` 256 bytes, a longer cookie passed over; `NTS_SERVER_MAX` 64 bytes of name; `NTS_PACKET_ROOM` 1,280 bytes a packet; four key-establishment servers a walk |
+| DNS over TLS | `DNS_MAX_MESSAGE` a reply; `DNS_TLS_SECONDS` 2 s for every TLS try before the UDP fallback (`on`), the lookup's own 3 s with `only` |
 | TLS | `TLS_RECORD_MAX`, `TLS_HS_MAX`, 64 extensions, 8 certificates |
 | HTTP | `HTTP_URL_MAX`, `HTTP_HEAD_MAX`, `HTTP_FETCH_MAX` (16 MiB in memory), `HTTP_HOPS`, `HTTP_WRITE_SPANS`; `HTTP_BODY_SECONDS` (300 s) bounds a stored body in every tier and a streamed one at the tight tier, where the default keeps GNU wget's idle timer alone |
 | Waterlink | 8 instances a packet; at most the packet's byte length in shared mDNS compression-pointer jumps; `LINK_GREET_SOURCE` 8 of 16 greeting slots; one reply and one answer an interval |
@@ -342,14 +406,19 @@ architecture gate above. CI is parked (`workflow_dispatch` only).
 
 ## Open
 
-- **Closed, unmerged work:** NTS (#18) and the clock floor of #17 (a floor,
-  SNTP_WALL_LEAST, is in the SNTP client); WPA3 and 802.11w (#19); DNS over TLS
-  (#20); DHCP over a raw socket (#21); wget and curl parity of defaults (#22).
-  Their branches are gone; each pull request keeps its head
-  (`git fetch origin pull/N/head`).
-- **No change planned:** plain SNTP is accepted anywhere the build and clock
-  window allow; a forged clock step before the SNTP window is undone only by
-  authenticated time; HEAD is not exercised; a response cut inside its status
+- **Closed, unmerged work:** WPA3 and 802.11w (#19); DHCP over a raw socket
+  (#21); wget and curl parity of defaults (#22). Their branches are gone; each
+  pull request keeps its head (`git fetch origin pull/N/head`). The clock floor
+  (#17), NTS (#18) and DNS over TLS (#20) are in the tree.
+- **Time and names:** at the default tier, with no NTS server reachable, plain
+  SNTP is believed between the clock's floor and 2104 (a day's step once the
+  clock is set, two seconds once synchronised) and a forged step is undone by
+  the next NTS answer; `clock.good` lags the truth by the time the machine was
+  switched off; DNS over TLS is off, so names are as forgeable as the network
+  is; the NTS-KE certificate of the first exchange of a boot is judged as of the
+  floor, so a stolen key whose certificate expired after the floor can answer
+  it; NTS's and SNTP's own names, and a caIssuers location, are asked in plain.
+- **No change planned:** HEAD is not exercised; a response cut inside its status
   line or a header fails in both tiers (GNU wget and curl disagree with each
   other there); an endless close-delimited body at the default tier can fill the
   disk; the radio lock is held across a whole join; the elements a scan reads are
