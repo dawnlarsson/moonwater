@@ -11193,7 +11193,7 @@ def files_floor_address_cap(farm):
 
     cap = 12 << 20
     jobs = (("ls", "-a"), ("cat", "f"), ("wc", "f"), ("tr", "a", "b"), ("cut", "-b1", "f"),
-            ("head", "-n1", "f"), ("stat", "-c", "%s", "f"), ("sh", "-c", "echo ok"))
+            ("head", "-n1", "f"), ("stat", "-c", "%s", "f"), ("sort", "f"), ("sh", "-c", "echo ok"))
     passed = total = 0
     notes = []
 

@@ -35197,9 +35197,21 @@ typedef struct
         bool traditional;
 } sort_key;
 
-static sort_key (address_to sort_keys_held)[SORT_KEYS_MAX];
-#define sort_keys UTILITY_HELD(sort_keys)
+/* The keys grow as they are given, one per -k and the default: the table
+   used to be a held 8192 keys, 512 KB mapped for a sort of one key. */
+static sort_key address_to sort_keys;
+static positive sort_keys_room;
 static b32 sort_key_count;
+
+static void sort_keys_reserve(positive count)
+{
+        if (!array_store_reserve(sort_keys, sort_keys_room, sort_key_count, count, 16))
+        {
+                text_complain("%s: memory exhausted\n", (string_address)text_name);
+                exit(1);
+        }
+}
+static bool sort_reverse;
 static bool sort_reverse;
 static bool sort_unique;
 static bool sort_stable;
@@ -36509,6 +36521,24 @@ enum
 
 // --parallel=1: every pool call runs on the caller.
 static bool sort_alone;
+
+/*
+        A buffer of a sort is no larger than the input it holds: the constant
+        it would otherwise take, cut to the bytes needed rounded up to a page.
+        A sort of a kilobyte mapped 6.7 MB of constants, a megabyte or four of
+        them for a line; the pooled and large cases are the constant as before.
+*/
+static positive sort_sized(positive constant, positive need)
+{
+        if (need >= constant)
+                return constant;
+
+        positive want = (need + SORT_SLACK + 4095) & ~(positive)4095;
+
+        if (want < 4096)
+                want = 4096;
+        return want < constant ? want : constant;
+}
 
 static inline INLINE positive sort_blocks(positive count)
 {
@@ -37833,8 +37863,11 @@ static bool sort_writer_ready(sort_writer address_to out, positive handle)
         out->piped = false;
         sort_out_used = 0;
 
-        if (sort_out || array_store_reserve(sort_out, sort_out_room, 0,
-                                             SORT_WRITE_BUFFER, SORT_WRITE_BUFFER))
+        // The writer flushes each time its room is full, so the room only
+        // needs what is held, not a megabyte for every sort.
+        positive out_room = sort_sized(SORT_WRITE_BUFFER, sort_text_used);
+
+        if (sort_out || array_store_reserve(sort_out, sort_out_room, 0, out_room, out_room))
                 return true;
 
         return string_diagnostic(&text_diagnostic, 0, null, "out of memory");
@@ -38367,7 +38400,7 @@ static fn sort_emit_job(address_any context, positive index,
 
                 if (wanted > scratch->room &&
                     !array_store_reserve(scratch->bytes, scratch->room, used, wanted,
-                                         4 << 20))
+                                         sort_sized(4 << 20, wanted)))
                 {
                         parallel_stop();
                         return;
@@ -39684,7 +39717,7 @@ static fn sort_piece_line(sort_scratch address_to slot, positive address_to used
 
         if (wanted > slot->room &&
             !array_store_reserve(slot->bytes, slot->room, address_to used, wanted,
-                                 SORT_WRITE_BUFFER + SORT_SLACK))
+                                 sort_sized(SORT_WRITE_BUFFER, wanted)))
         {
                 parallel_stop();
                 return;
@@ -40152,8 +40185,11 @@ static bool sort_spill()
 
 static bool sort_line_record(positive stop)
 {
+        // A line is at least one byte of the text, so the records never
+        // outnumber the bytes held: the growth is 64 KB for a kilobyte, not 1 MB.
         if (!array_store_reserve(sort_lines, sort_lines_room, sort_lines_count,
-                                 sort_lines_count + 1, 65536))
+                                 sort_lines_count + 1,
+                                 sort_sized(65536, sort_text_used)))
                 return sort_exhausted();
 
         sort_line address_to line = sort_lines + sort_lines_count;
@@ -40383,13 +40419,17 @@ static bool sort_gather(positive handle, string_address name)
         positive read_at = 0;
         positive read_end = 0;
         bool pooled = false;
+        positive size = 0;
+        bool regular = text_regular_size(handle, address_of size);
+        // The block a serial read asks for, and the growth of the text it
+        // reads into: a regular file's size, not a megabyte, when it is smaller.
+        positive block = regular ? sort_sized(SORT_READ, size) : SORT_READ;
 
         {
-                positive size = 0;
                 bipolar at = sort_alone || parallel_width() == 1 ? -1
                              : system_seek(handle, 0, FILE_SEEK_CUR);
 
-                if (at >= 0 && text_regular_size(handle, address_of size) &&
+                if (at >= 0 && regular &&
                     size > (positive)at && size - (positive)at >= 4 * SORT_READ)
                 {
                         read_at = (positive)at;
@@ -40437,14 +40477,14 @@ static bool sort_gather(positive handle, string_address name)
                         blocks = pooled ? blocks : 0;
                 }
 
-                positive want = blocks ? blocks * SORT_READ : SORT_READ;
+                positive want = blocks ? blocks * SORT_READ : block;
 
-                if (sort_text_used + (blocks ? want : SORT_READ / 4) + SORT_SLACK > sort_text_room)
+                if (sort_text_used + (blocks ? want : block / 4) + SORT_SLACK > sort_text_room)
                 {
                         if (!array_store_reserve(sort_text, sort_text_room,
                                                  sort_text_used,
                                                  sort_text_used + want + SORT_SLACK,
-                                                 4 * SORT_READ))
+                                                 4 * block))
                         {
                                 if (unsplit)
                                 {
@@ -40485,7 +40525,7 @@ static bool sort_gather(positive handle, string_address name)
 
                 positive room = sort_text_room - SORT_SLACK - sort_text_used;
                 bipolar got = system_read_retry(handle, sort_text + sort_text_used,
-                                                room < SORT_READ ? room : SORT_READ);
+                                                room < block ? room : block);
 
                 if (got <= 0)
                 {
@@ -40888,6 +40928,7 @@ static bool sort_key_refused(string_address what, string_address spec)
 */
 static bool sort_parse_key(string_address spec)
 {
+        sort_keys_reserve(sort_key_count + 1);
         if (sort_key_count >= SORT_KEYS_MAX)
                 return string_diagnostic(&text_diagnostic, 0, null, "too many keys");
 
@@ -41069,6 +41110,7 @@ static fn sort_obsolete_key(string_address plus, string_address minus)
                 return;
         }
 
+        sort_keys_reserve(sort_key_count + 1);
         sort_key address_to key = sort_keys + sort_key_count;
 
         (void)sort_obsolete_start(key, plus);
@@ -42216,6 +42258,7 @@ static b32 text_sort()
         sort_procs_count = 0;
         sort_tab_seen = false;
         sort_key_count = 0;
+        sort_keys_reserve(1);
         sort_have_separator = false;
         sort_size = 0;
         sort_batch = 16;
@@ -42370,7 +42413,10 @@ static b32 text_sort()
         sort_ordering given = defaults;
 
         if (!sort_key_count)
+        {
+                sort_keys_reserve(1);
                 sort_keys[sort_key_count++] = (sort_key){.first_field = 1};
+        }
         for (b32 i = 0; i < sort_key_count; i++)
         {
                 sort_key address_to key = sort_keys + i;
