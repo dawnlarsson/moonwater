@@ -61790,6 +61790,148 @@ int main(void)
     return checks.verdict("msan net", "msan-net")
 
 
+def harness_net_lease_transitions(argv):
+    """Production lease installation/rollback/release over a recorded kernel seam.
+    Covers route conflicts and failures without root or network namespaces.
+    """
+    del argv
+    host = (HARNESS_ROOT / "src/sh/net.c").read_text()
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    source = r'''
+#include <stdint.h>
+#include <stdbool.h>
+#include <string.h>
+#include <stdio.h>
+#include <errno.h>
+typedef uint8_t p8;
+typedef uint32_t p32;
+typedef int32_t b32;
+typedef uint64_t positive;
+typedef int64_t bipolar;
+typedef char *string_address;
+#define address_to *
+#define address_of &
+#define fn void
+#define COLD
+#define CONST
+#define null NULL
+#define min(a,b) ((a) < (b) ? (a) : (b))
+#define memory_fill memset
+#define memory_copy memcpy
+#define memory_compare memcmp
+static void string_format(int writer, const char *format, ...) { (void)writer; (void)format; }
+static int net_out, writer_terminal_name;
+static string_address net_host_text(p8 *into, p32 host) { (void)host; return (char *)into; }
+#define IFNAME_SIZE 16
+#define DNS_SERVERS_MAX 3
+#define NETLINK_ROUTE_ONLINK 4
+#define RTM_NEWROUTE 24
+#define NLM_REQUEST 1
+#define NLM_ACK 4
+#define NLM_CREATE 1024
+#define NLM_EXCLUSIVE 512
+#define NLM_REPLACE 256
+#define ERROR_NO_ENTRY ENOENT
+#define ERROR_NO_PROCESS ESRCH
+#define ERROR_NO_DEVICE ENODEV
+typedef struct { p32 address, mask, router, nameserver, server, seconds, renewal, rebinding; } dhcp_lease;
+typedef struct { p32 index, host; p8 prefix; bool leased; positive others;
+                 p32 other_host[8]; p8 other_prefix[8]; } netlink_lease_search;
+static int new_route_status, fail_old_address, fail_old_route, foreign_deletes;
+static bool old_route, new_route;
+static positive net_seconds(void) { return 100; }
+static void net_flush(void) {}
+static bipolar net_refused(string_address doing, bipolar status) { (void)doing; return status; }
+static bipolar net_write_resolv(p32 server) { (void)server; return 0; }
+static void net_dns_lease_note(p32 server) { (void)server; }
+static positive net_resolver_choose(p32 server, p32 *servers) { servers[0] = server; return 1; }
+static bipolar net_write_resolv_servers(string_address path, p32 *servers, positive count)
+{ (void)path; (void)servers; (void)count; return 0; }
+static void string_copy_max_end(p8 *into, string_address from, positive most)
+{ strncpy((char *)into, from, most); into[most] = 0; }
+static bipolar netlink_leases_on(b32 handle, netlink_lease_search *found)
+{ (void)handle; (void)found; return 0; }
+static bipolar netlink_address_lease(b32 handle, p32 index, p32 host, p8 prefix,
+                                    p32 seconds, bool exclusive)
+{ (void)handle; (void)index; (void)host; (void)prefix; (void)seconds; (void)exclusive; return 0; }
+static bipolar netlink_address_delete(b32 handle, p32 index, p32 host, p8 prefix)
+{
+        (void)handle; (void)index; (void)prefix;
+        if (host == 0x0a000002 && fail_old_address) { fail_old_address = 0; return -EIO; }
+        return 0;
+}
+static bipolar netlink_route_change(b32 handle, int type, int flags, p32 dest,
+                                    p8 bits, p32 gateway, p32 index, p8 extra)
+{
+        (void)handle; (void)type; (void)flags; (void)dest; (void)bits; (void)index; (void)extra;
+        if (gateway == 0x0a000001) { old_route = true; return 0; }
+        if (!new_route_status) new_route = true;
+        return new_route_status;
+}
+static bipolar netlink_route_delete(b32 handle, p32 dest, p8 bits, p32 gateway, p32 index)
+{
+        (void)handle; (void)dest; (void)bits; (void)index;
+        if (gateway == 0x0a000001) {
+                if (fail_old_route) { fail_old_route = 0; return -EACCES; }
+                old_route = false;
+        } else {
+                if (new_route_status == -EEXIST) foreign_deletes++;
+                new_route = false;
+        }
+        return 0;
+}
+'''
+    source += src_slice(host, "/*\n        What this machine is holding, and since when.",
+                        "/* The lease clock")
+    source += src_slice(net, "static CONST COLD p8 dhcp_prefix_of(",
+                        "static COLD fn dhcp_lease_merge(")
+    source += src_slice(host, "static COLD bool net_change_gone(",
+                        "static COLD bool net_wired_off(")
+    source += r'''
+int main(void)
+{
+        int checks = 0, failures = 0;
+#define expect(ok, text) do { checks++; if (!(ok)) { failures++; \
+        printf("  FAIL conflict %d fault %d: %s\n", conflict, fault, text); } } while (0)
+        for (int conflict = 0; conflict < 2; conflict++)
+        for (int fault = 0; fault < 3; fault++) {
+                net_holding held = {.index = 7, .address_owned = true, .route_owned = true,
+                    .lease = {.address = 0x0a000002, .mask = 0xffffff00,
+                              .router = 0x0a000001, .seconds = 600}};
+                net_holding before = held;
+                dhcp_lease lease = held.lease;
+                p8 hardware[6] = {0};
+                lease.address++;
+                lease.router = 0x0a000004;
+                new_route_status = conflict ? -EEXIST : 0;
+                fail_old_address = fault == 1;
+                fail_old_route = fault == 2;
+                old_route = true;
+                new_route = conflict;
+                foreign_deletes = 0;
+                b32 result = net_apply_lease(1, 7, "test0", hardware, &lease, &held, false);
+                expect((result != 0) == (fault != 0), "I/O failure reaches the caller");
+                if (fault) {
+                        expect(!memcmp(&held, &before, sizeof held), "rollback keeps the prior lease");
+                        expect(old_route && new_route == (bool)conflict,
+                               "rollback restores owned objects and preserves the foreign route");
+                } else {
+                        expect(held.route_owned == !conflict,
+                               "deleting the old route cannot acquire the conflicting route");
+                        expect(net_holding_release(1, &held) == 0,
+                               "the resulting lease can be released");
+                        expect(new_route == (bool)conflict,
+                               "release removes only a route the client installed");
+                }
+                expect(!foreign_deletes, "no delete targets the foreign route");
+        }
+        printf("net-lease-transitions %d/%d\n", checks - failures, checks);
+        return failures != 0;
+}
+'''
+    return run_sanitized("net-lease-transitions", source, None)
+
+
 def harness_net_clock_fault(argv):
     """Compile wait.c over a hostile monotonic clock and inject clock jumps."""
     del argv
@@ -62214,9 +62356,9 @@ def harness_security_hygiene(argv):
     security = ("tls_chains", "https_downgrade", "http_response_framing",
                 "tls_der_fuzz", "tls_hs_fuzz", "tls_fuzz", "msan_net", "pathname_race",
                 "dhcp_fuzz", "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "tls_peer",
-                "http_fuzz", "http_urls", "wifi_eapol_fuzz", "wifi_scan_fuzz",
+                "http_fuzz", "http_urls", "wifi_eapol_fuzz", "wifi_scan_fuzz", "wifi_key_state",
                 "bowl_sig_fuzz", "wget_mutation", "wget_hostile", "sntp_era", "net_netem",
-                "net_dependency_closure", "net_math_proof", "net_clock_fault",
+                "net_dependency_closure", "net_math_proof", "net_clock_fault", "net_lease_transitions",
                 "protected_links", "hostile_strings", "state_cuts")
     for name in security + ("tls_verify_fuzz",):
         checks(name in HARNESS_CHECKS, "differential.py: %s is not registered" % name)
@@ -67191,6 +67333,9 @@ static p8 fz_sta_tk[16], fz_sta_gtk[4][16];
 static positive fz_sta_tk_when, fz_sta_gtk_when[4];
 static bool fz_sta_tk_set, fz_sta_gtk_set[4], fz_authorized;
 static int fz_installs;
+static bipolar fz_key_error;
+static bipolar fz_send_error;
+static p8 fz_gtk_draws;
 static const p8 fz_ap[6] = {2, 0, 0, 0, 1, 0}, fz_sta[6] = {2, 0, 0, 0, 2, 0};
 
 static bipolar socket_send(b32 handle, const void *data, positive size, b32 flags,
@@ -67205,6 +67350,8 @@ static bipolar socket_send(b32 handle, const void *data, positive size, b32 flag
         memcpy(fz_sent, data, size);
         fz_sent_length = size;
         fz_sends++;
+        if (fz_send_error)
+                return fz_send_error;
         return (bipolar)size;
 }
 
@@ -67259,10 +67406,12 @@ static bipolar nl80211_new_key(nl80211 *session, p32 index, p8 idx, p32 type, p8
         (void)session, (void)index, (void)seq;
         if (key_length != 16)
                 abort();
+        if (fz_key_error)
+                return fz_key_error;
         fz_installs++;
         if (type == NL80211_KEYTYPE_PAIRWISE)
         {
-                when = fz_made_when(0, key);
+                when = fz_made_when(4, key);
                 if (idx || !mac || memcmp(mac, fz_ap, 6) || group_default || !when ||
                     (fz_sta_tk_set && (!memcmp(key, fz_sta_tk, 16) || when <= fz_sta_tk_when)))
                         abort();
@@ -67271,7 +67420,7 @@ static bipolar nl80211_new_key(nl80211 *session, p32 index, p8 idx, p32 type, p8
                 fz_sta_tk_when = when;
                 return 0;
         }
-        when = idx && idx <= 3 ? fz_made_when(idx, key) : 0;
+        when = idx <= 3 ? fz_made_when(idx, key) : 0;
         if (!when || mac || seq_length != 6 || !group_default ||
             (fz_sta_gtk_set[idx] &&
              (!memcmp(key, fz_sta_gtk[idx], 16) || when <= fz_sta_gtk_when[idx])))
@@ -67371,6 +67520,7 @@ static bool fz_held_moved(const wifi_link *before)
         return memcmp(before->replay, fz_link.replay, 8) ||
                before->replay_set != fz_link.replay_set ||
                before->installed != fz_link.installed ||
+               before->gtk_installed != fz_link.gtk_installed ||
                memcmp(before->ptk, fz_link.ptk, 64) || memcmp(before->gtk, fz_link.gtk, 64);
 }
 
@@ -67471,12 +67621,10 @@ static positive fz_key_data(p8 *out, const p8 *kek, bool rsn)
 
 static void fz_new_gtk(void)
 {
-        static p8 turn;
-
         fz_take(fz_ap_gtk, 16);
-        fz_ap_gtk[0] ^= ++turn;
+        fz_ap_gtk[0] ^= ++fz_gtk_draws;
         fz_ap_gtk[1] ^= 0x5a;
-        fz_ap_gtk_idx = fz_ap_gtk_idx == 1 ? 2 : 1;
+        fz_ap_gtk_idx = (fz_ap_gtk_idx + 1) & 3;
         fz_made_add(fz_ap_gtk_idx, fz_ap_gtk);
 }
 
@@ -67498,6 +67646,9 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
         fz_sta_tk_set = fz_authorized = fz_pending_bent = false;
         fz_made_count = fz_order = fz_sta_tk_when = 0;
         fz_installs = 0;
+        fz_key_error = 0;
+        fz_send_error = 0;
+        fz_gtk_draws = 0;
         fz_draws = 0;
         memset(fz_sta_gtk_set, 0, sizeof fz_sta_gtk_set);
         memset(fz_sta_gtk_when, 0, sizeof fz_sta_gtk_when);
@@ -67531,7 +67682,7 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                 else if (op == 1 && fz_pending_set)     /* message 3 */
                 {
                         memcpy(fz_ap_tk, fz_pending + 32, 16);
-                        fz_made_add(0, fz_ap_tk);
+                        fz_made_add(4, fz_ap_tk);
                         fz_made_add(fz_ap_gtk_idx, fz_ap_gtk);
                         fz_replay++;
                         n = fz_key_data(wrapped, fz_pending + 16, true);
@@ -67718,7 +67869,7 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
 
                         //      The key data, element by element: what the
                         //      station must take is the first GTK KDE whose
-                        //      key id is not 0, before anything cut short.
+                        //      key id is in 0..3, before anything cut short.
                         n = 0;
                         for (positive item = 0; item < items && !cut; item++)
                         {
@@ -67745,7 +67896,7 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                                         if (body > 16)
                                                 plain[n + 16] = fz_byte();
                                         n += body;
-                                        if (kind == 0 && (id & 3) && !want)
+                                        if (kind == 0 && !want)
                                         {
                                                 want = true;
                                                 want_idx = id & 3;
@@ -67843,7 +67994,7 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                                 memcpy(fz_ap_tk, fz_pending + 32, 16);
                                 if (unwraps)
                                 {
-                                        fz_made_add(0, fz_ap_tk);
+                                        fz_made_add(4, fz_ap_tk);
                                         if (want)
                                                 fz_made_add(want_idx, want_key);
                                 }
@@ -67943,6 +68094,147 @@ def wifi_eapol_fuzz_source(net, host, checks):
     return "\n".join((crypto, "#include <ctype.h>", WIFI_EAPOL_FUZZ_SHIM, derive, link,
                       "static void wifi_rekey_offload(wifi_link *link);", step, take,
                       WIFI_EAPOL_FUZZ_DRIVER))
+
+
+def harness_wifi_key_state(argv):
+    """Authenticated GTK install/retry/roam transitions in all four key slots.
+    Uses the EAPOL production lift and real MIC/key-wrap crypto under ASan/UBSan;
+    records driver calls so a missing install cannot pass by comparing zero bytes.
+    """
+    del argv
+    clang = shutil.which("clang")
+    if not clang:
+        print("wifi key state: NOT RUN -- needs clang with ASan/UBSan")
+        return 2
+    host = (HARNESS_ROOT / "src/sh/host.c").read_text()
+    source = wifi_eapol_fuzz_source((HARNESS_ROOT / "src/net/net.c").read_text(),
+                                   host, (HARNESS_ROOT / "test/checks.c").read_text())
+    source += src_slice(host, "static COLD fn wifi_roam(",
+                        "static COLD fn wifi_keep(")
+    source += r'''
+static int state_checks, state_failures;
+static void state_check(bool ok, const char *what, int idx, int zero, int pairwise)
+{
+        state_checks++;
+        if (!ok) {
+                state_failures++;
+                printf("  FAIL slot %d zero %d pairwise %d: %s\n", idx, zero, pairwise, what);
+        }
+}
+static bipolar state_gtk(bool pairwise)
+{
+        p8 frame[512], wrapped[128];
+        positive n = fz_key_data(wrapped, fz_ptk + 16, pairwise);
+        fz_replay++;
+        n = fz_frame(frame, pairwise ? 0x13ca : 0x1382,
+                     pairwise ? fz_anonce : 0, wrapped, n, fz_ptk);
+        return fz_deliver(frame, n);
+}
+int main(void)
+{
+        for (int idx = 0; idx < 4; idx++)
+        for (int zero = 0; zero < 2; zero++)
+        for (int pairwise = 0; pairwise < 2; pairwise++) {
+                (void)LLVMFuzzerTestOneInput(NULL, 0);
+                memset(fz_ptk, 0x42, sizeof fz_ptk);
+                memset(fz_anonce, 0x24, sizeof fz_anonce);
+                memcpy(fz_link.anonce, fz_anonce, 32);
+                memcpy(fz_link.pending, fz_ptk, 64);
+                memcpy(fz_link.ptk, fz_ptk, 64);
+                fz_link.pending_set = pairwise;
+                fz_link.installed = !pairwise;
+                fz_ap_gtk_idx = idx;
+                memset(fz_ap_gtk, zero ? 0 : 0x35, sizeof fz_ap_gtk);
+                fz_made_add(4, fz_ptk + 32);
+                fz_made_add(idx, fz_ap_gtk);
+                state_check(state_gtk(pairwise) == (pairwise ? 1 : 2) &&
+                            fz_sta_gtk_set[idx] && !memcmp(fz_sta_gtk[idx], fz_ap_gtk, 16),
+                            "first GTK is installed", idx, zero, pairwise);
+                int installs = fz_installs;
+                state_check(state_gtk(pairwise) == (pairwise ? 1 : 2) &&
+                            fz_installs == installs,
+                            "retransmission never reinstalls a key", idx, zero, pairwise);
+                fz_ap_gtk[7] ^= 1;
+                fz_made_add(idx, fz_ap_gtk);
+                state_check(state_gtk(false) == 2 && fz_installs == installs + 1 &&
+                            !memcmp(fz_sta_gtk[idx], fz_ap_gtk, 16),
+                            "changed GTK replaces the installed key", idx, zero, pairwise);
+
+                /* Roaming drops the old driver's keys. Receiving identical
+                   bytes from the next AP must install them in its new slot. */
+                wifi_roam(&fz_link, (p8 *)fz_ap);
+                memset(fz_sta_gtk_set, 0, sizeof fz_sta_gtk_set);
+                fz_sta_tk_set = fz_authorized = false;
+                memset(fz_ap_gtk, 0, sizeof fz_ap_gtk);
+                fz_made_add(idx, fz_ap_gtk);
+                memcpy(fz_link.pending, fz_ptk, 64);
+                memcpy(fz_link.anonce, fz_anonce, 32);
+                fz_link.pending_set = true;
+                fz_made_add(4, fz_ptk + 32);
+                state_check(!fz_link.gtk_installed && state_gtk(true) == 1 && fz_sta_gtk_set[idx],
+                            "roaming clears installed-key state", idx, zero, pairwise);
+
+                /* A driver refusal cannot make an empty slot look installed.
+                   Test group rekey, independently of pairwise installation. */
+                wifi_roam(&fz_link, (p8 *)fz_ap);
+                memset(fz_sta_gtk_set, 0, sizeof fz_sta_gtk_set);
+                memcpy(fz_link.ptk, fz_ptk, 64);
+                fz_link.installed = true;
+                fz_key_error = -5;
+                state_check(state_gtk(false) == -5 && !fz_sta_gtk_set[idx] &&
+                            !fz_link.gtk_installed && !fz_link.replay_set,
+                            "driver refusal fails the transition", idx, zero, pairwise);
+                fz_key_error = 0;
+                fz_replay--;
+                state_check(state_gtk(false) == 2 && fz_sta_gtk_set[idx],
+                            "same-counter retry after refusal installs", idx, zero, pairwise);
+
+                /* If the key went in but its acknowledgement did not go
+                   out, the same frame is answered without reinstalling it. */
+                wifi_roam(&fz_link, (p8 *)fz_ap);
+                memset(fz_sta_gtk_set, 0, sizeof fz_sta_gtk_set);
+                memcpy(fz_link.ptk, fz_ptk, 64);
+                fz_link.installed = true;
+                fz_send_error = -5;
+                installs = fz_installs;
+                state_check(state_gtk(false) == -1 && fz_sta_gtk_set[idx] &&
+                            fz_link.gtk_installed && !fz_link.replay_set,
+                            "reply refusal leaves the installed key retryable",
+                            idx, zero, pairwise);
+                fz_send_error = 0;
+                fz_replay--;
+                state_check(state_gtk(false) == 2 && fz_installs == installs + 1,
+                            "reply retry does not reinstall the key",
+                            idx, zero, pairwise);
+        }
+        printf("wifi key state %d/%d\n", state_checks - state_failures, state_checks);
+        return state_failures != 0;
+}
+'''
+    with tempfile.TemporaryDirectory(prefix="wifi-key-state-") as temporary:
+        unit = Path(temporary) / "state.c"
+        binary = unit.with_suffix("")
+        unit.write_text(source)
+        built = subprocess.run([clang, "-O1", "-g", "-fsanitize=address,undefined",
+                                "-fno-sanitize-recover=all", str(unit), "-o", str(binary)],
+                               capture_output=True, text=True, timeout=120)
+        if built.returncode:
+            print(built.stderr[-2000:], file=sys.stderr)
+            return 1
+        ran = subprocess.run(
+            [str(binary)], capture_output=True, text=True, timeout=30,
+            env=dict(os.environ,
+                     ASAN_OPTIONS="detect_leaks=0:halt_on_error=1",
+                     UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=0"))
+        print(ran.stdout, end="")
+        print(ran.stderr, end="", file=sys.stderr)
+        tally = re.search(r"wifi key state (\d+)/(\d+)", ran.stdout)
+        if tally:
+            write_tally("wifi-key-state", *tally.groups())
+        elif not ran.stderr:
+            print("wifi key state: test exited %d without a tally" % ran.returncode,
+                  file=sys.stderr)
+        return 1 if ran.returncode or not tally else 0
 
 
 def wifi_eapol_fuzz_seeds():
@@ -73967,6 +74259,7 @@ static void state_post(p64 now)
 static positive state_fill_one(struct waterlink_link *link, p64 now, p8 *into)
 {
         bool alone = false;
+        bool due = waterlink_wake(link, now) <= now;
         positive used;
 
         static p8 marks[WATERLINK_PAYLOAD];
@@ -73974,7 +74267,11 @@ static positive state_fill_one(struct waterlink_link *link, p64 now, p8 *into)
         memset(marks, 0xa5, WATERLINK_PAYLOAD);
         memset(state_fill, 0xa5, WATERLINK_PAYLOAD);
         used = waterlink_fill(link, state_fill, now, &alone);
-        if (used > WATERLINK_PAYLOAD ||
+        /* An empty fill may consume a loss timer and move the next wake into
+           the future. It only spins the service if the link remains due at
+           the same clock. The simulator used to hide that by advancing time. */
+        if ((due && !used && waterlink_wake(link, now) <= now) ||
+            used > WATERLINK_PAYLOAD ||
             memcmp(state_fill + used, marks, WATERLINK_PAYLOAD - used))
                 abort();
         if (used && into)
@@ -80103,6 +80400,7 @@ HARNESS_CHECKS = {
     "tls_verify_fuzz": harness_tls_verify_fuzz,
     "sntp_fuzz": harness_sntp_fuzz,
     "wifi_eapol_fuzz": harness_wifi_eapol_fuzz,
+    "wifi_key_state": harness_wifi_key_state,
     "wifi_scan_fuzz": harness_wifi_scan_fuzz,
     "bowl_sig_fuzz": harness_bowl_sig_fuzz,
     "wget_mutation": harness_wget_mutation,
@@ -80119,6 +80417,7 @@ HARNESS_CHECKS = {
     "tls_fuzz": harness_tls_fuzz,
     "msan_net": harness_msan_net,
     "net_clock_fault": harness_net_clock_fault,
+    "net_lease_transitions": harness_net_lease_transitions,
     "net_math_proof": harness_net_math_proof,
     "wire_constants": harness_wire_constants,
     "net_dependency_closure": harness_net_dependency_closure,

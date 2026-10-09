@@ -4032,6 +4032,7 @@ bowl_tight_one() { tight_check_one bowl; }
 lane_net()
 {
         python3 test/differential.py --harness net_clock_fault || return 1
+        python3 test/differential.py --harness net_lease_transitions || return 1
         python3 test/differential.py --harness net_math_proof || return 1
         python3 test/differential.py --harness wire_constants || return 1
         python3 test/differential.py --harness net_dependency_closure || return 1
@@ -4131,6 +4132,12 @@ lane_net()
         case $? in
         0) ;;
         2) note "sntp_fuzz: skipped (soft) -- does not downgrade net" ;;
+        *) net_outcome=1 ;;
+        esac
+        python3 test/differential.py --harness wifi_key_state
+        case $? in
+        0) ;;
+        2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
         *) net_outcome=1 ;;
         esac
         python3 test/differential.py --harness wifi_eapol_fuzz

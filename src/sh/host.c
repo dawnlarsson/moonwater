@@ -6184,6 +6184,7 @@ typedef struct
         p8 ptk[64];
         p8 pending[64];
         p8 gtk[4][16];
+        p8 gtk_installed; // one bit per driver slot; zero bytes are a valid key
         p8 replay[8];
         p8 answered;
         bool replay_set;
@@ -6298,13 +6299,10 @@ static COLD bipolar wifi_gtk_take(p8 address_to kek, p8 address_to data, positiv
                         p8 key_id = byte_reader_u8(&element);
 
                         (void)byte_reader_u8(&element);
-                        if (key_id & 3)
-                        {
-                                address_to idx = (p8)(key_id & 3);
-                                memory_copy(gtk, byte_reader_take(&element, 16), 16);
-                                found = 1;
-                                break;
-                        }
+                        address_to idx = (p8)(key_id & 3);
+                        memory_copy(gtk, byte_reader_take(&element, 16), 16);
+                        found = 1;
+                        break;
                 }
         }
         crypto_forget(plain, sizeof(plain));
@@ -6411,11 +6409,16 @@ static COLD bipolar wifi_eapol_step(wifi_link address_to link, p8 address_to fra
                 crypto_forget(gtk, sizeof(gtk));
                 return 0;
         }
-        memory_copy(link->replay, frame + 9, 8);
-        link->replay_set = true;
-
-        failed = wifi_eapol_reply(link, kck, pairwise ? 0x030a : 0x0302, link->replay,
-                                  false);
+        /* A failed group-key install is retried under the same replay
+           counter. Do not acknowledge or consume it until the driver has
+           the key. The joining handshake fails as a whole on an error, so
+           its existing early reply remains part of that transaction. */
+        if (pairwise)
+        {
+                memory_copy(link->replay, frame + 9, 8);
+                link->replay_set = true;
+                failed = wifi_eapol_reply(link, kck, 0x030a, link->replay, false);
+        }
         if (!failed && fresh && (!link->installed || memory_compare(link->ptk + 32,
                                                                     kck + 32, 16)))
                 failed = nl80211_new_key(address_of link->session, link->index, 0,
@@ -6434,15 +6437,28 @@ static COLD bipolar wifi_eapol_step(wifi_link address_to link, p8 address_to fra
         //      from, and putting that in again would reset its replay
         //      counter. Each key id also keeps its own last key.
         if (!failed && found && (fresh || !pairwise) &&
-            memory_compare(gtk, link->gtk[idx], 16))
+            (!(link->gtk_installed & (1u << idx)) ||
+             memory_compare(gtk, link->gtk[idx], 16)))
         {
                 failed = nl80211_new_key(address_of link->session, link->index, idx,
                                          NL80211_KEYTYPE_GROUP, null, gtk, 16, frame + 65,
                                          6, true);
                 if (!failed)
+                {
                         memory_copy(link->gtk[idx], gtk, 16);
+                        link->gtk_installed |= (p8)(1u << idx);
+                }
         }
         crypto_forget(gtk, sizeof(gtk));
+        if (!failed && !pairwise)
+        {
+                failed = wifi_eapol_reply(link, kck, 0x0302, frame + 9, false);
+                if (!failed)
+                {
+                        memory_copy(link->replay, frame + 9, 8);
+                        link->replay_set = true;
+                }
+        }
         if (!failed && pairwise && !link->installed)
                 failed = nl80211_authorize(address_of link->session, link->index,
                                            link->bssid);
@@ -6653,6 +6669,7 @@ static COLD fn wifi_roam(wifi_link address_to link, p8 address_to to)
         crypto_forget(link->ptk, sizeof(link->ptk));
         crypto_forget(link->pending, sizeof(link->pending));
         crypto_forget(link->gtk, sizeof(link->gtk));
+        link->gtk_installed = 0;
         memory_fill(link->replay, 0, sizeof(link->replay));
         link->replay_set = false;
         link->installed = false;

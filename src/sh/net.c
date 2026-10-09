@@ -1430,7 +1430,7 @@ static COLD bipolar net_holding_release(b32 handle, net_holding address_to held)
 static COLD bipolar net_lease_rollback(
     b32 handle, const net_holding address_to previous,
     p32 index, const dhcp_lease address_to lease,
-    bool address_changed, bool route_changed)
+    bool address_changed, bool route_installed, bool route_removed)
 {
         bipolar failed = 0;
 
@@ -1444,7 +1444,7 @@ static COLD bipolar net_lease_rollback(
                         failed = status;
         }
 
-        if (route_changed)
+        if (route_installed || route_removed)
         {
                 bool same = false;
 
@@ -1461,7 +1461,7 @@ static COLD bipolar net_lease_rollback(
 
                 //      The new route goes unless restoring the old one
                 //      already put back that very route.
-                if (lease->router && !same)
+                if (route_installed && lease->router && !same)
                         net_rollback_record(
                             netlink_route_delete(handle, 0, 0,
                                                  lease->router, index),
@@ -1494,6 +1494,7 @@ static COLD b32 net_apply_lease(b32 handle, p32 index, string_address name,
         p32 servers[DNS_SERVERS_MAX];
         positive named;
         bool route_applied = false;
+        bool route_removed = false;
         string_address doing = null;
         bipolar status = 0;
         p8 written[32];
@@ -1569,7 +1570,9 @@ static COLD b32 net_apply_lease(b32 handle, p32 index, string_address name,
                         doing = (string_address) "old route delete";
                         goto failed;
                 }
-                route_applied = true;
+                /* Removing our old route changes rollback work, but grants
+                   no ownership of a new route whose create said EEXIST. */
+                route_removed = true;
         }
 
         /* A prefix is part of an address object's identity.  Since
@@ -1644,7 +1647,7 @@ failed:
         {
                 bipolar rollback = net_lease_rollback(
                     handle, previous, index, lease,
-                    address_applied, route_applied);
+                    address_applied, route_applied, route_removed);
 
                 if (rollback < 0)
                 {
