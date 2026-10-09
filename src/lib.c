@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        400 routines (377 public, 23 local), 390 of them on all three and 10 local to one.
+        401 routines (378 public, 23 local), 391 of them on all three and 10 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -207,6 +207,7 @@
           md5_blocks                     public  yes     yes     yes
           memory                         public  yes     yes     yes
           memory_ascii_span              public  yes     yes     yes
+          memory_blend_u32_rect          public  yes     yes     yes
           memory_checksum_bsd16          public  yes     yes     yes
           memory_common_prefix           public  yes     yes     yes
           memory_compare                 public  yes     yes     yes
@@ -12642,6 +12643,71 @@ __asm__(
     "pop %r14\n   pop %r13\n   pop %r12\n   pop %rbx\n"
     ".Ltr32_x64_done:\n" ASM_RET
     ASM_END(memory_translate_u32_rect)
+
+    //
+    //       memory_blend_u32_rect -- coverage laid over a known ground: rdi
+    //       into, rsi into_stride in words, rdx from, rcx from_stride, r8
+    //       width, r9 height, the table on the stack, the ground after it.
+    //
+    //       With AVX-512 VBMI, sixteen pixels a turn: the bytes looked up in
+    //       the planes as memory_translate_u32_rect does, the pixels loaded,
+    //       and three masks -- the bytes that are not zero, the pixels that
+    //       are the ground, and the first of the first that is not the
+    //       second, where it stops, writing only the lanes before it.
+    //
+    //       On a 9950X core (test/run bench blend-rect: glyphs of 8 by 13 to
+    //       120 by 200, each row two strokes of ink in air, on a ground in
+    //       cache), the time of the C loop it replaced: VBMI 39-69%, the
+    //       SSE2 body below 69-78%.
+    //
+    ASM_FUNC(memory_blend_u32_rect)
+    "mov 8(%rsp), %rax\n   push %rbx\n   push %r12\n   push %r13\n   xor %r11d, %r11d\n   test %r8, %r8\n   jz .Lblend_x64_done\n"
+    "test %r9, %r9\n   jz .Lblend_x64_done\n   shl $2, %rsi\n   mov %rax, %r12\n"
+    ASM_NARROW("cpu_has_avx512_vbmi", ".Lblend_x64_narrow")
+    "vmovdqu64 1024(%rax), %zmm16\n   vmovdqu64 1088(%rax), %zmm17\n   vmovdqu64 1152(%rax), %zmm18\n   vmovdqu64 1216(%rax), %zmm19\n"
+    "vmovdqu64 1280(%rax), %zmm20\n   vmovdqu64 1344(%rax), %zmm21\n   vmovdqu64 1408(%rax), %zmm22\n   vmovdqu64 1472(%rax), %zmm23\n"
+    "vmovdqu64 1536(%rax), %zmm24\n   vmovdqu64 1600(%rax), %zmm25\n   vmovdqu64 1664(%rax), %zmm26\n   vmovdqu64 1728(%rax), %zmm27\n"
+    "vmovdqu64 1792(%rax), %zmm28\n   vmovdqu64 1856(%rax), %zmm29\n   vmovdqu64 1920(%rax), %zmm30\n   vmovdqu64 1984(%rax), %zmm31\n"
+    "vpbroadcastd 2048(%rax), %zmm12\n   mov $0xffffff, %r10d\n   vpbroadcastd %r10d, %zmm13\n   mov $0xffff, %r13d\n"
+    ".Lblend_x64_row:\n   xor %r10d, %r10d\n"
+    ".Lblend_x64_piece:\n   mov %r8, %rbx\n   sub %r10, %rbx\n   bzhi %ebx, %r13d, %ebx\n   cmp $16, %r8\n   jb 1f\n"
+    "lea 16(%r10), %rax\n   cmp %r8, %rax\n   ja 1f\n   mov $0xffff, %ebx\n"
+    "1:  kmovw %ebx, %k1\n   vmovdqu8 (%rdx,%r10), %xmm0{%k1}{z}\n"
+    TR32_X64_LOOKUP
+    "vmovdqu32 (%rdi,%r10,4), %zmm14{%k1}{z}\n   vpandd %zmm13, %zmm14, %zmm15\n   vpcmpeqd %zmm12, %zmm15, %k2\n"
+    "vptestmb %xmm0, %xmm0, %k3\n   kandnw %k3, %k2, %k5\n   kortestw %k5, %k5\n   jnz .Lblend_x64_stop\n"
+    "vmovdqu32 %zmm8, (%rdi,%r10,4){%k3}\n   add $16, %r10\n   cmp %r8, %r10\n   jb .Lblend_x64_piece\n"
+    "add %rsi, %rdi\n   add %rcx, %rdx\n   inc %r11\n   cmp %r9, %r11\n   jb .Lblend_x64_row\n"
+    "vzeroupper\n   jmp .Lblend_x64_done\n"
+    ".Lblend_x64_stop:\n   kmovw %k5, %eax\n   tzcnt %eax, %eax\n   bzhi %eax, %r13d, %ebx\n   kmovw %ebx, %k6\n   kandw %k3, %k6, %k6\n"
+    "vmovdqu32 %zmm8, (%rdi,%r10,4){%k6}\n   vzeroupper\n   imul %r8, %r11\n   add %r10, %r11\n   add %r11, %rax\n   jmp .Lblend_x64_out\n"
+    //  Without VBMI, four pixels a turn in SSE2 with no branch on the
+    //  coverage: the four words looked up whatever the bytes, the pixels
+    //  against the ground and the bytes against zero, the turn handed to the
+    //  pixel-at-a-time path only when a lane is neither, and the pixel kept
+    //  under a zero byte by and/andn/or. A branch on the byte mispredicts at
+    //  every edge of every stroke.
+    ".Lblend_x64_narrow:\n   mov 2048(%r12), %r13d\n   movd %r13d, %xmm5\n   pshufd $0, %xmm5, %xmm5\n   mov $0xffffff, %eax\n"
+    "movd %eax, %xmm6\n   pshufd $0, %xmm6, %xmm6\n   pxor %xmm7, %xmm7\n"
+    ".Lblend_x64_narrow_row:\n   xor %r10d, %r10d\n"
+    ".Lblend_x64_narrow_four:\n   lea 4(%r10), %rax\n   cmp %r8, %rax\n   ja .Lblend_x64_narrow_one\n"
+    "movd (%rdx,%r10), %xmm0\n   movdqu (%rdi,%r10,4), %xmm1\n   punpcklbw %xmm7, %xmm0\n   punpcklwd %xmm7, %xmm0\n"
+    "movdqa %xmm1, %xmm2\n   pand %xmm6, %xmm2\n   pcmpeqd %xmm5, %xmm2\n   movdqa %xmm0, %xmm3\n   pcmpeqd %xmm7, %xmm3\n"
+    "por %xmm3, %xmm2\n   movmskps %xmm2, %eax\n   cmp $15, %eax\n   jne .Lblend_x64_narrow_one\n"
+    "mov (%rdx,%r10), %ebx\n   movzbl %bl, %eax\n   movd (%r12,%rax,4), %xmm4\n   movzbl %bh, %eax\n   movd (%r12,%rax,4), %xmm8\n"
+    "shr $16, %ebx\n   movzbl %bl, %eax\n   movd (%r12,%rax,4), %xmm9\n   movzbl %bh, %eax\n   movd (%r12,%rax,4), %xmm10\n"
+    "punpckldq %xmm8, %xmm4\n   punpckldq %xmm10, %xmm9\n   punpcklqdq %xmm9, %xmm4\n"
+    "movdqa %xmm3, %xmm11\n   pand %xmm1, %xmm11\n   pandn %xmm4, %xmm3\n   por %xmm11, %xmm3\n   movdqu %xmm3, (%rdi,%r10,4)\n"
+    "add $4, %r10\n   jmp .Lblend_x64_narrow_next\n"
+    ".Lblend_x64_narrow_one:\n   movzbl (%rdx,%r10), %ebx\n   test %ebx, %ebx\n   jz 2f\n   mov (%rdi,%r10,4), %eax\n   and $0xffffff, %eax\n"
+    "cmp %r13d, %eax\n   jne .Lblend_x64_narrow_stop\n   mov (%r12,%rbx,4), %eax\n   mov %eax, (%rdi,%r10,4)\n"
+    "2:  inc %r10\n"
+    ".Lblend_x64_narrow_next:\n   cmp %r8, %r10\n   jb .Lblend_x64_narrow_four\n"
+    "add %rsi, %rdi\n   add %rcx, %rdx\n   inc %r11\n   cmp %r9, %r11\n   jb .Lblend_x64_narrow_row\n   jmp .Lblend_x64_done\n"
+    ".Lblend_x64_narrow_stop:\n   mov %r11, %rax\n   imul %r8, %rax\n   add %r10, %rax\n   jmp .Lblend_x64_out\n"
+    ".Lblend_x64_done:\n   mov %r8, %rax\n   imul %r9, %rax\n"
+    ".Lblend_x64_out:\n   pop %r13\n   pop %r12\n   pop %rbx\n" ASM_RET
+    ASM_END(memory_blend_u32_rect)
 #undef TR32_X64_LOOKUP
 
     //
@@ -21867,6 +21933,34 @@ __asm__(
     "9:  " ASM_RET
     ASM_END(memory_translate_u32_rect)
 
+    //       memory_blend_u32_rect: four pixels a turn with no branch on the
+    //       coverage. The four words are looked up whatever the bytes and
+    //       put in a vector; the pixels are tested against the ground and the
+    //       bytes against zero four at a time, the turn stops only when a
+    //       lane is neither, and bit keeps the pixel under a zero byte. A
+    //       glyph's row is runs of ink and air, and a branch on the byte
+    //       would mispredict at every edge of every stroke. The rest of a row
+    //       a pixel at a time, ccmp folding the two tests into one flag. On
+    //       an M2 core, the x86_64 block's glyphs: 46-76% of the time of
+    //       clang's loop and 45-75% of GCC's. The x86_64 block carries the
+    //       contract.
+    ASM_FUNC(memory_blend_u32_rect)
+    "cbz x4, 8f\n   cbz x5, 8f\n   lsl x1, x1, #2\n   ldr w7, [x6, #2048]\n   mov x8, xzr\n   dup v30.4s, w7\n   movi v31.4s, #0xff, msl #16\n"
+    "1:  mov x9, xzr\n"
+    "2:  add x10, x9, #4\n   cmp x10, x4\n   b.hi 3f\n   ldr w10, [x2, x9]\n   add x16, x0, x9, lsl #2\n   ldr q1, [x16]\n"
+    "ubfx w11, w10, #8, #8\n   ubfx w12, w10, #16, #8\n   lsr w13, w10, #24\n   and w14, w10, #0xff\n   fmov s0, w10\n"
+    "ldr w14, [x6, x14, lsl #2]\n   ldr w11, [x6, x11, lsl #2]\n   ldr w12, [x6, x12, lsl #2]\n   ldr w13, [x6, x13, lsl #2]\n"
+    "uxtl v0.8h, v0.8b\n   uxtl v0.4s, v0.4h\n   and v2.16b, v1.16b, v31.16b\n   cmeq v2.4s, v2.4s, v30.4s\n   cmeq v3.4s, v0.4s, #0\n"
+    "orr v2.16b, v2.16b, v3.16b\n   uminv s4, v2.4s\n   fmov w15, s4\n   cbz w15, 3f\n"
+    "fmov s5, w14\n   mov v5.s[1], w11\n   mov v5.s[2], w12\n   mov v5.s[3], w13\n   bit v5.16b, v1.16b, v3.16b\n"
+    "str q5, [x16]\n   add x9, x9, #4\n   b 4f\n"
+    "3:  ldrb w11, [x2, x9]\n   ldr w12, [x0, x9, lsl #2]\n   ldr w13, [x6, x11, lsl #2]\n   and w14, w12, #0xffffff\n"
+    "cmp w14, w7\n   ccmp w11, #0, #4, ne\n   b.ne 7f\n   cmp w11, #0\n   csel w12, w12, w13, eq\n   str w12, [x0, x9, lsl #2]\n   add x9, x9, #1\n"
+    "4:  cmp x9, x4\n   b.lo 2b\n   add x0, x0, x1\n   add x2, x2, x3\n   add x8, x8, #1\n   cmp x8, x5\n   b.lo 1b\n"
+    "8:  mul x0, x4, x5\n" ASM_RET
+    "7:  madd x0, x8, x4, x9\n" ASM_RET
+    ASM_END(memory_blend_u32_rect)
+
     //       memory_sweep_coverage: sixteen cells a turn in four vectors, each
     //       its own prefix sum by two ext against zero, the four joined by
     //       their last lanes, and the carry one add a turn; the byte by abs,
@@ -30142,6 +30236,41 @@ __asm__(
     "9:  " ASM_RET
     ASM_END(memory_translate_u32_rect)
 
+    //       memory_blend_u32_rect: with V, as many pixels as a register
+    //       holds: the bytes widened, vmsne for the ones not zero, the pixels
+    //       against the ground, vfirst for the first that is not and is
+    //       under a byte -- vl cut there -- and the words gathered by
+    //       vluxei32 and stored under the mask. Without V, a pixel at a time
+    //       on two moving pointers. Guest instructions a glyph against the C
+    //       under qemu, the x86_64 block's glyphs: 71-77% without V, 7-29%
+    //       with it at VLEN 128 and 256; cycles unmeasured. The x86_64 block
+    //       carries the contract.
+    ASM_FUNC(memory_blend_u32_rect)
+    "beqz a4, 8f\n   beqz a5, 8f\n   addi a7, a6, 2047\n   lw a7, 1(a7)\n   li t6, 0xffffff\n   li t4, 0\n"
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t5, 2\n   beq t3, t5, 0f\n   bnez t3, 4f\n"
+    "addi sp, sp, -32\n   sd ra, 8(sp)\n   sd a5, 16(sp)\n   sd a6, 24(sp)\n   call cpu_vector_detect\n"
+    "ld ra, 8(sp)\n   ld a5, 16(sp)\n   ld a6, 24(sp)\n   addi sp, sp, 32\n   j memory_blend_u32_rect\n"
+    "0:  slli a1, a1, 2\n"
+    "1:  li t5, 0\n"
+    "2:  sub t0, a4, t5\n   vsetvli t0, t0, e8, m1, ta, ma\n   add t1, a2, t5\n   vle8.v v1, (t1)\n"
+    "vsetvli zero, t0, e32, m4, ta, ma\n   vzext.vf4 v4, v1\n   vmsne.vi v0, v4, 0\n   slli t2, t5, 2\n   add t2, a0, t2\n"
+    "vle32.v v8, (t2)\n   vand.vx v12, v8, t6\n   vmsne.vx v2, v12, a7\n   vmand.mm v2, v2, v0\n   vfirst.m t1, v2\n"
+    "bgez t1, 3f\n   vsll.vi v4, v4, 2\n   vluxei32.v v8, (a6), v4, v0.t\n   vse32.v v8, (t2), v0.t\n"
+    "add t5, t5, t0\n   bltu t5, a4, 2b\n   add a0, a0, a1\n"
+    "add a2, a2, a3\n   addi t4, t4, 1\n   bltu t4, a5, 1b\n   j 8f\n"
+    "3:  vsetvli zero, t1, e32, m4, ta, ma\n   vsll.vi v4, v4, 2\n   vluxei32.v v8, (a6), v4, v0.t\n   vse32.v v8, (t2), v0.t\n"
+    "mul a0, t4, a4\n   add a0, a0, t5\n   add a0, a0, t1\n   ret\n"
+#endif
+    "4:  slli a1, a1, 2\n"
+    "5:  mv t1, a2\n   mv t2, a0\n   add t3, a2, a4\n"
+    "6:  lbu t0, 0(t1)\n   beqz t0, 7f\n   lw t5, 0(t2)\n   and t5, t5, t6\n   bne t5, a7, 9f\n   slli t0, t0, 2\n   add t0, a6, t0\n"
+    "lw t0, 0(t0)\n   sw t0, 0(t2)\n"
+    "7:  addi t1, t1, 1\n   addi t2, t2, 4\n   bne t1, t3, 6b\n   add a0, a0, a1\n   add a2, a2, a3\n   addi t4, t4, 1\n   bltu t4, a5, 5b\n"
+    "8:  mul a0, a4, a5\n   ret\n"
+    "9:  mul a0, t4, a4\n   add a0, a0, t1\n   sub a0, a0, a2\n" ASM_RET
+    ASM_END(memory_blend_u32_rect)
+
     //       memory_sweep_coverage: with V, as many cells as four registers
     //       hold, the prefix sum by vslideup of 1, 2, 4 ... lanes into a
     //       zeroed group and vadd, the carry added and taken from the last
@@ -37097,6 +37226,18 @@ fn memory_translate_u32_rect(p32 address_to into, positive into_stride,
 // full, to the nearest, halves up. Answers the sum after the last cell. A
 // zero count touches neither pointer, and nothing past either run is read.
 p32 memory_sweep_coverage(p8 address_to into, p32 address_to cells, positive count, p32 sum);
+// height rows of width coverage bytes laid over 32-bit pixels whose ground
+// is known, table as for memory_translate_u32_rect with the ground's 24 bits
+// in the word after its planes: a pixel under a nonzero byte whose low 24
+// bits are the ground becomes table[byte], a pixel under a zero byte is left.
+// Answers the index (row * width + column) of the first pixel under a nonzero
+// byte that is not the ground -- another glyph has drawn there, and the
+// caller mixes it itself -- every pixel before it written and none after;
+// width * height when there is none. Nothing past a row is read or written.
+positive memory_blend_u32_rect(p32 address_to into, positive into_stride,
+                               const p8 address_to from, positive from_stride,
+                               positive width, positive height,
+                               const p32 address_to table);
 #endif
 // Remove every byte whose entry in a readable 256-byte table is nonzero, moving
 // the kept bytes to the front of the block in their order, and answer how many

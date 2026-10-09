@@ -273,7 +273,11 @@ typedef struct
         p64 key;
         p32 pixel[256];
         p8 planes[4][256];
+        p32 ground;
 } font_pairing;
+
+_Static_assert(__builtin_offsetof(font_pairing, ground) == __builtin_offsetof(font_pairing, pixel) + 2048,
+               "the ground follows the planes, where memory_blend_u32_rect reads it");
 
 typedef struct
 {
@@ -2715,6 +2719,7 @@ static const p32 address_to font_tones(font_engine address_to e, p32 colour, p32
                         for (p32 k = 0; k < 4; k++)
                                 pair->planes[k][c] = (p8)(pair->pixel[c] >> (8 * k));
                 }
+                pair->ground = background & 0xffffff;
                 pair->key = key;
         }
         return pair->pixel;
@@ -2723,6 +2728,8 @@ static const p32 address_to font_tones(font_engine address_to e, p32 colour, p32
 //      A glyph's coverage onto the target at x, y: through the pair's tones
 //      where the pixel under it is still the background, by the full mix
 //      where another glyph has already drawn there or the ground is unknown.
+//      On a known ground the library lays the tones and stops at a pixel
+//      that is not the ground; that one is mixed here and the rest resumed.
 static fn font_blend(font_engine address_to e, const font_target address_to target,
                      b32 x, b32 y, font_bitmap glyph, p32 colour, p32 background)
 {
@@ -2732,24 +2739,50 @@ static fn font_blend(font_engine address_to e, const font_target address_to targ
         bool known = !(background & FONT_UNKNOWN);
         const p32 address_to pixel = known ? font_tones(e, colour, background) : null;
 
+        if (x0 >= x1 || y0 >= y1)
+                return;
         font_ramp(e, colour);
         colour &= 0xffffff;
-        background &= 0xffffff;
-        for (b32 r = y0; r < y1; r++)
-        {
-                const p8 address_to cover = glyph.coverage + (positive)r * glyph.stride;
-                p32 address_to row = target->pixels + (positive)(y + r) * target->stride + x;
 
-                for (b32 c = x0; c < x1; c++)
+        positive width = (positive)(x1 - x0), height = (positive)(y1 - y0), stride = target->stride;
+        p32 address_to into = target->pixels + (positive)(y + y0) * stride + (positive)(x + x0);
+        const p8 address_to from = glyph.coverage + (positive)y0 * glyph.stride + (positive)x0;
+
+        if (known)
+        {
+                positive at = memory_blend_u32_rect(into, stride, from, glyph.stride, width, height, pixel);
+                positive r = at / width, c = at % width;
+
+                while (r < height)
                 {
-                        p32 a = cover[c];
+                        p32 address_to here = into + r * stride + c;
+
+                        *here = font_mix(e, *here, colour, e->ramp[from[r * glyph.stride + c]]);
+
+                        //      The rest of row r, then every row after it.
+                        if (++c < width &&
+                            (at = memory_blend_u32_rect(here + 1, stride, from + r * glyph.stride + c, glyph.stride,
+                                                        width - c, 1, pixel)) < width - c)
+                        {
+                                c += at;
+                                continue;
+                        }
+                        if (++r >= height)
+                                break;
+                        at = memory_blend_u32_rect(into + r * stride, stride, from + r * glyph.stride, glyph.stride,
+                                                   width, height - r, pixel);
+                        r += at / width, c = at % width;
+                }
+                return;
+        }
+        for (positive r = 0; r < height; r++)
+                for (positive c = 0; c < width; c++)
+                {
+                        p32 a = from[r * glyph.stride + c];
 
                         if (a)
-                                row[c] = known && (row[c] & 0xffffff) == background
-                                             ? pixel[a]
-                                             : font_mix(e, row[c], colour, e->ramp[a]);
+                                into[r * stride + c] = font_mix(e, into[r * stride + c], colour, e->ramp[a]);
                 }
-        }
 }
 
 /*

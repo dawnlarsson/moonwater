@@ -98073,6 +98073,99 @@ static fn check_translate()
 }
 
 /*
+        memory_blend_u32_rect against the loop it replaces in font_blend:
+        every width to 80 and rows of 127 to 300, heights to 6, two strides,
+        coverage half zero, the pixels the ground but for a few that another
+        glyph drew (none, one, or one in sixty), the bytes' last row and the
+        pixels' last against pages that fault; the index it answers, every
+        pixel before it written, none after. Both x86_64 bodies, and the first
+        riscv64 call that asks for V.
+*/
+static positive blend_reference(p32 address_to into, positive stride, const p8 address_to from, positive from_stride,
+                                positive width, positive height, const p32 address_to table)
+{
+        for (positive r = 0; r < height; r++)
+                for (positive c = 0; c < width; c++)
+                {
+                        p32 a = from[r * from_stride + c], address_to p = &into[r * stride + c];
+
+                        if (!a)
+                                continue;
+                        if ((*p & 0xffffff) != table[512])
+                                return r * width + c;
+                        *p = table[a];
+                }
+        return width * height;
+}
+
+static fn check_blend()
+{
+        static const positive wide[] = {127, 128, 129, 255, 256, 257, 300};
+        static p32 table[513], want[3072];
+        p8 address_to source = memory(4 * 4096);
+        p32 address_to into = memory(4 * 4096);
+        p64 state = 0x2b7e151628aed2a6ull;
+        bool guarded = source && into &&
+                       system_call_3(syscall(mprotect), (positive)(source + 3 * 4096), 4096, 0) == 0 &&
+                       system_call_3(syscall(mprotect), (positive)((p8 address_to)into + 3 * 4096), 4096, 0) == 0;
+
+        check("blend: guard pages", guarded);
+        if (!guarded)
+                return;
+        for (p32 i = 0; i < 256; i++)
+        {
+                XORSHIFT64(state);
+                table[i] = (p32)state & 0xffffff;
+                for (p32 k = 0; k < 4; k++)
+                        ((p8 address_to)(table + 256))[k * 256 + i] = (p8)(table[i] >> (8 * k));
+        }
+        table[512] = 0x203040;
+#if RISCV64
+        cpu_has_vector = 0;
+        source[0] = 9, source[1] = 0, source[2] = 200, source[3] = 7;
+        into[0] = into[1] = into[2] = 0xff203040, into[3] = 0x123456;
+        positive first = memory_blend_u32_rect(into, 2, source, 2, 2, 2, table);
+        check("blend: the first call asks for V and keeps its height and table",
+              first == 3 && into[0] == table[9] && into[1] == 0xff203040 && into[2] == table[200] &&
+                  into[3] == 0x123456 && cpu_has_vector != 0);
+#endif
+#if X64
+        p8 planes = cpu_has_avx512_vbmi;
+        for (p32 tier = 0; tier < 2; tier++)
+        {
+                cpu_has_avx512_vbmi = tier ? 0 : planes;
+#endif
+                bool fine = true;
+                for (positive w = 0; w <= 80 + sizeof(wide) / sizeof(wide[0]) - 1; w++)
+                        for (positive width = w <= 80 ? w : wide[w - 81], height = 0; height <= (width > 80 ? 3u : 6u); height++)
+                                for (positive shape = 0; shape < 6; shape++)
+                                {
+                                        positive gap = shape & 1 ? 0 : 37, stride = width + gap;
+                                        positive span = height ? (height - 1) * stride + width : 0;
+                                        p8 address_to from = source + 3 * 4096 - span;
+                                        p32 address_to to = (p32 address_to)((p8 address_to)into + 3 * 4096) - span;
+
+                                        for (positive i = 0; i < span; i++)
+                                        {
+                                                XORSHIFT64(state);
+                                                from[i] = state & 1 ? 0 : (p8)(state >> 8);
+                                                to[i] = (shape >> 1 == 2 && state % 60 == 7) || (shape >> 1 == 1 && i == span / 2)
+                                                                ? 0x5a5a5a : 0xff203040 - (p32)(state >> 60) * 0x1000000;
+                                                want[i] = to[i];
+                                        }
+                                        positive expected = blend_reference(want, stride, from, stride, width, height, table);
+                                        positive answered = memory_blend_u32_rect(to, stride, from, stride, width, height, table);
+
+                                        fine = fine && answered == expected && !memory_compare(to, want, span * 4);
+                                }
+                check("blend: the ground's pixels its tones, the first other one answered, nothing after touched", fine);
+#if X64
+        }
+        cpu_has_avx512_vbmi = planes;
+#endif
+}
+
+/*
         memory_sweep_coverage against the loop it replaces in font_raster:
         every count from 0 to 80 and runs of 127 to 1000, cells sparse as an
         outline leaves them and dense, sums that run past full both ways and
@@ -98272,6 +98365,7 @@ b32 main()
         check_drawn();
         check_drawing(&one, &two);
         check_translate();
+        check_blend();
         check_sweep();
 
         guarded = memory(9 * 4096);
@@ -107273,6 +107367,127 @@ b32 main(void)
         return 0;
 }
 #endif /* BENCH_translate_rect */
+
+#ifdef BENCH_blend_rect
+/* memory_blend_u32_rect against the loop it replaced in font_blend: glyphs
+   of UI text at 13, 24 and 48 px (8 by 13, 14 by 24, 28 by 48) and a 4K
+   heading (120 by 200), each row two strokes of ink in air, laid on a
+   ground in a 3840-pixel frame that stays in cache; on x86_64 both bodies.
+   The rows overlap in the glyph array, so each shape has its own strokes. */
+#include "../src/lib.util.c"
+#define SHARED_bench_measure
+#include "checks.c"
+#undef SHARED_bench_measure
+
+#define TRIES 9
+
+static p32 table[513];
+static p8 glyph[256 * 200];
+static p32 frame[3840 * 220], frame_c[3840 * 220];
+
+__attribute__((noinline, noclone)) static positive former_blend(
+    p32 address_to into, positive stride, const p8 address_to from, positive from_stride,
+    positive width, positive height, const p32 address_to tones)
+{
+        for (positive r = 0; r < height; r++)
+                for (positive c = 0; c < width; c++)
+                {
+                        p32 a = from[r * from_stride + c];
+
+                        if (a)
+                        {
+                                if ((into[r * stride + c] & 0xffffff) != tones[512])
+                                        return r * width + c;
+                                into[r * stride + c] = tones[a];
+                        }
+                }
+        return width * height;
+}
+
+//      Sixteen glyphs along a line, each laid on ground the turn before it.
+static p64 run(bool assembly, positive width, positive height, positive rounds)
+{
+        p64 took = 0;
+
+        for (positive round = 0; round < rounds; round++)
+        {
+                for (positive r = 0; r < height; r++)
+                        memory_fill_u32(frame + r * 3840, 16 * width, 0x203040);
+                p64 start = get_cpu_time();
+                for (positive g = 0; g < 16; g++)
+                        if (assembly)
+                                memory_blend_u32_rect(frame + g * width, 3840, glyph, 256, width, height, table);
+                        else
+                                former_blend(frame + g * width, 3840, glyph, 256, width, height, table);
+                took += get_cpu_time() - start;
+        }
+        return took;
+}
+
+b32 main(void)
+{
+        static const positive shapes[][2] = {{8, 13}, {14, 24}, {28, 48}, {120, 200}};
+        p64 seed = 0x9e3779b97f4a7c15ULL;
+
+        //      Each row two strokes, a fifth of the row wide each, at random
+        //      places: runs of ink and air as a glyph's rows have them.
+        for (positive r = 0; r < 200; r++)
+                for (positive k = 0; k < 2; k++)
+                {
+                        XORSHIFT64(seed);
+                        for (positive w = 0; w < 4; w++)
+                        {
+                                positive width = w == 0 ? 8 : w == 1 ? 14 : w == 2 ? 28 : 120;
+                                positive at = (positive)(seed >> (8 * w)) % width, run = width / 5 + 1;
+
+                                for (positive c = at; c < at + run && c < width; c++)
+                                        glyph[r * 256 + c] = (p8)(seed >> 40 | 1);
+                        }
+                }
+        for (p32 i = 0; i < 256; i++)
+        {
+                table[i] = 0x203040 + i * 0x010101;
+                for (p32 k = 0; k < 4; k++)
+                        ((p8 address_to)(table + 256))[k * 256 + i] = (p8)(table[i] >> (8 * k));
+        }
+        table[512] = 0x203040;
+#if X64
+        p8 planes = cpu_has_avx512_vbmi;
+        for (p32 tier = 0; tier < (planes ? 2u : 1u); tier++)
+        {
+                cpu_has_avx512_vbmi = tier ? 0 : planes;
+#endif
+                for (positive row = 0; row < sizeof(shapes) / sizeof(shapes[0]); row++)
+                {
+                        positive width = shapes[row][0], height = shapes[row][1];
+                        positive ratios[TRIES];
+                        positive rounds = 400000 / (width * height * 16) + 1;
+
+                        memory_fill_u32(frame, sizeof(frame) / 4, 0x203040);
+                        memory_fill_u32(frame_c, sizeof(frame_c) / 4, 0x203040);
+                        if (memory_blend_u32_rect(frame, 3840, glyph, 256, width, height, table) !=
+                                former_blend(frame_c, 3840, glyph, 256, width, height, table) ||
+                            memory_compare(frame, frame_c, sizeof(frame)))
+                                return 1;
+                        BENCH_PAIRED_RUNS(ratios, former, assembly, width, height, rounds);
+                        string_format(log, "memory_blend_u32_rect %p by %p%s: paired median ASM/C %p.", width, height,
+#if X64
+                                      cpu_has_avx512_vbmi ? (string_address) " planes" : (string_address) " narrow",
+#else
+                                      (string_address) "",
+#endif
+                                      ratios[TRIES / 2] / 100);
+                        positive_to_padded(log, ratios[TRIES / 2] % 100, 2, '0', 0);
+                        log("%\n", 2);
+                }
+#if X64
+        }
+        cpu_has_avx512_vbmi = planes;
+#endif
+        log_flush();
+        return 0;
+}
+#endif /* BENCH_blend_rect */
 
 #ifdef BENCH_sweep_coverage
 /* memory_sweep_coverage against the loop it replaced in font_raster, over
