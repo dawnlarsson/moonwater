@@ -62629,6 +62629,369 @@ int main(void)
     return checks.verdict("net parser work states", "net-parser-work-states")
 
 
+def harness_net_dhcp_exchange(argv):
+    """The DHCP client's exchanges, run over a recorded socket seam.
+
+    Production dhcp_ask, dhcp_reacquire, dhcp_decline, dhcp_build and the lease
+    rules are lifted; the socket, the clock budget, the entropy and the receive
+    loop are scripted, so the schedule of attempts, every wait, the REQUEST
+    built from an OFFER, the work allowance and each failure of a send, an open
+    or a timer can be asserted without a server, a root or a second host. The
+    expected numbers are written out here, not computed by the code under test.
+    """
+    del argv
+    checks = Checks()
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    wait = (HARNESS_ROOT / "src/net/wait.c").read_text()
+    source = r'''
+#include <stdint.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+typedef uint64_t positive;
+typedef int64_t bipolar;
+typedef uint8_t p8;
+typedef uint16_t p16;
+typedef uint32_t p32;
+typedef int32_t b32;
+typedef char *string_address;
+#define address_to *
+#define address_of &
+#define COLD
+#define CONST
+#define null NULL
+#define AF_INET 2
+#define NETWORK_DISCARD_MAX 64
+#define HOST_ANY 0x00000000u
+#define HOST_BROADCAST 0xffffffffu
+#define network_order_16(v) ((p16)(v))
+#define network_order_32(v) ((p32)(v))
+#define memory_fill(at, v, n) memset((at), (int)(v), (n))
+#define memory_copy(to, from, n) memcpy((to), (from), (n))
+typedef uint64_t p64;
+typedef struct { p16 family; p16 port; p32 host; p64 pad; } socket_address_internet;
+typedef struct { positive began, budget; } network_deadline;
+/* CONSTANTS */
+static void network_store_16(p8 *b, p16 v) { b[0] = (p8)(v >> 8); b[1] = (p8)v; }
+static void network_store_32(p8 *b, p32 v)
+{ b[0] = (p8)(v >> 24); b[1] = (p8)(v >> 16); b[2] = (p8)(v >> 8); b[3] = (p8)v; }
+static p32 network_load_32(const p8 *b)
+{ return (p32)b[0] << 24 | (p32)b[1] << 16 | (p32)b[2] << 8 | b[3]; }
+
+static void require(bool ok, const char *what)
+{ if (!ok) { fprintf(stderr, "FAIL %s\n", what); abort(); } }
+
+/* The seam. */
+static bool fail_random, fail_spread, fail_open, fail_begin_at_valid;
+static int fail_begin_at, fail_send_at;
+static p8 spread_byte;
+static int opens, closes, sends, begins, completes, receives, serial;
+static p32 open_host; static bool open_broadcast;
+static struct { p8 bytes[300]; positive size; socket_address_internet to; bool has_to; } sent[64];
+static struct { positive seconds, nanoseconds; } budget[128];
+static bipolar complete_result;
+static struct { bool rebinding; p32 peer; positive seconds, nanoseconds; p32 transaction; } completed;
+static struct { int kind; } script[200];
+static int script_length, script_at;
+static dhcp_lease offer_lease;
+
+static bool dhcp_transaction_early(p32 *transaction)
+{ if (fail_random) return false; *transaction = 0x01020300u + (p32)++serial; return true; }
+static bipolar system_random_fill(void *into, positive size, int nonblocking)
+{ (void)nonblocking; if (fail_spread) return -1; memset(into, spread_byte, size); return 0; }
+static bipolar dhcp_open(string_address device, p32 host, bool broadcast)
+{ (void)device; if (fail_open) return -1; opens++; open_host = host; open_broadcast = broadcast; return 77; }
+static bipolar socket_send(b32 handle, const void *data, positive size, b32 flags,
+                           const socket_address_internet *to, positive tosize)
+{
+    (void)flags; (void)tosize; require(handle == 77, "send on the opened socket");
+    if (sends == fail_send_at) { sends++; return -1; }
+    if (sends < 64) {
+        memcpy(sent[sends].bytes, data, size < 300 ? size : 300);
+        sent[sends].size = size; sent[sends].has_to = to != NULL;
+        if (to) sent[sends].to = *to;
+    }
+    sends++;
+    return (bipolar)size;
+}
+static void socket_close(b32 handle) { require(handle == 77, "close the opened socket"); closes++; }
+static bool network_deadline_begin(network_deadline *deadline, positive seconds, positive nanoseconds)
+{
+    if (begins == fail_begin_at && fail_begin_at_valid) { begins++; return false; }
+    if (begins < 128) { budget[begins].seconds = seconds; budget[begins].nanoseconds = nanoseconds; }
+    begins++; deadline->began = 1; deadline->budget = 1; return true;
+}
+/* 0 nothing, 1 usable OFFER, 2 unusable OFFER, 3 an ACK where an OFFER belongs, 4 NAK */
+static bool dhcp_receive(bipolar handle, p8 *packet, positive room, p32 transaction,
+                         p8 *hardware, dhcp_lease *lease, p8 *kind,
+                         const socket_address_internet *expected_peer, bool any_peer_host,
+                         socket_address_internet *accepted_peer, positive *remaining,
+                         const network_deadline *deadline)
+{
+    (void)handle; (void)packet; (void)room; (void)transaction; (void)hardware;
+    (void)expected_peer; (void)any_peer_host; (void)accepted_peer; (void)deadline;
+    require(remaining != NULL, "the allowance is passed down");
+    receives++;
+    int next = script_at < script_length ? script[script_at++].kind : 0;
+    if (!next) return false;
+    *lease = offer_lease;
+    if (next == 2) lease->seconds = 0;
+    *kind = next == 3 ? DHCP_ACK : next == 4 ? DHCP_NAK : DHCP_OFFER;
+    return true;
+}
+static bipolar dhcp_complete(bipolar handle, p8 *packet, positive room, p32 transaction,
+                             p8 *hardware, dhcp_lease *lease, socket_address_internet *peer,
+                             bool rebinding, const network_deadline *deadline)
+{
+    (void)handle; (void)packet; (void)room; (void)hardware; (void)lease; (void)deadline;
+    completes++;
+    completed.rebinding = rebinding; completed.peer = peer->host; completed.transaction = transaction;
+    completed.seconds = budget[begins - 1].seconds; completed.nanoseconds = budget[begins - 1].nanoseconds;
+    return complete_result;
+}
+/* PRODUCTION */
+
+static void reset(void)
+{
+    fail_random = fail_spread = fail_open = fail_begin_at_valid = false;
+    fail_begin_at = fail_send_at = -1; spread_byte = 0;
+    opens = closes = sends = begins = completes = receives = 0;
+    script_length = script_at = 0; complete_result = DHCP_OK;
+    memset(sent, 0, sizeof sent); memset(budget, 0, sizeof budget);
+    offer_lease = (dhcp_lease){.address = 0x0a000015, .mask = 0xffffff00,
+        .router = 0x0a000001, .nameserver = 0x0a000001, .server = 0x0a000002, .seconds = 3600};
+}
+static void play(int kind) { script[script_length++].kind = kind; }
+static const p8 *option(const p8 *packet, p8 code, positive *length)
+{
+    for (positive at = DHCP_HEAD + 4; at < 300 && packet[at] != DHCP_OPTION_END;) {
+        if (packet[at] == DHCP_OPTION_PAD) { at++; continue; }
+        if (packet[at] == code) { *length = packet[at + 1]; return packet + at + 2; }
+        at += 2 + packet[at + 1];
+    }
+    return NULL;
+}
+static p8 packet_kind(int index)
+{ positive length = 0; const p8 *kind = option(sent[index].bytes, DHCP_OPTION_TYPE, &length);
+  require(kind && length == 1, "the message type is present"); return *kind; }
+static p32 option_address(int index, p8 code)
+{ positive length = 0; const p8 *value = option(sent[index].bytes, code, &length);
+  if (!value) return 0; require(length == 4, "an address option is four bytes"); return network_load_32(value); }
+static bool has_option(int index, p8 code) { positive length; return option(sent[index].bytes, code, &length) != NULL; }
+
+static positive expected_wait(int attempt, p8 spread)
+{
+    if (attempt == 0) return 50;
+    if (attempt < 12) return 250;
+    return (positive)(attempt - 11) * 2000 + (positive)spread * 2000 / 255 - 1000;
+}
+
+int main(void)
+{
+    p8 hardware[6] = {2, 0, 0, 0, 0, 7};
+    dhcp_lease lease;
+    unsigned long checks = 0;
+#define check(ok, what) do { checks++; require((ok), what); } while (0)
+
+    /* Silence: twenty DISCOVERs, each its own wait, one socket. */
+    p8 spreads[] = {0, 1, 128, 254, 255};
+    for (unsigned s = 0; s < sizeof spreads; s++) {
+        reset(); spread_byte = spreads[s];
+        check(dhcp_ask("x", hardware, &lease) == DHCP_NO_OFFER, "silence ends without an offer");
+        check(opens == 1 && closes == 1, "one socket, closed once");
+        check(sends == 20 && begins == 20 && receives == 20, "twenty attempts");
+        for (int i = 0; i < 20; i++) {
+            positive wait = expected_wait(i, spreads[s]);
+            check(packet_kind(i) == DHCP_DISCOVER, "a DISCOVER each attempt");
+            check(sent[i].has_to && sent[i].to.host == HOST_BROADCAST && sent[i].to.port == DHCP_SERVER_PORT,
+                  "to the broadcast address, server port");
+            check((sent[i].bytes[10] & 0x80) != 0, "asking for a broadcast reply");
+            check(sent[i].size == 300, "a 300 byte packet");
+            check(network_load_32(sent[i].bytes + 4) == network_load_32(sent[0].bytes + 4), "one transaction id");
+            check(budget[i].seconds == wait / 1000 && budget[i].nanoseconds == wait % 1000 * 1000000,
+                  "the wait of this attempt");
+        }
+        check(open_host == HOST_ANY && open_broadcast, "bound to any address, broadcast allowed");
+    }
+    /* No entropy for the spread: the middle of it. */
+    reset(); fail_spread = true;
+    check(dhcp_ask("x", hardware, &lease) == DHCP_NO_OFFER && sends == 20, "no spread, same twenty");
+    check(budget[12].seconds * 1000 + budget[12].nanoseconds / 1000000 == expected_wait(12, 128),
+          "a refused spread draws the middle");
+    /* No transaction id, no socket. */
+    reset(); fail_random = true;
+    check(dhcp_ask("x", hardware, &lease) == DHCP_NO_RANDOM && opens == 0 && sends == 0, "no entropy");
+    reset(); fail_open = true;
+    check(dhcp_ask("x", hardware, &lease) == DHCP_NO_SOCKET && sends == 0 && closes == 0, "no socket");
+
+    /* An OFFER is answered by one REQUEST that names it. */
+    struct { bipolar result; bipolar expect; int sends_after; } finals[] = {
+        {DHCP_OK, DHCP_OK, 2}, {DHCP_REFUSED, DHCP_REFUSED, 2}, {DHCP_NO_SOCKET, DHCP_NO_SOCKET, 2}};
+    for (unsigned f = 0; f < 3; f++) {
+        reset(); play(1); complete_result = finals[f].result;
+        check(dhcp_ask("x", hardware, &lease) == finals[f].expect, "the exchange's answer is returned");
+        check(sends == finals[f].sends_after && completes == 1 && closes == 1 && opens == 1, "DISCOVER, REQUEST, one completion");
+        check(packet_kind(0) == DHCP_DISCOVER && packet_kind(1) == DHCP_REQUEST, "DISCOVER then REQUEST");
+        check(option_address(1, DHCP_OPTION_REQUESTED) == 0x0a000015, "the offered address is asked for");
+        check(option_address(1, DHCP_OPTION_SERVER) == 0x0a000002, "from the server that offered it");
+        check(network_load_32(sent[1].bytes + 12) == 0, "ciaddr stays zero");
+        check((sent[1].bytes[10] & 0x80) != 0 && sent[1].to.host == HOST_BROADCAST, "broadcast");
+        check(!completed.rebinding && completed.transaction == network_load_32(sent[0].bytes + 4), "the same transaction");
+        check(completed.seconds == 0 && completed.nanoseconds == 250000000, "an ACK gets at least a quarter second");
+    }
+    /* A silent server after the REQUEST: the next attempt discovers again. */
+    reset(); play(1); complete_result = DHCP_NO_OFFER;
+    check(dhcp_ask("x", hardware, &lease) == DHCP_NO_OFFER && completes == 1 && sends == 21, "a lost ACK is another DISCOVER");
+    check(packet_kind(1) == DHCP_REQUEST && packet_kind(2) == DHCP_DISCOVER, "REQUEST then DISCOVER again");
+    /* The ACK window of a later attempt is its own wait. */
+    reset(); for (int i = 0; i < 13; i++) play(0);
+    play(1); complete_result = DHCP_OK; spread_byte = 255;
+    check(dhcp_ask("x", hardware, &lease) == DHCP_OK, "an offer at a late attempt");
+    /* attempt 13 waits (13 - 11) * 2000 + 2000 - 1000 = 5000 ms. */
+    check(completed.seconds == 5 && completed.nanoseconds == 0, "the ACK window follows the attempt's wait");
+    /* A REQUEST that cannot leave, or a window that cannot start, is no exchange. */
+    reset(); play(1); fail_send_at = 1;
+    check(dhcp_ask("x", hardware, &lease) == DHCP_NO_OFFER && completes == 0 && sends == 21, "a refused REQUEST ends the attempt");
+    reset(); play(1); fail_begin_at = 1; fail_begin_at_valid = true;
+    check(dhcp_ask("x", hardware, &lease) == DHCP_NO_OFFER && completes == 0, "no window, no completion");
+    /* What is not a usable OFFER is rejected against the allowance. */
+    int junk[] = {2, 3, 4};
+    for (unsigned j = 0; j < 3; j++) {
+        for (int count = 62; count <= 66; count++) {
+            reset();
+            for (int i = 0; i < count; i++) play(junk[j]);
+            play(1); complete_result = DHCP_OK;
+            check(dhcp_ask("x", hardware, &lease) == DHCP_OK, "the offer is taken in the end");
+            /* 64 rejections are allowed, the 65th ends the attempt: the usable
+               offer is then read in the next one. */
+            check(packet_kind(sends - 1) == DHCP_REQUEST, "the last send is the REQUEST");
+            check(sends == (count <= 64 ? 2 : 3), "the allowance is per attempt and exactly 64");
+        }
+    }
+
+    /* Keeping an address. */
+    dhcp_lease held = {.address = 0x0a000015, .mask = 0xffffff00, .router = 0x0a000001,
+                       .nameserver = 0x0a000001, .server = 0x0a000002, .seconds = 3600};
+    reset(); lease = held;
+    check(dhcp_reacquire("x", hardware, &lease, false, 0) == DHCP_NO_OFFER && opens == 0, "no time to wait, no exchange");
+    reset(); lease = held; lease.seconds = 0;
+    check(dhcp_reacquire("x", hardware, &lease, false, 5) == DHCP_NO_OFFER && opens == 0, "a lease that is no lease");
+    reset(); lease = held; fail_random = true;
+    check(dhcp_reacquire("x", hardware, &lease, false, 5) == DHCP_NO_RANDOM && opens == 0, "renewal needs entropy");
+    reset(); lease = held; fail_open = true;
+    check(dhcp_reacquire("x", hardware, &lease, true, 5) == DHCP_NO_SOCKET && sends == 0, "renewal needs a socket");
+    for (int rebinding = 0; rebinding < 2; rebinding++) {
+        reset(); lease = held; complete_result = DHCP_OK;
+        check(dhcp_reacquire("x", hardware, &lease, rebinding, 7) == DHCP_OK, "the answer is returned");
+        check(opens == 1 && closes == 1 && sends == 1 && completes == 1, "one REQUEST, one completion");
+        check(open_host == held.address && open_broadcast == (bool)rebinding, "bound to the held address");
+        check(packet_kind(0) == DHCP_REQUEST, "a REQUEST");
+        check(network_load_32(sent[0].bytes + 12) == held.address, "ciaddr is the held address");
+        check(!has_option(0, DHCP_OPTION_REQUESTED) && !has_option(0, DHCP_OPTION_SERVER), "no requested address or server id");
+        check(sent[0].to.host == (rebinding ? HOST_BROADCAST : held.server) && sent[0].to.port == DHCP_SERVER_PORT, "unicast to the server, broadcast when rebinding");
+        check(((sent[0].bytes[10] & 0x80) != 0) == (bool)rebinding, "the broadcast flag follows rebinding");
+        check(completed.rebinding == (bool)rebinding && completed.peer == held.server, "the server is the expected peer");
+        check(completed.seconds == 7 && completed.nanoseconds == 0, "the caller's wait");
+    }
+    for (int kind = 0; kind < 3; kind++) {
+        bipolar results[] = {DHCP_OK, DHCP_REFUSED, DHCP_NO_OFFER};
+        reset(); lease = held; complete_result = results[kind];
+        check(dhcp_reacquire("x", hardware, &lease, false, 3) == results[kind], "the completion's answer passes through");
+    }
+    reset(); lease = held; fail_send_at = 0;
+    check(dhcp_reacquire("x", hardware, &lease, false, 3) == DHCP_NO_SOCKET && completes == 0 && closes == 1, "a refused send");
+    reset(); lease = held; fail_begin_at = 0; fail_begin_at_valid = true;
+    check(dhcp_reacquire("x", hardware, &lease, false, 3) == DHCP_NO_OFFER && completes == 0 && closes == 1, "no window");
+
+    /* Giving an address back. */
+    reset(); lease = held; lease.address = 0;
+    check(dhcp_decline("x", hardware, &lease) == DHCP_NO_OFFER && opens == 0, "nothing to decline");
+    reset(); lease = held; lease.server = 0;
+    check(dhcp_decline("x", hardware, &lease) == DHCP_NO_OFFER && opens == 0, "no server to tell");
+    reset(); lease = held; fail_random = true;
+    check(dhcp_decline("x", hardware, &lease) == DHCP_NO_RANDOM && opens == 0, "a decline needs a transaction");
+    reset(); lease = held; fail_open = true;
+    check(dhcp_decline("x", hardware, &lease) == DHCP_NO_SOCKET && sends == 0, "a decline needs a socket");
+    reset(); lease = held;
+    check(dhcp_decline("x", hardware, &lease) == DHCP_OK && sends == 1 && closes == 1, "a decline is one send");
+    check(packet_kind(0) == DHCP_DECLINE && sent[0].size == 300, "a DECLINE, 300 bytes");
+    check(option_address(0, DHCP_OPTION_REQUESTED) == held.address && option_address(0, DHCP_OPTION_SERVER) == held.server,
+          "it names the address and the server");
+    check(!has_option(0, DHCP_OPTION_ASK), "and asks for nothing");
+    check(sent[0].to.host == HOST_BROADCAST && sent[0].to.port == DHCP_SERVER_PORT && open_broadcast, "broadcast");
+    check(network_load_32(sent[0].bytes + 12) == 0, "ciaddr zero");
+    reset(); lease = held; fail_send_at = 0;
+    check(dhcp_decline("x", hardware, &lease) == DHCP_NO_SOCKET && closes == 1, "a refused decline is a failure");
+
+    /* The timers of a lease: T1 < T2 < the lifetime, or the defaults. */
+    p32 seconds_set[] = {1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 100, 3600, 86400, 0x7fffffff, 0x80000000u, 0xfffffffeu, 0xffffffffu};
+    for (unsigned s = 0; s < sizeof seconds_set / sizeof *seconds_set; s++)
+        for (unsigned a = 0; a < 12; a++)
+            for (unsigned b = 0; b < 12; b++) {
+                p32 total = seconds_set[s];
+                p32 values[12] = {0, 1, 2, total / 2 - 1, total / 2, total / 2 + 1, total - 2, total - 1, total,
+                                  total + 1, 0x7fffffff, 0xffffffffu};
+                p32 given_renewal = values[a], given_rebinding = values[b];
+                dhcp_lease timed = {.seconds = total, .renewal = given_renewal, .rebinding = given_rebinding};
+                bool ok = dhcp_lease_timers(&timed);
+                if (total < 3) {
+                    check(ok && !timed.renewal && !timed.rebinding, "a lease under three seconds keeps no timers");
+                    continue;
+                }
+                p32 default_renewal = total / 2, default_rebinding = total - (p32)(((uint64_t)total + 7) / 8);
+                p32 renewal = given_renewal ? given_renewal : default_renewal;
+                p32 rebinding = given_rebinding ? given_rebinding : default_rebinding;
+                if (!(renewal && renewal < rebinding && rebinding < total)) { renewal = default_renewal; rebinding = default_rebinding; }
+                check(ok && timed.renewal == renewal && timed.rebinding == rebinding, "timers are given or default, in order");
+                check(timed.renewal < timed.rebinding && timed.rebinding < total, "and always strictly ordered");
+            }
+    dhcp_lease none = {.seconds = 0, .renewal = 5, .rebinding = 9};
+    check(!dhcp_lease_timers(&none) && none.renewal == 5, "a zero lifetime is refused and left alone");
+    check(!dhcp_lease_timers(NULL), "no lease, no timers");
+
+    printf("dhcp exchange %lu/%lu\n", checks, checks);
+    return 0;
+}
+'''
+    constants = ul_c_span(net, r"^#define DHCP_CLIENT_PORT", r"^static bool dhcp_transaction_early")
+    production = "\n".join((
+        ul_c_function(wait, "network_discard_one"),
+        ul_c_function(net, "dhcp_mask_valid"),
+        ul_c_function(net, "dhcp_lease_timers"),
+        ul_c_function(net, "dhcp_build"),
+        ul_c_function(net, "dhcp_address_unicast"),
+        ul_c_function(net, "dhcp_prefix_clear"),
+        ul_c_function(net, "dhcp_lease_usable"),
+        ul_c_function(net, "dhcp_ask"),
+        ul_c_function(net, "dhcp_reacquire"),
+        ul_c_function(net, "dhcp_decline")))
+    source = source.replace("/* CONSTANTS */", constants).replace("/* PRODUCTION */", production)
+    compiler = shutil.which("clang")
+    if not compiler:
+        print("net dhcp exchange: NOT RUN -- needs clang with ASan/UBSan")
+        return 2
+    with tempfile.TemporaryDirectory(prefix="net-dhcp-exchange-") as temporary:
+        unit = Path(temporary) / "exchange.c"
+        binary = Path(temporary) / "exchange"
+        unit.write_text(source)
+        built = subprocess.run([compiler, "-std=gnu11", "-O1", "-g", "-w",
+                                "-fsanitize=address,undefined", str(unit),
+                                "-o", str(binary)], capture_output=True, text=True)
+        checks(built.returncode == 0, "production DHCP exchanges compile over the seam")
+        if built.returncode:
+            print(built.stderr[-3000:])
+        else:
+            ran = subprocess.run([str(binary)], capture_output=True, text=True, timeout=120)
+            print("  " + ran.stdout.strip()) if ran.stdout.strip() else None
+            if ran.returncode:
+                print(ran.stderr[-3000:])
+            tally = re.search(r"dhcp exchange (\d+)/(\d+)", ran.stdout)
+            checks(ran.returncode == 0 and tally is not None,
+                   "every DHCP exchange, wait, packet field and failure matches the written expectation")
+    return checks.verdict("net dhcp exchange", "net-dhcp-exchange")
+
+
 def harness_net_math_proof(argv):
     """Machine-check finite arithmetic lemmas used by src/net/net.c."""
     del argv
@@ -63042,7 +63405,7 @@ def harness_security_hygiene(argv):
                 "http_fuzz", "http_urls", "wifi_eapol_fuzz", "wifi_scan_fuzz", "wifi_key_state",
                 "bowl_sig_fuzz", "wget_mutation", "wget_hostile", "sntp_era", "net_netem",
                 "net_dependency_closure", "net_math_proof", "net_clock_fault", "net_wait_states", "net_parser_work_states",
-                "net_lease_transitions",
+                "net_dhcp_exchange", "net_lease_transitions",
                 "protected_links", "hostile_strings", "state_cuts")
     for name in security + ("tls_verify_fuzz",):
         checks(name in HARNESS_CHECKS, "differential.py: %s is not registered" % name)
@@ -81148,6 +81511,7 @@ HARNESS_CHECKS = {
     "net_clock_fault": harness_net_clock_fault,
     "net_wait_states": harness_net_wait_states,
     "net_parser_work_states": harness_net_parser_work_states,
+    "net_dhcp_exchange": harness_net_dhcp_exchange,
     "net_lease_transitions": harness_net_lease_transitions,
     "net_math_proof": harness_net_math_proof,
     "wire_constants": harness_wire_constants,

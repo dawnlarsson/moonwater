@@ -4034,6 +4034,7 @@ lane_net()
         python3 test/differential.py --harness net_clock_fault || return 1
         python3 test/differential.py --harness net_wait_states || return 1
         python3 test/differential.py --harness net_parser_work_states || return 1
+        python3 test/differential.py --harness net_dhcp_exchange || return 1
         python3 test/differential.py --harness net_lease_transitions || return 1
         python3 test/differential.py --harness net_math_proof || return 1
         python3 test/differential.py --harness wire_constants || return 1

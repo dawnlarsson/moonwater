@@ -69698,6 +69698,83 @@ static fn leasing(void)
                               dhcp_read(packet, DHCP_HEAD + 14, 0xdeadbeef,
                                         hardware, address_of lease,
                                         address_of kind) < 0);
+
+                        p8 trial[1024];
+
+                        /* Every value of the control names the regions it
+                           walks, 1 the file and 2 the server name, 3 both,
+                           and no others: a region it does not name may hold
+                           anything, one it does must end in END. 0 and 4 name
+                           nothing the RFC defines. */
+                        for (positive value = 0; value <= 4; value++)
+                                for (positive ends = 0; ends < 4; ends++)
+                                {
+                                        bool file_walked = value == 1 || value == 3;
+                                        bool name_walked = value == 2 || value == 3;
+                                        bool file_ends = ends & 1;
+                                        bool name_ends = ends & 2;
+                                        bool expected = value >= 1 && value <= 3 &&
+                                            (!file_walked || file_ends) &&
+                                            (!name_walked || name_ends);
+
+                                        memory_fill(trial, 0, sizeof trial);
+                                        trial[0] = 2;
+                                        trial[1] = 1;
+                                        trial[2] = 6;
+                                        network_store_32(trial + 4, 0xdeadbeef);
+                                        network_store_32(trial + 16, 0x0a00020f);
+                                        memory_copy(trial + 28, hardware, 6);
+                                        network_store_32(trial + DHCP_HEAD,
+                                                         DHCP_COOKIE);
+                                        trial[DHCP_HEAD + 4] = DHCP_OPTION_TYPE;
+                                        trial[DHCP_HEAD + 5] = 1;
+                                        trial[DHCP_HEAD + 6] = DHCP_OFFER;
+                                        trial[DHCP_HEAD + 7] = DHCP_OPTION_OVERLOAD;
+                                        trial[DHCP_HEAD + 8] = 1;
+                                        trial[DHCP_HEAD + 9] = (p8)value;
+                                        trial[DHCP_HEAD + 10] = DHCP_OPTION_END;
+                                        //      A region that ends is END and then
+                                        //      padding; one that does not is
+                                        //      options that run off its end.
+                                        memory_fill(trial + DHCP_FILE,
+                                                    file_ends ? 0 : 1,
+                                                    DHCP_HEAD - DHCP_FILE);
+                                        memory_fill(trial + DHCP_SNAME,
+                                                    name_ends ? 0 : 1,
+                                                    DHCP_FILE - DHCP_SNAME);
+                                        if (file_ends)
+                                                trial[DHCP_FILE] = DHCP_OPTION_END;
+                                        if (name_ends)
+                                                trial[DHCP_SNAME] = DHCP_OPTION_END;
+                                        check("DHCP overload walks the regions its value names and no others",
+                                              (dhcp_read(trial, DHCP_HEAD + 11,
+                                                         0xdeadbeef, hardware,
+                                                         address_of lease,
+                                                         address_of kind) == 0) ==
+                                                  expected);
+                                }
+
+                        /* The hardware type and address length each have to
+                           be Ethernet's, alone. */
+                        for (positive wrong = 0; wrong < 4; wrong++)
+                        {
+                                memory_fill(trial, 0, sizeof trial);
+                                trial[0] = 2;
+                                trial[1] = wrong & 1 ? 6 : 1;
+                                trial[2] = wrong & 2 ? 4 : 6;
+                                network_store_32(trial + 4, 0xdeadbeef);
+                                network_store_32(trial + 16, 0x0a00020f);
+                                memory_copy(trial + 28, hardware, 6);
+                                network_store_32(trial + DHCP_HEAD, DHCP_COOKIE);
+                                trial[DHCP_HEAD + 4] = DHCP_OPTION_TYPE;
+                                trial[DHCP_HEAD + 5] = 1;
+                                trial[DHCP_HEAD + 6] = DHCP_OFFER;
+                                trial[DHCP_HEAD + 7] = DHCP_OPTION_END;
+                                check("a reply is read only for Ethernet in both its type and length",
+                                      (dhcp_read(trial, DHCP_HEAD + 8, 0xdeadbeef,
+                                                 hardware, address_of lease,
+                                                 address_of kind) == 0) == !wrong);
+                        }
                         packet[DHCP_HEAD + 10] = DHCP_OPTION_END;
                         packet[DHCP_FILE] = DHCP_OPTION_OVERLOAD;
                         packet[DHCP_FILE + 1] = 1;
