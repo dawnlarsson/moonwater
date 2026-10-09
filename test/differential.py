@@ -11269,6 +11269,42 @@ def shell_true_false_programs(farm):
         shutil.rmtree(work, ignore_errors=True)
 
 
+def shell_chained_applet_stdin(farm):
+    """A chain that starts an applet of the multicall reads its stdin as the shell's own.
+
+    The script arrives on the shell's stdin, as it does on a console: the
+    timeout child runs true, and true has to leave that stdin to the shell.
+    Before true was a tool, the child read the next line (echo after) as a
+    script of its own, so `timeout 1 true; echo ok2` printed nothing for the
+    line that followed. Sleep and timeout chains are checked the same way.
+    """
+    import tempfile
+
+    candidate = next((Path(farm) / name for name in ("sh", "shell", "ls", "cat", "true")
+                      if (Path(farm) / name).exists()), None)
+    reference = shutil.which("bash") or shutil.which("dash")
+    if candidate is None or reference is None:
+        return 0, 1, ["needs the shell image in the farm and a bash on the host"]
+    image = os.path.realpath(candidate)
+    work = tempfile.mkdtemp(prefix="chained-applet-")
+    try:
+        for name in ("sh", "true", "sleep", "timeout"):
+            os.symlink(image, os.path.join(work, name))
+        script = b"timeout 1 true; echo ok2\nsleep 0.1 && echo ok1\necho after\n"
+        # The reference finds the host's own true and sleep: a link to this
+        # image named true would make it run the same broken path.
+        answers = []
+        for program, path in ((reference, "/usr/bin:/bin"), (os.path.join(work, "sh"), work + ":/usr/bin:/bin")):
+            done = subprocess.run([program], input=script, capture_output=True, timeout=20,
+                                  env={"PATH": path, "HOME": work})
+            answers.append((done.returncode, done.stdout))
+        ok = answers[0] == answers[1] and answers[0][0] == 0
+        notes = [] if ok else [f"reference {answers[0]!r} ours {answers[1]!r}"]
+        return (1 if ok else 0), 1, notes
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def shell_start_placement(farm):
     """The statics a shell start writes all sit on the first page of bss.
 
@@ -20401,6 +20437,7 @@ SHELL_CHECKS = (
     shell_restricted_function_import,
     shell_start_placement,
     shell_true_false_programs,
+    shell_chained_applet_stdin,
     shell_glob_extended_bounded,
     shell_subscript_side_effects,
     shell_parse_scan_bounds,
