@@ -26541,7 +26541,7 @@ def harness_core_state(argv):
         cells += section(canvas, "struct target\n", "static void target_row")
         cells += section(compose, "struct shape\n", "static _Bool shape_span")
         cells += paint[paint.index("static CONST int round_inset"):]
-        cells += section(compose, "static _Bool shape_span", "static void shape_blit")
+        cells += section(compose, "static _Bool shape_span", "#define BX_N 1u")
         cells += section(canvas, "enum\n{", "/*\n        A pane")
         cells += section(paint, "static const u32 canvas_ink", "/*\n        A bitmap,")
         cells += section(paint, "static void bits_draw", "// xrgb8888")
@@ -26554,15 +26554,11 @@ def harness_core_state(argv):
         geometry += section(canvas, "static void pane_frame", "// Which edges")
         geometry += "#define compose_cells compose_cells_pixels\n"
         geometry += section(compose, "static void compose_cells", "/*\n        The bar down the right of a window")
-        #   The close button is not this harness's subject, and asking for
-        #   its square needs a shared page the pane mocked here does not
-        #   have. Saying there is never one leaves the titlebar drawn exactly
-        #   as it was before there was a button to draw -- which is the thing
-        #   these checks are about.
-        geometry += ("static _Bool pane_close_box(struct pane *p,int *x,"
-                     "int *y,int *side)\n"
-                     "{ (void)p;(void)x;(void)y;(void)side; return 0; }\n"
-                     "static const unsigned char close_bits[8] = {0};\n")
+        #   The close button as it ships. Only a pane with a shared page
+        #   wears one, and the layout checks mock none, so their titlebars
+        #   are drawn as before; the golden scene G-S1 gives its pane one.
+        geometry += section(canvas, "static _Bool pane_close_box",
+                            "// The first format in the plane's own order")
         geometry += section(compose, "struct pane_bar_geometry\n", "/*\n        The desktop, everywhere")
         geometry += "#undef compose_cells\n"
         geometry += section(drag, "static void bar_move", "/*\n        Filling the screen")

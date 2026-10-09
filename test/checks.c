@@ -101500,7 +101500,7 @@ static void reference_row(const struct target *t,const struct shape *s,int x,int
 struct pane {unsigned grid_columns,grid_rows,columns,rows,view,head,history,stride,skip;
     unsigned *lengths;struct window_cell *cells;
     int x,y,width,height,edge;unsigned style,state,title_length,pitch;
-    const char *title;u32 *pixels;};
+    const char *title;u32 *pixels;void *shared;};
 static unsigned pane_rows(struct pane *p) {return p->rows;}
 static unsigned pane_view_at(struct pane *p,unsigned view,unsigned *skip) {*skip=p->skip;return view;}
 // Every line of these rings has memory behind it; holding is the kernel's.
@@ -101533,9 +101533,75 @@ static void canvas_thread_wake(void) {}
 // Titles and pixel windows are not exercised by this cell-layout check.
 static void text_draw(const struct target *t,int x,int y,int w,int h,
     const char *text,unsigned length,unsigned align,int scale,u32 color) {assert(0);}
-static void shape_blit(const struct target *t,const struct shape *s,
-    int x,int y,int w,int h,const u32 *source,unsigned pitch) {assert(0);}
 #include "canvas-pane.inc"
+
+/* The golden scene G-S1 (canvas spec 05 section 1.3): a 1024 by 768 output
+   in the desktop ink, and one framed, focused pixel window with a shared page
+   and no title at (80, 80), its 128 by 64 buffer all 0x3a5a7a, at scales 1 to
+   4. The value is the SHA-256 of the buffer as little-endian words with the
+   top byte cleared, which is the byte no compositor agrees on. Recorded from
+   the kernel's compose path at 16ee8ddb, where canvas.c is byte for byte
+   cf9a0bca's; every compositor that draws the classic look must give the
+   same four. */
+#define GOLDEN_GS1_1 "07f0a6e39b44e87cd23667a5be9023f612c63dd21d382d251e4036aaaefc9c44"
+#define GOLDEN_GS1_2 "59ccc584601205c08305c86de93bc83d5678e2238039f2a0e2505675256558fc"
+#define GOLDEN_GS1_3 "d79d41aaf3ebec1983fcd399bf434a078c4984e064a72282f79a408d0caa56ba"
+#define GOLDEN_GS1_4 "55f194ecbb9ad8f55bb264bf0d4e92a89f200d8ace1b0ff080c9eaec564787d6"
+static const char *const golden_gs1[4]={GOLDEN_GS1_1,GOLDEN_GS1_2,GOLDEN_GS1_3,GOLDEN_GS1_4};
+static void golden_sha256(const u32 *pixels,size_t count,char out[65]) {
+    static const uint32_t k[64]={
+        0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+        0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+        0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+        0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+        0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+        0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+        0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+        0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2};
+    uint32_t h[8]={0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19};
+    uint64_t bytes=(uint64_t)count*4,total=(bytes+9+63)/64*64;
+    #define GROR(x,n) (((x)>>(n))|((x)<<(32-(n))))
+    for(uint64_t at=0;at<total;at+=64) {
+        uint8_t block[64];uint32_t w[64];
+        for(unsigned i=0;i<64;i++) {
+            uint64_t b=at+i;
+            block[i]=b<bytes?(uint8_t)((pixels[b/4]&0xffffffu)>>(b%4*8)):
+                b==bytes?0x80:b>=total-8?(uint8_t)(bytes*8>>((total-1-b)*8)):0;
+        }
+        for(unsigned i=0;i<16;i++)w[i]=(uint32_t)block[i*4]<<24|(uint32_t)block[i*4+1]<<16|
+            (uint32_t)block[i*4+2]<<8|block[i*4+3];
+        for(unsigned i=16;i<64;i++)w[i]=w[i-16]+(GROR(w[i-15],7)^GROR(w[i-15],18)^(w[i-15]>>3))+
+            w[i-7]+(GROR(w[i-2],17)^GROR(w[i-2],19)^(w[i-2]>>10));
+        uint32_t a=h[0],b=h[1],c=h[2],d=h[3],e=h[4],f=h[5],g=h[6],hh=h[7];
+        for(unsigned i=0;i<64;i++) {
+            uint32_t t1=hh+(GROR(e,6)^GROR(e,11)^GROR(e,25))+((e&f)^(~e&g))+k[i]+w[i];
+            uint32_t t2=(GROR(a,2)^GROR(a,13)^GROR(a,22))+((a&b)^(a&c)^(b&c));
+            hh=g;g=f;f=e;e=d+t1;d=c;c=b;b=a;a=t1+t2;
+        }
+        h[0]+=a;h[1]+=b;h[2]+=c;h[3]+=d;h[4]+=e;h[5]+=f;h[6]+=g;h[7]+=hh;
+    }
+    #undef GROR
+    for(unsigned i=0;i<8;i++)snprintf(out+i*8,9,"%08x",h[i]);
+}
+static u32 golden_screen[1024*768];
+static void check_golden_gs1(const u32 *ink) {
+    static u32 body[128*64];
+    for(unsigned i=0;i<128*64;i++)body[i]=0x3a5a7a;
+    for(unsigned scale=1;scale<=4;scale++) {
+        desktop.scale=scale;
+        for(unsigned i=0;i<1024*768;i++)golden_screen[i]=ink[INK_DESKTOP];
+        struct pane p={.x=80,.y=80,.width=128,.height=64,.style=WINDOW_FRAME,
+            .state=WINDOW_FOCUSED,.pixels=body,.pitch=128,.shared=body};
+        struct target t={.pixels=golden_screen,.pitch=1024,.width=1024,.height=768,
+            .clip={0,0,1024,768},.ink=ink};
+        compose_pane(&p,&t);
+        char got[65];golden_sha256(golden_screen,1024*768,got);
+        if(strcmp(got,golden_gs1[scale-1]))
+            fprintf(stderr,"G-S1 at scale %u is %s, not the golden %s\n",scale,got,golden_gs1[scale-1]);
+        check(!strcmp(got,golden_gs1[scale-1]));
+    }
+    desktop.scale=1;
+}
 
 static void check_pane_layout(void) {
     static u32 screen[256*256];
@@ -101859,6 +101925,7 @@ int main(void) {
     }
     struct font_desc face={8,16,font_bits};canvas_font=&face;
     check_pane_layout();
+    check_golden_gs1(palette);
     for(unsigned i=0;i<sizeof(font_bits);i++)font_bits[i]=(i*29+i/16*73)&255;
     struct window_cell cells[96];unsigned seed=123;
     for(unsigned trial=0;trial<2400;trial++) {
