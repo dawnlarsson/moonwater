@@ -61320,10 +61320,8 @@ int main(void)
         "static PURE bipolar http_header_end(",
         "/* Status and body framing have one interpretation in both clients.")
 
-    http_clean_source = base_shim + r"""
-#define HTTP_OK 0
-#define HTTP_MALFORMED (-5)
-""" + http_framing + r"""
+    #   What the head checks ask of http_response_fields: the grammar alone.
+    http_head_valid = r"""
 static bool http_header_block_valid(p8 *bytes, positive size)
 {
         http_response response = {.code = 200};
@@ -61331,6 +61329,12 @@ static bool http_header_block_valid(p8 *bytes, positive size)
 
         return http_response_fields(bytes, size, &response, &fields);
 }
+"""
+
+    http_clean_source = base_shim + r"""
+#define HTTP_OK 0
+#define HTTP_MALFORMED (-5)
+""" + http_framing + http_head_valid + r"""
 static int failures;
 
 static void expect_chunk(const char *label, const char *line, int want_ok,
@@ -61439,7 +61443,7 @@ int main(void)
         '#include <sanitizer/msan_interface.h>\n' + base_shim + r"""
 #define HTTP_OK 0
 #define HTTP_MALFORMED (-5)
-""" + http_framing + r"""
+""" + http_framing + http_head_valid + r"""
 int main(void)
 {
         /* Claim a full header block; poison the unread tail so the line walk
