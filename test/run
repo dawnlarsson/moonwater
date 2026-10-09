@@ -4132,6 +4132,7 @@ lane_net()
         *) net_outcome=1 ;;
         esac
         python3 test/differential.py --harness dhcp_fuzz; case $? in 0) ;; 2) note "dhcp_fuzz: skipped (soft) -- does not downgrade net" ;; *) net_outcome=1 ;; esac
+        python3 test/differential.py --harness dhcp_frame_fuzz; case $? in 0) ;; 2) note "dhcp_frame_fuzz: skipped (soft) -- does not downgrade net" ;; *) net_outcome=1 ;; esac
         python3 test/differential.py --harness sntp_fuzz
         case $? in
         0) ;;
@@ -13274,6 +13275,13 @@ printf 'loopback-%s-%s-%s\n' "$(cat /sys/class/net/lo/flags)" "$(ip addr show lo
 for i in $(seq 1 60); do [ "$(cat /proc/sys/net/ipv4/tcp_syncookies)" = 1 ] && break; sleep 0.2; done
 printf 'nk-%s-%s-%s-%s-%s-%s-%s-%s-%s-%s-%s-%s\n' "$(cat /proc/sys/net/ipv4/conf/default/accept_redirects)" "$(cat /proc/sys/net/ipv6/conf/eth0/accept_ra)" "$(cat /proc/sys/net/ipv6/conf/default/autoconf)" "$(cat /proc/sys/net/ipv4/tcp_rfc1337)" "$(cat /proc/sys/net/ipv4/tcp_syncookies)" "$(cat /proc/sys/fs/protected_symlinks)" "$(cat /proc/sys/fs/protected_hardlinks)" "$(cat /proc/sys/fs/protected_fifos)" "$(cat /proc/sys/fs/protected_regular)" "$(cat /proc/sys/kernel/kptr_restrict)" "$(cat /proc/sys/kernel/dmesg_restrict)" "$(cat /proc/sys/kernel/io_uring_disabled)" | rev
 #
+#       Written with them: reverse-path filtering loose (the DHCP client reads
+#       its OFFER from a packet socket, which rp_filter does not reach) and
+#       ARP answered only for the interface's own addresses, asked with the
+#       best source, and announced on link up.
+#
+printf 'nr-%s-%s-%s-%s-%s\n' "$(cat /proc/sys/net/ipv4/conf/all/rp_filter)" "$(cat /proc/sys/net/ipv4/conf/all/arp_ignore)" "$(cat /proc/sys/net/ipv4/conf/all/arp_filter)" "$(cat /proc/sys/net/ipv4/conf/all/arp_announce)" "$(cat /proc/sys/net/ipv4/conf/all/arp_notify)" | rev
+#
 #       The address space of a program the Spark loader started is randomized,
 #       as an ELF's is: the loader never set PF_RANDOMIZE, which begin_new_exec
 #       clears, so every program's stack sat at the top of the address space
@@ -13628,6 +13636,7 @@ says transcript 'and the clock reads the zone it was set to' '0010+'
 says transcript 'and the zone reached the kernel and this system' '1applied'
 says transcript 'as a TZif that bowl programs read' '2fiZTtzif'
 says transcript 'the watcher set the default kernel network and file settings' '1-1-1-1-1-1-1-1-1-0-0-0-kn'
+says transcript 'and rp_filter loose, with the ARP settings' '1-2-1-1-2-rn'
 says transcript 'floodlight device'   'fl-device-thgildoolf #'
 says transcript 'floodlight refuses nothing' 'fl-denials-0'
 says transcript 'floodlight has awk'  'fl-awk-1'

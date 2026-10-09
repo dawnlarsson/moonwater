@@ -2557,11 +2557,18 @@ static COLD bipolar net_watch_events(b32 events, netlink_buffer address_to messa
         network's.
 
         The reference tier (STRICT_REFERENCE) keeps the kernel's own values,
-        the rest write the table below. rp_filter is left alone on purpose: the
-        DHCP client is a UDP socket, its OFFER comes from an address with no
-        route yet, and with rp_filter 1 or 2 the OFFER is dropped and no lease
-        is ever taken (measured: OFFERs sent, no REQUEST, in a KVM guest booted
-        with either).
+        the rest write the table below. Reverse-path filtering is loose
+        (rp_filter 2: a packet whose source this machine has no route to at
+        all is dropped) and strict at the tight tier (1: no route back out of
+        the interface it came in on). It was left at the kernel's 0 while the
+        DHCP client read its OFFER from a UDP socket, which either setting
+        starves: the OFFER comes from an address with no route yet (measured:
+        OFFERs sent, no REQUEST, in a KVM guest booted with either). The
+        client reads it from a packet socket now (dhcp_frames_open). ARP is
+        answered only for an address of the interface asked on (arp_ignore
+        1), only when the asker is routed out of it (arp_filter 1), asked
+        with the best local source (arp_announce 2), and announced when a
+        link comes up (arp_notify 1).
 */
 #if MOONWATER_STRICT_NET >= STRICT_SAFE
 static COLD fn net_sysctl(string_address path, string_address value)
@@ -2655,9 +2662,19 @@ static COLD fn net_kernel_defaults(void)
         static const string_address quiet_v6[] = {
             "accept_ra", "autoconf", "accept_redirects", null};
 
+        static const string_address arp[][2] = {
+            {"arp_ignore", "1\n"}, {"arp_filter", "1\n"},
+            {"arp_announce", "2\n"}, {"arp_notify", "1\n"}};
+
         for (positive at = 0; quiet[at]; at++)
                 net_sysctl_family("/proc/sys/net/ipv4/conf", quiet[at], "0\n",
                                   false);
+        net_sysctl_family("/proc/sys/net/ipv4/conf", "rp_filter",
+                          MOONWATER_STRICT_NET >= STRICT_TIGHT ? "1\n" : "2\n",
+                          false);
+        for (positive at = 0; at < array_count(arp); at++)
+                net_sysctl_family("/proc/sys/net/ipv4/conf", arp[at][0],
+                                  arp[at][1], false);
         for (positive at = 0; quiet_v6[at]; at++)
                 net_sysctl_family("/proc/sys/net/ipv6/conf", quiet_v6[at],
                                   "0\n", true);

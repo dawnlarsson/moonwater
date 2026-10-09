@@ -165,11 +165,26 @@ never a pass.
 - **ARP probe:** a new lease is installed only after three probes, 200 ms apart,
   find nobody else on the address (+0.6 s to a first lease; renewals and
   rebinds skip it). A probe that cannot be sent refuses the lease.
+- **DHCP-D1, the replies of an acquisition come off a packet socket,** so
+  `rp_filter` is on: 2 (loose) at the default tier and 1 (strict) at the
+  tight one, with `arp_ignore` 1, `arp_filter` 1, `arp_announce` 2 and
+  `arp_notify` 1. A UDP socket never got the OFFER of a server the machine
+  has no route to yet with either `rp_filter` set, nor a reply unicast to the
+  offered address. The packet socket sees frames before netfilter and
+  `rp_filter`, so what IP and UDP would have refused is refused by
+  `dhcp_unframe` (version, header length, total length, fragments, protocol,
+  both checksums unless the kernel vouches for the UDP one, ports, UDP length)
+  and the destination must be the broadcast address or the one offered; a
+  locked classic BPF prefilter keeps only UDP to port 68 that is not a later
+  fragment. The IP source only binds the exchange to its OFFER's sender, as
+  the UDP peer did. Renewals and rebinding hold an address and stay on UDP.
 - **DHCP-D2, no filter, no exchange:** the confined child refuses to run when
   seccomp will not install its filter (a kernel without `SECCOMP_FILTER`, which
   every Moonwater kernel has by `build_essentials`, or qemu-user): no lease
-  rather than hostile packets parsed unfiltered. Callers that are not the
-  watcher's child (the checks) are not confined.
+  rather than hostile packets parsed unfiltered. Its `sendto` and `write` may
+  name only the client socket and the answer pipe, since a packet socket that
+  can be written sends any frame. Callers that are not the watcher's child
+  (the checks) are not confined.
 - **Bad URL spellings:** `http:` and `https:` without `//` are refused in every
   tier (a host named `https` is not worth a plaintext connection to the wrong
   place); the tight tier refuses every leading scheme token (`ftp:21`).
@@ -189,7 +204,7 @@ ARM64 and RISC-V mandatory with UBSan trapping.
 | Bytes, memory | `byte_reader` cursors (`security_hygiene` forbids listed parsers from indexing their input); `MSG_TRUNC`; guard pages (`codec`, `socket`, `standard`); ASan/UBSan fuzz `sh test/run fuzz`; MSan `sh test/run msan`; `net_math_proof` (DHCP masks, AES field and S-box, HKDF counter, netlink widths); `net_wait_states` (1,613,472 send/read and 4,302,592 writev schedules, 15,360 nested-deadline boundaries, ASan/UBSan) | `tls_parse_cert` index reads are guarded by hand and fuzzed; no corpus beyond generated seeds |
 | Netlink | sender, port, sequence, alignment, multipart, `NETLINK_DISCARD_MAX`; `netlink_fuzz` | nested attributes beyond the bounded fuzz |
 | DNS | exact question, ID, peer; per-query source port, 0x20, EDNS0 with fallbacks; own resolver first; `DNS_DISCARD_MAX`; `dns_fuzz`, `sh test/run net`; a validated TC reply keeps the full query deadline for TCP, while only the UDP EDNS trial is capped at one second | independent packet oracle |
-| DHCPv4 | xid, MAC, server and OFFER-peer binding; option overload, END and zero padding; lease sanity; ARP probes before install, and a DHCPDECLINE (RFC 2131 4.4.1) with a ten-second hold-off for an address another station answers for; watcher cut once per link news; the confinement refusing where seccomp answers ENOSYS (DHCP-D2); route ownership and rollback fault matrix (`net_lease_transitions`); `dhcp_fuzz`, `sh test/run netem net machine` | DHCP over a raw socket (`rp_filter`); the DECLINE is checked as a built packet and through its confined child, never against a live server |
+| DHCPv4 | xid, MAC, server and OFFER-peer binding; option overload, END and zero padding; lease sanity; ARP probes before install, and a DHCPDECLINE (RFC 2131 4.4.1) with a ten-second hold-off for an address another station answers for; watcher cut once per link news; replies off a packet socket judged as IP and UDP judge them (DHCP-D1): `dhcp_frame_fuzz` against an independent RFC 791/768 reading and a classic BPF interpreter running the kernel's prefilter, the CBMC proof `dhcp_frame`, `CHECK_net`'s rows and its loopback socket in namespaces of its own, `net_parser_work_states` off both sockets; netem scenes at `rp_filter` 1 and 2 and a server that unicasts its replies; the confinement refusing where seccomp answers ENOSYS (DHCP-D2); route ownership and rollback fault matrix (`net_lease_transitions`); `dhcp_fuzz`, `sh test/run netem net machine` | the DECLINE is checked as a built packet, through its confined child and against the scripted netem server, never against a production server; the frame judge's proof is bounded at 40 bytes and the fuzz is what covers longer frames; the loopback socket check is NOT RUN under qemu-user |
 | SNTP | 64-bit nonce, peer, mode, stratum, timing, exactly 48 bytes at the tight tier; each sample its own wait; `sntp_fuzz`, `sntp_era` (2036, 2038, 2104), `sh test/run netem machine` | unauthenticated; NTS is a separate branch |
 | HTTP, URL | `localhost` and `*.localhost` reach 127.0.0.1 without a resolver (RFC 6761; `wget_hostile` with a stub resolver, curl held to the same rows); host spellings named against GNU wget and curl; the scheme rule at both tiers (`http_urls`); sink-side validation of host, target, headers; userinfo, schemes, fragments refused; one framing reading; redirect and HTTPS-downgrade bounds; body deadline; per-hop host, address, SNI and Host identity; `http_response_framing` (with `http.client` and curl), `wget_mutation` and `wget_hostile` (GNU wget and curl as live oracles), `https_downgrade`, `http_fuzz` | CNAME, multi-address and interface-scope identity; `inet_aton` shorthands (`0x7f.1`, `127.1`) are names here and addresses to wget and curl (decision); SNTP, logger and Waterlink peers still ask DNS for localhost; the tight tier bounds each hop, not the redirect chain |
 | TLS, X.509 | transcript, Finished, AEAD, record sequence, state ordering; strict DER; CertificateEntry extensions refused; delivery schedules and FIN/RST cuts (`tls_peer --schedule`); SAN and name constraints, key usage, EKU, dates; chains against OpenSSL and Go `crypto/x509`; record nonce coverage over every value in every sequence byte lane and guarded unaligned buffers; record-header coverage over every 16-bit length and 8-bit type; `tls_chains` (also wget's status and words for each refusal), `tls_hostnames`, `tls_dates`, `public_suffixes`, `anchors`, `tls_peer`, `tls_der_fuzz`, `tls_hs_fuzz`, `tls_verify_fuzz`; `x509_corpus` by hand over 643 hosts | name constraints in more shapes |
@@ -201,7 +216,7 @@ ARM64 and RISC-V mandatory with UBSan trapping.
 | Terminal, JSON reader | `term_fuzz` (grid, write cuts, resizes, keys, pointer between writes; the cursor stays on the grid; it fails on a planted clamp bug) and `bowl_json_fuzz`, ASan/UBSan, smoke in `term` and `bowl` | KERNEL_MODE emulator build, MSan |
 | Shell, OS boundary | generated Bash and Dash differential; private edit files; `edit` draws a file's controls, DEL and invalid UTF-8 as `?` and drops C1 controls spelled in UTF-8, in rows and status line (`edit` lane, `hostile`); PTY setup; tar pinned parents; hostile environment and privilege matrices; `pathname_race`; effect-based coreutils (`sh test/run shell builtins files tar`) | |
 | Faults, resources | seccomp entropy failure; partial I/O, EINTR, ENOSPC, deadline and clock-jump faults; TLS 1.2/1.3 handshake writes and KeyUpdate replies share the operation deadline, including buffered writev batching; deferred read budgets are clamped to the enclosing body deadline; buffered payload cannot escape that body deadline; ordinary HTTP/TLS writes use one bounded nonblocking slow path, and queued whole writes need no clock or poll; interrupted output writev resumes its spans under one absolute retry budget, without a clock on uninterrupted writes; fatal TLS protocol errors spend both keys and cannot publish later buffered data (unexpected record types swept over both versions and sequence boundaries); descriptor and mmap exhaustion; once-armed `memory_reserve`, writev and socket faults mid-path; namespaces with netem (`sh test/run netem`) | SNTP allocation faults; a writev syscall that itself blocks on a disk or pipe is outside the interruption budget |
-| Kernel (ring 0) | `core_state`, `pane_pages`, `shared_page`, `console_queue`, `term_streams` (kit lane); `ring0_hostile` on KASAN, UBSAN, lockdep or KCSAN images (`MOONWATER_IMAGE=dist/bootx64.efi sh test/run ring0`); image defaults for redirects, router advertisements, RFC 1337, SYN cookies (`sh test/run boot`, `net_sysctl`) | |
+| Kernel (ring 0) | `core_state`, `pane_pages`, `shared_page`, `console_queue`, `term_streams` (kit lane); `ring0_hostile` on KASAN, UBSAN, lockdep or KCSAN images (`MOONWATER_IMAGE=dist/bootx64.efi sh test/run ring0`); image defaults for redirects, router advertisements, RFC 1337, SYN cookies, `rp_filter` and the ARP settings (`sh test/run boot`, `net_sysctl`) | the `rp_filter` and ARP row of the boot lane has not run on an image yet |
 | Supply chain | bowl bootstraps pinned by digest or signing key, refusal on any mismatch; a download held to a kernel size ceiling (2 x the measured size + 64 MiB, `RLIMIT_FSIZE`); the signature reader under `bowl_sig_fuzz`; `sh test/run bowl` | |
 
 SYN flood by hand: two taps in a namespace, a guest and a listener that accepts
@@ -236,7 +251,9 @@ socket fault tests check actual deadline propagation through TLS and HTTP.
 `net_parser_work_states` lifts production `dhcp_receive`, `dhcp_complete`,
 peer matching and the shared discard helper. It checks 2,129,920 five-event
 schedules over eight packet/transport outcomes and all 65 work boundaries,
-repeating the final event to include persistent junk. Completion and receive
+repeating the final event to include persistent junk, read off the client
+socket and again off the packet socket (4,259,840 in all), where the refused
+reply is a whole ACK sent to another station's address. Completion and receive
 are compared with an independent straight-line oracle; no more than 65
 datagrams are consumed to discard 64 and consider the next one. Native UDP
 tests sweep every split of syntax/identity and lease-state junk at exactly
@@ -290,14 +307,21 @@ input up to a bound: `byte_reader` for buffers of any length and `byte_store`
 for any append (every parser reads and writes through these), `dns_copy_name`
 (7 bytes), the ASN.1 helpers (8), netlink attribute finding (24),
 `http_header_end` with `http_response_fields` (10), the chunk-size and trailer
-lines (10), `http_split_into` (10) and `http_path_simplify` (8: no dot segment
-is left and a second pass changes nothing). Every proof is run again with its
+lines (10), `http_split_into` (10), `http_path_simplify` (8: no dot segment
+is left and a second pass changes nothing) and the DHCP frame judge (`dhcp_frame`:
+`dhcp_unframe` agrees with RFC 791 and 768 read by index on the verdict, the
+addresses, the port and the message's place for every frame of up to 40
+bytes, and `dhcp_frame_vouched` agrees with cmsg(3) over every control buffer
+of up to 48; `dhcp_frame_filter`: every frame of up to 68 bytes, so every
+header length, that the judge accepts with its UDP checksum vouched for -- the
+most it accepts -- is kept by the kernel's prefilter, run as classic BPF from
+its own bytes). Every proof is run again with its
 outcome marked, so an outcome no input reaches fails as vacuous. The lib.c
 routines the parsers call stand in as the contracts written in the harness.
 Not proved: the X.509 parser and chain builder, the TLS handshake state machine,
-`http_run`, DNS answer selection and the DHCP client's packet reader beyond its
-option walk; those rest on fuzzing, differential oracles and the mutation pass
-recorded with the change that added this lane.
+`http_run`, DNS answer selection and the DHCP client's reader beyond its frame
+judge and option walk; those rest on fuzzing, differential oracles and the
+mutation pass recorded with the change that added this lane.
 
 ## Ceilings
 
@@ -307,7 +331,7 @@ ledger at the top of its section).
 | Parser | Ceiling |
 | --- | --- |
 | DNS | message `DNS_MAX_MESSAGE`; label 63, name 255; `DNS_CNAME_HOPS` 16; `DNS_WORK_POINTERS` 4,096 compression jumps per framing section and across answer-selection passes, at most 16,384 per reply; `DNS_DISCARD_MAX` 64; `DNS_SERVERS_MAX` 3 |
-| DHCP | `NETWORK_DISCARD_MAX` 64 rejected datagrams per OFFER or ACK phase, shared across packet syntax/peer and lease-state rejection; caller room |
+| DHCP | `NETWORK_DISCARD_MAX` 64 rejected datagrams per OFFER or ACK phase, shared across packet syntax/peer and lease-state rejection, and off the packet socket across frames refused for their kind, their IP or UDP headers or their destination; `DHCP_FRAME_ROOM` 1,536 bytes a frame and caller room for its message |
 | Netlink | `NETLINK_DISCARD_MAX` 64 unrelated datagrams per transaction; 16 MiB datagram |
 | SNTP | `SNTP_DISCARD_MAX` 64 non-terminal receives per exchange |
 | TLS | `TLS_RECORD_MAX`, `TLS_HS_MAX`, 64 extensions, 8 certificates |
@@ -349,9 +373,11 @@ architecture gate above. CI is parked (`workflow_dispatch` only).
 
 - **Closed, unmerged work:** NTS (#18) and the clock floor of #17 (a floor,
   SNTP_WALL_LEAST, is in the SNTP client); WPA3 and 802.11w (#19); DNS over TLS
-  (#20); DHCP over a raw socket (#21); wget and curl parity of defaults (#22).
-  Their branches are gone; each pull request keeps its head
-  (`git fetch origin pull/N/head`).
+  (#20); wget and curl parity of defaults (#22). Their branches are gone; each
+  pull request keeps its head (`git fetch origin pull/N/head`). #21's packet
+  socket and `rp_filter` are in (DHCP-D1); its conflict probe inside the
+  child was not taken, the watcher's own probe and per-link DECLINE hold-off
+  were there first.
 - **No change planned:** plain SNTP is accepted anywhere the build and clock
   window allow; a forged clock step before the SNTP window is undone only by
   authenticated time; HEAD is not exercised; a response cut inside its status

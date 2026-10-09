@@ -2144,23 +2144,28 @@ static inline INLINE bool system_signal_install(
 
 #if defined(LINUX) && !defined(KERNEL_MODE) && !defined(STANDARD_NO_PLATFORM)
 /* A forked child lets go of everything its parent had open: every descriptor
-   from the first number up, except the one or two it still needs (a pipe's
-   end, a socket) -- pass descriptors_none for a missing one. The two may
-   come in either order, be the same, or lie below the first number; the
-   ranges handed to the kernel are the ones between them, so none is empty
-   (close_range refuses those). A copy of a descriptor outlives the process that opened it for as
-   long as any child holds it, and a lock or an attach on the file is held
-   that long, so a child that does not exec is the one place this has to be
-   said. False when the kernel refused a range. */
+   from the first number up, except the few it still needs (a pipe's end, a
+   socket or two) -- descriptors_none for a missing one. They may come in any
+   order, repeat, or lie below the first number; keep is put in order here,
+   and the ranges handed to the kernel are the ones between them, so none is
+   empty (close_range refuses those). A copy of a descriptor outlives the
+   process that opened it for as long as any child holds it, and a lock or an
+   attach on the file is held that long, so a child that does not exec is the
+   one place this has to be said. False when the kernel refused a range. */
 #define descriptors_none (~(p32)0)
 
-static COLD bool descriptors_close_except(p32 from, p32 first, p32 second)
+static COLD bool descriptors_close_outside(p32 from, p32 address_to keep,
+                                           positive count)
 {
-        p32 keep[2] = {first, second};
+        for (positive i = 1; i < count; i++)
+                for (positive j = i; j && keep[j] < keep[j - 1]; j--)
+                {
+                        p32 swap = keep[j];
 
-        if (keep[0] > keep[1])
-                keep[0] = second, keep[1] = first;
-        for (positive i = 0; i < 2 && keep[i] != descriptors_none; i++)
+                        keep[j] = keep[j - 1];
+                        keep[j - 1] = swap;
+                }
+        for (positive i = 0; i < count && keep[i] != descriptors_none; i++)
         {
                 if (keep[i] < from)
                         continue;
@@ -2170,6 +2175,13 @@ static COLD bool descriptors_close_except(p32 from, p32 first, p32 second)
                 from = keep[i] + 1;
         }
         return system_call_3(syscall(close_range), from, ~(p32)0, 0) >= 0;
+}
+
+static COLD bool descriptors_close_except(p32 from, p32 first, p32 second)
+{
+        p32 keep[2] = {first, second};
+
+        return descriptors_close_outside(from, keep, 2);
 }
 
 /*

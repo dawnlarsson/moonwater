@@ -43389,10 +43389,11 @@ def dhcp_lift():
     """src/net/net.c's DHCP reply side for a hosted build: (shim, head, walk).
 
     head runs from the DHCP defines through dhcp_lease_timers; walk from
-    dhcp_walk through dhcp_reacquisition_answer_matches. dhcp_packets and
-    dhcp_fuzz share it, so a moved anchor breaks both."""
+    dhcp_walk through the frame judge (dhcp_unframe, dhcp_frame_vouched).
+    dhcp_packets, dhcp_fuzz and dhcp_frame_fuzz share it, so a moved anchor
+    breaks all three."""
     net = (HARNESS_ROOT / "src/net/net.c").read_text()
-    head = net[net.index("#define DHCP_HEAD 236"):net.index("static COLD positive dhcp_build(")]
+    head = net[net.index("#define DHCP_CLIENT_PORT 68"):net.index("static COLD positive dhcp_build(")]
     walk = net[net.index("/*\n        A reply read for what it says."):
                net.index("/*\n        The exchange, confined.")]
     shim = r'''
@@ -44014,6 +44015,336 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 }
 """
     return tls_fuzz_run("dhcp", "dhcp", source, 1500)
+
+
+def dhcp_frame_build(message=b"", source=(10, 0, 2, 2), destination=(255, 255, 255, 255),
+                     source_port=67, destination_port=68, options=b"", fragment=0x4000,
+                     protocol=17, version=4, header_checksum="right", udp_checksum="right",
+                     udp_short=0, total_short=0, pad=b""):
+    """An IPv4 frame round a UDP datagram, as a packet socket hands it over,
+    with every field the frame judge reads open to being wrong."""
+    import struct
+    header = 20 + len(options)
+    udp_length = 8 + len(message) - udp_short
+    total = header + 8 + len(message) - total_short
+    ip = bytearray(struct.pack("!BBHHHBBH4s4s", version << 4 | header // 4, 0, total, 0x1234,
+                               fragment, 64, protocol, 0, bytes(source), bytes(destination)))
+    ip += options
+
+    def folded(data):
+        if len(data) % 2:
+            data += b"\0"
+        total = sum(struct.unpack("!%dH" % (len(data) // 2), data))
+        while total >> 16:
+            total = (total & 0xffff) + (total >> 16)
+        return total
+
+    if header_checksum == "right":
+        ip[10:12] = struct.pack("!H", ~folded(bytes(ip)) & 0xffff)
+    elif header_checksum == "wrong":
+        ip[10:12] = struct.pack("!H", (~folded(bytes(ip)) & 0xffff) ^ 0x0100)
+    udp = bytearray(struct.pack("!HHHH", source_port, destination_port, udp_length, 0)) + message
+    if udp_checksum in ("right", "wrong"):
+        pseudo = bytes(source) + bytes(destination) + struct.pack("!BBH", 0, 17, udp_length)
+        value = ~folded(pseudo + bytes(udp[:udp_length])) & 0xffff or 0xffff
+        udp[6:8] = struct.pack("!H", value ^ (0x0001 if udp_checksum == "wrong" else 0))
+    return bytes(ip) + bytes(udp) + pad
+
+
+def dhcp_frame_fuzz_seeds():
+    """Name to bytes for dhcp_frame_fuzz: frames in every shape the judge
+    tells apart. Byte 0 asks the target to shape what follows (0 here: the
+    frames are exact), byte 1 is the shaping's cuts, byte 2 the control
+    messages (0 none, 1 PACKET_AUXDATA vouching for the checksum, 2 saying
+    nothing, 3 the bytes after byte 3, whose count byte 3 is), then the
+    frame."""
+    import struct
+
+    def option(code, value):
+        return bytes([code, len(value)]) + value
+
+    reply = bytearray(236)
+    reply[0:3] = b"\x02\x01\x06"
+    reply[4:8] = (0xdeadbeef).to_bytes(4, "big")
+    reply[16:20] = bytes([10, 0, 2, 15])
+    reply[28:34] = bytes([2, 0, 0, 0, 0, 1])
+    offer = bytes(reply) + b"\x63\x82\x53\x63" + option(53, b"\x02") + \
+        option(54, bytes([10, 0, 2, 2])) + option(51, (3600).to_bytes(4, "big")) + b"\xff"
+
+    def seed(frame, control=0, raw=b""):
+        return bytes([0, 0, control, len(raw)]) + raw + frame
+
+    def auxdata(status, length=36, level=263, kind=8):
+        return (struct.pack("<QII", length, level, kind) + struct.pack("<IIIHHHH", status, 0, 0, 0, 0, 0, 0)
+                )[:max(16, length)].ljust((length + 7) & ~7, b"\0")
+
+    seeds = {
+        "offer": seed(dhcp_frame_build(offer)),
+        "offer_unicast": seed(dhcp_frame_build(offer, destination=(10, 0, 2, 15))),
+        "offer_no_udp_checksum": seed(dhcp_frame_build(offer, udp_checksum="none")),
+        "offer_unfinished": seed(dhcp_frame_build(offer, udp_checksum="wrong"), 1),
+        "offer_checked": seed(dhcp_frame_build(offer, udp_checksum="wrong"), 3, auxdata(0x80)),
+        "offer_other_status": seed(dhcp_frame_build(offer, udp_checksum="wrong"), 3, auxdata(0x77)),
+        "offer_wrong_udp_checksum": seed(dhcp_frame_build(offer, udp_checksum="wrong"), 2),
+        "offer_wrong_header_checksum": seed(dhcp_frame_build(offer, header_checksum="wrong")),
+        "offer_options": seed(dhcp_frame_build(offer, options=b"\x94\x04\0\0")),
+        "offer_long_options": seed(dhcp_frame_build(offer, options=b"\x01" * 40)),
+        "offer_padded": seed(dhcp_frame_build(offer, pad=b"\0" * 18)),
+        "offer_udp_short": seed(dhcp_frame_build(offer, udp_short=3)),
+        "offer_udp_long": seed(dhcp_frame_build(offer, udp_short=-1)),
+        "offer_total_short": seed(dhcp_frame_build(offer, total_short=40)),
+        "offer_total_long": seed(dhcp_frame_build(offer, total_short=-2)),
+        "offer_more_fragments": seed(dhcp_frame_build(offer, fragment=0x2000)),
+        "offer_later_fragment": seed(dhcp_frame_build(offer, fragment=0x0010)),
+        "offer_reserved_flag": seed(dhcp_frame_build(offer, fragment=0x8000)),
+        "offer_tcp": seed(dhcp_frame_build(offer, protocol=6)),
+        "offer_version_six": seed(dhcp_frame_build(offer, version=6)),
+        "offer_from_68": seed(dhcp_frame_build(offer, source_port=68)),
+        "offer_to_67": seed(dhcp_frame_build(offer, destination_port=67)),
+        "empty_datagram": seed(dhcp_frame_build(b"")),
+        "odd_datagram": seed(dhcp_frame_build(b"\x02\x01\x06")),
+        "header_only": seed(dhcp_frame_build(offer)[:20]),
+        "cut_in_udp": seed(dhcp_frame_build(offer)[:25]),
+        "auxdata_short": seed(dhcp_frame_build(offer, udp_checksum="wrong"), 3, auxdata(8, 18)),
+        "auxdata_after_other": seed(dhcp_frame_build(offer, udp_checksum="wrong"), 3,
+                                    auxdata(0, 20, 0, 29) + auxdata(8)),
+        "auxdata_length_huge": seed(dhcp_frame_build(offer), 3,
+                                    struct.pack("<QII", 1 << 62, 263, 8) + b"\x08\0\0\0"),
+        "auxdata_length_zero": seed(dhcp_frame_build(offer), 3, struct.pack("<QII", 0, 263, 8)),
+        "shaped_noise": bytes([0x07, 0x09, 1, 0]) + bytes(range(64)) * 6,
+    }
+    return {name + ".bin": data for name, data in seeds.items()}
+
+
+def harness_dhcp_frame_fuzz(argv):
+    """Coverage-guided libFuzzer over the frame judge an acquisition reads its
+    replies through (dhcp_unframe, dhcp_frame_vouched and dhcp_sum, lifted
+    from src/net/net.c with the rest of dhcp_lift), against an independent
+    reading here from RFC 791 and RFC 768 by direct indexing: the verdict, the
+    two addresses, the source port, and where the DHCP message starts and
+    how long it is. The control-message walk is read twice the same way. The
+    prefilter the kernel runs for the socket (dhcp_frame_filter, lifted as
+    the bytes the kernel is given) is run by a classic BPF interpreter written
+    here and has to keep every frame the judge accepts: a filter that dropped
+    one would starve the client of a reply it would have taken. An accepted
+    message goes on through dhcp_read in a heap block exactly its length.
+    Seeds from dhcp_frame_fuzz_seeds; byte 0 can ask the target to shape the
+    frame (version, header length, ports, lengths, both checksums) so that the
+    mutations reach the judge's last questions. ASan/UBSan, or MSan with
+    MOONWATER_MSAN=1; NOT RUN (2) without clang/libFuzzer.
+
+        python3 test/differential.py --harness dhcp_frame_fuzz
+    """
+    del argv
+    shim, head, walk = dhcp_lift()
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    program = re.search(r"^static const dhcp_filter_step dhcp_frame_filter\[\] = \{.*?\}\};",
+                        net, re.M | re.S)
+    if not program:
+        print("  FAIL dhcp frame fuzz: dhcp_frame_filter is not in src/net/net.c")
+        write_tally("dhcp-frame-fuzz", 0, 1)
+        return 1
+    source = shim + head + walk + ul_c_typedefs(net, "dhcp_filter_step") + "\n" + \
+        program.group(0) + r"""
+#define FUZZ_REQUIRE(condition, what)                                         \
+        do { if (!(condition)) { fprintf(stderr, "dhcp frame fuzz: %s\n", what); \
+                                 __builtin_trap(); } } while (0)
+
+/* RFC 1071's sum, a byte at a time into one wide accumulator: even bytes
+   high, odd bytes low, folded once at the end. */
+static unsigned long reference_sum(const p8 *bytes, long count, unsigned long sum)
+{
+        for (long i = 0; i < count; i++)
+                sum += i & 1 ? bytes[i] : (unsigned long)bytes[i] << 8;
+        return sum;
+}
+static int reference_folds_whole(unsigned long sum)
+{
+        while (sum > 0xffff)
+                sum = (sum & 0xffff) + (sum >> 16);
+        return sum == 0xffff;
+}
+
+typedef struct { p32 source, destination; unsigned port; long offset, length; } reference_frame;
+
+/* RFC 791 and RFC 768, by index into the frame. */
+static int reference_unframe(const p8 *f, long n, int vouched, reference_frame *out)
+{
+        if (n < 20)
+                return 0;
+        long header = (f[0] & 15) * 4;
+        long total = f[2] << 8 | f[3];
+        if (f[0] >> 4 != 4 || header < 20 || total < header + 8 || total > n)
+                return 0;
+        if ((f[6] & 0x3f) || f[7] || f[9] != 17)        /* MF, an offset, not UDP */
+                return 0;
+        if (!reference_folds_whole(reference_sum(f, header, 0)))
+                return 0;
+        const p8 *u = f + header;
+        long length = u[4] << 8 | u[5];
+        if ((u[0] << 8 | u[1]) != 67 || (u[2] << 8 | u[3]) != 68 || length < 8 ||
+            length > total - header)
+                return 0;
+        if ((u[6] || u[7]) && !vouched) {
+                p8 pseudo[12] = {f[12], f[13], f[14], f[15], f[16], f[17], f[18], f[19],
+                                 0, 17, (p8)(length >> 8), (p8)length};
+                if (!reference_folds_whole(reference_sum(u, length, reference_sum(pseudo, 12, 0))))
+                        return 0;
+        }
+        out->source = (p32)f[12] << 24 | (p32)f[13] << 16 | (p32)f[14] << 8 | f[15];
+        out->destination = (p32)f[16] << 24 | (p32)f[17] << 16 | (p32)f[18] << 8 | f[19];
+        out->port = u[0] << 8 | u[1];
+        out->offset = header + 8;
+        out->length = length - 8;
+        return 1;
+}
+
+/* cmsg(3): a size_t length counting its 16-byte header, level, type, data,
+   then CMSG_ALIGN to eight. TP_STATUS_CSUMNOTREADY is bit 3 of tp_status,
+   TP_STATUS_CSUM_VALID bit 7. */
+static int reference_vouched(const p8 *c, long n)
+{
+        for (long at = 0; n - at >= 16;) {
+                unsigned long length = 0;
+                for (int i = 7; i >= 0; i--)
+                        length = length << 8 | c[at + i];
+                unsigned level = c[at + 8] | c[at + 9] << 8 | c[at + 10] << 16 | (unsigned)c[at + 11] << 24;
+                unsigned type = c[at + 12] | c[at + 13] << 8 | c[at + 14] << 16 | (unsigned)c[at + 15] << 24;
+                if (length < 16 || length > (unsigned long)(n - at))
+                        return 0;
+                if (level == 263 && type == 8)
+                        return length >= 20 && (c[at + 16] & 0x88);
+                at += (long)((length + 7) & ~7ul);
+        }
+        return 0;
+}
+
+/* Classic BPF as the kernel runs a socket filter: a load past the packet
+   ends the program with 0, which drops it. Only what the filter uses. */
+static unsigned reference_bpf(const p8 *packet, unsigned long size)
+{
+        unsigned a = 0, x = 0;
+        unsigned count = sizeof dhcp_frame_filter / sizeof *dhcp_frame_filter;
+        for (unsigned pc = 0; pc < count; pc++) {
+                const dhcp_filter_step *step = dhcp_frame_filter + pc;
+                unsigned long at = step->value;
+                switch (step->code) {
+                case 0x30: if (at >= size) return 0; a = packet[at]; break;
+                case 0x28: if (at + 2 > size) return 0; a = packet[at] << 8 | packet[at + 1]; break;
+                case 0xb1: if (at >= size) return 0; x = (packet[at] & 15) * 4u; break;
+                case 0x48: at += x; if (at + 2 > size) return 0; a = packet[at] << 8 | packet[at + 1]; break;
+                case 0x15: pc += a == step->value ? step->jump_true : step->jump_false; break;
+                case 0x45: pc += a & step->value ? step->jump_true : step->jump_false; break;
+                case 0x06: return step->value;
+                default: FUZZ_REQUIRE(0, "the filter uses an instruction the interpreter does not know");
+                }
+        }
+        FUZZ_REQUIRE(0, "the filter runs off its end");
+        return 0;
+}
+
+static void put16(p8 *at, unsigned value) { at[0] = (p8)(value >> 8); at[1] = (p8)value; }
+
+/* Byte 0 bit 0: shape the frame -- version 4, a header of 5 + (bits 4..5)
+   words, UDP from 67 to 68, the total length the frame less (byte 1 & 7)
+   bytes of padding, the UDP length short by (byte 1 >> 3 & 3), no fragment;
+   bit 1: the header checksum made right; bit 2: the UDP checksum made right;
+   bit 3: no UDP checksum. */
+static void shape(p8 *f, long n, p8 how, p8 cuts)
+{
+        long header = 20 + 4 * ((how >> 4) & 3);
+        if (!(how & 1) || n < header + 8)
+                return;
+        long total = n - (cuts & 7) < header + 8 ? header + 8 : n - (cuts & 7);
+        long length = total - header - ((cuts >> 3) & 3);
+        if (length < 8)
+                length = 8;
+        f[0] = (p8)(0x40 | header / 4);
+        put16(f + 2, (unsigned)total);
+        put16(f + 6, 0x4000);
+        f[9] = 17;
+        put16(f + header, 67);
+        put16(f + header + 2, 68);
+        put16(f + header + 4, (unsigned)length);
+        if (how & 8)
+                put16(f + header + 6, 0);
+        if (how & 4) {
+                put16(f + header + 6, 0);
+                p8 pseudo[12] = {f[12], f[13], f[14], f[15], f[16], f[17], f[18], f[19],
+                                 0, 17, (p8)(length >> 8), (p8)length};
+                unsigned long sum = reference_sum(f + header, length, reference_sum(pseudo, 12, 0));
+                while (sum > 0xffff)
+                        sum = (sum & 0xffff) + (sum >> 16);
+                put16(f + header + 6, (unsigned)(~sum & 0xffff) ? (unsigned)(~sum & 0xffff) : 0xffff);
+        }
+        if (how & 2) {
+                put16(f + 10, 0);
+                unsigned long sum = reference_sum(f, header, 0);
+                while (sum > 0xffff)
+                        sum = (sum & 0xffff) + (sum >> 16);
+                put16(f + 10, (unsigned)(~sum & 0xffff));
+        }
+}
+
+static const p8 fuzz_hardware[6] = {2, 0, 0, 0, 0, 1};
+
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+{
+        if (size < 4)
+                return 0;
+        p8 how = data[0], cuts = data[1], mode = data[2] & 3;
+        long raw = mode == 3 ? data[3] : 0;
+        if ((long)size - 4 < raw)
+                return 0;
+        p8 made[40];
+        const p8 *control_bytes = data + 4;
+        long control_size = raw;
+        if (mode == 1 || mode == 2) {
+                memset(made, 0, sizeof made);
+                made[0] = 36; made[8] = 263 & 0xff; made[9] = 263 >> 8; made[12] = 8;
+                made[16] = mode == 1 ? 8 : 0;
+                control_bytes = made;
+                control_size = 40;
+        }
+        long n = (long)size - 4 - raw;
+        p8 *control = malloc(control_size ? control_size : 1);
+        p8 *frame = malloc(n ? n : 1);
+        memcpy(control, control_bytes, control_size);
+        memcpy(frame, data + 4 + raw, n);
+        shape(frame, n, how, cuts);
+
+        bool vouched = dhcp_frame_vouched(control, (positive)control_size);
+        FUZZ_REQUIRE(vouched == (reference_vouched(control, control_size) == 1),
+                     "dhcp_frame_vouched and the reference disagree");
+        dhcp_frame got;
+        memset(&got, 0xa5, sizeof got);
+        dhcp_frame untouched = got;
+        reference_frame want;
+        bool accepted = dhcp_unframe(frame, (positive)n, vouched, &got);
+        FUZZ_REQUIRE(accepted == (reference_unframe(frame, n, vouched, &want) == 1),
+                     "dhcp_unframe and the reference disagree on the verdict");
+        if (!accepted) {
+                FUZZ_REQUIRE(!memcmp(&got, &untouched, sizeof got), "a refused frame wrote its answer");
+        } else {
+                FUZZ_REQUIRE(got.message == frame + want.offset && got.length == (positive)want.length &&
+                             got.source == want.source && got.destination == want.destination &&
+                             got.source_port == want.port,
+                             "dhcp_unframe and the reference read different fields");
+                FUZZ_REQUIRE(reference_bpf(frame, (unsigned long)n) != 0,
+                             "the kernel's prefilter drops a frame the judge accepts");
+                p8 *message = malloc(got.length ? got.length : 1);
+                memcpy(message, got.message, got.length);
+                dhcp_lease lease;
+                p8 kind = 0;
+                (void)dhcp_read(message, got.length, 0xdeadbeef, (p8 *)fuzz_hardware, &lease, &kind);
+                free(message);
+        }
+        free(frame);
+        free(control);
+        return 0;
+}
+"""
+    return tls_fuzz_run("dhcp frame", dhcp_frame_fuzz_seeds(), source, 1600)
 
 
 def harness_term_fuzz(argv):
@@ -60849,7 +61180,7 @@ def harness_bowl_sig_fuzz(argv):
 
 def harness_tls_fuzz(argv):
     """tls_der_fuzz, tls_hs_fuzz, tls_verify_fuzz, waterlink_pre_fuzz,
-    waterlink_fuzz, dhcp_fuzz, sntp_fuzz, dns_fuzz, netlink_fuzz,
+    waterlink_fuzz, dhcp_fuzz, dhcp_frame_fuzz, sntp_fuzz, dns_fuzz, netlink_fuzz,
     crypto_fuzz, bowl_sig_fuzz, wifi_eapol_fuzz, wifi_scan_fuzz and http_fuzz in turn: `sh test/run fuzz`.
 
     Continuous by default, an hour a target with no run cap, unless
@@ -60868,7 +61199,7 @@ def harness_tls_fuzz(argv):
     os.environ.setdefault("MOONWATER_FUZZ_RUNS", "20000" if report else "-1")
     os.environ.setdefault("MOONWATER_FUZZ_SECONDS", "5" if report else "3600")
     runs, seconds, _ = tls_fuzz_budget()
-    print("tls fuzz: der then hs then verify then waterlink pre then waterlink then dhcp then sntp then wifi eapol then wifi scan then dns then netlink then crypto then bowl sig then http "
+    print("tls fuzz: der then hs then verify then waterlink pre then waterlink then dhcp then dhcp frame then sntp then wifi eapol then wifi scan then dns then netlink then crypto then bowl sig then http "
           "(runs=%d seconds=%d)" % (runs, seconds))
     seeds = {corpus: len(tls_fuzz_seeds(corpus))
              for corpus in ("tls_der", "tls_hs", "waterlink", "dhcp", "sntp", "dns", "netlink", "crypto", "http")}
@@ -60876,6 +61207,7 @@ def harness_tls_fuzz(argv):
     seeds["wifi_eapol"] = len(wifi_eapol_fuzz_seeds())
     seeds["wifi_scan"] = len(wifi_scan_fuzz_seeds())
     seeds["bowl_sig"] = len(bowl_sig_fuzz_seeds())
+    seeds["dhcp_frame"] = len(dhcp_frame_fuzz_seeds())
     targets = []
     for name, corpus, harness in (
             ("tls_der_fuzz", "tls_der", harness_tls_der_fuzz),
@@ -60884,6 +61216,7 @@ def harness_tls_fuzz(argv):
             ("waterlink_pre_fuzz", "waterlink_pre", harness_waterlink_pre_fuzz),
             ("waterlink_fuzz", "waterlink", harness_waterlink_fuzz),
             ("dhcp_fuzz", "dhcp", harness_dhcp_fuzz),
+            ("dhcp_frame_fuzz", "dhcp_frame", harness_dhcp_frame_fuzz),
             ("sntp_fuzz", "sntp", harness_sntp_fuzz),
             ("wifi_eapol_fuzz", "wifi_eapol", harness_wifi_eapol_fuzz),
             ("wifi_scan_fuzz", "wifi_scan", harness_wifi_scan_fuzz),
@@ -62499,10 +62832,13 @@ typedef uint32_t p32;
 #define DHCP_OK 0
 #define DHCP_REFUSED (-2)
 #define DHCP_NO_OFFER (-1)
+#define HOST_BROADCAST 0xffffffffu
 typedef struct { p32 family, port, host; } socket_address_internet;
 typedef struct { positive began, budget; } network_deadline;
-typedef struct { positive serial; } dhcp_lease;
+typedef struct { positive serial; p32 address; } dhcp_lease;
 static unsigned script[5], prefix, calls;
+/* The packet socket, when the schedule is read off one (dhcp_frame_next). */
+static bipolar dhcp_frames = -1;
 static void require(bool ok) { if (!ok) abort(); }
 static unsigned event(unsigned at)
 {
@@ -62522,6 +62858,20 @@ static bipolar network_receive_next(bipolar handle, p8 *packet, positive room,
     packet[0] = kind;
     return kind == 5 ? -5 : kind == 6 ? 2 : kind == 7 ? 0 : 1;
 }
+/* The same schedule off the packet socket. A frame's destination is the
+   broadcast address or the offered one, alternately; and a reply the parser
+   refuses (event 0) becomes a whole ACK sent to another station's address,
+   which only the destination rule refuses, so the oracle is the same. */
+static bipolar dhcp_frame_next(bipolar frames, p8 *packet, positive room,
+                               socket_address_internet *peer, p32 *size,
+                               p32 *destination, const network_deadline *deadline)
+{
+    require(frames == 7);
+    bipolar got = network_receive_next(frames, packet, room, peer, size, deadline);
+    *destination = calls & 1 ? HOST_BROADCAST : 0x0a000015u;
+    if (got == 1 && packet[0] == 0) { packet[0] = 3; *destination = 0x0a000099u; }
+    return got;
+}
 static bipolar dhcp_read(p8 *packet, positive length, p32 xid, p8 *hardware,
                           dhcp_lease *lease, p8 *kind)
 {
@@ -62529,6 +62879,7 @@ static bipolar dhcp_read(p8 *packet, positive length, p32 xid, p8 *hardware,
     require(length == 1);
     if (packet[0] == 0) return -1;
     lease->serial = packet[0];
+    lease->address = 0x0a000015u;
     *kind = packet[0];
     return 0;
 }
@@ -62567,8 +62918,10 @@ int main(void)
     socket_address_internet peer = {AF_INET, 1, 1};
     network_deadline deadline = {1, 1};
     p8 packet[1], hardware[6] = {0};
+    for (unsigned framed = 0; framed < 2; ++framed)
     for (unsigned code = 0; code < 32768; ++code) {
         unsigned n = code;
+        dhcp_frames = framed ? 7 : -1;
         for (unsigned at = 0; at < 5; ++at) { script[at] = n % 8; n /= 8; }
         for (unsigned boundary = 0; boundary <= 64; ++boundary) {
             unsigned used, rejected;
@@ -62603,6 +62956,8 @@ int main(void)
                               ul_c_function(net, "dhcp_peer_matches"),
                               ul_c_function(net, "dhcp_receive"),
                               ul_c_function(net, "dhcp_complete")))
+    #   The receive's own reading (network_receive_next, dhcp_frame_next) is
+    #   the script above; what is lifted is what decides with it.
     source = source.replace("/* PRODUCTION */", production)
     compiler = shutil.which("clang")
     if not compiler:
@@ -62624,20 +62979,25 @@ int main(void)
                 print(ran.stderr[-3000:])
             else:
                 print("  " + ran.stdout.strip())
-            checks(ran.returncode == 0 and "2129920 DHCP schedules" in ran.stdout,
-                   "all five-event schedules and all 65 work boundaries match the independent oracle")
+            #   2,129,920 schedules read off the client socket and the same
+            #   again off the packet socket (dhcp_frame_next).
+            checks(ran.returncode == 0 and "4259840 DHCP schedules" in ran.stdout,
+                   "all five-event schedules and all 65 work boundaries, off either socket, "
+                   "match the independent oracle")
     return checks.verdict("net parser work states", "net-parser-work-states")
 
 
 def harness_net_dhcp_exchange(argv):
     """The DHCP client's exchanges, run over a recorded socket seam.
 
-    Production dhcp_ask, dhcp_reacquire, dhcp_decline, dhcp_build and the lease
-    rules are lifted; the socket, the clock budget, the entropy and the receive
-    loop are scripted, so the schedule of attempts, every wait, the REQUEST
-    built from an OFFER, the work allowance and each failure of a send, an open
-    or a timer can be asserted without a server, a root or a second host. The
-    expected numbers are written out here, not computed by the code under test.
+    Production dhcp_ask, dhcp_reacquire, dhcp_decline, dhcp_build and the
+    lease rules are lifted; the sockets, the packet socket an acquisition
+    reads, the clock budget, the entropy and the receive loop are scripted, so
+    the schedule of attempts, every wait, the REQUEST built from an OFFER, the
+    work allowance, the order the sockets open and close in, and each failure
+    of a send, an open or a timer can be asserted without a server, a root or
+    a second host. The expected numbers are written out here, not computed by
+    the code under test.
     """
     del argv
     checks = Checks()
@@ -62660,6 +63020,7 @@ typedef char *string_address;
 #define address_of &
 #define COLD
 #define CONST
+#define fn void
 #define null NULL
 #define AF_INET 2
 #define NETWORK_DISCARD_MAX 64
@@ -62683,10 +63044,11 @@ static void require(bool ok, const char *what)
 { if (!ok) { fprintf(stderr, "FAIL %s\n", what); abort(); } }
 
 /* The seam. */
-static bool fail_random, fail_spread, fail_open, fail_begin_at_valid;
+static bool fail_random, fail_spread, fail_open, fail_frames, fail_begin_at_valid;
 static int fail_begin_at, fail_send_at;
 static p8 spread_byte;
 static int opens, closes, sends, begins, completes, receives, serial;
+static int frame_opens, frame_closes;
 static p32 open_host; static bool open_broadcast;
 static struct { p8 bytes[300]; positive size; socket_address_internet to; bool has_to; } sent[64];
 static struct { positive seconds, nanoseconds; } budget[128];
@@ -62695,13 +63057,23 @@ static struct { bool rebinding; p32 peer; positive seconds, nanoseconds; p32 tra
 static struct { int kind; } script[200];
 static int script_length, script_at;
 static dhcp_lease offer_lease;
+/* What happened, in order: T a transaction id drawn, S the spread drawn, F
+   the packet socket opened, U the client socket opened, f the packet socket
+   closed, u the client socket closed. */
+static char order[64]; static int ordered;
+static void happened(char what) { if (ordered < 63) order[ordered++] = what; order[ordered] = 0; }
+static bipolar dhcp_frames = -1;
 
 static bool dhcp_transaction_early(p32 *transaction)
-{ if (fail_random) return false; *transaction = 0x01020300u + (p32)++serial; return true; }
+{ if (fail_random) return false; happened('T'); *transaction = 0x01020300u + (p32)++serial; return true; }
 static bipolar system_random_fill(void *into, positive size, int nonblocking)
-{ (void)nonblocking; if (fail_spread) return -1; memset(into, spread_byte, size); return 0; }
+{ (void)nonblocking; happened('S'); if (fail_spread) return -1; memset(into, spread_byte, size); return 0; }
 static bipolar dhcp_open(string_address device, p32 host, bool broadcast)
-{ (void)device; if (fail_open) return -1; opens++; open_host = host; open_broadcast = broadcast; return 77; }
+{ (void)device; if (fail_open) return -1; happened('U'); opens++; open_host = host; open_broadcast = broadcast; return 77; }
+static bipolar dhcp_frames_open(string_address device)
+{ (void)device; require(dhcp_frames < 0, "no packet socket left open"); if (fail_frames) return -1; happened('F'); frame_opens++; return 88; }
+static void dhcp_frames_close(void)
+{ if (dhcp_frames >= 0) { require(dhcp_frames == 88, "close the packet socket opened"); happened('f'); frame_closes++; } dhcp_frames = -1; }
 static bipolar socket_send(b32 handle, const void *data, positive size, b32 flags,
                            const socket_address_internet *to, positive tosize)
 {
@@ -62715,7 +63087,7 @@ static bipolar socket_send(b32 handle, const void *data, positive size, b32 flag
     sends++;
     return (bipolar)size;
 }
-static void socket_close(b32 handle) { require(handle == 77, "close the opened socket"); closes++; }
+static void socket_close(b32 handle) { require(handle == 77, "close the opened socket"); happened('u'); closes++; }
 static bool network_deadline_begin(network_deadline *deadline, positive seconds, positive nanoseconds)
 {
     if (begins == fail_begin_at && fail_begin_at_valid) { begins++; return false; }
@@ -62754,9 +63126,11 @@ static bipolar dhcp_complete(bipolar handle, p8 *packet, positive room, p32 tran
 
 static void reset(void)
 {
-    fail_random = fail_spread = fail_open = fail_begin_at_valid = false;
+    fail_random = fail_spread = fail_open = fail_frames = fail_begin_at_valid = false;
     fail_begin_at = fail_send_at = -1; spread_byte = 0;
     opens = closes = sends = begins = completes = receives = 0;
+    frame_opens = frame_closes = ordered = 0; order[0] = 0;
+    dhcp_frames = -1;
     script_length = script_at = 0; complete_result = DHCP_OK;
     memset(sent, 0, sizeof sent); memset(budget, 0, sizeof budget);
     offer_lease = (dhcp_lease){.address = 0x0a000015, .mask = 0xffffff00,
@@ -62813,6 +63187,11 @@ int main(void)
                   "the wait of this attempt");
         }
         check(open_host == HOST_ANY && open_broadcast, "bound to any address, broadcast allowed");
+        /* The packet socket the answers are read from is opened after the
+           transaction and the spread are drawn and before the client socket,
+           whose opening confines the child; both are closed once. */
+        check(!strcmp(order, "TSFUuf") && frame_opens == 1 && frame_closes == 1 && dhcp_frames == -1,
+              "packet socket before the client socket, both closed once");
     }
     /* No entropy for the spread: the middle of it. */
     reset(); fail_spread = true;
@@ -62822,8 +63201,16 @@ int main(void)
     /* No transaction id, no socket. */
     reset(); fail_random = true;
     check(dhcp_ask("x", hardware, &lease) == DHCP_NO_RANDOM && opens == 0 && sends == 0, "no entropy");
+    check(!order[0] && frame_opens == 0, "no entropy, no packet socket");
     reset(); fail_open = true;
     check(dhcp_ask("x", hardware, &lease) == DHCP_NO_SOCKET && sends == 0 && closes == 0, "no socket");
+    check(!strcmp(order, "TSFf") && frame_closes == 1 && dhcp_frames == -1,
+          "no client socket: the packet socket is closed too");
+    /* A kernel or a caller without packet sockets: the answers come over the
+       client socket, as a renewal's do. */
+    reset(); fail_frames = true; play(1); complete_result = DHCP_OK;
+    check(dhcp_ask("x", hardware, &lease) == DHCP_OK && !strcmp(order, "TSUu") && frame_closes == 0,
+          "no packet socket: the exchange goes on over the client socket");
 
     /* An OFFER is answered by one REQUEST that names it. */
     struct { bipolar result; bipolar expect; int sends_after; } finals[] = {
@@ -62839,6 +63226,7 @@ int main(void)
         check((sent[1].bytes[10] & 0x80) != 0 && sent[1].to.host == HOST_BROADCAST, "broadcast");
         check(!completed.rebinding && completed.transaction == network_load_32(sent[0].bytes + 4), "the same transaction");
         check(completed.seconds == 0 && completed.nanoseconds == 250000000, "an ACK gets at least a quarter second");
+        check(!strcmp(order, "TSFUuf"), "both sockets closed");
     }
     /* A silent server after the REQUEST: the next attempt discovers again. */
     reset(); play(1); complete_result = DHCP_NO_OFFER;
@@ -63440,7 +63828,8 @@ static address_any memory_search(const void *block, positive size, const void *n
   return NULL; }
 '''
 
-# (name, unwind, harness C, production function names, extra C before production)
+# (name, unwind, harness C, production function names, extra C before production,
+#  or a function of net.c's text that gives it)
 NET_PROOFS = [
 ("byte_reader", 6, r'''
 /* Any sequence of reads, on a buffer of any length: every byte a read hands
@@ -63684,7 +64073,144 @@ int main(void)
         return 0;
 }
 ''', ["http_dot_segment", "http_path_simplify"], ""),
+("dhcp_frame", 22, r'''
+/* PRODUCTION */
+#define N 40
+#define M 48
+/* RFC 1071 over 16-bit words, written the other way round from dhcp_sum:
+   whole words first, a last odd byte as the high half of one more. */
+static p32 spec_sum(const p8 *b, positive n, p32 sum)
+{
+        for (positive i = 0; i + 1 < n; i += 2)
+                sum += (p32)b[i] << 8 | b[i + 1];
+        if (n & 1)
+                sum += (p32)b[n - 1] << 8;
+        sum = (sum & 0xffff) + (sum >> 16);
+        sum = (sum & 0xffff) + (sum >> 16);
+        return sum;
+}
+static p32 spec_load32(const p8 *b) { return (p32)b[0] << 24 | (p32)b[1] << 16 | (p32)b[2] << 8 | b[3]; }
+/* RFC 791 and RFC 768 by index: the verdict, and where the message is. */
+static bool spec_unframe(const p8 *f, positive n, bool vouched, positive *offset, positive *length)
+{
+        if (n < 20) return false;
+        positive header = (positive)(f[0] & 15) * 4, total = (positive)f[2] << 8 | f[3];
+        if (f[0] >> 4 != 4 || header < 20 || total < header + 8 || total > n) return false;
+        if ((f[6] & 0x3f) || f[7] || f[9] != 17) return false;
+        if (spec_sum(f, header, 0) != 0xffff) return false;
+        const p8 *u = f + header;
+        positive udp = (positive)u[4] << 8 | u[5];
+        if (((p32)u[0] << 8 | u[1]) != 67 || ((p32)u[2] << 8 | u[3]) != 68 || udp < 8 || udp > total - header)
+                return false;
+        if ((u[6] || u[7]) && !vouched) {
+                p8 pseudo[12] = {f[12], f[13], f[14], f[15], f[16], f[17], f[18], f[19],
+                                 0, 17, (p8)(udp >> 8), (p8)udp};
+                if (spec_sum(u, udp, spec_sum(pseudo, 12, 0)) != 0xffff) return false;
+        }
+        *offset = header + 8;
+        *length = udp - 8;
+        return true;
+}
+/* cmsg(3): length (its 16-byte header in it), level, type, data, padding
+   to eight; PACKET_AUXDATA's tp_status bits 3 and 7 vouch for the checksum. */
+static bool spec_vouched(const p8 *c, positive n)
+{
+        for (positive at = 0; n - at >= 16 && at <= n;) {
+                p64 length = 0;
+                for (int i = 7; i >= 0; i--) length = length << 8 | c[at + i];
+                p32 level = c[at + 8] | (p32)c[at + 9] << 8 | (p32)c[at + 10] << 16 | (p32)c[at + 11] << 24;
+                p32 type = c[at + 12] | (p32)c[at + 13] << 8 | (p32)c[at + 14] << 16 | (p32)c[at + 15] << 24;
+                if (length < 16 || length > n - at) return false;
+                if (level == 263 && type == 8) return length >= 20 && (c[at + 16] & 0x88);
+                at += (positive)((length + 7) & ~(p64)7);
+        }
+        return false;
+}
+/* Every frame of up to N bytes and every control buffer of up to M: the
+   judge reads only inside them, agrees with RFC 791 and 768 on the verdict
+   and on the addresses, the port and the message's place, and every frame it
+   accepts the kernel's prefilter keeps. */
+int main(void)
+{
+        p8 frame[N], control[M];
+        positive size = nondet_positive(), held = nondet_positive();
+        bool vouched = nondet_bool();
+        positive offset = 0, length = 0;
+        dhcp_frame got;
+        __CPROVER_assume(size <= N && held <= M);
+        bool accepted = dhcp_unframe(frame, size, vouched, &got);
+        assert(accepted == spec_unframe(frame, size, vouched, &offset, &length));
+        if (accepted) {
+                REACHED();
+                assert(got.message == frame + offset && got.length == length);
+                assert(got.message + got.length <= frame + size);
+                assert(got.source == spec_load32(frame + 12) && got.destination == spec_load32(frame + 16));
+                assert(got.source_port == 67);
+                assert(spec_filter(frame, size) != 0);
+        }
+        bool said = dhcp_frame_vouched(control, held);
+        assert(said == spec_vouched(control, held));
+        return 0;
+}
+''', ["dhcp_sum", "dhcp_unframe", "dhcp_frame_vouched"], lambda net: dhcp_frame_proof_lift(net)),
+("dhcp_frame_filter", 34, r'''
+/* PRODUCTION */
+#define N 68
+/* Every frame of up to 68 bytes, so every header length the filter can be
+   asked to step over: one the judge accepts with its UDP checksum vouched for
+   -- the most it accepts of any frame -- the kernel's prefilter keeps. */
+int main(void)
+{
+        p8 frame[N];
+        positive size = nondet_positive();
+        dhcp_frame got;
+        __CPROVER_assume(size <= N);
+        if (dhcp_unframe(frame, size, true, &got)) {
+                if ((frame[0] & 15) == 15) REACHED();
+                assert(spec_filter(frame, size) != 0);
+                assert(got.message >= frame && got.message + got.length <= frame + size);
+        }
+        return 0;
+}
+''', ["dhcp_sum", "dhcp_unframe"], lambda net: dhcp_frame_proof_lift(net)),
 ]
+
+
+def dhcp_frame_proof_lift(net):
+    """What the DHCP frame proofs take from net.c beside its functions: the
+    ports and control-message numbers, the frame and filter-step types, and
+    the filter's own bytes; then the classic BPF the kernel runs them as."""
+    return "\n".join(
+        re.findall(r"^#define (?:DHCP_CLIENT_PORT|DHCP_SERVER_PORT|DHCP_SOL_PACKET|"
+                   r"DHCP_PACKET_AUXDATA|DHCP_CHECKSUM_NOT_READY|DHCP_CHECKSUM_VALID) .*$",
+                   net, re.M) +
+        [ul_c_typedefs(net, "dhcp_frame", "dhcp_filter_step"),
+         re.search(r"^static const dhcp_filter_step dhcp_frame_filter\[\] = \{.*?\}\};",
+                   net, re.M | re.S).group(0),
+         DHCP_FRAME_SPEC_FILTER]) + "\n"
+
+
+DHCP_FRAME_SPEC_FILTER = r'''/* The kernel's classic BPF for a socket filter: a load past the packet ends
+   the program with 0, which drops it. */
+static p32 spec_filter(const p8 *packet, positive size)
+{
+        p32 a = 0, x = 0;
+        for (positive pc = 0; pc < sizeof dhcp_frame_filter / sizeof *dhcp_frame_filter; pc++) {
+                const dhcp_filter_step *step = dhcp_frame_filter + pc;
+                positive at = step->value;
+                if (step->code == 0x30) { if (at >= size) return 0; a = packet[at]; }
+                else if (step->code == 0x28) { if (at + 2 > size) return 0; a = (p32)packet[at] << 8 | packet[at + 1]; }
+                else if (step->code == 0xb1) { if (at >= size) return 0; x = (packet[at] & 15u) * 4; }
+                else if (step->code == 0x48) { at += x; if (at + 2 > size) return 0; a = (p32)packet[at] << 8 | packet[at + 1]; }
+                else if (step->code == 0x15) pc += a == step->value ? step->jump_true : step->jump_false;
+                else if (step->code == 0x45) pc += a & step->value ? step->jump_true : step->jump_false;
+                else if (step->code == 0x06) return step->value;
+                else assert(!"an instruction the model does not know");
+        }
+        assert(!"the filter ran off its end");
+        return 0;
+}
+'''
 
 
 def harness_net_bounded_proof(argv):
@@ -63698,8 +64224,11 @@ def harness_net_bounded_proof(argv):
     the proof asserts: a DNS name of at most 255 bytes ending in its root inside
     the message, an ASN.1 value inside its parent, a netlink attribute inside
     its datagram, a response field inside the head, a URL's host of host bytes
-    only, a path with no dot segment left that a second pass leaves alone. The
-    byte reader and the byte store are proved for buffers of any length.
+    only, a path with no dot segment left that a second pass leaves alone, a
+    DHCP reply frame judged as RFC 791 and 768 judge it, with every frame the
+    judge accepts kept by the classic BPF prefilter the kernel runs for the
+    packet socket (the filter's own bytes, lifted). The byte reader and the
+    byte store are proved for buffers of any length.
 
     The parsers call lib.c through the contracts written in NET_PROOF_SHIM;
     lib.c's own checks hold its routines to them. A bound is a bound: a proof
@@ -63722,7 +64251,10 @@ def harness_net_bounded_proof(argv):
             if chosen and name not in chosen:
                 continue
             production = "\n".join(ul_c_function(net, function) for function in functions)
-            source = common + extra + harness.replace("/* PRODUCTION */", production)
+            #   An extra that is a function lifts what it needs from the
+            #   source (a table the kernel is handed, say) rather than say it.
+            source = common + (extra(net) if callable(extra) else extra) + \
+                harness.replace("/* PRODUCTION */", production)
             unit = Path(temporary) / (name + ".c")
             unit.write_text(source)
             started = time.monotonic()
@@ -63952,7 +64484,7 @@ NET_DEPENDENCY_PRIMITIVES = frozenset("""
 array_count array_store_release array_store_reserve
 byte_reader_end byte_reader_here byte_reader_left byte_reader_ok byte_reader_open
 byte_reader_skip byte_reader_take byte_reader_u16 byte_reader_u16le
-byte_reader_u24 byte_reader_u32 byte_reader_u8 byte_reader_vector16
+byte_reader_u24 byte_reader_u32 byte_reader_u32le byte_reader_u8 byte_reader_vector16
 byte_reader_vector24 byte_reader_vector8 byte_reader_window
 byte_store_append_exact byte_store_release byte_store_reserve
 memory_compare memory_compare_ascii_case memory_copy memory_copy_apart
@@ -63984,6 +64516,13 @@ WIRE_ALIASES = {
     "NLMSG_IS_NOOP": "NLMSG_NOOP", "NLMSG_IS_ERROR": "NLMSG_ERROR",
     "NLMSG_IS_DONE": "NLMSG_DONE", "NETLINK_HEADER": "NLMSG_HDRLEN",
     "IFNAME_SIZE": "IFNAMSIZ",
+    #   The DHCP client's packet socket and its confinement.
+    "DHCP_SOL_PACKET": "SOL_PACKET", "DHCP_PACKET_AUXDATA": "PACKET_AUXDATA",
+    "DHCP_CHECKSUM_NOT_READY": "TP_STATUS_CSUMNOTREADY", "DHCP_CHECKSUM_VALID": "TP_STATUS_CSUM_VALID",
+    "DHCP_SO_ATTACH_FILTER": "SO_ATTACH_FILTER", "DHCP_SO_LOCK_FILTER": "SO_LOCK_FILTER",
+    "DHCP_SIOCGIFINDEX": "SIOCGIFINDEX", "DHCP_PACKET_HOST": "PACKET_HOST",
+    "DHCP_PACKET_BROADCAST": "PACKET_BROADCAST", "DHCP_MSG_CTRUNC": "MSG_CTRUNC",
+    "DHCP_FILTER_KILL": "SECCOMP_RET_KILL_PROCESS", "DHCP_FILTER_ALLOW": "SECCOMP_RET_ALLOW",
 }
 
 #       Families of names the uapi headers own. A define here whose name is
@@ -64034,7 +64573,8 @@ def harness_wire_constants(argv):
     headers = ("sys/socket.h", "netinet/in.h", "netinet/tcp.h", "sys/prctl.h",
                "linux/netlink.h", "linux/rtnetlink.h", "linux/genetlink.h",
                "linux/nl80211.h", "linux/if.h", "linux/if_ether.h", "linux/if_arp.h",
-               "linux/audit.h", "linux/seccomp.h", "linux/filter.h", "linux/udp.h")
+               "linux/audit.h", "linux/seccomp.h", "linux/filter.h", "linux/udp.h",
+               "linux/if_packet.h", "linux/sockios.h")
     head = "".join("#include <%s>\n" % h for h in headers) + "#include <stdio.h>\n"
 
     def program(names):
@@ -64111,7 +64651,7 @@ def harness_net_dependency_closure(argv):
     source = Path(__file__).resolve().read_text()
     run = (HARNESS_ROOT / "test/run").read_text()
     evidence = ("crypto_vectors", "crypto_fuzz", "tls_der_fuzz", "tls_hs_fuzz",
-                "tls_verify_fuzz", "dns_fuzz", "dhcp_fuzz", "netlink_fuzz",
+                "tls_verify_fuzz", "dns_fuzz", "dhcp_fuzz", "dhcp_frame_fuzz", "netlink_fuzz",
                 "http_fuzz", "tls_peer", "wget_mutation", "net_netem", "msan_net",
                 "net_wait_states", "net_parser_work_states")
     for name in evidence:
@@ -64161,7 +64701,7 @@ def harness_security_hygiene(argv):
 
     security = ("tls_chains", "https_downgrade", "http_response_framing",
                 "tls_der_fuzz", "tls_hs_fuzz", "tls_fuzz", "msan_net", "pathname_race",
-                "dhcp_fuzz", "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "tls_peer",
+                "dhcp_fuzz", "dhcp_frame_fuzz", "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "tls_peer",
                 "http_fuzz", "http_urls", "wifi_eapol_fuzz", "wifi_scan_fuzz", "wifi_key_state",
                 "bowl_sig_fuzz", "wget_mutation", "wget_hostile", "sntp_era", "net_netem",
                 "net_dependency_closure", "net_math_proof", "net_clock_fault", "net_wait_states", "net_parser_work_states",
@@ -64182,7 +64722,7 @@ def harness_security_hygiene(argv):
         checks("--harness " + name in run, "test/run: no lane asks for --harness " + name)
         checks(name + ": skipped (soft)" in run, "test/run: no soft skip for " + name)
     for name in ("tls_der_fuzz", "tls_hs_fuzz", "pathname_race", "dhcp_fuzz",
-                 "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "http_fuzz", "wifi_eapol_fuzz",
+                 "dhcp_frame_fuzz", "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "http_fuzz", "wifi_eapol_fuzz",
                  "wifi_scan_fuzz", "bowl_sig_fuzz"):
         checks(name + ": skipped (soft)" in run, "test/run: no soft skip for " + name)
 
@@ -64229,6 +64769,21 @@ def harness_security_hygiene(argv):
             line = text.count("\n", 0, call.start()) + 1
             if path.name != "wait.c" or "static bool" not in text[call.start() - 12:call.start()]:
                 unbounded.append("%s:%d" % (path.relative_to(HARNESS_ROOT), line))
+        #   recvmsg is spelled as a system call, not socket_receive: the same
+        #   rule, or every caller of the function that passes its flags on
+        #   (sntp_receive_message) asks for DONTWAIT itself.
+        for call in re.finditer(r"\bsystem_call_\d\(\s*syscall\(recvmsg\)", text):
+            statement = text[call.start():text.index(";", call.start())]
+            if "DONTWAIT" in statement:
+                continue
+            owner = re.findall(r"^static [^\n(]*\b(\w+)\(", text[:call.start()], re.M)
+            callers = [text[found.start():text.index(";", found.start())]
+                       for found in re.finditer(r"\b%s\(" % owner[-1], text)
+                       if not text[text.rfind("\n", 0, found.start()) + 1:found.start()].startswith("static")
+                       ] if owner else []
+            if not callers or not all("DONTWAIT" in caller for caller in callers):
+                blocking.append("%s:%d" % (path.relative_to(HARNESS_ROOT),
+                                           text.count("\n", 0, call.start()) + 1))
     #   TLS_BENCH_ANCHOR trusts one more root and lets a fetch reach 127/8, so
     #   only harness builds may define it; the image build and the lanes' own
     #   shell never do, and the tight tier keeps no such hook.
@@ -64316,6 +64871,8 @@ def harness_security_hygiene(argv):
         ("tls12_certificate_request", ("body",)),
         ("tls_check_cert_verify", ("msg",)),
         ("dhcp_walk", ("region",)),
+        ("dhcp_unframe", ("frame",)),
+        ("dhcp_frame_vouched", ("control",)),
         ("netlink_attributes", ("bytes",)),
         ("dns_copy_name", ("message",)),
         ("dns_message_at", ("message",)),
@@ -66810,8 +67367,11 @@ s.bind(("0.0.0.0", 67))
 log = open(sys.argv[2], "a", buffering=1)
 seen_discover = 0; naked = False
 def send(pkt, delay=0.0):
+    #   unicast: to the address offered, which a client without one never
+    #   receives on a UDP socket (the scene gives the far end its MAC).
+    to = (socket.inet_ntoa(pkt[16:20]), 68) if mode == "unicast" else ("255.255.255.255", 68)
     def go():
-        time.sleep(delay); s.sendto(pkt, ("255.255.255.255", 68))
+        time.sleep(delay); s.sendto(pkt, to)
     threading.Thread(target=go, daemon=True).start()
 while True:
     data, _ = s.recvfrom(2048)
@@ -66946,8 +67506,23 @@ try:
     label = "%s %s%s%s" % (kind, mode, " under netem" if netem_on else "",
                            " rp_filter " + os.environ["NETEM_RP_FILTER"]
                            if os.environ.get("NETEM_RP_FILTER", "0") != "0" else "")
+    if os.environ.get("NETEM_RP_FILTER", "0") != "0":
+        #   The setting is the scene: a write that did not take would make
+        #   every row below pass for nothing.
+        said = [open("/proc/sys/net/ipv4/conf/%s/rp_filter" % scope).read().strip()
+                for scope in ("all", "eth0")]
+        say(said == [os.environ["NETEM_RP_FILTER"]] * 2,
+            "%s: rp_filter reads %s on all and on the client's link" % (label, "/".join(said)))
     if kind == "dhcp":
         want = "10.88.0.51" if mode.startswith("conflict") else "10.88.0.50"
+        if mode == "unicast":
+            #   The far end may send to the offered address before the
+            #   client answers ARP for it: it is told the client's MAC.
+            probe = socket.socket()
+            mac = ":".join("%02x" % b for b in
+                           fcntl.ioctl(probe, 0x8927, struct.pack("256s", b"eth0"))[18:24])
+            probe.close()
+            there("ip", "neigh", "replace", "10.88.0.50", "lladdr", mac, "dev", "cb", "nud", "permanent")
         if mode.startswith("conflict"):
             #   A station already on the offered address: the far namespace's
             #   kernel answers the client's ARP probes for it.
@@ -67180,7 +67755,9 @@ def harness_net_netem(argv):
     no ciaddr, no parameter list, a transaction id of its own) and the next
     `ip auto` takes the address the server offers instead, and `ip watch`
     does the same by itself, waiting at least ten seconds before it asks
-    again.
+    again. The replies are read off a packet socket: `ip auto` has to lease
+    with rp_filter 1 and 2 on the client (read back from the namespace), and
+    from a server that unicasts its OFFER and ACK to the offered address.
     `moonwater time sync` is the SNTP client, with `/root/ntp.server` naming
     the far end: it has to take a clean, tripled, late or once-dropped answer,
     take the right one of a forged reply (wrong origin, three hours off) and
@@ -67243,6 +67820,11 @@ def harness_net_netem(argv):
         #   miss the defender one run in twelve, so the conflict scenes are
         #   asked on a clean wire.
         scenes += [("dhcp", mode, "", "0") for mode in ("conflict", "conflict-watch", "mute-watch")]
+        #   The OFFER at rp_filter 1 and 2, which a UDP socket never gets
+        #   from a server it has no route to, and replies unicast to the
+        #   offered address, which it never gets either.
+        scenes += [("dhcp", "clean", "", rp) for rp in ("1", "2")]
+        scenes += [("dhcp", "unicast", "", "0")]
         scenes += [("sntp", mode, netem, "0") for netem in impairments
                    for mode in ("clean", "dup", "spoof", "late", "drop2", "skewed", "kod")]
         checks = Checks()
@@ -82225,6 +82807,7 @@ HARNESS_CHECKS = {
     "terminfo_install": harness_terminfo_install,
     "dhcp_packets": harness_dhcp_packets,
     "dhcp_fuzz": harness_dhcp_fuzz,
+    "dhcp_frame_fuzz": harness_dhcp_frame_fuzz,
     "term_fuzz": harness_term_fuzz,
     "bowl_json_fuzz": harness_bowl_json_fuzz,
     "term_streams": harness_term_streams,

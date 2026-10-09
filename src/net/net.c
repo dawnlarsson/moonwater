@@ -11515,12 +11515,13 @@ static bipolar http_fetch_to(string_address start, bipolar dest, bool check_cert
         answer the routing table cannot.
 
         The broadcast flag. A server may unicast its reply to an address the
-        client does not have yet, which some clients receive anyway and some
-        do not. Setting the flag asks for a broadcast reply, which always
-        arrives. qemu's user-mode network broadcasts regardless and echoes the
-        flag back as zero, so this is the one part of the exchange that the
-        boot lane structurally cannot check -- it is set because a real
-        network needs it, not because a test proved it here.
+        client does not have yet, which a UDP socket never receives and the
+        packet socket an acquisition reads (dhcp_frames_open) does. Setting
+        the flag asks for a broadcast reply, which arrives either way. qemu's
+        user-mode network broadcasts regardless and echoes the flag back as
+        zero, so this is the one part of the exchange that the boot lane
+        structurally cannot check -- it is set because a real network needs
+        it, not because a test proved it here.
 
         The network watcher ARP-probes a newly acknowledged address before it
         installs the lease and schedules dhcp_reacquire at half its lifetime.
@@ -12026,18 +12027,174 @@ static COLD bool dhcp_reacquisition_answer_matches(
 }
 
 /*
+        A reply as the wire carries it, judged as IP and UDP would have.
+
+        An acquisition reads its answers off a packet socket (dhcp_frames_open
+        below), which is handed each frame after the link header and before
+        IP has looked at it. So what the kernel's IP and UDP layers would
+        have refused is refused here, the way they refuse it: version 4 and a
+        header of five words or more; a total length that covers the header
+        and a UDP header and no more than was read (what follows it is link
+        padding); no fragment, not even the first of several (a DHCP message
+        fits one frame, and nothing here puts pieces together); UDP; the
+        header's own checksum; a UDP length of at least its header and no
+        more than the IP payload, the rest cut off as the kernel cuts it; the
+        UDP checksum when the sender wrote one, unless the kernel vouches for
+        it (dhcp_frame_vouched); and from port 67 to port 68.
+        What is left is the DHCP message, and the addresses and source port a
+        UDP socket would have named.
+*/
+typedef struct
+{
+        p32 source;
+        p32 destination;
+        p16 source_port;
+        const p8 address_to message;
+        positive length;
+} dhcp_frame;
+
+/* The ones' complement sum of a block added to sum, folded to sixteen bits:
+   0xffff over a block whose own checksum is in it and right. */
+static COLD p32 dhcp_sum(byte_reader block, p32 sum)
+{
+        while (byte_reader_left(&block) >= 2)
+                sum += byte_reader_u16(&block);
+        if (byte_reader_left(&block))
+                sum += (p32)byte_reader_u8(&block) << 8;
+        while (sum >> 16)
+                sum = (sum & 0xffff) + (sum >> 16);
+        return sum;
+}
+
+static COLD bool dhcp_unframe(const p8 address_to frame, positive size,
+                              bool vouched, dhcp_frame address_to into)
+{
+        byte_reader fields = byte_reader_open(frame, size);
+        byte_reader rest = fields;
+        p8 lead = byte_reader_u8(&fields);
+        positive header = (positive)(lead & 15) * 4;
+        positive total;
+        p16 fragment;
+        p8 protocol;
+        p32 source;
+        p32 destination;
+        byte_reader datagram;
+        byte_reader udp;
+        p16 from;
+        p16 to;
+        p16 length;
+        p16 checksum;
+
+        (void)byte_reader_u8(&fields);           // type of service
+        total = byte_reader_u16(&fields);
+        (void)byte_reader_u16(&fields);          // identification
+        fragment = byte_reader_u16(&fields);
+        (void)byte_reader_u8(&fields);           // time to live
+        protocol = byte_reader_u8(&fields);
+        (void)byte_reader_u16(&fields);          // header checksum
+        source = byte_reader_u32(&fields);
+        destination = byte_reader_u32(&fields);
+        //      The reserved flag is not asked about, as the kernel does not.
+        if (!byte_reader_ok(&fields) || lead >> 4 != 4 || header < 20 ||
+            total < header + 8 || total > size || (fragment & 0x3fff) ||
+            protocol != 17)
+                return false;
+
+        datagram = byte_reader_window(&rest, total);
+        if (dhcp_sum(byte_reader_window(&datagram, header), 0) != 0xffff)
+                return false;
+        udp = datagram;
+        from = byte_reader_u16(&datagram);
+        to = byte_reader_u16(&datagram);
+        length = byte_reader_u16(&datagram);
+        checksum = byte_reader_u16(&datagram);
+        if (from != DHCP_SERVER_PORT || to != DHCP_CLIENT_PORT || length < 8 ||
+            length > total - header)
+                return false;
+        udp = byte_reader_window(&udp, length);
+        //      The pseudo-header (both addresses, the protocol, the UDP
+        //      length) and the datagram, its checksum in it.
+        if (checksum && !vouched &&
+            dhcp_sum(udp, (source >> 16) + (source & 0xffff) +
+                              (destination >> 16) + (destination & 0xffff) +
+                              17 + length) != 0xffff)
+                return false;
+        (void)byte_reader_skip(&udp, 8);
+        if (!byte_reader_ok(&udp))
+                return false;
+        into->source = source;
+        into->destination = destination;
+        into->source_port = from;
+        into->message = byte_reader_here(&udp);
+        into->length = byte_reader_left(&udp);
+        return true;
+}
+
+/*
+        Whether the kernel vouches for a frame's UDP checksum.
+
+        A frame sent from this machine to itself across a virtual wire (a veth
+        pair into a namespace, a bridge to a guest) carries its UDP checksum
+        unfinished: the kernel left it for a card to complete, and no card
+        did. And a card that checks checksums on the way in has checked this
+        one. The receive's control messages say either -- PACKET_AUXDATA's
+        tp_status has TP_STATUS_CSUMNOTREADY or TP_STATUS_CSUM_VALID -- and
+        the UDP layer would then not have asked, so neither does
+        dhcp_unframe. Each message is its length (a size_t, its sixteen-byte
+        header included), its level and type, its data, and padding to eight
+        bytes. The messages are the kernel's, not the wire's; the caller
+        believes none from a buffer the kernel cut short.
+*/
+#define DHCP_SOL_PACKET 263
+#define DHCP_PACKET_AUXDATA 8
+#define DHCP_CHECKSUM_NOT_READY 8
+#define DHCP_CHECKSUM_VALID 0x80
+
+static COLD bool dhcp_frame_vouched(const p8 address_to control,
+                                    positive size)
+{
+        byte_reader messages = byte_reader_open(control, size);
+
+        while (byte_reader_left(&messages) >= 16)
+        {
+                positive low = byte_reader_u32le(&messages);
+                positive length = low | (positive)byte_reader_u32le(&messages) << 32;
+                p32 level = byte_reader_u32le(&messages);
+                p32 type = byte_reader_u32le(&messages);
+                byte_reader data;
+
+                if (length < 16)
+                        return false;
+                data = byte_reader_window(&messages, length - 16);
+                if (level == DHCP_SOL_PACKET && type == DHCP_PACKET_AUXDATA)
+                {
+                        p32 status = byte_reader_u32le(&data);
+
+                        return byte_reader_ok(&data) &&
+                               (status & (DHCP_CHECKSUM_NOT_READY |
+                                          DHCP_CHECKSUM_VALID));
+                }
+                (void)byte_reader_skip(&messages, (8 - length % 8) % 8);
+        }
+        return false;
+}
+
+/*
         The exchange, confined.
 
         A reply is parsed as root, and any host on the wire can write one. So
         the watcher runs each exchange in a child (net_dhcp_apart), which
-        opens and binds the client socket while it may and then comes here:
-        every descriptor but that socket and the answer's pipe is closed,
-        every id becomes nobody's, no exec may grant anything back, and a
-        filter kills any call beyond the exchange's own -- sendto, recvfrom,
-        ppoll, clock_gettime, close -- the answer's write, and exit. What a
-        crafted packet could make of the child is then DHCP from port 68 on
-        that link, which any host on it can send already, and one lease,
-        which the parent judges as it would a packet.
+        opens and binds its sockets while it may and then comes here: every
+        descriptor but the client socket, the packet socket an acquisition
+        reads (dhcp_frames) and the answer's pipe is closed, every id becomes
+        nobody's, no exec may grant anything back, and a filter kills any
+        call beyond the exchange's own -- recvfrom, recvmsg, ppoll,
+        clock_gettime, close, exit -- and sendto and write, which may name
+        only the client socket and the pipe: a packet socket that can be
+        written to sends any frame at all. What a crafted packet could make
+        of the child is then DHCP from port 68 on that link, which any host
+        on it can send already, and one lease, which the parent judges as it
+        would a packet.
 
         No filter is no exchange. A kernel that will not install one -- built
         without SECCOMP_FILTER, which every Moonwater kernel has
@@ -12047,6 +12204,11 @@ static COLD bool dhcp_reacquisition_answer_matches(
         the checks that call dhcp_ask directly leave dhcp_apart unset.
 */
 static b32 dhcp_apart = -1;
+
+/* The packet socket an acquisition reads its answers from (dhcp_frames_open),
+   or -1 when it has none and reads its UDP socket as a renewal does. Open
+   only while dhcp_ask runs. */
+static bipolar dhcp_frames = -1;
 
 #define DHCP_NOBODY 65534
 
@@ -12066,25 +12228,32 @@ typedef struct
         p32 value;
 } dhcp_filter_step;
 
+#define DHCP_FILTER_KILL 0x80000000u
+#define DHCP_FILTER_ALLOW 0x7fff0000u
+
 static COLD bool dhcp_confine(b32 handle)
 {
         static const p32 allowed[] = {
-            (p32)syscall(sendto), (p32)syscall(recvfrom), (p32)syscall(ppoll),
+            (p32)syscall(recvfrom), (p32)syscall(recvmsg), (p32)syscall(ppoll),
             (p32)syscall(clock_gettime), (p32)syscall(close),
-            (p32)syscall(write), (p32)syscall(exit_group), (p32)syscall(exit),
+            (p32)syscall(exit_group), (p32)syscall(exit),
             (p32)syscall(rt_sigreturn), (p32)syscall(restart_syscall)};
-        dhcp_filter_step steps[6 + array_count(allowed)];
+        const p32 pinned[2][2] = {{(p32)syscall(sendto), (p32)handle},
+                                  {(p32)syscall(write), (p32)dhcp_apart}};
+        dhcp_filter_step steps[6 + 5 * 2 + array_count(allowed)];
         struct
         {
                 p16 count;
                 dhcp_filter_step address_to steps;
         } filter = {0, steps};
+        p32 keep[3] = {(p32)handle, (p32)dhcp_apart,
+                       dhcp_frames >= 0 ? (p32)dhcp_frames : descriptors_none};
         positive at = 0;
         bipolar status;
 
         if (dhcp_apart < 0)
                 return true;
-        if (!descriptors_close_except(0, (p32)handle, (p32)dhcp_apart))
+        if (!descriptors_close_outside(0, keep, 3))
                 return false;
 
         if ((!system_call_1(syscall(getuid), 0) &&
@@ -12101,13 +12270,24 @@ static COLD bool dhcp_confine(b32 handle)
         //      nothing listed and are killed with the rest.
         steps[at++] = (dhcp_filter_step){0x20, 0, 0, 4};
         steps[at++] = (dhcp_filter_step){0x15, 1, 0, DHCP_AUDIT_ARCH};
-        steps[at++] = (dhcp_filter_step){0x06, 0, 0, 0x80000000u};
+        steps[at++] = (dhcp_filter_step){0x06, 0, 0, DHCP_FILTER_KILL};
         steps[at++] = (dhcp_filter_step){0x20, 0, 0, 0};
+        //      A pinned call, then its descriptor: the low half of its first
+        //      argument, which is all of the int the kernel reads. Another
+        //      call goes on to the next block.
+        for (positive i = 0; i < 2; i++)
+        {
+                steps[at++] = (dhcp_filter_step){0x15, 0, 4, pinned[i][0]};
+                steps[at++] = (dhcp_filter_step){0x20, 0, 0, 16};
+                steps[at++] = (dhcp_filter_step){0x15, 0, 1, pinned[i][1]};
+                steps[at++] = (dhcp_filter_step){0x06, 0, 0, DHCP_FILTER_ALLOW};
+                steps[at++] = (dhcp_filter_step){0x06, 0, 0, DHCP_FILTER_KILL};
+        }
         for (positive i = 0; i < array_count(allowed); i++)
                 steps[at++] = (dhcp_filter_step){
                     0x15, (p8)(array_count(allowed) - i), 0, allowed[i]};
-        steps[at++] = (dhcp_filter_step){0x06, 0, 0, 0x80000000u};
-        steps[at++] = (dhcp_filter_step){0x06, 0, 0, 0x7fff0000u};
+        steps[at++] = (dhcp_filter_step){0x06, 0, 0, DHCP_FILTER_KILL};
+        steps[at++] = (dhcp_filter_step){0x06, 0, 0, DHCP_FILTER_ALLOW};
         filter.count = (p16)at;
 
         status = system_call_3(syscall(seccomp), 1 /* SET_MODE_FILTER */, 0,
@@ -12141,6 +12321,188 @@ static COLD bipolar dhcp_open(string_address device, p32 host, bool broadcast)
         }
 
         return handle;
+}
+
+/*
+        The replies, read where reverse-path filtering cannot drop them.
+
+        Before the client has an address the kernel's UDP receive path drops
+        an OFFER whenever rp_filter is on: the server's address has no route
+        yet, and rp_filter 1 or 2 discards a packet whose source would not be
+        routed back out of the interface it came in on (measured in a KVM
+        guest on a tap with rp_filter 2: OFFERs went out and no REQUEST came
+        back). So an acquisition reads its answers as dhclient and dhcpcd do,
+        from a packet socket on the interface, which is handed each IPv4
+        frame before IP sees it, and still sends on its UDP socket. The
+        kernel runs dhcp_frame_filter for the socket, which keeps UDP to
+        port 68 that is not a later fragment and drops the rest of the
+        link's traffic before it is queued; it is a prefilter, and
+        dhcp_unframe judges every frame it keeps. The filter is attached and
+        locked while the socket has no protocol and so receives nothing, and
+        only then is it bound, so no frame gets in that the filter has not
+        seen, and the confined child cannot take it off. -1 when the kernel
+        has no packet sockets or the caller may not open one: the acquisition
+        then reads its UDP socket as it always did. Renewals hold an address
+        and a route, and stay on UDP.
+*/
+#define DHCP_SO_ATTACH_FILTER 26
+#define DHCP_SO_LOCK_FILTER 44
+#define DHCP_SIOCGIFINDEX 0x8933
+#define DHCP_PACKET_HOST 0
+#define DHCP_PACKET_BROADCAST 1
+#define DHCP_MSG_CTRUNC 8
+#define DHCP_FRAME_ROOM 1536
+
+static const dhcp_filter_step dhcp_frame_filter[] = {
+    {0x30, 0, 0, 9},                    // ldb [9]: the protocol
+    {0x15, 0, 6, 17},                   //   UDP, or drop
+    {0x28, 0, 0, 6},                    // ldh [6]: flags and fragment offset
+    {0x45, 4, 0, 0x1fff},               //   a later fragment: drop
+    {0xb1, 0, 0, 0},                    // ldxb 4 * ([0] & 15): header length
+    {0x48, 0, 0, 2},                    // ldh [x + 2]: destination port
+    {0x15, 0, 1, DHCP_CLIENT_PORT},     //   68, or drop
+    {0x06, 0, 0, 0xffff},               // keep it
+    {0x06, 0, 0, 0}};                   // drop it
+
+static COLD bipolar dhcp_frames_open(string_address device)
+{
+        struct
+        {
+                p16 count;
+                const dhcp_filter_step address_to steps;
+        } filter = {(p16)array_count(dhcp_frame_filter), dhcp_frame_filter};
+        struct
+        {
+                p8 name[16];
+                b32 index;
+                p8 rest[20];
+        } request = {{0}, 0, {0}};
+        socket_address_packet link = {
+            .family = AF_PACKET, .protocol = network_order_16(ETH_P_IP)};
+        positive length = string_length(device);
+        bipolar handle;
+        b32 one = 1;
+
+        if (!length || length >= sizeof request.name)
+                return -1;
+        handle = socket_new(AF_PACKET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+        if (handle < 0)
+                return -1;
+        memory_copy(request.name, device, length);
+        if (system_call_3(syscall(ioctl), (positive)handle, DHCP_SIOCGIFINDEX,
+                          (positive)address_of request) < 0 ||
+            socket_option_set((b32)handle, DHCP_SOL_PACKET, DHCP_PACKET_AUXDATA,
+                              address_of one, sizeof one) < 0 ||
+            socket_option_set((b32)handle, SOL_SOCKET, DHCP_SO_ATTACH_FILTER,
+                              address_of filter, sizeof filter) < 0 ||
+            socket_option_set((b32)handle, SOL_SOCKET, DHCP_SO_LOCK_FILTER,
+                              address_of one, sizeof one) < 0)
+                goto refused;
+        link.index = (p32)request.index;
+        if (socket_bind((b32)handle, address_of link, sizeof link) < 0)
+                goto refused;
+        return handle;
+
+refused:
+        socket_close((b32)handle);
+        return -1;
+}
+
+static COLD fn dhcp_frames_close(void)
+{
+        if (dhcp_frames >= 0)
+                socket_close((b32)dhcp_frames);
+        dhcp_frames = -1;
+}
+
+typedef struct
+{
+        address_any base;
+        positive length;
+} dhcp_vector;
+
+typedef struct
+{
+        address_any name;
+        p32 name_size;
+        dhcp_vector address_to vectors;
+        positive vector_count;
+        address_any control;
+        positive control_size;
+        b32 flags;
+} dhcp_message_header;
+
+/* The next DHCP message off the packet socket, network_receive_next's way:
+   its length, with the message copied to `into`; 0 for a frame that is not
+   a DHCP reply this machine may read (sent by it, to another station's
+   hardware address, or refused by dhcp_unframe), which the caller counts
+   against its allowance as it counts any refused datagram; NETWORK_SILENT
+   when the deadline went by first; or the error that ended the wait or the
+   read. The read never blocks. The peer is the IP source and the UDP source
+   port, as a UDP socket would have named them, and `destination` the IP
+   destination, which a socket would have kept to itself. */
+static COLD bipolar dhcp_frame_next(bipolar frames, p8 address_to into,
+                                    positive room,
+                                    socket_address_internet address_to peer,
+                                    p32 address_to peer_size,
+                                    p32 address_to destination,
+                                    const network_deadline address_to deadline)
+{
+        for (;;)
+        {
+                p8 frame[DHCP_FRAME_ROOM];
+                p8 control[64];
+                socket_address_packet from;
+                dhcp_vector vector = {frame, sizeof frame};
+                dhcp_message_header message = {
+                    address_of from, sizeof from, address_of vector, 1,
+                    control, sizeof control, 0};
+                dhcp_frame found;
+                positive seconds;
+                positive nanoseconds;
+                bipolar got;
+
+                if (!network_deadline_left(deadline, address_of seconds,
+                                           address_of nanoseconds))
+                        return NETWORK_SILENT;
+                memory_zero(address_of from, sizeof from);
+                got = system_call_3(syscall(recvmsg), (positive)frames,
+                                    (positive)address_of message,
+                                    MSG_TRUNC | MSG_DONTWAIT);
+                if (got == NETWORK_INTERRUPTED)
+                        continue;
+                if (got == NETWORK_TRY_AGAIN)
+                {
+                        bipolar ready = network_wait_readable_until(frames,
+                                                                     deadline);
+
+                        if (ready <= 0)
+                                return ready ? ready : NETWORK_SILENT;
+                        continue;
+                }
+                if (got < 0)
+                        return got;
+                memory_zero(peer, sizeof *peer);
+                address_to peer_size = sizeof *peer;
+                if ((positive)got > sizeof frame ||
+                    message.name_size <= __builtin_offsetof(socket_address_packet,
+                                                            pkttype) ||
+                    (from.pkttype != DHCP_PACKET_HOST &&
+                     from.pkttype != DHCP_PACKET_BROADCAST) ||
+                    !dhcp_unframe(frame, (positive)got,
+                                  !(message.flags & DHCP_MSG_CTRUNC) &&
+                                      dhcp_frame_vouched(
+                                          control, message.control_size),
+                                  address_of found) ||
+                    !found.length || found.length > room)
+                        return 0;
+                memory_copy(into, found.message, found.length);
+                peer->family = AF_INET;
+                peer->port = network_order_16(found.source_port);
+                peer->host = network_order_32(found.source);
+                address_to destination = found.destination;
+                return (bipolar)found.length;
+        }
 }
 
 /* Packet fields identify the DHCP transaction; the datagram endpoint says
@@ -12179,18 +12541,31 @@ static COLD bool dhcp_receive(bipolar handle, p8 address_to packet, positive roo
         {
                 socket_address_internet peer;
                 p32 peer_size;
-                bipolar got = network_receive_next(handle, packet, room, address_of peer,
-                                                   address_of peer_size, deadline);
+                p32 destination = HOST_BROADCAST;
+                bool framed = dhcp_frames >= 0;
+                bipolar got = framed
+                    ? dhcp_frame_next(dhcp_frames, packet, room, address_of peer,
+                                      address_of peer_size,
+                                      address_of destination, deadline)
+                    : network_receive_next(handle, packet, room, address_of peer,
+                                           address_of peer_size, deadline);
+                dhcp_lease parsed;
 
                 if (got < 0)
                         return false;
 
+                //      A frame has no socket to have kept out what was sent
+                //      to another station's address: it is for this client
+                //      when it is broadcast or names the address it offers.
                 if (got && (positive)got <= room &&
                     dhcp_peer_matches(address_of peer, peer_size,
                                       expected_peer, any_peer_host) &&
                     dhcp_read(packet, (positive)got, transaction, hardware,
-                              lease, kind) >= 0)
+                              address_of parsed, kind) >= 0 &&
+                    (destination == HOST_BROADCAST ||
+                     (parsed.address && destination == parsed.address)))
                 {
+                        *lease = parsed;
                         if (accepted_peer)
                                 *accepted_peer = peer;
                         return true;
@@ -12284,10 +12659,16 @@ static bipolar dhcp_ask(string_address device, p8 address_to hardware,
         //      transaction, so it is ready; a refusal leaves no spread.
         if (system_random_fill(spread, sizeof spread, 1))
                 memory_fill(spread, 128, sizeof spread);
+        //      The packet socket first: dhcp_open confines the child, after
+        //      which nothing could open one.
+        dhcp_frames = dhcp_frames_open(device);
         handle = dhcp_open(device, HOST_ANY, true);
 
         if (handle < 0)
+        {
+                dhcp_frames_close();
                 return DHCP_NO_SOCKET;
+        }
 
         socket_address_internet where = {
             .family = AF_INET, .port = network_order_16(DHCP_SERVER_PORT),
@@ -12388,6 +12769,7 @@ static bipolar dhcp_ask(string_address device, p8 address_to hardware,
                         if (status != DHCP_NO_OFFER)
                         {
                                 socket_close((b32)handle);
+                                dhcp_frames_close();
                                 return status;
                         }
                         break;
@@ -12395,6 +12777,7 @@ static bipolar dhcp_ask(string_address device, p8 address_to hardware,
         }
 
         socket_close((b32)handle);
+        dhcp_frames_close();
         return DHCP_NO_OFFER;
 }
 
