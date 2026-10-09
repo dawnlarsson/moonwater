@@ -63006,11 +63006,13 @@ def harness_net_exhaustive_proof(argv):
     Agreement on all of them is a proof by exhaustion, of these functions
     against these specifications; it says nothing about a function not named.
 
-        python3 test/differential.py --harness net_exhaustive_proof [--slices N]
+        python3 test/differential.py --harness net_exhaustive_proof [--slices N] [PROOF...]
     """
     slices = os.cpu_count() or 4
     if argv[:1] == ["--slices"] and len(argv) > 1:
         slices = int(argv[1])
+        argv = argv[2:]
+    chosen = set(argv)
     checks = Checks()
     net = (HARNESS_ROOT / "src/net/net.c").read_text()
     template = TEMPLATE_NET_EXHAUSTIVE
@@ -63046,6 +63048,8 @@ def harness_net_exhaustive_proof(argv):
                     "timers": 1 << 32,
                     "walk": 2 * sum(8 ** n for n in range(11))}
         for proof, total in expected.items():
+            if chosen and proof not in chosen:
+                continue
             started = time.monotonic()
             program = guarded if proof == "walk" else binary
             runs = [subprocess.Popen([str(program), proof, str(index), str(slices)],
