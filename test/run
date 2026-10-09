@@ -9337,6 +9337,18 @@ same 'line erased'   '[xx]|[]'                   20 2 in 'xxxxxxxxxxxxxxxxxxxx' 
 same 'erased in colour' '[          ]|7,4' \
                                                  20 2 in 'xxxxxxxxxxxxxxxxxxxx' resize '10x2' \
                                                  in '\e[H\e[44m\e[K' row 0 attr '0,9'
+#       btop on a window narrowed from the right writes each row to the new
+#       width and never erases past it, so the old tail stayed on every row
+#       and Canvas folded it under the row, a second picture for each one. The
+#       alternate screen does not reflow, so its tails go at the resize, and a
+#       wide character left half at the new edge goes with its right half.
+same 'alternate tail is cut' '[xxxxxxxxxx]|[yyyyyyyyyy]|[]' \
+                                                 20 3 in '\e[?1049h\e[H' \
+                                                 in 'xxxxxxxxxxxxxxxxxxxx\r\nyyyyyyyyyyyyyyyyyyyy' \
+                                                 resize '10x3' dump
+same 'alternate wide cut at the edge' '[xxxxxxxxx ]|[]' \
+                                                 20 2 in '\e[?1049h\e[H' in 'xxxxxxxxx中' \
+                                                 resize '10x2' dump
 
 group streams
 #       Seeded streams from a grammar of everything that reaches the emulator,

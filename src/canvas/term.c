@@ -3694,6 +3694,41 @@ static fn grid_tell(b32 master)
 #endif
 
 /*
+        The alternate screen does not reflow.
+
+        A program drawing its picture there (btop, nano) writes every row to
+        the width it was told and never erases past it, so a row stored at the
+        old width keeps its tail. Canvas folds a stored line at the grid's
+        width, so each tail drew as a row of its own under the one it belonged
+        to: the window showed the bottom half of the ring and the picture came
+        apart. Nothing on the alternate screen is read back at the old width,
+        so its rows are cut to the new one. A wide character whose left half
+        is the last column loses its right half with the cut, so it is blanked
+        the way an erase at the edge blanks one. The primary screen keeps its lines,
+        which is what makes narrowing and then widening it lossless.
+*/
+static fn alternate_cut(void)
+{
+        for (unsigned int r = 0; r < ROWS; r++)
+        {
+                unsigned int slot = row_slot(r);
+                unsigned int address_to length = slot_length(slot);
+                struct window_cell address_to cells = slot_cells(slot);
+
+                if (address_to length <= COLUMNS)
+                        continue;
+
+                if (cells[COLUMNS - 1].flags & WINDOW_CELL_WIDE)
+                {
+                        cells[COLUMNS - 1].character = ' ';
+                        cells[COLUMNS - 1].flags &= (unsigned short)~WINDOW_CELL_WIDE;
+                }
+
+                address_to length = COLUMNS;
+        }
+}
+
+/*
         The window was resized.
 
         Nothing is copied. The rows are the last lines of the ring, so all a
@@ -3751,6 +3786,7 @@ fn regrid(b32 master)
                         window_scroll(window);
 
                 alternate_claim();
+                alternate_cut();
 
                 shift = (bipolar)ROWS - (bipolar)was_rows - (bipolar)added;
         }
