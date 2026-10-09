@@ -32506,6 +32506,7 @@ call-frame lifetime are covered separately by harness shell_functions.
     start = source.index('typedef struct\n{\n        b32 kind;', source.index('One node shape'))
     types = source[start:source.index('#define PARSE_WORD_LITERAL')]
     engine = source[source.index('/* Retained bodies own independent ranges'):]
+    types, engine = shell_source_plain(types), shell_source_plain(engine)
     reserve = 'static b32 parse_keep_reserve(positive arena, b32 count, b32 floor)\n{'
     assert engine.count(reserve) == 1
     engine = engine.replace(reserve, reserve + '\n        if ((b32)arena == injected_failure) return -1;')
@@ -32692,7 +32693,7 @@ call-frame lifetime are covered separately by harness shell_functions.
     binary = out / 'retention'
     unit.write_text(code)
     command = shlex.split(os.environ.get('CC', 'cc')) + [
-        '-std=c11', '-Wall', '-Wextra', '-Werror', '-O1', '-g',
+        '-std=c11', '-Wall', '-Wextra', '-Wno-sign-compare', '-Werror', '-O1', '-g',
         '-fsanitize=address,undefined', str(unit), '-o', str(binary)]
     build = subprocess.run(command, capture_output=True, text=True)
     (out / 'build.log').write_text(build.stdout + build.stderr)
@@ -33503,7 +33504,7 @@ int main(void)
 def shell_source_plain(text):
     """A shell source as a slice compiled on its own sees it: HOT_STATE is a
     section attribute from lib.c for the spark link, and no slice brings it."""
-    return text.replace(' HOT_STATE;', ';')
+    return text.replace(' HOT_STATE;', ';').replace(' HOT_STATE = ', ' = ')
 
 
 def harness_floodlight(argv):
@@ -35887,6 +35888,7 @@ typedef long long loff_t;
 #define EINVAL 22
 #define EFAULT 14
 #define ENOSPC 28
+#define NETWORK_INTERRUPTED (-4)
 #define ENOTTY 25
 #define EIO 5
 
@@ -49897,6 +49899,7 @@ typedef struct { positive began; positive budget; } network_deadline;
 #define TLS_NOT_YET (-4)
 #define TLS_MISMATCH (-5)
 #define ENOSPC 28
+#define NETWORK_INTERRUPTED (-4)
 #define syscall(name) 0
 static bipolar tls_borrow(void *a, positive b, p8 **c, positive *d,
                           positive e, positive f)
@@ -49909,6 +49912,19 @@ static bipolar tls_lend(void *a, positive b, p8 **c, positive *d)
 {
         (void)a; (void)b; (void)c; (void)d;
         return TLS_AGAIN;
+}
+static bipolar tls_lend_until(void *a, positive b, p8 **c, positive *d,
+                              const network_deadline *deadline)
+{
+        (void)deadline;
+        return tls_lend(a, b, c, d);
+}
+static bipolar tls_borrow_within(void *a, positive b, p8 **c, positive *d,
+                                 positive e, positive f,
+                                 const network_deadline *deadline)
+{
+        (void)deadline;
+        return tls_borrow(a, b, c, d, e, f);
 }
 static bool network_deadline_begin(network_deadline *d, positive s, positive n)
 {
@@ -50873,6 +50889,7 @@ typedef struct { positive began; positive budget; } network_deadline;
 #define SOCK_STREAM 1
 #define SOCK_CLOEXEC 02000000
 #define ENOSPC 28
+#define NETWORK_INTERRUPTED (-4)
 #define network_order_16(v) (v)
 #define network_order_32(v) (v)
 #define FUZZ_SYS_writev 20
@@ -50982,6 +50999,20 @@ static bool network_stream_send_all(bipolar h, const p8 *data, positive length)
         (void)h;
         fuzz_request(data, length);
         return true;
+}
+
+static bool network_stream_send_all_for(bipolar h, const p8 *data,
+                                        positive length, positive s, positive n)
+{
+        (void)s; (void)n;
+        return network_stream_send_all(h, data, length);
+}
+static bool network_stream_send_all_until(bipolar h, const p8 *data,
+                                          positive length,
+                                          const network_deadline *deadline)
+{
+        (void)deadline;
+        return network_stream_send_all(h, data, length);
 }
 
 static bipolar network_stream_read_some_until(bipolar h, p8 *into, positive room,
@@ -51119,6 +51150,19 @@ static bipolar tls_borrow(tls_conn *tls, positive room, p8 **span,
 static bipolar tls_lend(tls_conn *tls, positive room, p8 **span, positive *got)
 {
         return fuzz_tls_take(tls, room, span, got, true);
+}
+static bipolar tls_lend_until(tls_conn *tls, positive room, p8 **span,
+                              positive *got, const network_deadline *deadline)
+{
+        (void)deadline;
+        return tls_lend(tls, room, span, got);
+}
+static bipolar tls_borrow_within(tls_conn *tls, positive room, p8 **span,
+                                 positive *got, positive s, positive n,
+                                 const network_deadline *deadline)
+{
+        (void)deadline;
+        return tls_borrow(tls, room, span, got, s, n);
 }
 
 /* writev into a growing sink, sometimes short, and when asked, sometimes a
@@ -54473,6 +54517,17 @@ static positive memory_span_byte_reverse(const void *block, p8 byte, positive si
                 i++;
         return i;
 }
+#define memory_load_unaligned(type, source) \
+        ({ type _loaded; memcpy(&_loaded, (source), sizeof _loaded); _loaded; })
+#define memory_store_unaligned(type, destination, value) \
+        ({ type _stored = (value); memcpy((destination), &_stored, sizeof _stored); })
+static p64 network_load_64(const p8 *bytes)
+{
+        p64 value = 0;
+        for (int i = 0; i < 8; i++)
+                value = value << 8 | bytes[i];
+        return value;
+}
 static p16 network_load_16(const p8 *bytes)
 {
         return (p16)(((p16)bytes[0] << 8) | (p16)bytes[1]);
@@ -54800,6 +54855,20 @@ static bool network_stream_send_all(bipolar handle, p8 address_to data,
                 abort();
         return !fuzz_send_fails;
 }
+static bool network_stream_send_all_for(bipolar handle, p8 address_to data,
+                                         positive length, positive seconds,
+                                         positive nanoseconds)
+{
+        (void)seconds; (void)nanoseconds;
+        return network_stream_send_all(handle, data, length);
+}
+static bool network_stream_send_all_until(bipolar handle, p8 address_to data,
+                                           positive length,
+                                           const network_deadline address_to deadline)
+{
+        (void)deadline;
+        return network_stream_send_all(handle, data, length);
+}
 static bipolar system_random_fill(address_any into, positive length,
                                   positive flags)
 {
@@ -54885,8 +54954,11 @@ static bipolar fuzz_gather(tls_conn address_to tls, positive want,
         bipolar status;
         p8 address_to span = null;
         positive got = 0;
+        network_deadline enclosing = {1, 500000000};
+        const network_deadline *budget = (fuzz_next() & 1) ? &enclosing : null;
 
-        status = tls_borrow(tls, want, address_of span, address_of got, 1, 0);
+        status = tls_borrow_within(tls, want, address_of span, address_of got,
+                                    1, 0, budget);
         fuzz_offsets(tls);
         *got_total = got;
         if (status || !got)
@@ -54904,8 +54976,8 @@ static bipolar fuzz_gather(tls_conn address_to tls, positive want,
                 count++;
                 if (count == 16 || total == want)
                         break;
-                status = tls_lend(tls, want - total, address_of span,
-                                  address_of got);
+                status = tls_lend_until(tls, want - total, address_of span,
+                                        address_of got, budget);
                 fuzz_offsets(tls);
                 if (status == TLS_AGAIN || (!status && !got))
                         break;
@@ -54984,7 +55056,8 @@ static fn fuzz_connection(const p8 *data, positive length)
                 case 1:
                 {
                         p8 address_to span = null;
-                        status = tls_borrow(tls, room, &span, &got, 1, 0);
+                        status = tls_borrow_within(tls, room, &span, &got, 1, 0,
+                                                  (roll & 32) ? &deadline : null);
                         if (!status && got)
                                 memcpy(into, span, got);
                         break;
@@ -55000,7 +55073,39 @@ static fn fuzz_connection(const p8 *data, positive length)
                 }
                 fuzz_offsets(tls);
                 if (status == TLS_FAIL)
+                {
+                        if (tls->seq_read == TLS_AES_GCM_RECORD_LIMIT &&
+                            tls->seq_write == TLS_AES_GCM_RECORD_LIMIT)
+                        {
+                                /* Both counters at the limit is a spent
+                                   connection, whether a refused record spent
+                                   it or the near-limit starts ran out. What an
+                                   earlier, authenticated record left unread
+                                   is still the caller's; no later record may
+                                   add to it. */
+                                positive pending = tls->plain_used;
+                                positive drained = 0;
+                                bipolar resumed;
+
+                                for (int again = 0; again < 8; again++)
+                                {
+                                        p8 *span = null;
+                                        positive more = 0;
+
+                                        resumed = tls_lend_until(tls, 7, &span,
+                                                                  &more, null);
+                                        if (resumed || !more)
+                                                break;
+                                        drained += more;
+                                        if (drained > pending)
+                                                abort();
+                                }
+                                if (tls_write(tls, into, 1) != TLS_FAIL)
+                                        abort();
+                                fuzz_offsets(tls);
+                        }
                         break;
+                }
                 if (status != TLS_OK || got > room)
                         abort();
                 if (roll % 4 == 3)
@@ -55049,7 +55154,9 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 """
 
     return tls_fuzz_run("tls hs", "tls_hs",
-                        shim + "#define memory_copy_apart memmove\n" + byte_store_source() +
+                        shim + ul_c_function((HARNESS_ROOT / "src/net/wait.c").read_text(),
+                                             "network_deadline_begin_within") +
+                        "\n#define memory_copy_apart memmove\n" + byte_store_source() +
                         byte_reader_source() + defines + connection + stubs +
                         record + "\n" + load24 + "\n" + protocol + "\n" + driver,
                         81920)
@@ -57245,6 +57352,13 @@ def dns_fuzz_seeds():
         [dns_fuzz_seed_record(at12, 16, run)] +
         [dns_fuzz_seed_record(struct.pack(">H", 0xc000 | (41 + 2 * 399)), 16, b"")
          for _ in range(60)])
+    legal_run = b"".join(struct.pack(">H", 0xc000 | (12 if i == 0 else 39 + 2 * i))
+                         for i in range(126))
+    repeated = dns_fuzz_seed_reply(
+        "example.com",
+        [dns_fuzz_seed_record(at12, 65280, legal_run)] +
+        [a(struct.pack(">H", 0xc000 | (41 + 2 * 125)), [203, 0, 113, 9])
+         for _ in range(160)])
     long_label = "a" * 63 + ".b"
     longest = ".".join(["a" * 63] * 3 + ["b" * 61])
     conf = (b"# written by hand\nsearch example.com\noptions ndots:2 timeout:1\n"
@@ -57263,6 +57377,7 @@ def dns_fuzz_seeds():
         cname(at12, dns_fuzz_seed_name("edge.example.net")),
         a(dns_fuzz_seed_name("EDGE.example.NET"), [198, 51, 100, 7])], mixed=True)
     return {
+        "legal_pointer_fanout_work.bin": seed("example.com", udp(repeated)),
         "a_mixed.bin": seed("example.com", udp(plain_mixed)),
         "cname_chain_mixed.bin": seed("www.example.com", udp(chain_mixed)),
         "nxdomain_mixed.bin": seed("example.com", udp(mixed(authority=[soa], flags=0x8183))),
@@ -61922,11 +62037,497 @@ int main(void) {
     return checks.verdict("net clock fault", "net-clock-fault")
 
 
+def harness_net_wait_states(argv):
+    """Enumerate bounded production wait/send states under a model transport.
+
+    This is exhaustive for the stated finite alphabet and schedule depth,
+    not a proof of kernel scheduling, C memory safety or wall-clock fairness.
+    """
+    del argv
+    checks = Checks()
+    source = r'''
+#include <stdint.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <sys/time.h>
+typedef uint64_t positive;
+typedef int64_t bipolar;
+typedef uint8_t p8;
+typedef uint32_t p32;
+typedef int32_t b32;
+typedef int16_t b16;
+typedef int64_t b64;
+typedef void *address_any;
+#define address_to *
+#define address_of &
+#define null NULL
+#define positive_max UINT64_MAX
+#define memory_fill memset
+#define INLINE
+#define MSG_DONTWAIT 64
+#define MSG_NOSIGNAL 16384
+#define MSG_TRUNC 32
+#define SYSTEM_POLL_INVALID 32
+#define SYSTEM_POLL_READ 1
+#define SYSTEM_POLL_WRITE 4
+#define SOL_SOCKET 1
+#define SO_RCVTIMEO 20
+#define SO_SNDTIMEO 21
+typedef struct { b32 handle; b16 events; b16 returned; } system_poll_descriptor;
+typedef struct { p32 family, port, host; } socket_address_internet;
+
+/* I/O alphabet: one byte, whole span, EINTR, EAGAIN, EOF/zero,
+   terminal error, impossible over-report. Poll: ready, EINTR, invalid,
+   expiry. Each five-event schedule repeats its final event, so the same
+   enumeration covers persistent interruption and vanished readiness. */
+static unsigned script[5], poll_mode, clock_mode;
+static unsigned sends, receives, polls, clocks;
+static positive transferred, expected_length;
+static p8 bytes[16] = {1, 3, 5, 7, 9, 11, 13, 15};
+static p8 received[16];
+static unsigned long cases;
+static bool output_clock;
+static unsigned writes;
+static void require(bool ok) { if (!ok) abort(); }
+static positive clock_monotonic_nanoseconds(void)
+{
+    require(++clocks < 100);
+    if (clock_mode == 1 && clocks > 1) return 0;
+    if (clock_mode == 2 && clocks > 1) return 99;
+    return 100 + clocks * (clock_mode == 3 ? 20 : 1) *
+                 (output_clock ? UINT64_C(1000000000) : 1);
+}
+static bipolar next_result(unsigned call, positive length)
+{
+    switch (script[call < 5 ? call : 4]) {
+    case 0: return length ? 1 : 0;
+    case 1: return (bipolar)length;
+    case 2: return -4;
+    case 3: return -11;
+    case 4: return 0;
+    case 5: return -5;
+    default: return (bipolar)length + 1;
+    }
+}
+static bipolar socket_send(b32 h, p8 *data, positive length, b32 flags,
+                            void *peer, positive peer_size)
+{
+    (void)h; (void)peer; (void)peer_size;
+    require(sends < 100 && flags == (MSG_DONTWAIT | MSG_NOSIGNAL));
+    require(transferred <= expected_length &&
+            length == expected_length - transferred &&
+            data == bytes + transferred);
+    bipolar result = next_result(sends++, length);
+    if (result > 0 && (positive)result <= length) transferred += result;
+    return result;
+}
+static bipolar socket_receive(b32 h, p8 *into, positive room, b32 flags,
+                              void *peer, p32 *peer_size)
+{
+    (void)h; (void)peer; (void)peer_size;
+    require(receives < 100 && flags == MSG_DONTWAIT);
+    bipolar result = next_result(receives++, room);
+    if (result > 0 && (positive)result <= room) {
+        memcpy(into, bytes, result);
+        transferred = result;
+    }
+    return result;
+}
+static bipolar system_poll_wait(system_poll_descriptor *set, positive count,
+                                 struct timespec *limit, void *mask)
+{
+    (void)mask;
+    require(++polls < 100 && count == 1);
+    require(limit->tv_sec == 0 && limit->tv_nsec > 0 && limit->tv_nsec <= 20);
+    if (poll_mode == 1) return -4;
+    if (poll_mode == 2) { set[0].returned = SYSTEM_POLL_INVALID; return 1; }
+    return poll_mode == 3 ? 0 : 1;
+}
+static bipolar system_random_fill(void *p, positive width, positive flags)
+{ (void)p; (void)width; (void)flags; return -5; }
+static bipolar system_read_retry(positive h, p8 *p, positive n)
+{ (void)h; (void)p; (void)n; abort(); }
+static bipolar socket_option_set(b32 h, b32 level, b32 name, void *p, positive n)
+{ (void)h; (void)level; (void)name; (void)p; (void)n; return 0; }
+typedef struct timespec timespec;
+typedef struct timeval timeval;
+#include "src/net/wait.c"
+typedef struct { void *base; positive length; } http_span;
+static bipolar http_write_failure;
+#define HTTP_IDLE_SECONDS 2
+#define ENOSPC 28
+#define syscall(name) 0
+static bipolar system_call_3(positive call, positive fd, positive vector,
+                             positive count)
+{
+    (void)fd;
+    http_span *spans = (http_span *)vector;
+    positive total = 0;
+    require(call == 0 && writes < 100 && count <= 3);
+    for (positive i = 0; i < count; ++i) {
+        require(spans[i].base == bytes + transferred + total);
+        total += spans[i].length;
+    }
+    require(total == expected_length - transferred);
+    bipolar result = next_result(writes++, total);
+    if (result > 0 && (positive)result <= total) transferred += result;
+    return result;
+}
+/* PRODUCTION_HTTP_WRITE_SPANS */
+static void reset(void)
+{
+    sends = receives = polls = clocks = 0;
+    transferred = 0;
+    memset(received, 0, sizeof received);
+}
+int main(void)
+{
+    for (unsigned code = 0; code < 16807; ++code) {
+        unsigned n = code;
+        for (unsigned at = 0; at < 5; ++at) { script[at] = n % 7; n /= 7; }
+        for (poll_mode = 0; poll_mode < 4; ++poll_mode)
+        for (clock_mode = 0; clock_mode < 4; ++clock_mode)
+        for (unsigned length = 0; length <= 5; ++length) {
+            network_deadline d = {100, 20};
+            expected_length = length;
+            reset();
+            bool sent = network_stream_send_all_until(1, bytes, length, &d);
+            require(sent == (transferred == length));
+            require(length || (!sends && !clocks && !polls));
+            require(sends <= 20 && clocks <= 21 && polls <= 20);
+            reset();
+            sent = network_stream_send_all_for(1, bytes, length, 0, 20);
+            require(sent == (transferred == length));
+            require(length || (!sends && !clocks && !polls));
+            if (length && script[0] == 1)
+                require(sent && sends == 1 && !clocks && !polls);
+            require(sends <= 22 && clocks <= 23 && polls <= 22);
+            reset();
+            bipolar got = network_stream_read_some_until(1, received, length, &d);
+            if (got > 0 && (positive)got <= length)
+                require(transferred == (positive)got && !memcmp(received, bytes, got));
+            require(receives <= 20 && clocks <= 21 && polls <= 20);
+            /* Once an absolute budget is expired, no I/O is attempted. */
+            d = (network_deadline){1, 1};
+            reset();
+            require(network_stream_read_some_until(1, received, length, &d) < 0);
+            require(!receives && !polls);
+            reset();
+            require(network_stream_send_all_until(1, bytes, length, &d) == !length);
+            require(!sends && !polls);
+            ++cases;
+        }
+    }
+    printf("%lu schedules: bounded retries, ordered progress, nonblocking I/O, "
+           "expiry and clock-free whole writes\n", cases);
+    unsigned long output_cases = 0, bounds = 0;
+    output_clock = true;
+    for (unsigned code = 0; code < 16807; ++code) {
+        unsigned n = code;
+        for (unsigned at = 0; at < 5; ++at) { script[at] = n % 7; n /= 7; }
+        for (clock_mode = 0; clock_mode < 4; ++clock_mode)
+        for (unsigned partition = 0; partition < 64; ++partition) {
+            http_span spans[3];
+            positive total = 0;
+            for (unsigned i = 0; i < 3; ++i) {
+                positive length = (partition >> (i * 2)) & 3;
+                spans[i] = (http_span){bytes + total, length};
+                total += length;
+            }
+            expected_length = total;
+            reset(); writes = 0; http_write_failure = 0;
+            bool done = http_write_spans(1, spans, 3, total);
+            require(done == (transferred == total));
+            require(writes <= 12 && clocks <= 4);
+            require(total || (!writes && !clocks));
+            if (total && script[0] == 1) require(writes == 1 && !clocks);
+            ++output_cases;
+        }
+    }
+    output_clock = false;
+    const positive edges[] = {0, 1, 100, 101, 102, 120, 121, UINT64_MAX};
+    const positive seconds[] = {0, 1, 60, UINT64_MAX / NETWORK_NANOSECONDS,
+                                UINT64_MAX / NETWORK_NANOSECONDS + 1, UINT64_MAX};
+    const positive nanos[] = {0, 1, NETWORK_NANOSECONDS - 1,
+                              NETWORK_NANOSECONDS, UINT64_MAX};
+    for (unsigned begin = 0; begin < 8; ++begin)
+    for (unsigned budget = 0; budget < 8; ++budget)
+    for (unsigned s = 0; s < 6; ++s)
+    for (unsigned ns = 0; ns < 5; ++ns)
+    for (clock_mode = 0; clock_mode < 4; ++clock_mode)
+    for (unsigned alias = 0; alias < 2; ++alias) {
+        network_deadline outer = {edges[begin], edges[budget]}, d = outer;
+        positive now = clock_mode == 3 ? 120 : 101;
+        __uint128_t relative = (__uint128_t)seconds[s] * NETWORK_NANOSECONDS + nanos[ns];
+        bool valid = nanos[ns] < NETWORK_NANOSECONDS && relative != 0 &&
+                     outer.began != 0 && now >= outer.began &&
+                     now - outer.began < outer.budget;
+        reset();
+        bool started = network_deadline_begin_within(&d, seconds[s], nanos[ns],
+                                                      alias ? &d : &outer);
+        require(started == valid);
+        if (started) {
+            require(d.began == now && d.budget > 0);
+            require((__uint128_t)d.began + d.budget <=
+                    (__uint128_t)outer.began + outer.budget);
+            require(d.budget <= relative);
+        }
+        ++bounds;
+    }
+    printf("%lu output schedules and %lu nested deadline boundaries\n", output_cases, bounds);
+    return 0;
+}
+'''
+    source = source.replace("/* PRODUCTION_HTTP_WRITE_SPANS */",
+                            ul_c_function((HARNESS_ROOT / "src/net/net.c").read_text(),
+                                          "http_write_spans"))
+    compiler = shutil.which("clang")
+    if not compiler:
+        print("net wait states: NOT RUN -- needs clang with ASan/UBSan")
+        return 2
+    with tempfile.TemporaryDirectory(prefix="net-wait-states-") as temporary:
+        unit = Path(temporary) / "wait.c"
+        binary = Path(temporary) / "wait"
+        unit.write_text(source)
+        built = subprocess.run([compiler, "-std=c11", "-O2",
+                                "-fsanitize=address,undefined", "-I", str(HARNESS_ROOT),
+                                str(unit), "-o", str(binary)], capture_output=True, text=True)
+        checks(built.returncode == 0, "production wait state model compiles")
+        if built.returncode:
+            print(built.stderr[-3000:])
+        else:
+            ran = subprocess.run([str(binary)], capture_output=True, text=True, timeout=60)
+            if ran.returncode:
+                print(ran.stderr[-3000:])
+            else:
+                print("  " + ran.stdout.strip())
+            checks(ran.returncode == 0 and "1613472 schedules" in ran.stdout and
+                   "4302592 output schedules and 15360 nested deadline boundaries" in ran.stdout,
+                   "every five-event schedule preserves progress and termination invariants")
+    return checks.verdict("net wait states", "net-wait-states")
+
+
+def harness_net_parser_work_states(argv):
+    """Exhaust the DHCP loop's finite packet-class/work-budget model.
+
+    Real parsing, peer binding and lease policy have native datagram tests.
+    This model lifts the production loops, replacing those policies with
+    explicit outcomes so every composition of their rejection states is cheap.
+    """
+    del argv
+    checks = Checks()
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    wait = (HARNESS_ROOT / "src/net/wait.c").read_text()
+    source = r'''
+#include <stdint.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+typedef uint64_t positive;
+typedef int64_t bipolar;
+typedef uint8_t p8;
+typedef uint32_t p32;
+#define address_to *
+#define address_of &
+#define COLD
+#define null NULL
+#define AF_INET 2
+#define NETWORK_DISCARD_MAX 64
+#define DHCP_ACK 3
+#define DHCP_NAK 4
+#define DHCP_OK 0
+#define DHCP_REFUSED (-2)
+#define DHCP_NO_OFFER (-1)
+typedef struct { p32 family, port, host; } socket_address_internet;
+typedef struct { positive began, budget; } network_deadline;
+typedef struct { positive serial; } dhcp_lease;
+static unsigned script[5], prefix, calls;
+static void require(bool ok) { if (!ok) abort(); }
+static unsigned event(unsigned at)
+{
+    if (at < prefix) return at & 1 ? 2 : 0;
+    at -= prefix;
+    return script[at < 5 ? at : 4];
+}
+static bipolar network_receive_next(bipolar handle, p8 *packet, positive room,
+                                    socket_address_internet *peer, p32 *size,
+                                    const network_deadline *deadline)
+{
+    (void)handle; (void)deadline;
+    require(calls < 66 && room == 1);
+    unsigned kind = event(calls++);
+    *peer = (socket_address_internet){AF_INET, kind == 1 ? 2 : 1, 1};
+    *size = sizeof *peer;
+    packet[0] = kind;
+    return kind == 5 ? -5 : kind == 6 ? 2 : kind == 7 ? 0 : 1;
+}
+static bipolar dhcp_read(p8 *packet, positive length, p32 xid, p8 *hardware,
+                          dhcp_lease *lease, p8 *kind)
+{
+    (void)xid; (void)hardware;
+    require(length == 1);
+    if (packet[0] == 0) return -1;
+    lease->serial = packet[0];
+    *kind = packet[0];
+    return 0;
+}
+static bool dhcp_reacquisition_answer_matches(p8 kind, const dhcp_lease *answer,
+                                              const dhcp_lease *lease, bool rebind)
+{
+    (void)answer; (void)lease; (void)rebind;
+    return kind == DHCP_ACK || kind == DHCP_NAK;
+}
+static bool dhcp_lease_take(dhcp_lease *lease, const dhcp_lease *answer)
+{ *lease = *answer; return true; }
+/* PRODUCTION */
+/* Independent straight-line oracle: stop at a terminal packet or on the
+   (allowance + 1)th rejection. No nested parser loop or replenishment. */
+static bipolar oracle(unsigned allowance, bool complete, unsigned *used,
+                       unsigned *rejected)
+{
+    *rejected = 0;
+    for (unsigned at = 0; at <= allowance; ++at) {
+        unsigned kind = event(at);
+        *used = at + 1;
+        if (kind == 5) return complete ? DHCP_NO_OFFER : 0;
+        if (kind >= 2 && kind <= 4) {
+            if (!complete) return 1;
+            if (kind == 3) return DHCP_OK;
+            if (kind == 4) return DHCP_REFUSED;
+        }
+        if (*rejected == allowance) return complete ? DHCP_NO_OFFER : 0;
+        ++*rejected;
+    }
+    abort();
+}
+int main(void)
+{
+    unsigned long cases = 0;
+    socket_address_internet peer = {AF_INET, 1, 1};
+    network_deadline deadline = {1, 1};
+    p8 packet[1], hardware[6] = {0};
+    for (unsigned code = 0; code < 32768; ++code) {
+        unsigned n = code;
+        for (unsigned at = 0; at < 5; ++at) { script[at] = n % 8; n /= 8; }
+        for (unsigned boundary = 0; boundary <= 64; ++boundary) {
+            unsigned used, rejected;
+            prefix = boundary;
+            bipolar expected = oracle(64, true, &used, &rejected);
+            dhcp_lease lease = {99};
+            calls = 0;
+            bipolar result = dhcp_complete(1, packet, 1, 123, hardware,
+                                            &lease, &peer, false, &deadline);
+            require(result == expected && calls == used && calls <= 65);
+            require(lease.serial == (result == DHCP_OK ? 3 : 99));
+
+            prefix = 0;
+            positive remaining = boundary;
+            expected = oracle(boundary, false, &used, &rejected);
+            p8 kind = 0;
+            calls = 0;
+            bool got = dhcp_receive(1, packet, 1, 123, hardware, &lease, &kind,
+                                    &peer, false, NULL, &remaining, &deadline);
+            require(got == expected && calls == used && calls <= boundary + 1);
+            require(remaining == boundary - rejected);
+            if (got) require(kind >= 2 && kind <= 4 && lease.serial == kind);
+            if (!remaining) require(!network_discard_one(&remaining) && !remaining);
+            ++cases;
+        }
+    }
+    printf("%lu DHCP schedules, each checking completion and shared receive budgets\n", cases);
+    return 0;
+}
+'''
+    production = "\n".join((ul_c_function(wait, "network_discard_one"),
+                              ul_c_function(net, "dhcp_peer_matches"),
+                              ul_c_function(net, "dhcp_receive"),
+                              ul_c_function(net, "dhcp_complete")))
+    source = source.replace("/* PRODUCTION */", production)
+    compiler = shutil.which("clang")
+    if not compiler:
+        print("net parser work states: NOT RUN -- needs clang with ASan/UBSan")
+        return 2
+    with tempfile.TemporaryDirectory(prefix="net-parser-work-") as temporary:
+        unit = Path(temporary) / "work.c"
+        binary = Path(temporary) / "work"
+        unit.write_text(source)
+        built = subprocess.run([compiler, "-std=c11", "-O2",
+                                "-fsanitize=address,undefined", str(unit),
+                                "-o", str(binary)], capture_output=True, text=True)
+        checks(built.returncode == 0, "production DHCP work model compiles")
+        if built.returncode:
+            print(built.stderr[-3000:])
+        else:
+            ran = subprocess.run([str(binary)], capture_output=True, text=True, timeout=60)
+            if ran.returncode:
+                print(ran.stderr[-3000:])
+            else:
+                print("  " + ran.stdout.strip())
+            checks(ran.returncode == 0 and "2129920 DHCP schedules" in ran.stdout,
+                   "all five-event schedules and all 65 work boundaries match the independent oracle")
+    return checks.verdict("net parser work states", "net-parser-work-states")
+
+
 def harness_net_math_proof(argv):
     """Machine-check finite arithmetic lemmas used by src/net/net.c."""
     del argv
     checks = Checks()
     net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    wait = (HARNESS_ROOT / "src/net/wait.c").read_text()
+
+    # Prove the nested-deadline arithmetic across every four-word 64-bit
+    # assignment: began, now, outer budget, chosen inner budget. A finite
+    # carry/borrow automaton merges equivalent prefixes but retains their
+    # multiplicities. Inputs satisfying now >= began, elapsed < outer,
+    # and inner <= outer - elapsed must have now + inner <= began + outer.
+    # Compare the sums at 65 bits: wrapping their carry away would hide bugs
+    # at the end of the 64-bit clock range. This proves the arithmetic lemma,
+    # not kernel fairness, compiler correctness or the entire C function.
+    states = {(0, 0, False, 0, 0, 0, 0): 1}
+    for _ in range(64):
+        following = collections.Counter()
+        for (elapsed_borrow, left_borrow, left_any, clamp_borrow,
+             inner_carry, outer_carry, order_borrow), paths in states.items():
+            for bits in range(16):
+                began, now, outer, inner = ((bits >> i) & 1 for i in range(4))
+                elapsed = now - began - elapsed_borrow
+                left = outer - (elapsed & 1) - left_borrow
+                clamp = (left & 1) - inner - clamp_borrow
+                inner_sum = now + inner + inner_carry
+                outer_sum = began + outer + outer_carry
+                order = (outer_sum & 1) - (inner_sum & 1) - order_borrow
+                following[(int(elapsed < 0), int(left < 0),
+                           left_any or bool(left & 1), int(clamp < 0),
+                           inner_sum >> 1, outer_sum >> 1,
+                           int(order < 0))] += paths
+        states = dict(following)
+    eligible = wrong = 0
+    for (elapsed_borrow, left_borrow, left_any, clamp_borrow,
+         inner_carry, outer_carry, order_borrow), paths in states.items():
+        if not elapsed_borrow and not left_borrow and left_any and not clamp_borrow:
+            eligible += paths
+            wrong += paths if outer_carry - inner_carry - order_borrow < 0 else 0
+    # Independently count admissible tuples: for elapsed e and k = MAX-e,
+    # there are k+1 starts, and sum(t+1, t=1..k) choices of outer/inner
+    # budgets. Summing (k^3 + 4*k^2 + 3*k)/2 also prevents a vacuous proof
+    # caused by accidentally excluding valid guard states.
+    maximum = (1 << 64) - 1
+    sum1 = maximum * (maximum + 1) // 2
+    sum2 = maximum * (maximum + 1) * (2 * maximum + 1) // 6
+    expected_eligible = (sum1 * sum1 + 4 * sum2 + 3 * sum1) // 2
+    checks(sum(states.values()) == 1 << 256 and eligible == expected_eligible and wrong == 0,
+           "nested deadline arithmetic never extends expiry over all 2^256 input tuples")
+    clamp_source = ul_c_function(wait, "network_deadline_begin_within")
+    checks(all(guard in clamp_source for guard in (
+        "enclosing = *outer;", "deadline->began < enclosing.began",
+        "elapsed = deadline->began - enclosing.began;",
+        "if (elapsed >= enclosing.budget)", "left = enclosing.budget - elapsed;",
+        "if (deadline->budget > left)", "deadline->budget = left;")),
+        "production nested-deadline guards and clamp match the proved arithmetic")
 
     # Bit-blast x + 1 and x & (x + 1), least-significant bit first. States
     # carry their path multiplicity, so the final sum proves all 2^32 words
@@ -62076,12 +62677,12 @@ byte_reader_vector24 byte_reader_vector8 byte_reader_window
 byte_store_append_exact byte_store_release byte_store_reserve
 memory_compare memory_compare_ascii_case memory_copy memory_copy_apart
 memory_copy_apart_end memory_copy_end memory_fill memory_first_of
-memory_load_unaligned memory_search memory_span_byte memory_span_byte_reverse
-memory_span_without_byte memory_text_span memory_zero network_deadline_begin network_deadline_left network_load_16
+memory_load_unaligned memory_store_unaligned memory_search memory_span_byte memory_span_byte_reverse
+memory_span_without_byte memory_text_span memory_zero network_deadline_begin network_deadline_begin_within network_deadline_left network_discard_one network_load_16
 network_load_32 network_load_64 network_order_16 network_order_32
 network_receive_next network_store_16 network_store_32 network_store_64 network_stream_read_all
 network_stream_read_some_for network_stream_read_some_until
-network_stream_send_all network_stream_send_all_until network_stream_timeout
+network_stream_send_all_for network_stream_send_all_until network_stream_timeout
 network_transaction_secure network_wait_readable_until network_wait_writable_until
 positive_into socket_bind socket_close socket_connect socket_name socket_new
 socket_option_get socket_option_set socket_receive socket_send string_compare_max
@@ -62231,7 +62832,8 @@ def harness_net_dependency_closure(argv):
     run = (HARNESS_ROOT / "test/run").read_text()
     evidence = ("crypto_vectors", "crypto_fuzz", "tls_der_fuzz", "tls_hs_fuzz",
                 "tls_verify_fuzz", "dns_fuzz", "dhcp_fuzz", "netlink_fuzz",
-                "http_fuzz", "tls_peer", "wget_mutation", "net_netem", "msan_net")
+                "http_fuzz", "tls_peer", "wget_mutation", "net_netem", "msan_net",
+                "net_wait_states", "net_parser_work_states")
     for name in evidence:
         checks(name in HARNESS_CHECKS,
                "net dependency closure: unregistered evidence harness " + name)
@@ -62282,7 +62884,7 @@ def harness_security_hygiene(argv):
                 "dhcp_fuzz", "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "tls_peer",
                 "http_fuzz", "http_urls", "wifi_eapol_fuzz", "wifi_scan_fuzz",
                 "bowl_sig_fuzz", "wget_mutation", "wget_hostile", "sntp_era", "net_netem",
-                "net_dependency_closure", "net_math_proof", "net_clock_fault",
+                "net_dependency_closure", "net_math_proof", "net_clock_fault", "net_wait_states", "net_parser_work_states",
                 "protected_links", "hostile_strings", "state_cuts")
     for name in security + ("tls_verify_fuzz",):
         checks(name in HARNESS_CHECKS, "differential.py: %s is not registered" % name)
@@ -62319,6 +62921,37 @@ def harness_security_hygiene(argv):
 
     net = (HARNESS_ROOT / "src/net/net.c").read_text()
     checks_c = (HARNESS_ROOT / "test/checks.c").read_text()
+
+    #   No network call may sleep past a deadline. Readiness is only a hint (a
+    #   datagram can be gone between the poll and the read), so every receive in
+    #   the network sources is nonblocking, and the one send that has no
+    #   deadline, network_stream_send_all, is no production caller's.
+    def uncommented(text):
+        return re.sub(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"',
+                      lambda match: "\n" * match.group(0).count("\n"), text,
+                      flags=re.S)
+
+    blocking = []
+    unbounded = []
+    network_sources = [HARNESS_ROOT / "src/sh/net.c"] + sorted(
+        (HARNESS_ROOT / "src/net").glob("*.c")) + sorted(
+        (HARNESS_ROOT / "src/waterlink").glob("*.c"))
+    for path in network_sources + [HARNESS_ROOT / "src/sh/tools.c",
+                                   HARNESS_ROOT / "src/sh/host.c"]:
+        text = uncommented(path.read_text())
+        for call in re.finditer(r"\bsocket_receive\s*\(", text):
+            statement = text[call.start():text.index(";", call.start())]
+            if "MSG_DONTWAIT" not in statement:
+                blocking.append("%s:%d" % (path.relative_to(HARNESS_ROOT),
+                                           text.count("\n", 0, call.start()) + 1))
+        for call in re.finditer(r"\bnetwork_stream_send_all\s*\(", text):
+            line = text.count("\n", 0, call.start()) + 1
+            if path.name != "wait.c" or "static bool" not in text[call.start() - 12:call.start()]:
+                unbounded.append("%s:%d" % (path.relative_to(HARNESS_ROOT), line))
+    checks(not blocking, "a blocking socket_receive in the network sources: " + ", ".join(blocking))
+    checks(not unbounded,
+           "network_stream_send_all has no deadline; use network_stream_send_all_for or _until: "
+           + ", ".join(unbounded))
     verify = inspect.getsource(harness_tls_verify_fuzz)
     checks("tls_verify_one(" in verify and "fuzz_prove_wr2_gts()" in verify and
            "tls_verify_hosted_source(" in verify and "Mocked signature" not in verify,
@@ -62487,6 +63120,7 @@ HOSTILE_SOURCES = {
     "dns_copy_name": {
         "dns_answer_address": "compares names; only addresses are printed",
         "dns_skip_name": "skips a name",
+        "dns_records_end": "checks record framing and aggregate decompression work; prints nothing",
         "waterlink_dns_name": "names pass link_name_good before use",
     },
     "http_header": {
@@ -69887,10 +70521,10 @@ class MdnsWire:
         return bytes(out)
 
 
-def mdns_model_name(packet, at, steps=None):
+def mdns_model_name(packet, at, pointers=None):
     """net.c's dns_copy_name, step for step, as the reader calls it: the
-    name and the offset just past it, or None. A step is taken for each
-    label and pointer once its first byte is read."""
+    name and the offset just past it, or None. The shared budget counts
+    compression pointers; ordinary labels consume their own packet bytes."""
     ceiling, position, jumps, ended, out = len(packet), at, 0, None, bytearray()
     while True:
         here = position
@@ -69898,10 +70532,6 @@ def mdns_model_name(packet, at, steps=None):
             return None
         length = packet[position]
         position += 1
-        if steps is not None:
-            if steps[0] == 0:
-                return None
-            steps[0] -= 1
         if length & 0xc0 == 0xc0:
             if position >= ceiling:
                 return None
@@ -69912,6 +70542,8 @@ def mdns_model_name(packet, at, steps=None):
             jumps += 1
             if target >= here or jumps > 127:
                 return None
+            if pointers is not None and pointers[0] < jumps:
+                return None
             ceiling, position = here, target
             continue
         if length & 0xc0 or position + length > ceiling or len(out) + 1 + length > 255:
@@ -69920,20 +70552,23 @@ def mdns_model_name(packet, at, steps=None):
         out += packet[position:position + length]
         position += length
         if not length:
+            if pointers is not None:
+                pointers[0] -= jumps
             return bytes(out), ended if ended is not None else position
 
 
 def mdns_model_read(packet, budget=True):
     """waterlink_mdns_read as a model written from its comments and the
-    RFCs it cites: (read, asked, ports of the instances found, steps the
-    names took). The reader in the binary must say the same of every packet.
-    The names of a packet may take one step, a label or a pointer, for each
-    byte of it; without the budget the steps are only counted."""
+    RFCs it cites: (read, asked, ports of the instances found, compression
+    pointers followed). The reader in the binary must say the same of every
+    packet.
+    The names of a packet share a compression-pointer budget equal to its
+    wire length; without the budget the pointers are only counted."""
     import struct
     allowed = len(packet) if budget else 1 << 40
-    steps = [allowed]
+    pointers = [allowed]
     asked, found = False, []
-    took = lambda: allowed - steps[0]
+    took = lambda: allowed - pointers[0]
 
     def refused():
         return False, False, [], took()
@@ -69964,7 +70599,7 @@ def mdns_model_read(packet, budget=True):
         return found[-1]
     at = 12
     for _ in range(questions):
-        got = mdns_model_name(packet, at, steps)
+        got = mdns_model_name(packet, at, pointers)
         if got is None or got[1] + 4 > len(packet):
             return refused()
         kind, klass = struct.unpack(">HH", packet[got[1]:got[1] + 4])
@@ -69972,7 +70607,7 @@ def mdns_model_read(packet, budget=True):
             asked = True
         at = got[1] + 4
     for _ in range(records):
-        got = mdns_model_name(packet, at, steps)
+        got = mdns_model_name(packet, at, pointers)
         if got is None or got[1] + 10 > len(packet):
             return refused()
         kind, klass, ttl, size = struct.unpack(">HHIH", packet[got[1]:got[1] + 10])
@@ -69984,7 +70619,7 @@ def mdns_model_read(packet, budget=True):
             continue
         name = got[0]
         if kind == 12 and ttl and klass & 0x7fff == 1 and service(name):
-            target = mdns_model_name(packet, data, steps)
+            target = mdns_model_name(packet, data, pointers)
             if target and target[1] == at and instance(target[0]) is not None:
                 one = slot(instance(target[0]))
                 if one:
@@ -69997,7 +70632,7 @@ def mdns_model_read(packet, budget=True):
             port = struct.unpack(">H", packet[data + 4:data + 6])[0]
             if not port:
                 continue
-            target = mdns_model_name(packet, data + 6, steps)
+            target = mdns_model_name(packet, data + 6, pointers)
             if not target or target[1] != at or len(target[0]) <= 1:
                 continue
             one = slot(label)
@@ -70113,8 +70748,8 @@ def mdns_flood(rng, depth, place, kind, labels, records, pad):
 
 def mdns_floods(rng, count):
     """Floods of every shape, and for each the packet whose names take
-    exactly as many steps as it has bytes and the one that takes one more,
-    made by the padding alone: (packet, steps its names take)."""
+    exactly as many compression-pointer jumps as it has bytes and the one
+    that takes one more, made by padding alone: (packet, pointers followed)."""
     for _ in range(count):
         depth = rng.choice((1, 2, 4, 16, 64, 126, 127, rng.randint(1, 127)))
         labels = rng.choice((0, 0, 0, rng.randint(1, 120)))
@@ -70327,8 +70962,8 @@ def harness_waterlink_mdns(argv):
     checks(meant == kinds.count("response"),
            "every generated response reads, with the instances it was written with (%d of %d)" %
            (meant, kinds.count("response")))
-    #       What a packet costs: a flood whose names take exactly as many
-    #       steps as it has bytes reads and one step over is refused; and
+    #       What a packet costs: a flood whose names follow exactly as many
+    #       compression pointers as it has bytes reads and one more is refused; and
     #       what responders and browsers write is well inside it.
     edge = collections.Counter()
     for packet, kind, answer, took in zip(packets, kinds, answers, intents):
@@ -70336,13 +70971,13 @@ def harness_waterlink_mdns(argv):
             edge[took - len(packet), answer.startswith("ok")] += 1
     dearest = max(mdns_model_read(p)[3] / len(p) for p, k in zip(packets, kinds)
                   if k in ("response", "query", "dnspython"))
-    print("  mdns floods at exactly their bytes in steps: %d read, %d refused; one step over: "
+    print("  mdns floods at exactly their bytes in pointer jumps: %d read, %d refused; one over: "
           "%d read, %d refused" % (edge[0, True], edge[0, False], edge[1, True], edge[1, False]))
     checks(edge[0, True] > 10 and edge[1, False] > 10 and not edge[0, False] and not edge[1, True],
-           "a flood whose names take exactly its bytes in steps reads, one step more is refused")
-    checks(dearest < 0.75, "the dearest packet a responder or browser wrote took %.2f steps a byte" %
+           "a flood at its packet-sized pointer budget reads, one pointer more is refused")
+    checks(dearest < 0.75, "the dearest packet a responder or browser wrote followed %.2f pointers a byte" %
            dearest)
-    print("  mdns steps: the dearest generated response or question took %.2f a byte" % dearest)
+    print("  mdns pointer work: the dearest generated response or question followed %.2f a byte" % dearest)
     return checks.verdict("waterlink mdns:", "waterlink-mdns")
 
 
@@ -74756,6 +75391,7 @@ typedef enum { EITHER, INDEX, DIRENT, DIRENT_HTREE } dirblock_type_t;
 #define EFSCORRUPTED 117
 #define EEXIST 17
 #define ENOSPC 28
+#define NETWORK_INTERRUPTED (-4)
 struct qstr { const unsigned char *name; u32 len; };
 struct fscrypt_name { const struct qstr *usr_fname; struct fscrypt_str disk_name; u32 hash; u32 minor_hash; struct fscrypt_str crypto_buf; bool is_nokey_name; };
 struct ext4_filename { const struct qstr *usr_fname; struct fscrypt_str disk_name; struct dx_hash_info hinfo; struct fscrypt_str crypto_buf; struct qstr cf_name; };
@@ -80185,6 +80821,8 @@ HARNESS_CHECKS = {
     "tls_fuzz": harness_tls_fuzz,
     "msan_net": harness_msan_net,
     "net_clock_fault": harness_net_clock_fault,
+    "net_wait_states": harness_net_wait_states,
+    "net_parser_work_states": harness_net_parser_work_states,
     "net_math_proof": harness_net_math_proof,
     "wire_constants": harness_wire_constants,
     "net_dependency_closure": harness_net_dependency_closure,

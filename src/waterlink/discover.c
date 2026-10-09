@@ -255,8 +255,8 @@ positive waterlink_mdns_query(p8 address_to packet, positive room)
         resolver trusts: a pointer only ever goes back past where it stands,
         and nothing after it may read up to it again, so no loop is possible.
         Returns the offset just past the name as it sits in the packet, or 0
-        for anything that is not a name or would take more of the packet's
-        steps than are left.
+        for anything that is not a name or would take more compression
+        pointers than the packet's shared work budget has left.
 */
 #define WATERLINK_NAME_BYTES 256
 
@@ -362,10 +362,10 @@ waterlink_found_at(struct waterlink_found address_to found,
         nothing found, when it is not a well formed message; a well formed
         one about other things answers true with nothing found.
 
-        Anyone on the link sends these, so the names of a packet may take one
-        step, a label or a pointer, for each byte of it between them: a
-        hundred records naming the end of one long chain cost 45 us without
-        it. DNS-SD as responders write it takes under 0.4 a byte.
+        Anyone on the link sends these, so all names share a compression
+        pointer budget equal to the packet's wire length: a hundred records
+        naming the end of one long chain cost 45 us without it. Ordinary
+        labels consume packet bytes and do not spend this second budget.
 */
 bool waterlink_mdns_read(const p8 address_to packet, positive length,
                          struct waterlink_found address_to found)
