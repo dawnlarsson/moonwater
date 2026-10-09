@@ -57892,6 +57892,36 @@ static fn fetching(void)
                           used == sizeof expected - 1 &&
                           !memory_compare(request, expected, used));
 
+                static const p8 head_expected[] =
+                    "HEAD /x HTTP/1.1\r\n"
+                    "Host: example.com:8080\r\n"
+                    "User-Agent: Test\r\n"
+                    "Accept: */*\r\n"
+                    "Connection: close\r\n\r\n";
+
+                check("wget --spider's request is the same request with HEAD",
+                      http_request(request, sizeof request, true,
+                                   (string_address)"example.com", 8080,
+                                   (string_address)"/x", false, '1',
+                                   (string_address)"Test", address_of used) == HTTP_OK &&
+                          used == sizeof head_expected - 1 &&
+                          !memory_compare(request, head_expected, used) &&
+                          http_request(request, sizeof head_expected - 1, true,
+                                       (string_address)"example.com", 8080,
+                                       (string_address)"/x", false, '1',
+                                       (string_address)"Test", address_of used) ==
+                              HTTP_OK &&
+                          http_request(request, sizeof head_expected - 2, true,
+                                       (string_address)"example.com", 8080,
+                                       (string_address)"/x", false, '1',
+                                       (string_address)"Test", address_of used) ==
+                              HTTP_BAD_URL);
+                check("only the spider's manners ask HEAD, and they follow as wget does",
+                      http_manners_spider.head && http_manners_spider.follow &&
+                          !http_manners_spider.undeclared_most &&
+                          !http_manners_wget.head && !http_manners_fetch.head &&
+                          !http_manners_zone.head);
+
                 static const p8 fragmentless[] =
                     "GET /x?q=one HTTP/1.1\r\n"
                     "Host: example.com\r\n"

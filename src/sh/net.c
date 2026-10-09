@@ -662,6 +662,7 @@ static const argument_option wget_options[] = {
     {"help", 'h'},
     {"version", 'V'},
     {"no-check-certificate", 'K'},
+    {"spider", 's', ARGUMENT_LONG_ONLY},
     {null},
 };
 
@@ -815,6 +816,11 @@ static COLD b32 net_wget_failed(bipolar status, b32 code, p8 address_to where,
                                      file_reason(http_write_failure));
         case HTTP_STATUS:
                 refuse_if(code == 401, WGET_AUTH, "Username/Password Authentication Failed.\n");
+                //      --spider names output null, and says GNU wget's line.
+                if (!output && !http_response_is_redirect(code))
+                        return string_report(log_error, WGET_SERVER,
+                                             "Remote file does not exist -- "
+                                             "broken link!!!\n");
                 //      wget follows every redirect it is given a place for.
                 if (http_response_is_redirect(code))
                         return string_report(log_error, WGET_SERVER,
@@ -866,7 +872,8 @@ static b32 net_wget(void)
                 return WGET_USAGE;
 
         if (file_meta(address_of taking,
-                      (string_address) "[-q] [-O FILE] [--no-check-certificate] URL",
+                      (string_address) "[-q] [-O FILE] [--no-check-certificate] "
+                                       "[--spider] URL",
                       log))
         {
                 log_flush();
@@ -878,7 +885,7 @@ static b32 net_wget(void)
                 string_format(log_error, "wget: missing URL\n");
                 return string_report(log_error, WGET_GENERIC,
                                      "Usage: wget [-q] [-O FILE] "
-                                     "[--no-check-certificate] URL\n");
+                                     "[--no-check-certificate] [--spider] URL\n");
         }
 
         if (taking.first + 1 < (positive)program_argument_count())
@@ -903,6 +910,25 @@ static b32 net_wget(void)
         status = http_split_into(url, name, sizeof name, address_of port,
                                  address_of path, address_of tls);
         return_if(status, net_wget_failed(status, 0, url, null));
+
+        /* --spider asks HEAD at every hop, as GNU wget does, and keeps
+           nothing; GNU wget still makes an -O file, empty, and so does this
+           (on success: a failed fetch publishes no file here). */
+        if ((taking.flags & FILE_FLAG('s')) && !output)
+        {
+                if (!quiet)
+                        string_format(log_error, "Spider mode enabled. Check if "
+                                                 "remote file exists.\n%w\n",
+                                      writer_terminal_quoted_name, url);
+                string_copy(where, url);
+                status = http_spider(url, check_cert, address_of code, where);
+                if (status)
+                        return net_wget_failed(status, code, where, null);
+                if (!quiet)
+                        string_format(log_error, "Remote file exists.\n");
+                log_flush();
+                return 0;
+        }
 
         if (output && string_equals(output, (string_address) "-"))
                 dest = 1;
@@ -964,7 +990,9 @@ static b32 net_wget(void)
         }
 
         string_copy(where, url);
-        status = http_fetch_to(url, dest, check_cert, address_of code, where);
+        status = taking.flags & FILE_FLAG('s')
+                     ? http_spider(url, check_cert, address_of code, where)
+                     : http_fetch_to(url, dest, check_cert, address_of code, where);
         if (own_stream)
                 system_close((positive)dest);
 

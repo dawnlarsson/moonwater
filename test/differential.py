@@ -51196,12 +51196,14 @@ static bool network_deadline_left(const network_deadline *d, positive *s,
 
 /* Every request this client writes: one request line and four fields, each
    ended by CRLF, a blank line, and no other CR, LF or control. */
+static bool fuzz_request_head;
 static void fuzz_request(const p8 *data, positive length)
 {
         positive lines = 0;
+        positive method = fuzz_request_head ? 5 : 4;
         fuzz_requests++;
-        if (length < 4 || memcmp(data + length - 4, "\r\n\r\n", 4) ||
-            memcmp(data, "GET /", 5))
+        if (length < 5 || memcmp(data + length - 4, "\r\n\r\n", 4) ||
+            memcmp(data, fuzz_request_head ? "HEAD /" : "GET /", method + 1))
                 fuzz_die("request framing");
         for (positive at = 0; at < length; at++) {
                 p8 byte = data[at];
@@ -51218,7 +51220,7 @@ static void fuzz_request(const p8 *data, positive length)
                 fuzz_die("request line count");
         /* "GET " target " HTTP/1.x" CR: the target holds no space. */
         positive line = (positive)((const p8 *)memchr(data, '\r', length) - data);
-        if (line < 14 || memchr(data + 4, ' ', line - 13))
+        if (line < method + 10 || memchr(data + method, ' ', line - method - 9))
                 fuzz_die("space inside the request target");
         if (fuzz_identity_pending) {
                 const p8 *field = memmem(data, length, "\r\nHost: ", 8);
@@ -51611,10 +51613,12 @@ static int fuzz_whole(const p8 *segment, positive size, bool tls, bool follow,
         }
 }
 
+static bool fuzz_head;
 static void fuzz_run(const p8 *data, positive size, int lane)
 {
         bool tls = lane == 1;
         bool fetch = lane == 2;
+        bool head = fuzz_head && !fetch;
         const char *start = tls ? "https://127.0.0.1:8443/dir/file.bin?q=1"
                                 : "http://127.0.0.1:8080/dir/file.bin?q=1";
         http_buffer store = {0};
@@ -51629,8 +51633,12 @@ static void fuzz_run(const p8 *data, positive size, int lane)
         fuzz_identity_host[0] = 0;
         fuzz_identity_pending = false;
         fuzz_sink_used = 0;
+        fuzz_request_head = head;
         status = fetch ? http_get((string_address)start, &store, &code)
-                       : http_fetch_to((string_address)start, 7, true, &code, null);
+                 : head ? http_spider((string_address)start, true, &code, null)
+                        : http_fetch_to((string_address)start, 7, true, &code, null);
+        if (head && fuzz_sink_used)
+                fuzz_die("a HEAD wrote a body");
         if (fuzz_requests != fuzz_opened)
                 fuzz_die("a connection was opened with no request written on it");
         if (fuzz_identity_pending)
@@ -51652,7 +51660,22 @@ static void fuzz_run(const p8 *data, positive size, int lane)
                                                  "public space");
                 }
 
-        if (fuzz_opened && !fuzz_write_faults && fuzz_segment_open(fuzz_opened - 1)) {
+        /* A HEAD's final answer is its head: a whole 2xx head is success
+           whatever follows it, a refused head is a refusal. */
+        if (head && fuzz_opened && fuzz_segment_open(fuzz_opened - 1)) {
+                http_response response;
+                positive header = 0;
+                p8 *copy = malloc(fuzz_segment_size + 1);
+                memcpy(copy, fuzz_segment, fuzz_segment_size);
+                bipolar framed = http_response_framing(copy, fuzz_segment_size, &header,
+                                                       &response);
+                free(copy);
+                if (!framed && http_response_is_success(response.code) && status)
+                        fuzz_die("HEAD refused a whole 2xx head");
+                if (framed && framed != HTTP_NO_REPLY &&
+                    fuzz_segment_size < HTTP_HEAD_MAX && !status)
+                        fuzz_die("HEAD took a head the framing refuses");
+        } else if (fuzz_opened && !fuzz_write_faults && fuzz_segment_open(fuzz_opened - 1)) {
                 p8 *want = NULL;
                 positive want_size = 0;
                 int whole = fuzz_whole(fuzz_segment, fuzz_segment_size, tls, !fetch,
@@ -51702,6 +51725,7 @@ static void fuzz_url(const p8 *data, positive size)
         p8 leaf[256];
         p8 next[HTTP_URL_MAX];
 
+        fuzz_request_head = false;
         /* Escaping is idempotent and leaves nothing it escapes behind the
            authority: a second pass over its answer changes nothing. */
         for (int bare = 0; bare < 2; bare++) {
@@ -51819,7 +51843,10 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
         data += 2;
         size -= 2;
         if (lane < 3)
+        {
+                fuzz_head = lane < 2 && (data[-1] & 0x80);
                 fuzz_run(data, size, lane);
+        }
         else if (lane == 3)
                 fuzz_url(data, size);
         else
@@ -51887,6 +51914,15 @@ def http_fuzz_seeds():
     seeds["run0_faults_length.bin"] = b"\x80\x03" + (
         b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\n" + b"z" * 4096)
     seeds["run1_close_notify.bin"] = b"\x01\x02HTTP/1.1 200 OK\r\n\r\n" + b"q" * 3000
+    #   HEAD (wget --spider): a lane's second byte with its top bit set.
+    for name, wire in (("cl_unsent", b"HTTP/1.1 200 OK\r\nContent-Length: 99\r\n\r\n"),
+                       ("chunked", b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"),
+                       ("close_with_bytes", b"HTTP/1.1 200 OK\r\n\r\nnot a body"),
+                       ("missing", b"HTTP/1.1 404 Not Found\r\nContent-Length: 3\r\n\r\nno\n"),
+                       ("redirected", b"HTTP/1.1 302 Found\r\nLocation: /y\r\n\r\n" + hop +
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\n")):
+        for lane in (0, 1):
+            seeds["head%d_%s.bin" % (lane, name)] = bytes([lane, 0x87]) + wire
     seeds["run0_1xx_trickle.bin"] = b"\x00\x01" + (
         b"HTTP/1.1 100 Continue\r\n\r\n" * 20 + ok)
     for name, url, location in (
@@ -52396,6 +52432,7 @@ def harness_wget_hostile(argv):
     import socket
     import tempfile
     import threading
+    import time
     parser = argparse.ArgumentParser(prog="differential.py --harness wget_hostile")
     parser.add_argument("--cc", default=os.environ.get("CC", "gcc"))
     parser.add_argument("--shell", help="a built shell to use instead of building one")
@@ -52418,7 +52455,7 @@ def harness_wget_hostile(argv):
     def hop(location):
         """/x redirects to location; anything else is the answer."""
         return lambda line, port: (redirect(location.replace(b"PORT", b"%d" % port))
-                                   if line.startswith(b"GET /x ") else ok())
+                                   if line.split(b" ")[1:2] == [b"/x"] else ok())
 
     def answer(response):
         return lambda line, port: response.replace(b"PORT", b"%d" % port)
@@ -52460,8 +52497,14 @@ def harness_wget_hostile(argv):
                     if field.lower().startswith(b"host:"):
                         self.hosts.append(field[5:].strip())
                 reply = self.script(line, self.port)
+                hold = reply.endswith(b"<HOLD>")
+                reply = reply[:-6] if hold else reply
                 for at in range(0, len(reply), 4096):
                     peer.sendall(reply[at:at + 4096])
+                if hold:
+                    #   Keeps the connection open, as a server that means to
+                    #   send the body a head declares would.
+                    time.sleep(8)
             except OSError:
                 pass
             finally:
@@ -52482,11 +52525,13 @@ def harness_wget_hostile(argv):
     #   name, script, url (PORT and HOST filled in), expected request lines,
     #   expected exit for mw, references that must show the same lines, note
     def case(name, script, url, lines, code=0, refs=("wget", "curl"), host=None,
-             saved=b"hi", message=None):
+             saved=b"hi", message=None, spider=False, quick=False):
         return dict(name=name, script=script, url=url, lines=lines, code=code,
-                    refs=refs, host=host, saved=saved, message=message)
+                    refs=refs, host=host, saved=saved, message=message,
+                    spider=spider, quick=quick)
 
     GET = lambda target: b"GET " + target
+    HEAD = lambda target: b"HEAD " + target
     CASES = [
         #   A space, a backslash and bytes past ASCII after the authority are
         #   sent escaped, %XX in upper case, as GNU wget and curl send them
@@ -52527,6 +52572,22 @@ def harness_wget_hostile(argv):
         case("a Location too long to follow is named as it was, not as its sender",
              hop(b"/" + b"a" * 3000), "http://127.0.0.1:PORT/x", [GET(b"/x")], code=1,
              refs=(), saved=None, message=b"/aaaaaaaa"),
+        #   wget --spider asks HEAD at every hop and reads no body, however
+        #   the head frames one (curl -I beside it); with -O GNU wget leaves
+        #   an empty file, which this does on success.
+        case("--spider asks HEAD", answer(ok()), "http://127.0.0.1:PORT/x",
+             [HEAD(b"/x")], saved=b"", spider=True),
+        case("--spider follows a redirect with HEAD", hop(b"/z"), "http://127.0.0.1:PORT/x",
+             [HEAD(b"/x"), HEAD(b"/z")], saved=b"", spider=True),
+        case("--spider on a missing file is the server's answer",
+             answer(b"HTTP/1.1 404 Not Found\r\nContent-Length: 3\r\n\r\nno\n"),
+             "http://127.0.0.1:PORT/x", [HEAD(b"/x")], code=8, saved=None, spider=True),
+        case("--spider does not wait for a body the head declares",
+             answer(b"HTTP/1.1 200 OK\r\nContent-Length: 99\r\n\r\n<HOLD>"),
+             "http://127.0.0.1:PORT/x", [HEAD(b"/x")], saved=b"", spider=True, quick=True),
+        case("--spider does not wait for chunks the head declares",
+             answer(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n<HOLD>"),
+             "http://127.0.0.1:PORT/x", [HEAD(b"/x")], saved=b"", spider=True, quick=True),
         case("a redirect loop stops", answer(redirect(b"/x")),
              "http://127.0.0.1:PORT/x", [GET(b"/x")] * 21, code=8, refs=(), saved=None,
              message=b"redirections exceeded"),
@@ -52561,7 +52622,6 @@ def harness_wget_hostile(argv):
     #   wget and curl do.
     if args.netns:
         import struct
-        import time
         farm = Path(tempfile.mkdtemp(prefix="wget-netns-"))
         (farm / "wget").symlink_to(args.netns)
         #   The network's resolver, played by a stub on this namespace's own
@@ -52905,12 +52965,16 @@ def harness_wget_hostile(argv):
                 server = Server(one["script"])
                 folder = Path(tempfile.mkdtemp(dir=work))
                 url = one["url"].replace("PORT", str(server.port))
+                extra = ([] if not one["spider"] else
+                         ["-I"] if who == "curl" else ["--spider"])
+                began = time.monotonic()
                 try:
-                    done = subprocess.run(command + [url], capture_output=True,
+                    done = subprocess.run(command + extra + [url], capture_output=True,
                                           timeout=60, cwd=str(folder),
                                           env={"PATH": "/usr/bin:/bin"})
                 except subprocess.TimeoutExpired:
                     done = None
+                took = time.monotonic() - began
                 server.close()
                 label = "%s: %s" % (who, one["name"])
                 if done is None:
@@ -52922,6 +52986,9 @@ def harness_wget_hostile(argv):
                 if who == "mw":
                     checks(done.returncode == one["code"], "%s: exit %d, wanted %d (%s)" % (
                         label, done.returncode, one["code"], done.stderr[-160:]))
+                    if one["quick"]:
+                        checks(took < 5, "%s: took %.1f s, the server held the "
+                               "connection open" % (label, took))
                     if one["host"]:
                         want = one["host"] + b":%d" % server.port
                         checks(server.hosts == [want] * len(server.hosts) and server.hosts,

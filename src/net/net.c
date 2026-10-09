@@ -11157,11 +11157,13 @@ static positive http_port_suffix(p8 address_to into, bool tls, p16 port)
                    ? 0 : 1 + positive_into(into + 1, port);
 }
 
-static bipolar http_get_request(p8 address_to request, positive room,
-                                string_address host, p16 port,
-                                string_address path, bool tls,
-                                p8 version_minor, string_address agent,
-                                positive address_to used)
+/* The request, GET or -- for a caller that asks only whether the resource is
+   there, as wget --spider does -- HEAD, whose answer has no content whatever
+   its head declares (RFC 9110 9.3.2). */
+static bipolar http_request(p8 address_to request, positive room, bool head,
+                            string_address host, p16 port, string_address path,
+                            bool tls, p8 version_minor, string_address agent,
+                            positive address_to used)
 {
         p8 target[HTTP_URL_MAX];
         p8 port_text[7];
@@ -11175,7 +11177,8 @@ static bipolar http_get_request(p8 address_to request, positive room,
             version_minor < '0' || version_minor > '9')
                 return HTTP_BAD_URL;
 
-        ok = byte_store_append_exact(address_of out, "GET ", 4);
+        ok = head ? byte_store_append_exact(address_of out, "HEAD ", 5)
+                  : byte_store_append_exact(address_of out, "GET ", 4);
         ok &= byte_store_append_exact(address_of out, target, string_length(target));
         ok &= byte_store_append_exact(address_of out, " HTTP/1.", 8);
         ok &= byte_store_append_exact(address_of out, address_of version_minor, 1);
@@ -11191,6 +11194,16 @@ static bipolar http_get_request(p8 address_to request, positive room,
                 return HTTP_BAD_URL;
         address_to used = out.used;
         return HTTP_OK;
+}
+
+static bipolar http_get_request(p8 address_to request, positive room,
+                                string_address host, p16 port,
+                                string_address path, bool tls,
+                                p8 version_minor, string_address agent,
+                                positive address_to used)
+{
+        return http_request(request, room, false, host, port, path, tls,
+                            version_minor, agent, used);
 }
 
 static bipolar http_put_url(p8 address_to into, positive room, bool tls,
@@ -11597,17 +11610,24 @@ typedef struct
         //      HTTP_UNDECLARED_MOST. A body held in memory is held to
         //      body_most in every tier already.
         positive undeclared_most;
+        //      HEAD, not GET: whether the resource is there, and no body.
+        bool head;
 } http_manners;
 
 static const http_manners http_manners_fetch = {
     (string_address)"dawning", '0', false, false, true,
-    HTTP_HEAD_SECONDS, HTTP_BODY_SECONDS, HTTP_FETCH_MAX, 0};
+    HTTP_HEAD_SECONDS, HTTP_BODY_SECONDS, HTTP_FETCH_MAX, 0, false};
 static const http_manners http_manners_wget = {
     (string_address)"Wget", '1', true, true, false,
     HTTP_HEAD_SECONDS, HTTP_BODY_SECONDS, HTTP_FETCH_MAX,
-    MOONWATER_STRICT_NET >= STRICT_TIGHT ? HTTP_UNDECLARED_MOST : 0};
+    MOONWATER_STRICT_NET >= STRICT_TIGHT ? HTTP_UNDECLARED_MOST : 0, false};
+//      wget --spider: wget's manners, asking HEAD at every hop as GNU wget
+//      does, and reading no body however the head frames one.
+static const http_manners http_manners_spider = {
+    (string_address)"Wget", '1', true, true, false,
+    HTTP_HEAD_SECONDS, HTTP_BODY_SECONDS, HTTP_FETCH_MAX, 0, true};
 static const http_manners http_manners_zone = {
-    (string_address)"Moonwater", '1', false, true, false, 10, 10, 4096, 0};
+    (string_address)"Moonwater", '1', false, true, false, 10, 10, 4096, 0, false};
 
 /* The head of the response a fetch ended on, for the caller that reads a
    header of it. */
@@ -11673,8 +11693,8 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                 if (!status && !http_transport_allowed(address_of secure, tls))
                         status = HTTP_DOWNGRADE;
                 if (!status)
-                        status = http_get_request(
-                            head, sizeof head, host, port, path, tls,
+                        status = http_request(
+                            head, sizeof head, how->head, host, port, path, tls,
                             how->version_minor, how->agent, address_of used);
                 if (!status && !(ip = http_lookup(host)))
                         status = HTTP_NO_HOST;
@@ -11771,7 +11791,8 @@ static bipolar http_run(string_address start, const http_manners address_to how,
 
                 if (!status && !http_response_is_success(response.code))
                         status = HTTP_STATUS;
-                else if (!status && !http_response_has_no_body(response.code))
+                else if (!status && !how->head &&
+                         !http_response_has_no_body(response.code))
                 {
                         /* The default reads a 205's content as any other
                            response's, as wget and curl do.  The tight tier
@@ -11842,6 +11863,14 @@ static bipolar http_get(string_address url, http_buffer address_to body,
 {
         return http_run(url, address_of http_manners_fetch, false, -1, body,
                         code, null, null);
+}
+
+//      wget --spider: wget's request with HEAD, and nothing but the answer.
+static bipolar http_spider(string_address start, bool check_cert,
+                           b32 address_to code, p8 address_to where)
+{
+        return http_run(start, address_of http_manners_spider, check_cert, -1,
+                        null, code, where, null);
 }
 
 //      wget: TLS, redirects, and the body written as it arrives; where, if
