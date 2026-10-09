@@ -52,17 +52,51 @@ never a pass.
   at the tight tier holds RFC 9110 and RFC 3986: 204/205 framing, an explicit
   `http://` or `https://` for every URL, no redirect from public into private
   space, a whole-body deadline on streams.
-- **TLS:** no revocation (OCSP, CRL, CT), as default wget and curl. SAN only,
-  no common-name fallback. 120 Mozilla roots as keys, `distrust-after` dates
-  enforced. DNSSEC out of scope: the resolver is a stub that trusts the
-  network's DNS.
+- **TLS:** SAN only, no common-name fallback. 120 Mozilla roots as keys,
+  `distrust-after` dates enforced. No Certificate Transparency. DNSSEC out of
+  scope: the resolver is a stub that trusts the network's DNS.
+- **Revocation is stapling and CRLs, in tiers** (`tls_revocation_holds`). A
+  checked connection offers `status_request`; the leaf is asked by the OCSP
+  response its server staples (the leaf's CertificateEntry in TLS 1.3, a
+  CertificateStatus after the Certificate in TLS 1.2, relaid into the same
+  entry so one check reads both), and without a good staple, like every
+  certificate above it, by the CRL its first whole-reason `http:`
+  distribution point names. A staple has to be signed by the issuer or by a
+  responder the issuer issued with `id-kp-OCSPSigning`, name the leaf by a
+  SHA-1 or SHA-256 CertID, and be fresh within five minutes either way of
+  `thisUpdate` and a `nextUpdate` it must carry; a CRL has to be the
+  issuer's (Name, authority key identifier when both carry one, `cRLSign`
+  when the issuer limits its key, signature), cover the certificate
+  (`issuingDistributionPoint` sharing a name with its distribution point,
+  of its kind, not partial or indirect) and be fresh the same way. **Revoked
+  refuses in every tier**, stale or not. A must-staple leaf (TLS Feature
+  `status_request`, RFC 7633) without a good staple refuses in every tier. A
+  source that gives no usable answer -- unreachable, too large, unparseable,
+  stale, signed by no one it may be, about another certificate, `unknown`,
+  `tryLater` -- is **passed over at the default tier and refused at the
+  tight one** (`MOONWATER_STRICT_NET >= STRICT_TIGHT`, the hardened and
+  locked `sec_net` profiles). A certificate that names no CRL and whose server
+  staples nothing has no source to fail and passes in both. OCSP is never
+  fetched, only stapled, so a responder URL alone is not a source (Let's
+  Encrypt stopped answering OCSP in 2025 and publishes CRLs). A CRL is fetched
+  under the caIssuers rules (`http:` only, port 80 unless a harness serves
+  it, a public address, one HTTP/1.0 GET, no redirect) inside one
+  ten-second budget per handshake that nests in the handshake's own, held in
+  memory for the process (no file: the fetch may run where none can be
+  opened), refetched past its `nextUpdate`, and a failed fetch is not tried
+  again for five minutes. `--no-check-certificate` asks for nothing and reads
+  nothing, and keeps refusing an unasked staple.
 - **A refused certificate is status 5:** wget exits 5, as GNU wget does, and says
   which way it was refused in GNU's words (not trusted, owner does not match
-  hostname, has expired, is not yet activated) with the `--no-check-certificate`
-  hint, which still connects; any other failed handshake is 4. The causes are
-  kept apart from the handshake up (`tls_conn.fault`, `TLS_UNTRUSTED` to
-  `TLS_MISMATCH`, `HTTP_UNTRUSTED` to `HTTP_MISMATCH`), and a name that
-  fails is named before the dates.
+  hostname, has expired, is not yet activated, has been revoked -- GNU wget's
+  GnuTLS line) with the `--no-check-certificate` hint, which still connects;
+  where GNU wget has no line, a status that could not be checked where it is
+  required says `ERROR: Whether the certificate of 'HOST' is revoked could
+  not be checked.` with the same hint. Any other failed handshake is 4. The
+  causes are kept apart from the handshake up (`tls_conn.fault`,
+  `TLS_UNTRUSTED` to `TLS_UNCHECKED`, `HTTP_UNTRUSTED` to `HTTP_UNCHECKED`),
+  a name that fails is named before the dates, and revocation is asked only
+  of a path that passed everything else.
 - **A secret on a command line (`wifi add SSID PASSWORD`, `link group NAME
   SECRET`)** is in `ps` while the command lives and in the shell's history for
   good. The standard-input forms (`wifi add SSID -`, `link group NAME -`; a
@@ -187,7 +221,8 @@ ARM64 and RISC-V mandatory with UBSan trapping.
 | DHCPv4 | xid, MAC, server and OFFER-peer binding; option overload, END and zero padding; lease sanity; ARP probes before install, and a DHCPDECLINE (RFC 2131 4.4.1) with a ten-second hold-off for an address another station answers for; watcher cut once per link news; route ownership and rollback fault matrix (`net_lease_transitions`); `dhcp_fuzz`, `sh test/run netem net machine` | DHCP over a raw socket (`rp_filter`); the DECLINE is checked as a built packet and through its confined child, never against a live server |
 | SNTP | 64-bit nonce, peer, mode, stratum, timing, exactly 48 bytes at the tight tier; each sample its own wait; `sntp_fuzz`, `sntp_era` (2036, 2038, 2104), `sh test/run netem machine` | unauthenticated; NTS is a separate branch |
 | HTTP, URL | `localhost` and `*.localhost` reach 127.0.0.1 without a resolver (RFC 6761; `wget_hostile` with a stub resolver, curl held to the same rows); host spellings named against GNU wget and curl; the scheme rule at both tiers (`http_urls`); sink-side validation of host, target, headers; userinfo, schemes, fragments refused; one framing reading; redirect and HTTPS-downgrade bounds; body deadline; per-hop host, address, SNI and Host identity; `http_response_framing` (with `http.client` and curl), `wget_mutation` and `wget_hostile` (GNU wget and curl as live oracles), `https_downgrade`, `http_fuzz` | CNAME, multi-address and interface-scope identity; `inet_aton` shorthands (`0x7f.1`, `127.1`) are names here and addresses to wget and curl (decision); SNTP, logger and Waterlink peers still ask DNS for localhost; the tight tier bounds each hop, not the redirect chain |
-| TLS, X.509 | transcript, Finished, AEAD, record sequence, state ordering; strict DER; CertificateEntry extensions refused; delivery schedules and FIN/RST cuts (`tls_peer --schedule`); SAN and name constraints, key usage, EKU, dates; chains against OpenSSL and Go `crypto/x509`; record nonce coverage over every value in every sequence byte lane and guarded unaligned buffers; record-header coverage over every 16-bit length and 8-bit type; `tls_chains` (also wget's status and words for each refusal), `tls_hostnames`, `tls_dates`, `public_suffixes`, `anchors`, `tls_peer`, `tls_der_fuzz`, `tls_hs_fuzz`, `tls_verify_fuzz`; `x509_corpus` by hand over 643 hosts | name constraints in more shapes |
+| TLS, X.509 | transcript, Finished, AEAD, record sequence, state ordering; strict DER; CertificateEntry extensions refused but a staple the hello asked for; delivery schedules and FIN/RST cuts (`tls_peer --schedule`); SAN and name constraints, key usage, EKU, dates; chains against OpenSSL and Go `crypto/x509`; record nonce coverage over every value in every sequence byte lane and guarded unaligned buffers; record-header coverage over every 16-bit length and 8-bit type; `tls_chains` (also wget's status and words for each refusal), `tls_hostnames`, `tls_dates`, `public_suffixes`, `anchors`, `tls_peer`, `tls_der_fuzz`, `tls_hs_fuzz`, `tls_verify_fuzz`; `x509_corpus` by hand over 643 hosts | name constraints in more shapes |
+| Revocation | `tls_chains` serves CRLs made by `openssl ca -gencrl` (listing the leaf or not, partitioned by `issuingDistributionPoint`, another partition, CA-only, past `nextUpdate`, another key under the issuer's name, absent, PEM, an unknown critical extension, a delta, an RSA issuer, an intermediate and the first CA revoked) and holds wget to `openssl verify -crl_check` / `-crl_check_all`, at the default tier and again at the tight one, words and status included; `tls_peer` staples `openssl ocsp` responses (good, revoked, unknown, stale, no `nextUpdate`, another certificate's, a broken signature, a delegated responder with and without `id-kp-OCSPSigning`, `tryLater`, must-staple) over scripted TLS 1.3 and 1.2 flights at both tiers against `openssl ocsp -respin`, the wire shapes a staple may not take, and `openssl s_server -status_file` over both versions; `CHECK_net` (signed fixtures, the tiers at both `MOONWATER_STRICT` builds, the five-minute skew to the second, the TLS 1.2 relay, the ClientHello and ServerHello extension, every ceiling exact and one over); `tls_ocsp_fuzz`, `tls_crl_fuzz`; `net_bounded_proof` and `net_exhaustive_proof` below | OCSP responder URLs are not fetched; no Certificate Transparency; the CRL cache lives for one process, so each `wget` run fetches again; a CRL over `TLS_CRL_MAX` is no answer |
 | Crypto | OpenSSL vectors and every `lib.c` architecture body: `crypto_vectors` (`--wycheproof DIR` by hand), `crypto_fuzz` | none known |
 | Wi-Fi | RSN, EAPOL-Key, replay counters, source address, scan parsing; all four GTK slots, zero-valued first keys, driver refusal/retry and roam reset (`wifi_key_state`); the strongest 64 names kept and the associated row never evicted; one BSS donates every field of a row; `wifi_scan_fuzz`, `wifi_eapol_fuzz`, `wifi_air` | management-frame protection and WPA3 (separate branch); a forger outranking every retained row |
 | Waterlink | Noise handshake, cookie, replay window, grants, revocation; mDNS reads Internet class only, RCODE zero, TTL nonzero, an SRV with a non-root target and a nonzero port, exposes only a PTR and SRV intersection, and shares a packet-sized compression-pointer budget across every name; the reply and answer budgets move only after a successful send; `IP_MULTICAST_IF` failure refuses the send; a source holds at most `LINK_GREET_SOURCE` of the 16 greeting slots; legacy verifier migration is all-write plus `fsync`, and until it succeeds the listener stays off while commands keep the groups (their save is the scrub); every elapsed time is ordered first; `waterlink_fuzz` rejects a wake/fill cycle that remains immediately due without output; `sh test/run waterlink link`, `waterlink_sanitized`, `waterlink_fuzz` (MSan with `MOONWATER_MSAN=1`) | handshake flood under netem; address rotation reaches the global greeting ceiling |
@@ -276,8 +311,12 @@ written from the RFCs and the stated policy on every input of their domains:
 mask (141,733,920,768 cases); `tls_asn1_length` on every four-byte head at every
 truncation; `tls_oid_content_der` up to four bytes; `http_dot_segment` up to four
 bytes, and up to nine over the bytes it tells apart; the default lease timers
-for every lifetime; and `dhcp_walk` against an RFC 2132/3396 walker for every
-region of up to ten bytes over the bytes it tells apart, under ASan. Each
+for every lifetime; `dhcp_walk` against an RFC 2132/3396 walker for every
+region of up to ten bytes over the bytes it tells apart, under ASan;
+`tls_der_integer` and `tls_der_named_bits` on every content of up to four bytes
+against X.690's INTEGER and named-bit-list rules (4,311,810,305 cases); and
+`tls_date_seconds` and `tls_revocation_fresh` on every day from 1950 through
+2399 at four times of day against days counted one by one. Each
 reports how many inputs were accepted and fails if either answer never occurs.
 `net_bounded_proof` has CBMC prove memory safety, no pointer or signed
 overflow, termination by unwinding assertion and a stated property for every
@@ -285,14 +324,23 @@ input up to a bound: `byte_reader` for buffers of any length and `byte_store`
 for any append (every parser reads and writes through these), `dns_copy_name`
 (7 bytes), the ASN.1 helpers (8), netlink attribute finding (24),
 `http_header_end` with `http_response_fields` (10), the chunk-size and trailer
-lines (10), `http_split_into` (10) and `http_path_simplify` (8: no dot segment
-is left and a second pass changes nothing). Every proof is run again with its
+lines (10), `http_split_into` (10), `http_path_simplify` (8: no dot segment
+is left and a second pass changes nothing), and the revocation parsers' small
+pieces: the DER cursor `tls_der_value` with `tls_der_integer` and
+`tls_der_named_bits` (8: a value inside its reader past its header, the reader
+resuming after it, DER's one spelling), `tls_entry_status` (20: a staple only
+when asked, alone, inside the extensions), the TLS Feature parser (12:
+must-staple only with an INTEGER 5 in it), `authorityKeyIdentifier` (12: the
+key inside, no issuer without its serial) and `issuingDistributionPoint`
+(12: at most one of the three only-flags, names inside and never relative).
+Every proof is run again with its
 outcome marked, so an outcome no input reaches fails as vacuous. The lib.c
 routines the parsers call stand in as the contracts written in the harness.
-Not proved: the X.509 parser and chain builder, the TLS handshake state machine,
-`http_run`, DNS answer selection and the DHCP client's packet reader beyond its
-option walk; those rest on fuzzing, differential oracles and the mutation pass
-recorded with the change that added this lane.
+Not proved: the X.509 parser and chain builder, the whole OCSP response and
+CRL parsers (fuzzed, `tls_ocsp_fuzz` and `tls_crl_fuzz`), the TLS handshake
+state machine, `http_run`, DNS answer selection and the DHCP client's packet
+reader beyond its option walk; those rest on fuzzing, differential oracles and
+the mutation pass recorded with the change that added this lane.
 
 ## Ceilings
 
@@ -306,6 +354,7 @@ ledger at the top of its section).
 | Netlink | `NETLINK_DISCARD_MAX` 64 unrelated datagrams per transaction; 16 MiB datagram |
 | SNTP | `SNTP_DISCARD_MAX` 64 non-terminal receives per exchange |
 | TLS | `TLS_RECORD_MAX`, `TLS_HS_MAX`, 64 extensions, 8 certificates |
+| Revocation | `TLS_OCSP_MAX` 16,384 bytes a staple, `TLS_OCSP_RESPONSES` 16 SingleResponses, `TLS_OCSP_CERTS` 4 certificates a response; `TLS_LIST_EXTENSIONS` 16 extensions a CRL, CRL entry, response or single response; `TLS_CRL_ENTRIES` 524,288 revoked certificates a CRL (1.7 times the 311,758 of the largest public CRL seen, DigiCert Global G2 TLS RSA SHA256 2020 CA1 at 11.7 MB on 2026-10-09; Let's Encrypt's shards are a few hundred bytes); `TLS_CRL_MAX` 16 MiB a CRL, which is also all three DER length octets can say; `TLS_REVOCATION_SECONDS` 10 for every fetch of one handshake together, inside the handshake's 30 (each name lookup its own 3); `TLS_CRL_HELD` 8 CRLs and `TLS_CRL_HELD_BYTES` 32 MiB held per process, least recently used out first; `TLS_CRL_RETRY` 300 s before a failed fetch is tried again; `TLS_REVOCATION_SKEW` 300 s either way of `thisUpdate` and `nextUpdate`; 16 names a side compared between a distribution point and an `issuingDistributionPoint` |
 | HTTP | `HTTP_URL_MAX`, `HTTP_HEAD_MAX`, `HTTP_FETCH_MAX` (16 MiB in memory), `HTTP_HOPS`, `HTTP_WRITE_SPANS`; `HTTP_BODY_SECONDS` (300 s) bounds a stored body in every tier and a streamed one at the tight tier, where the default keeps GNU wget's idle timer alone |
 | Waterlink | 8 instances a packet; at most the packet's byte length in shared mDNS compression-pointer jumps; `LINK_GREET_SOURCE` 8 of 16 greeting slots; one reply and one answer an interval |
 
