@@ -54758,6 +54758,193 @@ static fn netlink_nonblocking_retries(void)
                 }
 }
 
+/*
+        Which datagrams complete a transaction. Only the kernel's reply to this
+        request does: its sequence and its port together. A datagram that
+        carries one and not the other is somebody else's, and so is one from
+        a socket that is not the kernel. Each is drawn and dropped, at most
+        NETWORK_DISCARD_MAX of them, and the walk gives up on the next.
+*/
+static fn netlink_reply_matching(void)
+{
+        struct { netlink_header header; b32 error; } stranger = {
+            .header = {.length = sizeof stranger, .type = NLMSG_IS_ERROR,
+                       .sequence = 55},
+            .error = -EPERM};
+        const struct { p32 port, sequence; } strangers[] = {
+            {9, 55}, {0, 56}, {9, 56}, {0xffffffffu, 55}, {0, 0}};
+
+        for (positive row = 0; row < array_count(strangers); row++)
+        {
+                b32 pair[2];
+                netlink_buffer request = {0}, reply = {0};
+                netlink_header done = {.length = NETLINK_HEADER,
+                    .type = NLMSG_IS_DONE, .sequence = 55};
+                p8 left[NETLINK_HEADER];
+                bipolar opened = system_call_4(syscall(socketpair), AF_UNIX,
+                                                SOCK_DGRAM, 0, (positive)pair);
+
+                check("netlink matching fixture opens", opened == 0);
+                if (opened)
+                        continue;
+                stranger.header.port = strangers[row].port;
+                stranger.header.sequence = strangers[row].sequence;
+                check("a stranger's reply and the real one queue",
+                      socket_send(pair[1], address_of stranger, sizeof stranger,
+                                  0, null, 0) == sizeof stranger &&
+                          socket_send(pair[1], address_of done, sizeof done, 0,
+                                      null, 0) == sizeof done);
+                check("a reply with the wrong port or sequence does not end the walk",
+                      netlink_begin(address_of request, RTM_GETLINK,
+                                    NLM_REQUEST, 55, 0) &&
+                          netlink_walk(pair[0], address_of request, 55,
+                                       address_of reply, null, null) == 0);
+                check("the walk drew the stranger and its own reply",
+                      socket_receive(pair[0], left, sizeof left, MSG_DONTWAIT,
+                                     null, null) == NETWORK_TRY_AGAIN);
+                netlink_forget(address_of request);
+                netlink_forget(address_of reply);
+                socket_close(pair[0]);
+                socket_close(pair[1]);
+        }
+
+        /* The allowance: NETWORK_DISCARD_MAX strangers are dropped and the
+           real reply after them still answers; one more and the walk ends. */
+        for (positive count = NETWORK_DISCARD_MAX - 1;
+             count <= NETWORK_DISCARD_MAX + 1; count++)
+        {
+                b32 pair[2];
+                netlink_buffer request = {0}, reply = {0};
+                netlink_header done = {.length = NETLINK_HEADER,
+                    .type = NLMSG_IS_DONE, .sequence = 55};
+                netlink_header other = {.length = NETLINK_HEADER,
+                    .type = RTM_NEWLINK, .sequence = 56};
+                bool queued = true;
+                bipolar opened = system_call_4(syscall(socketpair), AF_UNIX,
+                                                SOCK_DGRAM, 0, (positive)pair);
+
+                check("netlink allowance fixture opens", opened == 0);
+                if (opened)
+                        continue;
+                for (positive at = 0; at < count; at++)
+                        queued &= socket_send(pair[1], address_of other,
+                            sizeof other, 0, null, 0) == sizeof other;
+                queued &= socket_send(pair[1], address_of done, sizeof done, 0,
+                                      null, 0) == sizeof done;
+                check("the strangers and the real reply queue", queued);
+                check("strangers up to the allowance are dropped, one more ends the walk",
+                      netlink_begin(address_of request, RTM_GETLINK,
+                                    NLM_REQUEST, 55, 0) &&
+                          netlink_walk(pair[0], address_of request, 55,
+                                       address_of reply, null, null) ==
+                              (count <= NETWORK_DISCARD_MAX ? 0 : -1));
+                netlink_forget(address_of request);
+                netlink_forget(address_of reply);
+                socket_close(pair[0]);
+                socket_close(pair[1]);
+        }
+
+        /* A reply that is not from the kernel, or an empty datagram, is no
+           reply at all. */
+        {
+                b32 pair[2];
+                netlink_buffer reply = {0};
+                p8 nothing = 0;
+                netlink_header whole = {.length = NETLINK_HEADER,
+                    .type = NLMSG_IS_DONE, .sequence = 55};
+                bipolar opened = system_call_4(syscall(socketpair), AF_UNIX,
+                                                SOCK_DGRAM, 0, (positive)pair);
+
+                check("netlink empty-datagram fixture opens", opened == 0);
+                if (!opened)
+                {
+                        check("an empty datagram is refused",
+                              socket_send(pair[1], address_of nothing, 0, 0,
+                                          null, 0) == 0 &&
+                                  netlink_receive_one(pair[0], address_of reply,
+                                                      false) == -1);
+                        check("a whole one after it is read",
+                              socket_send(pair[1], address_of whole, sizeof whole,
+                                          0, null, 0) == sizeof whole &&
+                                  netlink_receive_one(pair[0], address_of reply,
+                                                      false) == sizeof whole &&
+                                  reply.used == sizeof whole);
+                        netlink_forget(address_of reply);
+                        socket_close(pair[0]);
+                        socket_close(pair[1]);
+                }
+        }
+
+        /* A datagram sender is the kernel only when it says it is netlink and
+           port zero, in an address of the whole size. */
+        {
+                socket_address_netlink source = {.family = AF_NETLINK, .port = 0};
+
+                check("the kernel as sender is accepted",
+                      netlink_source_is_kernel(address_of source, sizeof source));
+                source.family = AF_INET;
+                check("another family at port zero is refused",
+                      !netlink_source_is_kernel(address_of source, sizeof source));
+                source.family = AF_NETLINK;
+                source.port = 1;
+                check("port one is a process, not the kernel",
+                      !netlink_source_is_kernel(address_of source, sizeof source));
+                source.port = 0xffffffffu;
+                check("the largest port is refused",
+                      !netlink_source_is_kernel(address_of source, sizeof source));
+        }
+}
+
+/* netlink_each: a visitor that says stop ends the walk without failing it, a
+   cut or short message fails it, and what came before the cut was visited. */
+static bool netlink_count_all(netlink_header address_to header,
+                              address_any context)
+{
+        (void)header;
+        (*(positive address_to)context)++;
+        return true;
+}
+
+static fn netlink_each_stops(void)
+{
+        netlink_header one = {.length = NETLINK_HEADER, .type = RTM_NEWLINK};
+        p8 bytes[NETLINK_HEADER * 3];
+        netlink_buffer reply = {bytes, sizeof bytes, sizeof bytes, false};
+        positive visited = 0;
+
+        memory_copy(bytes, address_of one, NETLINK_HEADER);
+        memory_copy(bytes + NETLINK_HEADER, address_of one, NETLINK_HEADER);
+        memory_copy(bytes + 2 * NETLINK_HEADER, address_of one, NETLINK_HEADER);
+        check("every message of a datagram is visited",
+              netlink_each(address_of reply, netlink_count_all,
+                           address_of visited) && visited == 3);
+        visited = 0;
+        check("a visitor that stops is no failure and sees no more",
+              netlink_each(address_of reply, netlink_stop_after_first,
+                           address_of visited) && visited == 1);
+        visited = 0;
+        ((netlink_header address_to)(bytes + 2 * NETLINK_HEADER))->length =
+            2 * NETLINK_HEADER;
+        check("a message longer than what arrived fails the datagram after those before it",
+              !netlink_each(address_of reply, netlink_count_all,
+                            address_of visited) && visited == 2);
+        visited = 0;
+        ((netlink_header address_to)(bytes + 2 * NETLINK_HEADER))->length =
+            NETLINK_HEADER;
+        ((netlink_header address_to)(bytes + NETLINK_HEADER))->length =
+            NETLINK_HEADER - 1;
+        check("a length under its own header fails the datagram",
+              !netlink_each(address_of reply, netlink_count_all,
+                            address_of visited) && visited == 1);
+        visited = 0;
+        ((netlink_header address_to)(bytes + NETLINK_HEADER))->length =
+            NETLINK_HEADER;
+        reply.used = 2 * NETLINK_HEADER + NETLINK_HEADER - 1;
+        check("bytes after the last whole header are no message",
+              netlink_each(address_of reply, netlink_count_all,
+                           address_of visited) && visited == 2);
+}
+
 static fn error_frames(void)
 {
         b32 pair[2];
@@ -70566,6 +70753,8 @@ b32 main(void)
         net_group(attribute_growth);
         net_group(userspace_source_progress);
         net_group(error_frames);
+        net_group(netlink_reply_matching);
+        net_group(netlink_each_stops);
         net_group(netlink_multipart_identity);
         net_group(netlink_nonblocking_retries);
         net_group(link_candidates);

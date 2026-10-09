@@ -454,7 +454,13 @@ static COLD bipolar netlink_receive_one(b32 handle,
         }
 
         if (!size || (positive)size > NETLINK_DATAGRAM_MAX)
+        {
+                /* Left queued it would be the next peek too, and the socket
+                   would refuse every reply behind it. */
+                (void)socket_receive(handle, null, 0, MSG_DONTWAIT, 0, 0);
+                buffer->used = 0;
                 return -1;
+        }
 
         if (!net_room(buffer, (positive)size + 64))
                 return -1;
