@@ -91,7 +91,7 @@ export TEST_TALLY
 #       kernel/profile/sec_sanitize.
 asked_lanes="wifi fuzz msan ring0 tier scale desktop chrome"
 
-lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep"
+lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors font cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep"
 
 describe()
 {
@@ -160,6 +160,7 @@ describe()
         machine) echo "the machine script: hooks, functions, case arms, overlay lines and file policy" ;;
         snapshot) echo "process records, truncated tails and sentinel bounds on three machines" ;;
         sensors) echo "monitor's clocks, temperatures, fans, power and battery against generated sysfs trees" ;;
+        font) echo "the text engine: exact coverage of fonts written in the check, hostile fonts against a guard page, and FreeType and the exact area when both and a font are here" ;;
         cli)      echo "the moonwater command in a namespace: every verb, every zone it names, what it writes" ;;
         script)   echo "every verb as the machine script runs it, with no terminal and nothing on its input: bounded, asking nothing, and the same twice" ;;
         term)     echo "the emulator driven a byte and a read at a time, and the line being edited" ;;
@@ -3008,6 +3009,28 @@ lane_snapshot() { freestanding_checks_lane snapshot snapshot; }
 #       a seeded grammar makes up, against a model of what the rows must say.
 #
 lane_sensors() { freestanding_checks_lane sensors sensors; }
+
+#
+#       src/canvas/font.c, the text engine the compositor and its clients
+#       include. The check writes its own fonts and knows every byte they
+#       must draw, and cuts and mutates them against a guard page, on three
+#       machines. Then every glyph of each face found (MOONWATER_FONTS, else
+#       the system's) against FreeType and an exact rendering in doubles:
+#       within one level of exact, or the lane is red. NOT RUN, softly, when
+#       FreeType or a font is missing.
+#
+lane_font()
+{
+        freestanding_checks_lane font font
+        font_outcome=$?
+        python3 test/differential.py --harness font_reference
+        case $? in
+        0) ;;
+        2) [ "$font_outcome" != 0 ] || font_outcome=2 ;;
+        *) font_outcome=1 ;;
+        esac
+        return "$font_outcome"
+}
 
 #
 #       The moonwater command, which only the boot lane reached before: run

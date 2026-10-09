@@ -97038,6 +97038,1066 @@ b32 main(void)
 }
 #endif /* CHECK_sensors */
 
+#ifdef CHECK_font
+#include "../src/lib.util.c"
+#include "../src/canvas/font.c"
+
+#define SHARED_counted
+#include "checks.c"
+#undef SHARED_counted
+
+/*
+        The text engine against fonts made here, so that every number it has
+        to produce is known without a reference renderer.
+
+        Two fonts are written byte by byte: a proportional one (units per em
+        1024, long loca, cmap format 4 with a delta segment and a glyph-array
+        segment, GPOS kerning through a format 1 pair, a format 2 class pair
+        behind an extension lookup and a liga feature that must not apply,
+        OS/2 with USE_TYPO_METRICS, composites scaled, turned and
+        point-matched, one that contains itself) and a monospace one (2048,
+        short loca, cmap format 12 preferred over a format 4 that disagrees,
+        the kern table, no x-height in OS/2).
+
+        A square whose corners sit on the 1/1024 grid is drawn exactly, so its
+        bytes are 255 times the overlap of two intervals, rounded to the
+        nearest, at every phase. A circle of eight off-curve points is held to
+        a double-precision rendering of the same quadratics within one level a
+        pixel. Composites are held to the simple glyphs they equal. The drawn
+        cells are held to their seams: an arm reaching an edge leaves the edge
+        exactly as the plain line of its weight does, so neighbours join at
+        every cell size.
+
+        Then the hostile half: each font cut at every length and mutated some
+        thousands of times, every glyph drawn, every pair kerned and a line
+        laid out, with the font's last byte against a page that faults. A read
+        past the end ends the run.
+*/
+
+typedef struct
+{
+        p8 bytes[4096];
+        positive size;
+} font_table;
+
+static fn table16(font_table address_to t, p32 value)
+{
+        t->bytes[t->size++] = (p8)(value >> 8);
+        t->bytes[t->size++] = (p8)value;
+}
+
+static fn table32(font_table address_to t, p32 value)
+{
+        table16(t, value >> 16);
+        table16(t, value & 0xffff);
+}
+
+//      Patch a 16-bit offset at at with the distance from base to here.
+static fn table_mark(font_table address_to t, positive at, positive base)
+{
+        positive value = t->size - base;
+
+        t->bytes[at] = (p8)(value >> 8);
+        t->bytes[at + 1] = (p8)value;
+}
+
+static fn table_pad(font_table address_to t, positive size)
+{
+        while (t->size < size)
+                t->bytes[t->size++] = 0;
+}
+
+//      The sfnt: a directory of count tables, then the tables, each aligned.
+static positive font_build(p8 address_to out, p32 count, const p32 address_to tags,
+                           font_table address_to const address_to tables)
+{
+        positive at = 12 + 16 * (positive)count;
+
+        memory_zero(out, at);
+        out[1] = 1;
+        out[5] = (p8)count;
+        for (p32 i = 0; i < count; i++)
+        {
+                p8 address_to record = out + 12 + 16 * i;
+
+                for (p32 k = 0; k < 4; k++)
+                {
+                        record[k] = (p8)(tags[i] >> (24 - 8 * k));
+                        record[8 + k] = (p8)(at >> (24 - 8 * k));
+                        record[12 + k] = (p8)(tables[i]->size >> (24 - 8 * k));
+                }
+                memory_copy(out + at, tables[i]->bytes, tables[i]->size);
+                at += (tables[i]->size + 3) & ~(positive)3;
+        }
+        return at;
+}
+
+//      A simple glyph, flags and coordinates in their shortest spellings and
+//      repeated flags folded, so that every path of the parser is walked.
+static fn glyph_simple(font_table address_to glyf, const b32 address_to xy, const p8 address_to on,
+                       p32 count, const p16 address_to ends, p32 contours)
+{
+        b32 x0 = 1 << 30, y0 = 1 << 30, x1 = -(1 << 30), y1 = -(1 << 30);
+        p8 flags[64];
+
+        for (p32 i = 0; i < count; i++)
+        {
+                x0 = xy[2 * i] < x0 ? xy[2 * i] : x0;
+                x1 = xy[2 * i] > x1 ? xy[2 * i] : x1;
+                y0 = xy[2 * i + 1] < y0 ? xy[2 * i + 1] : y0;
+                y1 = xy[2 * i + 1] > y1 ? xy[2 * i + 1] : y1;
+        }
+        table16(glyf, contours);
+        table16(glyf, (p32)x0 & 0xffff), table16(glyf, (p32)y0 & 0xffff);
+        table16(glyf, (p32)x1 & 0xffff), table16(glyf, (p32)y1 & 0xffff);
+        for (p32 c = 0; c < contours; c++)
+                table16(glyf, ends[c]);
+        table16(glyf, 2);
+        table16(glyf, 0xb001);
+
+        for (p32 i = 0; i < count; i++)
+        {
+                b32 dx = xy[2 * i] - (i ? xy[2 * i - 2] : 0), dy = xy[2 * i + 1] - (i ? xy[2 * i - 1] : 0);
+                p8 f = on[i];
+
+                f |= !dx ? 0x10 : dx > -256 && dx < 256 ? (p8)(0x02 | (dx > 0 ? 0x10 : 0)) : 0;
+                f |= !dy ? 0x20 : dy > -256 && dy < 256 ? (p8)(0x04 | (dy > 0 ? 0x20 : 0)) : 0;
+                flags[i] = f;
+        }
+        for (p32 i = 0; i < count;)
+        {
+                p32 run = 1;
+
+                while (i + run < count && flags[i + run] == flags[i])
+                        run++;
+                glyf->bytes[glyf->size++] = (p8)(flags[i] | (run > 1 ? 8 : 0));
+                if (run > 1)
+                        glyf->bytes[glyf->size++] = (p8)(run - 1);
+                i += run;
+        }
+        for (p32 axis = 0; axis < 2; axis++)
+                for (p32 i = 0; i < count; i++)
+                {
+                        b32 d = xy[2 * i + axis] - (i ? xy[2 * i - 2 + axis] : 0);
+
+                        if (flags[i] & (axis ? 4 : 2))
+                                glyf->bytes[glyf->size++] = (p8)(d < 0 ? -d : d);
+                        else if (d)
+                                table16(glyf, (p32)d & 0xffff);
+                }
+        table_pad(glyf, (glyf->size + 3) & ~(positive)3);
+}
+
+//      A glyph of components: each with its flags, child, two arguments
+//      (words) and its transform words.
+static fn glyph_composite(font_table address_to glyf, p32 parts, const p32 address_to flags,
+                          const p32 address_to children, const b32 address_to args,
+                          const b16 address_to transforms)
+{
+        table16(glyf, 0xffff);
+        table16(glyf, 0), table16(glyf, 0), table16(glyf, 0), table16(glyf, 0);
+        for (p32 k = 0, t = 0; k < parts; k++)
+        {
+                p32 f = flags[k] | 1 | (k + 1 < parts ? 0x20 : 0);
+                p32 words = f & 8 ? 1 : f & 0x40 ? 2 : f & 0x80 ? 4 : 0;
+
+                table16(glyf, f);
+                table16(glyf, children[k]);
+                table16(glyf, (p32)args[2 * k] & 0xffff);
+                table16(glyf, (p32)args[2 * k + 1] & 0xffff);
+                for (p32 w = 0; w < words; w++)
+                        table16(glyf, (p32)(b32)transforms[t++] & 0xffff);
+        }
+        table_pad(glyf, (glyf->size + 3) & ~(positive)3);
+}
+
+static p8 font_one[8192], font_two[8192];
+static positive font_one_size, font_two_size;
+
+//      One pair adjustment subtable of format 1: first then second is value.
+static fn gpos_pair(font_table address_to t, p32 first, p32 second, b32 value)
+{
+        positive base = t->size;
+
+        table16(t, 1), table16(t, 12), table16(t, 4), table16(t, 0), table16(t, 1), table16(t, 18);
+        table16(t, 1), table16(t, 1), table16(t, first);
+        table16(t, 1), table16(t, second), table16(t, (p32)value & 0xffff);
+        (void)base;
+}
+
+/*
+        The proportional font, units per em 1024. Glyphs:
+            0  the missing glyph, a bar
+            1  a square, x 64..576, y 100..612
+            2  a circle: eight off-curve points round (600, 500)
+            3  glyph 1 at half scale, moved by (100, 200)
+            4  glyph 1 turned a quarter (0 1, -1 0), then a second glyph 1
+               placed by matching its point 0 to the first's point 2
+            5  a box with a hole, the hole wound the other way
+            6  two squares wound alike, overlapping at one corner
+            7  glyph 3 written out: x 132..388, y 250..506
+            8  a composite that contains itself
+            9  a square whose top is the x-height, y 0..500
+           10  glyph 4 written out
+*/
+static const b32 circle_one[] = {1000, 500, 883, 783, 600, 900, 317, 783, 200, 500, 317, 217, 600, 100, 883, 217};
+static const b32 circle_two[] = {2000, 1000, 1766, 1566, 1200, 1800, 634, 1566, 400, 1000, 634, 434, 1200, 200, 1766, 434};
+
+static fn font_make_one()
+{
+        static font_table head, hhea, maxp, os2, hmtx, cmap, loca, glyf, post, gpos;
+        static const b32 bar[] = {100, 0, 100, 700, 400, 700, 400, 0};
+        static const b32 square[] = {64, 100, 64, 612, 576, 612, 576, 100};
+        static const b32 holed[] = {0, 0, 0, 800, 800, 800, 800, 0, 200, 200, 600, 200, 600, 600, 200, 600};
+        static const b32 overlap[] = {0, 0, 0, 600, 600, 600, 600, 0, 580, 580, 580, 900, 900, 900, 900, 580};
+        static const b32 half[] = {132, 250, 132, 506, 388, 506, 388, 250};
+        static const b32 low[] = {64, 0, 64, 500, 576, 500, 576, 0};
+        static const p8 ons[8] = {1, 1, 1, 1, 1, 1, 1, 1}, offs[8] = {0};
+        static const p16 four[1] = {3}, eight[2] = {3, 7}, octagon[1] = {7};
+        b32 turned[16];
+        positive offsets[12];
+
+        for (p32 i = 0; i < 4; i++)
+        {
+                turned[2 * i] = -square[2 * i + 1];
+                turned[2 * i + 1] = square[2 * i];
+                turned[8 + 2 * i] = square[2 * i] + (-612 - 64);
+                turned[8 + 2 * i + 1] = square[2 * i + 1] + (576 - 100);
+        }
+
+        offsets[0] = glyf.size, glyph_simple(&glyf, bar, ons, 4, four, 1);
+        offsets[1] = glyf.size, glyph_simple(&glyf, square, ons, 4, four, 1);
+        offsets[2] = glyf.size, glyph_simple(&glyf, circle_one, offs, 8, octagon, 1);
+        offsets[3] = glyf.size;
+        glyph_composite(&glyf, 1, (const p32[]){0x0a}, (const p32[]){1}, (const b32[]){100, 200},
+                        (const b16[]){8192});
+        offsets[4] = glyf.size;
+        glyph_composite(&glyf, 2, (const p32[]){0x82, 0}, (const p32[]){1, 1}, (const b32[]){0, 0, 2, 0},
+                        (const b16[]){0, 16384, -16384, 0});
+        offsets[5] = glyf.size, glyph_simple(&glyf, holed, ons, 8, eight, 2);
+        offsets[6] = glyf.size, glyph_simple(&glyf, overlap, ons, 8, eight, 2);
+        offsets[7] = glyf.size, glyph_simple(&glyf, half, ons, 4, four, 1);
+        offsets[8] = glyf.size;
+        glyph_composite(&glyf, 1, (const p32[]){0x02}, (const p32[]){8}, (const b32[]){10, 10}, null);
+        offsets[9] = glyf.size, glyph_simple(&glyf, low, ons, 4, four, 1);
+        offsets[10] = glyf.size, glyph_simple(&glyf, turned, ons, 8, eight, 2);
+        offsets[11] = glyf.size;
+        for (p32 g = 0; g < 12; g++)
+                table32(&loca, (p32)offsets[g]);
+
+        table32(&head, 0x00010000), table32(&head, 0x00010000), table32(&head, 0), table32(&head, 0x5f0f3cf5);
+        table16(&head, 0), table16(&head, 1024);
+        table_pad(&head, 50);
+        table16(&head, 1), table16(&head, 0);
+
+        table32(&hhea, 0x00010000), table16(&hhea, 900), table16(&hhea, (p32)-300 & 0xffff), table16(&hhea, 0);
+        table_pad(&hhea, 34);
+        table16(&hhea, 11);
+
+        table32(&maxp, 0x00005000), table16(&maxp, 11);
+
+        static const p32 advances[11] = {500, 640, 1100, 500, 700, 800, 900, 500, 500, 640, 700};
+        static const b32 sides[11] = {100, 64, 200, 0, 0, 0, 0, 132, 0, 64, -612};
+        for (p32 g = 0; g < 11; g++)
+                table16(&hmtx, advances[g]), table16(&hmtx, (p32)sides[g] & 0xffff);
+
+        table16(&os2, 4);
+        table_pad(&os2, 62);
+        table16(&os2, 0x80);
+        table16(&os2, 0x41), table16(&os2, 0x2192);
+        table16(&os2, 800), table16(&os2, (p32)-200 & 0xffff), table16(&os2, 100);
+        table16(&os2, 900), table16(&os2, 300);
+        table32(&os2, 1), table32(&os2, 0);
+        table16(&os2, 500), table16(&os2, 700);
+        table_pad(&os2, 96);
+
+        table32(&post, 0x00030000), table32(&post, 0);
+        table16(&post, (p32)-100 & 0xffff), table16(&post, 50), table32(&post, 0);
+        table_pad(&post, 32);
+
+        //      cmap: one format 4 subtable, (3,1). Segment 0 is A..D by delta,
+        //      segment 1 is U+2190..2192 through the glyph array, then 0xffff.
+        table16(&cmap, 0), table16(&cmap, 1);
+        table16(&cmap, 3), table16(&cmap, 1), table32(&cmap, 12);
+        positive start = cmap.size;
+        table16(&cmap, 4), table16(&cmap, 0), table16(&cmap, 0);
+        table16(&cmap, 6), table16(&cmap, 4), table16(&cmap, 1), table16(&cmap, 2);
+        table16(&cmap, 0x44), table16(&cmap, 0x2192), table16(&cmap, 0xffff);
+        table16(&cmap, 0);
+        table16(&cmap, 0x41), table16(&cmap, 0x2190), table16(&cmap, 0xffff);
+        table16(&cmap, (1 - 0x41) & 0xffff), table16(&cmap, 0), table16(&cmap, 1);
+        table16(&cmap, 0), table16(&cmap, 4), table16(&cmap, 0);
+        table16(&cmap, 5), table16(&cmap, 6), table16(&cmap, 0);
+        cmap.bytes[start + 2] = (p8)((cmap.size - start) >> 8);
+        cmap.bytes[start + 3] = (p8)(cmap.size - start);
+
+        //      GPOS: scripts latn and DFLT. DFLT's default language uses
+        //      features 0 and 1: feature 0 is kern (lookups 0 and 1), feature
+        //      1 is liga (lookup 2). latn's uses feature 2 only, a second kern
+        //      feature reaching lookup 2. Lookup 2 adds 999 to glyph 1 then 1,
+        //      so that pair kerns only if the wrong script, a non-kern feature
+        //      or every kern feature regardless of script is taken.
+        table16(&gpos, 1), table16(&gpos, 0), table16(&gpos, 0), table16(&gpos, 0), table16(&gpos, 0);
+        table_mark(&gpos, 4, 0);
+        positive scripts = gpos.size;
+        table16(&gpos, 2), table32(&gpos, FONT_TAG('l', 'a', 't', 'n')), table16(&gpos, 0);
+        table32(&gpos, FONT_TAG('D', 'F', 'L', 'T')), table16(&gpos, 0);
+        table_mark(&gpos, scripts + 6, scripts);
+        table16(&gpos, 4), table16(&gpos, 0);
+        table16(&gpos, 0), table16(&gpos, 0xffff), table16(&gpos, 1), table16(&gpos, 2);
+        table_mark(&gpos, scripts + 12, scripts);
+        table16(&gpos, 4), table16(&gpos, 0);
+        table16(&gpos, 0), table16(&gpos, 0xffff), table16(&gpos, 2), table16(&gpos, 0), table16(&gpos, 1);
+        table_mark(&gpos, 6, 0);
+        positive features = gpos.size;
+        table16(&gpos, 3), table32(&gpos, FONT_TAG('k', 'e', 'r', 'n')), table16(&gpos, 0);
+        table32(&gpos, FONT_TAG('l', 'i', 'g', 'a')), table16(&gpos, 0);
+        table32(&gpos, FONT_TAG('k', 'e', 'r', 'n')), table16(&gpos, 0);
+        table_mark(&gpos, features + 6, features);
+        table16(&gpos, 0), table16(&gpos, 2), table16(&gpos, 0), table16(&gpos, 1);
+        table_mark(&gpos, features + 12, features);
+        table16(&gpos, 0), table16(&gpos, 1), table16(&gpos, 2);
+        table_mark(&gpos, features + 18, features);
+        table16(&gpos, 0), table16(&gpos, 1), table16(&gpos, 2);
+        table_mark(&gpos, 8, 0);
+        positive list = gpos.size;
+        table16(&gpos, 3), table16(&gpos, 0), table16(&gpos, 0), table16(&gpos, 0);
+
+        //      lookup 0: type 2, format 1, glyph 1 then 2 is -50
+        table_mark(&gpos, list + 2, list);
+        positive lookup = gpos.size;
+        table16(&gpos, 2), table16(&gpos, 0), table16(&gpos, 1), table16(&gpos, 0);
+        table_mark(&gpos, lookup + 6, lookup);
+        gpos_pair(&gpos, 1, 2, -50);
+
+        //      lookup 1: type 9 to a type 2 of format 2, where glyph 3 is class
+        //      1 of the first glyphs and glyph 4 class 1 of the second: -30.
+        table_mark(&gpos, list + 4, list);
+        lookup = gpos.size;
+        table16(&gpos, 9), table16(&gpos, 0), table16(&gpos, 1), table16(&gpos, 0);
+        table_mark(&gpos, lookup + 6, lookup);
+        table16(&gpos, 1), table16(&gpos, 2), table32(&gpos, 8);
+        positive pair = gpos.size;
+        table16(&gpos, 2), table16(&gpos, 0), table16(&gpos, 4), table16(&gpos, 0);
+        table16(&gpos, 0), table16(&gpos, 0), table16(&gpos, 2), table16(&gpos, 2);
+        table16(&gpos, 0), table16(&gpos, 0), table16(&gpos, 0), table16(&gpos, (p32)-30 & 0xffff);
+        table_mark(&gpos, pair + 2, pair);
+        table16(&gpos, 1), table16(&gpos, 1), table16(&gpos, 3);
+        table_mark(&gpos, pair + 8, pair);
+        table16(&gpos, 1), table16(&gpos, 3), table16(&gpos, 1), table16(&gpos, 1);
+        table_mark(&gpos, pair + 10, pair);
+        table16(&gpos, 2), table16(&gpos, 1), table16(&gpos, 4), table16(&gpos, 4), table16(&gpos, 1);
+
+        //      lookup 2: +999 on glyph 1 then 1, from liga and latn's kern
+        table_mark(&gpos, list + 6, list);
+        lookup = gpos.size;
+        table16(&gpos, 2), table16(&gpos, 0), table16(&gpos, 1), table16(&gpos, 0);
+        table_mark(&gpos, lookup + 6, lookup);
+        gpos_pair(&gpos, 1, 1, 999);
+
+        static const p32 tags[] = {
+            FONT_TAG('G', 'P', 'O', 'S'), FONT_TAG('O', 'S', '/', '2'), FONT_TAG('c', 'm', 'a', 'p'),
+            FONT_TAG('g', 'l', 'y', 'f'), FONT_TAG('h', 'e', 'a', 'd'), FONT_TAG('h', 'h', 'e', 'a'),
+            FONT_TAG('h', 'm', 't', 'x'), FONT_TAG('l', 'o', 'c', 'a'), FONT_TAG('m', 'a', 'x', 'p'),
+            FONT_TAG('p', 'o', 's', 't')};
+        font_table address_to const tables[] = {&gpos, &os2, &cmap, &glyf, &head, &hhea, &hmtx, &loca, &maxp, &post};
+        font_one_size = font_build(font_one, 10, tags, tables);
+}
+
+/*
+        The monospace font, units per em 2048, short loca. Glyphs: 0 a bar,
+        1 a square (also 'x', whose top is the measured x-height), 2 a wide
+        square, 3 the circle. cmap has format 12 (3,10) and a format 4 (3,1)
+        that maps A to glyph 2; the format 12 one must win. Kerning is the
+        kern table's: glyph 1 then 2 is -77.
+*/
+static fn font_make_two()
+{
+        static font_table head, hhea, maxp, os2, hmtx, cmap, loca, glyf, post, kern;
+        static const b32 bar[] = {200, 0, 200, 1400, 800, 1400, 800, 0};
+        static const b32 square[] = {128, 0, 128, 1024, 1152, 1024, 1152, 0};
+        static const b32 wide[] = {0, 0, 0, 1024, 1228, 1024, 1228, 0};
+        static const p8 ons[8] = {1, 1, 1, 1, 1, 1, 1, 1}, offs[8] = {0};
+        static const p16 four[1] = {3}, octagon[1] = {7};
+        positive offsets[5];
+
+        offsets[0] = glyf.size, glyph_simple(&glyf, bar, ons, 4, four, 1);
+        offsets[1] = glyf.size, glyph_simple(&glyf, square, ons, 4, four, 1);
+        offsets[2] = glyf.size, glyph_simple(&glyf, wide, ons, 4, four, 1);
+        offsets[3] = glyf.size, glyph_simple(&glyf, circle_two, offs, 8, octagon, 1);
+        offsets[4] = glyf.size;
+        for (p32 g = 0; g < 5; g++)
+                table16(&loca, (p32)(offsets[g] / 2));
+
+        table32(&head, 0x00010000), table32(&head, 0x00010000), table32(&head, 0), table32(&head, 0x5f0f3cf5);
+        table16(&head, 0), table16(&head, 2048);
+        table_pad(&head, 54);
+
+        table32(&hhea, 0x00010000), table16(&hhea, 1600), table16(&hhea, (p32)-400 & 0xffff), table16(&hhea, 0);
+        table_pad(&hhea, 34);
+        table16(&hhea, 1);
+
+        table32(&maxp, 0x00005000), table16(&maxp, 4);
+
+        table16(&hmtx, 1228), table16(&hmtx, 200);
+        table16(&hmtx, 128), table16(&hmtx, 0), table16(&hmtx, 400);
+
+        table16(&os2, 1);
+        table_pad(&os2, 86);
+
+        table32(&post, 0x00030000), table32(&post, 0), table16(&post, 0), table16(&post, 0), table32(&post, 1);
+        table_pad(&post, 32);
+
+        table16(&cmap, 0), table16(&cmap, 2);
+        table16(&cmap, 3), table16(&cmap, 1), table32(&cmap, 20);
+        table16(&cmap, 3), table16(&cmap, 10), table32(&cmap, 52);
+        table16(&cmap, 4), table16(&cmap, 32), table16(&cmap, 0), table16(&cmap, 4), table16(&cmap, 4), table16(&cmap, 1), table16(&cmap, 0);
+        table16(&cmap, 0x41), table16(&cmap, 0xffff), table16(&cmap, 0), table16(&cmap, 0x41), table16(&cmap, 0xffff);
+        table16(&cmap, (2 - 0x41) & 0xffff), table16(&cmap, 1), table16(&cmap, 0), table16(&cmap, 0);
+        table16(&cmap, 12), table16(&cmap, 0), table32(&cmap, 16 + 3 * 12), table32(&cmap, 0), table32(&cmap, 3);
+        table32(&cmap, 0x41), table32(&cmap, 0x42), table32(&cmap, 1);
+        table32(&cmap, 0x78), table32(&cmap, 0x78), table32(&cmap, 1);
+        table32(&cmap, 0x1f600), table32(&cmap, 0x1f600), table32(&cmap, 3);
+
+        table16(&kern, 0), table16(&kern, 1);
+        table16(&kern, 0), table16(&kern, 14 + 6 * 2), table16(&kern, 1);
+        table16(&kern, 2), table16(&kern, 12), table16(&kern, 1), table16(&kern, 0);
+        table16(&kern, 1), table16(&kern, 2), table16(&kern, (p32)-77 & 0xffff);
+        table16(&kern, 2), table16(&kern, 1), table16(&kern, 33);
+
+        static const p32 tags[] = {
+            FONT_TAG('O', 'S', '/', '2'), FONT_TAG('c', 'm', 'a', 'p'), FONT_TAG('g', 'l', 'y', 'f'),
+            FONT_TAG('h', 'e', 'a', 'd'), FONT_TAG('h', 'h', 'e', 'a'), FONT_TAG('h', 'm', 't', 'x'),
+            FONT_TAG('k', 'e', 'r', 'n'), FONT_TAG('l', 'o', 'c', 'a'), FONT_TAG('m', 'a', 'x', 'p'),
+            FONT_TAG('p', 'o', 's', 't')};
+        font_table address_to const tables[] = {&os2, &cmap, &glyf, &head, &hhea, &hmtx, &kern, &loca, &maxp, &post};
+        font_two_size = font_build(font_two, 10, tags, tables);
+}
+
+static font_engine engine, small_engine;
+static p8 atlas[512 * 512], small_atlas[128 * 32];
+static p8 coverage[1 << 16];
+
+static b32 render(const font_face address_to face, p32 glyph, p32 pixels64, p32 phase, p32 flags,
+                  font_bitmap address_to box)
+{
+        memory_zero(coverage, sizeof(coverage));
+        return font_render(&engine, face, glyph, pixels64, phase, flags, coverage, 256, sizeof(coverage), box);
+}
+
+static p32 level_of(p64 numerator, p64 denominator)
+{
+        return (p32)((255 * numerator + denominator / 2) / denominator);
+}
+
+/*
+        Glyph 1, the square, at 16 px (a unit is 1/64 px) and 24 px (3/128),
+        every phase: every edge is on the 1/1024 grid, so every pixel's area
+        is a product of two exact intervals and its byte is known exactly.
+*/
+static fn check_square(const font_face address_to face)
+{
+        for (p32 size = 16; size <= 24; size += 8)
+                for (p32 phase = 0; phase < FONT_PHASES; phase++)
+                {
+                        font_bitmap box;
+                        b32 refused = render(face, 1, size * 64, phase, FONT_UNHINTED, &box);
+                        //      Edges in 1/8192 px, size * 8 of them to the unit.
+                        p64 x0 = 64 * size * 8 + phase * 1024, x1 = 576 * size * 8 + phase * 1024;
+                        p64 y0 = 100 * size * 8, y1 = 612 * size * 8;
+                        bool exact = !refused && box.left == (b32)(x0 >> 13) &&
+                                     box.top == (b32)((y1 + 8191) >> 13) && box.width < 256;
+
+                        for (b32 r = 0; exact && r < box.height; r++)
+                                for (b32 c = 0; c < box.width; c++)
+                                {
+                                        b64 px = (b64)(box.left + c) << 13, py = (b64)(box.top - 1 - r) << 13;
+                                        b64 ox = ((b64)x1 < px + 8192 ? (b64)x1 : px + 8192) - ((b64)x0 > px ? (b64)x0 : px);
+                                        b64 oy = ((b64)y1 < py + 8192 ? (b64)y1 : py + 8192) - ((b64)y0 > py ? (b64)y0 : py);
+                                        p32 want = ox > 0 && oy > 0 ? level_of((p64)(ox * oy), (p64)8192 * 8192) : 0;
+
+                                        exact = exact && coverage[r * 256 + c] == want;
+                                }
+                        check("square: every pixel is 255 times its exact area, every phase and size", exact);
+                }
+}
+
+/*
+        A circle of eight off-curve points against the same quadratics drawn
+        in doubles: each flattened until no piece is 2^-14 px from its curve,
+        and every edge's area per cell exact (the polygon accumulation every
+        reference rasterizer shares). Within one level a pixel.
+*/
+static f64 reference[130 * 130];
+
+static fn reference_line(f64 x0, f64 y0, f64 x1, f64 y1, b32 height)
+{
+        if (y0 == y1)
+                return;
+
+        f64 sign = 1;
+        if (y0 > y1)
+        {
+                f64 t = x0;
+                x0 = x1, x1 = t, t = y0, y0 = y1, y1 = t, sign = -1;
+        }
+        f64 slope = (x1 - x0) / (y1 - y0), x = x0;
+        for (b32 y = (b32)y0; y < height && y < y1; y++)
+        {
+                f64 *row = reference + y * 130;
+                f64 dy = ((y + 1 < y1 ? y + 1 : y1) - (y > y0 ? y : y0)), next = x + slope * dy, d = dy * sign;
+                f64 lo = x < next ? x : next, hi = x < next ? next : x;
+                b32 a = (b32)lo, b = (b32)hi + 1;
+
+                lo = lo < 0 ? 0 : lo;
+                if (b <= a + 1)
+                {
+                        f64 middle = 0.5 * (x + next) - a;
+                        row[a] += d - d * middle;
+                        row[a + 1] += d * middle;
+                }
+                else
+                {
+                        f64 s = 1 / (hi - lo), first = lo - a, last = hi - (b - 1);
+                        f64 a0 = 0.5 * s * (1 - first) * (1 - first), am = 0.5 * s * last * last;
+                        row[a] += d * a0;
+                        if (b == a + 2)
+                                row[a + 1] += d * (1 - a0 - am);
+                        else
+                        {
+                                f64 a1 = s * (1.5 - first);
+                                row[a + 1] += d * (a1 - a0);
+                                for (b32 c = a + 2; c < b - 1; c++)
+                                        row[c] += d * s;
+                                row[b - 1] += d * (1 - (a1 + (b - a - 3) * s) - am);
+                        }
+                        row[b] += d * am;
+                }
+                x = next;
+        }
+}
+
+static fn check_circle(const font_face address_to face, p32 glyph, const b32 address_to points, f64 units)
+{
+        for (p32 size = 9; size <= 57; size += 24)
+        {
+                font_bitmap box;
+                b32 refused = render(face, glyph, size * 64, 3, FONT_UNHINTED, &box);
+                f64 scale = size / units, shift = 3.0 / FONT_PHASES;
+                p32 worst = 0;
+
+                memory_zero(reference, sizeof(reference));
+                for (p32 k = 0; k < 8; k++)
+                {
+                        //      Point k is a control; the curve runs from the midpoint
+                        //      before it to the midpoint after it.
+                        p32 before = (k + 7) % 8, after = (k + 1) % 8;
+                        f64 px[3], py[3];
+                        const b32 address_to q[3] = {points + 2 * before, points + 2 * k, points + 2 * after};
+
+                        for (p32 j = 0; j < 3; j++)
+                        {
+                                px[j] = q[j][0] * scale + shift - box.left;
+                                py[j] = box.top - q[j][1] * scale;
+                        }
+                        f64 ax = 0.5 * (px[0] + px[1]), ay = 0.5 * (py[0] + py[1]);
+                        f64 bx = 0.5 * (px[1] + px[2]), by = 0.5 * (py[1] + py[2]);
+                        f64 lastx = ax, lasty = ay;
+
+                        for (p32 i = 1; i <= 512; i++)
+                        {
+                                f64 t = i / 512.0, u = 1 - t;
+                                f64 x = u * u * ax + 2 * u * t * px[1] + t * t * bx;
+                                f64 y = u * u * ay + 2 * u * t * py[1] + t * t * by;
+
+                                reference_line(lastx, lasty, x, y, box.height);
+                                lastx = x, lasty = y;
+                        }
+                }
+                for (b32 r = 0; r < box.height; r++)
+                {
+                        f64 sum = 0;
+
+                        for (b32 c = 0; c < box.width; c++)
+                        {
+                                sum += reference[r * 130 + c];
+
+                                f64 area = sum < 0 ? -sum : sum;
+                                p32 want = (p32)(255 * (area > 1 ? 1 : area) + 0.5), got = coverage[r * 256 + c];
+                                p32 off = got > want ? got - want : want - got;
+
+                                worst = off > worst ? off : worst;
+                        }
+                }
+                check("circle of quadratics: within one level of the exact area, every pixel",
+                      !refused && box.width && box.width < 128 && box.height < 128 && worst <= 1);
+        }
+}
+
+//      Two glyphs of a face drawn alike at every phase and two sizes.
+static bool same_glyphs(const font_face address_to face, p32 one, p32 two)
+{
+        static p8 first[1 << 16];
+        bool same = true;
+
+        for (p32 size = 13; size <= 40; size += 27)
+                for (p32 phase = 0; phase < FONT_PHASES; phase++)
+                {
+                        font_bitmap a, b;
+
+                        render(face, one, size * 64, phase, FONT_UNHINTED, &a);
+                        memory_copy(first, coverage, sizeof(first));
+                        render(face, two, size * 64, phase, FONT_UNHINTED, &b);
+                        same = same && a.left == b.left && a.top == b.top && a.width == b.width &&
+                               a.height == b.height && !memory_compare(first, coverage, sizeof(first)) &&
+                               a.width > 0;
+                }
+        return same;
+}
+
+static fn check_outlines(const font_face address_to one, const font_face address_to two)
+{
+        font_bitmap box;
+
+        check_square(one);
+        check_circle(one, 2, circle_one, 1024);
+        check_circle(two, 3, circle_two, 2048);
+        check("composite: half scale and an offset draws as the glyph written out", same_glyphs(one, 3, 7));
+        check("composite: a quarter turn and a point match draw as the glyph written out", same_glyphs(one, 4, 10));
+        check("composite: one that contains itself is refused", render(one, 8, 1024, 0, 0, &box) == FONT_BAD);
+
+        //      The box with a hole at 20 px: 800 units is 15.625 px, the hole
+        //      3.90625..11.71875 px. Pixels wholly in the hole are empty, wholly
+        //      in the ring full.
+        render(one, 5, 20 * 64, 0, FONT_UNHINTED, &box);
+        check("hole: the inside wound the other way is empty", coverage[8 * 256 + 8] == 0 && coverage[7 * 256 + 6] == 0);
+        check("hole: the ring is full", coverage[1 * 256 + 1] == 255 && coverage[8 * 256 + 1] == 255);
+
+        //      Two squares wound alike, 0..600 and 580..900 units: at 20 px
+        //      11.71875 and 11.328125 px, so the pixel from 11 to 12 on both
+        //      axes holds a corner of each. Its union is 0.71875^2 + 0.671875^2
+        //      - 0.390625^2 of the pixel, 208; the clamped sum would be 246.
+        render(one, 6, 20 * 64, 0, FONT_UNHINTED, &box);
+        check("overlap: the union of two corners in one pixel is exact, not their sum",
+              box.top == 18 && coverage[6 * 256 + 11] == 208);
+        check("overlap: inside each square full, beside one its own edge",
+              coverage[12 * 256 + 5] == 255 && coverage[3 * 256 + 14] == 255 &&
+                  coverage[12 * 256 + 11] == level_of(736, 1024));
+
+        //      Fitting: glyph 9's top is the x-height, 500 units, 5.37 px at 11
+        //      px. Hinted, the top lands on 5 px and the top row is whole;
+        //      unhinted, it is 6 rows with a top row 0.37 covered.
+        render(one, 9, 11 * 64, 0, 0, &box);
+        check("fitting: the x-height lands on a whole pixel", box.height == 5 && box.top == 5 && coverage[1] == 255);
+        render(one, 9, 11 * 64, 0, FONT_UNHINTED, &box);
+        check("fitting: unhinted, the x-height row is partly covered",
+              box.height == 6 && coverage[1] == level_of(5500 - 5120, 1024));
+
+        //      Darkening thickens at 10 px and leaves 40 px alone.
+        for (p32 size = 10; size <= 40; size += 30)
+        {
+                positive plain = 0, dark = 0;
+
+                render(one, 2, size * 64, 0, FONT_UNHINTED, &box);
+                for (positive i = 0; i < sizeof(coverage); i++)
+                        plain += coverage[i];
+                render(one, 2, size * 64, 0, FONT_UNHINTED | FONT_DARKEN, &box);
+                for (positive i = 0; i < sizeof(coverage); i++)
+                        dark += coverage[i];
+                check("darkening: small text gains weight, large text none", size < 32 ? dark > plain : dark == plain);
+        }
+}
+
+static fn check_tables(const font_face address_to one, const font_face address_to two)
+{
+        p32 size = 16 * 64;
+        font_metrics m = font_metrics_at(one, size);
+
+        check("metrics: typo metrics when USE_TYPO_METRICS is set",
+              m.ascent == 819200 && m.descent == -204800 && m.gap == 102400);
+        check("metrics: x-height and cap height from OS/2", m.x_height == 512000 && m.cap_height == 716800);
+        check("metrics: the cell is the ascent, descent and gap rounded out",
+              m.cell_height == 13 + 4 + 2 && m.baseline == 13 + 1);
+        m = font_metrics_at(two, size);
+        check("metrics: hhea when the typo bit is clear, x-height measured from x",
+              m.ascent == 819200 && m.descent == -204800 && m.x_height == 524288);
+        check("metrics: the monospace cell is the advance rounded", m.cell_width == 10 && m.cell_height == 17);
+
+        check("cmap 4: a delta segment", font_glyph(one, 'A') == 1 && font_glyph(one, 'D') == 4);
+        check("cmap 4: past the segment, nothing", font_glyph(one, 'E') == 0 && font_glyph(one, '@') == 0);
+        check("cmap 4: the glyph array", font_glyph(one, 0x2190) == 5 && font_glyph(one, 0x2191) == 6 &&
+                                            font_glyph(one, 0x2192) == 0);
+        check("cmap 4: nothing past the plane", font_glyph(one, 0x1f600) == 0);
+        check("cmap 12: preferred over format 4", font_glyph(two, 'A') == 1 && font_glyph(two, 'B') == 2);
+        check("cmap 12: a group past the plane", font_glyph(two, 0x1f600) == 3 && font_glyph(two, 0x1f601) == 0);
+
+        check("advance: exact in 16.16", font_advance(one, 1, size) == 655360 && font_advance(two, 3, size) == 628736);
+        check("GPOS: a format 1 pair", font_kerning(one, 1, 2, size) == -51200);
+        check("GPOS: a format 2 class pair behind an extension lookup", font_kerning(one, 3, 4, size) == -30720);
+        check("GPOS: DFLT's kern feature only, not liga's lookup nor latn's kern",
+              font_kerning(one, 1, 1, size) == 0);
+        check("GPOS: a pair no lookup names", font_kerning(one, 2, 1, size) == 0);
+        check("kern: the table's pairs both ways", font_kerning(two, 1, 2, size) == -39424 &&
+                                                     font_kerning(two, 2, 1, size) == 16896);
+}
+
+static fn check_layout(const font_face address_to one, const font_face address_to two)
+{
+        const font_face address_to chain[2] = {one, two};
+        static const p8 text[] = "AB\xf0\x9f\x98\x80x\xff";
+        font_place places[8];
+        positive count = font_layout(&engine, chain, 2, text, sizeof(text) - 1, 16 * 64, 0, places, 8);
+
+        check("layout: one place a code point, the bad byte one too", count == 5);
+        check("layout: each from the first face that has it",
+              places[0].face == 0 && places[0].glyph == 1 && places[1].face == 0 && places[1].glyph == 2 &&
+                  places[2].face == 1 && places[2].glyph == 3 && places[3].face == 1 && places[3].glyph == 1 &&
+                  places[4].face == 0 && places[4].glyph == 0);
+        check("layout: pens exact, kerned within a face only",
+              places[0].x == 0 && places[1].x == 655360 - 51200 && places[2].x == 604160 + 1126400 &&
+                  places[3].x == 1730560 + 628736 && places[4].x == 2359296 + 628736);
+        count = font_layout(&engine, chain, 2, text, 2, 16 * 64, FONT_UNKERNED, places, 8);
+        check("layout: unkerned on request", count == 2 && places[1].x == 655360);
+}
+
+/*
+        The sRGB tables: every byte survives the round trip, light is
+        monotone, a blend at no coverage is the ground and at full the ink,
+        and half of white over black is 188, half the light.
+*/
+static fn check_light()
+{
+        bool round = true, rising = true;
+
+        for (p32 s = 0; s < 256; s++)
+        {
+                round = round && font_to_srgb[font_to_linear[s]] == s;
+                rising = rising && (!s || font_to_linear[s] > font_to_linear[s - 1]);
+        }
+        check("sRGB: every byte survives the round trip through 16-bit light", round);
+        check("sRGB: light rises with every byte", rising && font_to_linear[255] == 65535);
+
+        bool ends = true;
+        for (p32 s = 0; s < 256; s += 17)
+                ends = ends && font_mix(&engine, s * 0x010101, 0x204060, 0) == s * 0x010101 &&
+                       font_mix(&engine, s * 0x010101, 0x204060, 255) == 0x204060;
+        check("blend: no coverage is the ground, full is the ink", ends);
+        check("blend: half of white over black is half the light", font_mix(&engine, 0, 0xffffff, 128) == 0xbcbcbc);
+
+        const p32 address_to tones = font_tones(&engine, 0xdfe7ef, 0x101820);
+        check("tones: the ends of a pair are its two colours", tones[0] == 0x101820 && tones[255] == 0xdfe7ef);
+}
+
+/*
+        The drawn cells. Each box character's edges against the plain line of
+        each weight: an arm that reaches an edge leaves exactly the plain
+        line's profile there, and an edge with no arm is empty -- at four cell
+        sizes, so that cells join at any of them. Dashed lines leave their
+        edges empty by design; the diagonals are checked for their mirror.
+*/
+static p8 drawn[128 * 128], plain[6][128 * 128];
+
+static fn draw_cell(p32 code, b32 width, b32 height, p8 address_to into)
+{
+        memory_zero(into, 128 * 128);
+        font_drawn(&engine, code, width, height, into, 128);
+}
+
+static bool edge_same(const p8 address_to a, const p8 address_to b, b32 width, b32 height, p32 side)
+{
+        for (b32 i = 0; i < (side < 2 ? width : height); i++)
+        {
+                positive at = side == 0 ? (positive)i : side == 1 ? (positive)(height - 1) * 128 + i
+                              : side == 2 ? (positive)i * 128 : (positive)i * 128 + width - 1;
+
+                if (a[at] != (b ? b[at] : 0))
+                        return false;
+        }
+        return true;
+}
+
+static fn check_drawn()
+{
+        static const b32 sizes[4][2] = {{8, 16}, {10, 21}, {17, 37}, {32, 70}};
+        static const p32 lines[6] = {0x2502, 0x2503, 0x2551, 0x2500, 0x2501, 0x2550};
+
+        for (p32 s = 0; s < 4; s++)
+        {
+                b32 width = sizes[s][0], height = sizes[s][1];
+                bool seams = true;
+
+                for (p32 k = 0; k < 6; k++)
+                        draw_cell(lines[k], width, height, plain[k]);
+                for (p32 code = 0x2500; code <= 0x257f; code++)
+                {
+                        p32 arms = font_box_arms[code - 0x2500];
+
+                        if ((code >= 0x2504 && code <= 0x250b) || (code >= 0x254c && code <= 0x254f) ||
+                            (code >= 0x2571 && code <= 0x2573))
+                                continue;
+                        if (code >= 0x256d && code <= 0x2570)
+                                arms = code == 0x256d ? 0x11 : code == 0x256e ? 0x14 : code == 0x256f ? 0x44 : 0x41;
+                        draw_cell(code, width, height, drawn);
+                        //      sides: 0 top (north), 1 bottom (south), 2 left (west), 3 right (east)
+                        for (p32 side = 0; side < 4; side++)
+                        {
+                                p32 style = arms >> (6 - 2 * side) & 3;
+                                const p8 address_to want = style ? plain[(side < 2 ? 0 : 3) + style - 1] : null;
+
+                                seams = seams && edge_same(drawn, want, width, height, side);
+                        }
+                }
+                check("box drawing: every arm meets its edge as the plain line does, at every cell size", seams);
+
+                draw_cell(0x2571, width, height, drawn);
+                draw_cell(0x2572, width, height, plain[0]);
+                bool mirror = true;
+                for (b32 r = 0; r < height; r++)
+                        for (b32 c = 0; c < width; c++)
+                        {
+                                p32 a = drawn[r * 128 + c], b = plain[0][r * 128 + width - 1 - c];
+                                mirror = mirror && (a > b ? a - b : b - a) <= 1;
+                        }
+                check("box drawing: the two diagonals are mirrors", mirror);
+
+                //      Blocks: halves complementary, shades even, quadrants placed.
+                draw_cell(0x2580, width, height, drawn);
+                draw_cell(0x2584, width, height, plain[0]);
+                bool halves = true;
+                for (b32 r = 0; r < height; r++)
+                        for (b32 c = 0; c < width; c++)
+                                halves = halves && drawn[r * 128 + c] + plain[0][r * 128 + c] == 255;
+                check("blocks: the upper and lower halves tile the cell", halves);
+                draw_cell(0x2592, width, height, drawn);
+                check("blocks: a shade is even", drawn[0] == 128 && drawn[(height - 1) * 128 + width - 1] == 128);
+                draw_cell(0x259a, width, height, drawn);
+                check("blocks: a quadrant pair is where it says",
+                      drawn[0] == 255 && drawn[(height - 1) * 128 + width - 1] == 255 &&
+                          drawn[width - 1] == 0 && drawn[(height - 1) * 128] == 0);
+
+                //      Braille: each dot's centre is lit exactly when its bit is set.
+                bool dots = true;
+                for (p32 pattern = 0; pattern < 256; pattern += 37)
+                {
+                        draw_cell(0x2800 + pattern, width, height, drawn);
+                        for (p32 dot = 0; dot < 8; dot++)
+                        {
+                                p32 column = dot >= 3 && dot != 6, row = dot >= 6 ? 3 : dot % 3;
+                                b32 x = (b32)(width * (1 + 2 * column) / 4), y = (b32)(height * (1 + 2 * row) / 8);
+
+                                dots = dots && (drawn[y * 128 + x] > 64) == !!(pattern & 1u << dot);
+                        }
+                }
+                check("braille: each dot lit exactly when its bit is set", dots);
+        }
+}
+
+/*
+        Drawing into a target: what a known background draws is what an
+        unknown one blends to over the same ground, a cell writes all of its
+        rectangle and nothing else, clipping at every edge writes nothing
+        outside, and a tiny atlas that empties itself, or must lend itself
+        whole to one glyph, draws what a roomy one draws.
+*/
+static p32 canvas[96 * 96], canvas_again[96 * 96];
+
+static fn ground(p32 address_to pixels)
+{
+        for (p32 i = 0; i < 96 * 96; i++)
+                pixels[i] = 0xabcdef;
+        for (p32 y = 8; y < 88; y++)
+                for (p32 x = 8; x < 88; x++)
+                        pixels[y * 96 + x] = 0x101820;
+}
+
+static fn check_drawing(const font_face address_to one, const font_face address_to two)
+{
+        const font_face address_to chain[2] = {one, two};
+        font_target target = {canvas + 8 * 96 + 8, 96, 80, 80}, again = {canvas_again + 8 * 96 + 8, 96, 80, 80};
+        static const p8 text[] = "ABCD\xe2\x86\x90\xe2\x94\x80";
+
+        ground(canvas), ground(canvas_again);
+        font_draw(&engine, chain, 2, text, sizeof(text) - 1, 20 * 64, 0, &target, 3 << 16, 40, 0xdfe7ef, 0x101820);
+        font_draw(&engine, chain, 2, text, sizeof(text) - 1, 20 * 64, 0, &again, 3 << 16, 40, 0xdfe7ef, FONT_UNKNOWN);
+        check("draw: a known ground draws what an unknown one blends to",
+              !memory_compare(canvas, canvas_again, sizeof(canvas)));
+
+        bool inside = true;
+        for (p32 i = 0; i < 96 * 96; i++)
+                inside = inside && ((i / 96 >= 8 && i / 96 < 88 && i % 96 >= 8 && i % 96 < 88) || canvas[i] == 0xabcdef);
+        check("draw: nothing outside the target", inside);
+
+        //      Off every edge: the run hangs off the left, the top, the right
+        //      and the bottom in turn, and nothing outside is written.
+        static const b32 corners[4][2] = {{-30, 10}, {10, 5}, {60, 40}, {10, 95}};
+        for (p32 k = 0; k < 4; k++)
+        {
+                ground(canvas);
+                font_draw(&engine, chain, 2, text, sizeof(text) - 1, 30 * 64, 0, &target, corners[k][0] << 16,
+                          corners[k][1], 0xffffff, k & 1 ? FONT_UNKNOWN : 0x101820);
+                bool clipped = true;
+                for (p32 i = 0; i < 96 * 96; i++)
+                        clipped = clipped && ((i / 96 >= 8 && i / 96 < 88 && i % 96 >= 8 && i % 96 < 88) ||
+                                              canvas[i] == 0xabcdef);
+                check("draw: clipped at every edge of the target", clipped);
+        }
+
+        //      A cell writes its whole rectangle -- ground or tone -- and nothing else.
+        font_metrics grid = font_metrics_at(two, 16 * 64);
+        const p32 address_to tones = font_tones(&engine, 0xdfe7ef, 0x303030);
+        static const p32 codes[] = {'A', 0x2500, 0x253c, ' ', 0x1f600, 0x2593};
+        for (p32 k = 0; k < sizeof(codes) / sizeof(codes[0]); k++)
+        {
+                ground(canvas);
+                font_cell(&engine, chain + 1, 1, codes[k], 1, &grid, 16 * 64, 0, &target, 20, 30, 0xdfe7ef, 0x303030);
+                bool whole = true;
+                for (b32 y = 0; y < 96; y++)
+                        for (b32 x = 0; x < 96; x++)
+                        {
+                                bool in = x >= 28 && x < 28 + grid.cell_width && y >= 38 && y < 38 + grid.cell_height;
+                                p32 pixel = canvas[y * 96 + x];
+                                bool tone = false;
+
+                                for (p32 c = 0; c < 256 && in && !tone; c++)
+                                        tone = pixel == tones[c];
+                                whole = whole && (in ? tone : pixel == (x >= 8 && x < 88 && y >= 8 && y < 88 ? 0x101820u : 0xabcdefu));
+                        }
+                check("cell: its whole rectangle written in its tones, nothing else", whole);
+        }
+
+        //      A tiny atlas, 128 by 32: at 30 px emptied many times over, at
+        //      70 px too short for any glyph's shelf and lent whole to each.
+        for (p32 size = 30; size <= 70; size += 40)
+        {
+                ground(canvas), ground(canvas_again);
+                for (p32 pass = 0; pass < 3; pass++)
+                {
+                        font_draw(&engine, chain, 2, text, sizeof(text) - 1, size * 64, 0, &target, 0, size, 0xffffff, FONT_UNKNOWN);
+                        font_draw(&small_engine, chain, 2, text, sizeof(text) - 1, size * 64, 0, &again, 0, size, 0xffffff, FONT_UNKNOWN);
+                }
+                check("atlas: a tiny one that resets draws what a roomy one draws",
+                      !memory_compare(canvas, canvas_again, sizeof(canvas)));
+        }
+}
+
+/*
+        Hostile fonts. The bytes are copied so that the last one sits against
+        a page that faults, and each cut and each mutation is loaded, every
+        glyph drawn hinted and not at two sizes, every pair of the first
+        sixteen kerned, its metrics taken and a line laid out and drawn.
+        Surviving is the check; what the engine answers is not judged.
+*/
+static p8 address_to guarded;
+static positive hostile_cases;
+
+static fn exercise(const p8 address_to bytes, positive size)
+{
+        p8 address_to at = guarded + 8 * 4096 - size;
+        font_face face;
+
+        memory_copy(at, bytes, size);
+        hostile_cases++;
+        if (font_load(&face, at, size, 0))
+                return;
+
+        const font_face address_to chain[1] = {&face};
+        font_target target = {canvas + 8 * 96 + 8, 96, 80, 80};
+        font_metrics grid = font_metrics_at(&face, 13 * 64);
+        font_bitmap box;
+        p32 glyphs = face.glyphs < 24 ? face.glyphs : 24;
+
+        for (p32 g = 0; g < glyphs; g++)
+        {
+                font_render(&engine, &face, g, 13 * 64, g & 7, g & 1 ? FONT_UNHINTED : FONT_DARKEN,
+                            coverage, 256, sizeof(coverage), &box);
+                font_render(&engine, &face, g, 97 * 64, 3, 0, coverage, 256, sizeof(coverage), &box);
+        }
+        for (p32 left = 0; left < 16; left++)
+                for (p32 right = 0; right < 16; right++)
+                        font_kerning(&face, left, right, 13 * 64);
+        for (p32 code = 0x20; code < 0x80; code += 7)
+                font_glyph(&face, code);
+        font_glyph(&face, 0x1f600);
+        font_draw(&engine, chain, 1, (const p8 address_to)"AB x\xe2\x94\x80", 7, 13 * 64, 0, &target, 0, 20,
+                  0xffffff, 0x101820);
+        font_cell(&engine, chain, 1, 'A', 1, &grid, 13 * 64, 0, &target, 4, 4, 0xffffff, 0x101820);
+}
+
+static p64 hostile_state = 0x2545f4914f6cdd1dull;
+
+static p64 hostile_next(p64 below)
+{
+        XORSHIFT64(hostile_state);
+        return below ? hostile_state % below : 0;
+}
+
+static fn check_hostile(const p8 address_to font, positive size, p32 mutations)
+{
+        static p8 copy[8192];
+        positive before = hostile_cases;
+
+        for (positive cut = 0; cut <= size; cut++)
+                exercise(font, cut);
+
+        static const p32 extremes[] = {0, 1, 0x7fff, 0x8000, 0xffff, 0x7fffffff, 0xffffffff, 0x10000};
+        for (p32 m = 0; m < mutations; m++)
+        {
+                memory_copy(copy, font, size);
+                p32 changes = 1 + (p32)hostile_next(4);
+                for (p32 k = 0; k < changes; k++)
+                {
+                        positive at = hostile_next(size);
+
+                        if (hostile_next(2))
+                                copy[at] = (p8)hostile_next(256);
+                        else
+                        {
+                                //      A field at an even offset set to an extreme.
+                                p32 value = extremes[hostile_next(8)], wide = hostile_next(2) ? 4 : 2;
+
+                                at &= ~(positive)1;
+                                for (p32 b = 0; b < wide && at + b < size; b++)
+                                        copy[at + b] = (p8)(value >> (8 * (wide - 1 - b)));
+                        }
+                }
+                exercise(copy, size);
+        }
+        check("hostile: every cut and mutation survived against a guard page",
+              hostile_cases == before + size + 1 + mutations);
+}
+
+b32 main()
+{
+        font_face one, two;
+
+        font_make_one();
+        font_make_two();
+        font_start(&engine, atlas, 512, 512);
+        font_start(&small_engine, small_atlas, 128, 32);
+
+        check("load: the proportional font", font_load(&one, font_one, font_one_size, 0) == 0);
+        check("load: the monospace font", font_load(&two, font_two, font_two_size, 0) == 0);
+        check("load: an OpenType CFF font is out of scope",
+              font_load(&(font_face){0}, (const p8 address_to)"OTTO\0\0\0\0\0\0\0\0", 12, 0) == FONT_UNSUPPORTED);
+        check("load: nothing is not a font", font_load(&(font_face){0}, font_one, 0, 0) == FONT_BAD);
+
+        check_tables(&one, &two);
+        check_outlines(&one, &two);
+        check_layout(&one, &two);
+        check_light();
+        check_drawn();
+        check_drawing(&one, &two);
+
+        guarded = memory(9 * 4096);
+        check("hostile: a guard page",
+              guarded && system_call_3(syscall(mprotect), (positive)(guarded + 8 * 4096), 4096, 0) == 0);
+        check_hostile(font_one, font_one_size, 20000);
+        check_hostile(font_two, font_two_size, 20000);
+
+        return test_report(null);
+}
+#endif
+
 #ifdef CHECK_probe
 #include "../src/lib.util.c"
 #include "../src/moonwater/spark.c"

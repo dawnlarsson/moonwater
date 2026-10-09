@@ -80733,6 +80733,698 @@ def harness_network_cases(argv):
     return 0 if outcome.wasSuccessful() else 1
 
 
+FONT_DUMPER = r'''/* font.c's coverage for every glyph at each size and eighth of a pixel,
+   as headers of eight words and rows of bytes, or its rate in time mode. */
+#include "lib.util.c"
+#include "canvas/font.c"
+
+static font_engine engine;
+static p8 coverage[1 << 24];
+static p8 font_file[64 << 20];
+static p8 output[1 << 22];
+static positive used;
+
+static fn put(const address_any data, positive size)
+{
+        if (used + size > sizeof output)
+        {
+                system_write_all(1, output, used);
+                used = 0;
+        }
+        if (size > sizeof output)
+        {
+                system_write_all(1, data, size);
+                return;
+        }
+        memory_copy(output + used, data, size);
+        used += size;
+}
+
+static p32 number(string_address text)
+{
+        p32 value = 0;
+        while (*text >= '0' && *text <= '9')
+                value = value * 10 + (p32)(*text++ - '0');
+        return value;
+}
+
+b32 main()
+{
+        string_address path = program_argument(1);
+        string_address mode = program_argument(2);
+        bipolar got = file_slurp_regular_at(AT_FDCWD, path, font_file, sizeof font_file, 0);
+        font_face face;
+        b32 loaded = got > 0 ? font_load(&face, font_file, (positive)got, 0) : -9;
+
+        if (loaded)
+        {
+                string_format(log_error, "load %s: %p\n", path, (positive)(bipolar)loaded);
+                log_flush();
+                return loaded == FONT_UNSUPPORTED ? 3 : 1;
+        }
+        font_start(&engine, null, 0, 0);
+        positive count = program_argument_count();
+        p32 flags = mode[0] == 'h' ? 0 : FONT_UNHINTED;
+
+        if (mode[0] == 't')
+        {
+                for (positive a = 3; a < count; a++)
+                {
+                        p32 size = number(program_argument(a));
+                        positive best = ~(positive)0, glyphs = 0;
+                        for (p32 trial = 0; trial < 7; trial++)
+                        {
+                                positive start = clock_monotonic_nanoseconds();
+                                glyphs = 0;
+                                for (p32 phase = 0; phase < FONT_PHASES; phase++)
+                                        for (p32 g = 0; g < face.glyphs; g++)
+                                        {
+                                                font_bitmap box;
+                                                font_render(&engine, &face, g, size * 64, phase, FONT_UNHINTED,
+                                                            coverage, 4096, sizeof coverage, &box);
+                                                glyphs++;
+                                        }
+                                positive took = clock_monotonic_nanoseconds() - start;
+                                if (took < best)
+                                        best = took;
+                        }
+                        string_format(log, "ours size %p glyphs %p best_ns %p rate %p\n", (positive)size,
+                                      glyphs, best, glyphs * 1000000000ull / best);
+                }
+                log_flush();
+                return 0;
+        }
+
+        for (positive a = 3; a < count; a++)
+        {
+                p32 size = number(program_argument(a));
+                for (p32 phase = 0; phase < FONT_PHASES; phase++)
+                        for (p32 g = 0; g < face.glyphs; g++)
+                        {
+                                font_bitmap box = {0};
+                                b32 status = font_render(&engine, &face, g, size * 64, phase, flags,
+                                                         coverage, 4096, sizeof coverage, &box);
+                                b32 head[8] = {(b32)g, (b32)size, (b32)phase, status, box.left, box.top,
+                                               status ? 0 : box.width, status ? 0 : box.height};
+                                put(head, sizeof head);
+                                for (b32 r = 0; !status && r < box.height; r++)
+                                        put(coverage + (positive)r * 4096, (positive)box.width);
+                        }
+        }
+        system_write_all(1, output, used);
+        return 0;
+}
+'''
+
+FONT_COMPARATOR = r'''/* font.c's coverage on stdin against FreeType (FT_LOAD_NO_HINTING,
+   FT_RENDER_MODE_NORMAL, the outline moved by the same eighth of a pixel) and
+   against an exact rendering: the TrueType outline read here, in doubles,
+   scaled exactly, each quadratic flattened to within 2^-14 px, every
+   polygon edge's area per cell exact, as every reference rasterizer
+   accumulates it. Per size: mean and max of |ours - ft|, |ours - exact|,
+   |ft - exact| over pixels any of the three covers, |ours - ft| over the pixels
+   where FreeType is exact (ft-exact-ft), and the worst glyphs. */
+#include <ft2build.h>
+#include FT_FREETYPE_H
+#include FT_OUTLINE_H
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+static unsigned char ours[1 << 24];
+static unsigned char *font; static long font_size;
+static long glyf, loca, hmtx; static int units, long_loca, metrics, glyphs;
+
+static unsigned u8(long a) { return a < font_size ? font[a] : 0; }
+static unsigned u16(long a) { return u8(a) << 8 | u8(a + 1); }
+static int i16(long a) { return (short)u16(a); }
+static unsigned u32(long a) { return u16(a) << 16 | u16(a + 2); }
+
+typedef struct { double x, y; } point;
+static point pts[65536]; static unsigned char on[65536]; static int ends[16384];
+static int npts, nends, xmin0;
+
+static int outline(int g, int depth)
+{
+        if (g >= glyphs || depth > 8) return -1;
+        long start = long_loca ? u32(loca + 4 * g) : 2 * u16(loca + 2 * g);
+        long stop = long_loca ? u32(loca + 4 * g + 4) : 2 * u16(loca + 2 * g + 2);
+        if (stop <= start + 10) return 0;
+        long at = glyf + start;
+        int contours = i16(at), first = npts;
+        if (!depth) xmin0 = i16(at + 2);
+        if (contours >= 0)
+        {
+                int count = 0;
+                for (int k = 0; k < contours; k++) { int last = u16(at + 10 + 2 * k); count = last + 1; ends[nends++] = first + last; }
+                long p = at + 10 + 2 * contours; p += 2 + u16(p);
+                unsigned char flags[65536];
+                for (int i = 0; i < count;) { int f = u8(p++), r = f & 8 ? u8(p++) : 0; for (int j = 0; j <= r && i < count; j++) flags[i++] = f; }
+                for (int axis = 0; axis < 2; axis++)
+                {
+                        int v = 0;
+                        for (int i = 0; i < count; i++)
+                        {
+                                int f = flags[i], brief = axis ? 4 : 2, same = axis ? 32 : 16;
+                                if (f & brief) { int d = u8(p++); v += f & same ? d : -d; }
+                                else if (!(f & same)) { v += i16(p); p += 2; }
+                                if (axis) pts[first + i].y = v; else pts[first + i].x = v;
+                        }
+                }
+                for (int i = 0; i < count; i++) on[first + i] = flags[i] & 1;
+                npts = first + count;
+                return 0;
+        }
+        long p = at + 10; int flags;
+        do
+        {
+                flags = u16(p); int child = u16(p + 2); p += 4; int a1, a2;
+                if (flags & 1) { a1 = flags & 2 ? i16(p) : (int)u16(p); a2 = flags & 2 ? i16(p + 2) : (int)u16(p + 2); p += 4; }
+                else { a1 = flags & 2 ? (signed char)u8(p) : (int)u8(p); a2 = flags & 2 ? (signed char)u8(p + 1) : (int)u8(p + 1); p += 2; }
+                double xx = 1, xy = 0, yx = 0, yy = 1;
+                if (flags & 8) { xx = yy = i16(p) / 16384.0; p += 2; }
+                else if (flags & 0x40) { xx = i16(p) / 16384.0; yy = i16(p + 2) / 16384.0; p += 4; }
+                else if (flags & 0x80) { xx = i16(p) / 16384.0; yx = i16(p + 2) / 16384.0; xy = i16(p + 4) / 16384.0; yy = i16(p + 6) / 16384.0; p += 8; }
+                int from = npts;
+                if (outline(child, depth + 1) < 0) return -1;
+                for (int i = from; i < npts; i++) { double x = pts[i].x, y = pts[i].y; pts[i].x = x * xx + y * xy; pts[i].y = x * yx + y * yy; }
+                double dx, dy;
+                if (flags & 2)
+                {
+                        dx = a1; dy = a2;
+                        if ((flags & 0xc8) && (flags & 0x800)) { dx *= hypot(xx, xy); dy *= hypot(yy, yx); }
+                }
+                else { dx = pts[first + a1].x - pts[from + a2].x; dy = pts[first + a1].y - pts[from + a2].y; }
+                for (int i = from; i < npts; i++) { pts[i].x += dx; pts[i].y += dy; }
+        } while (flags & 0x20);
+        return 0;
+}
+
+static double *acc; static long acc_cap; static int W, H;
+typedef struct { double x0, y0, x1, y1; } edge_t;
+static edge_t *edges; static long edge_count, edge_cap;
+
+static void line(double x0, double y0, double x1, double y1)   /* y down, font-rs */
+{
+        if (y0 == y1) return;
+        if (edge_count == edge_cap) { edge_cap = edge_cap ? 2 * edge_cap : 65536; edges = realloc(edges, edge_cap * sizeof *edges); }
+        edges[edge_count++] = (edge_t){x0, y0, x1, y1};
+        double dir = 1;
+        if (y0 > y1) { double t = x0; x0 = x1; x1 = t; t = y0; y0 = y1; y1 = t; dir = -1; }
+        double dxdy = (x1 - x0) / (y1 - y0), x = x0;
+        int ystart = (int)floor(y0); if (ystart < 0) ystart = 0;
+        if (y0 < 0) x -= y0 * dxdy;
+        int yend = (int)ceil(y1); if (yend > H) yend = H;
+        for (int y = ystart; y < yend; y++)
+        {
+                double *row = acc + (long)y * (W + 2);
+                double dy = fmin(y + 1.0, y1) - fmax((double)y, y0);
+                double xnext = x + dxdy * dy, d = dy * dir;
+                double cx = fmin(fmax(x, 0), W), cn = fmin(fmax(xnext, 0), W);
+                double xa = cx < cn ? cx : cn, xb = cx < cn ? cn : cx;
+                double xaf = floor(xa); int xai = (int)xaf;
+                double xbc = ceil(xb); int xbi = (int)xbc;
+                if (xai < 0) xai = 0;
+                if (xbi <= xai + 1)
+                {
+                        double xmf = 0.5 * (cx + cn) - xaf;
+                        row[xai] += d - d * xmf;
+                        row[xai + 1] += d * xmf;
+                }
+                else
+                {
+                        double s = 1 / (xb - xa), x0f = xa - xaf, a0 = 0.5 * s * (1 - x0f) * (1 - x0f);
+                        double x1f = xb - xbc + 1, am = 0.5 * s * x1f * x1f;
+                        row[xai] += d * a0;
+                        if (xbi == xai + 2) row[xai + 1] += d * (1 - a0 - am);
+                        else
+                        {
+                                double a1 = s * (1.5 - x0f);
+                                row[xai + 1] += d * (a1 - a0);
+                                for (int xi = xai + 2; xi < xbi - 1; xi++) row[xi] += d * s;
+                                double a2 = a1 + (xbi - xai - 3) * s;
+                                row[xbi - 1] += d * (1 - a2 - am);
+                        }
+                        row[xbi] += d * am;
+                }
+                x = xnext;
+        }
+}
+
+static void quad(point a, point c, point b)
+{
+        double ax = a.x - 2 * c.x + b.x, ay = a.y - 2 * c.y + b.y;
+        double bow = fmax(fabs(ax), fabs(ay));
+        int n = (int)ceil(sqrt(bow / (4.0 / 16384))); if (n < 1) n = 1;
+        point p = a;
+        for (int i = 1; i <= n; i++)
+        {
+                double t = (double)i / n, u = 1 - t;
+                point q = {u * u * a.x + 2 * u * t * c.x + t * t * b.x, u * u * a.y + 2 * u * t * c.y + t * t * b.y};
+                if (i == n) q = b;
+                line(p.x, p.y, q.x, q.y);
+                p = q;
+        }
+}
+
+/* the exact coverage of glyph g at size, phase/8 px: fills exact[] (doubles 0..1) over left/top/w/h */
+static double exact_cov[1 << 22]; static int ex_left, ex_top, ex_w, ex_h;
+static int oracle(int g, int size, int phase)
+{
+        npts = nends = 0;
+        ex_w = ex_h = 0;
+        if (outline(g, 0) < 0) return -1;
+        if (!npts) return 0;
+        int m = g < metrics ? g : metrics - 1;
+        int lsb = g < metrics ? i16(hmtx + 4 * g + 2) : i16(hmtx + 4 * metrics + 2 * (g - metrics));
+        (void)m;
+        double scale = (double)size / units, shift = lsb - xmin0;
+        double l = 1e30, r = -1e30, b = 1e30, t = -1e30;
+        for (int i = 0; i < npts; i++)
+        {
+                pts[i].x = (pts[i].x + shift) * scale + phase / 8.0;
+                pts[i].y = pts[i].y * scale;
+                l = fmin(l, pts[i].x); r = fmax(r, pts[i].x); b = fmin(b, pts[i].y); t = fmax(t, pts[i].y);
+        }
+        int L = (int)floor(l), R = (int)ceil(r), B = (int)floor(b), T = (int)ceil(t);
+        W = R - L; H = T - B;
+        if (W <= 0 || H <= 0) return 0;
+        if ((long)(W + 2) * (H + 1) > acc_cap) { acc_cap = (long)(W + 2) * (H + 1); acc = realloc(acc, acc_cap * sizeof *acc); }
+        memset(acc, 0, (long)(W + 2) * (H + 1) * sizeof *acc);
+        edge_count = 0;
+        for (int i = 0; i < npts; i++) { pts[i].x -= L; pts[i].y = T - pts[i].y; }
+        int first = 0;
+        for (int c = 0; c < nends; first = ends[c++] + 1)
+        {
+                int last = ends[c], i = first, stop = last;
+                point s, ctl = {0}; int pending = 0;
+                if (on[first]) { s = pts[first]; i = first + 1; }
+                else if (on[last]) { s = pts[last]; stop = last - 1; }
+                else s = (point){(pts[first].x + pts[last].x) / 2, (pts[first].y + pts[last].y) / 2};
+                point cur = s;
+                for (; i <= stop; i++)
+                {
+                        if (!on[i]) { if (pending) { point mid = {(ctl.x + pts[i].x) / 2, (ctl.y + pts[i].y) / 2}; quad(cur, ctl, mid); cur = mid; } ctl = pts[i]; pending = 1; }
+                        else if (pending) { quad(cur, ctl, pts[i]); cur = pts[i]; pending = 0; }
+                        else { line(cur.x, cur.y, pts[i].x, pts[i].y); cur = pts[i]; }
+                }
+                if (pending) quad(cur, ctl, s); else line(cur.x, cur.y, s.x, s.y);
+        }
+        if ((long)W * H > (long)(sizeof exact_cov / sizeof *exact_cov)) return -2;
+        for (int y = 0; y < H; y++)
+        {
+                double sum = 0;
+                for (int x = 0; x < W; x++) { sum += acc[(long)y * (W + 2) + x]; double c = fabs(sum); exact_cov[(long)y * W + x] = c > 1 ? 1 : c; }
+        }
+        ex_left = L; ex_top = T; ex_w = W; ex_h = H;
+        return 0;
+}
+
+/* The true nonzero area of each pixel of the last oracle glyph, which is the
+   exact answer: 1024 sub-scanlines a row, every crossing's winding, the
+   runs of nonzero winding integrated exactly along x. The midpoint rule in
+   y is exact for the straight pieces between sub-rows, so the error is in
+   the sub-rows where an edge ends, turns or crosses another, at most half a
+   sub-row of a run's width each, under an eighth of a level. The clamped
+   sum of signed areas (what most rasterizers draw) is kept to count the
+   glyphs where the two differ: those whose contours overlap. */
+#define SUBROWS 1024
+static double union_cov[1 << 22];
+typedef struct { double x; int w; } cross_t;
+static cross_t *crossings; static long *starts; static long cross_cap, start_cap;
+
+static int compare_cross(const void *a, const void *b)
+{
+        double d = ((const cross_t *)a)->x - ((const cross_t *)b)->x;
+        return d < 0 ? -1 : d > 0;
+}
+
+static void true_union(void)
+{
+        long rows = (long)H * SUBROWS, total = 0;
+        if (rows + 1 > start_cap) { start_cap = rows + 1; starts = realloc(starts, start_cap * sizeof *starts); }
+        memset(starts, 0, (rows + 1) * sizeof *starts);
+        for (int pass = 0; pass < 2; pass++)
+        {
+                for (long e = 0; e < edge_count; e++)
+                {
+                        edge_t *g = edges + e;
+                        double lo = fmin(g->y0, g->y1), hi = fmax(g->y0, g->y1);
+                        long first = (long)ceil(lo * SUBROWS - 0.5), last = (long)ceil(hi * SUBROWS - 0.5);
+                        if (first < 0) first = 0;
+                        if (last > rows) last = rows;
+                        for (long k = first; k < last; k++)
+                        {
+                                if (!pass) { starts[k + 1]++; continue; }
+                                double y = (k + 0.5) / SUBROWS;
+                                crossings[starts[k]++] = (cross_t){g->x0 + (y - g->y0) * (g->x1 - g->x0) / (g->y1 - g->y0), g->y1 > g->y0 ? 1 : -1};
+                        }
+                }
+                if (!pass)
+                {
+                        for (long k = 0; k < rows; k++) starts[k + 1] += starts[k];
+                        total = starts[rows];
+                        if (total > cross_cap) { cross_cap = total; crossings = realloc(crossings, cross_cap * sizeof *crossings); }
+                }
+                else
+                        for (long k = rows; k > 0; k--) starts[k] = starts[k - 1];
+                if (pass) starts[0] = 0;
+        }
+        memset(union_cov, 0, (long)W * H * sizeof *union_cov);
+        for (long k = 0; k < rows; k++)
+        {
+                long a = starts[k], b = starts[k + 1];
+                qsort(crossings + a, b - a, sizeof *crossings, compare_cross);
+                int winding = 0; double from = 0;
+                double *row = union_cov + (k / SUBROWS) * W;
+                for (long i = a; i < b; i++)
+                {
+                        int before = winding;
+                        winding += crossings[i].w;
+                        if (!before && winding) from = crossings[i].x;
+                        if (before && !winding)
+                        {
+                                double to = crossings[i].x;
+                                for (int c = (int)floor(from); c < W && c <= (int)floor(to); c++)
+                                {
+                                        double l = fmax(from, c), r = fmin(to, c + 1.0);
+                                        if (c >= 0 && r > l) row[c] += (r - l) / SUBROWS;
+                                }
+                        }
+                }
+        }
+        (void)total;
+}
+
+static int may_overlap(void)
+{
+        double box[256][4]; int wound[256], first = 0;
+        if (nends > 256) return 1;
+        for (int c = 0; c < nends; first = ends[c++] + 1)
+        {
+                double area = 0;
+                box[c][0] = box[c][1] = 1e30; box[c][2] = box[c][3] = -1e30;
+                for (int i = first; i <= ends[c]; i++)
+                {
+                        point a = pts[i], b = pts[i == ends[c] ? first : i + 1];
+                        area += a.x * b.y - b.x * a.y;
+                        box[c][0] = fmin(box[c][0], a.x); box[c][1] = fmin(box[c][1], a.y);
+                        box[c][2] = fmax(box[c][2], a.x); box[c][3] = fmax(box[c][3], a.y);
+                }
+                wound[c] = area < 0 ? -1 : 1;
+                for (int k = 0; k < c; k++)
+                        if (wound[k] == wound[c] && box[k][0] < box[c][2] && box[c][0] < box[k][2] &&
+                            box[k][1] < box[c][3] && box[c][1] < box[k][3])
+                                return 1;
+        }
+        return 0;
+}
+
+static double now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec * 1e-9; }
+
+typedef struct { int glyph, phase, max, a, f, x; } worst_t;
+typedef struct { double sum; long n; int max; long over; worst_t worst[6]; } stat_t;
+
+static void note(stat_t *s, int glyph, int phase, int gmax, int a, int f, int x, int threshold)
+{
+        if (gmax > s->max) s->max = gmax;
+        if (gmax > threshold) s->over++;
+        for (int w = 0; w < 6; w++)
+                if (gmax > s->worst[w].max) { memmove(s->worst + w + 1, s->worst + w, (5 - w) * sizeof *s->worst); s->worst[w] = (worst_t){glyph, phase, gmax, a, f, x}; break; }
+}
+
+static void show(const char *name, stat_t *s)
+{
+        printf("  %-12s mean %.4f max %d over %ld worst", name, s->n ? s->sum / s->n : 0, s->max, s->over);
+        for (int w = 0; w < 6 && s->worst[w].max; w++)
+                printf(" g%d/p%d:%d(o%d,f%d,x%d)", s->worst[w].glyph, s->worst[w].phase, s->worst[w].max, s->worst[w].a, s->worst[w].f, s->worst[w].x);
+        printf("\n");
+}
+
+int main(int argc, char **argv)
+{
+        FT_Library library; FT_Face face;
+        if (FT_Init_FreeType(&library) || FT_New_Face(library, argv[1], 0, &face))
+                return fprintf(stderr, "freetype: cannot open %s\n", argv[1]), 2;
+
+        if (argc > 2 && !strcmp(argv[2], "time"))
+        {
+                for (int a = 3; a < argc; a++)
+                {
+                        int size = atoi(argv[a]); double best = 1e30; long glyphs_done = 0;
+                        FT_Set_Pixel_Sizes(face, 0, size);
+                        for (int trial = 0; trial < 7; trial++)
+                        {
+                                double start = now(); glyphs_done = 0;
+                                for (int phase = 0; phase < 8; phase++)
+                                        for (long g = 0; g < face->num_glyphs; g++)
+                                        {
+                                                if (!FT_Load_Glyph(face, g, FT_LOAD_NO_HINTING | FT_LOAD_NO_BITMAP))
+                                                {
+                                                        FT_Outline_Translate(&face->glyph->outline, phase * 8, 0);
+                                                        FT_Render_Glyph(face->glyph, FT_RENDER_MODE_NORMAL);
+                                                }
+                                                glyphs_done++;
+                                        }
+                                double took = now() - start; if (took < best) best = took;
+                        }
+                        printf("freetype size %d glyphs %ld best_ns %.0f rate %.0f\n", size, glyphs_done, best * 1e9, glyphs_done / best);
+                }
+                return 0;
+        }
+
+        int use_oracle = argc > 2 && !strcmp(argv[2], "exact"), threshold = argc > 3 ? atoi(argv[3]) : 8;
+        FILE *ff = fopen(argv[1], "rb"); fseek(ff, 0, SEEK_END); font_size = ftell(ff); rewind(ff);
+        font = malloc(font_size); if (fread(font, 1, font_size, ff) != (size_t)font_size) return 2; fclose(ff);
+        for (int i = 0, n = u16(4); i < n; i++)
+        {
+                long r = 12 + 16 * i; unsigned tag = u32(r); long off = u32(r + 8);
+                if (tag == 0x676c7966) glyf = off; if (tag == 0x6c6f6361) loca = off; if (tag == 0x686d7478) hmtx = off;
+                if (tag == 0x68656164) { units = u16(off + 18); long_loca = i16(off + 50); }
+                if (tag == 0x6d617870) glyphs = u16(off + 4);
+                if (tag == 0x68686561) metrics = u16(off + 34);
+        }
+
+        int head[8], current = -1;
+        long glyph_count = 0, refused = 0, missing = 0, overlap = 0, pixels = 0;
+        stat_t of = {0}, ox = {0}, fx = {0}, agreed = {0};
+        long union_glyphs = 0, union_overlaps = 0, union_off = 0; int union_max = 0, union_glyph = -1;
+        double cont_ours = 0, cont_ft = 0; long cont_n = 0; double cont_ours_max = 0, cont_ft_max = 0;
+
+#define REPORT() if (current >= 0) { \
+        printf("size %d glyphs %ld pixels %ld refused %ld ft_missing %ld overlap %ld\n", current, glyph_count, pixels, refused, missing, overlap); \
+        show("ours-ft", &of); if (use_oracle) { show("ours-exact", &ox); show("ft-exact", &fx); show("ft-exact-ft", &agreed); \
+        printf("  overlaps     glyphs %ld overlapping %ld clamp-pixels-over-one %ld max %d worst-glyph %d\n", union_glyphs, union_overlaps, union_off, union_max, union_glyph); \
+        printf("  continuous  ours mean %.4f max %.3f   ft mean %.4f max %.3f (|byte - 255c|)\n", cont_ours / cont_n, cont_ours_max, cont_ft / cont_n, cont_ft_max); } fflush(stdout); }
+
+        while (fread(head, sizeof head, 1, stdin) == 1)
+        {
+                int glyph = head[0], size = head[1], phase = head[2], status = head[3];
+                int left = head[4], top = head[5], width = head[6], height = head[7];
+                if (width * height && fread(ours, (size_t)width * height, 1, stdin) != 1) return fprintf(stderr, "short read\n"), 2;
+                if (size != current)
+                {
+                        REPORT();
+                        current = size;
+                        glyph_count = refused = missing = overlap = pixels = 0;
+                        memset(&of, 0, sizeof of); memset(&ox, 0, sizeof ox); memset(&fx, 0, sizeof fx); memset(&agreed, 0, sizeof agreed);
+                        cont_ours = cont_ft = 0; cont_n = 0; cont_ours_max = cont_ft_max = 0;
+                        union_glyphs = union_overlaps = union_off = 0; union_max = 0; union_glyph = -1;
+                        FT_Set_Pixel_Sizes(face, 0, size);
+                }
+                glyph_count++;
+                if (FT_Load_Glyph(face, glyph, FT_LOAD_NO_HINTING | FT_LOAD_NO_BITMAP)) { missing++; continue; }
+                overlap += (face->glyph->outline.flags & FT_OUTLINE_OVERLAP) != 0;
+                FT_Outline_Translate(&face->glyph->outline, phase * 8, 0);
+                if (FT_Render_Glyph(face->glyph, FT_RENDER_MODE_NORMAL)) { missing++; continue; }
+                if (status) refused++;
+                if (use_oracle && oracle(glyph, size, phase) < 0) { missing++; continue; }
+                if (use_oracle && ex_w && (size <= 48 || may_overlap()))
+                {
+                        /* The exact answer is the true union; where the clamped
+                           sum is more than a level from it, the glyph overlaps.
+                           Past 48 px only glyphs with two contours wound alike
+                           whose boxes meet are asked: no others can differ. */
+                        int overlapping = 0;
+                        true_union();
+                        union_glyphs++;
+                        for (long i = 0; i < (long)ex_w * ex_h; i++)
+                        {
+                                double u = fmin(union_cov[i], 1);
+                                if (fabs(u - exact_cov[i]) * 255 > 1)
+                                {
+                                        int d = (int)(fabs(u - exact_cov[i]) * 255 + 0.5);
+                                        overlapping = 1;
+                                        union_off++;
+                                        if (d > union_max) { union_max = d; union_glyph = glyph; }
+                                }
+                                exact_cov[i] = u;
+                        }
+                        union_overlaps += overlapping;
+                }
+                FT_Bitmap *b = &face->glyph->bitmap;
+                int fl = face->glyph->bitmap_left, ft = face->glyph->bitmap_top, fw = (int)b->width, fh = (int)b->rows;
+                int x0 = left < fl ? left : fl, x1 = left + width > fl + fw ? left + width : fl + fw;
+                int y1 = top > ft ? top : ft, y0 = top - height < ft - fh ? top - height : ft - fh;
+                if (use_oracle && ex_w) { x0 = x0 < ex_left ? x0 : ex_left; x1 = x1 > ex_left + ex_w ? x1 : ex_left + ex_w; y1 = y1 > ex_top ? y1 : ex_top; y0 = y0 < ex_top - ex_h ? y0 : ex_top - ex_h; }
+                int m_of = 0, m_ox = 0, m_fx = 0, m_ag = 0; int wa = 0, wf = 0, wx = 0, xa = 0, xf = 0, xx = 0, ya = 0, yf = 0, yx = 0, za = 0, zf = 0, zx = 0;
+                for (int y = y1 - 1; y >= y0; y--)
+                        for (int x = x0; x < x1; x++)
+                        {
+                                int a = 0, f = 0, e8 = 0; double c = 0;
+                                int ox_ = x - left, oy = top - 1 - y; if (ox_ >= 0 && ox_ < width && oy >= 0 && oy < height) a = ours[oy * width + ox_];
+                                int fx_ = x - fl, fy = ft - 1 - y; if (fx_ >= 0 && fx_ < fw && fy >= 0 && fy < fh) f = b->buffer[fy * b->pitch + fx_];
+                                if (use_oracle) { int ex = x - ex_left, ey = ex_top - 1 - y; if (ex >= 0 && ex < ex_w && ey >= 0 && ey < ex_h) c = exact_cov[(long)ey * ex_w + ex]; e8 = (int)floor(255 * c + 0.5); }
+                                if (!a && !f && !e8 && c == 0) continue;
+                                pixels++;
+                                int d = abs(a - f); of.sum += d; of.n++; if (d > m_of) { m_of = d; wa = a; wf = f; wx = e8; }
+                                if (use_oracle)
+                                {
+                                        d = abs(a - e8); ox.sum += d; ox.n++; if (d > m_ox) { m_ox = d; xa = a; xf = f; xx = e8; }
+                                        d = abs(f - e8); fx.sum += d; fx.n++; if (d > m_fx) { m_fx = d; ya = a; yf = f; yx = e8; }
+                                        if (f == e8) { d = abs(a - f); agreed.sum += d; agreed.n++; if (d > m_ag) { m_ag = d; za = a; zf = f; zx = e8; } }
+                                        double co = fabs(a - 255 * c), cf = fabs(f - 255 * c);
+                                        cont_ours += co; cont_ft += cf; cont_n++;
+                                        if (co > cont_ours_max) cont_ours_max = co; if (cf > cont_ft_max) cont_ft_max = cf;
+                                }
+                        }
+                note(&of, glyph, phase, m_of, wa, wf, wx, threshold);
+                if (use_oracle) { note(&ox, glyph, phase, m_ox, xa, xf, xx, threshold); note(&fx, glyph, phase, m_fx, ya, yf, yx, threshold);
+                                  note(&agreed, glyph, phase, m_ag, za, zf, zx, threshold); }
+        }
+        REPORT();
+        return 0;
+}
+'''
+
+
+def harness_font_reference(argv):
+    """The text engine against FreeType and against the exact answer.
+
+    For every glyph of each face, at each size and each of the eight phases,
+    src/canvas/font.c's coverage is set beside FreeType's unhinted rendering
+    of the same outline at the same offset, and beside an exact rendering
+    computed here in doubles from the outline itself (FONT_COMPARATOR says
+    how). The engine has to be within one 8-bit level of the exact answer
+    everywhere and within half a level on average; FreeType is reported, not
+    judged: where it differs from the exact answer it is its own flattening,
+    which draws a curve bowing less than a quarter pixel as a straight chord.
+
+        --fonts DIR    every .ttf there (MOONWATER_FONTS, else system faces)
+        --sizes "..."  pixel sizes (8 16 48; the gate is 8 to 400)
+        --bench        glyphs a second at 16, 48 and 200 px for both engines,
+                       under --lock FILE on --cpu N when given
+
+    NOT RUN (2) without FreeType, a C compiler that builds for this Linux
+    machine, or a font.
+    """
+    import subprocess
+    import tempfile
+    parser = argparse.ArgumentParser(prog="font_reference")
+    parser.add_argument("--fonts", default=os.environ.get("MOONWATER_FONTS", ""))
+    parser.add_argument("--sizes", default="8 16 48")
+    parser.add_argument("--bench", action="store_true")
+    parser.add_argument("--lock")
+    parser.add_argument("--cpu")
+    args = parser.parse_args(argv)
+    root = HARNESS_ROOT
+    cc = shutil.which(os.environ.get("CC", "cc")) or shutil.which("gcc")
+    if platform.system() != "Linux" or platform.machine() not in ("x86_64", "aarch64") or not cc:
+        print("font reference: NOT RUN -- needs Linux on x86_64 or arm64 and a C compiler")
+        return 2
+    if args.fonts:
+        fonts = sorted(str(path) for path in Path(args.fonts).glob("*.ttf"))
+    else:
+        fonts = [path for path in ("/usr/share/fonts/TTF/Hack-Regular.ttf",
+                                   "/usr/share/fonts/TTF/DejaVuSans.ttf",
+                                   "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                                   "/usr/share/fonts/noto/NotoSans-Regular.ttf")
+                 if os.path.exists(path)]
+    if not fonts:
+        print("font reference: NOT RUN -- no TrueType font (give --fonts or MOONWATER_FONTS)")
+        return 2
+    flags = subprocess.run(["pkg-config", "--cflags", "--libs", "freetype2"], capture_output=True,
+                           text=True, check=False) if shutil.which("pkg-config") else None
+    freetype = shlex.split(flags.stdout) if flags and flags.returncode == 0 else \
+        ["-I/usr/include/freetype2", "-lfreetype"]
+    check = Checks()
+    with tempfile.TemporaryDirectory(prefix="font-reference-") as temporary:
+        work = Path(temporary)
+        (work / "dump.c").write_text(FONT_DUMPER)
+        (work / "compare.c").write_text(FONT_COMPARATOR)
+        built = subprocess.run([cc, "-O2", "-Wall", "-o", str(work / "compare"), str(work / "compare.c")] +
+                               freetype + ["-lm"], capture_output=True, text=True, check=False)
+        if built.returncode:
+            print("font reference: NOT RUN -- FreeType does not build here: " + built.stderr.strip()[-300:])
+            return 2
+        march = ["-march=x86-64"] if platform.machine() == "x86_64" else []
+        built = subprocess.run([cc, "-O2", "-static", "-nostdlib", "-nostartfiles", "-fno-stack-protector",
+                                "-fno-builtin", "-w"] + march +
+                               ["-T", str(root / "src/build/spark.ld"), "-Wl,-e,_start", "-Wl,--build-id=none",
+                                "-Wl,--no-warn-rwx-segments", "-I", str(root / "src"),
+                                "-o", str(work / "dump"), str(work / "dump.c")],
+                               capture_output=True, text=True, check=False)
+        check(built.returncode == 0, "the engine's dumper builds: " + built.stderr.strip()[-300:])
+        if built.returncode:
+            return check.verdict("font reference", "font_reference")
+        pinned = []
+        if args.lock:
+            pinned += ["flock", args.lock]
+        if args.cpu:
+            pinned += ["taskset", "-c", args.cpu]
+        for font in fonts:
+            name = Path(font).name
+            if args.bench:
+                for program in ("dump", "compare"):
+                    ran = subprocess.run(pinned + [str(work / program), font, "time", "16", "48", "200"],
+                                         capture_output=True, text=True, check=False)
+                    print("font reference %s %s" % (name, ran.stdout.strip().replace("\n", "; ")))
+                continue
+            probe = subprocess.run([str(work / "dump"), font, "dump"], capture_output=True, check=False)
+            if probe.returncode == 3:
+                print("  %-24s skipped: a format the engine refuses on purpose (CFF, variable or bitmap)" % name)
+                continue
+            dumper = subprocess.Popen([str(work / "dump"), font, "dump"] + args.sizes.split(),
+                                      stdout=subprocess.PIPE)
+            compared = subprocess.run([str(work / "compare"), font, "exact"], stdin=dumper.stdout,
+                                      capture_output=True, text=True, check=False)
+            dumper.stdout.close()
+            dumper.wait()
+            check(dumper.returncode == 0 and compared.returncode == 0,
+                  "%s: the dump and the comparison ran (%s)" % (name, compared.stderr.strip()[-200:]))
+            size, ours_ft = None, 0.0
+            for line in compared.stdout.splitlines():
+                words = line.split()
+                if words[:1] == ["size"]:
+                    size = words[1]
+                    figures = dict(zip(words[2::2], words[3::2]))
+                    check(figures.get("refused") == "0" and figures.get("ft_missing") == "0",
+                          "%s %s px: every glyph FreeType draws, the engine draws: %s" % (name, size, line))
+                elif words[:1] in (["ours-ft"], ["ours-exact"], ["ft-exact"], ["ft-exact-ft"]):
+                    mean, worst = float(words[2]), int(words[4])
+                    print("  %-24s %4s px  %-10s mean %7.4f  max %3d" % (name, size, words[0], mean, worst))
+                    if words[0] == "ours-exact":
+                        check(worst <= 1 and mean <= 0.5,
+                              "%s %s px: within one level of the exact area (mean %.4f, max %d)" %
+                              (name, size, mean, worst))
+                    elif words[0] == "ours-ft":
+                        ours_ft = mean
+                    elif words[0] == "ft-exact":
+                        # FreeType's own distance from the exact area is the
+                        # most the engine may sit from it: 3.07 levels on
+                        # average for Inter at 8 px, where it clamps
+                        # overlapping contours a pixel at a time.
+                        check(ours_ft <= mean + 0.5,
+                              "%s %s px: no further from FreeType than FreeType is from exact (%.4f, %.4f)" %
+                              (name, size, ours_ft, mean))
+                    elif words[0] == "ft-exact-ft":
+                        check(worst <= 1, "%s %s px: where FreeType is exact, within one level of it (max %d)" %
+                              (name, size, worst))
+    return check.verdict("font reference", "font_reference")
+
+
 HARNESS_CHECKS = {
     "g_tables": harness_g_tables,
     "scale": harness_scale,
@@ -80766,6 +81458,7 @@ HARNESS_CHECKS = {
     "image_nodes": harness_image_nodes,
     "canvas_seam": harness_canvas_seam,
     "canvas_scale": harness_canvas_scale,
+    "font_reference": harness_font_reference,
     "bowl_session": harness_bowl_session,
     "bowl_matrix": harness_bowl_matrix,
     "bowl_roots": harness_bowl_roots,
