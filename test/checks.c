@@ -57938,7 +57938,7 @@ static fn network_stream_send_timeout(void)
                     13, address_of default_action, null, 8);
                 positive began = clock_monotonic_nanoseconds();
                 bool sent = network_stream_send_all_for(
-                    pair[0], payload, payload_size, 5, 0);
+                    pair[0], payload, payload_size, 0, 100000000);
                 positive elapsed = clock_monotonic_nanoseconds() - began;
 
                 socket_close(pair[0]);

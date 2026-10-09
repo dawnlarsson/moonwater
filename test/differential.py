@@ -26096,12 +26096,16 @@ static positive memory_text_span(const void *block, positive size)
                 i++;
         return i;
 }
+#ifndef memory_zero
 static void memory_zero(void *into, positive size)
 {
         if (size)
                 memset(into, 0, size);
 }
+#endif
+#ifndef max
 #define max(a, b) ((a) > (b) ? (a) : (b))
+#endif
 static positive digit_known(p8 character, positive base)
 {
         positive v;
@@ -61314,7 +61318,7 @@ int main(void)
     http_framing = sec(
         net,
         "static PURE bipolar http_header_end(",
-        "static bipolar http_unchunk(p8 address_to bytes, positive size);")
+        "/* Status and body framing have one interpretation in both clients.")
 
     http_clean_source = base_shim + r"""
 #define HTTP_OK 0
