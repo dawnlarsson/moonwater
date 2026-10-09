@@ -278,6 +278,9 @@ cover('folds_already', 'size', 'memory_squeeze_bytes',
       'tr hands it what its read and the delete or translate before it left; '
       'no reachable call site passes a literal size, and the table is built '
       'from the command line')
+cover('folds_already', 'count', 'memory_sweep_coverage',
+      'the rasteriser hands it a run of touched blocks whose length the '
+      'outline decides at run time; no reachable call site passes a literal')
 cover('folds_already', 'width', 'memory_translate_u32_rect',
       'the text engine hands it a terminal cell or a glyph clipped to one; '
       'widths and heights come from the grid and the glyph at run time, so '

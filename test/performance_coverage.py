@@ -258,6 +258,9 @@ cover('direct_benchmark', 'test/checks.c#BENCH_translate', 'memory_translate',
 cover('direct_benchmark', 'test/checks.c#BENCH_translate_rect', 'memory_translate_u32_rect',
       'paired former-C/assembly timing over terminal cells at 1080p, 4K and 8K '
       'and a wide strip, from atlas rows into frame rows, both x86-64 bodies')
+cover('direct_benchmark', 'test/checks.c#BENCH_sweep_coverage', 'memory_sweep_coverage',
+      'paired former-C/assembly timing over coverage runs of 8 to 400 cells, '
+      'every x86-64 body')
 cover('direct_benchmark', 'test/checks.c#BENCH_delete', 'memory_delete_bytes',
       'paired former-C/assembly timing over byte deletion by table at three densities')
 cover('direct_benchmark', 'test/checks.c#BENCH_squeeze', 'memory_squeeze_bytes',

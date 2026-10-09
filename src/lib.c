@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        399 routines (376 public, 23 local), 389 of them on all three and 10 local to one.
+        400 routines (377 public, 23 local), 390 of them on all three and 10 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -274,6 +274,7 @@
           memory_span_byte_wide          local   yes     --      --
           memory_squeeze_bytes           public  yes     yes     yes
           memory_sum_bytes               public  yes     yes     yes
+          memory_sweep_coverage          public  yes     yes     yes
           memory_take                    public  yes     yes     yes
           memory_text_span               public  yes     yes     yes
           memory_to_lower_ascii          public  yes     yes     yes
@@ -12642,6 +12643,74 @@ __asm__(
     ".Ltr32_x64_done:\n" ASM_RET
     ASM_END(memory_translate_u32_rect)
 #undef TR32_X64_LOOKUP
+
+    //
+    //       memory_sweep_coverage -- a row of coverage cells summed, made
+    //       bytes and cleared: rdi into, rsi cells, rdx count, ecx sum.
+    //
+    //       A running sum is a chain, so the vector bodies cut it: each
+    //       vector's own prefix sum is four shifted adds (valignd against
+    //       zero, by 1, 2, 4 and 8 lanes) that wait on nothing, its total is
+    //       its last lane broadcast, and the chain from vector to vector is
+    //       one vpaddd of that total into the carry. The byte is the absolute
+    //       value, clamped at 2^21, times 255 as a shift and a subtract, plus
+    //       2^20, shifted down 21 and narrowed. With AVX-512 the last vector
+    //       is masked to the count; with AVX2 eight lanes a turn and the rest
+    //       one at a time, as without either.
+    //
+    //       On a 9950X core (test/run bench sweep-coverage), runs of 8 to 400
+    //       cells, two in five of them nonzero, the time of the C loop it
+    //       replaced: AVX-512 12-94% (12% from 48 cells; 8 cells, all set-up,
+    //       94%), AVX2 21-46%, one at a time 92-99%.
+    //
+#define SWEEP_X64_LEVEL(Y, T)                                                                           \
+    "vpabsd %" Y "5, %" Y "5\n   vpminud %" Y "2, %" Y "5, %" Y "5\n   vpslld $8, %" Y "5, %" Y "6\n"      \
+    "vpsubd %" Y "5, %" Y "6, %" Y "5\n   vpaddd %" Y "3, %" Y "5, %" Y "5\n   vpsrld $21, %" Y "5, %" Y "5\n" T
+#define SWEEP_X64_PREFIX                                                                                \
+    "valignd $15, %zmm0, %zmm5, %zmm6\n   vpaddd %zmm6, %zmm5, %zmm5\n   valignd $14, %zmm0, %zmm5, %zmm6\n" \
+    "vpaddd %zmm6, %zmm5, %zmm5\n   valignd $12, %zmm0, %zmm5, %zmm6\n   vpaddd %zmm6, %zmm5, %zmm5\n"     \
+    "valignd $8, %zmm0, %zmm5, %zmm6\n   vpaddd %zmm6, %zmm5, %zmm5\n"                                   \
+    "vpermd %zmm5, %zmm4, %zmm7\n   vpaddd %zmm1, %zmm5, %zmm5\n   vpaddd %zmm7, %zmm1, %zmm1\n"
+    ASM_FUNC(memory_sweep_coverage)
+    "mov %ecx, %eax\n   test %rdx, %rdx\n   jz .Lsweep_x64_done\n"
+    ASM_NARROW("cpu_has_avx512", ".Lsweep_x64_narrow")
+    "vpbroadcastd %ecx, %zmm1\n   vpxord %zmm0, %zmm0, %zmm0\n   mov $0x200000, %r8d\n   vpbroadcastd %r8d, %zmm2\n"
+    "mov $0x100000, %r8d\n   vpbroadcastd %r8d, %zmm3\n   mov $15, %r8d\n   vpbroadcastd %r8d, %zmm4\n"
+    "cmp $16, %rdx\n   jb .Lsweep_x64_last\n"
+    ".Lsweep_x64_sixteen:\n   vmovdqu32 (%rsi), %zmm5\n   vmovdqu32 %zmm0, (%rsi)\n"
+    SWEEP_X64_PREFIX
+    SWEEP_X64_LEVEL("zmm", "vpmovdb %zmm5, %xmm5\n")
+    "vmovdqu %xmm5, (%rdi)\n   add $64, %rsi\n   add $16, %rdi\n   sub $16, %rdx\n   cmp $16, %rdx\n   jae .Lsweep_x64_sixteen\n"
+    ".Lsweep_x64_last:\n   test %rdx, %rdx\n   jz .Lsweep_x64_wide_done\n"
+    "mov $0xffff, %r8d\n   bzhi %edx, %r8d, %r8d\n   kmovw %r8d, %k1\n   lea -1(%rdx), %r8d\n   vpbroadcastd %r8d, %zmm4\n"
+    "vmovdqu32 (%rsi), %zmm5{%k1}{z}\n   vmovdqu32 %zmm0, (%rsi){%k1}\n"
+    SWEEP_X64_PREFIX
+    SWEEP_X64_LEVEL("zmm", "vpmovdb %zmm5, %xmm5\n")
+    "vmovdqu8 %xmm5, (%rdi){%k1}\n"
+    ".Lsweep_x64_wide_done:\n   vmovd %xmm1, %eax\n   vzeroupper\n" ASM_RET
+    //  AVX2: within each 128-bit half by vpslldq, the low half's total into
+    //  the high half by vpshufd and vperm2i128.
+    ".Lsweep_x64_narrow:\n   cmp $8, %rdx\n   jb .Lsweep_x64_one\n   cmpb $0, cpu_has_avx2(%rip)\n   je .Lsweep_x64_one\n"
+    "vmovd %ecx, %xmm1\n   vpbroadcastd %xmm1, %ymm1\n   vpxor %xmm0, %xmm0, %xmm0\n   mov $0x200000, %r8d\n   vmovd %r8d, %xmm2\n"
+    "vpbroadcastd %xmm2, %ymm2\n   mov $0x100000, %r8d\n   vmovd %r8d, %xmm3\n   vpbroadcastd %xmm3, %ymm3\n   mov $7, %r8d\n"
+    "vmovd %r8d, %xmm4\n   vpbroadcastd %xmm4, %ymm4\n"
+    ".Lsweep_x64_eight:\n   vmovdqu (%rsi), %ymm5\n   vmovdqu %ymm0, (%rsi)\n"
+    "vpslldq $4, %ymm5, %ymm6\n   vpaddd %ymm6, %ymm5, %ymm5\n   vpslldq $8, %ymm5, %ymm6\n   vpaddd %ymm6, %ymm5, %ymm5\n"
+    "vpshufd $0xff, %ymm5, %ymm6\n   vperm2i128 $0x08, %ymm6, %ymm6, %ymm6\n   vpaddd %ymm6, %ymm5, %ymm5\n"
+    "vpermd %ymm5, %ymm4, %ymm7\n   vpaddd %ymm1, %ymm5, %ymm5\n   vpaddd %ymm7, %ymm1, %ymm1\n"
+    SWEEP_X64_LEVEL("ymm", "vextracti128 $1, %ymm5, %xmm6\n   vpackusdw %xmm6, %xmm5, %xmm5\n   vpackuswb %xmm5, %xmm5, %xmm5\n")
+    "vmovq %xmm5, (%rdi)\n   add $32, %rsi\n   add $8, %rdi\n   sub $8, %rdx\n   cmp $8, %rdx\n   jae .Lsweep_x64_eight\n"
+    "vmovd %xmm1, %ecx\n   vzeroupper\n   mov %ecx, %eax\n   test %rdx, %rdx\n   jz .Lsweep_x64_done\n"
+    //  A cell at a time: neg and cmovs for the magnitude (INT_MIN stays
+    //  2^31 unsigned and is clamped), cmova for the clamp.
+    ".Lsweep_x64_one:\n   mov $0x200000, %r9d\n"
+    ".Lsweep_x64_cell:\n   add (%rsi), %ecx\n   movl $0, (%rsi)\n   mov %ecx, %eax\n   neg %eax\n   cmovs %ecx, %eax\n   cmp %r9d, %eax\n"
+    "cmova %r9d, %eax\n   imul $255, %eax, %eax\n   add $0x100000, %eax\n   shr $21, %eax\n   mov %al, (%rdi)\n   add $4, %rsi\n"
+    "inc %rdi\n   dec %rdx\n   jnz .Lsweep_x64_cell\n   mov %ecx, %eax\n"
+    ".Lsweep_x64_done:\n" ASM_RET
+    ASM_END(memory_sweep_coverage)
+#undef SWEEP_X64_LEVEL
+#undef SWEEP_X64_PREFIX
 #endif
 
     //
@@ -21797,6 +21866,49 @@ __asm__(
     "5:  add x0, x0, x1\n   add x2, x2, x3\n   subs x5, x5, #1\n   b.ne 1b\n"
     "9:  " ASM_RET
     ASM_END(memory_translate_u32_rect)
+
+    //       memory_sweep_coverage: sixteen cells a turn in four vectors, each
+    //       its own prefix sum by two ext against zero, the four joined by
+    //       their last lanes, and the carry one add a turn; the byte by abs,
+    //       umin, mul and urshr, which is the halves-up rounding, narrowed by
+    //       two uzp1. Then four a turn, then one at a time. On an M2 core,
+    //       runs of 8 to 400: 32-48% of the time of clang's loop and 35-51%
+    //       of GCC's, 0.22 ns a cell from 160. The x86_64 block carries the
+    //       contract.
+#define SWEEP_A64_PREFIX(V)                                                                             \
+    "ext v4.16b, v17.16b, " V ".16b, #12\n   add " V ".4s, " V ".4s, v4.4s\n"                              \
+    "ext v4.16b, v17.16b, " V ".16b, #8\n   add " V ".4s, " V ".4s, v4.4s\n"
+#define SWEEP_A64_LEVEL(V)                                                                              \
+    "abs " V ".4s, " V ".4s\n   umin " V ".4s, " V ".4s, v18.4s\n   mul " V ".4s, " V ".4s, v19.4s\n"       \
+    "urshr " V ".4s, " V ".4s, #21\n"
+    ASM_FUNC(memory_sweep_coverage)
+    "mov w9, w3\n   cbz x2, 8f\n   cmp x2, #4\n   b.lo 5f\n"
+    "dup v16.4s, w3\n   movi v17.4s, #0\n   mov w10, #0x200000\n   dup v18.4s, w10\n   movi v19.4s, #255\n"
+    "cmp x2, #16\n   b.lo 3f\n"
+    "1:  ld1 {v0.4s-v3.4s}, [x1]\n   stp q17, q17, [x1]\n   stp q17, q17, [x1, #32]\n   add x1, x1, #64\n"
+    SWEEP_A64_PREFIX("v0") SWEEP_A64_PREFIX("v1") SWEEP_A64_PREFIX("v2") SWEEP_A64_PREFIX("v3")
+    "dup v4.4s, v0.s[3]\n   add v1.4s, v1.4s, v4.4s\n   dup v4.4s, v1.s[3]\n   add v2.4s, v2.4s, v4.4s\n"
+    "dup v4.4s, v2.s[3]\n   add v3.4s, v3.4s, v4.4s\n   dup v5.4s, v3.s[3]\n"
+    "add v0.4s, v0.4s, v16.4s\n   add v1.4s, v1.4s, v16.4s\n   add v2.4s, v2.4s, v16.4s\n   add v3.4s, v3.4s, v16.4s\n"
+    "add v16.4s, v16.4s, v5.4s\n"
+    SWEEP_A64_LEVEL("v0") SWEEP_A64_LEVEL("v1") SWEEP_A64_LEVEL("v2") SWEEP_A64_LEVEL("v3")
+    "uzp1 v0.8h, v0.8h, v1.8h\n   uzp1 v2.8h, v2.8h, v3.8h\n   uzp1 v0.16b, v0.16b, v2.16b\n   str q0, [x0], #16\n"
+    "sub x2, x2, #16\n   cmp x2, #16\n   b.hs 1b\n"
+    "3:  cmp x2, #4\n   b.lo 4f\n"
+    "2:  ldr q0, [x1]\n   str q17, [x1], #16\n"
+    SWEEP_A64_PREFIX("v0")
+    "dup v5.4s, v0.s[3]\n   add v0.4s, v0.4s, v16.4s\n   add v16.4s, v16.4s, v5.4s\n"
+    SWEEP_A64_LEVEL("v0")
+    "xtn v0.4h, v0.4s\n   xtn v0.8b, v0.8h\n   str s0, [x0], #4\n   sub x2, x2, #4\n   cmp x2, #4\n   b.hs 2b\n"
+    "4:  mov w9, v16.s[0]\n   cbz x2, 8f\n"
+    "5:  mov w10, #0x200000\n   mov w11, #255\n"
+    "6:  ldr w12, [x1]\n   str wzr, [x1], #4\n   add w9, w9, w12\n   cmp w9, #0\n   cneg w12, w9, mi\n   cmp w12, w10\n"
+    "csel w12, w12, w10, lo\n   mul w12, w12, w11\n   add w12, w12, #0x100, lsl #12\n   lsr w12, w12, #21\n   strb w12, [x0], #1\n"
+    "subs x2, x2, #1\n   b.ne 6b\n"
+    "8:  mov w0, w9\n" ASM_RET
+    ASM_END(memory_sweep_coverage)
+#undef SWEEP_A64_PREFIX
+#undef SWEEP_A64_LEVEL
 #endif
 
     // memory_delete_bytes: four lanes a turn, all four loads before the
@@ -30029,6 +30141,43 @@ __asm__(
 #endif
     "9:  " ASM_RET
     ASM_END(memory_translate_u32_rect)
+
+    //       memory_sweep_coverage: with V, as many cells as four registers
+    //       hold, the prefix sum by vslideup of 1, 2, 4 ... lanes into a
+    //       zeroed group and vadd, the carry added and taken from the last
+    //       lane; the byte by vmax with the negation, vminu, vmul, add and
+    //       shift, narrowed twice. Without V, two cells a turn. Guest
+    //       instructions a call under qemu against the C, runs of 8 to 400
+    //       and the harness's own stores counted in both: 93-98% without V,
+    //       26-55% with it at VLEN 128 and 256; cycles unmeasured. The x86_64
+    //       block carries the contract.
+    ASM_FUNC(memory_sweep_coverage)
+    "beqz a2, 8f\n"
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t4, 2\n   beq t3, t4, 1f\n   bnez t3, 5f\n"
+    "addi sp, sp, -16\n   sd ra, 8(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   addi sp, sp, 16\n   j memory_sweep_coverage\n"
+    "1:  li t3, 0x200000\n   li t4, 255\n   li t5, 0x100000\n"
+    "2:  vsetvli t0, a2, e32, m4, ta, ma\n   vle32.v v8, (a1)\n   vmv.v.i v12, 0\n   vse32.v v12, (a1)\n   li t1, 1\n"
+    "3:  bgeu t1, t0, 4f\n   vmv.v.i v12, 0\n   vslideup.vx v12, v8, t1\n   vadd.vv v8, v8, v12\n   slli t1, t1, 1\n   j 3b\n"
+    "4:  vadd.vx v8, v8, a3\n   addi t2, t0, -1\n   vslidedown.vx v12, v8, t2\n   vmv.x.s a3, v12\n"
+    "vrsub.vi v12, v8, 0\n   vmax.vv v8, v8, v12\n   vminu.vx v8, v8, t3\n   vmul.vx v8, v8, t4\n   vadd.vx v8, v8, t5\n   vsrl.vi v8, v8, 21\n"
+    "vsetvli zero, t0, e16, m2, ta, ma\n   vnsrl.wi v12, v8, 0\n   vsetvli zero, t0, e8, m1, ta, ma\n   vnsrl.wi v14, v12, 0\n   vse8.v v14, (a0)\n"
+    "add a0, a0, t0\n   slli t1, t0, 2\n   add a1, a1, t1\n   sub a2, a2, t0\n   bnez a2, 2b\n   j 8f\n"
+#endif
+    //  Two cells a turn: the magnitude as (x ^ s) - s, which leaves INT_MIN
+    //  a huge unsigned word that the clamp catches; 255 as a shift and a subtract.
+    "5:  li t3, 0x200000\n   li t5, 0x100000\n   andi t6, a2, 1\n   srli a2, a2, 1\n   beqz a2, 7f\n"
+    "6:  lw t0, 0(a1)\n   lw a4, 4(a1)\n   sw zero, 0(a1)\n   sw zero, 4(a1)\n   addw a3, a3, t0\n   sraiw t1, a3, 31\n   xor t2, a3, t1\n   subw t2, t2, t1\n"
+    "addw a4, a4, a3\n   bltu t2, t3, 61f\n   mv t2, t3\n"
+    "61: sraiw t1, a4, 31\n   xor t0, a4, t1\n   subw t0, t0, t1\n   bltu t0, t3, 62f\n   mv t0, t3\n"
+    "62: slli t1, t2, 8\n   sub t2, t1, t2\n   add t2, t2, t5\n   srli t2, t2, 21\n   sb t2, 0(a0)\n"
+    "slli t1, t0, 8\n   sub t0, t1, t0\n   add t0, t0, t5\n   srli t0, t0, 21\n   sb t0, 1(a0)\n   mv a3, a4\n"
+    "addi a1, a1, 8\n   addi a0, a0, 2\n   addi a2, a2, -1\n   bnez a2, 6b\n"
+    "7:  beqz t6, 8f\n   lw t0, 0(a1)\n   sw zero, 0(a1)\n   addw a3, a3, t0\n   sraiw t1, a3, 31\n   xor t2, a3, t1\n   subw t2, t2, t1\n"
+    "bltu t2, t3, 71f\n   mv t2, t3\n"
+    "71: slli t1, t2, 8\n   sub t2, t1, t2\n   add t2, t2, t5\n   srli t2, t2, 21\n   sb t2, 0(a0)\n"
+    "8:  sext.w a0, a3\n" ASM_RET
+    ASM_END(memory_sweep_coverage)
     ".option pop\n"
 #endif
 
@@ -36941,6 +37090,13 @@ fn memory_translate_u32_rect(p32 address_to into, positive into_stride,
                              const p8 address_to from, positive from_stride,
                              positive width, positive height,
                              const p32 address_to table);
+// count running sums of 32-bit differences made bytes, a row of the text
+// engine's coverage: sum += cells[i], cells[i] = 0, and into[i] is
+// (min(|sum|, 2^21) * 255 + 2^20) >> 21 -- the sum being twice an area in
+// 2^20ths of a pixel, the byte is 255 times the covered fraction clamped at
+// full, to the nearest, halves up. Answers the sum after the last cell. A
+// zero count touches neither pointer, and nothing past either run is read.
+p32 memory_sweep_coverage(p8 address_to into, p32 address_to cells, positive count, p32 sum);
 #endif
 // Remove every byte whose entry in a readable 256-byte table is nonzero, moving
 // the kept bytes to the front of the block in their order, and answer how many

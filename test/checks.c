@@ -98073,6 +98073,98 @@ static fn check_translate()
 }
 
 /*
+        memory_sweep_coverage against the loop it replaces in font_raster:
+        every count from 0 to 80 and runs of 127 to 1000, cells sparse as an
+        outline leaves them and dense, sums that run past full both ways and
+        to INT_MIN, the cells' last word and the bytes' last against pages
+        that fault, the bytes before and after held to a canary, the cells
+        past the count untouched, every cell in the count cleared, and the
+        sum it answers. On x86_64 with AVX-512, with AVX2 alone and with
+        neither; on riscv64 the first call asks for V itself.
+*/
+static p32 sweep_level(p32 sum)
+{
+        p32 area = (b32)sum < 0 ? -sum : sum;
+
+        area = area > 0x200000 ? 0x200000 : area;
+        return (area * 255 + 0x100000) >> 21;
+}
+
+static fn check_sweep()
+{
+        static const positive long_runs[] = {127, 128, 129, 255, 256, 257, 640, 1000};
+        p8 address_to bytes = memory(2 * 4096);
+        p32 address_to cells = memory(2 * 4096);
+        static p32 want_cells[1100];
+        static p8 want_bytes[1100];
+        p64 state = 0x5d1c3a9e7f20b468ull;
+        bool guarded = bytes && cells &&
+                       system_call_3(syscall(mprotect), (positive)(bytes + 4096), 4096, 0) == 0 &&
+                       system_call_3(syscall(mprotect), (positive)((p8 address_to)cells + 4096), 4096, 0) == 0;
+
+        check("sweep: guard pages", guarded);
+        if (!guarded)
+                return;
+#if RISCV64
+        cpu_has_vector = 0;
+        cells[1020] = 0x100000, cells[1021] = 0x100000, cells[1022] = -0x200000, cells[1023] = 7;
+        p32 first = memory_sweep_coverage(bytes + 4092, cells + 1020, 4, 3);
+        check("sweep: the first call asks for V and keeps its count and sum",
+              first == 10 && bytes[4092] == 128 && bytes[4093] == 255 && bytes[4094] == 0 && bytes[4095] == 0 &&
+                  !cells[1020] && !cells[1023] && cpu_has_vector != 0);
+#endif
+#if X64
+        p8 wide = cpu_has_avx512, two = cpu_has_avx2;
+        for (p32 tier = 0; tier < 3; tier++)
+        {
+                cpu_has_avx512 = tier ? 0 : wide;
+                cpu_has_avx2 = tier == 2 ? 0 : two;
+#endif
+                bool fine = true;
+                for (positive k = 0; k <= 80 + sizeof(long_runs) / sizeof(long_runs[0]) - 1; k++)
+                        for (p32 shape = 0; shape < 4; shape++)
+                        {
+                                //      Even shapes end against the pages that fault,
+                                //      odd ones keep three words and bytes after.
+                                positive count = k <= 80 ? k : long_runs[k - 81], pad = shape & 1 ? 3 : 0;
+                                p32 address_to run = cells + 1024 - count - pad;
+                                p8 address_to into = bytes + 4096 - count - pad;
+                                p32 sum = shape == 3 ? 0x80000000u - 5 : (p32)(state >> 40) - (1u << 23);
+
+                                //      Sparse as an outline's cells, dense, saturating,
+                                //      and wrapping through INT_MIN.
+                                for (positive i = 0; i < count + pad; i++)
+                                {
+                                        XORSHIFT64(state);
+                                        b32 value = (b32)(state >> 32) >> (shape == 0 ? 9 : shape == 1 ? 11 : 6);
+                                        run[i] = shape == 0 && state % 5 ? 0 : shape == 3 && i < count ? (i & 1 ? 3 : 1)
+                                                                                                     : (p32)value;
+                                }
+                                memory_fill(into - 3, 0xa5, count + pad + 3);
+                                p32 expected = sum;
+                                for (positive i = 0; i < count; i++)
+                                {
+                                        expected += run[i];
+                                        want_bytes[i] = (p8)sweep_level(expected);
+                                }
+                                for (positive i = 0; i < count + pad; i++)
+                                        want_cells[i] = i < count ? 0 : run[i];
+
+                                p32 answered = memory_sweep_coverage(into, run, count, sum);
+
+                                fine = fine && answered == expected && !memory_compare(into, want_bytes, count) &&
+                                       !memory_compare(run, want_cells, (count + pad) * 4);
+                                for (positive i = 0; i < 3; i++)
+                                        fine = fine && (into - 3)[i] == 0xa5 && (i >= pad || into[count + i] == 0xa5);
+                        }
+                check("sweep: every byte its running sum's level, the cells cleared, nothing else touched", fine);
+#if X64
+        }
+        cpu_has_avx512 = wide, cpu_has_avx2 = two;
+#endif
+}
+
+/*
         Hostile fonts. The bytes are copied so that the last one sits against
         a page that faults, and each cut and each mutation is loaded, every
         glyph drawn hinted and not at two sizes, every pair of the first
@@ -98180,6 +98272,7 @@ b32 main()
         check_drawn();
         check_drawing(&one, &two);
         check_translate();
+        check_sweep();
 
         guarded = memory(9 * 4096);
         check("hostile: a guard page",
@@ -107180,6 +107273,108 @@ b32 main(void)
         return 0;
 }
 #endif /* BENCH_translate_rect */
+
+#ifdef BENCH_sweep_coverage
+/* memory_sweep_coverage against the loop it replaced in font_raster, over
+   runs as long as a glyph's touched blocks are at 13, 24, 48, 200 and 400
+   px: 8, 16, 24, 48, 160 and 400 cells, two in five of them an edge's. On
+   x86_64 for each of its three bodies. */
+#include "../src/lib.util.c"
+#define SHARED_bench_measure
+#include "checks.c"
+#undef SHARED_bench_measure
+
+#define TRIES 9
+#define RUNS 256
+
+static p32 pattern[RUNS * 400], cells[RUNS * 400];
+static p8 bytes[RUNS * 400];
+static volatile p32 sink;
+
+__attribute__((noinline, noclone)) static p32 former_sweep(p8 address_to into, p32 address_to row,
+                                                           positive count, p32 sum)
+{
+        for (positive x = 0; x < count; x++)
+        {
+                sum += row[x];
+                row[x] = 0;
+
+                p32 area = (b32)sum < 0 ? -sum : sum;
+                area = area > 0x200000 ? 0x200000 : area;
+                into[x] = (p8)((area * 255 + 0x100000) >> 21);
+        }
+        return sum;
+}
+
+//      Each run starts from the cells the pattern holds, as a band does.
+static p64 run(bool assembly, positive count, positive rounds)
+{
+        p64 took = 0;
+
+        for (positive round = 0; round < rounds; round++)
+        {
+                memory_copy(cells, pattern, RUNS * count * 4);
+                p64 start = get_cpu_time();
+                for (positive r = 0; r < RUNS; r++)
+                        sink += assembly ? memory_sweep_coverage(bytes + r * count, cells + r * count, count, 0)
+                                         : former_sweep(bytes + r * count, cells + r * count, count, 0);
+                took += get_cpu_time() - start;
+        }
+        return took;
+}
+
+b32 main(void)
+{
+        static const positive counts[] = {8, 16, 24, 48, 160, 400};
+        static p8 former_bytes[RUNS * 400];
+        p64 seed = 0x9e3779b97f4a7c15ULL;
+
+        for (positive i = 0; i < RUNS * 400; i++)
+        {
+                XORSHIFT64(seed);
+                pattern[i] = seed % 5 < 2 ? (p32)((b32)(seed >> 32) >> 10) : 0;
+        }
+#if X64
+        p8 wide = cpu_has_avx512, two = cpu_has_avx2;
+        for (p32 tier = 0; tier < 3; tier++)
+        {
+                cpu_has_avx512 = tier ? 0 : wide;
+                cpu_has_avx2 = tier == 2 ? 0 : two;
+#endif
+                for (positive row = 0; row < sizeof(counts) / sizeof(counts[0]); row++)
+                {
+                        positive count = counts[row];
+                        positive ratios[TRIES];
+                        positive rounds = 2000000 / (RUNS * count) + 1;
+
+                        memory_copy(cells, pattern, RUNS * count * 4);
+                        for (positive r = 0; r < RUNS; r++)
+                                memory_sweep_coverage(bytes + r * count, cells + r * count, count, 0);
+                        memory_copy(cells, pattern, RUNS * count * 4);
+                        for (positive r = 0; r < RUNS; r++)
+                                former_sweep(former_bytes + r * count, cells + r * count, count, 0);
+                        if (memory_compare(bytes, former_bytes, RUNS * count))
+                                return 1;
+                        BENCH_PAIRED_RUNS(ratios, former, assembly, count, rounds);
+                        string_format(log, "memory_sweep_coverage %p cells%s: paired median ASM/C %p.", count,
+#if X64
+                                      cpu_has_avx512 ? (string_address) " avx512" :
+                                      cpu_has_avx2 ? (string_address) " avx2" : (string_address) " scalar",
+#else
+                                      (string_address) "",
+#endif
+                                      ratios[TRIES / 2] / 100);
+                        positive_to_padded(log, ratios[TRIES / 2] % 100, 2, '0', 0);
+                        log("%\n", 2);
+                }
+#if X64
+        }
+        cpu_has_avx512 = wide, cpu_has_avx2 = two;
+#endif
+        log_flush();
+        return 0;
+}
+#endif /* BENCH_sweep_coverage */
 
 #ifdef BENCH_escape
 /* Shared escaping versus the former writer loops. Native timings only measure

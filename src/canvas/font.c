@@ -1853,26 +1853,22 @@ static fn font_raster(font_engine address_to e, b32 width, b32 height,
                         p8 address_to row = out + (positive)(height - 1 - e->band - r) * stride;
                         p64 touched = e->touched[r];
 
+                        //      A run of blocks no edge touched is one level; a
+                        //      run of touched ones is summed, made bytes and
+                        //      cleared by the library.
                         e->touched[r] = 0;
                         for (b32 x = 0; x < width;)
                         {
-                                b32 block = x >> e->grain, next = (block + 1) << e->grain;
+                                b32 block = x >> e->grain;
+                                p64 rest = touched >> block;
+                                b32 next = (block + bits_trailing_zeros(rest & 1 ? ~rest : rest)) << e->grain;
 
                                 next = next < width ? next : width;
-                                if (!(touched >> block & 1))
-                                {
-                                        p8 level = font_level(sum);
-
-                                        for (; x < next; x++)
-                                                row[x] = level;
-                                        continue;
-                                }
-                                for (; x < next; x++)
-                                {
-                                        sum += cells[x];
-                                        cells[x] = 0;
-                                        row[x] = font_level(sum);
-                                }
+                                if (rest & 1)
+                                        sum = memory_sweep_coverage(row + x, cells + x, (positive)(next - x), sum);
+                                else
+                                        memory_fill(row + x, (b8)font_level(sum), (positive)(next - x));
+                                x = next;
                         }
                         cells[width] = cells[width + 1] = 0;
                 }
