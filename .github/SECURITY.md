@@ -236,6 +236,20 @@ ARM64 and RISC-V mandatory with UBSan trapping.
 | Kernel (ring 0) | `core_state`, `pane_pages`, `shared_page`, `console_queue`, `term_streams` (kit lane); `ring0_hostile` on KASAN, UBSAN, lockdep or KCSAN images (`MOONWATER_IMAGE=dist/bootx64.efi sh test/run ring0`); image defaults for redirects, router advertisements, RFC 1337, SYN cookies (`sh test/run boot`, `net_sysctl`) | |
 | Supply chain | bowl bootstraps pinned by digest or signing key, refusal on any mismatch; a download held to a kernel size ceiling (2 x the measured size + 64 MiB, `RLIMIT_FSIZE`); the signature reader under `bowl_sig_fuzz`; `sh test/run bowl` | |
 
+Revocation by hand, 2026-10-09: wget at both tiers, with the shipped anchors,
+against 30 public hosts across Let's Encrypt, Google Trust Services, DigiCert
+(Global G2 and G3, EV), Sectigo, GlobalSign, Amazon, Microsoft, Apple,
+SSL.com, HydrantID and Thawte, 22 of them stapling: no TLS refusal at either
+tier (the tight tier first refused bing.com and learn.microsoft.com, whose
+first CRL mirror answers 403; mirrors are now tried in turn). Over the 642
+live chains of `x509_corpus` the 1,872 certificates parse the same before and
+after (1,854 parse; 1,708 name an `http:` CRL; none asks for a staple). Cost,
+median of seven interleaved runs, parent tree against this one: +17 ms for a
+stapled DigiCert G2 host, +49 ms for a Let's Encrypt leaf (a 61 KB CRL),
++66 ms for Netflix (125 KB), +111 ms for SSL.com (1.4 MB); on loopback a
+leaf's CRL adds 0.35 ms of wall and 0.15 ms of CPU to a 0.75 ms fetch, three
+CRLs 0.82 ms and 0.40 ms, and a stapled answer 0.11 ms and 0.10 ms.
+
 SYN flood by hand: two taps in a namespace, a guest and a listener that accepts
 and closes, 20,000 random-source SYNs a second for 14 s while a second address
 connects every quarter second; toggle `net.ipv4.tcp_syncookies`. With cookies
