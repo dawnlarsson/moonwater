@@ -53852,6 +53852,23 @@ static positive http_writev_short_limit;
 static bool http_writev_short_hit;
 static bipolar http_writev_error;
 static bool http_writev_error_hit;
+static bool http_writev_error_sticky;
+static positive http_writev_calls;
+
+/* A deterministic advancing clock for fault paths, not wall-time sleeps.
+   Every other group uses the real monotonic clock. */
+static positive net_clock_now;
+static positive net_clock_step;
+static positive net_clock_calls;
+
+static positive net_test_monotonic_nanoseconds(void)
+{
+        net_clock_calls++;
+        if (!net_clock_step)
+                return clock_monotonic_nanoseconds();
+        net_clock_now += net_clock_step;
+        return net_clock_now;
+}
 
 /*
         DNS/DHCP (and wait.c stream helpers) call ASM socket_send/socket_receive,
@@ -53870,6 +53887,7 @@ static bool net_send_short_hit;
 static bool net_send_error_sticky;
 static positive net_send_arm_after;
 static positive net_send_calls;
+static positive net_send_blocking_calls;
 static p8 address_to net_send_capture;
 static positive net_send_capture_room;
 static positive net_send_capture_length;
@@ -53923,6 +53941,8 @@ typedef struct
 static bipolar http_net_call3(positive number, positive one, positive two,
                               positive three)
 {
+        if (number == syscall(writev))
+                http_writev_calls++;
         if (number == syscall(writev) && http_writev_short_limit)
         {
                 positive want = http_writev_short_limit;
@@ -53955,8 +53975,12 @@ static bipolar http_net_call3(positive number, positive one, positive two,
         {
                 bipolar fault = http_writev_error;
 
-                http_writev_error = 0;
+                if (!http_writev_error_sticky)
+                        http_writev_error = 0;
                 http_writev_error_hit = true;
+                /* A broken retry loop must fail the test, not hang its runner. */
+                if (http_writev_error_sticky && http_writev_calls > 100)
+                        return -EIO;
                 return fault;
         }
         return (system_call_3)(number, one, two, three);
@@ -53966,6 +53990,8 @@ static bipolar net_test_socket_send(b32 handle, address_any data, positive size,
                                     b32 flags, address_any to, positive to_size)
 {
         net_send_calls++;
+        if (!(flags & MSG_DONTWAIT))
+                net_send_blocking_calls++;
         if (net_send_capture)
         {
                 net_send_capture_length = min(size, net_send_capture_room);
@@ -54140,7 +54166,9 @@ static address_any net_test_memory_search(address_any block, positive size,
 #define socket_send(...) net_test_socket_send(__VA_ARGS__)
 #define socket_receive(...) net_test_socket_receive(__VA_ARGS__)
 #define memory_reserve(...) net_test_memory_reserve(__VA_ARGS__)
+#define clock_monotonic_nanoseconds net_test_monotonic_nanoseconds
 #include "../src/net/net.c"
+#undef clock_monotonic_nanoseconds
 #undef file_slurp
 #undef memory_search
 #undef memory_text_span
@@ -54176,8 +54204,10 @@ static bool net_as_emulated(void)
           name wire length   255
             exact+one-over:  "a DNS name of two hundred fifty-five octets is accepted"
                              / "a DNS name of two hundred fifty-six octets is refused"
-          decompress jumps   structural (ceiling lowers; no step counter)
-            hit:             "a pointer loop is refused", forward/cycle sweeps
+          decompress jumps   DNS_WORK_POINTERS (4096 shared per section/pass set)
+            exact neighbors: "DNS work ceiling and valid neighbors at every pointer depth in all sections"
+            aggregate hit:   "DNS refuses repeated pointer work across a declared record section"
+            structural hit:  "a pointer loop is refused", forward/cycle sweeps
           CNAME hop passes   min(answers, DNS_CNAME_HOPS (16)) + 1
             exact path:      "DNS follows a case-insensitive CNAME chain by owner"
             hop exhaust:     "a DNS CNAME cycle exhausts the answer-section hop budget"
@@ -54769,7 +54799,10 @@ static fn error_frames(void)
                               netlink_walk(pair[0], &request, 91, &reply, null, null) ==
                                   (bytes == sizeof frame ? -123 : -1));
                         p8 discarded[NETLINK_HEADER];
-                        socket_receive(pair[1], discarded, sizeof discarded, 0, null, null);
+                        check("a malformed netlink reply still leaves its request to drain",
+                              socket_receive(pair[1], discarded, sizeof discarded,
+                                             MSG_DONTWAIT, null, null) ==
+                                  sizeof discarded);
                 }
         else
                 check("netlink framing request allocates", false);
@@ -54782,8 +54815,10 @@ static fn error_frames(void)
                       netlink_walk(pair[0], &request, 91, &reply, null, null) ==
                           -1);
                 p8 discarded[NETLINK_HEADER];
-                socket_receive(pair[1], discarded, sizeof discarded, 0,
-                               null, null);
+                check("a positive netlink error still leaves its request to drain",
+                      socket_receive(pair[1], discarded, sizeof discarded,
+                                     MSG_DONTWAIT, null, null) ==
+                          sizeof discarded);
         }
         frame.error = -123;
         if (netlink_begin(&request, RTM_GETLINK, NLM_REQUEST, 91, 0))
@@ -54824,7 +54859,10 @@ static fn error_frames(void)
                           socket_receive(pair[0], left, sizeof left, MSG_DONTWAIT,
                                          null, null) == NETWORK_TRY_AGAIN);
                 p8 discarded[NETLINK_HEADER];
-                socket_receive(pair[1], discarded, sizeof discarded, 0, null, null);
+                check("an interrupted netlink reply leaves its request to drain",
+                      socket_receive(pair[1], discarded, sizeof discarded,
+                                     MSG_DONTWAIT, null, null) ==
+                          sizeof discarded);
         }
         netlink_forget(&request);
         netlink_forget(&reply);
@@ -55582,6 +55620,7 @@ enum
         DNS_TCP_WRONG_QUESTION,
         DNS_UDP_OVERSIZED_COMPLETE,
         DNS_TCP_DEADLINE,
+        DNS_TCP_EDNS_WINDOW,
 };
 
 static fn dns_tcp_test_server(bipolar datagram, bipolar listening,
@@ -55692,7 +55731,17 @@ static fn dns_tcp_test_server(bipolar datagram, bipolar listening,
         {
                 network_store_16(frame, (p16)length);
 
-                if (which == DNS_TCP_SPLIT)
+                if (which == DNS_TCP_EDNS_WINDOW)
+                {
+                        timespec pause = {1, 200000000};
+
+                        network_stream_send_all(stream, frame, 1);
+                        system_call_2(syscall(nanosleep),
+                                      (positive)address_of pause, 0);
+                        network_stream_send_all(stream, frame + 1, 1);
+                        network_stream_send_all(stream, reply, length);
+                }
+                else if (which == DNS_TCP_SPLIT)
                 {
                         network_stream_send_all(stream, frame, 1);
                         network_stream_send_all(stream, frame + 1, 1);
@@ -55762,7 +55811,8 @@ static bipolar dns_tcp_loopback_case(positive which, p32 address_to found,
         socket_close((b32)listening);
         began = clock_monotonic_nanoseconds();
         result = dns_resolve_at(HOST_LOOPBACK, network_order_16(where.port),
-                                (string_address)"split.example", found, 1);
+                                (string_address)"split.example", found,
+                                which == DNS_TCP_EDNS_WINDOW ? 3 : 1);
         if (elapsed)
                 address_to elapsed = clock_monotonic_nanoseconds() - began;
         if (system_wait4_retry((b32)child, address_of raw, 0, null) != child ||
@@ -55790,6 +55840,12 @@ static fn resolving_truncated(void)
                   found == 0xc0000207);
         check("DNS sends its UDP query then one whole framed TCP query",
               net_send_calls == 2);
+        found = 0;
+        check("TCP fallback retains the full query budget past the EDNS probe window",
+              dns_tcp_loopback_case(DNS_TCP_EDNS_WINDOW, address_of found,
+                                     address_of elapsed) == DNS_OK &&
+                  found == 0xc0000207 && elapsed > NETWORK_NANOSECONDS &&
+                  elapsed < 3 * NETWORK_NANOSECONDS);
         check("an oversized TCP DNS frame is refused",
               dns_tcp_loopback_case(DNS_TCP_OVERSIZED, null, null) ==
                   DNS_MALFORMED);
@@ -57392,6 +57448,7 @@ static fn streaming_chunk_boundaries(void)
         static string_address framed[] = {"1\nA\n0\n\n",
                                           "1\r\nA\r\n0\r\n\r\n"};
         p8 address_to pages = memory(3 * 4096);
+        bool socket_send_denied = false;
 
         check("chunk stash guard allocation",
               !system_failed(pages) && pages != null);
@@ -57432,9 +57489,23 @@ static fn streaming_chunk_boundaries(void)
                         }
 
                         positive length = string_length(framed[which]);
-                        check("chunk boundary input queues",
-                              socket_send(input[1], framed[which], length, 0,
-                                          null, 0) == (bipolar)length);
+                        bipolar queued = socket_send(input[1], framed[which],
+                                                     length, 0, null, 0);
+                        if (queued == -EPERM || queued == -EACCES)
+                                socket_send_denied = true;
+                        else
+                                check("chunk boundary input queues", queued ==
+                                      (bipolar)length);
+                        if (queued != (bipolar)length)
+                        {
+                                socket_close(input[0]);
+                                socket_close(input[1]);
+                                socket_close(output[0]);
+                                socket_close(output[1]);
+                                if (socket_send_denied)
+                                        break;
+                                continue;
+                        }
 
                         http_link link = {.handle = input[0], .tls = false};
                         http_body body = {
@@ -57442,20 +57513,24 @@ static fn streaming_chunk_boundaries(void)
                             .stash = pages + 8192,
                             .stash_used = 0, .scratch = scratch,
                         };
+                        bipolar copied = http_copy_chunked(address_of body,
+                                                           output[0]);
                         check("chunk delimiter at empty stash boundary",
-                              http_copy_chunked(address_of body, output[0]) ==
-                                  HTTP_OK);
+                              copied == HTTP_OK);
 
                         p8 byte = 0;
                         check("chunk boundary preserves body byte",
-                              system_read_retry((positive)output[1],
-                                                address_of byte, 1) == 1 &&
+                              copied == HTTP_OK &&
+                                  socket_receive(output[1], address_of byte, 1,
+                                                 MSG_DONTWAIT, null, null) == 1 &&
                                   byte == 'A');
                         socket_close(input[0]);
                         socket_close(input[1]);
                         socket_close(output[0]);
                                 socket_close(output[1]);
                 }
+        if (socket_send_denied)
+                log_direct(str("net: streaming socket fixtures NOT RUN -- local send denied\n"));
 
         {
                 static const p8 bad_extension[] = {
@@ -57505,7 +57580,8 @@ static fn streaming_chunk_boundaries(void)
                     {over_limit, sizeof over_limit, HTTP_MALFORMED},
                 };
 
-                for (positive which = 0; which < array_count(cases); which++)
+                for (positive which = 0;
+                     !socket_send_denied && which < array_count(cases); which++)
                 for (positive split = 0; split <= cases[which].length; split++)
                 {
                         b32 input[2];
@@ -57534,11 +57610,20 @@ static fn streaming_chunk_boundaries(void)
                                 continue;
                         }
 
-                        check("streaming chunk parser input queues",
-                              socket_send(input[1], cases[which].bytes + split,
-                                          cases[which].length - split, 0, null, 0) ==
-                                  (bipolar)(cases[which].length - split));
+                        bipolar queued = socket_send(
+                            input[1], cases[which].bytes + split,
+                            cases[which].length - split, 0, null, 0);
+                        check("streaming chunk parser input queues", queued ==
+                              (bipolar)(cases[which].length - split));
                         socket_shutdown(input[1], SHUT_BOTH);
+                        if (queued != (bipolar)(cases[which].length - split))
+                        {
+                                socket_close(input[0]);
+                                socket_close(input[1]);
+                                socket_close(output[0]);
+                                socket_close(output[1]);
+                                continue;
+                        }
 
                         /* Header and body share this backing buffer in the client. */
                         p8 address_to stash = scratch + 71;
@@ -57547,16 +57632,19 @@ static fn streaming_chunk_boundaries(void)
                         http_body body = {.link = address_of link,
                                           .stash = stash, .stash_used = split,
                                           .scratch = scratch};
+                        bipolar copied = http_copy_chunked(address_of body,
+                                                           output[0]);
                         check("chunk framing survives every header/socket split",
-                              http_copy_chunked(address_of body, output[0]) ==
-                                  cases[which].expected);
+                              copied == cases[which].expected);
                         socket_shutdown(output[0], SHUT_BOTH);
-                        if (cases[which].expected == HTTP_OK)
+                        if (cases[which].expected == HTTP_OK && copied == HTTP_OK)
                         {
                                 p8 decoded[4];
                                 positive wanted = cases[which].bytes == valid_trailer ? 3 : 0;
                                 check("borrowed chunk payload survives scratch reuse",
-                                      system_read_retry(output[1], decoded, sizeof decoded) == wanted &&
+                                      socket_receive(output[1], decoded,
+                                          sizeof decoded, MSG_DONTWAIT,
+                                          null, null) == wanted &&
                                       !memory_compare(decoded, "ABC", wanted));
                         }
                         socket_close(input[0]);
@@ -59042,6 +59130,7 @@ static fn net_io_faults_clear(void)
         net_send_short_hit = false;
         net_send_error_sticky = false;
         net_send_arm_after = 0;
+        net_send_blocking_calls = 0;
         net_recv_error = 0;
         net_recv_error_hit = false;
         net_recv_eintr_once = false;
@@ -59061,6 +59150,323 @@ static fn net_io_faults_clear(void)
 
 /* Procedural interruption counts and deadline budgets exercise both recovery
    and starvation while a real stream socket remains readable. */
+static fn network_write_regressions(void)
+{
+        b32 pair[2];
+        bipolar opened = system_call_4(syscall(socketpair), AF_UNIX,
+                                        SOCK_STREAM, 0, (positive)pair);
+        p8 received[3] = {0};
+        http_span span = {.base = (p8 address_to)"abc", .length = 3};
+
+        check("network write regression fixture opens", opened == 0);
+        if (opened)
+                return;
+        http_writev_error = NETWORK_INTERRUPTED;
+        http_writev_error_hit = false;
+        http_write_failure = 0;
+        check("an interrupted HTTP output write preserves and retries its span",
+              http_write_spans(pair[0], address_of span, 1, 3) &&
+                  http_writev_error_hit && !http_write_failure &&
+                  socket_receive(pair[1], received, sizeof received,
+                                 MSG_DONTWAIT, null, null) == 3 &&
+                  !memory_compare(received, "abc", 3));
+        http_writev_error = 0;
+        {
+                tls_conn tls = {.handle = pair[0],
+                    .host = (string_address)"localhost"};
+                network_deadline expired = {.began = 1, .budget = 1};
+
+                net_io_faults_clear();
+                net_send_calls = 0;
+                check("an expired TLS handshake sends no ClientHello",
+                      tls_handshake(address_of tls, address_of expired) == TLS_FAIL &&
+                          !net_send_calls);
+                tls_forget(address_of tls);
+        }
+        for (positive row = 0; row < 2; row++)
+        {
+                tls_conn tls = {.handle = pair[0],
+                    .host = (string_address)"localhost"};
+                network_deadline deadline;
+                positive began = clock_monotonic_nanoseconds();
+
+                net_io_faults_clear();
+                net_send_error = row ? NETWORK_TRY_AGAIN : NETWORK_INTERRUPTED;
+                net_send_error_sticky = true;
+                check("TLS handshake write storm deadline starts",
+                      network_deadline_begin(address_of deadline, 0, 50000000));
+                check("TLS handshake writes stay bounded through EINTR and backpressure",
+                      tls_handshake(address_of tls, address_of deadline) == TLS_FAIL &&
+                          net_send_error_hit && !net_send_blocking_calls &&
+                          clock_monotonic_nanoseconds() - began < NETWORK_NANOSECONDS);
+                tls_forget(address_of tls);
+
+                net_io_faults_clear();
+                net_send_error = row ? NETWORK_TRY_AGAIN : NETWORK_INTERRUPTED;
+                net_send_error_sticky = true;
+                began = clock_monotonic_nanoseconds();
+                check("relative writes stay bounded through EINTR and backpressure",
+                      !network_stream_send_all_for(pair[0], (p8 address_to)"s", 1,
+                                                   0, 5000000) &&
+                          net_send_error_hit && !net_send_blocking_calls &&
+                          clock_monotonic_nanoseconds() - began < NETWORK_NANOSECONDS);
+        }
+        net_io_faults_clear();
+        socket_close(pair[0]);
+        socket_close(pair[1]);
+}
+
+/* A fully buffered KeyUpdate can request a write without any receive
+   wait. That reply must spend the read's budget, including the relative
+   reader's deferred timer, rather than a new thirty-second send timeout. */
+static fn tls_key_update_write_deadlines(void)
+{
+        static p8 update[] = {TLS_HS_KEY_UPDATE, 0, 0, 1, 1};
+        p8 key[16] = {0};
+
+        for (positive relative = 0; relative < 2; relative++)
+                for (positive fault = 0; fault < 2; fault++)
+                {
+                        tls_conn receiver = {.encrypted = true,
+                                             .application = true};
+                        tls_conn sender = {0};
+                        b32 pair[2];
+                        p8 address_to span = null;
+                        positive got = 99;
+                        network_deadline deadline;
+                        positive began;
+                        bipolar status;
+                        bipolar opened = system_call_4(syscall(socketpair),
+                            AF_UNIX, SOCK_STREAM, 0, (positive)pair);
+
+                        check("KeyUpdate write deadline socket pair opens", !opened);
+                        if (opened)
+                                continue;
+                        receiver.handle = pair[0];
+                        crypto_aesgcm_prepare(address_of receiver.s_gcm, key);
+                        crypto_aesgcm_prepare(address_of receiver.c_gcm, key);
+                        crypto_aesgcm_prepare(address_of sender.c_gcm, key);
+                        receiver.receive_end = tls_seal(address_of sender,
+                            TLS_CT_HANDSHAKE, update, sizeof update, receiver.receive);
+                        receiver.receive_high = receiver.receive_end;
+                        check("KeyUpdate write deadline record seals", receiver.receive_end > 0);
+                        net_io_faults_clear();
+                        net_send_error = fault ? NETWORK_TRY_AGAIN : NETWORK_INTERRUPTED;
+                        net_send_error_sticky = true;
+                        began = clock_monotonic_nanoseconds();
+                        /* QEMU and a loaded host can consume a five-ms real
+                           budget before the injected send is reached. Keep
+                           the fault path deterministic; socket wait tests
+                           separately verify elapsed wall time. */
+                        net_clock_now = 1000000;
+                        net_clock_step = 1000000;
+                        deadline = (network_deadline){1000000, 5000000};
+                        status = relative
+                            ? tls_borrow(address_of receiver, 1, address_of span,
+                                         address_of got, 0, 5000000)
+                            : tls_take(address_of receiver, 1, address_of span,
+                                       address_of got, address_of deadline, 0, 0, false);
+                        check("KeyUpdate backpressure and EINTR cannot escape the read deadline",
+                              status == TLS_FAIL && net_send_error_hit &&
+                                  !net_send_blocking_calls &&
+                                  receiver.seq_write == TLS_AES_GCM_RECORD_LIMIT &&
+                                  clock_monotonic_nanoseconds() - began < NETWORK_NANOSECONDS);
+                        net_clock_step = 0;
+                        net_io_faults_clear();
+                        socket_close(pair[0]);
+                        socket_close(pair[1]);
+                        tls_forget(address_of receiver);
+                        tls_forget(address_of sender);
+                }
+}
+
+static fn tls_lending_and_fatal_states(void)
+{
+        p8 key[16] = {0};
+        static p8 update[] = {TLS_HS_KEY_UPDATE, 0, 0, 1, 1};
+
+        for (positive expired = 0; expired < 2; expired++)
+                for (positive method = 0; method < 3; method++)
+                {
+                        tls_conn receiver = {.handle = -1, .plain_used = 1,
+                                             .receive_start = 1, .receive_end = 1};
+                        network_deadline outer = {1000000, expired ? 1 : 5000000};
+                        p8 address_to span = null;
+                        p8 copied = 0;
+                        positive got = 99;
+                        bipolar status;
+
+                        receiver.receive[0] = 'a';
+                        net_clock_now = net_clock_step = 1000000;
+                        if (!method)
+                                status = tls_lend_until(address_of receiver, 1,
+                                    address_of span, address_of got, address_of outer);
+                        else if (method == 1)
+                                status = tls_borrow_within(address_of receiver, 1,
+                                    address_of span, address_of got, 1, 0, address_of outer);
+                        else
+                                status = tls_read_until(address_of receiver, address_of copied,
+                                    1, address_of got, address_of outer);
+                        check("cached TLS plaintext obeys an enclosing absolute deadline",
+                              expired ? status == TLS_FAIL && receiver.plain_used == 1
+                                      : status == TLS_OK && got == 1 && !receiver.plain_used);
+                        net_clock_step = 0;
+                        tls_forget(address_of receiver);
+                }
+
+        for (positive expired = 0; expired < 2; expired++)
+                for (positive fault = 0; fault < 2; fault++)
+                {
+                        b32 pair[2];
+                        tls_conn sender = {0};
+                        http_link link = {.tls = true, .session = {
+                            .encrypted = true, .application = true}};
+                        http_body body = {.link = address_of link,
+                            .stash = (p8 address_to)"a", .stash_used = 1,
+                            .deadline = {1000000, expired ? 1 : 5000000}};
+                        bipolar sink = system_open_at(AT_FDCWD,
+                            (string_address)"/dev/null", O_WRONLY | O_CLOEXEC);
+                        bool opened = system_call_4(syscall(socketpair), AF_UNIX,
+                            SOCK_STREAM, 0, (positive)pair) == 0;
+
+                        check("TLS lending deadline fixtures open", opened && sink >= 0);
+                        if (!opened || sink < 0)
+                        {
+                                if (opened) { socket_close(pair[0]); socket_close(pair[1]); }
+                                if (sink >= 0) system_close((positive)sink);
+                                continue;
+                        }
+                        link.handle = link.session.handle = pair[0];
+                        crypto_aesgcm_prepare(address_of sender.c_gcm, key);
+                        crypto_aesgcm_prepare(address_of link.session.s_gcm, key);
+                        crypto_aesgcm_prepare(address_of link.session.c_gcm, key);
+                        link.session.receive_end = tls_seal(address_of sender,
+                            TLS_CT_HANDSHAKE, update, sizeof update, link.session.receive);
+                        link.session.receive_high = link.session.receive_end;
+                        net_io_faults_clear();
+                        net_send_calls = net_clock_calls = 0;
+                        net_send_error = fault ? NETWORK_TRY_AGAIN : NETWORK_INTERRUPTED;
+                        net_send_error_sticky = true;
+                        net_clock_now = 1000000;
+                        net_clock_step = 1000000;
+                        bipolar result = http_copy(address_of body, sink, 2, true);
+
+                        check("TLS lending cannot send control replies after the body deadline",
+                              result == HTTP_NO_REPLY &&
+                                  (expired ? !net_send_calls : net_send_calls <= 4) &&
+                                  net_clock_calls <= 9 && !net_send_blocking_calls);
+                        net_clock_step = 0;
+                        net_io_faults_clear();
+                        system_close((positive)sink);
+                        socket_close(pair[0]); socket_close(pair[1]);
+                        tls_forget(address_of sender);
+                        tls_forget(address_of link.session);
+                }
+
+        for (positive version = 0; version < 2; version++)
+        {
+                tls_conn sender = {.tls12 = version != 0};
+                tls_conn receiver = {.handle = -1, .tls12 = version != 0,
+                    .encrypted = true, .application = true};
+                p8 address_to span = null;
+                positive got = 99;
+                positive at;
+
+                crypto_aesgcm_prepare(address_of sender.c_gcm, key);
+                crypto_aesgcm_prepare(address_of receiver.s_gcm, key);
+                crypto_aesgcm_prepare(address_of receiver.c_gcm, key);
+                at = tls_seal(address_of sender, version ? TLS_CT_HANDSHAKE : 25,
+                               (p8 address_to)"x", 1, receiver.receive);
+                at += tls_seal(address_of sender, TLS_CT_APP,
+                                (p8 address_to)"ok", 2, receiver.receive + at);
+                receiver.receive_end = receiver.receive_high = at;
+                check("a fatal TLS protocol refusal spends both record keys",
+                      tls_lend(address_of receiver, 2, address_of span,
+                               address_of got) == TLS_FAIL &&
+                          receiver.seq_read == TLS_AES_GCM_RECORD_LIMIT &&
+                          receiver.seq_write == TLS_AES_GCM_RECORD_LIMIT);
+                check("buffered data cannot reopen a fatally refused TLS stream",
+                      tls_lend(address_of receiver, 2, address_of span,
+                               address_of got) == TLS_FAIL);
+                net_send_calls = 0;
+                check("a fatally refused TLS stream cannot send application data",
+                      tls_write(address_of receiver, (p8 address_to)"no", 2) ==
+                          TLS_FAIL && !net_send_calls);
+                tls_forget(address_of sender);
+                tls_forget(address_of receiver);
+        }
+}
+
+static fn tls_unexpected_type_matrix(void)
+{
+        p8 key[16] = {0};
+        crypto_aesgcm_key prepared;
+        const positive sequences[] = {0, TLS_AES_GCM_RECORD_LIMIT - 2};
+
+        crypto_aesgcm_prepare(address_of prepared, key);
+        for (positive version = 0; version < 2; version++)
+                for (positive sequence = 0; sequence < array_count(sequences); sequence++)
+                        for (positive type = 0; type < 256; type++)
+                        {
+                                if (type == TLS_CT_APP || type == TLS_CT_HANDSHAKE ||
+                                    type == TLS_CT_ALERT)
+                                        continue;
+                                tls_conn sender = {.tls12 = version != 0,
+                                    .seq_write = sequences[sequence], .c_gcm = prepared};
+                                tls_conn receiver = {.handle = -1, .tls12 = version != 0,
+                                    .encrypted = true, .application = true,
+                                    .seq_read = sequences[sequence], .s_gcm = prepared,
+                                    .c_gcm = prepared};
+                                p8 address_to span = null;
+                                positive got = 99;
+                                positive at = tls_seal(address_of sender, (p8)type,
+                                    (p8 address_to)"x", 1, receiver.receive);
+
+                                at += tls_seal(address_of sender, TLS_CT_APP,
+                                    (p8 address_to)"ok", 2, receiver.receive + at);
+                                receiver.receive_end = receiver.receive_high = at;
+                                check("every unexpected TLS record type is a permanent refusal",
+                                      tls_lend(address_of receiver, 2, address_of span,
+                                               address_of got) == TLS_FAIL &&
+                                          receiver.seq_read == TLS_AES_GCM_RECORD_LIMIT &&
+                                          receiver.seq_write == TLS_AES_GCM_RECORD_LIMIT &&
+                                          tls_lend(address_of receiver, 2, address_of span,
+                                                   address_of got) == TLS_FAIL);
+                                tls_forget(address_of sender);
+                                tls_forget(address_of receiver);
+                        }
+}
+
+static fn http_output_interruption_budget(void)
+{
+        bipolar sink = system_open_at(AT_FDCWD, (string_address)"/dev/null",
+                                      O_WRONLY | O_CLOEXEC);
+        http_span span = {(address_any)"abc", 3};
+
+        check("HTTP interruption budget output opens", sink >= 0);
+        if (sink < 0) return;
+        http_writev_calls = net_clock_calls = 0;
+        http_writev_error = NETWORK_INTERRUPTED;
+        http_writev_error_sticky = true;
+        http_write_failure = 0;
+        net_clock_now = NETWORK_NANOSECONDS;
+        net_clock_step = NETWORK_NANOSECONDS;
+        check("persistent interrupted HTTP output exhausts one absolute budget",
+              !http_write_spans(sink, address_of span, 1, 3) &&
+                  http_write_failure == NETWORK_INTERRUPTED &&
+                  http_writev_calls <= HTTP_IDLE_SECONDS + 1 &&
+                  net_clock_calls <= HTTP_IDLE_SECONDS + 2);
+        net_clock_step = 0;
+        http_writev_error_sticky = false;
+        http_writev_error = 0;
+        http_writev_calls = net_clock_calls = 0;
+        span = (http_span){(address_any)"abc", 3};
+        check("uninterrupted HTTP output does not read the clock",
+              http_write_spans(sink, address_of span, 1, 3) &&
+                  http_writev_calls == 1 && !net_clock_calls);
+        system_close((positive)sink);
+}
+
 static fn network_stream_interruption_deadlines(void)
 {
         b32 pair[2];
@@ -59643,7 +60049,7 @@ static fn dns_dhcp_midpath_faults(void)
         check("DHCP recv EINTR then ENOSPC fails closed mid-path",
               !dhcp_receive(receiver, received, sizeof received, 123, hardware,
                             address_of lease, address_of kind,
-                            address_of any_sender, true, null,
+                            address_of any_sender, true, null, null,
                             address_of deadline) &&
                   net_recv_eintr_hit && net_recv_error_hit);
         net_io_faults_clear();
@@ -59661,7 +60067,7 @@ static fn dns_dhcp_midpath_faults(void)
         check("DHCP recv EAGAIN resumes its queued matching offer",
               dhcp_receive(receiver, received, sizeof received, 123, hardware,
                             address_of lease, address_of kind,
-                            address_of any_sender, true, null,
+                            address_of any_sender, true, null, null,
                             address_of deadline) &&
                   net_recv_error_hit && net_recv_calls == 2 && kind == DHCP_OFFER);
         net_io_faults_clear();
@@ -59686,7 +60092,7 @@ static fn dns_dhcp_midpath_faults(void)
         check("DHCP discards junk then fails closed on short/EIO mid-path",
               !dhcp_receive(receiver, received, sizeof received, 123, hardware,
                             address_of lease, address_of kind,
-                            address_of sender_at, false, null,
+                            address_of sender_at, false, null, null,
                             address_of deadline) &&
                   net_recv_short_hit && net_recv_error_hit);
         net_io_faults_clear();
@@ -59704,7 +60110,7 @@ static fn dns_dhcp_midpath_faults(void)
         check("DHCP sticky EINTR fails closed inside the absolute deadline",
               !dhcp_receive(receiver, received, sizeof received, 123, hardware,
                             address_of lease, address_of kind,
-                            address_of any_sender, true, null,
+                            address_of any_sender, true, null, null,
                             address_of deadline) &&
                   net_recv_eintr_hit);
         net_io_faults_clear();
@@ -60691,6 +61097,78 @@ static fn tls_seal_in_receive(tls_conn address_to tls, positive content)
         room took the first read and the rest a second.
 */
 static tls_conn tls_receive_conn;
+
+static fn tls_nonce_byte_states(void)
+{
+        p8 source[14];
+        p8 got[14];
+        p8 expected[12];
+        bool same = true;
+
+        /* XOR has no carry between bytes. Exhausting every value in every
+           sequence lane therefore covers the full per-byte state space; the
+           four fixed vectors below cover simultaneous nonzero lanes. Both
+           buffers are deliberately unaligned and guarded. */
+        for (positive lane = 0; lane < 8; lane++)
+                for (positive value = 0; value < 256; value++)
+                {
+                        for (positive at = 0; at < sizeof expected; at++)
+                                source[at + 1] = expected[at] =
+                                    (p8)(value + at * 29);
+                        expected[4 + lane] ^= (p8)value;
+                        got[0] = 0x39;
+                        got[13] = 0x93;
+                        tls_nonce(source + 1,
+                                  (p64)value << (8 * (7 - lane)), got + 1);
+                        same &= got[0] == 0x39 && got[13] == 0x93 &&
+                                !memory_compare(got + 1, expected,
+                                                sizeof expected);
+                }
+        {
+                static const p64 sequences[] = {
+                    0, 1, 0xffffffffffffffffull,
+                    0x0123456789abcdefull,
+                    0x8000000000000001ull};
+
+                for (positive row = 0; row < array_count(sequences); row++)
+                {
+                        p64 sequence = sequences[row];
+
+                        for (positive at = 0; at < sizeof expected; at++)
+                                source[at + 1] = expected[at] =
+                                    (p8)(0xd3 - at * 11);
+                        for (positive at = 0; at < 8; at++)
+                                expected[11 - at] ^=
+                                    (p8)(sequence >> (8 * at));
+                        tls_nonce(source + 1, sequence, got + 1);
+                        same &= !memory_compare(got + 1, expected,
+                                                sizeof expected);
+                }
+        }
+        check("TLS nonce word path matches every value in every sequence byte lane",
+              same);
+
+        {
+                p8 header[7];
+
+                same = true;
+                for (positive length = 0; length <= 0xffff; length++)
+                {
+                        p8 type = (p8)length;
+
+                        header[0] = 0x69;
+                        header[6] = 0x96;
+                        tls_record_header(header + 1, type, length);
+                        same &= header[0] == 0x69 && header[6] == 0x96 &&
+                                header[1] == type && header[2] == 3 &&
+                                header[3] == 3 &&
+                                header[4] == (p8)(length >> 8) &&
+                                header[5] == (p8)length;
+                }
+                check("TLS record word store matches every 16-bit length and 8-bit type",
+                      same);
+        }
+}
 
 static fn tls_failed_send_state(void)
 {
@@ -64721,29 +65199,103 @@ static positive x25519_check_whole(void)
 #endif
 
 #ifndef KERNEL_MODE
-/*
-        What x25519 leaves under the stack once it returns: its frame holds
-        the clamped scalar a word at a time through the whole ladder, so a
-        wipe that is missing leaves the secret key below the stack pointer.
-        One call a frame down, then a sibling reads the two kilobytes under
-        it -- every body's frame fits -- for any word of the clamped scalar.
-*/
-static __attribute__((noinline, noclone)) fn x25519_residue_call(
-    p8 address_to out, const p8 address_to scalar, const p8 address_to u)
-{
-        x25519(out, scalar, u);
-}
+/* Capture the stack below a raw crypto call, without reading an uninitialized
+   C object or sampling spills left by the reference arithmetic. The entire
+   region is cleared before the call and copied into the caller's initialized
+   array immediately after it. Unused callee-saved registers carry a sentinel
+   rather than the reference builder's schedule words. The third argument is
+   a block count or X25519 input pointer; blake2b also receives a 128-byte
+   counter. Extra arguments are ignored by bodies that do not use them. */
+fn crypto_stack_snapshot(address_any body, address_any state,
+                         const p8 address_to input, positive third, address_any sampled);
+#if X64
+__asm__(
+    ASM_FUNC(crypto_stack_snapshot)
+    "push %r12\n push %r13\n push %r14\n push %r15\n push %rbx\n push %rbp\n sub $8, %rsp\n"
+    "mov %rdi, %r12\n mov %r8, %r13\n mov %rsi, %r14\n mov %rcx, %r15\n"
+    "sub $2048, %rsp\n mov %rsp, %rdi\n xor %eax, %eax\n mov $256, %ecx\n rep stosq\n"
+    "add $2048, %rsp\n mov %r14, %rdi\n mov %rdx, %rsi\n mov %r15, %rdx\n"
+    "movabs $0x6b8d24a7e3195fc1, %rbx\n mov %rbx, %rbp\n mov $128, %ecx\n call *%r12\n"
+    "mov %r13, %rdi\n lea -2048(%rsp), %rsi\n mov $256, %ecx\n rep movsq\n"
+    "add $8, %rsp\n pop %rbp\n pop %rbx\n pop %r15\n pop %r14\n pop %r13\n pop %r12\n"
+    ASM_RET ASM_END(crypto_stack_snapshot)
+);
+#elif ARM64
+__asm__(
+    ASM_FUNC(crypto_stack_snapshot)
+    "stp x19, x20, [sp, #-96]!\n stp x21, x22, [sp, #16]\n stp x23, x24, [sp, #32]\n"
+    "stp x25, x26, [sp, #48]\n stp x27, x28, [sp, #64]\n stp x29, x30, [sp, #80]\n"
+    "mov x19, x0\n mov x20, x4\n mov x21, x1\n mov x22, x3\n"
+    "sub sp, sp, #2048\n mov x9, sp\n mov x10, #128\n"
+    ".Lcrypto_stack_clear: stp xzr, xzr, [x9], #16\n"
+    "subs x10, x10, #1\n b.ne .Lcrypto_stack_clear\n add sp, sp, #2048\n"
+    "mov x0, x21\n mov x1, x2\n mov x2, x22\n mov x3, #128\n"
+    "movz x23, #0x5fc1\n movk x23, #0xe319, lsl #16\n"
+    "movk x23, #0x24a7, lsl #32\n movk x23, #0x6b8d, lsl #48\n"
+    "mov x24, x23\n mov x25, x23\n mov x26, x23\n mov x27, x23\n mov x28, x23\n mov x29, x23\n blr x19\n"
+    "sub x9, sp, #2048\n mov x10, #128\n"
+    ".Lcrypto_stack_copy: ldp x11, x12, [x9], #16\n stp x11, x12, [x20], #16\n"
+    "subs x10, x10, #1\n b.ne .Lcrypto_stack_copy\n"
+    "ldp x29, x30, [sp, #80]\n ldp x27, x28, [sp, #64]\n ldp x25, x26, [sp, #48]\n"
+    "ldp x23, x24, [sp, #32]\n ldp x21, x22, [sp, #16]\n ldp x19, x20, [sp], #96\n"
+    ASM_RET ASM_END(crypto_stack_snapshot)
+);
+#elif RISCV64
+__asm__(
+    ASM_FUNC(crypto_stack_snapshot)
+    "addi sp, sp, -112\n sd ra, 0(sp)\n sd s0, 8(sp)\n sd s1, 16(sp)\n sd s2, 24(sp)\n sd s3, 32(sp)\n"
+    "sd s4, 40(sp)\n sd s5, 48(sp)\n sd s6, 56(sp)\n sd s7, 64(sp)\n"
+    "sd s8, 72(sp)\n sd s9, 80(sp)\n sd s10, 88(sp)\n sd s11, 96(sp)\n"
+    "mv s0, a0\n mv s1, a4\n mv s2, a1\n mv s3, a3\n"
+    "addi sp, sp, -2048\n mv t0, sp\n li t1, 256\n"
+    ".Lcrypto_stack_clear: sd zero, 0(t0)\n addi t0, t0, 8\n"
+    "addi t1, t1, -1\n bnez t1, .Lcrypto_stack_clear\n li t0, 2048\n add sp, sp, t0\n"
+    "mv a0, s2\n mv a1, a2\n mv a2, s3\n li a3, 128\n"
+    "li s4, 0x6b8d24a7e3195fc1\n mv s5, s4\n mv s6, s4\n mv s7, s4\n"
+    "mv s8, s4\n mv s9, s4\n mv s10, s4\n mv s11, s4\n jalr s0\n"
+    "li t0, 2048\n sub t0, sp, t0\n li t1, 256\n"
+    ".Lcrypto_stack_copy: ld t2, 0(t0)\n sd t2, 0(s1)\n"
+    "addi t0, t0, 8\n addi s1, s1, 8\n addi t1, t1, -1\n bnez t1, .Lcrypto_stack_copy\n"
+    "ld s4, 40(sp)\n ld s5, 48(sp)\n ld s6, 56(sp)\n ld s7, 64(sp)\n"
+    "ld s8, 72(sp)\n ld s9, 80(sp)\n ld s10, 88(sp)\n ld s11, 96(sp)\n"
+    "ld ra, 0(sp)\n ld s0, 8(sp)\n ld s1, 16(sp)\n ld s2, 24(sp)\n ld s3, 32(sp)\n addi sp, sp, 112\n"
+    ASM_RET ASM_END(crypto_stack_snapshot)
+);
+#endif
 
-static __attribute__((noinline, noclone)) positive x25519_residue_scan(
-    const p64 address_to words)
+fn crypto_stack_dirty(address_any state, const p8 address_to input);
+fn crypto_stack_clean(address_any state, const p8 address_to input);
+__asm__(
+    ASM_FUNC(crypto_stack_dirty)
+#if X64
+    "mov (%rsi), %rax\n mov %rax, -16(%rsp)\n"
+#elif ARM64
+    "sub sp, sp, #16\n ldr x9, [x1]\n str x9, [sp]\n add sp, sp, #16\n"
+#elif RISCV64
+    "addi sp, sp, -16\n ld t0, 0(a1)\n sd t0, 0(sp)\n addi sp, sp, 16\n"
+#endif
+    ASM_RET ASM_END(crypto_stack_dirty)
+    ASM_FUNC(crypto_stack_clean)
+    ASM_RET ASM_END(crypto_stack_clean)
+);
+
+static fn crypto_stack_snapshot_controls(void)
 {
-        volatile p64 window[256];
+        p64 secret = 0x73b96a8e5c214fd0ull;
+        p64 sampled[256];
         positive found = 0;
 
-        for (positive i = 0; i < array_count(window); i++)
-                for (positive j = 0; j < 4; j++)
-                        found += window[i] == words[j];
-        return found;
+        crypto_stack_snapshot((address_any)crypto_stack_dirty, null,
+                               (const p8 address_to)address_of secret, 0, sampled);
+        for (positive i = 0; i < array_count(sampled); i++)
+                found += sampled[i] == secret;
+        check("the stack snapshot detects a planted secret spill", found > 0);
+        found = 0;
+        crypto_stack_snapshot((address_any)crypto_stack_clean, null,
+                               (const p8 address_to)address_of secret, 0, sampled);
+        for (positive i = 0; i < array_count(sampled); i++)
+                found += sampled[i] == secret;
+        check("the stack snapshot excludes a preceding call's spills", found == 0);
 }
 
 static positive x25519_residue(void)
@@ -64764,8 +65316,13 @@ static positive x25519_residue(void)
         for (positive body = 0; body < 2; body++)
         {
                 cpu_has_mulx = body ? 0 : mulx;
-                x25519_residue_call(out, scalar, nine);
-                found += x25519_residue_scan(words);
+                p64 sampled[256];
+
+                crypto_stack_snapshot((address_any)x25519, out, scalar,
+                                       (positive)nine, sampled);
+                for (positive i = 0; i < array_count(sampled); i++)
+                        for (positive j = 0; j < array_count(words); j++)
+                                found += sampled[i] == words[j];
         }
         cpu_has_mulx = mulx;
         return found;
@@ -64775,6 +65332,7 @@ static positive x25519_residue(void)
 static fn crypto_floor_x25519(void)
 {
 #ifndef KERNEL_MODE
+        crypto_stack_snapshot_controls();
         check("x25519 leaves no word of the clamped scalar on the stack",
               x25519_residue() == 0);
 #if X64
@@ -65030,37 +65588,6 @@ static positive field_check_wrong(const crypto_field address_to f,
         return wrong;
 }
 
-/*
-        What a field body leaves on the stack once it has returned.
-
-        A square or product of a secret is as secret as the operand, so a
-        body that spills part of one must wipe it before it pops its frame.
-        field_residue_call runs the body one frame down; field_residue_scan,
-        called next from the same frame, reads the kilobyte of stack that
-        now lies under it -- where the body's frame was -- and counts the
-        words that are a limb of the double-width square the body computed.
-        x86_64's p384_square spilled t0 and the high half t6..t11 there and
-        left them; the other bodies keep everything in registers.
-*/
-static __attribute__((noinline, noclone)) fn field_residue_call(
-    fn (*body)(p64 address_to, const p64 address_to), p64 address_to d,
-    const p64 address_to a)
-{
-        body(d, a);
-}
-
-static __attribute__((noinline, noclone)) positive field_residue_scan(
-    const p64 address_to limbs, positive count)
-{
-        volatile p64 window[128];
-        positive found = 0;
-
-        for (positive i = 0; i < array_count(window); i++)
-                for (positive j = 0; j < count; j++)
-                        found += window[i] == limbs[j];
-        return found;
-}
-
 static positive field_residue(fn (*body)(p64 address_to, const p64 address_to),
                               positive n)
 {
@@ -65083,8 +65610,15 @@ static positive field_residue(fn (*body)(p64 address_to, const p64 address_to),
                 }
                 wide[i + n] = carry;
         }
-        field_residue_call(body, d, a);
-        return field_residue_scan(wide, 2 * n);
+        p64 sampled[256];
+        positive found = 0;
+
+        crypto_stack_snapshot((address_any)body, d, (const p8 address_to)a,
+                               0, sampled);
+        for (positive i = 0; i < array_count(sampled); i++)
+                for (positive j = 0; j < 2 * n; j++)
+                        found += sampled[i] == wide[j];
+        return found;
 }
 
 /*
@@ -65096,31 +65630,6 @@ static positive field_residue(fn (*body)(p64 address_to, const p64 address_to),
         searched for any 32-bit word of the message schedule (sha1, sha256,
         sha512 by halves) or of the message (blake2b).
 */
-static __attribute__((noinline, noclone)) fn hash_residue_call(
-    positive which, p64 address_to state, const p8 address_to block)
-{
-        if (which == 0)
-                sha1_blocks((p32 address_to)state, block, 1);
-        else if (which == 1)
-                sha256_blocks((p32 address_to)state, block, 1);
-        else if (which == 2)
-                sha512_blocks(state, block, 1);
-        else
-                blake2b_blocks(state, block, 1, 128);
-}
-
-static __attribute__((noinline, noclone)) positive hash_residue_scan(
-    const p32 address_to words, positive count)
-{
-        volatile p32 window[512];
-        positive found = 0;
-
-        for (positive i = 0; i < array_count(window); i++)
-                for (positive j = 0; j < count; j++)
-                        found += window[i] == words[j];
-        return found;
-}
-
 static p32 hash_residue_rotate(p32 x, positive n)
 {
         return x >> n | x << (32 - n);
@@ -65191,22 +65700,16 @@ static positive hash_residue(positive which, p8 address_to block)
                         words[count++] = (p32)(wide[t] >> 32);
                 }
         }
-#if X64
         address_any bodies[] = {(address_any)sha1_blocks, (address_any)sha256_blocks,
                                 (address_any)sha512_blocks, (address_any)blake2b_blocks};
-        p64 saved[12];
         p32 sampled[512];
         positive found = 0;
 
-        hash_saved_slots(bodies[which], state, block, saved, sampled);
+        crypto_stack_snapshot(bodies[which], state, block, 1, sampled);
         for (positive i = 0; i < array_count(sampled); i++)
                 for (positive j = 0; j < count; j++)
                         found += sampled[i] == words[j];
         return found;
-#else
-        hash_residue_call(which, state, block);
-        return hash_residue_scan(words, count);
-#endif
 }
 
 #if X64
@@ -69529,6 +70032,205 @@ done:
         if (sender >= 0) socket_close(sender);
 }
 
+/* Packet-local syntax limits must not renew the enclosing exchange's work
+   allowance when a parsed reply is unusable in the current lease state. */
+static fn dhcp_mixed_discard_budget(void)
+{
+        p8 packet[300], received[300], hardware[6] = {1, 2, 3, 4, 5, 6};
+        socket_address_internet at = {.family = AF_INET,
+                                      .host = network_order_32(HOST_LOOPBACK)};
+        socket_address_internet from = at;
+        p32 size = sizeof at;
+        bipolar receiver = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+        bipolar sender = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+        bool opened = receiver >= 0 && sender >= 0 &&
+            socket_bind(receiver, address_of at, sizeof at) == 0 &&
+            socket_bind(sender, address_of from, sizeof from) == 0 &&
+            socket_name(receiver, address_of at, address_of size) == 0 &&
+            (size = sizeof from,
+             socket_name(sender, address_of from, address_of size) == 0);
+
+        check("DHCP mixed discard fixture opens", opened);
+        if (!opened)
+                goto done;
+        for (positive rebinding = 0; rebinding < 2; rebinding++)
+        for (positive over = 0; over < 2; over++)
+        for (positive syntax = 0; syntax <= NETWORK_DISCARD_MAX + over; syntax++)
+        for (positive reverse = 0; reverse < 2; reverse++)
+        {
+                dhcp_lease held = {.address = 0x0a00020f, .mask = 0xffffff00,
+                                   .server = 0x0a000202, .seconds = 3600,
+                                   .renewal = 1800, .rebinding = 3150};
+                dhcp_lease old = held;
+                positive unwanted = NETWORK_DISCARD_MAX + over;
+                bool queued = true;
+
+                for (positive row = 0; row <= unwanted; row++)
+                {
+                        bool bad_syntax = row < unwanted &&
+                            (reverse ? row >= unwanted - syntax : row < syntax);
+                        /* A replay fails packet identity. A matching OFFER
+                           parses but cannot complete a REQUEST. */
+                        dhcp_build(packet, sizeof packet,
+                                   row == unwanted ? DHCP_ACK : DHCP_OFFER,
+                                   bad_syntax ? 124 : 123, hardware,
+                                   0, held.server, 0, false);
+                        packet[0] = 2;
+                        network_store_32(packet + 16, held.address);
+                        queued &= socket_send(sender, packet, sizeof packet, 0,
+                                              address_of at, sizeof at) ==
+                                      sizeof packet;
+                }
+                network_deadline deadline;
+                bool began = network_deadline_begin(address_of deadline, 1, 0);
+                net_recv_calls = 0;
+                bipolar result = queued && began
+                    ? dhcp_complete(receiver, received, sizeof received, 123,
+                                    hardware, address_of held, address_of from,
+                                    rebinding != 0, address_of deadline)
+                    : DHCP_NO_SOCKET;
+                positive calls = net_recv_calls;
+
+                check("DHCP syntax and lease-state junk share one exact discard budget",
+                      queued && began &&
+                          result == (over ? DHCP_NO_OFFER : DHCP_OK) &&
+                          calls == NETWORK_DISCARD_MAX + 1 &&
+                          !memory_compare(address_of held, address_of old,
+                                          sizeof held));
+                bipolar left = socket_receive(receiver, received,
+                                               sizeof received, MSG_DONTWAIT,
+                                               null, null);
+                check("DHCP cannot reach the valid ACK behind an over-budget mixture",
+                      over ? left == sizeof received : left == -EAGAIN);
+                while (socket_receive(receiver, received, sizeof received,
+                                      MSG_DONTWAIT, null, null) >= 0)
+                        ;
+        }
+done:
+        if (receiver >= 0) socket_close(receiver);
+        if (sender >= 0) socket_close(sender);
+}
+
+static fn dns_shared_pointer_work(void)
+{
+        p8 request[64] = {0}, reply[DNS_MAX_MESSAGE] = {0};
+        p16 id = 0x4312;
+        bipolar name = dns_write_name(request + DNS_HEADER,
+                                      sizeof request - DNS_HEADER,
+                                      (string_address)"work.example");
+        positive question = (positive)name + 4;
+        positive at = DNS_HEADER + question;
+        p32 found = 0;
+
+        network_store_16(request, id);
+        network_store_16(request + 4, 1);
+        network_store_16(request + DNS_HEADER + name, DNS_TYPE_A);
+        network_store_16(request + DNS_HEADER + name + 2, DNS_CLASS_IN);
+        memory_copy(reply, request, at);
+        network_store_16(reply + 2, DNS_FLAG_RESPONSE);
+        /* An opaque record contains a backwards-only chain. Each subsequent
+           owner legally refers through it, staying within the per-name cap. */
+        reply[at++] = 0xc0;
+        reply[at++] = DNS_HEADER;
+        network_store_16(reply + at, 65280); // opaque private-use RR
+        network_store_16(reply + at + 2, DNS_CLASS_IN);
+        network_store_16(reply + at + 8, 2 * (DNS_POINTER_HOPS - 1));
+        at += 10;
+        positive target = DNS_HEADER;
+        for (positive hop = 0; hop < DNS_POINTER_HOPS - 1; hop++)
+        {
+                network_store_16(reply + at, (p16)(0xc000 | target));
+                target = at;
+                at += 2;
+        }
+        positive records_at = DNS_HEADER + question;
+        positive last_owner = 0;
+        for (positive record = 0; record < 160; record++)
+        {
+                last_owner = at;
+                network_store_16(reply + at, (p16)(0xc000 | target));
+                at += 2;
+                network_store_16(reply + at, DNS_TYPE_A);
+                network_store_16(reply + at + 2, DNS_CLASS_IN);
+                network_store_16(reply + at + 8, 4);
+                network_store_32(reply + at + 10, 0xcb007109);
+                at += 14;
+        }
+        network_store_16(reply + 6, 161);
+        p8 owner[256];
+        positive ended, pointers = DNS_POINTER_HOPS + 3;
+        check("DNS work fixture stays within message and per-name ceilings",
+              at <= sizeof reply &&
+                  dns_copy_name(reply, at, last_owner, owner, sizeof owner,
+                                address_of ended, address_of pointers) == name &&
+                  pointers == 3 && ended == last_owner + 2);
+        check("DNS refuses repeated pointer work across a declared record section",
+              dns_reply_result(reply, at, id, request, question,
+                               address_of found) == DNS_MALFORMED && !found);
+        check("DNS direct answer selection has the same aggregate work bound",
+              dns_answer_address(reply, at, records_at, 161, DNS_HEADER,
+                                 address_of found) == DNS_MALFORMED && !found);
+
+        /* Sweep every legal pointer depth and each section's exact work
+           boundary, with the packet-size boundary as the valid neighbor
+           when that is reached first. The generator's independent cost is
+           one pointer for the opaque record owner, then depth+1 per A owner. */
+        for (positive section = 0; section < 3; section++)
+        for (positive depth = 0; depth < DNS_POINTER_HOPS; depth++)
+        {
+                positive head = DNS_HEADER + question + 12 + depth * 2;
+                positive fit = (DNS_MAX_MESSAGE - head) / 16;
+                positive limit = (DNS_WORK_POINTERS - 1) / (depth + 1);
+                positive edge = min(fit, limit);
+
+                for (positive neighbor = 0; neighbor < 3; neighbor++)
+                {
+                        positive records = edge + neighbor - 1;
+                        if (!records || records > fit)
+                                continue;
+                        memory_zero(reply, sizeof reply);
+                        at = DNS_HEADER + question;
+                        memory_copy(reply, request, at);
+                        network_store_16(reply + 2, DNS_FLAG_RESPONSE);
+                        network_store_16(reply + 6 + section * 2,
+                                         (p16)(records + 1));
+                        network_store_16(reply + at, 0xc000 | DNS_HEADER);
+                        at += 2;
+                        network_store_16(reply + at, 65280);
+                        network_store_16(reply + at + 2, DNS_CLASS_IN);
+                        network_store_16(reply + at + 8, (p16)(depth * 2));
+                        at += 10;
+                        target = DNS_HEADER;
+                        for (positive hop = 0; hop < depth; hop++)
+                        {
+                                network_store_16(reply + at,
+                                                 (p16)(0xc000 | target));
+                                target = at;
+                                at += 2;
+                        }
+                        for (positive record = 0; record < records; record++)
+                        {
+                                network_store_16(reply + at,
+                                                 (p16)(0xc000 | target));
+                                at += 2;
+                                network_store_16(reply + at, DNS_TYPE_A);
+                                network_store_16(reply + at + 2, DNS_CLASS_IN);
+                                network_store_16(reply + at + 8, 4);
+                                network_store_32(reply + at + 10, 0xcb007109);
+                                at += 14;
+                        }
+                        positive cost = 1 + records * (depth + 1);
+                        bipolar expected = cost > DNS_WORK_POINTERS
+                            ? DNS_MALFORMED : section ? DNS_NO_ADDRESS : DNS_OK;
+                        found = 0;
+                        check("DNS work ceiling and valid neighbors at every pointer depth in all sections",
+                              dns_reply_result(reply, at, id, request, question,
+                                               address_of found) == expected &&
+                                  found == (expected == DNS_OK ? 0xcb007109 : 0));
+                }
+        }
+}
+
 static fn leasing_datagrams(void)
 {
         p8 packet[301], received[300], hardware[6] = {1, 2, 3, 4, 5, 6};
@@ -69604,7 +70306,7 @@ static fn leasing_datagrams(void)
                       dhcp_receive(receiver, received, sizeof received, 123,
                                    hardware, &lease, &kind,
                                    address_of any_sender, true,
-                                   address_of accepted,
+                                   address_of accepted, null,
                                    address_of deadline) ==
                           (length == 300));
                 if (length == 300)
@@ -69639,7 +70341,7 @@ static fn leasing_datagrams(void)
               network_deadline_begin(address_of deadline, 0, 100000000));
         check("DHCP discards replay, junk and wrong peers before the valid reply",
               dhcp_receive(receiver, received, sizeof received, 123, hardware,
-                           &lease, &kind, address_of sender_at, false, null,
+                           &lease, &kind, address_of sender_at, false, null, null,
                            address_of deadline));
 
         network_store_32(packet + 4, 124);
@@ -69656,7 +70358,7 @@ static fn leasing_datagrams(void)
               network_deadline_begin(address_of deadline, 1, 0));
         check("DHCP discards exactly its wrong-transaction work budget",
               dhcp_receive(receiver, received, sizeof received, 123, hardware,
-                           &lease, &kind, address_of sender_at, false, null,
+                           &lease, &kind, address_of sender_at, false, null, null,
                            address_of deadline));
 
         network_store_32(packet + 4, 124);
@@ -69673,7 +70375,7 @@ static fn leasing_datagrams(void)
               network_deadline_begin(address_of deadline, 1, 0));
         check("DHCP fails closed one wrong transaction over its work budget",
               !dhcp_receive(receiver, received, sizeof received, 123, hardware,
-                            &lease, &kind, address_of sender_at, false, null,
+                            &lease, &kind, address_of sender_at, false, null, null,
                             address_of deadline));
 
         /* A renewal's answer: the ACK keeps the lease and the NAK gives it
@@ -69857,6 +70559,7 @@ b32 main(void)
         net_group(talking);
         net_group(resolving);
         net_group(resolving_edges);
+        net_group(dns_shared_pointer_work);
         net_group(resolving_truncated);
         net_group(resolving_policy);
         net_group(resolving_walk);
@@ -69883,12 +70586,18 @@ b32 main(void)
         net_group(http_write_spans_partial);
         net_group(http_write_spans_midpath_fault);
         net_group(dns_dhcp_midpath_faults);
+        net_group(network_write_regressions);
+        net_group(tls_key_update_write_deadlines);
+        net_group(tls_lending_and_fatal_states);
+        net_group(tls_unexpected_type_matrix);
+        net_group(http_output_interruption_budget);
         net_group(network_stream_interruption_deadlines);
         net_group(network_relative_read_deadlines);
         net_group(network_datagram_readiness_races);
         net_group(network_datagram_queued_progress);
         net_group(network_stream_sigpipe);
         net_group(tls_closure_boundaries);
+        net_group(tls_nonce_byte_states);
         net_group(tls_record_payload_ceiling);
         net_group(tls_receive_whole_room);
         net_group(tls_failed_send_state);
@@ -69932,6 +70641,7 @@ b32 main(void)
         net_group(dhcp_reacquisition_state_matrix);
         net_group(dhcp_ack_lease_integrity);
         net_group(dhcp_ack_invalid_then_valid);
+        net_group(dhcp_mixed_discard_budget);
         net_group(leasing_datagrams);
         net_group(dhcp_transaction_randomness);
         net_group(userspace_route_source_in_namespace);
@@ -107186,7 +107896,8 @@ b32 main(void)
 #endif /* BENCH_net_parsers */
 
 #ifdef BENCH_net_hot
-/* Production response parsing, DHCP padding and queued datagram reception.
+/* Production response parsing, TLS wire primitives, DHCP padding and queued
+   datagram reception.
    The same harness builds against saved pre-change network sources, so the
    comparison measures complete callers rather than isolated byte scans. */
 #include "../src/lib.util.c"
@@ -107201,6 +107912,13 @@ static positive net_hot_size;
 static positive net_hot_rounds;
 static positive net_hot_kind;
 static b32 net_hot_pair[2];
+static p8 net_hot_iv[12] = {0x31, 0x41, 0x59, 0x26, 0x53, 0x58,
+                            0x97, 0x93, 0x23, 0x84, 0x62, 0x64};
+static p8 net_hot_dns_request[64];
+static p8 net_hot_dns_reply[128];
+static positive net_hot_dns_size;
+static positive net_hot_dns_question;
+static positive net_hot_dns_ttl;
 
 __attribute__((noipa)) static positive net_hot_response(void)
 {
@@ -107224,6 +107942,69 @@ __attribute__((noipa)) static positive net_hot_padding(void)
 
 static fn net_hot_work(void)
 {
+        if (net_hot_kind == 7)
+        {
+                for (positive round = 0; round < net_hot_rounds; round++)
+                {
+                        tls_record_header(net_hot_bytes, (p8)round,
+                                          round * 257);
+                        net_hot_sink += net_hot_bytes[4];
+                }
+                return;
+        }
+        if (net_hot_kind == 6)
+        {
+                for (positive round = 0; round < net_hot_rounds; round++)
+                {
+                        p32 found = 0;
+
+                        net_hot_dns_reply[net_hot_dns_ttl] ^= 1;
+                        net_hot_sink += (positive)dns_reply_result(
+                            net_hot_dns_reply, net_hot_dns_size, 0x4312,
+                            net_hot_dns_request, net_hot_dns_question, address_of found) +
+                            found;
+                }
+                return;
+        }
+        if (net_hot_kind == 5)
+        {
+                p8 nonce[12];
+
+                for (positive round = 0; round < net_hot_rounds; round++)
+                {
+                        tls_nonce(net_hot_iv, round * 0x9e3779b97f4a7c15ull,
+                                  nonce);
+                        net_hot_sink += nonce[round % sizeof nonce];
+                }
+                return;
+        }
+        if (net_hot_kind == 3 || net_hot_kind == 4)
+        {
+                p8 byte;
+
+                for (positive round = 0; round < net_hot_rounds; round++)
+                {
+                        bool sent;
+
+                        if (net_hot_kind == 3)
+                                sent = network_stream_send_all_for(
+                                    net_hot_pair[0], (p8 address_to)"w", 1, 30, 0);
+                        else
+                        {
+                                network_deadline deadline;
+
+                                sent = network_deadline_begin(address_of deadline, 30, 0) &&
+                                       network_stream_send_all_until(
+                                           net_hot_pair[0], (p8 address_to)"w", 1,
+                                           address_of deadline);
+                        }
+                        if (!sent || socket_receive(net_hot_pair[1], address_of byte,
+                                                     1, MSG_DONTWAIT, null, null) != 1)
+                                system_call_1(syscall(exit_group), 2);
+                        net_hot_sink += byte;
+                }
+                return;
+        }
         if (net_hot_kind == 2)
         {
                 p8 bytes[32];
@@ -107321,12 +108102,61 @@ b32 main(void)
         net_hot_size = 279;
         net_hot_row("DHCP END and 278 PAD bytes");
 
+        net_hot_kind = 5;
+        net_hot_rounds = 1000000;
+        net_hot_row("TLS record nonce");
+
+        {
+                bipolar name = dns_write_name(net_hot_dns_request + DNS_HEADER,
+                    sizeof net_hot_dns_request - DNS_HEADER,
+                    (string_address)"example.com");
+                positive at;
+
+                net_hot_dns_question = (positive)name + 4;
+                at = DNS_HEADER + net_hot_dns_question;
+                network_store_16(net_hot_dns_request, 0x4312);
+                network_store_16(net_hot_dns_request + 4, 1);
+                network_store_16(net_hot_dns_request + DNS_HEADER + name,
+                                 DNS_TYPE_A);
+                network_store_16(net_hot_dns_request + DNS_HEADER + name + 2,
+                                 DNS_CLASS_IN);
+                memory_copy(net_hot_dns_reply, net_hot_dns_request, at);
+                network_store_16(net_hot_dns_reply + 2, DNS_FLAG_RESPONSE);
+                network_store_16(net_hot_dns_reply + 6, 1);
+                net_hot_dns_reply[at++] = 0xc0;
+                net_hot_dns_reply[at++] = DNS_HEADER;
+                network_store_16(net_hot_dns_reply + at, DNS_TYPE_A);
+                network_store_16(net_hot_dns_reply + at + 2, DNS_CLASS_IN);
+                net_hot_dns_ttl = at + 4;
+                network_store_32(net_hot_dns_reply + net_hot_dns_ttl, 300);
+                network_store_16(net_hot_dns_reply + at + 8, 4);
+                network_store_32(net_hot_dns_reply + at + 10, 0xc0000201);
+                net_hot_dns_size = at + 14;
+                net_hot_kind = 6;
+                net_hot_rounds = 10000;
+                net_hot_row("DNS compressed one-record reply");
+        }
+        net_hot_kind = 7;
+        net_hot_rounds = 1000000;
+        net_hot_row("TLS record header");
+        log_flush();
+
         if (system_call_4(syscall(socketpair), AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK,
                           0, (positive)net_hot_pair))
                 return 2;
         net_hot_kind = 2;
         net_hot_rounds = 128;
         net_hot_row("Queued 64-datagram burst, send and receive");
+        socket_close(net_hot_pair[0]);
+        socket_close(net_hot_pair[1]);
+        if (system_call_4(syscall(socketpair), AF_UNIX, SOCK_STREAM, 0,
+                          (positive)net_hot_pair))
+                return 2;
+        net_hot_rounds = 100000;
+        net_hot_kind = 4;
+        net_hot_row("Queued stream write with eager deadline, send and receive");
+        net_hot_kind = 3;
+        net_hot_row("Queued stream write with deferred deadline, send and receive");
         socket_close(net_hot_pair[0]);
         socket_close(net_hot_pair[1]);
         return 0;

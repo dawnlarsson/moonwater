@@ -21,6 +21,16 @@
    unbounded parsing and system calls inside one deadline. */
 #define NETWORK_DISCARD_MAX 64
 
+/* One enclosing exchange owns this allowance. Parsing a packet successfully
+   must not replenish it when the caller then rejects that packet's meaning. */
+static bool network_discard_one(positive address_to remaining)
+{
+        if (!address_to remaining)
+                return false;
+        address_to remaining -= 1;
+        return true;
+}
+
 typedef struct
 {
         positive began;
@@ -46,6 +56,35 @@ static bool network_deadline_begin(network_deadline address_to deadline,
         began = clock_monotonic_nanoseconds();
         deadline->began = began;
         return began != 0 && deadline->budget != 0;
+}
+
+/* A deferred relative wait may live inside an earlier whole-operation
+   deadline. Clamp at the same clock observation that starts it, so neither
+   work before the first wait nor a later retry can extend the outer budget.
+   Copy the enclosing values first, so the two pointers may alias. */
+static bool network_deadline_begin_within(
+    network_deadline address_to deadline, positive seconds, positive nanoseconds,
+    const network_deadline address_to outer)
+{
+        network_deadline enclosing;
+        positive elapsed;
+        positive left;
+
+        if (outer)
+                enclosing = *outer;
+        if (!network_deadline_begin(deadline, seconds, nanoseconds))
+                return false;
+        if (!outer)
+                return true;
+        if (!enclosing.began || deadline->began < enclosing.began)
+                return false;
+        elapsed = deadline->began - enclosing.began;
+        if (elapsed >= enclosing.budget)
+                return false;
+        left = enclosing.budget - elapsed;
+        if (deadline->budget > left)
+                deadline->budget = left;
+        return true;
 }
 
 static bool network_deadline_left(
@@ -336,6 +375,41 @@ static bool network_stream_send_all_until(
         }
 
         return true;
+}
+
+/* A usual small write completes in one nonblocking send, with no clock or
+   poll. Partial progress, backpressure and interruption start one absolute
+   budget for the remainder; none renews it. A refused first send does not
+   need a timer, and an empty span does not enter the kernel at all. */
+static bool network_stream_send_all_for(
+    bipolar handle, p8 address_to data, positive length,
+    positive seconds, positive nanoseconds)
+{
+        network_deadline deadline;
+        bipolar wrote;
+
+        if (!length)
+                return true;
+        wrote = socket_send((b32)handle, data, length,
+                            MSG_DONTWAIT | MSG_NOSIGNAL, null, 0);
+        if (wrote > 0)
+        {
+                if ((positive)wrote > length)
+                        return false;
+                if ((positive)wrote == length)
+                        return true;
+                data += wrote;
+                length -= (positive)wrote;
+        }
+        else if (wrote != NETWORK_INTERRUPTED && wrote != NETWORK_TRY_AGAIN)
+                return false;
+        if (!network_deadline_begin(address_of deadline, seconds, nanoseconds))
+                return false;
+        if (wrote == NETWORK_TRY_AGAIN &&
+            network_wait_writable_until(handle, address_of deadline) <= 0)
+                return false;
+        return network_stream_send_all_until(handle, data, length,
+                                              address_of deadline);
 }
 
 /*

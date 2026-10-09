@@ -4032,6 +4032,8 @@ bowl_tight_one() { tight_check_one bowl; }
 lane_net()
 {
         python3 test/differential.py --harness net_clock_fault || return 1
+        python3 test/differential.py --harness net_wait_states || return 1
+        python3 test/differential.py --harness net_parser_work_states || return 1
         python3 test/differential.py --harness net_math_proof || return 1
         python3 test/differential.py --harness wire_constants || return 1
         python3 test/differential.py --harness net_dependency_closure || return 1
@@ -18719,7 +18721,7 @@ bench_about()
         net-parsers) bench_section=BENCH_net_parsers
                  bench_line="network parser byte loops against the lib.c routines, at their callers" ;;
         net-hot) bench_section=BENCH_net_hot
-                 bench_line="production HTTP fields, DHCP padding and queued datagram reception" ;;
+                 bench_line="production HTTP and DNS parsing, TLS wire primitives, DHCP padding and queued I/O" ;;
         utf8-valid) bench_section=BENCH_utf8_valid
                  bench_line="well-formed UTF-8 prefix: grep's former C check against the assembly" ;;
         cells-ascii) bench_section=BENCH_cells_ascii
