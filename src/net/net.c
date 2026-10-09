@@ -9565,6 +9565,72 @@ static bool http_web_scheme(string_address url, positive scheme)
                !memory_compare_ascii_case(url, "https", scheme - 1);
 }
 
+/* A URL made fit for a request line the way GNU wget and curl make one: after
+   the authority, a space, a backslash and every byte past 0x7f become %XX in
+   upper case, and every other byte -- '%' included, so an escape already
+   there is never doubled and one that is not an escape (%zz) goes on as curl
+   sends it -- goes through as it came.  A server's Location with a space or
+   UTF-8 in it, or a URL typed with one, is a real answer that both fetch;
+   http_split_into's and the request builder's refusal of those bytes stays
+   the backstop for a caller that skips this.  The authority is left exactly
+   as written for the parser to judge: url is a whole URL, whose authority
+   follows "scheme://" or, when bare_host, starts it; otherwise it is a
+   reference, whose only authority follows a leading "//".  url is length
+   bytes and a terminator; into holds the answer whole with its own, or this
+   is HTTP_BAD_URL. */
+static bipolar http_url_escape(string_address url, positive length, bool bare_host,
+                               p8 address_to into, positive room)
+{
+        static const p8 hex[] = "0123456789ABCDEF";
+        byte_reader reader = byte_reader_open((const p8 address_to)url, length);
+        byte_reader slashes = reader;
+        byte_store out = {into, room ? room - 1 : 0, 0};
+        positive scheme = http_scheme_length(url);
+        positive verbatim = 0;
+
+        if (scheme > length)
+                scheme = 0;
+        byte_reader_skip(address_of slashes, scheme);
+        if ((scheme || !bare_host) && byte_reader_u8(address_of slashes) == '/' &&
+            byte_reader_u8(address_of slashes) == '/' && byte_reader_ok(address_of slashes))
+                verbatim = scheme + 2;
+        if (verbatim || bare_host)
+        {
+                byte_reader rest = reader;
+
+                byte_reader_skip(address_of rest, verbatim);
+                for (;;)
+                {
+                        byte_reader look = rest;
+                        p8 byte = byte_reader_u8(address_of look);
+
+                        if (!byte_reader_ok(address_of look) || byte == '/' ||
+                            byte == '?' || byte == '#')
+                                break;
+                        rest = look;
+                        verbatim++;
+                }
+        }
+        if (!room || !byte_store_append_exact(address_of out,
+                                               byte_reader_take(address_of reader,
+                                                                verbatim),
+                                               verbatim))
+                return HTTP_BAD_URL;
+        while (byte_reader_left(address_of reader))
+        {
+                p8 byte = byte_reader_u8(address_of reader);
+                p8 escape[3] = {'%', hex[byte >> 4], hex[byte & 15]};
+                bool plain = byte != ' ' && byte != '\\' && byte <= 0x7f;
+
+                if (!byte_store_append_exact(address_of out, plain ? address_of byte
+                                                                   : escape,
+                                             plain ? 1 : 3))
+                        return HTTP_BAD_URL;
+        }
+        into[out.used] = end;
+        return HTTP_OK;
+}
+
 /*
         http://host[:port][/path] taken apart.
 
@@ -11022,6 +11088,9 @@ static bipolar http_put_url(p8 address_to into, positive room, bool tls,
         return HTTP_OK;
 }
 
+/* A Location resolved against the URL that answered with it, into room
+   bytes at into, which may be location itself: the reference is copied
+   before a byte is written. */
 static bipolar http_absolutize(bool tls, string_address host, p16 port,
                                string_address path, string_address location,
                                p8 address_to into, positive room)
@@ -11519,8 +11588,16 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                                 memory_copy(placed, response.location,
                                             response.location_length);
                                 placed[response.location_length] = end;
-                                status = http_absolutize(tls, host, port, path, placed,
-                                                         next, sizeof next);
+                                /* Escaped into next, and resolved from there
+                                   in place: http_absolutize copies the
+                                   reference before it writes a byte. */
+                                status = http_url_escape(placed,
+                                                         response.location_length,
+                                                         false, next, sizeof next);
+                                if (!status)
+                                        status = http_absolutize(tls, host, port, path,
+                                                                 next, next,
+                                                                 sizeof next);
                                 //      The next hop, or the Location a failure
                                 //      names; both terminate inside a buffer
                                 //      exactly as large as url.

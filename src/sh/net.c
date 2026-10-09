@@ -834,6 +834,7 @@ static b32 net_wget(void)
         p8 leaf[256];
         p8 numbered[256 + 24];
         p8 where[HTTP_URL_MAX];
+        p8 escaped[HTTP_URL_MAX];
         string_address path;
         p16 port;
         bool tls;
@@ -874,6 +875,12 @@ static b32 net_wget(void)
         }
 
         url = program_argument((b32)taking.first);
+        /* A space, a backslash or a byte past ASCII in the URL is fetched
+           escaped, as GNU wget and curl fetch it; one too long to escape is
+           named as it was typed. */
+        if (!http_url_escape(url, string_length(url), true, escaped,
+                             sizeof escaped))
+                url = (string_address)escaped;
         quiet = (taking.flags & FILE_FLAG('q')) != 0;
         check_cert = (taking.flags & FILE_FLAG('K')) == 0;
         output = file_option_value(address_of taking, 'O');

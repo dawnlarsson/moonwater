@@ -51635,6 +51635,19 @@ static void fuzz_url(const p8 *data, positive size)
         p8 leaf[256];
         p8 next[HTTP_URL_MAX];
 
+        /* Escaping is idempotent and leaves nothing it escapes behind the
+           authority: a second pass over its answer changes nothing. */
+        for (int bare = 0; bare < 2; bare++) {
+                char *text = bare ? url : location;
+                p8 once[HTTP_URL_MAX], twice[HTTP_URL_MAX];
+                if (!http_url_escape((string_address)text, strlen(text), bare, once,
+                                     sizeof once) &&
+                    (http_url_escape(once, strlen((char *)once), bare, twice,
+                                     sizeof twice) ||
+                     strcmp((char *)once, (char *)twice)))
+                        fuzz_die("escaping an escaped URL changed it");
+        }
+
         memset(host, 0xa5, sizeof host);
         if (http_split_into(url, host, sizeof host, &port, &path, &tls)) {
                 if (host[0] != 0xa5)
@@ -51765,7 +51778,8 @@ def http_fuzz_seeds():
                            ("downgrade", b"http://127.0.0.1/p"),
                            ("unknown_host", b"http://unknown.invalid/"),
                            ("trailing_blank", b"/p \t"), ("dot_segments", b"../../x"),
-                           ("unbuildable", b"/caf\xe9"), ("percent_cr", b"/%0d")):
+                           ("unbuildable", b"/caf\xe9"), ("percent_cr", b"/%0d"),
+                           ("spaced", b"dir/a b?q=x y"), ("backslash", b"/a\\b%zz")):
         redirect = (b"HTTP/1.1 302 Found\r\nLocation: " + location +
                     b"\r\nContent-Length: 0\r\n\r\n")
         for lane in (0, 1):
@@ -51807,7 +51821,8 @@ def http_fuzz_seeds():
             ("scheme_only", b"gopher://h/", b"mailto:x"),
             ("bare_web_scheme", b"https:443", b"http:80"),
             ("bare_other_scheme", b"ftp:21", b"smtp:25"),
-            ("long", b"http://h/" + b"a" * 2100, b"b" * 2100)):
+            ("long", b"http://h/" + b"a" * 2100, b"b" * 2100),
+            ("escapes", b"h:8/a b\\c\xc3\xa9?d e", b"//h b/c d\xff")):
         seeds["url_%s.bin" % name] = b"\x03\x00" + url + b"\x00" + location
     return seeds
 
@@ -52388,6 +52403,31 @@ def harness_wget_hostile(argv):
 
     GET = lambda target: b"GET " + target
     CASES = [
+        #   A space, a backslash and bytes past ASCII after the authority are
+        #   sent escaped, %XX in upper case, as GNU wget and curl send them
+        #   (curl sends a backslash on as it is, so that row is GNU wget's).
+        case("a Location with UTF-8 is fetched, escaped", hop(b"/caf\xc3\xa9"),
+             "http://127.0.0.1:PORT/x", [GET(b"/x"), GET(b"/caf%C3%A9")]),
+        case("a Location with a space is fetched, escaped", hop(b"/a b"),
+             "http://127.0.0.1:PORT/x", [GET(b"/x"), GET(b"/a%20b")]),
+        case("a Location with a backslash in the path is escaped", hop(b"/a\\b"),
+             "http://127.0.0.1:PORT/x", [GET(b"/x"), GET(b"/a%5Cb")], refs=("wget",)),
+        case("a relative Location is escaped whole", hop(b"dir/a b?q=x y"),
+             "http://127.0.0.1:PORT/x", [GET(b"/x"), GET(b"/dir/a%20b?q=x%20y")],
+             refs=("wget",)),
+        case("an absolute Location with UTF-8", hop(b"http://127.0.0.1:PORT/\xc3\xa9"),
+             "http://127.0.0.1:PORT/x", [GET(b"/x"), GET(b"/%C3%A9")]),
+        case("a network-path Location with a space", hop(b"//127.0.0.1:PORT/a b"),
+             "http://127.0.0.1:PORT/x", [GET(b"/x"), GET(b"/a%20b")]),
+        case("an escape already there is not doubled", hop(b"/a%20b%zz"),
+             "http://127.0.0.1:PORT/x", [GET(b"/x"), GET(b"/a%20b%zz")],
+             refs=("curl",)),
+        case("a URL typed with UTF-8", answer(ok()), "http://127.0.0.1:PORT/é",
+             [GET(b"/%C3%A9")]),
+        case("a URL typed with a space", answer(ok()), "http://127.0.0.1:PORT/a b?c d",
+             [GET(b"/a%20b?c%20d")], refs=("wget",)),
+        case("a schemeless URL typed with a space", answer(ok()), "127.0.0.1:PORT/a b",
+             [GET(b"/a%20b")], refs=("wget",)),
         #   A redirect with nothing to follow is the server's answer: GNU wget
         #   exits 8 ("Redirection (302) without location"; with an empty
         #   Location it asks again for the same URL until its twenty run out,
@@ -52780,6 +52820,17 @@ int main(void)
                 p8 *url = unhex(strcmp(first, "-") ? first : "");
                 if (mode[0] == 'S') {
                         answer(url);
+                } else if (mode[0] == 'E' || mode[0] == 'F') {
+                        p8 into[8192];
+                        unsigned room;
+                        if (scanf("%u", &room) == 1 && room <= sizeof into &&
+                            !http_url_escape((string_address)url, strlen((char *)url),
+                                             mode[0] == 'E', into, room)) {
+                                printf("OK\t");
+                                emit(into);
+                                printf("\n");
+                        } else
+                                printf("BAD\n");
                 } else if (scanf("%8191s", second) == 1) {
                         p8 *ref = unhex(strcmp(second, "-") ? second : "");
                         p8 host[256];
@@ -53012,6 +53063,55 @@ int main(void)
             checks(tight == default, "%r + %r: the tiers resolve differently" % (base, reference))
         checks(tiers["default took, tight refused"] > 0 and tiers["both refused"] > 0,
                "both halves of the scheme-token rule seen: %r" % dict(tiers))
+
+        #   http_url_escape: after the authority a space, a backslash and every
+        #   byte past 0x7f is %XX in upper case, and nothing else moves. The
+        #   oracle is a regular expression, not the C's loop; that GNU wget and
+        #   curl send these bytes so is wget_hostile's, against the real ones.
+        def escaped(text, bare):
+            """A whole URL's authority follows scheme:// or, typed bare,
+            starts it; a reference's follows a leading //."""
+            raw = text.encode("utf-8")
+            found = (re.match(rb"^[A-Za-z][A-Za-z0-9+.-]*://[^/?#]*", raw) or
+                     (re.match(rb"^//[^/?#]*", raw) if not bare else
+                      re.match(rb"^[^/?#]*", raw)))
+            stop = found.end() if found else 0
+            tail = re.sub(rb"[ \\\x80-\xff]", lambda hit: b"%%%02X" % hit.group()[0],
+                          raw[stop:])
+            return raw[:stop] + tail
+
+        texts = sorted(set(urls[:1500]) | set(references) | {
+            "", "/", " ", "\\", "\u00e9", "//", "//h", "//h/a b", "h/a b", "a b:c",
+            "http://h/a b#f g", "http://h b/", "http:", "http://", "x:// y",
+            "\u00e9://h/a b", "a b://h/c d", "HTTP://h/\u00e9?\u00e9#\u00e9",
+            "//h b/c d", "//h\\@e/x y", "//\u00e9:1?q r", "http://\u00e9 \\/a b"})
+        wire = [(mode, text) for text in texts for mode in ("E", "F")]
+        questions = []
+        for mode, text in wire:
+            want = escaped(text, mode == "E")
+            questions.append("%s %s %d" % (mode, encode(text), 8192))
+            #   Exactly enough room, and one byte less.
+            questions.append("%s %s %d" % (mode, encode(text), len(want) + 1))
+            questions.append("%s %s %d" % (mode, encode(text), len(want)))
+        ran = subprocess.run([str(work / "http_urls")], input="\n".join(questions) + "\n",
+                             capture_output=True, text=True, timeout=120,
+                             env=dict(os.environ, ASAN_OPTIONS="detect_leaks=0"))
+        answers = ran.stdout.splitlines()
+        if ran.returncode or len(answers) != len(questions):
+            print("  FAIL the escape lift stopped:\n" + ran.stderr[-3000:])
+            write_tally("http-urls", 0, 1)
+            return 1
+        for at, (mode, text) in enumerate(wire):
+            want = escaped(text, mode == "E")
+            for offset, room_ok in ((0, True), (1, True), (2, False)):
+                got = answers[3 * at + offset]
+                if room_ok:
+                    checks(got.startswith("OK\t") and
+                           binascii.unhexlify(got.split("\t")[1]) == want,
+                           "%s %r: escaped %r, wanted %r" % (mode, text, got, want))
+                else:
+                    checks(got == "BAD", "%s %r: one byte too little room answered %r"
+                           % (mode, text, got))
 
     return checks.verdict("http urls", "http-urls")
 
@@ -64640,6 +64740,7 @@ def harness_security_hygiene(argv):
         ("bowl_signature_read", ("bytes",)),
         ("net_arp_claims", ("packet",)),
         ("http_length_values", ("value",)),
+        ("http_url_escape", ("url",)),
     )
     #   The kernel log is anybody's to read on this image (DMESG_RESTRICT is
     #   off) and the ring-0 terminal draws it, so every part of a host_kmsg

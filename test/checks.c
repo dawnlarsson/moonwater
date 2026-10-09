@@ -68881,6 +68881,33 @@ static fn redirect_urls(void)
                                address_of body, address_of code) == HTTP_BAD_URL &&
                           http_fetch_to((string_address)"http://127.0.0.1:1/%0d",
                                         -1, false, address_of code, null) == HTTP_BAD_URL);
+                /* What wget and a redirect send instead: the bytes after the
+                   authority escaped, the authority as written, in exactly the
+                   room the answer and its terminator take. */
+                {
+                        static const char typed[] = "h:8/a b\\c\xc3\xa9?d e#f g";
+                        static const char typed_want[] =
+                            "h:8/a%20b%5Cc%C3%A9?d%20e#f%20g";
+                        static const char spaced[] = "//h b/c d%20%zz";
+                        static const char spaced_want[] = "//h b/c%20d%20%zz";
+                        p8 escaped[64];
+
+                        check("a typed URL is escaped after its authority, as wget and curl send it",
+                              http_url_escape((string_address)typed, sizeof typed - 1,
+                                              true, escaped, sizeof typed_want) ==
+                                      HTTP_OK &&
+                                  !memory_compare(escaped, typed_want,
+                                                  sizeof typed_want));
+                        check("an escaped URL needs room for its terminator as well",
+                              http_url_escape((string_address)typed, sizeof typed - 1,
+                                              true, escaped, sizeof typed_want - 1) ==
+                                  HTTP_BAD_URL);
+                        check("a reference keeps its network-path authority and every escape",
+                              http_url_escape((string_address)spaced, sizeof spaced - 1,
+                                              false, escaped, sizeof escaped) == HTTP_OK &&
+                                  !memory_compare(escaped, spaced_want,
+                                                  sizeof spaced_want));
+                }
 
                 /* Absolute Location that already fills the next-URL buffer. */
                 {
