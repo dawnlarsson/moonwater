@@ -2948,7 +2948,7 @@ static fn link_receive_all(p64 now)
         `moonwater link serve`: the listener in the foreground. `link on` and
         the machine process start exactly this, detached.
 */
-static b32 link_serve(void)
+static b32 link_serve(string_address ready_text)
 {
         system_poll_descriptor watch[3 + LINK_SESSIONS * 5];
         bool address_to quiet[3 + LINK_SESSIONS * 5];
@@ -2957,6 +2957,7 @@ static b32 link_serve(void)
         bipolar signals;
         b32 stop = 0;
         p16 port = link_port();
+        bipolar ready = -1;
 
         if (link_identity(address_of link_self.me, true) < 0)
                 return host_refuse("%s cannot be read or made\n", LINK_KEY_PATH);
@@ -2974,6 +2975,19 @@ static b32 link_serve(void)
 
         link_self.socket = link_socket_open(port, true);
         return_if(link_self.socket < 0, host_fail("the link's port", link_self.socket));
+        //      `link on` waits for this byte, or for the pipe to end, which is
+        //      what a listener that could not start does. Written once, then closed.
+        if (ready_text && byte_is_digit(ready_text[0]))
+        {
+                bool over = false;
+                string_address at = ready_text;
+                p8 mark = '1';
+
+                ready = (bipolar)string_decimal_saturated(address_of at, 1 << 20,
+                                                          address_of over);
+                (void)system_write_all((positive)ready, address_of mark, 1);
+                system_close(ready);
+        }
         link_nearby.socket = -1;
         link_self.server = true;
         //      Segment runs unless told otherwise, which is how the cost of

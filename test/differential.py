@@ -65711,14 +65711,38 @@ status, out, err = on("a", moon + " link run b echo detached")
 say(status == 0 and out == b"detached\n", "the detached listener answers")
 status, out, err = on("b", moon + " link on")
 say(status == 0, "link on twice is still on")
+#       A bare command's round trip through the same namespace set-up is the
+#       baseline: link off has to come back within a few milliseconds of it,
+#       as the listener's exit is what it waits for (a 50 ms poll was 50 ms).
+t0 = time.monotonic()
+on("b", "true")
+base = time.monotonic() - t0
+t0 = time.monotonic()
 status, out, err = on("b", moon + " link off")
+took = time.monotonic() - t0
 say(status == 0 and b"link off" in out, "link off stops it")
+say(took - base < 0.025, "link off returns when the listener has gone (%.1f ms over a bare command)" %
+    ((took - base) * 1000))
 status, out, err = on("b", "cat /root/link")
 say(out.strip() == b"off", "and keeps that choice")
 status, out, err = on("a", moon + " link run b echo gone", timeout=30)
 say(status == 255, "nothing answers after link off")
 status, out, err = on("b", moon + " link")
 say(b"link off" in out, "status says off")
+#       A port somebody else holds is refused at once: the listener's pipe
+#       ends as it exits, where a lock poll waited three seconds to say so.
+holder = subprocess.Popen(argv_on("b", "python3 -c 'import socket,time; "
+                                  "s=socket.socket(socket.AF_INET6,socket.SOCK_DGRAM); "
+                                  "s.bind((\"::\",22348)); time.sleep(60)'"),
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+time.sleep(1.0)
+t0 = time.monotonic()
+status, out, err = on("b", moon + " link on")
+took = time.monotonic() - t0
+holder.kill()
+holder.wait()
+say(status != 0 and b"did not start" in out + err and took < 1.0,
+    "link on refused at once when the port is taken (%.0f ms)" % (took * 1000))
 
 # Groups: a and b join the same one and pair by themselves; c joins it with
 # the wrong secret and is never paired, and learns nothing.

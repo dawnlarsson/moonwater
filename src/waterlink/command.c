@@ -500,31 +500,78 @@ static b32 link_grant_locked(string_address name, bool allow,
         process's child, so a terminal closing takes nothing with it. The
         machine process keeps its own child and restarts it if it dies.
 */
-static fn link_serve_start(bool detached)
+static fn link_serve_start(bool detached, bipolar ready)
 {
-        string_address words[] = {"moonwater", "link", "serve", null};
+        p8 digits[12];
+        string_address words[] = {"moonwater", "link", "serve", (string_address)digits, null};
+        string_address plain[] = {"moonwater", "link", "serve", null};
 
-        if (detached ? !host_detach(descriptors_none, descriptors_none) : system_fork() != 0)
+        if (ready >= 0)
+                digits[positive_into_string(digits, (positive)ready)] = end;
+        if (detached ? !host_detach((p32)(ready >= 0 ? ready : descriptors_none), descriptors_none)
+                     : system_fork() != 0)
                 return;
         if (!detached)
         {
                 (void)system_call(syscall(setsid));
                 (void)descriptors_close_except(3, descriptors_none, descriptors_none);
         }
-        (void)shell_exec_file((string_address) "/proc/self/exe", words, 3,
+        (void)shell_exec_file((string_address) "/proc/self/exe",
+                              ready >= 0 ? words : plain, ready >= 0 ? 4 : 3,
                               file_environment_all());
         system_call_1(syscall(exit), 127);
 }
 
-static bool link_wait_owner(bool present)
+/*
+        The listener's lock lasts as long as the listener, and the lock names
+        its holder. `link off` waits on that pid's pidfd, which wakes at the
+        holder's exit (its locks go before the exit is told), and reads the
+        lock again. A holder that cannot be opened as a pidfd is waited for a
+        turn at a time, as before. Three seconds, then refused.
+*/
+static bool link_wait_stopped(void)
 {
-        for (positive turn = 0; turn < 60; turn++)
+        p64 until = system_clock_ns(HOST_CLOCK_BOOTTIME) + 3000000000ull;
+
+        for (;;)
         {
-                if ((host_lock_owner(LINK_LOCK_PATH) > 0) == present)
+                b32 owner = host_lock_owner(LINK_LOCK_PATH);
+                p64 now = system_clock_ns(HOST_CLOCK_BOOTTIME);
+                bipolar pid;
+                timespec limit;
+
+                if (owner <= 0)
                         return true;
-                host_pause(50000000);
+                if (now >= until)
+                        return false;
+                pid = system_call_2(syscall(pidfd_open), (positive)owner, 0);
+                if (pid < 0)
+                {
+                        host_pause(50000000);
+                        continue;
+                }
+                limit.tv_sec = (p64)(until - now) / 1000000000ull;
+                limit.tv_nsec = (p64)(until - now) % 1000000000ull;
+                (void)descriptor_wait_readable(pid, address_of limit, null);
+                system_close(pid);
         }
-        return false;
+}
+
+/*
+        The listener writes one byte to the pipe `link on` gave it once its
+        lock is held and its port is open, and closes the pipe. A pipe that
+        ends without the byte is a listener that did not start. Three seconds,
+        then the same question as before: is the lock held by someone?
+*/
+static bool link_wait_started(bipolar ready)
+{
+        timespec limit = {3, 0};
+        p8 byte;
+
+        if (descriptor_wait_readable(ready, address_of limit, null) > 0 &&
+            system_read_retry((positive)ready, address_of byte, 1) == 1)
+                return true;
+        return host_lock_owner(LINK_LOCK_PATH) > 0;
 }
 
 static b32 link_switch(bool on, bool say)
@@ -539,7 +586,7 @@ static b32 link_switch(bool on, bool say)
         if (!on)
         {
                 (void)host_lock_signal(LINK_LOCK_PATH, 15);
-                if (!link_wait_owner(false))
+                if (!link_wait_stopped())
                         return host_refuse("the listener did not stop\n");
                 if (say)
                 {
@@ -555,10 +602,21 @@ static b32 link_switch(bool on, bool say)
         crypto_forget(address_of me, sizeof me);
 
         if (host_lock_owner(LINK_LOCK_PATH) <= 0)
-                link_serve_start(true);
-        if (!link_wait_owner(true))
-                return host_refuse("the listener did not start: is udp %p "
-                                   "taken?\n", (positive)link_port());
+        {
+                b32 ends[2];
+                bool started;
+
+                if (system_pipe(ends, 0) < 0)
+                        return host_refuse("the listener did not start: is udp %p "
+                                           "taken?\n", (positive)link_port());
+                link_serve_start(true, (bipolar)ends[1]);
+                system_close((bipolar)ends[1]);
+                started = link_wait_started((bipolar)ends[0]);
+                system_close((bipolar)ends[0]);
+                if (!started)
+                        return host_refuse("the listener did not start: is udp %p "
+                                           "taken?\n", (positive)link_port());
+        }
 
         link_key_text(me.public, key);
         crypto_forget(address_of me, sizeof me);
@@ -1289,7 +1347,7 @@ static const struct
         positive least;
         positive most;
 } link_shapes[] = {
-    {"on", 3, 3},   {"off", 3, 3},   {"key", 3, 3},  {"serve", 3, 3},
+    {"on", 3, 3},   {"off", 3, 3},   {"key", 3, 3},  {"serve", 3, 4},
     {"port", 3, 4},
     {"pair", 3, 4}, {"add", 5, 6},   {"remove", 4, 4},
     {"allow", 5, ~(positive)0},      {"deny", 5, ~(positive)0},
@@ -1345,7 +1403,7 @@ static b32 link_main(string_address address_to arguments, positive count)
         if (string_equals(verb, "port"))
                 return link_port_verb(count == 4 ? arguments[3] : null);
         if (string_equals(verb, "serve"))
-                return link_serve();
+                return link_serve(count == 4 ? arguments[3] : null);
         if (string_equals(verb, "pair"))
                 return link_pair_here(count == 4 ? arguments[3] : null);
 
@@ -1470,7 +1528,7 @@ static fn link_keep(void)
         link_keep_next = now + link_keep_wait;
         if (link_keep_wait < 60)
                 link_keep_wait *= 2;
-        link_serve_start(false);
+        link_serve_start(false, -1);
 }
 
 #endif // WATERLINK_COMMAND_INCLUDED
