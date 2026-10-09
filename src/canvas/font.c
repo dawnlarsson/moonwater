@@ -209,7 +209,7 @@
 #define FONT_MEMO 2048
 #define FONT_GROUP 6144
 #define FONT_NEAR 512
-#define FONT_EVENTS 4096
+#define FONT_EVENTS 3840
 
 #define FONT_TAG(a, b, c, d) ((p32)(a) << 24 | (p32)(b) << 16 | (p32)(c) << 8 | (p32)(d))
 
@@ -303,10 +303,13 @@ typedef struct
 
         p32 cells[FONT_BAND];
         p64 touched[FONT_ROWS];
-        b32 band, rows, stride, width, grain, x, y;
+        b32 near[FONT_ROWS], far[FONT_ROWS], seen[2][2][FONT_ROWS];
+        p64 shared[FONT_EDGE / 64 + 1];
+        p8 winds[FONT_CONTOURS];
+        b32 band, rows, stride, width, grain, wound, x, y;
         b32 cell_x, cell_y;
-        p32 cover, area, gathered;
-        bool clip, gather, overflow;
+        p32 cover, area, gathered, used[4];
+        bool clip, gather, overflow, track;
 
         p8 ramp[256];
         p32 ramp_colour, ramp_contrast;
@@ -1249,27 +1252,27 @@ static fn font_flush(font_engine address_to e)
 /*
         Overlapping contours. The sum of signed areas is the union's area only
         where at most one contour covers a point: where two wound alike
-        overlap and both their edges cross one pixel -- a composite's ogonek
-        on its letter -- the clamped sum counts the shared part twice, and
-        FreeType draws such a pixel up to half too dark (a font may flag the
-        glyph, and few static ones do). So the rows where two contours wound
-        alike have boxes that meet are drawn again exactly: cut into slabs at
-        every end of an edge and every crossing of two, inside which no edge
-        begins, ends or crosses another, so that the edges are in one order
-        and the winding between neighbours is fixed; each run of nonzero
-        winding is then a trapezoid, and its area in every pixel is
-        integrated in closed form. The edges are those the clamped pass drew,
-        gathered a band of rows at a time into the cells, which lie idle
-        meanwhile; a row with more edges or crossings than the scratch holds
-        keeps its clamped bytes.
+        overlap and both their edges cross one pixel -- a stroke laid over a
+        bowl, an ogonek on its letter -- the clamped sum counts the shared
+        part twice, and FreeType draws such a pixel up to half too dark. Rows
+        where that can happen (below) are drawn again exactly. A row's edges
+        are joined into chains, each running one way, up or down, and the row
+        is cut into slabs at every chain's ends and every crossing of two,
+        inside which the chains keep one order and the winding between
+        neighbours is fixed; each run of nonzero winding is then bounded by
+        two chains, and its area is laid into the row's differences by its
+        two sides, piece by piece, in closed form. The edges are those the
+        clamped pass drew, gathered a band of rows at a time into the cells,
+        which lie idle meanwhile; a row with more edges or crossings than the
+        scratch holds keeps its clamped bytes.
 */
 typedef struct
 {
         b32 group[FONT_GROUP][4];
         p16 listed[2 * FONT_GROUP];
         p32 listing[34];
-        f64 near[FONT_NEAR][5], along[FONT_NEAR], reach[FONT_NEAR];
-        p32 foot[FONT_NEAR], active[FONT_NEAR], across[FONT_NEAR];
+        f64 point[3 * FONT_NEAR][2], along[FONT_NEAR], reach[FONT_NEAR];
+        p32 start[FONT_NEAR + 1], cursor[FONT_NEAR], active[FONT_NEAR], order[FONT_NEAR];
         f64 events[FONT_EVENTS];
         f64 cover[FONT_EDGE + 2];
 } font_scratch;
@@ -1413,6 +1416,23 @@ static fn font_walker_start(b64 address_to at, b64 address_to step, b64 address_
         *bend = font_ratio(2 * a, square);
 }
 
+//      The columns a piece of a contour may cover in the rows it crosses:
+//      its box, a curve's by its three points, which hold it.
+static fn font_extent(font_engine address_to e, b32 xa, b32 xb, b32 xc, b32 ya, b32 yb, b32 yc)
+{
+        b32 left = xa < xb ? xa : xb, right = xa < xb ? xb : xa, bottom = ya < yb ? ya : yb, top = ya < yb ? yb : ya;
+
+        left = left < xc ? left : xc, right = right > xc ? right : xc;
+        bottom = ((bottom < yc ? bottom : yc) >> FONT_SHIFT) - e->band;
+        top = (((top > yc ? top : yc) - 1) >> FONT_SHIFT) - e->band;
+        bottom = bottom < 0 ? 0 : bottom, top = top >= e->rows ? e->rows - 1 : top;
+        for (b32 r = bottom; r <= top && e->track && !e->gather; r++)
+        {
+                e->near[r] = left < e->near[r] ? left : e->near[r];
+                e->far[r] = right > e->far[r] ? right : e->far[r];
+        }
+}
+
 static fn font_conic(font_engine address_to e, b32 cx, b32 cy, b32 x, b32 y)
 {
         b32 x0 = e->x, y0 = e->y;
@@ -1422,6 +1442,7 @@ static fn font_conic(font_engine address_to e, b32 cx, b32 cy, b32 x, b32 y)
         e->y = y;
         if ((y0 >= high && cy >= high && y >= high) || (y0 < low && cy < low && y < low))
                 return;
+        font_extent(e, x0, cx, x, y0, cy, y);
 
         b64 ax = (b64)x0 - 2 * (b64)cx + x, ay = (b64)y0 - 2 * (b64)cy + y;
         b64 bow = ax < 0 ? -ax : ax, rise = ay < 0 ? -ay : ay;
@@ -1456,9 +1477,73 @@ static fn font_conic(font_engine address_to e, b32 cx, b32 cy, b32 x, b32 y)
 
 static fn font_line(font_engine address_to e, b32 x, b32 y)
 {
+        if (e->y != y)
+                font_extent(e, e->x, x, x, e->y, y, y);
         font_piece(e, e->x, e->y, x, y);
         e->x = x;
         e->y = y;
+}
+
+/*
+        Where the clamped sum is wrong. It counts a point twice only where
+        two contours wound alike both cover it, and inside a row a contour
+        covers nothing outside the columns its edges cross there: so each
+        contour notes, row by row, how far left and right its pieces' boxes
+        reach, and a row where that span overlaps the span of the contours
+        wound the same way before it is drawn again as the union. Every other
+        row keeps the sum, which is exact there. One contour's own loops are
+        not looked for.
+*/
+//      Whether any two contours wound alike have boxes that meet, which
+//      the spans are needed for; each contour's winding kept for the walk.
+//      Past 64 contours the boxes are not compared and the spans decide.
+static bool font_tracking(font_engine address_to e)
+{
+        b32 box[64][4];
+        p32 first = 0;
+        bool meet = e->contour_count > 64;
+
+        for (p32 c = 0; c < e->contour_count; first = e->ends[c++] + 1u)
+        {
+                b64 area = 0;
+                b32 b[4] = {0x7fffffff, 0x7fffffff, -0x7fffffff, -0x7fffffff};
+
+                for (p32 i = first; i <= e->ends[c] && i < e->point_count; i++)
+                {
+                        const font_point address_to p = &e->points[i];
+                        const font_point address_to q = &e->points[i == e->ends[c] ? first : i + 1];
+
+                        area += (b64)p->x * q->y - (b64)q->x * p->y;
+                        b[0] = p->x < b[0] ? (b32)p->x : b[0], b[1] = p->y < b[1] ? (b32)p->y : b[1];
+                        b[2] = p->x > b[2] ? (b32)p->x : b[2], b[3] = p->y > b[3] ? (b32)p->y : b[3];
+                }
+                e->winds[c] = area < 0;
+                if (c < 64)
+                {
+                        memory_copy(box[c], b, sizeof(b));
+                        for (p32 k = 0; k < c && !meet; k++)
+                                meet = e->winds[k] == e->winds[c] && box[k][0] < b[2] && b[0] < box[k][2] &&
+                                       box[k][1] < b[3] && b[1] < box[k][3];
+                }
+        }
+        return meet;
+}
+
+static fn font_marks(font_engine address_to e)
+{
+        if (e->gather || !e->track)
+                return;
+        for (b32 r = 0; r < e->rows; r++)
+                if (e->near[r] < e->far[r])
+                {
+                        b32 address_to low = &e->seen[e->wound][0][r], address_to high = &e->seen[e->wound][1][r];
+
+                        if (e->near[r] < *high && *low < e->far[r])
+                                e->shared[(e->band + r) >> 6] |= (p64)1 << ((e->band + r) & 63);
+                        *low = e->near[r] < *low ? e->near[r] : *low;
+                        *high = e->far[r] > *high ? e->far[r] : *high;
+                        e->near[r] = 0x7fffffff, e->far[r] = -0x7fffffff;
+                }
 }
 
 //      The contours as TrueType writes them: an off-curve point between two
@@ -1477,6 +1562,9 @@ static fn font_walk(font_engine address_to e)
 
                 if (last < first || last >= e->point_count)
                         break;
+                if (c)
+                        font_marks(e);
+                e->wound = e->winds[c];
                 if (e->on[first])
                 {
                         sx = (b32)p[first].x, sy = (b32)p[first].y;
@@ -1518,6 +1606,7 @@ static fn font_walk(font_engine address_to e)
                 else
                         font_line(e, sx, sy);
         }
+        font_marks(e);
 }
 
 //      The byte for a running sum: twice the covered area in 2^20ths of
@@ -1556,206 +1645,241 @@ static fn font_sort(f64 address_to v, p32 count)
                 }
 }
 
-static inline f64 font_at(const f64 address_to n, f64 y)
+//      A chain's x at y, its piece found from the cursor up.
+static f64 font_chain_at(const font_scratch address_to s, p32 chain, p32 address_to at, f64 y)
 {
-        return n[0] + (y - n[1]) * (n[2] - n[0]) / (n[3] - n[1]);
+        p32 last = (s->start[chain + 1] & 0x7fffffff) - 1;
+
+        while (*at + 1 < last && s->point[*at + 1][1] <= y)
+                ++*at;
+
+        const f64 address_to p = s->point[*at], address_to q = s->point[*at + 1];
+        return p[0] + (y - p[1]) * (q[0] - p[0]) / (q[1] - p[1]);
+}
+
+//      One side of a run of nonzero winding across a slab of height h, the
+//      edge from xa at its foot to xb at its top, into the row's differences:
+//      the pixels it crosses take their part of the area right of it, every
+//      pixel past it the whole slab; sign is +1 for a run's left side and -1
+//      for its right.
+static fn font_side(f64 address_to step, b32 width, f64 xa, f64 xb, f64 h, f64 sign)
+{
+        f64 least = xa < xb ? xa : xb, most = xa < xb ? xb : xa, before = 0;
+        b32 first = least < 0 ? 0 : (b32)(least / FONT_ONE);
+        b32 last = most / FONT_ONE >= width ? width - 1 : (b32)(most / FONT_ONE);
+
+        if (first > last)
+                return;
+        for (b32 c = first; c <= last; c++)
+        {
+                f64 x0 = (f64)c * FONT_ONE, part = sign * (font_left_of(x0 + FONT_ONE, xa, xb, h) - font_left_of(x0, xa, xb, h));
+
+                step[c] += part - before;
+                before = part;
+        }
+        step[last + 1] += sign * h * FONT_ONE - before;
 }
 
 static fn font_union_row(font_engine address_to e, b32 r, b32 width, p8 address_to row)
 {
         font_scratch address_to s = (font_scratch address_to)e->cells;
         f64 low = (f64)r * FONT_ONE, high = low + FONT_ONE;
-        p32 near = 0, events = 2;
+        p32 chains = 0, points = 0, events = 2, previous = 0x7fffffff;
+        bool rising = false;
 
-        //      The edges that cross the row, clipped to it, foot first, in
-        //      the order of their feet.
+        //      The row's edges, clipped to it, joined into chains: a piece
+        //      that starts where the one before it ended, going the same way
+        //      up or down, continues its chain. A chain's points are kept in
+        //      rising order and its winding in the top bit of its start.
         for (p32 at = s->listing[r - e->band]; at < s->listing[r - e->band + 1]; at++)
         {
-                const b32 address_to g = s->group[s->listed[at]];
+                p32 index = s->listed[at];
+                const b32 address_to g = s->group[index];
                 bool up = g[1] < g[3];
-                f64 xa = up ? g[0] : g[2], ya = up ? g[1] : g[3], xb = up ? g[2] : g[0], yb = up ? g[3] : g[1];
+                f64 ya = up ? g[1] : g[3], yb = up ? g[3] : g[1], xa = up ? g[0] : g[2], xb = up ? g[2] : g[0];
 
                 if (yb <= low || ya >= high || ya == yb)
                         continue;
-                if (near == FONT_NEAR)
+
+                f64 a = ya > low ? ya : low, b = yb < high ? yb : high, slope = (xb - xa) / (yb - ya);
+                f64 xl = xa + (a - ya) * slope, xh = xa + (b - ya) * slope;
+                bool joins = chains && index == previous + 1 && up == rising && s->group[index - 1][2] == g[0] &&
+                             s->group[index - 1][3] == g[1];
+
+                if (points + 2 > 3 * FONT_NEAR || (!joins && chains == FONT_NEAR))
+                {
+                        e->used[2] = FONT_NEAR;
                         return;
-
-                f64 slope = (xb - xa) / (yb - ya), a = ya > low ? ya : low, b = yb < high ? yb : high;
-                p32 j = near++;
-
-                for (; j && s->near[s->foot[j - 1]][1] > a; j--)
-                        s->foot[j] = s->foot[j - 1];
-                s->foot[j] = near - 1;
-
-                f64 address_to n = s->near[near - 1];
-                n[0] = xa + (a - ya) * slope, n[1] = a, n[2] = xa + (b - ya) * slope, n[3] = b;
-                n[4] = up ? 1 : -1;
+                }
+                if (!joins)
+                {
+                        if (chains && !rising)
+                                for (p32 i = s->start[chains - 1] & 0x7fffffff, j = points - 1; i < j; i++, j--)
+                                {
+                                        f64 x = s->point[i][0], y = s->point[i][1];
+                                        s->point[i][0] = s->point[j][0], s->point[i][1] = s->point[j][1];
+                                        s->point[j][0] = x, s->point[j][1] = y;
+                                }
+                        s->start[chains++] = points | (up ? 0 : 0x80000000u);
+                        s->point[points][0] = up ? xl : xh, s->point[points++][1] = up ? a : b;
+                }
+                s->point[points][0] = up ? xh : xl, s->point[points++][1] = up ? b : a;
+                previous = index, rising = up;
         }
-        if (!near)
+        if (chains && !rising)
+                for (p32 i = s->start[chains - 1] & 0x7fffffff, j = points - 1; i < j; i++, j--)
+                {
+                        f64 x = s->point[i][0], y = s->point[i][1];
+                        s->point[i][0] = s->point[j][0], s->point[i][1] = s->point[j][1];
+                        s->point[j][0] = x, s->point[j][1] = y;
+                }
+        s->start[chains] = points;
+        e->used[2] = chains > e->used[2] ? chains : e->used[2];
+        if (!chains)
                 return;
 
-        //      The slabs: the row's edges, every end, every crossing of two
-        //      edges, which can only be two whose reaches along x meet: taken
-        //      in the order of where they begin, each against those that begin
-        //      before it ends.
+        //      The slabs: the row's ends, every chain's ends, and every
+        //      crossing of two chains, which can only be two whose reaches
+        //      along x meet -- found between consecutive points of either,
+        //      where both are straight and the gap between them is too.
         s->events[0] = low, s->events[1] = high;
-        for (p32 i = 0; i < near; i++)
+        for (p32 c = 0; c < chains; c++)
         {
-                f64 address_to a = s->near[i];
-                f64 begin = a[0] < a[2] ? a[0] : a[2];
-                p32 j = i;
+                p32 first = s->start[c] & 0x7fffffff, last = (s->start[c + 1] & 0x7fffffff) - 1, j = c;
+                f64 least = s->point[first][0], most = least;
 
-                for (; j && s->reach[j - 1] > begin; j--)
+                for (p32 i = first + 1; i <= last; i++)
+                {
+                        least = s->point[i][0] < least ? s->point[i][0] : least;
+                        most = s->point[i][0] > most ? s->point[i][0] : most;
+                }
+                for (; j && s->reach[j - 1] > least; j--)
                 {
                         s->reach[j] = s->reach[j - 1];
-                        s->across[j] = s->across[j - 1];
+                        s->along[j] = s->along[j - 1];
+                        s->order[j] = s->order[j - 1];
                 }
-                s->reach[j] = begin;
-                s->across[j] = i;
-        }
-        for (p32 o = 0; o < near; o++)
-        {
-                f64 address_to a = s->near[s->across[o]];
-                f64 stop = a[0] < a[2] ? a[2] : a[0];
-
+                s->reach[j] = least, s->along[j] = most, s->order[j] = c;
                 if (events + 2 > FONT_EVENTS)
-                        return;
-                s->events[events++] = a[1];
-                s->events[events++] = a[3];
-                for (p32 q = o + 1; q < near && s->reach[q] <= stop; q++)
                 {
-                        f64 address_to b = s->near[s->across[q]];
-                        f64 from = a[1] > b[1] ? a[1] : b[1], to = a[3] < b[3] ? a[3] : b[3];
+                        e->used[3] = FONT_EVENTS;
+                        return;
+                }
+                s->events[events++] = s->point[first][1];
+                s->events[events++] = s->point[last][1];
+        }
+        for (p32 o = 0; o < chains; o++)
+                for (p32 q = o + 1; q < chains && s->reach[q] <= s->along[o]; q++)
+                {
+                        p32 one = s->order[o], two = s->order[q];
+                        p32 i = s->start[one] & 0x7fffffff, j = s->start[two] & 0x7fffffff;
+                        p32 ia = i, ja = j;
+                        f64 from = s->point[i][1] > s->point[j][1] ? s->point[i][1] : s->point[j][1];
+                        f64 to = s->point[(s->start[one + 1] & 0x7fffffff) - 1][1];
+                        f64 top = s->point[(s->start[two + 1] & 0x7fffffff) - 1][1];
 
+                        to = to < top ? to : top;
                         if (to <= from)
                                 continue;
 
-                        f64 start = font_at(a, from) - font_at(b, from), finish = font_at(a, to) - font_at(b, to);
-
-                        if ((start < 0 && finish > 0) || (start > 0 && finish < 0))
+                        f64 y = from, gap = font_chain_at(s, one, &ia, y) - font_chain_at(s, two, &ja, y);
+                        while (y < to)
                         {
-                                if (events == FONT_EVENTS)
-                                        return;
-                                s->events[events++] = from + (to - from) * start / (start - finish);
+                                f64 next = to;
+                                if (ia + 1 < (s->start[one + 1] & 0x7fffffff) && s->point[ia + 1][1] > y)
+                                        next = s->point[ia + 1][1] < next ? s->point[ia + 1][1] : next;
+                                if (ja + 1 < (s->start[two + 1] & 0x7fffffff) && s->point[ja + 1][1] > y)
+                                        next = s->point[ja + 1][1] < next ? s->point[ja + 1][1] : next;
+
+                                f64 later = font_chain_at(s, one, &ia, next) - font_chain_at(s, two, &ja, next);
+                                if ((gap < 0 && later > 0) || (gap > 0 && later < 0) || later == 0)
+                                {
+                                        if (events == FONT_EVENTS)
+                                        {
+                                                e->used[3] = FONT_EVENTS;
+                                                return;
+                                        }
+                                        s->events[events++] = later == 0 ? next : y + (next - y) * gap / (gap - later);
+                                }
+                                y = next, gap = later;
                         }
                 }
-        }
         font_sort(s->events, events);
+        e->used[3] = events > e->used[3] ? events : e->used[3];
 
-        for (b32 c = 0; c <= width; c++)
+        for (b32 c = 0; c <= width + 1; c++)
                 s->cover[c] = 0;
 
-        //      A sweep up the row: the edges spanning each slab, kept in order
-        //      along it from one slab to the next.
-        p32 count = 0, next = 0;
+        //      A sweep up the row: the chains spanning each slab, in order
+        //      along it, and each run of nonzero winding between two of them
+        //      integrated by its sides, piece by piece.
+        for (p32 c = 0; c < chains; c++)
+                s->cursor[c] = s->start[c] & 0x7fffffff;
         for (p32 k = 0; k + 1 < events; k++)
         {
                 f64 a = s->events[k], b = s->events[k + 1], middle = (a + b) / 2;
-                b32 winding = 0, start = 0;
+                p32 count = 0;
+                b32 winding = 0, begin = 0;
 
                 if (b <= a)
                         continue;
-
-                p32 kept = 0;
-                for (p32 i = 0; i < count; i++)
-                        if (s->near[s->active[i]][3] > middle)
-                                s->active[kept++] = s->active[i];
-                count = kept;
-                for (; next < near && s->near[s->foot[next]][1] < middle; next++)
-                        if (s->near[s->foot[next]][3] > middle)
-                                s->active[count++] = s->foot[next];
-                for (p32 i = 0; i < count; i++)
+                for (p32 c = 0; c < chains; c++)
                 {
-                        p32 edge = s->active[i], j = i;
-                        f64 x = font_at(s->near[edge], middle);
+                        p32 first = s->start[c] & 0x7fffffff, last = (s->start[c + 1] & 0x7fffffff) - 1;
+
+                        if (s->point[first][1] >= middle || s->point[last][1] <= middle)
+                                continue;
+                        while (s->point[s->cursor[c] + 1][1] <= a)
+                                s->cursor[c]++;
+
+                        p32 at = s->cursor[c], j = count++;
+                        f64 x = font_chain_at(s, c, &at, middle);
 
                         for (; j && s->along[j - 1] > x; j--)
                         {
                                 s->along[j] = s->along[j - 1];
                                 s->active[j] = s->active[j - 1];
                         }
-                        s->along[j] = x;
-                        s->active[j] = edge;
+                        s->along[j] = x, s->active[j] = c;
                 }
-
                 for (p32 i = 0; i < count; i++)
                 {
-                        f64 address_to n = s->near[s->active[i]];
+                        p32 chain = s->active[i];
                         b32 before = winding;
 
-                        winding += (b32)n[4];
+                        winding += s->start[chain] >> 31 ? -1 : 1;
                         if (!before && winding)
-                                start = (b32)i;
+                                begin = (b32)i;
                         if (!before || winding)
                                 continue;
-
-                        //      A run of nonzero winding, from edge start to edge
-                        //      i: a trapezoid, added to each pixel it lies over.
-                        f64 address_to l = s->near[s->active[start]];
-                        f64 la = font_at(l, a), lb = font_at(l, b), ra = font_at(n, a), rb = font_at(n, b);
-                        f64 least = la < lb ? la : lb, most = ra > rb ? ra : rb;
-                        b32 first = least < 0 ? 0 : (b32)(least / FONT_ONE);
-                        b32 last = most / FONT_ONE >= width ? width - 1 : (b32)(most / FONT_ONE);
-
-                        for (b32 c = first; c <= last; c++)
+                        for (p32 side = 0; side < 2; side++)
                         {
-                                f64 x0 = (f64)c * FONT_ONE, x1 = x0 + FONT_ONE;
+                                p32 c = side ? chain : s->active[begin];
+                                p32 last = (s->start[c + 1] & 0x7fffffff) - 1;
 
-                                s->cover[c] += (font_left_of(x1, la, lb, b - a) - font_left_of(x1, ra, rb, b - a)) -
-                                               (font_left_of(x0, la, lb, b - a) - font_left_of(x0, ra, rb, b - a));
+                                for (p32 at = s->cursor[c]; at < last && s->point[at][1] < b; at++)
+                                {
+                                        const f64 address_to p = s->point[at], address_to q = s->point[at + 1];
+                                        f64 y0 = p[1] > a ? p[1] : a, y1 = q[1] < b ? q[1] : b;
+
+                                        if (y1 <= y0)
+                                                continue;
+
+                                        f64 slope = (q[0] - p[0]) / (q[1] - p[1]);
+                                        font_side(s->cover, width, p[0] + (y0 - p[1]) * slope, p[0] + (y1 - p[1]) * slope,
+                                                  y1 - y0, side ? -1 : 1);
+                                }
                         }
                 }
         }
+        f64 sum = 0;
         for (b32 c = 0; c < width; c++)
         {
-                f64 area = s->cover[c] / ((f64)FONT_ONE * FONT_ONE);
+                sum += s->cover[c];
 
+                f64 area = sum / ((f64)FONT_ONE * FONT_ONE);
                 row[c] = (p8)(255 * (area < 0 ? 0 : area > 1 ? 1 : area) + 0.5);
         }
-}
-
-//      The rows where two contours wound alike may share area, the one case
-//      where the clamped sum overstates: those their boxes share, from *low
-//      up to *high. Two whose boxes do not meet share nothing; past 64
-//      contours the question is not asked.
-static bool font_overlapping(const font_engine address_to e, b64 address_to low, b64 address_to high)
-{
-        b64 box[64][4];
-        b32 wound[64];
-        p32 first = 0;
-
-        *low = (b64)1 << 62, *high = -((b64)1 << 62);
-        if (e->contour_count < 2 || e->contour_count > 64)
-                return false;
-        for (p32 c = 0; c < e->contour_count; first = e->ends[c++] + 1u)
-        {
-                f64 area = 0;
-
-                box[c][0] = box[c][1] = (b64)1 << 62, box[c][2] = box[c][3] = -((b64)1 << 62);
-                for (p32 i = first; i <= e->ends[c] && i < e->point_count; i++)
-                {
-                        const font_point address_to a = &e->points[i];
-                        const font_point address_to b = &e->points[i == e->ends[c] ? first : i + 1];
-
-                        area += (f64)a->x * b->y - (f64)b->x * a->y;
-                        box[c][0] = a->x < box[c][0] ? a->x : box[c][0];
-                        box[c][1] = a->y < box[c][1] ? a->y : box[c][1];
-                        box[c][2] = a->x > box[c][2] ? a->x : box[c][2];
-                        box[c][3] = a->y > box[c][3] ? a->y : box[c][3];
-                }
-                wound[c] = area < 0 ? -1 : 1;
-                for (p32 k = 0; k < c; k++)
-                        if (wound[k] == wound[c] && box[k][0] < box[c][2] && box[c][0] < box[k][2] &&
-                            box[k][1] < box[c][3] && box[c][1] < box[k][3])
-                        {
-                                b64 from = box[k][1] > box[c][1] ? box[k][1] : box[c][1];
-                                b64 to = box[k][3] < box[c][3] ? box[k][3] : box[c][3];
-
-                                *low = from < *low ? from : *low;
-                                *high = to > *high ? to : *high;
-                        }
-        }
-        return *low <= *high;
 }
 
 //      Each gathered edge listed under every row of the band it crosses, by
@@ -1794,6 +1918,7 @@ static bool font_list(font_engine address_to e)
                         total = s->listing[e->rows];
                         if (total > 2 * FONT_GROUP)
                                 return false;
+                        e->used[1] = total > e->used[1] ? total : e->used[1];
                 }
                 for (b32 r = e->rows; r > 0 && pass; r--)
                         s->listing[r] = s->listing[r - 1];
@@ -1806,8 +1931,10 @@ static bool font_list(font_engine address_to e)
 static fn font_union(font_engine address_to e, b32 width, b32 from, b32 to, b32 height,
                      p8 address_to out, positive stride)
 {
+        font_scratch address_to s = (font_scratch address_to)e->cells;
         b32 most = 32;
 
+        memory_zero(e->used, sizeof(e->used));
         e->gather = true;
         for (e->band = from; e->band < to;)
         {
@@ -1820,14 +1947,28 @@ static fn font_union(font_engine address_to e, b32 width, b32 from, b32 to, b32 
                         most = e->rows / 2;
                         continue;
                 }
+                e->used[0] = e->gathered > e->used[0] ? e->gathered : e->used[0];
                 if (!e->overflow && font_list(e))
                         for (b32 r = e->band; r < e->band + e->rows; r++)
-                                font_union_row(e, r, width, out + (positive)(height - 1 - r) * stride);
+                                if (e->shared[r >> 6] >> (r & 63) & 1)
+                                        font_union_row(e, r, width, out + (positive)(height - 1 - r) * stride);
                 e->band += e->rows;
                 most = most < 16 ? most * 2 : 32;
         }
         e->gather = false;
-        memory_zero(e->cells, sizeof(font_scratch));
+
+        //      The cells are zero again for the next glyph: what the scratch
+        //      used of them, which is little of the quarter megabyte.
+        p32 near = e->used[2] < FONT_NEAR ? e->used[2] + 1 : FONT_NEAR;
+        memory_zero(s->group, (positive)(e->used[0] < FONT_GROUP ? e->used[0] + 1 : FONT_GROUP) * sizeof(s->group[0]));
+        memory_zero(s->listed, (positive)(e->used[1] < 2 * FONT_GROUP ? e->used[1] + 1 : 2 * FONT_GROUP) * 2);
+        memory_zero(s->listing, sizeof(s->listing));
+        memory_zero(s->point, sizeof(s->point));
+        memory_zero(s->along, near * 8), memory_zero(s->reach, near * 8);
+        memory_zero(s->start, (near + 1) * 4), memory_zero(s->cursor, near * 4);
+        memory_zero(s->active, near * 4), memory_zero(s->order, near * 4);
+        memory_zero(s->events, (positive)(e->used[3] < FONT_EVENTS ? e->used[3] + 2 : FONT_EVENTS) * 8);
+        memory_zero(s->cover, (positive)(width + 2) * 8);
 }
 
 static fn font_raster(font_engine address_to e, b32 width, b32 height,
@@ -1837,6 +1978,8 @@ static fn font_raster(font_engine address_to e, b32 width, b32 height,
         e->stride = width + 2;
         for (e->grain = 3; (width + 1) >> e->grain >= 64;)
                 e->grain++;
+        memory_zero(e->shared, ((positive)height + 63) / 64 * 8);
+        e->track = font_tracking(e);
 
         b32 most = FONT_BAND / e->stride < FONT_ROWS ? FONT_BAND / e->stride : FONT_ROWS;
         for (e->band = 0; e->band < height; e->band += e->rows)
@@ -1844,6 +1987,9 @@ static fn font_raster(font_engine address_to e, b32 width, b32 height,
                 e->rows = height - e->band < most ? height - e->band : most;
                 e->cover = e->area = 0;
                 e->cell_y = -1;
+                for (b32 r = 0; r < e->rows; r++)
+                        e->near[r] = e->seen[0][0][r] = e->seen[1][0][r] = 0x7fffffff,
+                        e->far[r] = e->seen[0][1][r] = e->seen[1][1][r] = -0x7fffffff;
                 font_walk(e);
                 font_flush(e);
 
@@ -1873,13 +2019,15 @@ static fn font_raster(font_engine address_to e, b32 width, b32 height,
                         cells[width] = cells[width + 1] = 0;
                 }
         }
-        b64 low, high;
-        if (font_overlapping(e, &low, &high))
-        {
-                b32 from = (b32)(low >> FONT_SHIFT), to = (b32)((high + FONT_ONE - 1) >> FONT_SHIFT);
-
-                font_union(e, width, from < 0 ? 0 : from, to > height ? height : to, height, out, stride);
-        }
+        b32 from = -1, to = 0;
+        for (b32 w = 0; w < (height + 63) / 64; w++)
+                if (e->shared[w])
+                {
+                        from = from < 0 ? w * 64 + (b32)bits_trailing_zeros(e->shared[w]) : from;
+                        to = w * 64 + 64 - (b32)bits_leading_zeros(e->shared[w]);
+                }
+        if (from >= 0)
+                font_union(e, width, from, to, height, out, stride);
 }
 
 /*
