@@ -50499,6 +50499,8 @@ typedef struct { positive began; positive budget; } network_deadline;
 #define TLS_EXPIRED (-3)
 #define TLS_NOT_YET (-4)
 #define TLS_MISMATCH (-5)
+#define TLS_REVOKED (-6)
+#define TLS_UNCHECKED (-7)
 #define ENOSPC 28
 #define NETWORK_INTERRUPTED (-4)
 #define syscall(name) 0
@@ -51647,6 +51649,8 @@ static bipolar network_stream_read_some_for(bipolar h, p8 *into, positive room,
 #define TLS_EXPIRED (-3)
 #define TLS_NOT_YET (-4)
 #define TLS_MISMATCH (-5)
+#define TLS_REVOKED (-6)
+#define TLS_UNCHECKED (-7)
 typedef struct
 {
         p8 *receive;
@@ -56242,6 +56246,9 @@ def tls_verify_chain_lift(net, now=None, aia=None):
         date = "#include <time.h>\ntypedef struct tm tm;\n" + src_slice(
             net, "static COLD bool tls_date_now(p64 address_to value)",
             "static COLD bool tls_cert_current(")
+    #   Revocation lives with the HTTP client, which this lift has not: a
+    #   path that verifies is not revoked here, and wget is held to its
+    #   revocation answers live (tls_chains, tls_peer).
     return (r"""
 #define array_count(a) (sizeof(a) / sizeof((a)[0]))
 #define TLS_FAULT_EARLY 1
@@ -56250,6 +56257,7 @@ def tls_verify_chain_lift(net, now=None, aia=None):
 typedef struct
 {
         bool check_cert;
+        bool status_requested;
         p8 leaf_qx[48];
         p8 leaf_qy[48];
         p8 leaf_n[CRYPTO_RSA_BYTES];
@@ -56263,6 +56271,13 @@ typedef struct
             "                                   p8 address_to into, positive room)\n{\n" +
             (aia or "        (void)url;\n        (void)length;\n        (void)into;\n"
                     "        (void)room;\n        return 0;\n") + "}\n" +
+            "static COLD bool tls_revocation_holds(tls_conn address_to tls,\n"
+            "        tls_cert address_to certs, const positive address_to path,\n"
+            "        positive depth, tls_cert address_to top, const p8 address_to staple,\n"
+            "        positive staple_length, p64 now)\n{\n"
+            "        (void)tls; (void)certs; (void)path; (void)depth; (void)top;\n"
+            "        (void)staple; (void)staple_length; (void)now;\n"
+            "        return true;\n}\n" +
             src_slice(net, "static COLD bool tls_verify_chain(p8 address_to body",
                          "static COLD bool tls_hello_append("))
 

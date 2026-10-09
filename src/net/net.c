@@ -9159,7 +9159,8 @@ static COLD positive tls_aia_fetch(const p8 address_to url, positive length,
                                    p8 address_to into, positive room);
 
 /* Whether the certificates on a verified path are revoked, as their issuers
-   answer: defined after tls_verify_chain, which asks it last. */
+   answer, which tls_verify_chain asks last: defined with the HTTP client,
+   beside the CRL fetch. */
 static COLD bool tls_revocation_holds(tls_conn address_to tls,
                                       tls_cert address_to certs,
                                       const positive address_to path,
@@ -9315,398 +9316,6 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
                 child = next;
                 path[++depth] = next;
         }
-}
-
-/*
-        Revocation: stapling and CRLs, in tiers.
-
-        Each certificate on a verified path below its anchor is asked about
-        by the issuer that signed it. The leaf first by the OCSP response its
-        server stapled (RFC 6066 8, RFC 8446 4.4.2.1), when it stapled one;
-        then -- the leaf without a good staple, and every certificate above
-        it -- by the CRL its first whole-reason http: distribution point
-        names (RFC 5280 6.3), fetched under caIssuers' rules and held in
-        memory for the rest of the process (tls_crl_get).
-
-        An answer is good, revoked, none (a source there is that said
-        nothing usable: unreachable, too large, unparseable, signed by
-        nobody it may be, about another certificate, unknown, or stale) or
-        absent (no source: no staple and no distribution point). Revoked
-        refuses in every tier. A leaf that asks for a staple (TLS Feature
-        status_request, RFC 7633) and has no good one is refused in every
-        tier too. None is passed over at the default tier, as browsers that
-        still fetch revocation pass over it, and refuses at the tight one.
-        Absent is passed in both: a certificate that names no CRL and whose
-        server staples nothing has no source to fail, and OCSP is never
-        fetched (only stapled), so a responder URL alone is not a source.
-
-        Ceilings: TLS_REVOCATION_SECONDS for every fetch of one handshake
-        together (inside the handshake's own deadline; each name lookup has
-        its own three seconds), TLS_CRL_MAX bytes a CRL, TLS_CRL_HELD CRLs and
-        TLS_CRL_HELD_BYTES held, a failed fetch not tried again for
-        TLS_CRL_RETRY seconds.
-*/
-#define TLS_ANSWER_GOOD 0
-#define TLS_ANSWER_REVOKED 1
-#define TLS_ANSWER_NONE 2
-#define TLS_ANSWER_ABSENT 3
-#define TLS_REVOCATION_SECONDS 10
-#define TLS_CRL_MAX ((positive)16 << 20)
-#define TLS_CRL_HELD 8
-#define TLS_CRL_HELD_BYTES ((positive)32 << 20)
-#define TLS_CRL_RETRY 300
-
-/* The CRL a distribution point names, fetched over the HTTP client (defined
-   there, beside tls_aia_fetch) into a store that grows to TLS_CRL_MAX. */
-static COLD bool tls_crl_fetch(const p8 address_to url, positive length,
-                               byte_store address_to into,
-                               const network_deadline address_to deadline);
-
-/* SHA-1 (kind 1, 20 bytes) or SHA-256 (kind 2, 32), the two an OCSP CertID
-   names its issuer by. */
-static COLD fn tls_revocation_hash(p8 kind, const p8 address_to bytes,
-                                   positive length, p8 address_to out)
-{
-        digest_state digest;
-
-        digest_open(address_of digest, kind == 1 ? DIGEST_SHA1 : DIGEST_SHA256,
-                    kind == 1 ? 20 : 32);
-        digest_write(address_of digest, (address_any)bytes, length);
-        digest_close(address_of digest, out);
-}
-
-/* Whether signer's key signed tbs: tls_verify_one, given the signed part of
-   an OCSP response or a CRL laid out as a certificate's. */
-static COLD bool tls_signed_by(p8 address_to tbs, positive tbs_length,
-                               p8 address_to sig_oid, positive sig_oid_length,
-                               const p8 address_to sig, positive sig_length,
-                               tls_cert address_to signer)
-{
-        tls_cert part;
-
-        memory_fill(address_of part, 0, sizeof part);
-        part.tbs = tbs;
-        part.tbs_length = tbs_length;
-        part.sig_oid = sig_oid;
-        part.sig_oid_length = sig_oid_length;
-        part.sig = (p8 address_to)sig;
-        part.sig_length = sig_length;
-        return tls_verify_one(address_of part, signer);
-}
-
-/* What a stapled OCSP response says of leaf, which issuer signed (RFC 6960
-   3.2, 4.2.2.2). It has to parse (tls_parse_ocsp); exactly one of its
-   SingleResponses has to name leaf -- the hash of leaf's issuer Name and of
-   issuer's key under the CertID's hash, and leaf's serial; and it has to be
-   signed by issuer, or by a delegated responder among its certificates:
-   issued by issuer (the Name leaf names, issuer's signature), with
-   id-kp-OCSPSigning, current, a digitalSignature key if it limits its key
-   at all, and the responder the response names (byName its subject, byKey
-   the SHA-1 of its key). Revoked so signed is revoked whenever it was said;
-   good has to be fresh (tls_revocation_fresh); unknown, stale or anything
-   short of the above is none. */
-static COLD p8 tls_ocsp_answer(tls_cert address_to leaf, tls_cert address_to issuer,
-                               const p8 address_to response, positive length,
-                               p64 now)
-{
-        p8 key[32 + CRYPTO_RSA_BYTES];
-        p8 names[2][32];
-        p8 keys[2][32];
-        positive key_length = tls_key_bits(issuer, key, sizeof key);
-        positive matched = 0;
-        tls_ocsp ocsp;
-        tls_ocsp_single single;
-        tls_ocsp_single found;
-        tls_cert responder;
-        tls_cert address_to signer = null;
-        byte_reader list;
-
-        if (!key_length || !leaf->issuer || !leaf->serial ||
-            tls_parse_ocsp((p8 address_to)response, length, address_of ocsp))
-                return TLS_ANSWER_NONE;
-        for (p8 kind = 1; kind <= 2; kind++)
-        {
-                tls_revocation_hash(kind, leaf->issuer, leaf->issuer_length,
-                                    names[kind - 1]);
-                tls_revocation_hash(kind, key, key_length, keys[kind - 1]);
-        }
-        memory_fill(address_of found, 0, sizeof found);
-        list = byte_reader_open(ocsp.responses, ocsp.responses_length);
-        while (byte_reader_left(&list))
-        {
-                positive size = 0;
-                const p8 address_to whole = tls_der_whole(&list, 0x30, address_of size);
-
-                if (!whole || tls_parse_ocsp_single(whole, size, address_of single))
-                        return TLS_ANSWER_NONE;
-                if (!memory_compare(single.name_hash, names[single.hash - 1],
-                                    single.hash_length) &&
-                    !memory_compare(single.key_hash, keys[single.hash - 1],
-                                    single.hash_length) &&
-                    single.serial_length == leaf->serial_length &&
-                    !memory_compare(single.serial, leaf->serial, leaf->serial_length))
-                {
-                        found = single;
-                        matched++;
-                }
-        }
-        //      None names leaf, or two do, which could disagree.
-        if (matched != 1)
-                return TLS_ANSWER_NONE;
-
-        if (ocsp.by_key ? !memory_compare(ocsp.responder, keys[0], 20)
-                        : ocsp.responder_length == leaf->issuer_length &&
-                              !memory_compare(ocsp.responder, leaf->issuer,
-                                              leaf->issuer_length))
-                signer = issuer;
-        list = byte_reader_open(ocsp.certs, ocsp.certs_length);
-        while (!signer && byte_reader_left(&list))
-        {
-                positive size = 0;
-                p8 address_to whole =
-                    (p8 address_to)tls_der_whole(&list, 0x30, address_of size);
-                p8 named[20];
-
-                if (!whole)
-                        break;
-                if (tls_parse_cert(whole, size, address_of responder, null) ||
-                    responder.issuer_length != leaf->issuer_length ||
-                    memory_compare(responder.issuer, leaf->issuer,
-                                   leaf->issuer_length) ||
-                    !responder.ocsp_signing ||
-                    !tls_cert_current(address_of responder, now) ||
-                    (responder.key_usage && !responder.digital_signature))
-                        continue;
-                if (ocsp.by_key)
-                {
-                        p8 bits[32 + CRYPTO_RSA_BYTES];
-                        positive bits_length = tls_key_bits(address_of responder, bits,
-                                                            sizeof bits);
-
-                        tls_revocation_hash(1, bits, bits_length, named);
-                        if (!bits_length || memory_compare(named, ocsp.responder, 20))
-                                continue;
-                }
-                else if (responder.subject_length != ocsp.responder_length ||
-                         memory_compare(responder.subject, ocsp.responder,
-                                        ocsp.responder_length))
-                        continue;
-                if (tls_verify_one(address_of responder, issuer))
-                        signer = address_of responder;
-        }
-        if (!signer || !tls_signed_by(ocsp.tbs, ocsp.tbs_length, ocsp.sig_oid,
-                                      ocsp.sig_oid_length, ocsp.sig,
-                                      ocsp.sig_length, signer))
-                return TLS_ANSWER_NONE;
-        if (found.status == TLS_OCSP_REVOKED)
-                return TLS_ANSWER_REVOKED;
-        return found.status == TLS_OCSP_GOOD &&
-                       tls_revocation_fresh(found.this_update, found.next_update,
-                                            now)
-                   ? TLS_ANSWER_GOOD
-                   : TLS_ANSWER_NONE;
-}
-
-/*
-        The CRLs this process fetched, by the SHA-256 of their URL: the bytes
-        (or a failed fetch, not tried again for TLS_CRL_RETRY seconds), and
-        once one verifies, the SHA-256 of the key it verified under and its
-        nextUpdate. Memory only: the fetch may run where no file can be
-        opened, and a CRL is a few seconds' download at worst. A CRL past its
-        nextUpdate is fetched again; the least recently used goes when a new
-        one would hold more than TLS_CRL_HELD of them or TLS_CRL_HELD_BYTES.
-*/
-typedef struct
-{
-        byte_store crl;
-        p8 name[32];
-        p8 signer[32];
-        p64 next_update;
-        p64 fetched;
-        positive age;
-        bool used;
-        bool failed;
-} tls_crl_held;
-
-static tls_crl_held tls_crl_cache[TLS_CRL_HELD];
-static positive tls_crl_clock;
-
-static COLD fn tls_crl_drop(tls_crl_held address_to held)
-{
-        byte_store_release(address_of held->crl);
-        memory_fill(held, 0, sizeof(address_to held));
-}
-
-static COLD tls_crl_held address_to tls_crl_get(const p8 address_to url,
-                                               positive length, p64 now,
-                                               const network_deadline address_to deadline)
-{
-        p8 name[32];
-        p64 at = tls_date_seconds(now);
-        byte_store fetched = {null, 0, 0};
-        tls_crl_held address_to slot = null;
-        bool got;
-
-        crypto_sha256_of((p8 address_to)url, length, name);
-        for (positive k = 0; k < TLS_CRL_HELD; k++)
-        {
-                tls_crl_held address_to held = tls_crl_cache + k;
-
-                if (!held->used || memory_compare(held->name, name, 32))
-                        continue;
-                if (held->failed ? held->fetched + TLS_CRL_RETRY > at
-                                 : !held->next_update ||
-                                       tls_date_seconds(held->next_update) +
-                                               TLS_REVOCATION_SKEW >= at)
-                {
-                        held->age = ++tls_crl_clock;
-                        return held;
-                }
-                tls_crl_drop(held);
-        }
-        if (!deadline)
-                return null;
-        got = tls_crl_fetch(url, length, address_of fetched, deadline);
-        if (!got)
-                byte_store_release(address_of fetched);
-        for (;;)
-        {
-                positive count = 0;
-                positive bytes = fetched.used;
-                tls_crl_held address_to oldest = null;
-
-                slot = null;
-                for (positive k = 0; k < TLS_CRL_HELD; k++)
-                {
-                        tls_crl_held address_to held = tls_crl_cache + k;
-
-                        if (!held->used)
-                        {
-                                slot = slot ? slot : held;
-                                continue;
-                        }
-                        count++;
-                        bytes += held->crl.used;
-                        if (!oldest || held->age < oldest->age)
-                                oldest = held;
-                }
-                if (slot && bytes <= TLS_CRL_HELD_BYTES)
-                        break;
-                if (!oldest)
-                {
-                        byte_store_release(address_of fetched);
-                        return null;
-                }
-                tls_crl_drop(oldest);
-        }
-        slot->crl = fetched;
-        memory_copy(slot->name, name, 32);
-        slot->fetched = at;
-        slot->age = ++tls_crl_clock;
-        slot->used = true;
-        slot->failed = !got;
-        return slot;
-}
-
-/* What cert's CRL says of it, which issuer signed (RFC 5280 6.3.3): the CRL
-   its distribution point names, fetched or held; parsed with cert's serial
-   looked up (tls_parse_crl); issued under the Name cert names and, when both
-   carry one, the same authority key identifier; by an issuer whose key may
-   sign CRLs (cRLSign, when it limits its key at all); signed by issuer; of a
-   scope that covers cert (tls_crl_covers). Listed so signed is revoked;
-   otherwise good when fresh. Absent when cert names no CRL, none for any
-   other failure. */
-static COLD p8 tls_crl_answer(tls_cert address_to cert, tls_cert address_to issuer,
-                              p64 now, const network_deadline address_to deadline)
-{
-        p8 key[32 + CRYPTO_RSA_BYTES];
-        p8 signer[32];
-        positive key_length;
-        tls_crl_held address_to held;
-        tls_crl crl;
-
-        if (!cert->crl_url)
-                return TLS_ANSWER_ABSENT;
-        key_length = tls_key_bits(issuer, key, sizeof key);
-        if (!key_length || !cert->issuer || !cert->serial ||
-            (issuer->key_usage && !issuer->crl_sign))
-                return TLS_ANSWER_NONE;
-        crypto_sha256_of(key, key_length, signer);
-        held = tls_crl_get(cert->crl_url, cert->crl_url_length, now, deadline);
-        if (!held || held->failed ||
-            tls_parse_crl(held->crl.bytes, held->crl.used, cert->serial,
-                          cert->serial_length, address_of crl) ||
-            crl.issuer_length != cert->issuer_length ||
-            memory_compare(crl.issuer, cert->issuer, cert->issuer_length) ||
-            (crl.authority_key && cert->authority_key &&
-             (crl.authority_key_length != cert->authority_key_length ||
-              memory_compare(crl.authority_key, cert->authority_key,
-                             crl.authority_key_length))) ||
-            !tls_crl_covers(address_of crl.scope, cert))
-                return TLS_ANSWER_NONE;
-        if (memory_compare(held->signer, signer, 32))
-        {
-                if (!tls_signed_by(crl.tbs, crl.tbs_length, crl.sig_oid,
-                                   crl.sig_oid_length, crl.sig, crl.sig_length,
-                                   issuer))
-                        return TLS_ANSWER_NONE;
-                memory_copy(held->signer, signer, 32);
-                held->next_update = crl.next_update;
-        }
-        if (crl.listed)
-                return TLS_ANSWER_REVOKED;
-        return tls_revocation_fresh(crl.this_update, crl.next_update, now)
-                   ? TLS_ANSWER_GOOD
-                   : TLS_ANSWER_NONE;
-}
-
-/* The tiers over a verified path: path[0] the leaf, path[depth] the last
-   certificate below the anchor, top the certificate or anchor that signed
-   that one. False with tls->fault saying why when the path may not be
-   used: revoked, or unchecked where the answer was required. */
-static COLD bool tls_revocation_holds(tls_conn address_to tls,
-                                      tls_cert address_to certs,
-                                      const positive address_to path,
-                                      positive depth, tls_cert address_to top,
-                                      const p8 address_to staple,
-                                      positive staple_length, p64 now)
-{
-        network_deadline deadline;
-        bool timed = network_deadline_begin_within(address_of deadline,
-                                                   TLS_REVOCATION_SECONDS, 0,
-                                                   tls->deadline);
-        bool tight = MOONWATER_STRICT_NET >= STRICT_TIGHT;
-
-        for (positive k = 0; k <= depth; k++)
-        {
-                tls_cert address_to cert = certs + path[k];
-                tls_cert address_to issuer = k < depth ? certs + path[k + 1] : top;
-                p8 answer = TLS_ANSWER_ABSENT;
-
-                if (!k && staple)
-                        answer = tls_ocsp_answer(cert, issuer, staple, staple_length,
-                                                 now);
-                if (answer == TLS_ANSWER_GOOD)
-                        continue;
-                if (answer == TLS_ANSWER_REVOKED)
-                        goto revoked;
-                if ((!k && cert->must_staple) || (answer == TLS_ANSWER_NONE && tight))
-                        goto unchecked;
-                answer = tls_crl_answer(cert, issuer, now,
-                                        timed ? address_of deadline : null);
-                if (answer == TLS_ANSWER_REVOKED)
-                        goto revoked;
-                if (answer == TLS_ANSWER_NONE && tight)
-                        goto unchecked;
-        }
-        return true;
-
-revoked:
-        tls->fault = TLS_FAULT_REVOKED;
-        return false;
-unchecked:
-        tls->fault = TLS_FAULT_UNCHECKED;
-        return false;
 }
 
 static COLD bool tls_hello_append(p8 address_to out, positive room,
@@ -12900,6 +12509,398 @@ static bool http_address_public(p32 ip)
 #define TLS_AIA_SECONDS 5
 /* What a CRL's store grows by while its length is not yet known. */
 #define TLS_CRL_STEP ((positive)1 << 16)
+
+/*
+        Revocation: stapling and CRLs, in tiers.
+
+        Each certificate on a verified path below its anchor is asked about
+        by the issuer that signed it. The leaf first by the OCSP response its
+        server stapled (RFC 6066 8, RFC 8446 4.4.2.1), when it stapled one;
+        then -- the leaf without a good staple, and every certificate above
+        it -- by the CRL its first whole-reason http: distribution point
+        names (RFC 5280 6.3), fetched under caIssuers' rules and held in
+        memory for the rest of the process (tls_crl_get).
+
+        An answer is good, revoked, none (a source there is that said
+        nothing usable: unreachable, too large, unparseable, signed by
+        nobody it may be, about another certificate, unknown, or stale) or
+        absent (no source: no staple and no distribution point). Revoked
+        refuses in every tier. A leaf that asks for a staple (TLS Feature
+        status_request, RFC 7633) and has no good one is refused in every
+        tier too. None is passed over at the default tier, as browsers that
+        still fetch revocation pass over it, and refuses at the tight one.
+        Absent is passed in both: a certificate that names no CRL and whose
+        server staples nothing has no source to fail, and OCSP is never
+        fetched (only stapled), so a responder URL alone is not a source.
+
+        Ceilings: TLS_REVOCATION_SECONDS for every fetch of one handshake
+        together (inside the handshake's own deadline; each name lookup has
+        its own three seconds), TLS_CRL_MAX bytes a CRL, TLS_CRL_HELD CRLs and
+        TLS_CRL_HELD_BYTES held, a failed fetch not tried again for
+        TLS_CRL_RETRY seconds.
+*/
+#define TLS_ANSWER_GOOD 0
+#define TLS_ANSWER_REVOKED 1
+#define TLS_ANSWER_NONE 2
+#define TLS_ANSWER_ABSENT 3
+#define TLS_REVOCATION_SECONDS 10
+#define TLS_CRL_MAX ((positive)16 << 20)
+#define TLS_CRL_HELD 8
+#define TLS_CRL_HELD_BYTES ((positive)32 << 20)
+#define TLS_CRL_RETRY 300
+
+/* The CRL a distribution point names, fetched over the HTTP client (defined
+   there, beside tls_aia_fetch) into a store that grows to TLS_CRL_MAX. */
+static COLD bool tls_crl_fetch(const p8 address_to url, positive length,
+                               byte_store address_to into,
+                               const network_deadline address_to deadline);
+
+/* SHA-1 (kind 1, 20 bytes) or SHA-256 (kind 2, 32), the two an OCSP CertID
+   names its issuer by. */
+static COLD fn tls_revocation_hash(p8 kind, const p8 address_to bytes,
+                                   positive length, p8 address_to out)
+{
+        digest_state digest;
+
+        digest_open(address_of digest, kind == 1 ? DIGEST_SHA1 : DIGEST_SHA256,
+                    kind == 1 ? 20 : 32);
+        digest_write(address_of digest, (address_any)bytes, length);
+        digest_close(address_of digest, out);
+}
+
+/* Whether signer's key signed tbs: tls_verify_one, given the signed part of
+   an OCSP response or a CRL laid out as a certificate's. */
+static COLD bool tls_signed_by(p8 address_to tbs, positive tbs_length,
+                               p8 address_to sig_oid, positive sig_oid_length,
+                               const p8 address_to sig, positive sig_length,
+                               tls_cert address_to signer)
+{
+        tls_cert part;
+
+        memory_fill(address_of part, 0, sizeof part);
+        part.tbs = tbs;
+        part.tbs_length = tbs_length;
+        part.sig_oid = sig_oid;
+        part.sig_oid_length = sig_oid_length;
+        part.sig = (p8 address_to)sig;
+        part.sig_length = sig_length;
+        return tls_verify_one(address_of part, signer);
+}
+
+/* What a stapled OCSP response says of leaf, which issuer signed (RFC 6960
+   3.2, 4.2.2.2). It has to parse (tls_parse_ocsp); exactly one of its
+   SingleResponses has to name leaf -- the hash of leaf's issuer Name and of
+   issuer's key under the CertID's hash, and leaf's serial; and it has to be
+   signed by issuer, or by a delegated responder among its certificates:
+   issued by issuer (the Name leaf names, issuer's signature), with
+   id-kp-OCSPSigning, current, a digitalSignature key if it limits its key
+   at all, and the responder the response names (byName its subject, byKey
+   the SHA-1 of its key). Revoked so signed is revoked whenever it was said;
+   good has to be fresh (tls_revocation_fresh); unknown, stale or anything
+   short of the above is none. */
+static COLD p8 tls_ocsp_answer(tls_cert address_to leaf, tls_cert address_to issuer,
+                               const p8 address_to response, positive length,
+                               p64 now)
+{
+        p8 key[32 + CRYPTO_RSA_BYTES];
+        p8 names[2][32];
+        p8 keys[2][32];
+        positive key_length = tls_key_bits(issuer, key, sizeof key);
+        positive matched = 0;
+        tls_ocsp ocsp;
+        tls_ocsp_single single;
+        tls_ocsp_single found;
+        tls_cert responder;
+        tls_cert address_to signer = null;
+        byte_reader list;
+
+        if (!key_length || !leaf->issuer || !leaf->serial ||
+            tls_parse_ocsp((p8 address_to)response, length, address_of ocsp))
+                return TLS_ANSWER_NONE;
+        for (p8 kind = 1; kind <= 2; kind++)
+        {
+                tls_revocation_hash(kind, leaf->issuer, leaf->issuer_length,
+                                    names[kind - 1]);
+                tls_revocation_hash(kind, key, key_length, keys[kind - 1]);
+        }
+        memory_fill(address_of found, 0, sizeof found);
+        list = byte_reader_open(ocsp.responses, ocsp.responses_length);
+        while (byte_reader_left(&list))
+        {
+                positive size = 0;
+                const p8 address_to whole = tls_der_whole(&list, 0x30, address_of size);
+
+                if (!whole || tls_parse_ocsp_single(whole, size, address_of single))
+                        return TLS_ANSWER_NONE;
+                if (!memory_compare(single.name_hash, names[single.hash - 1],
+                                    single.hash_length) &&
+                    !memory_compare(single.key_hash, keys[single.hash - 1],
+                                    single.hash_length) &&
+                    single.serial_length == leaf->serial_length &&
+                    !memory_compare(single.serial, leaf->serial, leaf->serial_length))
+                {
+                        found = single;
+                        matched++;
+                }
+        }
+        //      None names leaf, or two do, which could disagree.
+        if (matched != 1)
+                return TLS_ANSWER_NONE;
+
+        if (ocsp.by_key ? !memory_compare(ocsp.responder, keys[0], 20)
+                        : ocsp.responder_length == leaf->issuer_length &&
+                              !memory_compare(ocsp.responder, leaf->issuer,
+                                              leaf->issuer_length))
+                signer = issuer;
+        list = byte_reader_open(ocsp.certs, ocsp.certs_length);
+        while (!signer && byte_reader_left(&list))
+        {
+                positive size = 0;
+                p8 address_to whole =
+                    (p8 address_to)tls_der_whole(&list, 0x30, address_of size);
+                p8 named[20];
+
+                if (!whole)
+                        break;
+                if (tls_parse_cert(whole, size, address_of responder, null) ||
+                    responder.issuer_length != leaf->issuer_length ||
+                    memory_compare(responder.issuer, leaf->issuer,
+                                   leaf->issuer_length) ||
+                    !responder.ocsp_signing ||
+                    !tls_cert_current(address_of responder, now) ||
+                    (responder.key_usage && !responder.digital_signature))
+                        continue;
+                if (ocsp.by_key)
+                {
+                        p8 bits[32 + CRYPTO_RSA_BYTES];
+                        positive bits_length = tls_key_bits(address_of responder, bits,
+                                                            sizeof bits);
+
+                        tls_revocation_hash(1, bits, bits_length, named);
+                        if (!bits_length || memory_compare(named, ocsp.responder, 20))
+                                continue;
+                }
+                else if (responder.subject_length != ocsp.responder_length ||
+                         memory_compare(responder.subject, ocsp.responder,
+                                        ocsp.responder_length))
+                        continue;
+                if (tls_verify_one(address_of responder, issuer))
+                        signer = address_of responder;
+        }
+        if (!signer || !tls_signed_by(ocsp.tbs, ocsp.tbs_length, ocsp.sig_oid,
+                                      ocsp.sig_oid_length, ocsp.sig,
+                                      ocsp.sig_length, signer))
+                return TLS_ANSWER_NONE;
+        if (found.status == TLS_OCSP_REVOKED)
+                return TLS_ANSWER_REVOKED;
+        return found.status == TLS_OCSP_GOOD &&
+                       tls_revocation_fresh(found.this_update, found.next_update,
+                                            now)
+                   ? TLS_ANSWER_GOOD
+                   : TLS_ANSWER_NONE;
+}
+
+/*
+        The CRLs this process fetched, by the SHA-256 of their URL: the bytes
+        (or a failed fetch, not tried again for TLS_CRL_RETRY seconds), and
+        once one verifies, the SHA-256 of the key it verified under and its
+        nextUpdate. Memory only: the fetch may run where no file can be
+        opened, and a CRL is a few seconds' download at worst. A CRL past its
+        nextUpdate is fetched again; the least recently used goes when a new
+        one would hold more than TLS_CRL_HELD of them or TLS_CRL_HELD_BYTES.
+*/
+typedef struct
+{
+        byte_store crl;
+        p8 name[32];
+        p8 signer[32];
+        p64 next_update;
+        p64 fetched;
+        positive age;
+        bool used;
+        bool failed;
+} tls_crl_held;
+
+static tls_crl_held tls_crl_cache[TLS_CRL_HELD];
+static positive tls_crl_clock;
+
+static COLD fn tls_crl_drop(tls_crl_held address_to held)
+{
+        byte_store_release(address_of held->crl);
+        memory_fill(held, 0, sizeof(address_to held));
+}
+
+static COLD tls_crl_held address_to tls_crl_get(const p8 address_to url,
+                                               positive length, p64 now,
+                                               const network_deadline address_to deadline)
+{
+        p8 name[32];
+        p64 at = tls_date_seconds(now);
+        byte_store fetched = {null, 0, 0};
+        tls_crl_held address_to slot = null;
+        bool got;
+
+        crypto_sha256_of((p8 address_to)url, length, name);
+        for (positive k = 0; k < TLS_CRL_HELD; k++)
+        {
+                tls_crl_held address_to held = tls_crl_cache + k;
+
+                if (!held->used || memory_compare(held->name, name, 32))
+                        continue;
+                if (held->failed ? held->fetched + TLS_CRL_RETRY > at
+                                 : !held->next_update ||
+                                       tls_date_seconds(held->next_update) +
+                                               TLS_REVOCATION_SKEW >= at)
+                {
+                        held->age = ++tls_crl_clock;
+                        return held;
+                }
+                tls_crl_drop(held);
+        }
+        if (!deadline)
+                return null;
+        got = tls_crl_fetch(url, length, address_of fetched, deadline);
+        if (!got)
+                byte_store_release(address_of fetched);
+        for (;;)
+        {
+                positive count = 0;
+                positive bytes = fetched.used;
+                tls_crl_held address_to oldest = null;
+
+                slot = null;
+                for (positive k = 0; k < TLS_CRL_HELD; k++)
+                {
+                        tls_crl_held address_to held = tls_crl_cache + k;
+
+                        if (!held->used)
+                        {
+                                slot = slot ? slot : held;
+                                continue;
+                        }
+                        count++;
+                        bytes += held->crl.used;
+                        if (!oldest || held->age < oldest->age)
+                                oldest = held;
+                }
+                if (slot && bytes <= TLS_CRL_HELD_BYTES)
+                        break;
+                if (!oldest)
+                {
+                        byte_store_release(address_of fetched);
+                        return null;
+                }
+                tls_crl_drop(oldest);
+        }
+        slot->crl = fetched;
+        memory_copy(slot->name, name, 32);
+        slot->fetched = at;
+        slot->age = ++tls_crl_clock;
+        slot->used = true;
+        slot->failed = !got;
+        return slot;
+}
+
+/* What cert's CRL says of it, which issuer signed (RFC 5280 6.3.3): the CRL
+   its distribution point names, fetched or held; parsed with cert's serial
+   looked up (tls_parse_crl); issued under the Name cert names and, when both
+   carry one, the same authority key identifier; by an issuer whose key may
+   sign CRLs (cRLSign, when it limits its key at all); signed by issuer; of a
+   scope that covers cert (tls_crl_covers). Listed so signed is revoked;
+   otherwise good when fresh. Absent when cert names no CRL, none for any
+   other failure. */
+static COLD p8 tls_crl_answer(tls_cert address_to cert, tls_cert address_to issuer,
+                              p64 now, const network_deadline address_to deadline)
+{
+        p8 key[32 + CRYPTO_RSA_BYTES];
+        p8 signer[32];
+        positive key_length;
+        tls_crl_held address_to held;
+        tls_crl crl;
+
+        if (!cert->crl_url)
+                return TLS_ANSWER_ABSENT;
+        key_length = tls_key_bits(issuer, key, sizeof key);
+        if (!key_length || !cert->issuer || !cert->serial ||
+            (issuer->key_usage && !issuer->crl_sign))
+                return TLS_ANSWER_NONE;
+        crypto_sha256_of(key, key_length, signer);
+        held = tls_crl_get(cert->crl_url, cert->crl_url_length, now, deadline);
+        if (!held || held->failed ||
+            tls_parse_crl(held->crl.bytes, held->crl.used, cert->serial,
+                          cert->serial_length, address_of crl) ||
+            crl.issuer_length != cert->issuer_length ||
+            memory_compare(crl.issuer, cert->issuer, cert->issuer_length) ||
+            (crl.authority_key && cert->authority_key &&
+             (crl.authority_key_length != cert->authority_key_length ||
+              memory_compare(crl.authority_key, cert->authority_key,
+                             crl.authority_key_length))) ||
+            !tls_crl_covers(address_of crl.scope, cert))
+                return TLS_ANSWER_NONE;
+        if (memory_compare(held->signer, signer, 32))
+        {
+                if (!tls_signed_by(crl.tbs, crl.tbs_length, crl.sig_oid,
+                                   crl.sig_oid_length, crl.sig, crl.sig_length,
+                                   issuer))
+                        return TLS_ANSWER_NONE;
+                memory_copy(held->signer, signer, 32);
+                held->next_update = crl.next_update;
+        }
+        if (crl.listed)
+                return TLS_ANSWER_REVOKED;
+        return tls_revocation_fresh(crl.this_update, crl.next_update, now)
+                   ? TLS_ANSWER_GOOD
+                   : TLS_ANSWER_NONE;
+}
+
+/* The tiers over a verified path: path[0] the leaf, path[depth] the last
+   certificate below the anchor, top the certificate or anchor that signed
+   that one. False with tls->fault saying why when the path may not be
+   used: revoked, or unchecked where the answer was required. */
+static COLD bool tls_revocation_holds(tls_conn address_to tls,
+                                      tls_cert address_to certs,
+                                      const positive address_to path,
+                                      positive depth, tls_cert address_to top,
+                                      const p8 address_to staple,
+                                      positive staple_length, p64 now)
+{
+        network_deadline deadline;
+        bool timed = network_deadline_begin_within(address_of deadline,
+                                                   TLS_REVOCATION_SECONDS, 0,
+                                                   tls->deadline);
+        bool tight = MOONWATER_STRICT_NET >= STRICT_TIGHT;
+
+        for (positive k = 0; k <= depth; k++)
+        {
+                tls_cert address_to cert = certs + path[k];
+                tls_cert address_to issuer = k < depth ? certs + path[k + 1] : top;
+                p8 answer = TLS_ANSWER_ABSENT;
+
+                if (!k && staple)
+                        answer = tls_ocsp_answer(cert, issuer, staple, staple_length,
+                                                 now);
+                if (answer == TLS_ANSWER_GOOD)
+                        continue;
+                if (answer == TLS_ANSWER_REVOKED)
+                        goto revoked;
+                if ((!k && cert->must_staple) || (answer == TLS_ANSWER_NONE && tight))
+                        goto unchecked;
+                answer = tls_crl_answer(cert, issuer, now,
+                                        timed ? address_of deadline : null);
+                if (answer == TLS_ANSWER_REVOKED)
+                        goto revoked;
+                if (answer == TLS_ANSWER_NONE && tight)
+                        goto unchecked;
+        }
+        return true;
+
+revoked:
+        tls->fault = TLS_FAULT_REVOKED;
+        return false;
+unchecked:
+        tls->fault = TLS_FAULT_UNCHECKED;
+        return false;
+}
 
 /*
         tls_verify_chain's two fetches over plain HTTP: the certificate a
