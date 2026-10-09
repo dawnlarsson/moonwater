@@ -71850,6 +71850,45 @@ static fn tls_revocation_answers(void)
                               REVOCATION_NOW) &&
                   tls_crl_answer(address_of leaf->cert, address_of ca->cert,
                                  REVOCATION_NOW, null) == TLS_ANSWER_NONE);
+        {
+                /* A distribution point of two mirrors, the first refusing. */
+                static p8 mirrors[54];
+                revocation_held_cert mirrored = revocation_leaf;
+
+                mirrors[0] = mirrors[27] = 0x86;
+                mirrors[1] = mirrors[28] = 25;
+                memory_copy(mirrors + 2, "http://dead.example/x.crl", 25);
+                memory_copy(mirrors + 29, "http://crl.example/ca.crl", 25);
+                mirrored.cert.crl_url = mirrors + 2;
+                mirrored.cert.crl_url_length = 25;
+                mirrored.cert.crl_names = mirrors;
+                mirrored.cert.crl_names_length = sizeof mirrors;
+                revocation_forget();
+                check("a CRL the second mirror serves answers when the first refuses",
+                      revocation_hold((string_address) "http://dead.example/x.crl", null,
+                                      REVOCATION_NOW) &&
+                          revocation_hold((string_address) "http://crl.example/ca.crl",
+                                          revocation_crl_empty_hex, REVOCATION_NOW) &&
+                          tls_crl_answer(address_of mirrored.cert, address_of ca->cert,
+                                         REVOCATION_NOW, null) == TLS_ANSWER_GOOD);
+                revocation_forget();
+                check("the first mirror that answers is the answer",
+                      revocation_hold((string_address) "http://dead.example/x.crl",
+                                      revocation_crl_listed_hex, REVOCATION_NOW) &&
+                          revocation_hold((string_address) "http://crl.example/ca.crl",
+                                          revocation_crl_empty_hex, REVOCATION_NOW) &&
+                          tls_crl_answer(address_of mirrored.cert, address_of ca->cert,
+                                         REVOCATION_NOW, null) == TLS_ANSWER_REVOKED);
+                revocation_forget();
+                check("no mirror answering is none",
+                      revocation_hold((string_address) "http://dead.example/x.crl", null,
+                                      REVOCATION_NOW) &&
+                          revocation_hold((string_address) "http://crl.example/ca.crl", null,
+                                          REVOCATION_NOW) &&
+                          tls_crl_answer(address_of mirrored.cert, address_of ca->cert,
+                                         REVOCATION_NOW, null) == TLS_ANSWER_NONE);
+                revocation_forget();
+        }
         check("a certificate that names no CRL has no answer to give",
               tls_crl_answer(address_of revocation_bare.cert, address_of ca->cert,
                              REVOCATION_NOW, null) == TLS_ANSWER_ABSENT);

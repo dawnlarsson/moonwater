@@ -12801,31 +12801,21 @@ static COLD tls_crl_held address_to tls_crl_get(const p8 address_to url,
         return slot;
 }
 
-/* What cert's CRL says of it, which issuer signed (RFC 5280 6.3.3): the CRL
-   its distribution point names, fetched or held; parsed with cert's serial
-   looked up (tls_parse_crl); issued under the Name cert names and, when both
-   carry one, the same authority key identifier; by an issuer whose key may
-   sign CRLs (cRLSign, when it limits its key at all); signed by issuer; of a
-   scope that covers cert (tls_crl_covers). Listed so signed is revoked;
-   otherwise good when fresh. Absent when cert names no CRL, none for any
-   other failure. */
-static COLD p8 tls_crl_answer(tls_cert address_to cert, tls_cert address_to issuer,
-                              p64 now, const network_deadline address_to deadline)
+/* What the CRL at one URL says of cert, which issuer signed (RFC 5280
+   6.3.3): fetched or held; parsed with cert's serial looked up
+   (tls_parse_crl); issued under the Name cert names and, when both carry one,
+   the same authority key identifier; signed by issuer, whose key's SHA-256
+   is signer; of a scope that covers cert (tls_crl_covers). Listed so signed
+   is revoked; otherwise good when fresh; none for any failure. */
+static COLD p8 tls_crl_answer_at(tls_cert address_to cert,
+                                 tls_cert address_to issuer,
+                                 const p8 address_to url, positive length,
+                                 const p8 address_to signer, p64 now,
+                                 const network_deadline address_to deadline)
 {
-        p8 key[32 + CRYPTO_RSA_BYTES];
-        p8 signer[32];
-        positive key_length;
-        tls_crl_held address_to held;
+        tls_crl_held address_to held = tls_crl_get(url, length, now, deadline);
         tls_crl crl;
 
-        if (!cert->crl_url)
-                return TLS_ANSWER_ABSENT;
-        key_length = tls_key_bits(issuer, key, sizeof key);
-        if (!key_length || !cert->issuer || !cert->serial ||
-            (issuer->key_usage && !issuer->crl_sign))
-                return TLS_ANSWER_NONE;
-        crypto_sha256_of(key, key_length, signer);
-        held = tls_crl_get(cert->crl_url, cert->crl_url_length, now, deadline);
         if (!held || held->failed ||
             tls_parse_crl(held->crl.bytes, held->crl.used, cert->serial,
                           cert->serial_length, address_of crl) ||
@@ -12851,6 +12841,52 @@ static COLD p8 tls_crl_answer(tls_cert address_to cert, tls_cert address_to issu
         return tls_revocation_fresh(crl.this_update, crl.next_update, now)
                    ? TLS_ANSWER_GOOD
                    : TLS_ANSWER_NONE;
+}
+
+/* What cert's CRL says of it: each http: URI of the distribution point it
+   names, in order, until one answers (tls_crl_answer_at), at most
+   TLS_CRL_POINTS of them. A CA lists mirrors there, and one may refuse a
+   plain GET that another serves: Microsoft's www.microsoft.com answers 403
+   where crl2.microsoft.com serves the same CRL. The issuer has to be one
+   whose key may sign CRLs (cRLSign, when it limits its key at all). Absent
+   when cert names no CRL, none when no URI answers. */
+#define TLS_CRL_POINTS 4
+
+static COLD p8 tls_crl_answer(tls_cert address_to cert, tls_cert address_to issuer,
+                              p64 now, const network_deadline address_to deadline)
+{
+        p8 key[32 + CRYPTO_RSA_BYTES];
+        p8 signer[32];
+        positive key_length;
+        positive tried = 0;
+        byte_reader names;
+
+        if (!cert->crl_url)
+                return TLS_ANSWER_ABSENT;
+        key_length = tls_key_bits(issuer, key, sizeof key);
+        if (!key_length || !cert->issuer || !cert->serial ||
+            (issuer->key_usage && !issuer->crl_sign))
+                return TLS_ANSWER_NONE;
+        crypto_sha256_of(key, key_length, signer);
+        names = byte_reader_open(cert->crl_names, cert->crl_names_length);
+        while (byte_reader_left(&names) && tried < TLS_CRL_POINTS)
+        {
+                p8 tag = tls_der_peek(names);
+                byte_reader uri = tls_der_value(&names, tag);
+                const p8 address_to text = byte_reader_here(&uri);
+                positive size = byte_reader_left(&uri);
+                p8 answer;
+
+                if (tag != 0x86 || size <= 7 || !tls_printable(text, size) ||
+                    memory_compare_ascii_case(text, "http://", 7))
+                        continue;
+                tried++;
+                answer = tls_crl_answer_at(cert, issuer, text, size, signer, now,
+                                           deadline);
+                if (answer != TLS_ANSWER_NONE)
+                        return answer;
+        }
+        return TLS_ANSWER_NONE;
 }
 
 /* The tiers over a verified path: path[0] the leaf, path[depth] the last

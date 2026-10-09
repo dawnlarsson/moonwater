@@ -60,8 +60,10 @@ never a pass.
   response its server staples (the leaf's CertificateEntry in TLS 1.3, a
   CertificateStatus after the Certificate in TLS 1.2, relaid into the same
   entry so one check reads both), and without a good staple, like every
-  certificate above it, by the CRL its first whole-reason `http:`
-  distribution point names. A staple has to be signed by the issuer or by a
+  certificate above it, by the CRL its first whole-reason
+  distribution point names, at each of its `http:` URIs in turn until one
+  answers (Microsoft's first, www.microsoft.com, answers a plain GET with 403;
+  its second, crl2.microsoft.com, serves the CRL). A staple has to be signed by the issuer or by a
   responder the issuer issued with `id-kp-OCSPSigning`, name the leaf by a
   SHA-1 or SHA-256 CertID, and be fresh within five minutes either way of
   `thisUpdate` and a `nextUpdate` it must carry; a CRL has to be the
@@ -354,7 +356,7 @@ ledger at the top of its section).
 | Netlink | `NETLINK_DISCARD_MAX` 64 unrelated datagrams per transaction; 16 MiB datagram |
 | SNTP | `SNTP_DISCARD_MAX` 64 non-terminal receives per exchange |
 | TLS | `TLS_RECORD_MAX`, `TLS_HS_MAX`, 64 extensions, 8 certificates |
-| Revocation | `TLS_OCSP_MAX` 16,384 bytes a staple, `TLS_OCSP_RESPONSES` 16 SingleResponses, `TLS_OCSP_CERTS` 4 certificates a response; `TLS_LIST_EXTENSIONS` 16 extensions a CRL, CRL entry, response or single response; `TLS_CRL_ENTRIES` 524,288 revoked certificates a CRL (1.7 times the 311,758 of the largest public CRL seen, DigiCert Global G2 TLS RSA SHA256 2020 CA1 at 11.7 MB on 2026-10-09; Let's Encrypt's shards are a few hundred bytes); `TLS_CRL_MAX` 16 MiB a CRL, which is also all three DER length octets can say; `TLS_REVOCATION_SECONDS` 10 for every fetch of one handshake together, inside the handshake's 30 (each name lookup its own 3); `TLS_CRL_HELD` 8 CRLs and `TLS_CRL_HELD_BYTES` 32 MiB held per process, least recently used out first; `TLS_CRL_RETRY` 300 s before a failed fetch is tried again; `TLS_REVOCATION_SKEW` 300 s either way of `thisUpdate` and `nextUpdate`; 16 names a side compared between a distribution point and an `issuingDistributionPoint` |
+| Revocation | `TLS_OCSP_MAX` 16,384 bytes a staple, `TLS_OCSP_RESPONSES` 16 SingleResponses, `TLS_OCSP_CERTS` 4 certificates a response; `TLS_LIST_EXTENSIONS` 16 extensions a CRL, CRL entry, response or single response; `TLS_CRL_ENTRIES` 524,288 revoked certificates a CRL (1.7 times the 311,758 of the largest public CRL seen, DigiCert Global G2 TLS RSA SHA256 2020 CA1 at 11.7 MB on 2026-10-09; Let's Encrypt's shards are a few hundred bytes); `TLS_CRL_MAX` 16 MiB a CRL, which is also all three DER length octets can say; `TLS_REVOCATION_SECONDS` 10 for every fetch of one handshake together, inside the handshake's 30 (each name lookup its own 3); `TLS_CRL_POINTS` 4 URIs tried a distribution point; `TLS_CRL_HELD` 8 CRLs and `TLS_CRL_HELD_BYTES` 32 MiB held per process, least recently used out first; `TLS_CRL_RETRY` 300 s before a failed fetch is tried again; `TLS_REVOCATION_SKEW` 300 s either way of `thisUpdate` and `nextUpdate`; 16 names a side compared between a distribution point and an `issuingDistributionPoint` |
 | HTTP | `HTTP_URL_MAX`, `HTTP_HEAD_MAX`, `HTTP_FETCH_MAX` (16 MiB in memory), `HTTP_HOPS`, `HTTP_WRITE_SPANS`; `HTTP_BODY_SECONDS` (300 s) bounds a stored body in every tier and a streamed one at the tight tier, where the default keeps GNU wget's idle timer alone |
 | Waterlink | 8 instances a packet; at most the packet's byte length in shared mDNS compression-pointer jumps; `LINK_GREET_SOURCE` 8 of 16 greeting slots; one reply and one answer an interval |
 
