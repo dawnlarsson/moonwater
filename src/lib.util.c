@@ -10572,7 +10572,13 @@ pub fn parallel_lines_ordered(parallel_lines address_to run, parallel_lines_emit
         stays pinned open for exactly as long as the leaf runs. A leaf has no
         children and no leave.
 */
-#define PARALLEL_TREE_INLINE_NODES 32
+//      The walk runs on the caller alone until it has entered this many
+//      directories, and only then wakes the pool. At 32, find and du of a tree
+//      with 32 directories or more started 32 threads, each with an 8 MB
+//      stack, whatever the number of entries. At 1,024, a tree with fewer than
+//      1,024 directories stays on one thread, and one of 2,000 directories
+//      still goes wide.
+#define PARALLEL_TREE_INLINE_NODES 1024
 #define PARALLEL_TREE_HELD_NODES 4096
 #define PARALLEL_TREE_HELD_BYTES (64ull << 20)
 #define PARALLEL_TREE_SHARE_EVERY 1024

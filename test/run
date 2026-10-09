@@ -6026,6 +6026,51 @@ lane_files()
         [ "$sed_status:$sed_mode" = '0:755' ]
         verdict sed-replacement-clears-set-id files_failed 'sed replacement returned $sed_status with mode $sed_mode'
 
+        #       A walk of 2,000 entries stays on the caller's thread. The
+        #       pool used to wake at 32 entered directories, so find and du
+        #       on this tree started 32 workers with an 8 MB stack each; the
+        #       thread count is sampled from /proc while each walk runs, five
+        #       times each, and the peak must be one.
+        tree_threads_tree=$work/tree-threads
+        rm -rf "$tree_threads_tree"
+        tree_threads_d=0
+        while [ "$tree_threads_d" -lt 40 ]
+        do
+                mkdir -p "$tree_threads_tree/d$tree_threads_d"
+                tree_threads_f=0
+                while [ "$tree_threads_f" -lt 50 ]
+                do
+                        : > "$tree_threads_tree/d$tree_threads_d/f$tree_threads_f"
+                        tree_threads_f=$((tree_threads_f + 1))
+                done
+                tree_threads_d=$((tree_threads_d + 1))
+        done
+        tree_threads_peak=0
+        tree_threads_sample()
+        {
+                tree_threads_seen=0
+                "$@" > /dev/null 2>&1 &
+                tree_threads_pid=$!
+                while :
+                do
+                        tree_threads_state=$(awk '/^State:/{print $2}' "/proc/$tree_threads_pid/status" 2>/dev/null)
+                        [ -n "$tree_threads_state" ] && [ "$tree_threads_state" != Z ] || break
+                        tree_threads_now=$(awk '/^Threads:/{print $2}' "/proc/$tree_threads_pid/status" 2>/dev/null)
+                        [ "${tree_threads_now:-0}" -gt "$tree_threads_seen" ] && tree_threads_seen=$tree_threads_now
+                done
+                wait "$tree_threads_pid"
+                [ "$tree_threads_seen" -gt "$tree_threads_peak" ] && tree_threads_peak=$tree_threads_seen
+        }
+        tree_threads_rep=0
+        while [ "$tree_threads_rep" -lt 5 ]
+        do
+                tree_threads_sample "$farm/find" "$tree_threads_tree"
+                tree_threads_sample "$farm/du" -s "$tree_threads_tree"
+                tree_threads_rep=$((tree_threads_rep + 1))
+        done
+        [ "$tree_threads_peak" -le 1 ]
+        verdict walk-2000-entries-one-thread files_failed 'find or du started $tree_threads_peak threads on 2000 entries (want 1)'
+
         differential_domain files || files_failed=1
         return "$files_failed"
 }
