@@ -54758,6 +54758,193 @@ static fn netlink_nonblocking_retries(void)
                 }
 }
 
+/*
+        Which datagrams complete a transaction. Only the kernel's reply to this
+        request does: its sequence and its port together. A datagram that
+        carries one and not the other is somebody else's, and so is one from
+        a socket that is not the kernel. Each is drawn and dropped, at most
+        NETWORK_DISCARD_MAX of them, and the walk gives up on the next.
+*/
+static fn netlink_reply_matching(void)
+{
+        struct { netlink_header header; b32 error; } stranger = {
+            .header = {.length = sizeof stranger, .type = NLMSG_IS_ERROR,
+                       .sequence = 55},
+            .error = -EPERM};
+        const struct { p32 port, sequence; } strangers[] = {
+            {9, 55}, {0, 56}, {9, 56}, {0xffffffffu, 55}, {0, 0}};
+
+        for (positive row = 0; row < array_count(strangers); row++)
+        {
+                b32 pair[2];
+                netlink_buffer request = {0}, reply = {0};
+                netlink_header done = {.length = NETLINK_HEADER,
+                    .type = NLMSG_IS_DONE, .sequence = 55};
+                p8 left[NETLINK_HEADER];
+                bipolar opened = system_call_4(syscall(socketpair), AF_UNIX,
+                                                SOCK_DGRAM, 0, (positive)pair);
+
+                check("netlink matching fixture opens", opened == 0);
+                if (opened)
+                        continue;
+                stranger.header.port = strangers[row].port;
+                stranger.header.sequence = strangers[row].sequence;
+                check("a stranger's reply and the real one queue",
+                      socket_send(pair[1], address_of stranger, sizeof stranger,
+                                  0, null, 0) == sizeof stranger &&
+                          socket_send(pair[1], address_of done, sizeof done, 0,
+                                      null, 0) == sizeof done);
+                check("a reply with the wrong port or sequence does not end the walk",
+                      netlink_begin(address_of request, RTM_GETLINK,
+                                    NLM_REQUEST, 55, 0) &&
+                          netlink_walk(pair[0], address_of request, 55,
+                                       address_of reply, null, null) == 0);
+                check("the walk drew the stranger and its own reply",
+                      socket_receive(pair[0], left, sizeof left, MSG_DONTWAIT,
+                                     null, null) == NETWORK_TRY_AGAIN);
+                netlink_forget(address_of request);
+                netlink_forget(address_of reply);
+                socket_close(pair[0]);
+                socket_close(pair[1]);
+        }
+
+        /* The allowance: NETWORK_DISCARD_MAX strangers are dropped and the
+           real reply after them still answers; one more and the walk ends. */
+        for (positive count = NETWORK_DISCARD_MAX - 1;
+             count <= NETWORK_DISCARD_MAX + 1; count++)
+        {
+                b32 pair[2];
+                netlink_buffer request = {0}, reply = {0};
+                netlink_header done = {.length = NETLINK_HEADER,
+                    .type = NLMSG_IS_DONE, .sequence = 55};
+                netlink_header other = {.length = NETLINK_HEADER,
+                    .type = RTM_NEWLINK, .sequence = 56};
+                bool queued = true;
+                bipolar opened = system_call_4(syscall(socketpair), AF_UNIX,
+                                                SOCK_DGRAM, 0, (positive)pair);
+
+                check("netlink allowance fixture opens", opened == 0);
+                if (opened)
+                        continue;
+                for (positive at = 0; at < count; at++)
+                        queued &= socket_send(pair[1], address_of other,
+                            sizeof other, 0, null, 0) == sizeof other;
+                queued &= socket_send(pair[1], address_of done, sizeof done, 0,
+                                      null, 0) == sizeof done;
+                check("the strangers and the real reply queue", queued);
+                check("strangers up to the allowance are dropped, one more ends the walk",
+                      netlink_begin(address_of request, RTM_GETLINK,
+                                    NLM_REQUEST, 55, 0) &&
+                          netlink_walk(pair[0], address_of request, 55,
+                                       address_of reply, null, null) ==
+                              (count <= NETWORK_DISCARD_MAX ? 0 : -1));
+                netlink_forget(address_of request);
+                netlink_forget(address_of reply);
+                socket_close(pair[0]);
+                socket_close(pair[1]);
+        }
+
+        /* A reply that is not from the kernel, or an empty datagram, is no
+           reply at all. */
+        {
+                b32 pair[2];
+                netlink_buffer reply = {0};
+                p8 nothing = 0;
+                netlink_header whole = {.length = NETLINK_HEADER,
+                    .type = NLMSG_IS_DONE, .sequence = 55};
+                bipolar opened = system_call_4(syscall(socketpair), AF_UNIX,
+                                                SOCK_DGRAM, 0, (positive)pair);
+
+                check("netlink empty-datagram fixture opens", opened == 0);
+                if (!opened)
+                {
+                        check("an empty datagram is refused",
+                              socket_send(pair[1], address_of nothing, 0, 0,
+                                          null, 0) == 0 &&
+                                  netlink_receive_one(pair[0], address_of reply,
+                                                      false) == -1);
+                        check("a whole one after it is read",
+                              socket_send(pair[1], address_of whole, sizeof whole,
+                                          0, null, 0) == sizeof whole &&
+                                  netlink_receive_one(pair[0], address_of reply,
+                                                      false) == sizeof whole &&
+                                  reply.used == sizeof whole);
+                        netlink_forget(address_of reply);
+                        socket_close(pair[0]);
+                        socket_close(pair[1]);
+                }
+        }
+
+        /* A datagram sender is the kernel only when it says it is netlink and
+           port zero, in an address of the whole size. */
+        {
+                socket_address_netlink source = {.family = AF_NETLINK, .port = 0};
+
+                check("the kernel as sender is accepted",
+                      netlink_source_is_kernel(address_of source, sizeof source));
+                source.family = AF_INET;
+                check("another family at port zero is refused",
+                      !netlink_source_is_kernel(address_of source, sizeof source));
+                source.family = AF_NETLINK;
+                source.port = 1;
+                check("port one is a process, not the kernel",
+                      !netlink_source_is_kernel(address_of source, sizeof source));
+                source.port = 0xffffffffu;
+                check("the largest port is refused",
+                      !netlink_source_is_kernel(address_of source, sizeof source));
+        }
+}
+
+/* netlink_each: a visitor that says stop ends the walk without failing it, a
+   cut or short message fails it, and what came before the cut was visited. */
+static bool netlink_count_all(netlink_header address_to header,
+                              address_any context)
+{
+        (void)header;
+        (*(positive address_to)context)++;
+        return true;
+}
+
+static fn netlink_each_stops(void)
+{
+        netlink_header one = {.length = NETLINK_HEADER, .type = RTM_NEWLINK};
+        p8 bytes[NETLINK_HEADER * 3];
+        netlink_buffer reply = {bytes, sizeof bytes, sizeof bytes, false};
+        positive visited = 0;
+
+        memory_copy(bytes, address_of one, NETLINK_HEADER);
+        memory_copy(bytes + NETLINK_HEADER, address_of one, NETLINK_HEADER);
+        memory_copy(bytes + 2 * NETLINK_HEADER, address_of one, NETLINK_HEADER);
+        check("every message of a datagram is visited",
+              netlink_each(address_of reply, netlink_count_all,
+                           address_of visited) && visited == 3);
+        visited = 0;
+        check("a visitor that stops is no failure and sees no more",
+              netlink_each(address_of reply, netlink_stop_after_first,
+                           address_of visited) && visited == 1);
+        visited = 0;
+        ((netlink_header address_to)(bytes + 2 * NETLINK_HEADER))->length =
+            2 * NETLINK_HEADER;
+        check("a message longer than what arrived fails the datagram after those before it",
+              !netlink_each(address_of reply, netlink_count_all,
+                            address_of visited) && visited == 2);
+        visited = 0;
+        ((netlink_header address_to)(bytes + 2 * NETLINK_HEADER))->length =
+            NETLINK_HEADER;
+        ((netlink_header address_to)(bytes + NETLINK_HEADER))->length =
+            NETLINK_HEADER - 1;
+        check("a length under its own header fails the datagram",
+              !netlink_each(address_of reply, netlink_count_all,
+                            address_of visited) && visited == 1);
+        visited = 0;
+        ((netlink_header address_to)(bytes + NETLINK_HEADER))->length =
+            NETLINK_HEADER;
+        reply.used = 2 * NETLINK_HEADER + NETLINK_HEADER - 1;
+        check("bytes after the last whole header are no message",
+              netlink_each(address_of reply, netlink_count_all,
+                           address_of visited) && visited == 2);
+}
+
 static fn error_frames(void)
 {
         b32 pair[2];
@@ -55727,7 +55914,7 @@ static fn dns_tcp_test_server(bipolar datagram, bipolar listening,
         if (which == DNS_TCP_OVERSIZED)
         {
                 network_store_16(frame, DNS_MAX_MESSAGE + 1);
-                network_stream_send_all(stream, frame, sizeof frame);
+                network_stream_send_all_for(stream, frame, sizeof frame, 5, 0);
         }
         else
         {
@@ -55737,38 +55924,38 @@ static fn dns_tcp_test_server(bipolar datagram, bipolar listening,
                 {
                         timespec pause = {1, 200000000};
 
-                        network_stream_send_all(stream, frame, 1);
+                        network_stream_send_all_for(stream, frame, 1, 5, 0);
                         system_call_2(syscall(nanosleep),
                                       (positive)address_of pause, 0);
-                        network_stream_send_all(stream, frame + 1, 1);
-                        network_stream_send_all(stream, reply, length);
+                        network_stream_send_all_for(stream, frame + 1, 1, 5, 0);
+                        network_stream_send_all_for(stream, reply, length, 5, 0);
                 }
                 else if (which == DNS_TCP_SPLIT)
                 {
-                        network_stream_send_all(stream, frame, 1);
-                        network_stream_send_all(stream, frame + 1, 1);
-                        network_stream_send_all(stream, reply, 3);
-                        network_stream_send_all(stream, reply + 3, length - 3);
+                        network_stream_send_all_for(stream, frame, 1, 5, 0);
+                        network_stream_send_all_for(stream, frame + 1, 1, 5, 0);
+                        network_stream_send_all_for(stream, reply, 3, 5, 0);
+                        network_stream_send_all_for(stream, reply + 3, length - 3, 5, 0);
                 }
                 else if (which == DNS_TCP_SHORT)
                 {
-                        network_stream_send_all(stream, frame, sizeof frame);
-                        network_stream_send_all(stream, reply, length / 2);
+                        network_stream_send_all_for(stream, frame, sizeof frame, 5, 0);
+                        network_stream_send_all_for(stream, reply, length / 2, 5, 0);
                 }
                 else if (which == DNS_TCP_DEADLINE)
                 {
                         timespec pause = {0, 700000000};
 
-                        network_stream_send_all(stream, frame, 1);
+                        network_stream_send_all_for(stream, frame, 1, 5, 0);
                         system_call_2(syscall(nanosleep),
                                       (positive)address_of pause, 0);
-                        network_stream_send_all(stream, frame + 1, 1);
-                        network_stream_send_all(stream, reply, length);
+                        network_stream_send_all_for(stream, frame + 1, 1, 5, 0);
+                        network_stream_send_all_for(stream, reply, length, 5, 0);
                 }
                 else
                 {
-                        network_stream_send_all(stream, frame, sizeof frame);
-                        network_stream_send_all(stream, reply, length);
+                        network_stream_send_all_for(stream, frame, sizeof frame, 5, 0);
+                        network_stream_send_all_for(stream, reply, length, 5, 0);
                 }
         }
 
@@ -56496,6 +56683,17 @@ static bool http_response_framing_harness_case(
 }
 
 //      The URL, the headers and the chunk framing -- all of it pure.
+//      The grammar of a head and nothing else: what http_response_fields
+//      makes of it under a 200, which keeps no Location.
+static bool http_header_block_valid(p8 address_to bytes, positive size)
+{
+        http_response response = {.code = 200};
+        http_framing_fields fields;
+
+        return http_response_fields(bytes, size, address_of response,
+                                    address_of fields);
+}
+
 static fn fetching(void)
 {
         p8 name[64];
@@ -57926,8 +58124,8 @@ static fn network_stream_send_timeout(void)
                 bipolar reset = system_signal_action(
                     13, address_of default_action, null, 8);
                 positive began = clock_monotonic_nanoseconds();
-                bool sent = network_stream_send_all(
-                    pair[0], payload, payload_size);
+                bool sent = network_stream_send_all_for(
+                    pair[0], payload, payload_size, 0, 100000000);
                 positive elapsed = clock_monotonic_nanoseconds() - began;
 
                 socket_close(pair[0]);
@@ -58437,8 +58635,8 @@ static fn http_tcp_latency_policy(void)
                                                SOCK_CLOEXEC | SOCK_NONBLOCK);
                 p8 bytes[2];
                 network_deadline deadline;
-                bool sent = network_stream_send_all(handle, (p8 address_to)"F", 1) &&
-                            network_stream_send_all(handle, (p8 address_to)"R", 1);
+                bool sent = network_stream_send_all_for(handle, (p8 address_to)"F", 1, 5, 0) &&
+                            network_stream_send_all_for(handle, (p8 address_to)"R", 1, 5, 0);
 
                 check("consecutive small TCP writes retain exact stream bytes",
                       peer >= 0 && sent &&
@@ -59264,8 +59462,8 @@ static fn tls_key_update_write_deadlines(void)
                         net_clock_step = 1000000;
                         deadline = (network_deadline){1000000, 5000000};
                         status = relative
-                            ? tls_borrow(address_of receiver, 1, address_of span,
-                                         address_of got, 0, 5000000)
+                            ? tls_borrow_within(address_of receiver, 1, address_of span,
+                                         address_of got, 0, 5000000, null)
                             : tls_take(address_of receiver, 1, address_of span,
                                        address_of got, address_of deadline, 0, 0, false);
                         check("KeyUpdate backpressure and EINTR cannot escape the read deadline",
@@ -59383,13 +59581,13 @@ static fn tls_lending_and_fatal_states(void)
                                 (p8 address_to)"ok", 2, receiver.receive + at);
                 receiver.receive_end = receiver.receive_high = at;
                 check("a fatal TLS protocol refusal spends both record keys",
-                      tls_lend(address_of receiver, 2, address_of span,
-                               address_of got) == TLS_FAIL &&
+                      tls_lend_until(address_of receiver, 2, address_of span,
+                               address_of got, null) == TLS_FAIL &&
                           receiver.seq_read == TLS_AES_GCM_RECORD_LIMIT &&
                           receiver.seq_write == TLS_AES_GCM_RECORD_LIMIT);
                 check("buffered data cannot reopen a fatally refused TLS stream",
-                      tls_lend(address_of receiver, 2, address_of span,
-                               address_of got) == TLS_FAIL);
+                      tls_lend_until(address_of receiver, 2, address_of span,
+                               address_of got, null) == TLS_FAIL);
                 net_send_calls = 0;
                 check("a fatally refused TLS stream cannot send application data",
                       tls_write(address_of receiver, (p8 address_to)"no", 2) ==
@@ -59428,12 +59626,12 @@ static fn tls_unexpected_type_matrix(void)
                                     (p8 address_to)"ok", 2, receiver.receive + at);
                                 receiver.receive_end = receiver.receive_high = at;
                                 check("every unexpected TLS record type is a permanent refusal",
-                                      tls_lend(address_of receiver, 2, address_of span,
-                                               address_of got) == TLS_FAIL &&
+                                      tls_lend_until(address_of receiver, 2, address_of span,
+                                               address_of got, null) == TLS_FAIL &&
                                           receiver.seq_read == TLS_AES_GCM_RECORD_LIMIT &&
                                           receiver.seq_write == TLS_AES_GCM_RECORD_LIMIT &&
-                                          tls_lend(address_of receiver, 2, address_of span,
-                                                   address_of got) == TLS_FAIL);
+                                          tls_lend_until(address_of receiver, 2, address_of span,
+                                                   address_of got, null) == TLS_FAIL);
                                 tls_forget(address_of sender);
                                 tls_forget(address_of receiver);
                         }
@@ -59515,7 +59713,7 @@ static fn network_stream_interruption_deadlines(void)
                               net_recv_interruptions && net_recv_eintr_hit);
                 net_io_faults_clear();
                 check("a timed-out interrupted read leaves data for recovery",
-                      network_stream_read_now(pair[0], address_of byte, 1) == 1 &&
+                      socket_receive((b32)pair[0], address_of byte, 1, MSG_DONTWAIT, null, 0) == 1 &&
                               byte == 'x');
         }
         net_io_faults_clear();
@@ -60390,8 +60588,8 @@ static fn network_stream_sigpipe(void)
                 positive default_action[4] = {0, 0, 0, 0};
                 bipolar reset = system_signal_action(
                     13, address_of default_action, null, 8);
-                bool sent = network_stream_send_all(
-                    pair[0], (p8 address_to)"x", 1);
+                bool sent = network_stream_send_all_for(
+                    pair[0], (p8 address_to)"x", 1, 5, 0);
 
                 socket_close(pair[0]);
                 system_call_1(syscall(exit_group), reset < 0 ? 3
@@ -60423,7 +60621,7 @@ static bool tls_post_handshake_valid(p8 address_to messages,
 
         memory_fill(tls, 0, TLS_CONN_HEAD);
         tls->handle = -1;
-        valid = tls_post_handshake_append(tls, messages, length) == TLS_OK &&
+        valid = tls_post_handshake_append_until(tls, messages, length, null) == TLS_OK &&
                 !tls->post_handshake_used;
         tls_forget(tls);
         return valid;
@@ -60540,8 +60738,8 @@ static fn tls_closure_boundaries(void)
                         receiver.encrypted = true;
                         receiver.application = true;
                         check("TLS forged and genuine records queue",
-                              network_stream_send_all(pair[1], forged,
-                                                      sizeof forged) &&
+                              network_stream_send_all_for(pair[1], forged,
+                                                      sizeof forged, 5, 0) &&
                                   tls_send_enc(address_of sender, TLS_CT_APP,
                                                data, sizeof data) == TLS_OK);
                         check("TLS forged record is refused",
@@ -60579,8 +60777,8 @@ static fn tls_closure_boundaries(void)
                         receiver.encrypted = true;
                         receiver.application = true;
                         check("TLS forged CCS and genuine record queue",
-                              network_stream_send_all(pair[1], forged,
-                                                      sizeof forged) &&
+                              network_stream_send_all_for(pair[1], forged,
+                                                      sizeof forged, 5, 0) &&
                                   tls_send_enc(address_of sender, TLS_CT_APP,
                                                data, sizeof data) == TLS_OK);
                         check("TLS CCS after the application keys is refused",
@@ -63510,11 +63708,11 @@ static fn tls_post_handshake_framing(void)
                 memory_fill(tls, 0, TLS_CONN_HEAD);
                 tls->handle = -1;
                 check("a fragmented post-handshake ticket is held",
-                      tls_post_handshake_append(tls, ticket, 7) == TLS_OK &&
+                      tls_post_handshake_append_until(tls, ticket, 7, null) == TLS_OK &&
                           tls->post_handshake_used == 7);
                 check("a fragmented post-handshake ticket is reassembled",
-                      tls_post_handshake_append(tls, ticket + 7,
-                                                sizeof ticket - 7) == TLS_OK &&
+                      tls_post_handshake_append_until(tls, ticket + 7,
+                                                sizeof ticket - 7, null) == TLS_OK &&
                           !tls->post_handshake_used);
                 tls_forget(tls);
         }
@@ -63579,10 +63777,10 @@ static fn tls_post_handshake_framing(void)
                 tls->handle = -1;
                 tls->seq_read = 9;
                 check("a KeyUpdate split across records is held",
-                      tls_post_handshake_append(tls, key_update, 3) == TLS_OK &&
+                      tls_post_handshake_append_until(tls, key_update, 3, null) == TLS_OK &&
                           tls->seq_read == 9);
                 check("a KeyUpdate split across records rekeys when whole",
-                      tls_post_handshake_append(tls, key_update + 3, 2) ==
+                      tls_post_handshake_append_until(tls, key_update + 3, 2, null) ==
                               TLS_OK &&
                           !tls->seq_read &&
                           memory_compare(tls->s_ap_traffic, zeros, 32) &&
@@ -63591,7 +63789,7 @@ static fn tls_post_handshake_framing(void)
                 tls->handle = -1;
                 key_update[4] = 1;
                 check("a KeyUpdate asking for one cannot be answered unsent",
-                      tls_post_handshake_append(tls, key_update, 5) == TLS_FAIL);
+                      tls_post_handshake_append_until(tls, key_update, 5, null) == TLS_FAIL);
                 key_update[4] = 0;
                 tls_forget(tls);
         }
@@ -70555,6 +70753,8 @@ b32 main(void)
         net_group(attribute_growth);
         net_group(userspace_source_progress);
         net_group(error_frames);
+        net_group(netlink_reply_matching);
+        net_group(netlink_each_stops);
         net_group(netlink_multipart_identity);
         net_group(netlink_nonblocking_retries);
         net_group(link_candidates);

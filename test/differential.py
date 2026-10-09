@@ -26096,12 +26096,16 @@ static positive memory_text_span(const void *block, positive size)
                 i++;
         return i;
 }
+#ifndef memory_zero
 static void memory_zero(void *into, positive size)
 {
         if (size)
                 memset(into, 0, size);
 }
+#endif
+#ifndef max
 #define max(a, b) ((a) > (b) ? (a) : (b))
+#endif
 static positive digit_known(p8 character, positive base)
 {
         positive v;
@@ -61314,12 +61318,23 @@ int main(void)
     http_framing = sec(
         net,
         "static PURE bipolar http_header_end(",
-        "static bipolar http_unchunk(p8 address_to bytes, positive size);")
+        "/* Status and body framing have one interpretation in both clients.")
+
+    #   What the head checks ask of http_response_fields: the grammar alone.
+    http_head_valid = r"""
+static bool http_header_block_valid(p8 *bytes, positive size)
+{
+        http_response response = {.code = 200};
+        http_framing_fields fields;
+
+        return http_response_fields(bytes, size, &response, &fields);
+}
+"""
 
     http_clean_source = base_shim + r"""
 #define HTTP_OK 0
 #define HTTP_MALFORMED (-5)
-""" + http_framing + r"""
+""" + http_framing + http_head_valid + r"""
 static int failures;
 
 static void expect_chunk(const char *label, const char *line, int want_ok,
@@ -61428,7 +61443,7 @@ int main(void)
         '#include <sanitizer/msan_interface.h>\n' + base_shim + r"""
 #define HTTP_OK 0
 #define HTTP_MALFORMED (-5)
-""" + http_framing + r"""
+""" + http_framing + http_head_valid + r"""
 int main(void)
 {
         /* Claim a full header block; poison the unread tail so the line walk
@@ -63091,6 +63106,17 @@ def harness_security_hygiene(argv):
             line = text.count("\n", 0, call.start()) + 1
             if path.name != "wait.c" or "static bool" not in text[call.start() - 12:call.start()]:
                 unbounded.append("%s:%d" % (path.relative_to(HARNESS_ROOT), line))
+    #   TLS_BENCH_ANCHOR trusts one more root and lets a fetch reach 127/8, so
+    #   only harness builds may define it; the image build and the lanes' own
+    #   shell never do, and the tight tier keeps no such hook.
+    benched = [str(path.relative_to(HARNESS_ROOT))
+               for path in [HARNESS_ROOT / "build.sh", HARNESS_ROOT / "test/run"] +
+               sorted(path for path in (HARNESS_ROOT / "src/build").rglob("*")
+                      if path.is_file()) +
+               sorted(path for path in (HARNESS_ROOT / "kernel").rglob("*")
+                      if path.is_file() and path.stat().st_size < 1_000_000)
+               if path.is_file() and "TLS_BENCH_" in path.read_text(errors="replace")]
+    checks(not benched, "a production build names TLS_BENCH_*: " + ", ".join(benched))
     checks(not blocking, "a blocking socket_receive in the network sources: " + ", ".join(blocking))
     checks(not unbounded,
            "network_stream_send_all has no deadline; use network_stream_send_all_for or _until: "
