@@ -13824,6 +13824,81 @@ static bipolar locale_auto_ask(locale_auto_answer address_to answer)
         return status ? status : found ? 0 : HTTP_MALFORMED;
 }
 
+/*
+        The question, apart. The machine asks it as root, so all of it -- the
+        TLS, the HTTP and the reading of the headers and the trace -- runs in
+        a confined child (net_apart), and what comes back is a status and two
+        words. They are believed only as names the table holds: the zone as
+        clock_zone_named spells it, the country through locale_auto_country
+        again. What this process writes and logs is the table's spelling,
+        never the child's bytes.
+*/
+typedef struct
+{
+        b64 status;
+        locale_auto_answer answer;
+} locale_auto_said;
+
+static bool locale_auto_ask_task(address_any context, bipolar answer)
+{
+        locale_auto_said said;
+
+        (void)context;
+        memory_zero(address_of said, sizeof said);
+        said.status = locale_auto_ask(address_of said.answer);
+        return system_write_all((positive)answer, address_of said, sizeof said) ==
+               sizeof said;
+}
+
+//      What the child said, as far as it can be believed: its status when
+//      http_run could have returned it, and a zone only as the table spells
+//      it -- a zone name, or a country code that names one.
+static bipolar locale_auto_believe(locale_auto_said address_to said,
+                                   locale_auto_answer address_to answer)
+{
+        string_address named;
+
+        memory_zero(answer, sizeof(address_to answer));
+        if (said->status)
+                return http_apart_status(said->status) ? (bipolar)said->status
+                                                       : HTTP_APART;
+        said->answer.zone[sizeof(said->answer.zone) - 1] = end;
+        said->answer.mode[sizeof(said->answer.mode) - 1] = end;
+        if (string_equals(said->answer.mode, (string_address) "auto cloudflare"))
+        {
+                named = clock_zone_named(said->answer.zone);
+                if (!named || !string_equals(named, said->answer.zone))
+                        return HTTP_MALFORMED;
+                string_copy_bounded(answer->zone, named, sizeof(answer->zone));
+                string_copy_bounded(answer->mode, "auto cloudflare",
+                                    sizeof(answer->mode));
+                return 0;
+        }
+        if (string_length(said->answer.mode) == 15 &&
+            !memory_compare(said->answer.mode, "auto country ", 13) &&
+            locale_auto_country(said->answer.mode + 13, answer))
+                return 0;
+        memory_zero(answer, sizeof(address_to answer));
+        return HTTP_MALFORMED;
+}
+
+static bipolar locale_auto_ask_apart(locale_auto_answer address_to answer)
+{
+        byte_store got = {0};
+        locale_auto_said said;
+        bipolar ran = net_apart(locale_auto_ask_task, null, -1, address_of got,
+                                sizeof said);
+        bool whole = ran == NET_APART_OK && got.used == sizeof said;
+
+        memory_zero(answer, sizeof(address_to answer));
+        if (whole)
+                memory_copy(address_of said, got.bytes, sizeof said);
+        byte_store_release(address_of got);
+        if (!whole)
+                return ran == NET_APART_UNCONFINED ? HTTP_CONFINE : HTTP_APART;
+        return locale_auto_believe(address_of said, answer);
+}
+
 static string_address locale_auto_reason(bipolar status)
 {
         switch (status)
@@ -13842,6 +13917,10 @@ static string_address locale_auto_reason(bipolar status)
                 return (string_address) "it answered with an error";
         case HTTP_MALFORMED:
                 return (string_address) "the answer named no zone";
+        case HTTP_CONFINE:
+                return (string_address) "the question could not be confined here";
+        case HTTP_APART:
+                return (string_address) "the confined question died";
         }
         return (string_address) "no answer";
 }
@@ -13905,7 +13984,7 @@ static b32 locale_zone_auto(void)
                 return_if(kept < 0, host_fail("timezone", kept));
         }
         locale_network(network, sizeof(network));
-        status = locale_auto_ask(address_of answer);
+        status = locale_auto_ask_apart(address_of answer);
         if (status)
         {
                 locale_auto_asked(null);
@@ -13933,7 +14012,7 @@ static locale_child locale_auto_child = {0, -1};
 static p8 locale_auto_task(address_any network)
 {
         locale_auto_answer answer;
-        bool took = !locale_auto_ask(address_of answer) &&
+        bool took = !locale_auto_ask_apart(address_of answer) &&
                     !locale_auto_take(address_of answer, false);
 
         if (took)

@@ -155,6 +155,38 @@ never a pass.
   that wants them off sets it. `unprivileged_bpf_disabled` has no knob: the
   image has no `bpf(2)` (the classic socket filters the DHCP client uses are
   separate).
+- **The clients' network half runs apart (`net_apart`, `src/net/net.c`).**
+  wget, fetch and the zone question the machine asks at boot as root
+  (`locale_auto_ask`) parse TLS, X.509, HTTP and DNS from whoever answers, so
+  that half runs in a forked child; bowl's downloads exec wget and get it too.
+  The child keeps the answer's pipe, the output it was handed (wget's file or
+  standard output, or nothing) and standard error, and closes the rest; reads
+  `resolv.conf` before it may not (the anchors are compiled in, the clock is
+  the vDSO); becomes nobody when it is root (a user namespace that maps no
+  nobody, `unshare -r`, keeps its root, which owns nothing outside it); is
+  not dumpable, dies with the client (`PR_SET_PDEATHSIG`) and gains nothing
+  through exec (`NO_NEW_PRIVS`); then a seccomp filter kills it at any call
+  but IPv4 TCP and UDP sockets (no unix, netlink, packet, raw or IPv6), their
+  connect, bind, sendto and recvfrom, `SO_RCVTIMEO`, `SO_SNDTIMEO` and
+  `TCP_NODELAY` to set and `SO_ERROR` to read, ppoll, the clock, getrandom,
+  write, writev, close, memory that is never executable, exit, and
+  `riscv_hwprobe` on RISC-V. A redirect, a caIssuers fetch or a revocation
+  list is another socket in the same child. The client opens and publishes
+  the output and makes every decision that touches a file, and believes the
+  child's answer only as far as it can check it: a status `http_run` can
+  return, an errno, a URL, head and body no longer than they may be, lengths
+  that add up; the zone question's answer is read again through the zone
+  table, so what root writes and logs is the table's spelling. **It fails
+  closed:** a kernel that will not take the filter (one without seccomp, a
+  container whose filter refuses it, qemu-user) fetches nothing
+  (`HTTP_CONFINE`; wget exits 1, "cannot confine the download"); a child
+  that dies or answers what cannot be believed is `HTTP_APART` (wget exits 4
+  and names the signal); a child killed by SIGPIPE or SIGXFSZ died writing the
+  output, and the client dies of the same signal, so `wget -O - | head` is
+  still 141. DHCP keeps its own older rule (`dhcp_confine`: no filter still
+  gets a lease). For a new client (NTS-KE, DNS over TLS) the exchange is a
+  task handed to `net_apart`, and `security_hygiene` fails any call into the
+  HTTP/TLS engine that is not inside one.
 - **Root is not a wall:** hardening against a hostile root is out of scope.
 - **Ring 0:** no `crypto_`, `tls_` or X.509 code is in the include graph of
   `src/moonwater/core.c`; `net.c` is userspace only.
@@ -188,6 +220,7 @@ ARM64 and RISC-V mandatory with UBSan trapping.
 | SNTP | 64-bit nonce, peer, mode, stratum, timing, exactly 48 bytes at the tight tier; each sample its own wait; `sntp_fuzz`, `sntp_era` (2036, 2038, 2104), `sh test/run netem machine` | unauthenticated; NTS is a separate branch |
 | HTTP, URL | `localhost` and `*.localhost` reach 127.0.0.1 without a resolver (RFC 6761; `wget_hostile` with a stub resolver, curl held to the same rows); host spellings named against GNU wget and curl; the scheme rule at both tiers (`http_urls`); sink-side validation of host, target, headers; userinfo, schemes, fragments refused; one framing reading; redirect and HTTPS-downgrade bounds; body deadline; per-hop host, address, SNI and Host identity; `http_response_framing` (with `http.client` and curl), `wget_mutation` and `wget_hostile` (GNU wget and curl as live oracles), `https_downgrade`, `http_fuzz` | CNAME, multi-address and interface-scope identity; `inet_aton` shorthands (`0x7f.1`, `127.1`) are names here and addresses to wget and curl (decision); SNTP, logger and Waterlink peers still ask DNS for localhost; the tight tier bounds each hop, not the redirect chain |
 | TLS, X.509 | transcript, Finished, AEAD, record sequence, state ordering; strict DER; CertificateEntry extensions refused; delivery schedules and FIN/RST cuts (`tls_peer --schedule`); SAN and name constraints, key usage, EKU, dates; chains against OpenSSL and Go `crypto/x509`; record nonce coverage over every value in every sequence byte lane and guarded unaligned buffers; record-header coverage over every 16-bit length and 8-bit type; `tls_chains` (also wget's status and words for each refusal), `tls_hostnames`, `tls_dates`, `public_suffixes`, `anchors`, `tls_peer`, `tls_der_fuzz`, `tls_hs_fuzz`, `tls_verify_fuzz`; `x509_corpus` by hand over 643 hosts | name constraints in more shapes |
+| Confinement | `CHECK_net` on all three machines: `net_apart_filter_decisions` runs the built filter in a classic-BPF interpreter over the calls a fetch makes and the ones it must not (another architecture, x32, unix, netlink, packet, IPv6 and raw sockets, a named protocol, options fetching never sets, executable memory, openat, execve, ptrace, mprotect, ioctl, kill, prctl, read); natively, `net_apart_confinement` (the child keeps its pipe, output and standard error and nothing else, every call fetching needs works, and openat, execve, ptrace, the five refused socket kinds, executable memory, mprotect and ioctl each die of SIGSYS after it answered) and `net_apart_fetching` (fetch's and wget's manners through the child against a loopback server that reads `Seccomp: 2` and `NoNewPrivs: 1` off the waiting child; a planted openat after a working fetch dies; a 12 MiB body grows its store inside the filter; the resolver answers from the servers read before the filter); under qemu-user the refusal is checked and the deaths are NOT RUN; `security_hygiene` fails any call into `http_run`, `http_link_open`, `http_stream_open`, `tls_connect`, `tls_aia_fetch` or `locale_auto_ask` outside a task handed to `net_apart`, a task called directly, and a filter install that takes anything but success; `wget_mutation`, `wget_hostile` (its address rows under `unshare -Urnm`), `tls_peer`, `https_downgrade` and the misc lane's wget and fetch rows run through it | the drop to nobody as root is seen by hand (`perf trace`), not by a lane; the child may connect to any IPv4 address its user can reach, so the tight tier's private-address rule and caIssuers' public-only rule hold only while the child is not compromised |
 | Crypto | OpenSSL vectors and every `lib.c` architecture body: `crypto_vectors` (`--wycheproof DIR` by hand), `crypto_fuzz` | none known |
 | Wi-Fi | RSN, EAPOL-Key, replay counters, source address, scan parsing; all four GTK slots, zero-valued first keys, driver refusal/retry and roam reset (`wifi_key_state`); the strongest 64 names kept and the associated row never evicted; one BSS donates every field of a row; `wifi_scan_fuzz`, `wifi_eapol_fuzz`, `wifi_air` | management-frame protection and WPA3 (separate branch); a forger outranking every retained row |
 | Waterlink | Noise handshake, cookie, replay window, grants, revocation; mDNS reads Internet class only, RCODE zero, TTL nonzero, an SRV with a non-root target and a nonzero port, exposes only a PTR and SRV intersection, and shares a packet-sized compression-pointer budget across every name; the reply and answer budgets move only after a successful send; `IP_MULTICAST_IF` failure refuses the send; a source holds at most `LINK_GREET_SOURCE` of the 16 greeting slots; legacy verifier migration is all-write plus `fsync`, and until it succeeds the listener stays off while commands keep the groups (their save is the scrub); every elapsed time is ordered first; `waterlink_fuzz` rejects a wake/fill cycle that remains immediately due without output; `sh test/run waterlink link`, `waterlink_sanitized`, `waterlink_fuzz` (MSan with `MOONWATER_MSAN=1`) | handshake flood under netem; address rotation reaches the global greeting ceiling |
@@ -355,6 +388,12 @@ architecture gate above. CI is parked (`workflow_dispatch` only).
   disk; the radio lock is held across a whole join; the elements a scan reads are
   unauthenticated, so the join only orders by what the saved network asks for and
   the handshake authenticates.
+- **Parsing still in the asking process:** the HTTP/TLS clients run apart
+  (Decisions), but a DNS answer read for `host`, `hostid`, a Waterlink service
+  name or the SNTP server's name (`sntp_query`, in the machine's NTP child, as
+  root), and an SNTP reply, are parsed where they were asked. Each can become
+  a task for `net_apart`; the resolver already reads its servers before the
+  filter there.
 - **Evidence:** a corpus beyond generated seeds; ASan/UBSan and native
   namespace runs as required jobs; MSan beyond hosted lifts; a second oracle for
   DNS; an independent review once those are reproducible.

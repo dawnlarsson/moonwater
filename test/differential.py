@@ -63969,8 +63969,9 @@ socket_option_get socket_option_set socket_receive socket_send string_compare_ma
 string_copy string_copy_max_end string_digits_checked string_digits_max
 string_equals string_first_of string_first_of_or_end string_get string_has_prefix
 string_is string_last_of string_length string_span_max string_span_without_set
-string_to_host system_call_1 system_call_2 system_call_3 system_call_5
-system_random_fill system_read_retry
+string_to_host system_call system_call_1 system_call_2 system_call_3 system_call_5
+system_child_fork system_close system_random_fill system_read_retry
+system_signal_action system_signal_install system_wait4_retry system_write_all
 """.split())
 
 
@@ -64153,6 +64154,8 @@ def harness_security_hygiene(argv):
     - http_response_framing's CASES / MUST_ACCEPT / DELIBERATE agree, and its
       DELIBERATE rows keep the must-disagree assert against http.client
     - https_downgrade keeps several Location shapes
+    - the HTTP/TLS engine is entered only through a task handed to net_apart
+      (the confined child), and net_apart never runs a task unfiltered
     """
     del argv
     checks = Checks()
@@ -64389,6 +64392,60 @@ def harness_security_hygiene(argv):
     shapes = sum(needle in downgrade for needle in ("http://", "HTTP://", "//", "user@",
                                                     "http:///"))
     checks(shapes >= 4, "https_downgrade: %d Location shapes, want several" % shapes)
+
+    #   The clients' network half runs in a confined child (net_apart in
+    #   src/net/net.c). The engine's entry points are called only by the
+    #   engine itself and by a task handed to net_apart, so a client that
+    #   called http_run, tls_connect or any of the rest from its own process
+    #   fails here until it goes through net_apart and is named below; a
+    #   task is handed to net_apart and never called; and the primitive
+    #   takes nothing from seccomp but success, ENOSYS included.
+    confined_callers = {
+        "http_run": {"http_get", "http_fetch_to", "http_apart_task", "locale_auto_ask"},
+        "http_get": set(),
+        "http_fetch_to": set(),
+        "http_link_open": {"http_run"},
+        "http_stream_open": {"http_link_open", "tls_aia_fetch"},
+        "tls_connect": {"http_link_open"},
+        "tls_aia_fetch": {"tls_verify_chain"},
+        "locale_auto_ask": {"locale_auto_ask_task"},
+    }
+    apart_tasks = {"http_apart_task": "src/net/net.c",
+                   "locale_auto_ask_task": "src/sh/host.c"}
+    found_callers = {}
+    for path in sorted(list((HARNESS_ROOT / "src").rglob("*.c")) +
+                       list((HARNESS_ROOT / "src").rglob("*.inc"))):
+        current = None
+        for line in uncommented(path.read_text(errors="replace")).splitlines():
+            head = re.match(r"^(?:static|fn|b32|bool|bipolar|positive|p\d+|void|int|"
+                            r"string_address)\b[^;=]*?\b(\w+)\(", line)
+            if head:
+                current = head.group(1)
+            for name in list(confined_callers) + list(apart_tasks):
+                if re.search(r"\b%s\s*\(" % name, line) and current != name:
+                    found_callers.setdefault(name, set()).add(
+                        "%s:%s" % (path.relative_to(HARNESS_ROOT), current))
+    for name, allowed in confined_callers.items():
+        for caller in sorted(found_callers.get(name, set())):
+            checks(caller.split(":", 1)[1] in allowed,
+                   "confinement: %s calls %s outside net_apart; run it in a task "
+                   "handed to net_apart and name the task in confined_callers" %
+                   (caller, name))
+    for task, home in apart_tasks.items():
+        text = uncommented((HARNESS_ROOT / home).read_text())
+        checks(re.search(r"\bnet_apart\(\s*%s\b" % task, text) is not None,
+               "confinement: %s is no longer handed to net_apart in %s" % (task, home))
+        for caller in sorted(found_callers.get(task, set())):
+            checks(False, "confinement: %s calls the task %s directly" % (caller, task))
+    apart = uncommented(net)
+    install = re.search(r"static COLD bool net_filter_install\(.*?^\}$", apart, re.M | re.S)
+    child = re.search(r"static DEAD_END COLD fn net_apart_child\(.*?^\}$", apart, re.M | re.S)
+    checks(install is not None and "ENOSYS" not in install.group(0) and
+           "== 0" in install.group(0),
+           "confinement: net_filter_install must take only success from seccomp")
+    checks(child is not None and "!net_filter_install(" in child.group(0) and
+           "NET_APART_EXIT_UNCONFINED" in child.group(0),
+           "confinement: net_apart_child must refuse to run its task unfiltered")
 
     print("security hygiene %d/%d" % (checks.checks - checks.failures, checks.checks))
     return 1 if checks.failures else 0
