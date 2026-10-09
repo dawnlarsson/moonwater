@@ -272,6 +272,7 @@ typedef struct
 {
         p64 key;
         p32 pixel[256];
+        p8 planes[4][256];
 } font_pairing;
 
 typedef struct
@@ -2551,7 +2552,9 @@ static p32 font_mix(const font_engine address_to e, p32 back, p32 fore, p32 a)
         paints each cell's background, a panel its own. Every coverage level
         then has one answer, so the 256 pixels for the pair of colours are
         made once -- contrast curve, linear light and all -- and a glyph is a
-        lookup a pixel: the pair's 256 tones. The engine keeps 64 pairs.
+        lookup a pixel: the pair's 256 tones, and after them the same tones
+        as four planes of bytes, which is the table memory_translate_u32_rect
+        takes. The engine keeps 64 pairs.
 */
 static const p32 address_to font_tones(font_engine address_to e, p32 colour, p32 background)
 {
@@ -2563,7 +2566,11 @@ static const p32 address_to font_tones(font_engine address_to e, p32 colour, p32
         {
                 font_ramp(e, colour);
                 for (p32 c = 0; c < 256; c++)
+                {
                         pair->pixel[c] = font_mix(e, background, colour, e->ramp[c]);
+                        for (p32 k = 0; k < 4; k++)
+                                pair->planes[k][c] = (p8)(pair->pixel[c] >> (8 * k));
+                }
                 pair->key = key;
         }
         return pair->pixel;
@@ -2744,6 +2751,15 @@ b32 font_draw(font_engine address_to e, const font_face address_to const address
         return pen;
 }
 
+//      A rectangle of a cell's ground.
+static fn font_ground(const font_target address_to target, b32 left, b32 top, b32 right, b32 bottom,
+                      p32 background)
+{
+        for (b32 row = top; row < bottom && left < right; row++)
+                memory_fill_u32(target->pixels + (positive)row * target->stride + left, (positive)(right - left),
+                                background & 0xffffff);
+}
+
 /*
         A terminal cell, whole: its background and its glyph written in one
         pass, each pixel once, through the pair's tones. A glyph is cached as
@@ -2754,15 +2770,6 @@ b32 font_draw(font_engine address_to e, const font_face address_to const address
         for whose pixel it is. With an unknown background only the glyph is
         blended in.
 */
-static fn font_translate(p32 address_to into, positive into_stride, const p8 address_to from,
-                         positive from_stride, positive width, positive height,
-                         const p32 address_to table)
-{
-        for (positive r = 0; r < height; r++, into += into_stride, from += from_stride)
-                for (positive i = 0; i < width; i++)
-                        into[i] = table[from[i]];
-}
-
 fn font_cell(font_engine address_to e, const font_face address_to const address_to faces,
              p32 count, p32 code, p32 cells, const font_metrics address_to grid, p32 size,
              p32 flags, const font_target address_to target, b32 x, b32 y, p32 colour,
@@ -2809,27 +2816,14 @@ fn font_cell(font_engine address_to e, const font_face address_to const address_
                 return;
         if (from >= to || above >= below)
                 from = to = left, above = below = top;
-        for (b32 row = top; row < bottom; row++)
-        {
-                p32 address_to line = target->pixels + (positive)row * target->stride;
-
-                if (row == above && below > above)
-                {
-                        font_translate(line + from, target->stride,
-                                       box.coverage + (positive)(above - gy) * box.stride + (from - gx), box.stride,
-                                       (positive)(to - from), (positive)(below - above), pixel);
-                        row = below - 1;
-                        continue;
-                }
-                memory_fill_u32(line + left, (positive)(right - left), background & 0xffffff);
-        }
-        for (b32 row = above; row < below && (from > left || to < right); row++)
-        {
-                p32 address_to line = target->pixels + (positive)row * target->stride;
-
-                memory_fill_u32(line + left, (positive)(from - left), background & 0xffffff);
-                memory_fill_u32(line + to, (positive)(right - to), background & 0xffffff);
-        }
+        font_ground(target, left, top, right, above, background);
+        font_ground(target, left, below, right, bottom, background);
+        font_ground(target, left, above, from, below, background);
+        font_ground(target, to, above, right, below, background);
+        if (from < to)
+                memory_translate_u32_rect(target->pixels + (positive)above * target->stride + from, target->stride,
+                                          box.coverage + (positive)(above - gy) * box.stride + (from - gx),
+                                          box.stride, (positive)(to - from), (positive)(below - above), pixel);
 }
 
 #endif // MOONWATER_CANVAS_FONT

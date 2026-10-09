@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        398 routines (375 public, 23 local), 388 of them on all three and 10 local to one.
+        399 routines (376 public, 23 local), 389 of them on all three and 10 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -279,6 +279,7 @@
           memory_to_lower_ascii          public  yes     yes     yes
           memory_to_upper_ascii          public  yes     yes     yes
           memory_translate               public  yes     yes     yes
+          memory_translate_u32_rect      public  yes     yes     yes
           memory_utf8_span               public  yes     yes     yes
           memory_utf8_span_wide          local   yes     yes     yes
           memory_utf8_valid_span         public  yes     yes     yes
@@ -12545,6 +12546,104 @@ __asm__(
 #endif
     ASM_END(memory_translate)
 
+#ifndef KERNEL_MODE
+    //
+    //       memory_translate_u32_rect -- a rectangle of bytes made words
+    //       through a table: rdi into, rsi into_stride in words, rdx from,
+    //       rcx from_stride, r8 width, r9 height, the table on the stack.
+    //
+    //       With AVX-512 VBMI the table is its four byte planes in zmm16 to
+    //       zmm31, and 64 bytes are looked up at once: two vpermt2b of 128
+    //       entries a plane and the byte's top bit to choose, then the planes
+    //       interleaved into words by unpacking and moving 128-bit lanes. A
+    //       rectangle 16 or narrower -- a terminal cell, the reason this is
+    //       here -- packs four rows into the 64 bytes, a lane a row, so a
+    //       cell of 16 by 35 is nine turns; a wider one goes a row at a
+    //       time in 64-byte pieces. Loads and stores are masked to the row,
+    //       so nothing past it is read or written. Otherwise the narrow body:
+    //       eight words a turn, every byte read, looked up and stored
+    //       straight, three memory operations a word and nothing else.
+    //
+    //       On a 9950X core, cells from a 4096-byte atlas into a 3840-pixel
+    //       frame (test/run bench translate-rect), the time of the C loop it
+    //       replaced: the planes 52% at 9 by 19, 31% at 16 by 35, 37% at 31
+    //       by 70 and 20% at 256 by 64; the narrow body 77, 83, 87 and 75%.
+    //       A 4K terminal frame of 16 by 35 cells went from 5.1-5.7 ms to
+    //       3.0-3.5; writing the frame alone (memory_fill_u32) is 1.66-1.86.
+    //
+#define TR32_X64_LOOKUP                                                                                 \
+    "vpmovb2m %zmm0, %k4\n"                                                                             \
+    "vmovdqa64 %zmm16, %zmm1\n   vpermt2b %zmm17, %zmm0, %zmm1\n   vmovdqa64 %zmm18, %zmm2\n"          \
+    "vpermt2b %zmm19, %zmm0, %zmm2\n   vmovdqu8 %zmm2, %zmm1{%k4}\n"                                  \
+    "vmovdqa64 %zmm20, %zmm2\n   vpermt2b %zmm21, %zmm0, %zmm2\n   vmovdqa64 %zmm22, %zmm3\n"          \
+    "vpermt2b %zmm23, %zmm0, %zmm3\n   vmovdqu8 %zmm3, %zmm2{%k4}\n"                                  \
+    "vmovdqa64 %zmm24, %zmm3\n   vpermt2b %zmm25, %zmm0, %zmm3\n   vmovdqa64 %zmm26, %zmm4\n"          \
+    "vpermt2b %zmm27, %zmm0, %zmm4\n   vmovdqu8 %zmm4, %zmm3{%k4}\n"                                  \
+    "vmovdqa64 %zmm28, %zmm4\n   vpermt2b %zmm29, %zmm0, %zmm4\n   vmovdqa64 %zmm30, %zmm5\n"          \
+    "vpermt2b %zmm31, %zmm0, %zmm5\n   vmovdqu8 %zmm5, %zmm4{%k4}\n"                                  \
+    "vpunpcklbw %zmm2, %zmm1, %zmm5\n   vpunpckhbw %zmm2, %zmm1, %zmm6\n"                              \
+    "vpunpcklbw %zmm4, %zmm3, %zmm7\n   vpunpckhbw %zmm4, %zmm3, %zmm1\n"                              \
+    "vpunpcklwd %zmm7, %zmm5, %zmm2\n   vpunpckhwd %zmm7, %zmm5, %zmm3\n"                              \
+    "vpunpcklwd %zmm1, %zmm6, %zmm4\n   vpunpckhwd %zmm1, %zmm6, %zmm5\n"                              \
+    "vshufi32x4 $0x44, %zmm3, %zmm2, %zmm6\n   vshufi32x4 $0x44, %zmm5, %zmm4, %zmm7\n"                 \
+    "vshufi32x4 $0xee, %zmm3, %zmm2, %zmm2\n   vshufi32x4 $0xee, %zmm5, %zmm4, %zmm4\n"                 \
+    "vshufi32x4 $0x88, %zmm7, %zmm6, %zmm8\n   vshufi32x4 $0xdd, %zmm7, %zmm6, %zmm9\n"                 \
+    "vshufi32x4 $0x88, %zmm4, %zmm2, %zmm10\n   vshufi32x4 $0xdd, %zmm4, %zmm2, %zmm11\n"
+    ASM_FUNC(memory_translate_u32_rect)
+    "test %r8, %r8\n   jz .Ltr32_x64_done\n   test %r9, %r9\n   jz .Ltr32_x64_done\n   mov 8(%rsp), %rax\n   shl $2, %rsi\n"
+    ASM_NARROW("cpu_has_avx512_vbmi", ".Ltr32_x64_narrow")
+    "vmovdqu64 1024(%rax), %zmm16\n   vmovdqu64 1088(%rax), %zmm17\n   vmovdqu64 1152(%rax), %zmm18\n   vmovdqu64 1216(%rax), %zmm19\n"
+    "vmovdqu64 1280(%rax), %zmm20\n   vmovdqu64 1344(%rax), %zmm21\n   vmovdqu64 1408(%rax), %zmm22\n   vmovdqu64 1472(%rax), %zmm23\n"
+    "vmovdqu64 1536(%rax), %zmm24\n   vmovdqu64 1600(%rax), %zmm25\n   vmovdqu64 1664(%rax), %zmm26\n   vmovdqu64 1728(%rax), %zmm27\n"
+    "vmovdqu64 1792(%rax), %zmm28\n   vmovdqu64 1856(%rax), %zmm29\n   vmovdqu64 1920(%rax), %zmm30\n   vmovdqu64 1984(%rax), %zmm31\n"
+    "cmp $16, %r8\n   ja .Ltr32_x64_rows\n"
+    //  Four rows of 16 or fewer a turn, a 128-bit lane each.
+    "mov $0xffff, %r10d\n   bzhi %r8d, %r10d, %r10d\n   kmovw %r10d, %k2\n"
+    ".Ltr32_x64_four:\n   cmp $4, %r9\n   jb .Ltr32_x64_last\n"
+    "vmovdqu8 (%rdx), %xmm0{%k2}{z}\n   lea (%rdx,%rcx), %r10\n   vmovdqu8 (%r10), %xmm12{%k2}{z}\n   add %rcx, %r10\n"
+    "vmovdqu8 (%r10), %xmm13{%k2}{z}\n   vmovdqu8 (%r10,%rcx), %xmm14{%k2}{z}\n"
+    "vinserti32x4 $1, %xmm12, %zmm0, %zmm0\n   vinserti32x4 $2, %xmm13, %zmm0, %zmm0\n   vinserti32x4 $3, %xmm14, %zmm0, %zmm0\n"
+    TR32_X64_LOOKUP
+    "vmovdqu32 %zmm8, (%rdi){%k2}\n   lea (%rdi,%rsi), %r10\n   vmovdqu32 %zmm9, (%r10){%k2}\n   add %rsi, %r10\n"
+    "vmovdqu32 %zmm10, (%r10){%k2}\n   vmovdqu32 %zmm11, (%r10,%rsi){%k2}\n   lea (%r10,%rsi,2), %rdi\n   lea (%rdx,%rcx,4), %rdx\n"
+    "sub $4, %r9\n   jmp .Ltr32_x64_four\n"
+    ".Ltr32_x64_last:\n   test %r9, %r9\n   jz .Ltr32_x64_wide_done\n"
+    "vmovdqu8 (%rdx), %xmm0{%k2}{z}\n"
+    TR32_X64_LOOKUP
+    "vmovdqu32 %zmm8, (%rdi){%k2}\n   add %rsi, %rdi\n   add %rcx, %rdx\n   dec %r9\n   jmp .Ltr32_x64_last\n"
+    //  Wider: a row at a time, 64 bytes a turn, the last turn masked.
+    ".Ltr32_x64_rows:\n   xor %r10d, %r10d\n"
+    ".Ltr32_x64_piece:\n   mov %r8, %r11\n   sub %r10, %r11\n   mov $64, %eax\n   cmp %rax, %r11\n   cmova %rax, %r11\n"
+    //  bzhi reads the low byte of its index alone, so a row with 256 or more left is cut to 64 first.
+    "mov $-1, %rax\n   bzhi %r11, %rax, %rax\n   kmovq %rax, %k1\n"
+    "vmovdqu8 (%rdx,%r10), %zmm0{%k1}{z}\n"
+    TR32_X64_LOOKUP
+    "kshiftrq $16, %k1, %k3\n   kshiftrq $32, %k1, %k5\n   kshiftrq $48, %k1, %k6\n"
+    "vmovdqu32 %zmm8, (%rdi,%r10,4){%k1}\n   vmovdqu32 %zmm9, 64(%rdi,%r10,4){%k3}\n"
+    "vmovdqu32 %zmm10, 128(%rdi,%r10,4){%k5}\n   vmovdqu32 %zmm11, 192(%rdi,%r10,4){%k6}\n"
+    "add $64, %r10\n   cmp %r8, %r10\n   jb .Ltr32_x64_piece\n"
+    "add %rsi, %rdi\n   add %rcx, %rdx\n   dec %r9\n   jnz .Ltr32_x64_rows\n"
+    ".Ltr32_x64_wide_done:\n   vzeroupper\n" ASM_RET
+    //  Eight words a turn from the words of the table.
+    ".Ltr32_x64_narrow:\n   push %rbx\n   push %r12\n   push %r13\n   push %r14\n   mov %r8, %r13\n   and $-8, %r13\n"
+    ".Ltr32_x64_row:\n   xor %ebx, %ebx\n   test %r13, %r13\n   jz .Ltr32_x64_tail\n"
+    ".balign 16\n.Ltr32_x64_eight:\n"
+    "movzbl (%rdx,%rbx), %r10d\n   movzbl 1(%rdx,%rbx), %r11d\n   movzbl 2(%rdx,%rbx), %r12d\n   movzbl 3(%rdx,%rbx), %r14d\n"
+    "mov (%rax,%r10,4), %r10d\n   mov (%rax,%r11,4), %r11d\n   mov (%rax,%r12,4), %r12d\n   mov (%rax,%r14,4), %r14d\n"
+    "mov %r10d, (%rdi,%rbx,4)\n   mov %r11d, 4(%rdi,%rbx,4)\n   mov %r12d, 8(%rdi,%rbx,4)\n   mov %r14d, 12(%rdi,%rbx,4)\n"
+    "movzbl 4(%rdx,%rbx), %r10d\n   movzbl 5(%rdx,%rbx), %r11d\n   movzbl 6(%rdx,%rbx), %r12d\n   movzbl 7(%rdx,%rbx), %r14d\n"
+    "mov (%rax,%r10,4), %r10d\n   mov (%rax,%r11,4), %r11d\n   mov (%rax,%r12,4), %r12d\n   mov (%rax,%r14,4), %r14d\n"
+    "mov %r10d, 16(%rdi,%rbx,4)\n   mov %r11d, 20(%rdi,%rbx,4)\n   mov %r12d, 24(%rdi,%rbx,4)\n   mov %r14d, 28(%rdi,%rbx,4)\n"
+    "add $8, %rbx\n   cmp %r13, %rbx\n   jb .Ltr32_x64_eight\n"
+    ".Ltr32_x64_tail:\n   cmp %r8, %rbx\n   jae .Ltr32_x64_next\n"
+    ".Ltr32_x64_one:\n   movzbl (%rdx,%rbx), %r10d\n   mov (%rax,%r10,4), %r10d\n   mov %r10d, (%rdi,%rbx,4)\n   inc %rbx\n   cmp %r8, %rbx\n   jb .Ltr32_x64_one\n"
+    ".Ltr32_x64_next:\n   add %rsi, %rdi\n   add %rcx, %rdx\n   dec %r9\n   jnz .Ltr32_x64_row\n"
+    "pop %r14\n   pop %r13\n   pop %r12\n   pop %rbx\n"
+    ".Ltr32_x64_done:\n" ASM_RET
+    ASM_END(memory_translate_u32_rect)
+#undef TR32_X64_LOOKUP
+#endif
+
     //
     //       memory_delete_bytes -- keep the bytes a table leaves unmarked, in
     //       order, at the front of the block.
@@ -21675,6 +21774,31 @@ __asm__(
 #endif
     ASM_END(memory_translate)
 
+#ifndef KERNEL_MODE
+    //       memory_translate_u32_rect: eight words a turn. The eight bytes are
+    //       one load and eight ubfx, the words eight loads, paired with orr
+    //       and stored by two stp; the tail a word at a time. NEON has no
+    //       gather, and the table's four planes are 64 registers of tbl,
+    //       twice the file. On an M2 core, the x86_64 block's cells: 68-74%
+    //       of the time of clang's loop and 50-68% of GCC's. The x86_64
+    //       block carries the contract.
+    ASM_FUNC(memory_translate_u32_rect)
+    "cbz x4, 9f\n   cbz x5, 9f\n   lsl x1, x1, #2\n   and x8, x4, #-8\n"
+    "1:  mov x7, xzr\n   cbz x8, 3f\n"
+    "2:  ldr x9, [x2, x7]\n   ubfx x10, x9, #0, #8\n   ubfx x11, x9, #8, #8\n   ubfx x12, x9, #16, #8\n   ubfx x13, x9, #24, #8\n"
+    "ubfx x14, x9, #32, #8\n   ubfx x15, x9, #40, #8\n   ubfx x16, x9, #48, #8\n   lsr x17, x9, #56\n"
+    "ldr w10, [x6, x10, lsl #2]\n   ldr w11, [x6, x11, lsl #2]\n   ldr w12, [x6, x12, lsl #2]\n   ldr w13, [x6, x13, lsl #2]\n"
+    "ldr w14, [x6, x14, lsl #2]\n   ldr w15, [x6, x15, lsl #2]\n   ldr w16, [x6, x16, lsl #2]\n   ldr w17, [x6, x17, lsl #2]\n"
+    "orr x10, x10, x11, lsl #32\n   orr x12, x12, x13, lsl #32\n   orr x14, x14, x15, lsl #32\n   orr x16, x16, x17, lsl #32\n"
+    "add x9, x0, x7, lsl #2\n   stp x10, x12, [x9]\n   stp x14, x16, [x9, #16]\n"
+    "add x7, x7, #8\n   cmp x7, x8\n   b.lo 2b\n"
+    "3:  cmp x7, x4\n   b.hs 5f\n"
+    "4:  ldrb w9, [x2, x7]\n   ldr w9, [x6, x9, lsl #2]\n   str w9, [x0, x7, lsl #2]\n   add x7, x7, #1\n   cmp x7, x4\n   b.lo 4b\n"
+    "5:  add x0, x0, x1\n   add x2, x2, x3\n   subs x5, x5, #1\n   b.ne 1b\n"
+    "9:  " ASM_RET
+    ASM_END(memory_translate_u32_rect)
+#endif
+
     // memory_delete_bytes: four lanes a turn, all four loads before the
     // first store, every byte stored at the cursor and the cursor moved by
     // cinc when its entry is zero. The x86_64 block carries the full contract.
@@ -29870,6 +29994,44 @@ __asm__(
     ".Lmemory_translate_rv_done:\n" ASM_RET
     ASM_END(memory_translate)
 
+#ifndef KERNEL_MODE
+    //       memory_translate_u32_rect: with V, as many bytes as a register
+    //       holds, widened four times by vzext, made offsets and gathered by
+    //       vluxei32 from the words, stored; without it four words a turn.
+    //       Guest instructions a cell against the C, the x86_64 block's
+    //       cells under qemu: 75-88% without V, 5-26% with it at VLEN 128
+    //       and 256, a gather counted as one. Cycles are unmeasured: a core
+    //       may gather a lane at a time, and qemu, which does, runs the V
+    //       body 7 to 10 times slower than the C. The x86_64 block carries
+    //       the contract.
+    ".option push\n   .option arch, +v\n"
+    ASM_FUNC(memory_translate_u32_rect)
+    "beqz a4, 9f\n   beqz a5, 9f\n"
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t4, 2\n   beq t3, t4, 6f\n   bnez t3, 1f\n"
+    //  The detect keeps a0-a4 and a7; the height and the table are a5 and a6.
+    "addi sp, sp, -32\n   sd ra, 8(sp)\n   sd a5, 16(sp)\n   sd a6, 24(sp)\n   call cpu_vector_detect\n"
+    "ld ra, 8(sp)\n   ld a5, 16(sp)\n   ld a6, 24(sp)\n   addi sp, sp, 32\n   j memory_translate_u32_rect\n"
+#endif
+    "1:  slli a1, a1, 2\n"
+    "2:  mv t5, a2\n   mv t6, a0\n   mv a7, a4\n   li t4, 4\n   bltu a7, t4, 4f\n"
+    "3:  lbu t0, 0(t5)\n   lbu t1, 1(t5)\n   lbu t2, 2(t5)\n   lbu t3, 3(t5)\n   slli t0, t0, 2\n   slli t1, t1, 2\n   slli t2, t2, 2\n   slli t3, t3, 2\n"
+    "add t0, t0, a6\n   add t1, t1, a6\n   add t2, t2, a6\n   add t3, t3, a6\n   lw t0, 0(t0)\n   lw t1, 0(t1)\n   lw t2, 0(t2)\n   lw t3, 0(t3)\n"
+    "sw t0, 0(t6)\n   sw t1, 4(t6)\n   sw t2, 8(t6)\n   sw t3, 12(t6)\n   addi t5, t5, 4\n   addi t6, t6, 16\n   addi a7, a7, -4\n   bgeu a7, t4, 3b\n"
+    "4:  beqz a7, 5f\n   lbu t0, 0(t5)\n   slli t0, t0, 2\n   add t0, t0, a6\n   lw t0, 0(t0)\n   sw t0, 0(t6)\n   addi t5, t5, 1\n   addi t6, t6, 4\n   addi a7, a7, -1\n   j 4b\n"
+    "5:  add a0, a0, a1\n   add a2, a2, a3\n   addi a5, a5, -1\n   bnez a5, 2b\n   ret\n"
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "6:  slli a1, a1, 2\n"
+    "7:  mv t5, a2\n   mv t6, a0\n   mv a7, a4\n"
+    "8:  vsetvli t0, a7, e8, m1, ta, ma\n   vle8.v v1, (t5)\n   vsetvli zero, t0, e32, m4, ta, ma\n   vzext.vf4 v4, v1\n   vsll.vi v4, v4, 2\n"
+    "vluxei32.v v8, (a6), v4\n   vse32.v v8, (t6)\n   add t5, t5, t0\n   slli t1, t0, 2\n   add t6, t6, t1\n   sub a7, a7, t0\n   bnez a7, 8b\n"
+    "add a0, a0, a1\n   add a2, a2, a3\n   addi a5, a5, -1\n   bnez a5, 7b\n"
+#endif
+    "9:  " ASM_RET
+    ASM_END(memory_translate_u32_rect)
+    ".option pop\n"
+#endif
+
     // memory_delete_bytes: four lanes a turn, all four loads before the first
     // store, every byte stored at the cursor and the cursor moved by seqz of
     // its entry -- sltiu, so neither C nor Zbb. The x86_64 block carries the
@@ -36767,6 +36929,19 @@ READS_WRITES(1, 2) address_any memory_to_upper_ascii(address_any block, positive
 READS_WRITES(1, 2)
 address_any memory_translate(address_any block, positive size,
                              address_any table);
+#ifndef KERNEL_MODE
+// height rows of width bytes, from_stride bytes apart, made 32-bit words
+// through table into rows into_stride words apart: into[r][i] is
+// table[from[r][i]]. table holds the 256 words and, after them, the same
+// words as four planes of 256 bytes, byte 0 of every word first; the vector
+// bodies look up in the planes and the others in the words. A zero width or
+// height touches nothing, and nothing past a row is read. Text on one ground:
+// a glyph's coverage into the tones between its colour and the ground's.
+fn memory_translate_u32_rect(p32 address_to into, positive into_stride,
+                             const p8 address_to from, positive from_stride,
+                             positive width, positive height,
+                             const p32 address_to table);
+#endif
 // Remove every byte whose entry in a readable 256-byte table is nonzero, moving
 // the kept bytes to the front of the block in their order, and answer how many
 // were kept. Size zero accesses neither pointer; the table must not overlap

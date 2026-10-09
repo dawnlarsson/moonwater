@@ -278,6 +278,10 @@ cover('folds_already', 'size', 'memory_squeeze_bytes',
       'tr hands it what its read and the delete or translate before it left; '
       'no reachable call site passes a literal size, and the table is built '
       'from the command line')
+cover('folds_already', 'width', 'memory_translate_u32_rect',
+      'the text engine hands it a terminal cell or a glyph clipped to one; '
+      'widths and heights come from the grid and the glyph at run time, so '
+      'no reachable call site passes a literal')
 cover('specialized', 'size', 'memory_translate',
       'Measured at the six-byte temporary-name call site. Straight table '
       'loads with no loop or call take 98% of the assembly-call time on '

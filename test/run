@@ -3023,6 +3023,18 @@ lane_font()
 {
         freestanding_checks_lane font font
         font_outcome=$?
+
+        #       memory_translate_u32_rect has a V body: the riscv64 check
+        #       again with no V, and with V at 256 and 512 bits.
+        if target_tools riscv64; then
+                for cpu in rv64 rv64,v=true,vlen=256 rv64,v=true,vlen=512; do
+                        target=riscv64
+                        target_runner="qemu-riscv64 -cpu $cpu"
+                        target_label=riscv64-$(printf '%s' "$cpu" | sed 's/rv64,v=true,vlen=/v/')
+                        freestanding_checks_one font font || font_outcome=1
+                done
+                target_label=
+        fi
         python3 test/differential.py --harness font_reference
         case $? in
         0) ;;
@@ -18696,7 +18708,7 @@ python3 test/differential.py --harness scale "$@"
 #       absolute number that is not. A Linux host target runs directly.
 #
 
-benchmarks="floor baseline numbers bases hex hex-decode escape spelled codec fixed table padded input-bases fields human human-nearest hash-33 span-byte utf8-valid net-parsers net-hot cells-ascii fill-u32 fill-u64 paths reverse writer-field writer-text text-hot prefix-known translate delete squeeze offsets record-scans ascii-case ascii-case-fold line-break bounded-fold ascii-convert ascii-search grep-search grep-count last-of words clock scan-literal random allocator lock pool ordered tree reserve storage-read compare-max string-copy stream-get stream-write format-bounds startup montgomery limbs shell tools grep-sets awk find boot-time engines compression compression-floor cksum-crc cksum-digests unicode-width link"
+benchmarks="floor baseline numbers bases hex hex-decode translate-rect escape spelled codec fixed table padded input-bases fields human human-nearest hash-33 span-byte utf8-valid net-parsers net-hot cells-ascii fill-u32 fill-u64 paths reverse writer-field writer-text text-hot prefix-known translate delete squeeze offsets record-scans ascii-case ascii-case-fold line-break bounded-fold ascii-convert ascii-search grep-search grep-count last-of words clock scan-literal random allocator lock pool ordered tree reserve storage-read compare-max string-copy stream-get stream-write format-bounds startup montgomery limbs shell tools grep-sets awk find boot-time engines compression compression-floor cksum-crc cksum-digests unicode-width link"
 
 #       One benchmark's section and one line about it. A name with no section
 #       is one of the drivers below, which time a whole binary against the
@@ -18717,6 +18729,8 @@ bench_about()
                  bench_line="bulk hex output against the former checksum loop" ;;
         hex-decode) bench_section=BENCH_hex_decode
                  bench_line="hexadecimal decode at digest lengths against the C loop it replaced" ;;
+        translate-rect) bench_section=BENCH_translate_rect
+                 bench_line="the text engine's cells made pixels through a table, against the C loop it replaced" ;;
         escape)  bench_section=BENCH_escape
                  bench_line="shared escaping against the former writer loops" ;;
         spelled) bench_section=BENCH_spelled
