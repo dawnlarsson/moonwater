@@ -7103,6 +7103,20 @@ static void drag_release(int x, int y)
 }
 
 /*
+        A gesture whose release never reached the compositor: the card was
+        taken and the release was dropped while it was yielded, so
+        drag_release never ran. The window would
+        follow the pointer with no button held until the next click. Ended
+        without a snap, since nobody let go where the pointer says.
+*/
+static void drag_abandon(void)
+{
+        desktop.dragging = NULL;
+        desktop.resizing = NULL;
+        desktop.barring = NULL;
+}
+
+/*
         The wheel goes to whatever is under the pointer.
 
         Under, not focused: a wheel is aimed with the hand rather than chosen,
@@ -10658,6 +10672,11 @@ static void pointer_apply(void)
                                 desktop_watch();
                         }
 
+                        if ((desktop.dragging || desktop.resizing ||
+                             desktop.barring) &&
+                            !atomic_read(&desktop.button_down))
+                                drag_abandon();
+
                         if (desktop.dragging || desktop.resizing ||
                             desktop.barring)
                         {
@@ -11016,6 +11035,16 @@ static HOT void pointer_event_run(struct input_handle *handle, unsigned int type
         if (unlikely(READ_ONCE(canvas_yielded)))
         {
                 __this_cpu_inc(canvas_quiet);
+
+                /*
+                        The left button is not handed on while another
+                        program has the card, but its state is kept: a release
+                        dropped here left button_down set, and a drag begun
+                        before the card was taken went on following the
+                        pointer after it came back, with no button held.
+                */
+                if (type == EV_KEY && (code == BTN_LEFT || code == BTN_TOUCH))
+                        atomic_set(&desktop.button_down, !!value);
 
                 if (!pointer_yield_hears(type, code))
                 {

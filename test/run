@@ -17774,6 +17774,79 @@ else:
     for name in fw_names:
         out.append((name, "not run: no OVMF", "0" if name in fw_names[2:3] + fw_names[5:6] else "1" if name == fw_names[7] else "yes"))
 
+#       A drag whose button comes up while another program holds the card.
+#       The release is dropped with the input while the card is taken, and
+#       the window must not go on following the pointer once the card is back
+#       with no button held. The holder is started from the terminal, which
+#       has the keyboard only while nothing holds the card.
+def leftmost_run(name):
+        lw_, lh_, lpx_ = load(name)
+        lbg = lpx_[((4 * lw_) + 4) * 3:((4 * lw_) + 4) * 3 + 3]
+        runs_, start_ = [], None
+        for x in range(lw_):
+                o = ((lh_ // 2) * lw_ + x) * 3
+                lit = lpx_[o:o + 3] != lbg
+                if lit and start_ is None:
+                        start_ = x
+                elif not lit and start_ is not None:
+                        if x - start_ > 40:
+                                runs_.append((start_, x - 1))
+                        start_ = None
+        return runs_[-1] if runs_ else None
+
+if holder:
+        lost_work = work + "/lost-release"
+        os.makedirs(lost_work, exist_ok=True)
+        lost = Guest(desktop(image) + [
+            "-device", "usb-mouse,id=xhcimouse",
+            "-drive", "if=none,id=stick,format=raw,file=fat:ro:" + stick + ",readonly=on",
+            "-device", "usb-storage,drive=stick,removable=on",
+            "-no-reboot", "-display", "none", "-serial", "file:" + lost_work + "/serial",
+            "-append", "console=ttyS0 drm_client_lib.active= moonwater.cursor_plane=0"],
+            lost_work + "/qmp", lost_work + "/mon", lost_work)
+        time.sleep(25)
+        shot("lost-start")
+        win = leftmost_run("lost-start")
+        if win is None:
+                out.append(("a drag whose release the card swallowed ends with the button",
+                            "not run: no window found", "still"))
+        else:
+                lw_, lh_, lpx_ = load("lost-start")
+                mid = (win[0] + win[1]) // 2
+                bgc = lpx_[((4 * lw_) + 4) * 3:((4 * lw_) + 4) * 3 + 3]
+                top = next((y for y in range(lh_)
+                            if lpx_[(y * lw_ + mid) * 3:(y * lw_ + mid) * 3 + 3] != bgc), 0)
+                tx, ty = mid, top + 12
+                moveto(tx, ty)
+                send([{"type": "btn", "data": {"down": True, "button": "left"}}])
+                time.sleep(0.2)
+                for i in range(3):
+                        moveto(tx + 10 * (i + 1), ty)
+                        time.sleep(0.03)
+                type_text("mkdir -p /tmp/s")
+                key("ret")
+                type_text("mount -r /dev/sda1 /tmp/s")
+                key("ret")
+                type_text("/tmp/s/drmhold 4 1 2")
+                key("ret")
+                time.sleep(1.5)
+                send([{"type": "btn", "data": {"down": False, "button": "left"}}])
+                time.sleep(7.0)
+                shot("lost-after")
+                held = leftmost_run("lost-after")
+                for i in range(12):
+                        moveto(tx + 40 + 10 * i, ty + 4)
+                        time.sleep(0.05)
+                time.sleep(0.5)
+                shot("lost-moved")
+                moved = leftmost_run("lost-moved")
+                out.append(("a drag whose release the card swallowed ends with the button",
+                            "still" if held == moved else "moved %s" % (moved,), "still"))
+        lost.quit()
+        time.sleep(1)
+        if lost.poll() is None:
+                lost.kill()
+
 for name, got, want in out:
     print("%s|%s|%s" % (name, got, want))
 PY
