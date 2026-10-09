@@ -778,6 +778,26 @@ static COLD b32 net_wget_failed(bipolar status, b32 code, p8 address_to where,
                                      status == HTTP_EXPIRED
                                          ? "has expired" : "is not yet activated",
                                      writer_terminal_quoted_name, host);
+        //      GNU wget's line for a revoked certificate (its GnuTLS build's,
+        //      which says the others above too); then one GNU wget has no
+        //      equivalent for, for a status that could not be checked where
+        //      it is required: must-staple without a good staple, or the
+        //      tight tier's unreachable, stale or unreadable source.
+        case HTTP_REVOKED:
+                return string_report(log_error, WGET_SSL,
+                                     "ERROR: The certificate of '%w' has been revoked.\n"
+                                     "To connect to %w insecurely, use "
+                                     "`--no-check-certificate'.\n",
+                                     writer_terminal_quoted_name, host,
+                                     writer_terminal_quoted_name, host);
+        case HTTP_UNCHECKED:
+                return string_report(log_error, WGET_SSL,
+                                     "ERROR: Whether the certificate of '%w' is "
+                                     "revoked could not be checked.\n"
+                                     "To connect to %w insecurely, use "
+                                     "`--no-check-certificate'.\n",
+                                     writer_terminal_quoted_name, host,
+                                     writer_terminal_quoted_name, host);
         case HTTP_PRIVATE:
                 return string_report(log_error, WGET_GENERIC,
                                      "wget: refused a redirect to %w, an address "

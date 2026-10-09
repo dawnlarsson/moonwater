@@ -54239,6 +54239,30 @@ static bool net_as_emulated(void)
           AEAD sequence      TLS_AES_GCM_RECORD_LIMIT
             at-limit refuse: "TLS write/read keys stop at their AES-GCM usage limit"
 
+        Revocation
+          staple bytes       TLS_OCSP_MAX (16384)
+            exact+one-over:  "an OCSP response of exactly TLS_OCSP_MAX bytes parses"
+                             / "an OCSP response one byte past TLS_OCSP_MAX is refused"
+          single responses   TLS_OCSP_RESPONSES (16)
+            exact+one-over:  "an OCSP response of TLS_OCSP_RESPONSES SingleResponses parses"
+                             / "an OCSP response of one SingleResponse more is refused"
+          response certs     TLS_OCSP_CERTS (4)
+            exact+one-over:  "an OCSP response carrying TLS_OCSP_CERTS certificates parses"
+                             / "an OCSP response carrying one certificate more is refused"
+          list extensions    TLS_LIST_EXTENSIONS (16)
+            exact+one-over:  "an OCSP response of TLS_LIST_EXTENSIONS extensions parses"
+                             / "an OCSP response of one extension more is refused",
+                             "a CRL of TLS_LIST_EXTENSIONS extensions parses"
+                             / "a CRL of one extension more is refused"
+          CRL entries        TLS_CRL_ENTRIES (524288)
+            exact+one-over:  "a CRL of TLS_CRL_ENTRIES revoked certificates parses"
+                             / "a CRL of one revoked certificate more is refused"
+          clock skew         TLS_REVOCATION_SKEW (300 s)
+            exact+one-over:  "an answer holds five minutes past its nextUpdate and not a second more",
+                             "an answer holds five minutes before its thisUpdate and not a second more"
+          CRL bytes, time    TLS_CRL_MAX, TLS_REVOCATION_SECONDS: tls_plain_get's
+                             reads (tls_chains serves the CRLs it fetches)
+
         HTTP
           URL length         HTTP_URL_MAX (2048)
             exact+one-over:  start/Location URL ceiling checks in redirect_urls
@@ -67436,16 +67460,16 @@ static fn crypto_rsa_served_sizes(void)
                   child.sig_length == 512);
         check("ISRG Root X1's 4096-bit PKCS#1 signature over Root YR verifies",
               child.sig_length == 512 &&
-                  tls_anchor_verifies(address_of child, 20260101000000ull));
+                  tls_anchor_verifies(address_of child, 20260101000000ull, null));
         if (child.sig_length == 512)
         {
                 child.sig[child.sig_length - 1] ^= 1;
                 check("the 4096-bit verify refuses one flipped signature bit",
-                      !tls_anchor_verifies(address_of child, 20260101000000ull));
+                      !tls_anchor_verifies(address_of child, 20260101000000ull, null));
                 child.sig[child.sig_length - 1] ^= 1;
                 child.tbs[child.tbs_length - 1] ^= 1;
                 check("the 4096-bit verify refuses one flipped TBS bit",
-                      !tls_anchor_verifies(address_of child, 20260101000000ull));
+                      !tls_anchor_verifies(address_of child, 20260101000000ull, null));
                 child.tbs[child.tbs_length - 1] ^= 1;
         }
 
@@ -68087,7 +68111,7 @@ static fn tls_trust_anchor_chains(void)
                 return;
 
         check("kernel.org's Atlas intermediate finds GlobalSign Root CA - R3 by Name",
-              tls_anchor_verifies(address_of atlas_cert, 20260101000000ull));
+              tls_anchor_verifies(address_of atlas_cert, 20260101000000ull, null));
         check("a served GTS Root R1 cross-certificate carries an anchor key",
               tls_spki_is_anchor(address_of gts_cert, 20260101000000ull) &&
                   !tls_spki_is_anchor(address_of wr2_cert, 20260101000000ull));
@@ -68096,19 +68120,19 @@ static fn tls_trust_anchor_chains(void)
                                           address_of gts_cert) &&
                   tls_verify_one(address_of wr2_cert, address_of gts_cert));
         check("Sectigo OV R36 verifies under Root R46 with sha384WithRSAEncryption",
-              tls_anchor_verifies(address_of r36_cert, 20260101000000ull));
+              tls_anchor_verifies(address_of r36_cert, 20260101000000ull, null));
         r36_cert.sig[r36_cert.sig_length - 1] ^= 1;
         check("the SHA-384 PKCS#1 verify refuses one flipped signature bit",
-              !tls_anchor_verifies(address_of r36_cert, 20260101000000ull));
+              !tls_anchor_verifies(address_of r36_cert, 20260101000000ull, null));
         r36_cert.sig[r36_cert.sig_length - 1] ^= 1;
         check("Certum Trusted Root CA verifies under Certum Trusted Network CA with sha512WithRSAEncryption",
-              tls_anchor_verifies(address_of certum_cert, 20260101000000ull));
+              tls_anchor_verifies(address_of certum_cert, 20260101000000ull, null));
         certum_cert.sig[certum_cert.sig_length - 1] ^= 1;
         check("the SHA-512 PKCS#1 verify refuses one flipped signature bit",
-              !tls_anchor_verifies(address_of certum_cert, 20260101000000ull));
+              !tls_anchor_verifies(address_of certum_cert, 20260101000000ull, null));
         atlas_cert.issuer[atlas_cert.issuer_length - 1] ^= 1;
         check("an issuer Name no anchor carries fails closed",
-              !tls_anchor_verifies(address_of atlas_cert, 20260101000000ull));
+              !tls_anchor_verifies(address_of atlas_cert, 20260101000000ull, null));
         atlas_cert.issuer[atlas_cert.issuer_length - 1] ^= 1;
 
         for (positive i = 0; i < array_count(tls_anchors); i++)
@@ -71178,6 +71202,1188 @@ static positive net_descriptors_open(void)
         return open;
 }
 
+/*
+        Revocation: what a certificate names its revocation by, the stapled
+        OCSP answer, the CRL, the tiers over them, the TLS 1.2 and 1.3 wire
+        that carries a staple, and the ceilings.
+
+        The fixtures are a P-256 CA and what it issued and signed at fixed
+        dates -- thisUpdate 2026-10-08, nextUpdate 2026-10-15 -- made once
+        by Python's cryptography (an RSA certificate beside them for the key
+        rebuilt from its parts); the rows ask at 2026-10-10 unless they say.
+        A CRL reaches tls_crl_answer through the process's cache
+        (revocation_hold), so no row fetches anything.
+*/
+static const char revocation_rsa_hex[] =
+    "308202ab30820193a003020102020112300d06092a864886f70d01010b050030"
+    "193117301506035504030c0e7265766f636174696f6e20727361301e170d3236"
+    "303130313030303030305a170d3237303130313030303030305a301931173015"
+    "06035504030c0e7265766f636174696f6e2072736130820122300d06092a8648"
+    "86f70d01010105000382010f003082010a0282010100d8fe047396d9de9ff1e1"
+    "d6f16aaecace36555ceed784dccf1c47c2e32469831a79dd0aa54716358b0a59"
+    "14b25f814bd4442780c57802eb4ed0ae1e3f2a02131bc1f4013fe060e685e72b"
+    "7142c50d637f09859fcd3961880c68f666f20fda63422846de718e46aa97a917"
+    "c115b65a5b47149621071a9e6ee9b40c189dec899946fdbc409a70a98a2b4fa8"
+    "eac6acedf350ccb2b496492265b798367bf441becbe625684b6144f20d4cf018"
+    "66a885afff5065bf5e4a845ce8ba4be69862dc4c323cb4e31acfbee46928a789"
+    "36ee2be52d6814a6ffd66fb93cccc24c2312464c52c8ec4b5a184d5231ab3c65"
+    "0965c86b171bc977d20dbfd630129da5bee5a11ef1070203010001300d06092a"
+    "864886f70d01010b0500038201010097ffd339f942252411cffe78c2ebc3e575"
+    "a2bff96ff37d0553f678ca1a27d99581752630778f2c5bee5d0c32a0dcc6e0af"
+    "22a425728b6d0963ae877dd250a25ca809e8f0539be186376aa38422dccf6d4e"
+    "6a3211cce1974322f4529f3e6907719965872624a10dc1fb4f4844de10596bad"
+    "40e96f284cdecbb1032ab8ff056d694d24ef8b8d1054d088013ceb7302a2b918"
+    "d4147eac68dee6a3c6d987e8bb56d2cde3088d8c00ac5a91e755c2f3b360507f"
+    "5597fd1c405dd7410a1b7d2b936eb48e63d57b76ec90ed1950f4869317572057"
+    "4ed401551e4fa4099e2a30f07026b0750aa12a6efeb83deeff8997fccf8b78f5"
+    "2ff66ecb030ff7a90f82da06f1018b";
+static const char revocation_ca_hex[] =
+    "3082016030820107a003020102020110300a06082a8648ce3d04030230183116"
+    "301406035504030c0d7265766f636174696f6e206361301e170d323630313031"
+    "3030303030305a170d3237303130313030303030305a30183116301406035504"
+    "030c0d7265766f636174696f6e2063613059301306072a8648ce3d020106082a"
+    "8648ce3d03010703420004fbd0ea5bd96b8586f096b43c0753748e9aea493ce7"
+    "5ea2e1a86b572a15d3aa3a3c96371a3a3f5b91ddcfb18ffcc8e91652cbdfa0ec"
+    "44d966e80bac6bca0ce8f2a3423040300f0603551d130101ff040530030101ff"
+    "300e0603551d0f0101ff040403020106301d0603551d0e041604146c4da71146"
+    "594dba1e533ecb9555740aca994533300a06082a8648ce3d0403020347003044"
+    "02200f1d8d2aa3230e5e121e1b836130054070c938e0c0445eac9a0b8571f8eb"
+    "4721022049e23c67cf391a6d3ad3864766714af2a772714df75042de4ae7a857"
+    "772a0693";
+static const char revocation_leaf_hex[] =
+    "308201c63082016ba00302010202021001300a06082a8648ce3d040302301831"
+    "16301406035504030c0d7265766f636174696f6e206361301e170d3236303130"
+    "313030303030305a170d3237303130313030303030305a301a31183016060355"
+    "04030c0f7265766f636174696f6e206c6561663059301306072a8648ce3d0201"
+    "06082a8648ce3d03010703420004a619b7fce3c6b29b25bf4f3e2c92c4e3eae5"
+    "282b662c265be2bf63c2b94fbf049f3f199563b7111e3fb7ee6ef8fe3663eb03"
+    "b2b7bb74be2d69fbf915521edf0ca381a230819f301f0603551d230418301680"
+    "146c4da71146594dba1e533ecb9555740aca994533300c0603551d130101ff04"
+    "023000300e0603551d0f0101ff04040302078030130603551d25040c300a0608"
+    "2b06010505070301301d0603551d110416301482127265766f636174696f6e2e"
+    "6578616d706c65302a0603551d1f04233021301fa01da01b8619687474703a2f"
+    "2f63726c2e6578616d706c652f63612e63726c300a06082a8648ce3d04030203"
+    "49003046022100c30fb0794040811db5c16b6def110911b9cef9bb6f6ac4c00a"
+    "dbb0ab4ba01d2e022100b1e1b1c8c966347b734194d4a7c70c562d9699b3c1be"
+    "fafad20d3b5c12c725c2";
+static const char revocation_staple_hex[] =
+    "308201d930820180a00302010202021002300a06082a8648ce3d040302301831"
+    "16301406035504030c0d7265766f636174696f6e206361301e170d3236303130"
+    "313030303030305a170d3237303130313030303030305a301c311a3018060355"
+    "04030c117265766f636174696f6e20737461706c653059301306072a8648ce3d"
+    "020106082a8648ce3d0301070342000478ea8dac1a5ccecae4bc5c5fd57e803d"
+    "1e2c5e0074e2d38071d725484c35adc8f7aaf41223b128a741f478272a2f29c9"
+    "1e49654b8e48d670d0a29729f73c4456a381b53081b2301f0603551d23041830"
+    "1680146c4da71146594dba1e533ecb9555740aca994533300c0603551d130101"
+    "ff04023000300e0603551d0f0101ff04040302078030130603551d25040c300a"
+    "06082b06010505070301301d0603551d110416301482127265766f636174696f"
+    "6e2e6578616d706c65302a0603551d1f04233021301fa01da01b861968747470"
+    "3a2f2f63726c2e6578616d706c652f63612e63726c301106082b060105050701"
+    "1804053003020105300a06082a8648ce3d040302034700304402204da154d088"
+    "f670e06dc899e5c15f18eb33351d535b9962860477c02e45b3759702207e390f"
+    "c06dbe76a3c815227fabbc63c4c7fab0f8cf935adebf50112927a74bf1";
+static const char revocation_bare_hex[] =
+    "308201983082013da00302010202021003300a06082a8648ce3d040302301831"
+    "16301406035504030c0d7265766f636174696f6e206361301e170d3236303130"
+    "313030303030305a170d3237303130313030303030305a301a31183016060355"
+    "04030c0f7265766f636174696f6e20626172653059301306072a8648ce3d0201"
+    "06082a8648ce3d0301070342000402b28c18765e0dd60f1962db12bf8edc5d7d"
+    "ffcadebdbe255631db4f54a3e44b9c60f5ac824b0d6aa4b5475eaf02b5000bf8"
+    "1d706a13c7d60ef2d752d3f1e93ba3753073301f0603551d230418301680146c"
+    "4da71146594dba1e533ecb9555740aca994533300c0603551d130101ff040230"
+    "00300e0603551d0f0101ff04040302078030130603551d25040c300a06082b06"
+    "010505070301301d0603551d110416301482127265766f636174696f6e2e6578"
+    "616d706c65300a06082a8648ce3d0403020349003046022100fbcacda2a60a99"
+    "ff41178a2c17bd968b152fffb0f7b8df703b0c9960382fdc81022100945baba1"
+    "83d7031975dfa79a8ff4cbd2d0ad8b4add67604d161d95ffdcc50856";
+static const char revocation_part_hex[] =
+    "308201c53082016aa00302010202021004300a06082a8648ce3d040302301831"
+    "16301406035504030c0d7265766f636174696f6e206361301e170d3236303130"
+    "313030303030305a170d3237303130313030303030305a301a31183016060355"
+    "04030c0f7265766f636174696f6e20706172743059301306072a8648ce3d0201"
+    "06082a8648ce3d030107034200048346af94d7bced6868ab557c3cbc70210d43"
+    "a8ee83ae734d122486cae15a0db7ac256088f686aafc16cab6b958d807f5df2d"
+    "8035e91feaf89481a10bcd4cb082a381a130819e301f0603551d230418301680"
+    "146c4da71146594dba1e533ecb9555740aca994533300c0603551d130101ff04"
+    "023000300e0603551d0f0101ff04040302078030130603551d25040c300a0608"
+    "2b06010505070301301d0603551d110416301482127265766f636174696f6e2e"
+    "6578616d706c6530290603551d1f04223020301ea01ca01a8618687474703a2f"
+    "2f63726c2e6578616d706c652f372e63726c300a06082a8648ce3d0403020349"
+    "003046022100b78ec854f45bb2896c1296abc2f9e31f15fbaaa74e32e978cb8d"
+    "8c4987b06b35022100f8c4f2f833ce2b684e587755110e69e79bf893824041a2"
+    "320edb7223a046771a";
+static const char revocation_responder_hex[] =
+    "3082016e30820115a00302010202022001300a06082a8648ce3d040302301831"
+    "16301406035504030c0d7265766f636174696f6e206361301e170d3236303130"
+    "313030303030305a170d3237303130313030303030305a301f311d301b060355"
+    "04030c147265766f636174696f6e20726573706f6e6465723059301306072a86"
+    "48ce3d020106082a8648ce3d030107034200042e72b66f019e8efcd2a2957f5d"
+    "6f0d2c5b02306a0eb6075779bbfc7219e86a04eb96ef9f756cc7c143cfd8a00f"
+    "747ff2cf300d11a6fc38881533a7e7a8cf3fdea3483046301f0603551d230418"
+    "301680146c4da71146594dba1e533ecb9555740aca994533300e0603551d0f01"
+    "01ff04040302078030130603551d25040c300a06082b06010505070309300a06"
+    "082a8648ce3d04030203470030440220214863f73994453df9bae81ffb6846df"
+    "bd071e62982f0406d453137eefd16ae102204edf434e7f670a454e92ff175f6b"
+    "86f4004dc5c14db06e00f1259cd918361612";
+static const char revocation_pretender_hex[] =
+    "3082016e30820115a00302010202022002300a06082a8648ce3d040302301831"
+    "16301406035504030c0d7265766f636174696f6e206361301e170d3236303130"
+    "313030303030305a170d3237303130313030303030305a301f311d301b060355"
+    "04030c147265766f636174696f6e2070726574656e6465723059301306072a86"
+    "48ce3d020106082a8648ce3d03010703420004af6f4ca508c11a13df7432389e"
+    "9469ab39c04e718fcb4569822fde49149ea23ffcdd3281f7a25e1ca65740d36b"
+    "b3a0c5f83438e2bc44ee84bab8394700a1fd59a3483046301f0603551d230418"
+    "301680146c4da71146594dba1e533ecb9555740aca994533300e0603551d0f01"
+    "01ff04040302078030130603551d25040c300a06082b06010505070301300a06"
+    "082a8648ce3d040302034700304402207443a88dd2d5e863fd309efa01713f96"
+    "5468b9852641d64468ddad5988babb1a0220571033d981309b0229729e81d34b"
+    "b9e7b749335d3a16d66a45a09b174005a7dd";
+static const char revocation_ocsp_good_hex[] =
+    "308201040a0100a081fe3081fb06092b06010505073001010481ed3081ea3081"
+    "90a21604146c4da71146594dba1e533ecb9555740aca994533180f3230323631"
+    "3030393139333532385a30653063303b300906052b0e03021a0500041419b089"
+    "c1c36bd6d78c8b60fc6735c905046fee2504146c4da71146594dba1e533ecb95"
+    "55740aca994533020210018000180f32303236313030383030303030305aa011"
+    "180f32303236313031353030303030305a300a06082a8648ce3d040302034900"
+    "3046022100c3d9057512ce787e7f39177c7d967c6f9228c703b98c032272f563"
+    "f1455fd65d022100ab3fcd9b7875537350cac7cb85f0b3c3a824c661cc7b3aed"
+    "a3c8ae15c924f172";
+static const char revocation_ocsp_good256_hex[] =
+    "308201230a0100a082011c3082011806092b0601050507300101048201093082"
+    "01053081ada21604146c4da71146594dba1e533ecb9555740aca994533180f32"
+    "303236313030393139333532385a308181307f3057300d060960864801650304"
+    "02010500042041194f23ca1d5cae965d5d21befdab72de61d03b3dcdf6870688"
+    "ca0dbcaecd4e0420ced35bc29a23f88e5da705633c66b1905c5b10fbc5a2454b"
+    "c5f0953660dc89b7020210018000180f32303236313030383030303030305aa0"
+    "11180f32303236313031353030303030305a300a06082a8648ce3d0403020347"
+    "0030440220112380f2adc492ab68181b73f73528cf23d46802035984a2ad8de5"
+    "8c8add218502207de259383804e54f783baa0cacafc03de209f68bb12c4b33f7"
+    "cca7be5c50dba2";
+static const char revocation_ocsp_revoked_hex[] =
+    "3082011c0a0100a08201153082011106092b0601050507300101048201023081"
+    "ff3081a6a21604146c4da71146594dba1e533ecb9555740aca994533180f3230"
+    "3236313030393139333532385a307b3079303b300906052b0e03021a05000414"
+    "19b089c1c36bd6d78c8b60fc6735c905046fee2504146c4da71146594dba1e53"
+    "3ecb9555740aca99453302021001a116180f3230323631303031303030303030"
+    "5aa0030a0101180f32303236313030383030303030305aa011180f3230323631"
+    "3031353030303030305a300a06082a8648ce3d04030203480030450220136f53"
+    "45e2fa242c1839e63922abe468ef026a1442a020ccfe647be7c5f5aff3022100"
+    "a406e2270caaeec7ca3a07bb0b8a230beb2427b397fdd3c511329879edb12667";
+static const char revocation_ocsp_unknown_hex[] =
+    "308201040a0100a081fe3081fb06092b06010505073001010481ed3081ea3081"
+    "90a21604146c4da71146594dba1e533ecb9555740aca994533180f3230323631"
+    "3030393139333532385a30653063303b300906052b0e03021a0500041419b089"
+    "c1c36bd6d78c8b60fc6735c905046fee2504146c4da71146594dba1e533ecb95"
+    "55740aca994533020210018200180f32303236313030383030303030305aa011"
+    "180f32303236313031353030303030305a300a06082a8648ce3d040302034900"
+    "3046022100aa38c8130eb748af8d14d71a19a29b9b1296512b1d788096cf7b8d"
+    "4ea5e8d68c022100c9aa555771c4ee8e578f1567e6ac821a1ca70523338b9e98"
+    "0f8bea10afd917e1";
+static const char revocation_ocsp_no_next_hex[] =
+    "3081ef0a0100a081e93081e606092b06010505073001010481d83081d5307da2"
+    "1604146c4da71146594dba1e533ecb9555740aca994533180f32303236313030"
+    "393139333532385a30523050303b300906052b0e03021a0500041419b089c1c3"
+    "6bd6d78c8b60fc6735c905046fee2504146c4da71146594dba1e533ecb955574"
+    "0aca994533020210018000180f32303236313030383030303030305a300a0608"
+    "2a8648ce3d0403020348003045022100f2dbbcc8cd6b88eeffeef4bed47ef72e"
+    "2294f9a4c06906aae909d5aedde6fa2a022067d1359576eb4f1e455ae2d17152"
+    "02cbf1aaeb162fc2c37d8bc288ee13f29b8e";
+static const char revocation_ocsp_delegated_hex[] =
+    "3082028d0a0100a08202863082028206092b0601050507300101048202733082"
+    "026f30819ba121301f311d301b06035504030c147265766f636174696f6e2072"
+    "6573706f6e646572180f32303236313030393139333532385a30653063303b30"
+    "0906052b0e03021a0500041419b089c1c36bd6d78c8b60fc6735c905046fee25"
+    "04146c4da71146594dba1e533ecb9555740aca994533020210018000180f3230"
+    "3236313030383030303030305aa011180f32303236313031353030303030305a"
+    "300a06082a8648ce3d0403020349003046022100b978e2ede4fbfcd05a44925a"
+    "cef1d373955a125354663948baba851c50518938022100a1eea423b16a35856c"
+    "8e665e24a26ebabcb77deca069c87442bd717f51db0beaa08201763082017230"
+    "82016e30820115a00302010202022001300a06082a8648ce3d04030230183116"
+    "301406035504030c0d7265766f636174696f6e206361301e170d323630313031"
+    "3030303030305a170d3237303130313030303030305a301f311d301b06035504"
+    "030c147265766f636174696f6e20726573706f6e6465723059301306072a8648"
+    "ce3d020106082a8648ce3d030107034200042e72b66f019e8efcd2a2957f5d6f"
+    "0d2c5b02306a0eb6075779bbfc7219e86a04eb96ef9f756cc7c143cfd8a00f74"
+    "7ff2cf300d11a6fc38881533a7e7a8cf3fdea3483046301f0603551d23041830"
+    "1680146c4da71146594dba1e533ecb9555740aca994533300e0603551d0f0101"
+    "ff04040302078030130603551d25040c300a06082b06010505070309300a0608"
+    "2a8648ce3d04030203470030440220214863f73994453df9bae81ffb6846dfbd"
+    "071e62982f0406d453137eefd16ae102204edf434e7f670a454e92ff175f6b86"
+    "f4004dc5c14db06e00f1259cd918361612";
+static const char revocation_ocsp_delegated_by_key_hex[] =
+    "308202810a0100a082027a3082027606092b0601050507300101048202673082"
+    "0263308190a216041443142b4895f604cba5de36bd60d0ac3084551c68180f32"
+    "303236313030393139333532385a30653063303b300906052b0e03021a050004"
+    "1419b089c1c36bd6d78c8b60fc6735c905046fee2504146c4da71146594dba1e"
+    "533ecb9555740aca994533020210018000180f32303236313030383030303030"
+    "305aa011180f32303236313031353030303030305a300a06082a8648ce3d0403"
+    "020348003045022049090334ba5885d5b2dc86168ee35c6b2abd834c5d593b1f"
+    "33193ed6606a70c8022100a8a11da76617bba2e74423e72a33198c53248b2595"
+    "3ef25b08675f3ec71f47f1a0820176308201723082016e30820115a003020102"
+    "02022001300a06082a8648ce3d04030230183116301406035504030c0d726576"
+    "6f636174696f6e206361301e170d3236303130313030303030305a170d323730"
+    "3130313030303030305a301f311d301b06035504030c147265766f636174696f"
+    "6e20726573706f6e6465723059301306072a8648ce3d020106082a8648ce3d03"
+    "0107034200042e72b66f019e8efcd2a2957f5d6f0d2c5b02306a0eb6075779bb"
+    "fc7219e86a04eb96ef9f756cc7c143cfd8a00f747ff2cf300d11a6fc38881533"
+    "a7e7a8cf3fdea3483046301f0603551d230418301680146c4da71146594dba1e"
+    "533ecb9555740aca994533300e0603551d0f0101ff0404030207803013060355"
+    "1d25040c300a06082b06010505070309300a06082a8648ce3d04030203470030"
+    "440220214863f73994453df9bae81ffb6846dfbd071e62982f0406d453137eef"
+    "d16ae102204edf434e7f670a454e92ff175f6b86f4004dc5c14db06e00f1259c"
+    "d918361612";
+static const char revocation_ocsp_pretender_hex[] =
+    "3082028d0a0100a08202863082028206092b0601050507300101048202733082"
+    "026f30819ba121301f311d301b06035504030c147265766f636174696f6e2070"
+    "726574656e646572180f32303236313030393139333532385a30653063303b30"
+    "0906052b0e03021a0500041419b089c1c36bd6d78c8b60fc6735c905046fee25"
+    "04146c4da71146594dba1e533ecb9555740aca994533020210018000180f3230"
+    "3236313030383030303030305aa011180f32303236313031353030303030305a"
+    "300a06082a8648ce3d0403020349003046022100eb829cfe4123030034dbcdc9"
+    "928635ebd2c443a0194536f17178b911bfb3c063022100849c953d9206491ec9"
+    "7ffdb26f5e691a46f232280006aa0b5a359b7a8381a0b2a08201763082017230"
+    "82016e30820115a00302010202022002300a06082a8648ce3d04030230183116"
+    "301406035504030c0d7265766f636174696f6e206361301e170d323630313031"
+    "3030303030305a170d3237303130313030303030305a301f311d301b06035504"
+    "030c147265766f636174696f6e2070726574656e6465723059301306072a8648"
+    "ce3d020106082a8648ce3d03010703420004af6f4ca508c11a13df7432389e94"
+    "69ab39c04e718fcb4569822fde49149ea23ffcdd3281f7a25e1ca65740d36bb3"
+    "a0c5f83438e2bc44ee84bab8394700a1fd59a3483046301f0603551d23041830"
+    "1680146c4da71146594dba1e533ecb9555740aca994533300e0603551d0f0101"
+    "ff04040302078030130603551d25040c300a06082b06010505070301300a0608"
+    "2a8648ce3d040302034700304402207443a88dd2d5e863fd309efa01713f9654"
+    "68b9852641d64468ddad5988babb1a0220571033d981309b0229729e81d34bb9"
+    "e7b749335d3a16d66a45a09b174005a7dd";
+static const char revocation_ocsp_staple_hex[] =
+    "308201030a0100a081fd3081fa06092b06010505073001010481ec3081e93081"
+    "90a21604146c4da71146594dba1e533ecb9555740aca994533180f3230323631"
+    "3030393139333532385a30653063303b300906052b0e03021a0500041419b089"
+    "c1c36bd6d78c8b60fc6735c905046fee2504146c4da71146594dba1e533ecb95"
+    "55740aca994533020210028000180f32303236313030383030303030305aa011"
+    "180f32303236313031353030303030305a300a06082a8648ce3d040302034800"
+    "304502202139a15822e9ea50b87c0cd7f8e7b562e2856eca5b99b08ba2973e14"
+    "2575b1d502210095c121b30898513309bb28ba8525f320070c1582dc54755592"
+    "db21fb7c5db292";
+static const char revocation_ocsp_other_key_hex[] =
+    "308201080a0100a08201013081fe06092b06010505073001010481f03081ed30"
+    "8194a11a30183116301406035504030c0d7265766f636174696f6e206361180f"
+    "32303236313030393139333532385a30653063303b300906052b0e03021a0500"
+    "041419b089c1c36bd6d78c8b60fc6735c905046fee2504146c4da71146594dba"
+    "1e533ecb9555740aca994533020210018000180f323032363130303830303030"
+    "30305aa011180f32303236313031353030303030305a300a06082a8648ce3d04"
+    "0302034800304502201148354542f3d93d803dea8fda1b47f82478ac7de5dd32"
+    "f5521e165ef0aaf13a022100dcfccf06327a3dd0068b5f1fdca50e2077121000"
+    "3b8df4f2655b5734cce36954";
+static const char revocation_crl_empty_hex[] =
+    "3081d03078020101300a06082a8648ce3d04030230183116301406035504030c"
+    "0d7265766f636174696f6e206361170d3236313030383030303030305a170d32"
+    "36313031353030303030305aa02f302d301f0603551d230418301680146c4da7"
+    "1146594dba1e533ecb9555740aca994533300a0603551d140403020107300a06"
+    "082a8648ce3d0403020348003045022100a09b46416912ad584f70da18caf55b"
+    "b7f6479841b468d1a2c96c3e51708315b502201bc3793e799ec4403725c4b7a5"
+    "619dee09b3d3f5e2d61f7ff9f0fb593ce33c9b";
+static const char revocation_crl_listed_hex[] =
+    "308201183081c0020101300a06082a8648ce3d04030230183116301406035504"
+    "030c0d7265766f636174696f6e206361170d3236313030383030303030305a17"
+    "0d3236313031353030303030305a3046302102021005170d3236313030313030"
+    "303030305a300c300a0603551d1504030a0101302102021001170d3236313030"
+    "313030303030305a300c300a0603551d1504030a0101a02f302d301f0603551d"
+    "230418301680146c4da71146594dba1e533ecb9555740aca994533300a060355"
+    "1d140403020107300a06082a8648ce3d040302034700304402201369e70528ed"
+    "f6ed207036c9725982071c1c1dff5ab845b12cc1ea2b0116f305022018dc717b"
+    "b0bd262c0ad2ec25a97139db46e43acc190b364858ea60f86b55eb4c";
+static const char revocation_crl_part_hex[] =
+    "308201263081cc020101300a06082a8648ce3d04030230183116301406035504"
+    "030c0d7265766f636174696f6e206361170d3236313030383030303030305a17"
+    "0d3236313031353030303030305a3023302102021005170d3236313030313030"
+    "303030305a300c300a0603551d1504030a0101a05e305c301f0603551d230418"
+    "301680146c4da71146594dba1e533ecb9555740aca994533300a0603551d1404"
+    "03020107302d0603551d1c0101ff04233021a01ca01a8618687474703a2f2f63"
+    "726c2e6578616d706c652f372e63726c8101ff300a06082a8648ce3d04030203"
+    "49003046022100a34890ea83cdca2a3fb6283be6875d1162bea325363eb97a24"
+    "84e089e0e681f1022100f94971384ee413aa39ccb99fea3e8624fcde70dbabfc"
+    "9ce8398e431a50eebef0";
+static const char revocation_crl_part_listed_hex[] =
+    "308201243081cc020101300a06082a8648ce3d04030230183116301406035504"
+    "030c0d7265766f636174696f6e206361170d3236313030383030303030305a17"
+    "0d3236313031353030303030305a3023302102021004170d3236313030313030"
+    "303030305a300c300a0603551d1504030a0101a05e305c301f0603551d230418"
+    "301680146c4da71146594dba1e533ecb9555740aca994533300a0603551d1404"
+    "03020107302d0603551d1c0101ff04233021a01ca01a8618687474703a2f2f63"
+    "726c2e6578616d706c652f372e63726c8101ff300a06082a8648ce3d04030203"
+    "47003044022074baefdbd2930805725fa6fc92ca271ace88d8685223036812e9"
+    "a53ad162274d02206441bb254d1819aca57cd2cdd1f2164cd60bce10dfc343e3"
+    "afe46e7aa7236737";
+static const char revocation_crl_part_other_hex[] =
+    "308201253081cc020101300a06082a8648ce3d04030230183116301406035504"
+    "030c0d7265766f636174696f6e206361170d3236313030383030303030305a17"
+    "0d3236313031353030303030305a3023302102021004170d3236313030313030"
+    "303030305a300c300a0603551d1504030a0101a05e305c301f0603551d230418"
+    "301680146c4da71146594dba1e533ecb9555740aca994533300a0603551d1404"
+    "03020107302d0603551d1c0101ff04233021a01ca01a8618687474703a2f2f63"
+    "726c2e6578616d706c652f382e63726c8101ff300a06082a8648ce3d04030203"
+    "48003045022100abd0a78daa2b655bc528da018b2ac58fc920a3352bc8335e3f"
+    "a4beb10162d65602203ff4d3403bc8b29f3023f2d10066cd4dff18e6df0e70d3"
+    "d6a8120fa1b4a83494";
+static const char revocation_crl_ca_only_hex[] =
+    "308201023081a8020101300a06082a8648ce3d04030230183116301406035504"
+    "030c0d7265766f636174696f6e206361170d3236313030383030303030305a17"
+    "0d3236313031353030303030305aa05f305d301f0603551d230418301680146c"
+    "4da71146594dba1e533ecb9555740aca994533300a0603551d14040302010730"
+    "2e0603551d1c0101ff04243022a01da01b8619687474703a2f2f63726c2e6578"
+    "616d706c652f63612e63726c8201ff300a06082a8648ce3d0403020349003046"
+    "022100b80a799a11c6e505163260a26be0f82b991ba104f0f0d197d732410324"
+    "60d1d0022100fe107f3715520e70b3fe390b259d601eff4be9efefde45455cb0"
+    "285d2cd99343";
+static const char revocation_crl_other_key_hex[] =
+    "3081d03078020101300a06082a8648ce3d04030230183116301406035504030c"
+    "0d7265766f636174696f6e206361170d3236313030383030303030305a170d32"
+    "36313031353030303030305aa02f302d301f0603551d230418301680141415a7"
+    "0f9930ddbb1c9b6f8b95c1060b21bb7c8a300a0603551d140403020107300a06"
+    "082a8648ce3d0403020348003045022100811a31168ccf5907c7077e6c12e902"
+    "03f3087455009b5d02c2c33f34535f85a7022006e19f7b5b4825ca2ea806994a"
+    "1d39ad6d918b31955e3ba98cab5b108f2536cc";
+
+#define REVOCATION_NOW 20261010000000ull
+
+typedef struct
+{
+        p8 der[1024];
+        positive length;
+        tls_cert cert;
+} revocation_held_cert;
+
+static revocation_held_cert revocation_ca, revocation_leaf, revocation_staple,
+    revocation_bare, revocation_part, revocation_responder, revocation_pretender,
+    revocation_rsa;
+static tls_conn revocation_conn;
+
+static bool revocation_load(revocation_held_cert address_to held,
+                            string_address hex)
+{
+        held->length = crypto_hex_into(held->der, sizeof held->der, hex);
+        return held->length &&
+               !tls_parse_cert(held->der, held->length, address_of held->cert, null);
+}
+
+static fn revocation_forget(void)
+{
+        for (positive k = 0; k < TLS_CRL_HELD; k++)
+                if (tls_crl_cache[k].used)
+                        tls_crl_drop(tls_crl_cache + k);
+}
+
+/* A CRL held as tls_crl_get leaves one fetched from url at the date given,
+   or with no hex a fetch that failed. */
+static bool revocation_hold(string_address url, string_address hex, p64 when)
+{
+        tls_crl_held address_to slot = null;
+        positive length = hex ? string_length(hex) / 2 : 0;
+
+        for (positive k = 0; k < TLS_CRL_HELD && !slot; k++)
+                if (!tls_crl_cache[k].used)
+                        slot = tls_crl_cache + k;
+        if (!slot || (length && !byte_store_reserve(address_of slot->crl, length, 4096)))
+                return false;
+        if (length)
+                slot->crl.used = crypto_hex_into(slot->crl.bytes, slot->crl.room, hex);
+        crypto_sha256_of((p8 address_to)url, string_length(url), slot->name);
+        slot->fetched = tls_date_seconds(when);
+        slot->age = ++tls_crl_clock;
+        slot->used = true;
+        slot->failed = !length;
+        return true;
+}
+
+static p8 revocation_ocsp(revocation_held_cert address_to leaf,
+                          revocation_held_cert address_to issuer,
+                          string_address hex, p64 now, positive flip)
+{
+        static p8 bytes[4096];
+        positive length = crypto_hex_into(bytes, sizeof bytes, hex);
+
+        if (!length)
+                return 0xff;
+        if (flip)
+                bytes[length - flip] ^= 1;
+        return tls_ocsp_answer(address_of leaf->cert, address_of issuer->cert, bytes,
+                               length, now);
+}
+
+static p8 revocation_crl(revocation_held_cert address_to cert,
+                         revocation_held_cert address_to issuer, string_address hex,
+                         p64 now)
+{
+        revocation_forget();
+        if (hex && !revocation_hold((string_address) "http://crl.example/ca.crl", hex,
+                                    REVOCATION_NOW))
+                return 0xff;
+        if (hex && !revocation_hold((string_address) "http://crl.example/7.crl", hex,
+                                    REVOCATION_NOW))
+                return 0xff;
+        return tls_crl_answer(address_of cert->cert, address_of issuer->cert, now, null);
+}
+
+static fn tls_revocation_parsing(void)
+{
+        bool loaded = revocation_load(address_of revocation_ca, revocation_ca_hex) &&
+                      revocation_load(address_of revocation_leaf, revocation_leaf_hex) &&
+                      revocation_load(address_of revocation_staple, revocation_staple_hex) &&
+                      revocation_load(address_of revocation_bare, revocation_bare_hex) &&
+                      revocation_load(address_of revocation_part, revocation_part_hex) &&
+                      revocation_load(address_of revocation_responder,
+                                      revocation_responder_hex) &&
+                      revocation_load(address_of revocation_pretender,
+                                      revocation_pretender_hex) &&
+                      revocation_load(address_of revocation_rsa, revocation_rsa_hex);
+        tls_cert address_to leaf = address_of revocation_leaf.cert;
+        static const p8 serial[] = {0x10, 0x01};
+
+        check("the revocation fixtures parse", loaded);
+        if (!loaded)
+                return;
+        check("a certificate's first http: distribution point is kept with its names",
+              leaf->crl_url_length == 25 &&
+                  !memory_compare(leaf->crl_url, "http://crl.example/ca.crl", 25) &&
+                  leaf->crl_names && leaf->crl_names_length == 27);
+        check("a certificate keeps its serial's contents and authority key identifier",
+              leaf->serial_length == 2 && !memory_compare(leaf->serial, serial, 2) &&
+                  leaf->authority_key_length == 20);
+        check("TLS Feature status_request is must-staple",
+              revocation_staple.cert.must_staple && !leaf->must_staple);
+        check("a certificate without cRLDistributionPoints names no CRL",
+              !revocation_bare.cert.crl_url && !revocation_bare.cert.crl_names);
+        check("id-kp-OCSPSigning is read from extendedKeyUsage",
+              revocation_responder.cert.ocsp_signing &&
+                  !revocation_pretender.cert.ocsp_signing && !leaf->ocsp_signing);
+        check("keyUsage cRLSign is read", revocation_ca.cert.crl_sign &&
+                                              !leaf->crl_sign);
+
+        /* An anchor carries no SubjectPublicKey bytes; the key rebuilt from
+           its parts has to be the bytes a certificate of it would carry. */
+        for (positive k = 0; k < 2; k++)
+        {
+                tls_cert copy = k ? revocation_rsa.cert : revocation_ca.cert;
+                p8 rebuilt[32 + CRYPTO_RSA_BYTES];
+                positive length;
+                bool same;
+
+                copy.key_bits = null;
+                length = tls_key_bits(address_of copy, rebuilt, sizeof rebuilt);
+                same = length == copy.key_bits_length && length &&
+                       !memory_compare(rebuilt, k ? revocation_rsa.cert.key_bits
+                                                  : revocation_ca.cert.key_bits,
+                                       length);
+                if (k)
+                        check("an RSA key rebuilt from modulus and exponent is its DER",
+                              same);
+                else
+                        check("a P-256 key rebuilt from its point is its BIT STRING", same);
+                check("a key that does not fit the room is refused",
+                      !tls_key_bits(address_of copy, rebuilt, length - 1));
+        }
+
+        /* A cRLDistributionPoints whose only point names a cRLIssuer, or
+           only reasons, or no http: URI: the first is valid but not this
+           CA's, the second is refused, the third names nothing to fetch. */
+        {
+                static const p8 delegated[] = {
+                    0x30, 0x0c, 0x30, 0x0a, 0xa2, 0x08, 0x86, 0x06,
+                    'h', 't', 't', 'p', ':', '/'};
+                static const p8 reasons[] = {0x30, 0x06, 0x30, 0x04, 0x81, 0x02,
+                                             0x07, 0x80};
+                static const p8 ldap[] = {
+                    0x30, 0x0e, 0x30, 0x0c, 0xa0, 0x0a, 0xa0, 0x08, 0x86, 0x06,
+                    'l', 'd', 'a', 'p', ':', '/'};
+                tls_cert cert = {0};
+
+                check("a distribution point of another CRL issuer is not fetched",
+                      tls_parse_crl_points((p8 address_to)delegated, sizeof delegated,
+                                           address_of cert) == TLS_OK &&
+                          !cert.crl_url);
+                check("a distribution point of reasons alone is refused",
+                      tls_parse_crl_points((p8 address_to)reasons, sizeof reasons,
+                                           address_of cert) == TLS_FAIL);
+                check("a distribution point with no http: URI names nothing",
+                      tls_parse_crl_points((p8 address_to)ldap, sizeof ldap,
+                                           address_of cert) == TLS_OK &&
+                          !cert.crl_url);
+        }
+}
+
+static fn tls_revocation_answers(void)
+{
+        revocation_held_cert address_to ca = address_of revocation_ca;
+        revocation_held_cert address_to leaf = address_of revocation_leaf;
+        const p64 stale = 20261016000000ull;
+
+        if (!revocation_ca.length)
+                return;
+        check("a good OCSP answer the issuer signed is good",
+              revocation_ocsp(leaf, ca, revocation_ocsp_good_hex, REVOCATION_NOW, 0) ==
+                  TLS_ANSWER_GOOD);
+        check("a good OCSP answer naming its issuer by SHA-256 is good",
+              revocation_ocsp(leaf, ca, revocation_ocsp_good256_hex, REVOCATION_NOW, 0) ==
+                  TLS_ANSWER_GOOD);
+        check("a revoked OCSP answer is revoked",
+              revocation_ocsp(leaf, ca, revocation_ocsp_revoked_hex, REVOCATION_NOW, 0) ==
+                  TLS_ANSWER_REVOKED);
+        check("an unknown OCSP answer is no answer",
+              revocation_ocsp(leaf, ca, revocation_ocsp_unknown_hex, REVOCATION_NOW, 0) ==
+                  TLS_ANSWER_NONE);
+        check("an OCSP answer with no nextUpdate is no answer",
+              revocation_ocsp(leaf, ca, revocation_ocsp_no_next_hex, REVOCATION_NOW, 0) ==
+                  TLS_ANSWER_NONE);
+        check("a delegated responder with id-kp-OCSPSigning, named by name, answers",
+              revocation_ocsp(leaf, ca, revocation_ocsp_delegated_hex, REVOCATION_NOW, 0) ==
+                  TLS_ANSWER_GOOD);
+        check("a delegated responder named by its key's hash answers",
+              revocation_ocsp(leaf, ca, revocation_ocsp_delegated_by_key_hex,
+                              REVOCATION_NOW, 0) == TLS_ANSWER_GOOD);
+        check("a delegated responder without id-kp-OCSPSigning does not answer",
+              revocation_ocsp(leaf, ca, revocation_ocsp_pretender_hex, REVOCATION_NOW, 0) ==
+                  TLS_ANSWER_NONE);
+        check("an OCSP answer about another certificate is no answer",
+              revocation_ocsp(leaf, ca, revocation_ocsp_staple_hex, REVOCATION_NOW, 0) ==
+                  TLS_ANSWER_NONE);
+        check("an OCSP answer signed by another key under the issuer's name is none",
+              revocation_ocsp(leaf, ca, revocation_ocsp_other_key_hex, REVOCATION_NOW, 0) ==
+                  TLS_ANSWER_NONE);
+        check("an OCSP answer with one signature bit flipped is none",
+              revocation_ocsp(leaf, ca, revocation_ocsp_good_hex, REVOCATION_NOW, 1) ==
+                  TLS_ANSWER_NONE);
+        check("an OCSP answer asked of the wrong issuer is none",
+              revocation_ocsp(leaf, address_of revocation_responder,
+                              revocation_ocsp_good_hex, REVOCATION_NOW, 0) ==
+                  TLS_ANSWER_NONE);
+        check("a good OCSP answer past its nextUpdate is none",
+              revocation_ocsp(leaf, ca, revocation_ocsp_good_hex, stale, 0) ==
+                  TLS_ANSWER_NONE);
+        check("a revoked OCSP answer past its nextUpdate is still revoked",
+              revocation_ocsp(leaf, ca, revocation_ocsp_revoked_hex, stale, 0) ==
+                  TLS_ANSWER_REVOKED);
+
+        /* The five minutes of skew either way, to the second. */
+        check("an answer holds five minutes past its nextUpdate and not a second more",
+              tls_revocation_fresh(20261008000000ull, 20261015000000ull,
+                                   20261015000500ull) &&
+                  !tls_revocation_fresh(20261008000000ull, 20261015000000ull,
+                                        20261015000501ull));
+        check("an answer holds five minutes before its thisUpdate and not a second more",
+              tls_revocation_fresh(20261008000000ull, 20261015000000ull,
+                                   20261007235500ull) &&
+                  !tls_revocation_fresh(20261008000000ull, 20261015000000ull,
+                                        20261007235459ull));
+        check("an answer with no nextUpdate, or one before its thisUpdate, never holds",
+              !tls_revocation_fresh(20261008000000ull, 0, REVOCATION_NOW) &&
+                  !tls_revocation_fresh(20261015000000ull, 20261008000000ull,
+                                        REVOCATION_NOW));
+        check("seconds count across a leap day and a year",
+              tls_date_seconds(20280301000000ull) - tls_date_seconds(20280228000000ull) ==
+                      2 * 86400 &&
+                  tls_date_seconds(20270101000000ull) -
+                          tls_date_seconds(20261231235959ull) == 1);
+
+        check("an empty CRL its issuer signed is good",
+              revocation_crl(leaf, ca, revocation_crl_empty_hex, REVOCATION_NOW) ==
+                  TLS_ANSWER_GOOD);
+        {
+                p8 key[32 + CRYPTO_RSA_BYTES];
+                p8 signer[32];
+                positive length = tls_key_bits(address_of ca->cert, key, sizeof key);
+                tls_crl_held address_to held = null;
+
+                crypto_sha256_of(key, length, signer);
+                for (positive k = 0; k < TLS_CRL_HELD; k++)
+                        if (tls_crl_cache[k].used &&
+                            !memory_compare(tls_crl_cache[k].signer, signer, 32))
+                                held = tls_crl_cache + k;
+                check("a CRL that verified is held with its signer and nextUpdate",
+                      held && held->next_update == 20261015000000ull);
+        }
+        check("a CRL listing the certificate is revoked",
+              revocation_crl(leaf, ca, revocation_crl_listed_hex, REVOCATION_NOW) ==
+                  TLS_ANSWER_REVOKED);
+        check("a CRL past its nextUpdate is none",
+              revocation_crl(leaf, ca, revocation_crl_empty_hex, stale) == TLS_ANSWER_NONE);
+        check("a CRL past its nextUpdate that lists the certificate is revoked",
+              revocation_crl(leaf, ca, revocation_crl_listed_hex, stale) ==
+                  TLS_ANSWER_REVOKED);
+        check("a partitioned CRL that names the point is good",
+              revocation_crl(address_of revocation_part, ca, revocation_crl_part_hex,
+                             REVOCATION_NOW) == TLS_ANSWER_GOOD);
+        check("a partitioned CRL that names the point and lists it is revoked",
+              revocation_crl(address_of revocation_part, ca,
+                             revocation_crl_part_listed_hex, REVOCATION_NOW) ==
+                  TLS_ANSWER_REVOKED);
+        check("another partition's CRL at the point is none, whatever it lists",
+              revocation_crl(address_of revocation_part, ca,
+                             revocation_crl_part_other_hex, REVOCATION_NOW) ==
+                  TLS_ANSWER_NONE);
+        check("a CRL of CA certificates only does not answer for an end entity",
+              revocation_crl(leaf, ca, revocation_crl_ca_only_hex, REVOCATION_NOW) ==
+                  TLS_ANSWER_NONE);
+        check("a CRL under the issuer's name that another key signed is none",
+              revocation_crl(leaf, ca, revocation_crl_other_key_hex, REVOCATION_NOW) ==
+                  TLS_ANSWER_NONE);
+        {
+                revocation_held_cert limited = revocation_ca;
+
+                limited.cert.key_usage = true;
+                limited.cert.crl_sign = false;
+                check("a CRL from an issuer whose key may not sign CRLs is none",
+                      revocation_crl(leaf, address_of limited, revocation_crl_empty_hex,
+                                     REVOCATION_NOW) == TLS_ANSWER_NONE);
+        }
+        {
+                revocation_held_cert renamed = revocation_leaf;
+
+                renamed.cert.issuer = revocation_responder.cert.subject;
+                renamed.cert.issuer_length = revocation_responder.cert.subject_length;
+                check("a CRL under another issuer's name is none",
+                      revocation_crl(address_of renamed, ca, revocation_crl_empty_hex,
+                                     REVOCATION_NOW) == TLS_ANSWER_NONE);
+        }
+        revocation_forget();
+        check("a CRL fetch that failed is none until it is tried again",
+              revocation_hold((string_address) "http://crl.example/ca.crl", null,
+                              REVOCATION_NOW) &&
+                  tls_crl_answer(address_of leaf->cert, address_of ca->cert,
+                                 REVOCATION_NOW, null) == TLS_ANSWER_NONE);
+        check("a certificate that names no CRL has no answer to give",
+              tls_crl_answer(address_of revocation_bare.cert, address_of ca->cert,
+                             REVOCATION_NOW, null) == TLS_ANSWER_ABSENT);
+        revocation_forget();
+        check("a CRL not held and not fetched is none",
+              tls_crl_answer(address_of leaf->cert, address_of ca->cert, REVOCATION_NOW,
+                             null) == TLS_ANSWER_NONE);
+        {
+                /* One signature bit flipped in a held CRL. */
+                bool held = revocation_hold((string_address) "http://crl.example/ca.crl",
+                                            revocation_crl_empty_hex, REVOCATION_NOW);
+                tls_crl_held address_to slot = tls_crl_cache;
+
+                for (positive k = 0; k < TLS_CRL_HELD; k++)
+                        if (tls_crl_cache[k].used)
+                                slot = tls_crl_cache + k;
+                slot->crl.bytes[slot->crl.used - 1] ^= 1;
+                check("a CRL with one signature bit flipped is none",
+                      held && tls_crl_answer(address_of leaf->cert, address_of ca->cert,
+                                             REVOCATION_NOW, null) == TLS_ANSWER_NONE);
+        }
+        revocation_forget();
+}
+
+/* The tiers: tls_revocation_holds over the leaf and its CA, the staple and
+   the CRL each made to answer one way. */
+static bool revocation_tier(revocation_held_cert address_to leaf,
+                            string_address staple, string_address crl, bool failed)
+{
+        static p8 bytes[4096];
+        tls_cert chain[2] = {leaf->cert, revocation_ca.cert};
+        positive path[1] = {0};
+        positive length = staple ? crypto_hex_into(bytes, sizeof bytes, staple) : 0;
+
+        revocation_forget();
+        if (crl || failed)
+                (void)revocation_hold((string_address) "http://crl.example/ca.crl", crl,
+                                      REVOCATION_NOW);
+        memory_fill(address_of revocation_conn, 0, TLS_CONN_HEAD);
+        return tls_revocation_holds(address_of revocation_conn, chain, path, 0,
+                                    chain + 1, length ? bytes : null, length,
+                                    REVOCATION_NOW);
+}
+
+static fn tls_revocation_tiers(void)
+{
+        bool tight = MOONWATER_STRICT_NET >= STRICT_TIGHT;
+        p8 address_to fault = address_of revocation_conn.fault;
+        revocation_held_cert address_to leaf = address_of revocation_leaf;
+        revocation_held_cert address_to staple = address_of revocation_staple;
+
+        if (!revocation_ca.length)
+                return;
+        check("a good staple holds in every tier",
+              revocation_tier(leaf, revocation_ocsp_good_hex, null, false));
+        check("a revoked staple refuses in every tier, as revoked",
+              !revocation_tier(leaf, revocation_ocsp_revoked_hex, null, false) &&
+                  *fault == TLS_FAULT_REVOKED);
+        check("an unknown staple falls to the CRL at the default tier and refuses at the tight one",
+              revocation_tier(leaf, revocation_ocsp_unknown_hex, revocation_crl_empty_hex,
+                              false) == !tight &&
+                  (!tight || *fault == TLS_FAULT_UNCHECKED));
+        check("an unknown staple and a CRL that lists the leaf refuse as revoked",
+              tight ? !revocation_tier(leaf, revocation_ocsp_unknown_hex,
+                                       revocation_crl_listed_hex, false)
+                    : !revocation_tier(leaf, revocation_ocsp_unknown_hex,
+                                       revocation_crl_listed_hex, false) &&
+                          *fault == TLS_FAULT_REVOKED);
+        check("a good CRL holds in every tier",
+              revocation_tier(leaf, null, revocation_crl_empty_hex, false));
+        check("a CRL that lists the leaf refuses in every tier, as revoked",
+              !revocation_tier(leaf, null, revocation_crl_listed_hex, false) &&
+                  *fault == TLS_FAULT_REVOKED);
+        check("an unreachable CRL passes at the default tier and refuses at the tight one",
+              revocation_tier(leaf, null, null, true) == !tight &&
+                  (!tight || *fault == TLS_FAULT_UNCHECKED));
+        check("a must-staple leaf without a staple refuses in every tier, unchecked",
+              !revocation_tier(staple, null, revocation_crl_empty_hex, false) &&
+                  *fault == TLS_FAULT_UNCHECKED);
+        check("a must-staple leaf with an unknown staple refuses in every tier",
+              !revocation_tier(staple, revocation_ocsp_unknown_hex,
+                               revocation_crl_empty_hex, false) &&
+                  *fault == TLS_FAULT_UNCHECKED);
+        check("a must-staple leaf with a good staple holds",
+              revocation_tier(staple, revocation_ocsp_staple_hex, null, false));
+        check("a leaf that names no source holds in every tier",
+              revocation_tier(address_of revocation_bare, null, null, false));
+        revocation_forget();
+}
+
+/* tls_entry_status, the CertificateEntry extensions a staple rides in. */
+static fn tls_revocation_entries(void)
+{
+        static const struct
+        {
+                string_address name;
+                string_address hex;
+                bool asked;
+                bool accept;
+                positive response;
+        } rows[] = {
+            {"no extensions", "", false, true, 0},
+            {"a staple when asked", "000500080100000430020500", true, true, 4},
+            {"a staple when not asked", "000500080100000430020500", false, false, 0},
+            {"a status of another type", "000500080200000430020500", true, false, 0},
+            {"an empty response", "0005000401000000", true, false, 0},
+            {"a response longer than its extension", "000500080100000530020500", true,
+             false, 0},
+            {"a byte after the response", "00050009010000043002050000", true, false, 0},
+            {"two extensions", "0005000801000004300205000012000400020000", true, false, 0},
+            {"an SCT list", "001200040002aabb", true, false, 0},
+        };
+        bool all = true;
+
+        for (positive row = 0; row < array_count(rows); row++)
+        {
+                p8 bytes[64];
+                positive length = crypto_hex_into(bytes, sizeof bytes, rows[row].hex);
+                const p8 address_to response = (const p8 address_to)bytes;
+                positive response_length = 99;
+                bool accepted = tls_entry_status(bytes, length, rows[row].asked,
+                                                 address_of response,
+                                                 address_of response_length);
+
+                if (accepted != rows[row].accept ||
+                    (accepted && response_length != rows[row].response) ||
+                    (accepted && rows[row].response && response != bytes + 8) ||
+                    (accepted && !rows[row].response && response))
+                {
+                        all = false;
+                        string_format(log, "  entry status row: %s\n", rows[row].name);
+                }
+        }
+        check("each CertificateEntry extensions row answers its verdict", all);
+}
+
+/* The TLS 1.2 wire: status_request offered only when the chain is checked,
+   an echo taken only when offered and empty, CertificateStatus after the
+   Certificate only, and the staple relaid into the leaf's entry. */
+static fn tls_revocation_handshake(void)
+{
+        static p8 scratch[5 + TLS_PLAINTEXT_MAX];
+        tls_conn address_to tls = address_of revocation_conn;
+        p8 hello[512];
+        positive used = 0;
+        positive at = 0;
+        positive size = 0;
+
+        for (positive checked = 0; checked < 2; checked++)
+        {
+                tls_conn client = {.host = "revocation.example", .check_cert = checked};
+                bool offered = tls_client_hello(address_of client, hello, sizeof hello,
+                                                address_of used, null, 0) == TLS_OK &&
+                               client.status_requested == checked &&
+                               tls_hello_extension(hello, used, 5, address_of at,
+                                                   address_of size) == checked &&
+                               (!checked ||
+                                (size == 5 && !memory_compare(hello + at,
+                                                              "\1\0\0\0\0", 5)));
+
+                if (checked)
+                        check("a checked ClientHello offers status_request for OCSP",
+                              offered);
+                else
+                        check("an unchecked ClientHello offers no status_request",
+                              offered);
+                crypto_forget(client.scalar, sizeof client.scalar);
+        }
+
+        {
+                static const struct
+                {
+                        string_address name;
+                        string_address extensions;
+                        p16 suite;
+                        bool asked;
+                        bool accept;
+                } rows[] = {
+                    {"a TLS 1.2 echo of status_request", "00170000ff01000100" "00050000",
+                     0xc02b, true, true},
+                    {"a TLS 1.2 echo nothing asked for", "00170000ff01000100" "00050000",
+                     0xc02b, false, false},
+                    {"a TLS 1.2 echo with a body", "00170000ff01000100" "0005000100",
+                     0xc02b, true, false},
+                    {"two TLS 1.2 echoes", "00170000ff01000100" "00050000" "00050000",
+                     0xc02b, true, false},
+                    {"a TLS 1.3 ServerHello echoing status_request",
+                     "002b00020304" "00330024001d0020" "4242424242424242424242424242424242424242424242424242424242424242"
+                     "00050000", 0x1301, true, false},
+                };
+                bool all = true;
+
+                for (positive row = 0; row < array_count(rows); row++)
+                {
+                        p8 message[160] = {TLS_HS_SERVER_HELLO, 0, 0, 0, 3, 3};
+                        p8 peer[97];
+                        positive share = 0;
+                        positive group = 0;
+                        const p8 address_to cookie = null;
+                        positive cookie_length = 0;
+                        positive length;
+                        bool accepted;
+
+                        memory_fill(tls, 0, TLS_CONN_HEAD);
+                        tls->group = 0x1d;
+                        tls->status_requested = rows[row].asked;
+                        memory_fill(message + 6, 0x42, 32);
+                        at = 38;
+                        message[at++] = 0;
+                        network_store_16(message + at, rows[row].suite);
+                        at += 3;
+                        length = crypto_hex_into(message + at + 2, sizeof message - at - 2,
+                                                 rows[row].extensions);
+                        network_store_16(message + at, (p16)length);
+                        at += 2 + length;
+                        message[3] = (p8)(at - 4);
+                        accepted = tls_server_hello_keys(message, at, tls, peer,
+                                                         sizeof peer, &share, &group,
+                                                         &cookie, &cookie_length) ==
+                                       TLS_OK &&
+                                   tls->tls12 && tls->status_echoed;
+                        if (accepted != rows[row].accept)
+                        {
+                                all = false;
+                                string_format(log, "  status echo row: %s\n",
+                                              rows[row].name);
+                        }
+                }
+                check("each ServerHello status_request row answers its verdict", all);
+        }
+
+        {
+                p8 state = TLS12_FLIGHT_CERTIFICATE;
+
+                check("TLS 1.2 takes a CertificateStatus after the Certificate",
+                      tls_server_flight_step(address_of state, TLS_HS_CERTIFICATE) &&
+                          tls_server_flight_step(address_of state,
+                                                 TLS_HS_CERTIFICATE_STATUS) &&
+                          tls_server_flight_step(address_of state,
+                                                 TLS_HS_SERVER_KEY_EXCHANGE));
+                state = TLS12_FLIGHT_CERTIFICATE;
+                check("TLS 1.2 refuses a CertificateStatus before the Certificate",
+                      !tls_server_flight_step(address_of state,
+                                              TLS_HS_CERTIFICATE_STATUS));
+                check("TLS 1.2 refuses a second CertificateStatus",
+                      tls_server_flight_step(address_of state, TLS_HS_CERTIFICATE) &&
+                          tls_server_flight_step(address_of state,
+                                                 TLS_HS_CERTIFICATE_STATUS) &&
+                          !tls_server_flight_step(address_of state,
+                                                  TLS_HS_CERTIFICATE_STATUS));
+                state = TLS_SERVER_FLIGHT_CERTIFICATE;
+                check("TLS 1.3 has no CertificateStatus message",
+                      tls_server_flight_step(address_of state, TLS_HS_CERTIFICATE) &&
+                          !tls_server_flight_step(address_of state,
+                                                  TLS_HS_CERTIFICATE_STATUS));
+        }
+
+        /* The relay: the leaf in a TLS 1.2 list, its check waiting, then a
+           CertificateStatus that lands as the leaf entry's extension. */
+        if (revocation_leaf.length)
+        {
+                static p8 body[3 + 3 + 1024];
+                static p8 status[4 + 4 + 4096];
+                positive cert = revocation_leaf.length;
+                positive response = crypto_hex_into(status + 4, sizeof status - 4,
+                                                    revocation_ocsp_good_hex);
+                positive list = 3 + cert;
+
+                body[0] = (p8)(list >> 16);
+                network_store_16(body + 1, (p16)list);
+                body[3] = 0;
+                network_store_16(body + 4, (p16)cert);
+                memory_copy(body + 6, revocation_leaf.der, cert);
+                memory_fill(tls, 0, TLS_CONN_HEAD);
+                tls->tls12 = true;
+                tls->suite = 0xc02b;
+                tls->host = "revocation.example";
+                tls->status_requested = tls->status_echoed = true;
+                check("a TLS 1.2 Certificate after a status_request echo waits for its staple",
+                      tls12_certificate(tls, body, 3 + list, scratch) &&
+                          tls->chain_pending && !tls->leaf_curve);
+                status[0] = 1;
+                status[1] = (p8)(response >> 16);
+                network_store_16(status + 2, (p16)response);
+                check("a CertificateStatus of another type is refused and the check still waits",
+                      (status[0] = 2, !tls12_certificate_status(tls, status, 4 + response,
+                                                                scratch)) &&
+                          tls->chain_pending);
+                status[0] = 1;
+                check("a CertificateStatus lands as the leaf entry's status_request",
+                      tls12_certificate_status(tls, status, 4 + response, scratch) &&
+                          !tls->chain_pending && tls->leaf_curve == 1 &&
+                          tls_load_24(scratch + 1) == 3 + cert + 2 + 8 + response &&
+                          network_load_16(scratch + 7 + cert) == 8 + response &&
+                          network_load_16(scratch + 9 + cert) == 5 &&
+                          scratch[13 + cert] == 1 &&
+                          !memory_compare(scratch + 17 + cert, status + 4, response));
+                check("a CertificateStatus nothing waits for is refused",
+                      !tls12_certificate_status(tls, status, 4 + response, scratch));
+        }
+}
+
+/* A DER value of tag around the length bytes at the front of bytes, moved
+   up behind its header: the whole length. */
+static positive revocation_wrap(p8 address_to bytes, positive length, p8 tag)
+{
+        positive head = tls_der_header_size(length);
+
+        memory_copy(bytes + head, bytes, length);
+        tls_der_header(bytes, tag, length);
+        return head + length;
+}
+
+static positive revocation_put(p8 address_to out, positive at, string_address hex)
+{
+        return at + crypto_hex_into(out + at, 1 << 20, hex);
+}
+
+static positive revocation_fill(p8 address_to out, positive at, p8 byte,
+                                positive count)
+{
+        memory_fill(out + at, byte, count);
+        return at + count;
+}
+
+/* One SingleResponse: a SHA-1 CertID of made-up hashes for serial 1001,
+   good, thisUpdate and nextUpdate. */
+static positive revocation_single(p8 address_to out, positive at)
+{
+        positive start = at;
+
+        at = revocation_put(out, at, "300906052b0e03021a05000414");
+        at = revocation_fill(out, at, 0x11, 20);
+        at = revocation_put(out, at, "0414");
+        at = revocation_fill(out, at, 0x22, 20);
+        at = revocation_put(out, at, "02021001");
+        at = start + revocation_wrap(out + start, at - start, 0x30);
+        at = revocation_put(out, at, "8000180f32303236313030383030303030305a"
+                                     "a011180f32303236313031353030303030305a");
+        return start + revocation_wrap(out + start, at - start, 0x30);
+}
+
+/* An OCSP response of singles SingleResponses, certs certificates (empty
+   SEQUENCEs: the parser only counts them), extensions unknown response
+   extensions and one more of pad bytes when pad is not 0. */
+static positive revocation_ocsp_shape(p8 address_to out, positive singles,
+                                      positive certs, positive extensions,
+                                      positive pad)
+{
+        static p8 part[24576];
+        positive at = 0;
+        positive length;
+
+        for (positive k = 0; k < singles; k++)
+                at = revocation_single(part, at);
+        length = revocation_wrap(part, at, 0x30);
+        at = revocation_put(out, 0, "a2160414");
+        at = revocation_fill(out, at, 0x33, 20);
+        at = revocation_put(out, at, "180f32303236313030383030303030305a");
+        memory_copy(out + at, part, length);
+        at += length;
+        if (extensions || pad)
+        {
+                positive list = 0;
+
+                for (positive k = 0; k < extensions; k++)
+                {
+                        part[list++] = 0x30;
+                        part[list++] = 7;
+                        part[list++] = 6;
+                        part[list++] = 2;
+                        part[list++] = 0x2a;
+                        part[list++] = (p8)k;
+                        part[list++] = 4;
+                        part[list++] = 1;
+                        part[list++] = 0;
+                }
+                if (pad)
+                {
+                        positive value;
+
+                        memory_fill(part + list, 0, pad);
+                        value = revocation_wrap(part + list, pad, 0x04);
+                        memory_copy(part + list + 4, part + list, value);
+                        part[list + 0] = 6;
+                        part[list + 1] = 2;
+                        part[list + 2] = 0x2a;
+                        part[list + 3] = 0x7f;
+                        list += revocation_wrap(part + list, 4 + value, 0x30);
+                }
+                length = revocation_wrap(part, list, 0x30);
+                length = revocation_wrap(part, length, 0xa1);
+                memory_copy(out + at, part, length);
+                at += length;
+        }
+        at = revocation_wrap(out, at, 0x30);
+        at = revocation_put(out, at, "300a06082a8648ce3d040302" "0309003006020101020101");
+        if (certs)
+        {
+                positive list = 0;
+
+                for (positive k = 0; k < certs; k++)
+                        list = revocation_put(part, list, "3000");
+                length = revocation_wrap(part, list, 0x30);
+                length = revocation_wrap(part, length, 0xa0);
+                memory_copy(out + at, part, length);
+                at += length;
+        }
+        at = revocation_wrap(out, at, 0x30);
+        at = revocation_wrap(out, at, 0x04);
+        memory_copy(out + 11, out, at);
+        crypto_hex_into(out, 11, "06092b0601050507300101");
+        at = revocation_wrap(out, 11 + at, 0x30);
+        at = revocation_wrap(out, at, 0xa0);
+        memory_copy(out + 3, out, at);
+        crypto_hex_into(out, 3, "0a0100");
+        return revocation_wrap(out, 3 + at, 0x30);
+}
+
+/* A CRL of entries entries and extensions unknown CRL extensions, into a
+   store. */
+static positive revocation_crl_shape(byte_store address_to into, positive entries,
+                                     positive extensions)
+{
+        static const p8 entry[] = {0x30, 0x14, 0x02, 0x03, 0x01, 0x02, 0x03, 0x17, 0x0d,
+                                   '2', '6', '1', '0', '0', '1', '0', '0', '0', '0',
+                                   '0', '0', 'Z'};
+        positive at;
+        positive revoked;
+
+        into->used = 0;
+        if (!byte_store_reserve(into, entries * sizeof entry + 4096, 1 << 20))
+                return 0;
+        for (positive k = 0; k < entries; k++)
+                memory_copy(into->bytes + k * sizeof entry, entry, sizeof entry);
+        revoked = revocation_wrap(into->bytes, entries * sizeof entry, 0x30);
+        at = 0;
+        {
+                static p8 head[256];
+                positive size = revocation_put(head, 0,
+                                               "020101300a06082a8648ce3d040302"
+                                               "300f310d300b06035504030c0474657374"
+                                               "170d3236313030383030303030305a"
+                                               "170d3236313031353030303030305a");
+
+                memory_copy(into->bytes + size, into->bytes, revoked);
+                memory_copy(into->bytes, head, size);
+                at = size + revoked;
+        }
+        if (extensions)
+        {
+                positive list = 0;
+                p8 address_to tail = into->bytes + at;
+
+                for (positive k = 0; k < extensions; k++)
+                {
+                        tail[list++] = 0x30;
+                        tail[list++] = 7;
+                        tail[list++] = 6;
+                        tail[list++] = 2;
+                        tail[list++] = 0x2a;
+                        tail[list++] = (p8)k;
+                        tail[list++] = 4;
+                        tail[list++] = 1;
+                        tail[list++] = 0;
+                }
+                list = revocation_wrap(tail, list, 0x30);
+                at += revocation_wrap(tail, list, 0xa0);
+        }
+        at = revocation_wrap(into->bytes, at, 0x30);
+        at = revocation_put(into->bytes, at, "300a06082a8648ce3d040302" "0309003006020101020101");
+        into->used = revocation_wrap(into->bytes, at, 0x30);
+        return into->used;
+}
+
+static fn tls_revocation_ceilings(void)
+{
+        static p8 response[TLS_OCSP_MAX + 64];
+        static const p8 serial[] = {0x01, 0x02, 0x03};
+        tls_ocsp ocsp;
+        tls_crl crl;
+        byte_store store = {null, 0, 0};
+        positive pad;
+        positive length;
+
+        check("an OCSP response of TLS_OCSP_RESPONSES SingleResponses parses",
+              (length = revocation_ocsp_shape(response, TLS_OCSP_RESPONSES, 0, 0, 0)) &&
+                  tls_parse_ocsp(response, length, address_of ocsp) == TLS_OK);
+        check("an OCSP response of one SingleResponse more is refused",
+              (length = revocation_ocsp_shape(response, TLS_OCSP_RESPONSES + 1, 0, 0, 0)) &&
+                  tls_parse_ocsp(response, length, address_of ocsp) == TLS_FAIL);
+        check("an OCSP response carrying TLS_OCSP_CERTS certificates parses",
+              (length = revocation_ocsp_shape(response, 1, TLS_OCSP_CERTS, 0, 0)) &&
+                  tls_parse_ocsp(response, length, address_of ocsp) == TLS_OK);
+        check("an OCSP response carrying one certificate more is refused",
+              (length = revocation_ocsp_shape(response, 1, TLS_OCSP_CERTS + 1, 0, 0)) &&
+                  tls_parse_ocsp(response, length, address_of ocsp) == TLS_FAIL);
+        check("an OCSP response of TLS_LIST_EXTENSIONS extensions parses",
+              (length = revocation_ocsp_shape(response, 1, 0, TLS_LIST_EXTENSIONS, 0)) &&
+                  tls_parse_ocsp(response, length, address_of ocsp) == TLS_OK);
+        check("an OCSP response of one extension more is refused",
+              (length = revocation_ocsp_shape(response, 1, 0, TLS_LIST_EXTENSIONS + 1, 0)) &&
+                  tls_parse_ocsp(response, length, address_of ocsp) == TLS_FAIL);
+        for (pad = 15000; pad < TLS_OCSP_MAX; pad++)
+                if (revocation_ocsp_shape(response, 1, 0, 0, pad) == TLS_OCSP_MAX)
+                        break;
+        check("an OCSP response of exactly TLS_OCSP_MAX bytes parses",
+              pad < TLS_OCSP_MAX &&
+                  tls_parse_ocsp(response, TLS_OCSP_MAX, address_of ocsp) == TLS_OK);
+        check("an OCSP response one byte past TLS_OCSP_MAX is refused",
+              revocation_ocsp_shape(response, 1, 0, 0, pad + 1) == TLS_OCSP_MAX + 1 &&
+                  tls_parse_ocsp(response, TLS_OCSP_MAX + 1, address_of ocsp) == TLS_FAIL);
+
+        check("a CRL of TLS_LIST_EXTENSIONS extensions parses",
+              revocation_crl_shape(address_of store, 1, TLS_LIST_EXTENSIONS) &&
+                  tls_parse_crl(store.bytes, store.used, serial, sizeof serial,
+                                address_of crl) == TLS_OK &&
+                  crl.listed && crl.entries == 1);
+        check("a CRL of one extension more is refused",
+              revocation_crl_shape(address_of store, 1, TLS_LIST_EXTENSIONS + 1) &&
+                  tls_parse_crl(store.bytes, store.used, serial, sizeof serial,
+                                address_of crl) == TLS_FAIL);
+        check("a CRL of TLS_CRL_ENTRIES revoked certificates parses",
+              revocation_crl_shape(address_of store, TLS_CRL_ENTRIES, 0) &&
+                  tls_parse_crl(store.bytes, store.used, serial, sizeof serial,
+                                address_of crl) == TLS_OK &&
+                  crl.entries == TLS_CRL_ENTRIES && crl.listed);
+        check("a CRL of one revoked certificate more is refused",
+              revocation_crl_shape(address_of store, TLS_CRL_ENTRIES + 1, 0) &&
+                  tls_parse_crl(store.bytes, store.used, serial, sizeof serial,
+                                address_of crl) == TLS_FAIL);
+        byte_store_release(address_of store);
+}
+
 typedef fn (*net_group_body)(void);
 
 static fn net_group(string_address name, net_group_body body)
@@ -71291,6 +72497,12 @@ b32 main(void)
         net_group(tls_ca_issuers_rules);
         net_group(tls_trust_anchor_chains);
         net_group(tls12_pieces);
+        net_group(tls_revocation_parsing);
+        net_group(tls_revocation_answers);
+        net_group(tls_revocation_tiers);
+        net_group(tls_revocation_entries);
+        net_group(tls_revocation_handshake);
+        net_group(tls_revocation_ceilings);
         net_group(redirect_urls);
         net_group(fetching_for_real);
         net_group(leasing);
