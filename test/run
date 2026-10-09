@@ -4125,6 +4125,18 @@ lane_net()
         2) note "tls_der_fuzz: skipped (soft) -- does not downgrade net" ;;
         *) net_outcome=1 ;;
         esac
+        python3 test/differential.py --harness tls_ocsp_fuzz
+        case $? in
+        0) ;;
+        2) note "tls_ocsp_fuzz: skipped (soft) -- does not downgrade net" ;;
+        *) net_outcome=1 ;;
+        esac
+        python3 test/differential.py --harness tls_crl_fuzz
+        case $? in
+        0) ;;
+        2) note "tls_crl_fuzz: skipped (soft) -- does not downgrade net" ;;
+        *) net_outcome=1 ;;
+        esac
         python3 test/differential.py --harness tls_hs_fuzz
         case $? in
         0) ;;
