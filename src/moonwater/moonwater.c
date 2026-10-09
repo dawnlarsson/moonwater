@@ -2226,19 +2226,30 @@ static fn host_machine_refused(string_address name, p16 line)
                       host_machine_where(), (positive)line);
 }
 
+/*
+        The verdict is waited for on the directory that publishes it, the same
+        watch host_verdict_settled holds (host.c): the machine process used to
+        re-read it every 200 ms, so a verdict written just after a read sat
+        for up to that long before the script was sourced. The watch is made
+        before the read, so a publish between the read and the wait is already
+        queued and the wait ends at once.
+*/
 static fn host_machine_wait_verdict(p8 address_to into, positive room)
 {
         p64 started = system_clock_ns(HOST_CLOCK_BOOTTIME);
+        bipolar notify = host_verdict_watch();
 
         into[0] = end;
         for (;;) {
                 if (host_read_word(HOST_VERDICT, into, room) >= 0)
-                        return;
+                        break;
                 if (system_clock_ns(HOST_CLOCK_BOOTTIME) - started >=
                     HOST_VERDICT_WAIT_NS)
-                        return;
-                host_pause(HOST_POLL_NS * 2);
+                        break;
+                host_verdict_pause(notify, started + HOST_VERDICT_WAIT_NS,
+                                   HOST_POLL_NS * 2);
         }
+        host_verdict_unwatch(notify);
 }
 
 /*
