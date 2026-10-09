@@ -11138,7 +11138,7 @@ static COLD bool exec_special_error_fatal(string_address command,
         return special && status;
 }
 
-static exec_kept_value address_to exec_promotable;
+static exec_kept_value address_to exec_promotable HOT_STATE;
 static b32 exec_promotable_count;
 
 /* An explicit export/readonly on this simple command adopts its prefix
@@ -11532,11 +11532,11 @@ static bool exec_declaration_compound(string_address word)
 {
         // Raw compound operands retain their parse-word pointer; expanded
         // quoted parentheses have new storage and are ordinary scalar data.
-        for (b32 at = 0; at < PARSE_WORDS; at++)
+        for (b32 at = 0; at < parse_kept_arenas[1].room; at++)
         {
                 if (at == parse_word_used)
                         at = parse_word_top;
-                if (at < PARSE_WORDS && parse_words[at] == word)
+                if (at < parse_kept_arenas[1].room && parse_words[at] == word)
                         return (parse_word_rows[at].flags & PARSE_WORD_COMPOUND) != 0;
         }
         return false;

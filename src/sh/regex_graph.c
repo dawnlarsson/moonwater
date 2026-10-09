@@ -3482,7 +3482,10 @@ static bool regex_machine_holds(const regex_program *program, rx_hints *hints, b
         (-w): the end of the line is the end, whatever byte follows it.
 */
 static rx_dfa regex_anchor_dfa;
-static rx_dfa_cache regex_anchor_cache;
+/* 2.98 MB of state, used only on the anchored path: held at its first use,
+   not in bss, so a process that never asks for it maps none of it. */
+static rx_dfa_cache address_to regex_anchor_cache_held;
+#define regex_anchor_cache UTILITY_HELD(regex_anchor_cache)
 static const rx_hints *regex_anchor_owner;
 static p32 regex_anchor_serial;
 

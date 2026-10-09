@@ -308,7 +308,7 @@ HOT fn lex_prepare()
         lex_ready = true;
 }
 
-static KEEP positive lex_at;
+static KEEP positive lex_at HOT_STATE;
 
 static HOT KEEP b32 lex_add(b32 kind, b32 op, string_address text, positive length)
 {

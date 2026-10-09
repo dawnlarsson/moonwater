@@ -2213,7 +2213,11 @@ typedef struct
 #define FILE_ACCOUNT_USER 0
 #define FILE_ACCOUNT_GROUP 1
 
-static file_account_cache file_accounts[2];
+/* 256 KB of name text, held at the first lookup: a start that never asks for
+   a user or a group name maps none of it, and the bss it used to sit in lay
+   between the lib's pool and allocator state, which then took a page each. */
+static file_account_cache (address_to file_accounts_held)[2];
+#define file_accounts UTILITY_HELD(file_accounts)
 static const string_address file_account_paths[2] = {"/etc/passwd", "/etc/group"};
 
 // ls -l asks for a name per entry, so the file is read once and kept rather

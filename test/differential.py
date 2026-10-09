@@ -11178,10 +11178,97 @@ def files_ls_address_cap(farm):
         return 0, 1, [f"ls -R under 16 MB: status {got.returncode}, {said.splitlines()[:1]!r}"]
 
 
+def files_floor_address_cap(farm):
+    """The tools and the shell run under a 12 MiB address-space cap, as the users need.
+
+    The image maps 11 MiB of text and bss, so a process under 12 MiB has
+    little left: ls, cat and the rest must answer as the reference does under
+    the same cap, and sh -c must run (its parse arenas take what the cap
+    leaves). It was a segmentation fault for ls and a syntax error for sh
+    below 14 MB before the image's bss and the arena reserve were cut.
+    """
+    import resource
+    import subprocess
+    import tempfile
+
+    cap = 12 << 20
+    jobs = (("ls", "-a"), ("cat", "f"), ("wc", "f"), ("tr", "a", "b"), ("cut", "-b1", "f"),
+            ("head", "-n1", "f"), ("stat", "-c", "%s", "f"), ("sh", "-c", "echo ok"))
+    passed = total = 0
+    notes = []
+
+    def limited():
+        resource.setrlimit(resource.RLIMIT_AS, (cap, cap))
+
+    for job in jobs:
+        candidate = Path(farm) / job[0]
+        reference = shutil.which(job[0], path="/usr/bin:/bin")
+        if not candidate.exists() or not reference:
+            continue
+        total += 1
+        answers = []
+        for program in (reference, str(candidate)):
+            work = Path(tempfile.mkdtemp())
+            try:
+                (work / "f").write_bytes(b"alpha\nbeta\ngamma\n")
+                done = subprocess.run([program, *job[1:]], cwd=work, input=b"abc\n", capture_output=True,
+                                      timeout=10, preexec_fn=limited)
+                answers.append((done.returncode, done.stdout))
+            finally:
+                shutil.rmtree(work, ignore_errors=True)
+        if answers[0] == answers[1] and answers[1][0] == 0:
+            passed += 1
+        else:
+            notes.append(f"{' '.join(job)} under 12 MiB: reference {answers[0][0]}, ours {answers[1][0]}")
+    return passed, total, notes
+
+
+# The statics a shell start writes, which HOT_STATE puts on the first page of bss.
+SHELL_START_WRITERS = (
+    "shell_invoked_as", "shell_dynamic_gone", "shell_more", "shell_directory_known", "env_index_room",
+    "shell_check_only", "shell_directory_device", "shell_directory_inode", "expand_text_room",
+    "expand_mark_room", "shell_var_count", "env_index_slots", "env_index", "env_lookup",
+    "parse_node_used", "parse_word_used", "parse_redirect_used", "parse_word_top", "parse_redirect_top",
+    "parse_nodes", "parse_words", "parse_word_rows", "parse_redirects", "parse_kept_text",
+    "parse_kept_bodies", "parse_memo_on", "parse_list_ran_out", "parse_memo_room", "parse_depth",
+    "shell_large_request", "shell_argv", "shell_argv_room", "shell_execution_string",
+    "shell_parser_isolated_live", "lex_at", "exec_promotable",
+)
+
+
+def shell_start_placement(farm):
+    """The statics a shell start writes all sit on the first page of bss.
+
+    A start dirties every bss page it writes (each one a fault and, in a fork
+    child, a copy), and these statics were spread over eight pages of it. nm
+    on the image places each one; it must lie within 4096 bytes of __bss_start.
+    """
+    # Any name of the shell image will do: every link in a farm is the one image.
+    candidate = next((Path(farm) / name for name in ("sh", "shell", "ls", "cat", "true")
+                      if (Path(farm) / name).exists()), None)
+    if candidate is None:
+        return 0, 1, ["the farm holds no link to the shell image"]
+    image = os.path.realpath(candidate)
+    named = {}
+    listing = subprocess.run(["nm", "-n", image], capture_output=True, text=True).stdout
+    for line in listing.splitlines():
+        fields = line.split()
+        if len(fields) == 3:
+            named.setdefault(fields[2], int(fields[0], 16))
+    start = named.get("__bss_start")
+    if start is None:
+        return 0, 1, ["the image has no __bss_start"]
+    outside = [name for name in SHELL_START_WRITERS if not (start <= named.get(name, -1) < start + 4096)]
+    passed = len(SHELL_START_WRITERS) - len(outside)
+    notes = [f"not on the first bss page: {', '.join(outside)}"] if outside else []
+    return passed, len(SHELL_START_WRITERS), notes
+
+
 FILES_CHECKS = (files_uname_identity, files_cp_into_self, files_locale_names, files_collation_ls, files_large_inputs, files_column_layout, files_xargs_parallel, files_zones, files_tar,
                 files_tar_formats,
                 files_find_terminal, files_zone_names, files_hostname_set, files_move_across,
-                files_address_cap, files_kill_bash_word, files_tar_short_archive, files_find_write_error, files_ls_address_cap)
+                files_address_cap, files_kill_bash_word, files_tar_short_archive, files_find_write_error, files_ls_address_cap,
+                files_floor_address_cap)
 
 # ---- domain: misc (from spec_misc.py) ----
 
@@ -20279,6 +20366,7 @@ def shell_parse_nesting(farm):
 
 SHELL_CHECKS = (
     shell_restricted_function_import,
+    shell_start_placement,
     shell_glob_extended_bounded,
     shell_subscript_side_effects,
     shell_parse_scan_bounds,

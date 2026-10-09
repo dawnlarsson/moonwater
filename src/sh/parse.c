@@ -168,8 +168,8 @@ typedef struct
 #define PARSE_REDIRECTS (1 << 16)
 #define PARSE_KEPT_TEXT (1 << 23)
 
-static parse_node address_to parse_nodes;
-static string_address address_to parse_words;
+static parse_node address_to parse_nodes HOT_STATE;
+static string_address address_to parse_words HOT_STATE;
 /* What a word is besides its text, in one row: a command reads its words'
    rows together, a parse writes them together, and one array is one page of
    a start where four arrays were four (each in a window of its own, so each
@@ -182,8 +182,8 @@ typedef struct
         positive name_hash;
         positive flags;
 } parse_word_row;
-static parse_word_row address_to parse_word_rows;
-static parse_redirect address_to parse_redirects;
+static parse_word_row address_to parse_word_rows HOT_STATE;
+static parse_redirect address_to parse_redirects HOT_STATE;
 
 #define PARSE_WORD_LITERAL 1
 #define PARSE_WORD_ASSIGNMENT 2
@@ -200,14 +200,14 @@ static parse_redirect address_to parse_redirects;
 #define CASE_FALL_THROUGH 1
 #define CASE_TEST_ON 2
 
-static b32 parse_node_used;
+static b32 parse_node_used HOT_STATE;
 static b32 parse_node_top HOT_STATE;
-static b32 parse_word_used;
-static b32 parse_word_top;
-static b32 parse_redirect_used;
-static b32 parse_redirect_top;
+static b32 parse_word_used HOT_STATE;
+static b32 parse_word_top HOT_STATE;
+static b32 parse_redirect_used HOT_STATE;
+static b32 parse_redirect_top HOT_STATE;
 
-static p8 address_to parse_kept_text;
+static p8 address_to parse_kept_text HOT_STATE;
 static bool parse_arenas();
 
 #define PARSE_OK 0
@@ -269,9 +269,9 @@ typedef struct
 } parse_memo;
 
 static parse_memo address_to parse_memos;
-static positive parse_memo_room;
+static positive parse_memo_room HOT_STATE;
 static positive parse_memo_epoch HOT_DATA = 1;
-static bool parse_memo_on;
+static bool parse_memo_on HOT_STATE;
 
 /* The same memo for a case, kept apart from parse_memos because a case may be
    the first command of a list that has its own. Each entry is the case as far
@@ -431,7 +431,7 @@ static string_address parse_syntax_reason HOT_STATE;
 //      How many commands deep the parse is, for parse_command's limit. Every
 //      way out of parse_command passes the one decrement, so nothing needs to
 //      put it back.
-static positive parse_depth;
+static positive parse_depth HOT_STATE;
 
 HOT fn parse_reset()
 {
@@ -3409,7 +3409,7 @@ static b32 parse_and_or()
 }
 
 /* Whether the list that stopped last stopped because the tokens ran out. */
-static bool parse_list_ran_out;
+static bool parse_list_ran_out HOT_STATE;
 
 static HOT b32 parse_list()
 {
@@ -3726,7 +3726,7 @@ typedef struct
         positive references;
 } parse_kept_body;
 
-static parse_kept_body address_to parse_kept_bodies;
+static parse_kept_body address_to parse_kept_bodies HOT_STATE;
 static struct
 {
         b8 address_to occupied;
@@ -3737,9 +3737,8 @@ static struct
         // before had taken, which for ten thousand functions was most of the
         // time of defining them.
         b32 ceiling;
-} parse_kept_arenas[] = {
-    {null, PARSE_NODES, PARSE_NODES}, {null, PARSE_WORDS, PARSE_WORDS},
-    {null, PARSE_REDIRECTS, PARSE_REDIRECTS}, {null, PARSE_KEPT_TEXT, PARSE_KEPT_TEXT},
+} parse_kept_arenas[] HOT_STATE = {
+    {null, 0, 0}, {null, 0, 0}, {null, 0, 0}, {null, 0, 0},
 };
 
 /* Every array above, in one mapping the kernel fills a page at a time: 51
@@ -3753,14 +3752,35 @@ static struct
    a bigger constant here. */
 #define PARSE_MAP_NORESERVE 0x4000
 
+/* The arenas are reserved whole at the first parse. A limit on address space
+   (ulimit -v) that refuses the full 51 MiB is answered with half of it, and
+   again half, down to 1/256: what the parse reads is bounded by the tops and
+   the kept-text room of the reserve it got, not by the constants above, so a
+   smaller reserve is a shorter list and not a crash. dash and bash run a
+   command under a 12 MiB cap; this shell said "syntax error" under any cap
+   below about 70 MB. */
+#define PARSE_SHIFT_MAX 8
+
+static bool parse_arenas_at(positive shift);
+
 static bool parse_arenas()
 {
+        for (positive shift = 0; shift <= PARSE_SHIFT_MAX; shift++)
+                if (parse_arenas_at(shift))
+                        return true;
+        return false;
+}
+
+static bool parse_arenas_at(positive shift)
+{
+        positive nodes = PARSE_NODES >> shift, words = PARSE_WORDS >> shift,
+                 redirects = PARSE_REDIRECTS >> shift, kept = PARSE_KEPT_TEXT >> shift;
         positive sizes[] = {
-            PARSE_NODES * sizeof(parse_node), PARSE_NODES * sizeof(parse_kept_body),
-            PARSE_WORDS * sizeof(string_address),
-            PARSE_WORDS * sizeof(parse_word_row),
-            PARSE_REDIRECTS * sizeof(parse_redirect), PARSE_KEPT_TEXT,
-            PARSE_NODES, PARSE_WORDS, PARSE_REDIRECTS, PARSE_KEPT_TEXT,
+            nodes * sizeof(parse_node), nodes * sizeof(parse_kept_body),
+            words * sizeof(string_address),
+            words * sizeof(parse_word_row),
+            redirects * sizeof(parse_redirect), kept,
+            nodes, words, redirects, kept,
         };
         address_any address_to places[] = {
             (address_any address_to)address_of parse_nodes,
@@ -3799,9 +3819,13 @@ static bool parse_arenas()
                 *places[i] = (address_any)mapped;
                 mapped += (bipolar)((sizes[i] + 4095) & ~(positive)4095);
         }
-        parse_node_top = PARSE_NODES;
-        parse_word_top = PARSE_WORDS;
-        parse_redirect_top = PARSE_REDIRECTS;
+        parse_node_top = nodes;
+        parse_word_top = words;
+        parse_redirect_top = redirects;
+        parse_kept_arenas[0].room = parse_kept_arenas[0].ceiling = nodes;
+        parse_kept_arenas[1].room = parse_kept_arenas[1].ceiling = words;
+        parse_kept_arenas[2].room = parse_kept_arenas[2].ceiling = redirects;
+        parse_kept_arenas[3].room = parse_kept_arenas[3].ceiling = kept;
         return true;
 }
 
@@ -3877,18 +3901,18 @@ static bool parse_keep_measure(b32 index, parse_kept_body address_to body)
                 for (b32 i = 0; i < node->word_count; i++)
                 {
                         positive length = parse_word_rows[node->word + i].length;
-                        if (length >= PARSE_KEPT_TEXT || !parse_keep_amount(body, 3, length + 1))
+                        if (length >= parse_kept_arenas[3].room || !parse_keep_amount(body, 3, length + 1))
                                 return false;
                 }
                 for (b32 i = 0; i < node->redirect_count; i++)
                 {
                         parse_redirect address_to redirect = parse_redirects + node->redirect + i;
-                        if (redirect->text_length >= PARSE_KEPT_TEXT ||
+                        if (redirect->text_length >= parse_kept_arenas[3].room ||
                             !parse_keep_amount(body, 3, redirect->text_length + 1) ||
                             (redirect->var_length &&
-                             (redirect->var_length >= PARSE_KEPT_TEXT ||
+                             (redirect->var_length >= parse_kept_arenas[3].room ||
                               !parse_keep_amount(body, 3, redirect->var_length + 1))) ||
-                            (redirect->body_length && (redirect->body_length >= PARSE_KEPT_TEXT ||
+                            (redirect->body_length && (redirect->body_length >= parse_kept_arenas[3].room ||
                              !parse_keep_amount(body, 3, redirect->body_length + 1))))
                                 return false;
                 }

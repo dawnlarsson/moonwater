@@ -1260,9 +1260,9 @@ typedef struct
         b32 array;
 } env_variable;
 
-KEEP __attribute__((externally_visible)) env_variable address_to shell_vars;
+KEEP __attribute__((externally_visible)) env_variable address_to shell_vars HOT_STATE;
 static positive shell_vars_room HOT_STATE;
-KEEP __attribute__((externally_visible)) positive shell_var_count;
+KEEP __attribute__((externally_visible)) positive shell_var_count HOT_STATE;
 /*
         The last name that was found.
 
@@ -1281,7 +1281,7 @@ KEEP __attribute__((externally_visible)) struct
         positive hit_hash;
         positive hit_length;
         positive hit_index;
-} env_lookup;
+} env_lookup HOT_STATE;
 // Fast negative answer for the overwhelmingly common shell with no readonly
 // declarations. The names themselves remain in the indexed variable table;
 // this is only a count, not a second registry.
@@ -1308,9 +1308,9 @@ typedef struct
         positive index_plus_one;
 } name_index_slot;
 
-KEEP __attribute__((externally_visible)) name_index_slot address_to env_index;
-static positive env_index_room;
-KEEP __attribute__((externally_visible)) positive env_index_slots;
+KEEP __attribute__((externally_visible)) name_index_slot address_to env_index HOT_STATE;
+static positive env_index_room HOT_STATE;
+KEEP __attribute__((externally_visible)) positive env_index_slots HOT_STATE;
 static positive env_index_tombstones HOT_STATE;
 
 static inline INLINE fn env_index_touch()
@@ -3199,11 +3199,11 @@ static const string_address shell_dynamic_listed[] = {
     "BASH=", "BASH_ARGV0=", "BASH_MONOSECONDS=", "COMP_WORDBREAKS=",
     "BASH_LOADABLES_PATH=", "BASH_EXECUTION_STRING=", "HISTCMD=",
 };
-static p32 shell_dynamic_gone;
+static p32 shell_dynamic_gone HOT_STATE;
 
 //      The text of bash -c, which BASH_EXECUTION_STRING answers; null when
 //      the shell was not started with one.
-string_address shell_execution_string;
+string_address shell_execution_string HOT_STATE;
 
 //      Bash keeps the last value a dynamic variable gave and lists it: a
 //      declare -p that follows a read of RANDOM shows that number, and one
@@ -5182,7 +5182,7 @@ positive shell_subshell_depth HOT_STATE;
 //      a name with no slash is looked for on PATH, one with a relative
 //      path is put after the directory it was started from. Worked out the
 //      first time it is asked for.
-string_address shell_invoked_as;
+string_address shell_invoked_as HOT_STATE;
 bool shell_here(p8 address_to into, positive room);
 static b32 shell_find_in_path_mode(string_address name, p8 address_to into,
                                    positive room, positive access,
@@ -5818,9 +5818,9 @@ fn shell_path_tidy(p8 address_to path)
         spelled by, is the one). The name is as true as the directory is
         the same one, which "." says in one step.
 */
-static p64 shell_directory_device;
-static p64 shell_directory_inode;
-static bool shell_directory_known;
+static p64 shell_directory_device HOT_STATE;
+static p64 shell_directory_inode HOT_STATE;
+static bool shell_directory_known HOT_STATE;
 
 // Whether the name is the spelling cd made of it -- dots taken out, one slash
 // between levels, or what getcwd said -- and so has nothing left to tidy.

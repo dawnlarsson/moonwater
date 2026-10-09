@@ -303,7 +303,7 @@ static bool shell_memory_failed;
 /* Set by a completed exceptional expansion and cleared only when the complete
    top-level command ends. A compound command may finish on a tiny `:` after
    doing large work; its final expansion is not its working set. */
-static bool shell_large_request;
+static bool shell_large_request HOT_STATE;
 
 /*
         The first of everything the shell holds comes out of one block.
@@ -952,7 +952,7 @@ static positive shell_syntax_generation HOT_STATE;
    source's bytes is not the only influence, because reading or seeking a
    shared open description also changes where the parent continues. */
 static file_facts shell_parser_isolated_facts;
-static bool shell_parser_isolated_live;
+static bool shell_parser_isolated_live HOT_STATE;
 static bool shell_parser_source_active HOT_STATE;
 static bool shell_parser_source_ambiguous HOT_STATE;
 static positive shell_parser_source_kind = SHELL_PARSER_SOURCE_MEMORY;
@@ -1286,8 +1286,8 @@ static bool token_room(positive want)
 }
 
 // Nothing holds an address inside argv, so it may move as the line grows.
-string_address address_to shell_argv;
-positive shell_argv_room;
+string_address address_to shell_argv HOT_STATE;
+positive shell_argv_room HOT_STATE;
 positive shell_argc;
 
 /* The executor supplies these only when argv[0] came unchanged from a parsed
@@ -2068,7 +2068,7 @@ static fn shell_command_scratch_relax()
         them -- which is also how a here-document body is collected, except
         that a body is not source and is taken verbatim until its delimiter.
 */
-static bool shell_more;
+static bool shell_more HOT_STATE;
 
 //      Whether the parser is in the middle of a construct, which is the one
 //      thing the reader needs to know to choose between PS1 and PS2.
@@ -2112,7 +2112,7 @@ static fn shell_syntax_fatal(b32 status, bool fatal)
         parses its text, and nothing in it runs; a body's own substitutions
         are checked by the same walk as its words are read.
 */
-static bool shell_check_only;
+static bool shell_check_only HOT_STATE;
 
 /*
         The bodies that parsed, as the hash of their bytes and the mode they

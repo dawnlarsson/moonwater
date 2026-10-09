@@ -355,9 +355,9 @@ static bool expand_double_bare;
 //      this grows with it. Everything here is reached by index, never by an
 //      address kept across a push, so the two blocks may move.
 static p8 address_to expand_text;
-static positive expand_text_room;
+static positive expand_text_room HOT_STATE;
 static p8 address_to expand_mark;
-static positive expand_mark_room;
+static positive expand_mark_room HOT_STATE;
 static positive expand_length HOT_STATE;
 static bool expand_overflow HOT_STATE;
 static bool expand_quoted_seen HOT_STATE;
