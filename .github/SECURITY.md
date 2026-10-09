@@ -267,6 +267,33 @@ drains and chunk-output reads are nonblocking. A denied local send therefore
 fails a check instead of leaving the security lane asleep on a byte that can
 never arrive.
 
+`sh test/run proof` (named only) holds proofs, not samples.
+`net_exhaustive_proof` compares production predicates with specifications
+written from the RFCs and the stated policy on every input of their domains:
+`http_address_public` on all 2^32 addresses; `dhcp_mask_valid`,
+`dhcp_prefix_of` and `dhcp_address_unicast` on all 2^32 values;
+`dhcp_prefix_clear` on every address under every prefix length and the omitted
+mask (141,733,920,768 cases); `tls_asn1_length` on every four-byte head at every
+truncation; `tls_oid_content_der` up to four bytes; `http_dot_segment` up to four
+bytes, and up to nine over the bytes it tells apart; the default lease timers
+for every lifetime; and `dhcp_walk` against an RFC 2132/3396 walker for every
+region of up to ten bytes over the bytes it tells apart, under ASan. Each
+reports how many inputs were accepted and fails if either answer never occurs.
+`net_bounded_proof` has CBMC prove memory safety, no pointer or signed
+overflow, termination by unwinding assertion and a stated property for every
+input up to a bound: `byte_reader` for buffers of any length and `byte_store`
+for any append (every parser reads and writes through these), `dns_copy_name`
+(7 bytes), the ASN.1 helpers (8), netlink attribute finding (24),
+`http_header_end` with `http_response_fields` (10), the chunk-size and trailer
+lines (10), `http_split_into` (10) and `http_path_simplify` (8: no dot segment
+is left and a second pass changes nothing). Every proof is run again with its
+outcome marked, so an outcome no input reaches fails as vacuous. The lib.c
+routines the parsers call stand in as the contracts written in the harness.
+Not proved: the X.509 parser and chain builder, the TLS handshake state machine,
+`http_run`, DNS answer selection and the DHCP client's packet reader beyond its
+option walk; those rest on fuzzing, differential oracles and the mutation pass
+recorded with the change that added this lane.
+
 ## Ceilings
 
 Exact-limit and one-over rows live in `CHECK_net` (`test/checks.c`, with the
@@ -315,10 +342,11 @@ architecture gate above. CI is parked (`workflow_dispatch` only).
 
 ## Open
 
-- **Separate branches:** NTS and a clock floor (`feature/clock-floor`,
-  `feature/nts`); WPA3 and 802.11w (`feature/wpa3-pmf-sae`); DNS over TLS
-  (`feature/dns-over-tls`); DHCP over a raw socket (`feature/dhcp-packet-socket-acd`);
-  wget and curl parity of defaults (`feature/wget-curl-parity`).
+- **Closed, unmerged work:** NTS (#18) and the clock floor of #17 (a floor,
+  SNTP_WALL_LEAST, is in the SNTP client); WPA3 and 802.11w (#19); DNS over TLS
+  (#20); DHCP over a raw socket (#21); wget and curl parity of defaults (#22).
+  Their branches are gone; each pull request keeps its head
+  (`git fetch origin pull/N/head`).
 - **No change planned:** plain SNTP is accepted anywhere the build and clock
   window allow; a forged clock step before the SNTP window is undone only by
   authenticated time; HEAD is not exercised; a response cut inside its status
