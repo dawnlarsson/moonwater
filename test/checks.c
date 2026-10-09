@@ -55727,7 +55727,7 @@ static fn dns_tcp_test_server(bipolar datagram, bipolar listening,
         if (which == DNS_TCP_OVERSIZED)
         {
                 network_store_16(frame, DNS_MAX_MESSAGE + 1);
-                network_stream_send_all(stream, frame, sizeof frame);
+                network_stream_send_all_for(stream, frame, sizeof frame, 5, 0);
         }
         else
         {
@@ -55737,38 +55737,38 @@ static fn dns_tcp_test_server(bipolar datagram, bipolar listening,
                 {
                         timespec pause = {1, 200000000};
 
-                        network_stream_send_all(stream, frame, 1);
+                        network_stream_send_all_for(stream, frame, 1, 5, 0);
                         system_call_2(syscall(nanosleep),
                                       (positive)address_of pause, 0);
-                        network_stream_send_all(stream, frame + 1, 1);
-                        network_stream_send_all(stream, reply, length);
+                        network_stream_send_all_for(stream, frame + 1, 1, 5, 0);
+                        network_stream_send_all_for(stream, reply, length, 5, 0);
                 }
                 else if (which == DNS_TCP_SPLIT)
                 {
-                        network_stream_send_all(stream, frame, 1);
-                        network_stream_send_all(stream, frame + 1, 1);
-                        network_stream_send_all(stream, reply, 3);
-                        network_stream_send_all(stream, reply + 3, length - 3);
+                        network_stream_send_all_for(stream, frame, 1, 5, 0);
+                        network_stream_send_all_for(stream, frame + 1, 1, 5, 0);
+                        network_stream_send_all_for(stream, reply, 3, 5, 0);
+                        network_stream_send_all_for(stream, reply + 3, length - 3, 5, 0);
                 }
                 else if (which == DNS_TCP_SHORT)
                 {
-                        network_stream_send_all(stream, frame, sizeof frame);
-                        network_stream_send_all(stream, reply, length / 2);
+                        network_stream_send_all_for(stream, frame, sizeof frame, 5, 0);
+                        network_stream_send_all_for(stream, reply, length / 2, 5, 0);
                 }
                 else if (which == DNS_TCP_DEADLINE)
                 {
                         timespec pause = {0, 700000000};
 
-                        network_stream_send_all(stream, frame, 1);
+                        network_stream_send_all_for(stream, frame, 1, 5, 0);
                         system_call_2(syscall(nanosleep),
                                       (positive)address_of pause, 0);
-                        network_stream_send_all(stream, frame + 1, 1);
-                        network_stream_send_all(stream, reply, length);
+                        network_stream_send_all_for(stream, frame + 1, 1, 5, 0);
+                        network_stream_send_all_for(stream, reply, length, 5, 0);
                 }
                 else
                 {
-                        network_stream_send_all(stream, frame, sizeof frame);
-                        network_stream_send_all(stream, reply, length);
+                        network_stream_send_all_for(stream, frame, sizeof frame, 5, 0);
+                        network_stream_send_all_for(stream, reply, length, 5, 0);
                 }
         }
 
@@ -56496,6 +56496,17 @@ static bool http_response_framing_harness_case(
 }
 
 //      The URL, the headers and the chunk framing -- all of it pure.
+//      The grammar of a head and nothing else: what http_response_fields
+//      makes of it under a 200, which keeps no Location.
+static bool http_header_block_valid(p8 address_to bytes, positive size)
+{
+        http_response response = {.code = 200};
+        http_framing_fields fields;
+
+        return http_response_fields(bytes, size, address_of response,
+                                    address_of fields);
+}
+
 static fn fetching(void)
 {
         p8 name[64];
@@ -57926,8 +57937,8 @@ static fn network_stream_send_timeout(void)
                 bipolar reset = system_signal_action(
                     13, address_of default_action, null, 8);
                 positive began = clock_monotonic_nanoseconds();
-                bool sent = network_stream_send_all(
-                    pair[0], payload, payload_size);
+                bool sent = network_stream_send_all_for(
+                    pair[0], payload, payload_size, 5, 0);
                 positive elapsed = clock_monotonic_nanoseconds() - began;
 
                 socket_close(pair[0]);
@@ -58437,8 +58448,8 @@ static fn http_tcp_latency_policy(void)
                                                SOCK_CLOEXEC | SOCK_NONBLOCK);
                 p8 bytes[2];
                 network_deadline deadline;
-                bool sent = network_stream_send_all(handle, (p8 address_to)"F", 1) &&
-                            network_stream_send_all(handle, (p8 address_to)"R", 1);
+                bool sent = network_stream_send_all_for(handle, (p8 address_to)"F", 1, 5, 0) &&
+                            network_stream_send_all_for(handle, (p8 address_to)"R", 1, 5, 0);
 
                 check("consecutive small TCP writes retain exact stream bytes",
                       peer >= 0 && sent &&
@@ -59264,8 +59275,8 @@ static fn tls_key_update_write_deadlines(void)
                         net_clock_step = 1000000;
                         deadline = (network_deadline){1000000, 5000000};
                         status = relative
-                            ? tls_borrow(address_of receiver, 1, address_of span,
-                                         address_of got, 0, 5000000)
+                            ? tls_borrow_within(address_of receiver, 1, address_of span,
+                                         address_of got, 0, 5000000, null)
                             : tls_take(address_of receiver, 1, address_of span,
                                        address_of got, address_of deadline, 0, 0, false);
                         check("KeyUpdate backpressure and EINTR cannot escape the read deadline",
@@ -59383,13 +59394,13 @@ static fn tls_lending_and_fatal_states(void)
                                 (p8 address_to)"ok", 2, receiver.receive + at);
                 receiver.receive_end = receiver.receive_high = at;
                 check("a fatal TLS protocol refusal spends both record keys",
-                      tls_lend(address_of receiver, 2, address_of span,
-                               address_of got) == TLS_FAIL &&
+                      tls_lend_until(address_of receiver, 2, address_of span,
+                               address_of got, null) == TLS_FAIL &&
                           receiver.seq_read == TLS_AES_GCM_RECORD_LIMIT &&
                           receiver.seq_write == TLS_AES_GCM_RECORD_LIMIT);
                 check("buffered data cannot reopen a fatally refused TLS stream",
-                      tls_lend(address_of receiver, 2, address_of span,
-                               address_of got) == TLS_FAIL);
+                      tls_lend_until(address_of receiver, 2, address_of span,
+                               address_of got, null) == TLS_FAIL);
                 net_send_calls = 0;
                 check("a fatally refused TLS stream cannot send application data",
                       tls_write(address_of receiver, (p8 address_to)"no", 2) ==
@@ -59428,12 +59439,12 @@ static fn tls_unexpected_type_matrix(void)
                                     (p8 address_to)"ok", 2, receiver.receive + at);
                                 receiver.receive_end = receiver.receive_high = at;
                                 check("every unexpected TLS record type is a permanent refusal",
-                                      tls_lend(address_of receiver, 2, address_of span,
-                                               address_of got) == TLS_FAIL &&
+                                      tls_lend_until(address_of receiver, 2, address_of span,
+                                               address_of got, null) == TLS_FAIL &&
                                           receiver.seq_read == TLS_AES_GCM_RECORD_LIMIT &&
                                           receiver.seq_write == TLS_AES_GCM_RECORD_LIMIT &&
-                                          tls_lend(address_of receiver, 2, address_of span,
-                                                   address_of got) == TLS_FAIL);
+                                          tls_lend_until(address_of receiver, 2, address_of span,
+                                                   address_of got, null) == TLS_FAIL);
                                 tls_forget(address_of sender);
                                 tls_forget(address_of receiver);
                         }
@@ -59515,7 +59526,7 @@ static fn network_stream_interruption_deadlines(void)
                               net_recv_interruptions && net_recv_eintr_hit);
                 net_io_faults_clear();
                 check("a timed-out interrupted read leaves data for recovery",
-                      network_stream_read_now(pair[0], address_of byte, 1) == 1 &&
+                      socket_receive((b32)pair[0], address_of byte, 1, MSG_DONTWAIT, null, 0) == 1 &&
                               byte == 'x');
         }
         net_io_faults_clear();
@@ -60390,8 +60401,8 @@ static fn network_stream_sigpipe(void)
                 positive default_action[4] = {0, 0, 0, 0};
                 bipolar reset = system_signal_action(
                     13, address_of default_action, null, 8);
-                bool sent = network_stream_send_all(
-                    pair[0], (p8 address_to)"x", 1);
+                bool sent = network_stream_send_all_for(
+                    pair[0], (p8 address_to)"x", 1, 5, 0);
 
                 socket_close(pair[0]);
                 system_call_1(syscall(exit_group), reset < 0 ? 3
@@ -60423,7 +60434,7 @@ static bool tls_post_handshake_valid(p8 address_to messages,
 
         memory_fill(tls, 0, TLS_CONN_HEAD);
         tls->handle = -1;
-        valid = tls_post_handshake_append(tls, messages, length) == TLS_OK &&
+        valid = tls_post_handshake_append_until(tls, messages, length, null) == TLS_OK &&
                 !tls->post_handshake_used;
         tls_forget(tls);
         return valid;
@@ -60540,8 +60551,8 @@ static fn tls_closure_boundaries(void)
                         receiver.encrypted = true;
                         receiver.application = true;
                         check("TLS forged and genuine records queue",
-                              network_stream_send_all(pair[1], forged,
-                                                      sizeof forged) &&
+                              network_stream_send_all_for(pair[1], forged,
+                                                      sizeof forged, 5, 0) &&
                                   tls_send_enc(address_of sender, TLS_CT_APP,
                                                data, sizeof data) == TLS_OK);
                         check("TLS forged record is refused",
@@ -60579,8 +60590,8 @@ static fn tls_closure_boundaries(void)
                         receiver.encrypted = true;
                         receiver.application = true;
                         check("TLS forged CCS and genuine record queue",
-                              network_stream_send_all(pair[1], forged,
-                                                      sizeof forged) &&
+                              network_stream_send_all_for(pair[1], forged,
+                                                      sizeof forged, 5, 0) &&
                                   tls_send_enc(address_of sender, TLS_CT_APP,
                                                data, sizeof data) == TLS_OK);
                         check("TLS CCS after the application keys is refused",
@@ -63510,11 +63521,11 @@ static fn tls_post_handshake_framing(void)
                 memory_fill(tls, 0, TLS_CONN_HEAD);
                 tls->handle = -1;
                 check("a fragmented post-handshake ticket is held",
-                      tls_post_handshake_append(tls, ticket, 7) == TLS_OK &&
+                      tls_post_handshake_append_until(tls, ticket, 7, null) == TLS_OK &&
                           tls->post_handshake_used == 7);
                 check("a fragmented post-handshake ticket is reassembled",
-                      tls_post_handshake_append(tls, ticket + 7,
-                                                sizeof ticket - 7) == TLS_OK &&
+                      tls_post_handshake_append_until(tls, ticket + 7,
+                                                sizeof ticket - 7, null) == TLS_OK &&
                           !tls->post_handshake_used);
                 tls_forget(tls);
         }
@@ -63579,10 +63590,10 @@ static fn tls_post_handshake_framing(void)
                 tls->handle = -1;
                 tls->seq_read = 9;
                 check("a KeyUpdate split across records is held",
-                      tls_post_handshake_append(tls, key_update, 3) == TLS_OK &&
+                      tls_post_handshake_append_until(tls, key_update, 3, null) == TLS_OK &&
                           tls->seq_read == 9);
                 check("a KeyUpdate split across records rekeys when whole",
-                      tls_post_handshake_append(tls, key_update + 3, 2) ==
+                      tls_post_handshake_append_until(tls, key_update + 3, 2, null) ==
                               TLS_OK &&
                           !tls->seq_read &&
                           memory_compare(tls->s_ap_traffic, zeros, 32) &&
@@ -63591,7 +63602,7 @@ static fn tls_post_handshake_framing(void)
                 tls->handle = -1;
                 key_update[4] = 1;
                 check("a KeyUpdate asking for one cannot be answered unsent",
-                      tls_post_handshake_append(tls, key_update, 5) == TLS_FAIL);
+                      tls_post_handshake_append_until(tls, key_update, 5, null) == TLS_FAIL);
                 key_update[4] = 0;
                 tls_forget(tls);
         }
