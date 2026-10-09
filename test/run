@@ -89,7 +89,7 @@ export TEST_TALLY
 #       fuzz an hour a target, msan a clang with MemorySanitizer, ring0 an
 #       image and a machine that boots it, best one built with
 #       kernel/profile/sec_sanitize.
-asked_lanes="wifi fuzz msan proof ring0 tier scale desktop chrome"
+asked_lanes="wifi fuzz msan proof mutation ring0 tier scale desktop chrome"
 
 lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep"
 
@@ -176,6 +176,7 @@ describe()
         fuzz)     echo "every network libFuzzer target for an hour each, or a release report" ;;
         msan)     echo "the net wire parsers under MemorySanitizer" ;;
         proof)    echo "the network parsers proved: whole-domain exhaustion and CBMC bounded model checking" ;;
+        mutation) echo "every decision in the network code flipped once, and the checks that notice" ;;
         ring0)    echo "a hostile program's windows, ioctls, images and log lines against a booted kernel, and what its sanitizers say" ;;
         tier)     echo "a security tier's image, booted: the sysctls init wrote, the mount flags, lockdown, the W+X check and the IOMMU the tier asked for (MOONWATER_TIER names the tier)" ;;
         scale)    echo "every tool against the host's own from a kilobyte to a gigabyte and from one entry to a million: a loss, a cliff, a refusal or a super-linear step fails (NOT RUN off Linux or without the host tools)" ;;
@@ -4242,6 +4243,18 @@ lane_msan() { MOONWATER_MSAN=1 python3 test/differential.py --harness msan_net; 
 #       termination and a stated property of each parser for every input up to
 #       its bound. cbmc comes from PATH or MOONWATER_CBMC; without it the
 #       bounded half is NOT RUN, which does not fail the lane.
+#       Every decision in src/net/net.c and src/net/wait.c flipped once against
+#       CHECK_net and the harnesses of its family; a survivor that is not listed
+#       in NET_MUTATION_EQUIVALENT with its reason fails. Hours, not minutes:
+#       MOONWATER_MUTATION_JOBS sets the parallelism (default a quarter of the
+#       CPUs), MOONWATER_MUTATION_FUNCTIONS a regular expression of functions.
+lane_mutation()
+{
+        python3 test/differential.py --harness net_mutation --oracle full \
+                --jobs "${MOONWATER_MUTATION_JOBS:-$(( $(nproc) / 4 + 1 ))}" \
+                ${MOONWATER_MUTATION_FUNCTIONS:+--functions "$MOONWATER_MUTATION_FUNCTIONS"}
+}
+
 lane_proof()
 {
         python3 test/differential.py --harness net_exhaustive_proof || return 1

@@ -63752,6 +63752,225 @@ def harness_net_bounded_proof(argv):
     return checks.verdict("net bounded proof", "net-bounded-proof")
 
 
+#       Mutants that cannot be told apart from the original by any input, each
+#       with the reason. Keyed by function, the stripped source line, the
+#       operator flipped and which occurrence of it on that line, so a moved
+#       line keeps its entry and an edited one loses it.
+NET_MUTATION_EQUIVALENT = {
+    ("dhcp_lease_timers", 'return renewal && renewal < rebinding && rebinding < lease->seconds;', "&&", 1): "After the defaults are applied every reachable state has 0 < renewal < rebinding < seconds (net_exhaustive_proof 'timers' proves the defaults for every lifetime, and the given pair is kept only when it already satisfies that), so a weaker conjunction is true wherever the original is.",
+    ("dhcp_lease_timers", 'return renewal && renewal < rebinding && rebinding < lease->seconds;', "&&", 2): "After the defaults are applied every reachable state has 0 < renewal < rebinding < seconds (net_exhaustive_proof 'timers' proves the defaults for every lifetime, and the given pair is kept only when it already satisfies that), so a weaker conjunction is true wherever the original is.",
+    ("dhcp_lease_timers", 'return renewal && renewal < rebinding && rebinding < lease->seconds;', "<", 1): "After the defaults are applied every reachable state has 0 < renewal < rebinding < seconds (net_exhaustive_proof 'timers' proves the defaults for every lifetime, and the given pair is kept only when it already satisfies that), so a weaker conjunction is true wherever the original is.",
+    ("dhcp_lease_timers", 'return renewal && renewal < rebinding && rebinding < lease->seconds;', "<", 2): "After the defaults are applied every reachable state has 0 < renewal < rebinding < seconds (net_exhaustive_proof 'timers' proves the defaults for every lifetime, and the given pair is kept only when it already satisfies that), so a weaker conjunction is true wherever the original is.",
+    ("dhcp_walk", "taken = before < 4 ? min(byte_reader_left(&value), 4 - before)", "<", 1):
+        "At before == 4 the taken branch is min(left, 0) == 0, the other branch's value.",
+}
+
+NET_MUTATION_FAMILIES = r"^(dns_|netlink_|http_|dhcp_|tls_|network_|net_)"
+NET_MUTATION_EXCLUDED = r"^(crypto_|tls_bench|tls_anchor|tls_share|tls_derive|tls_traffic|tls_finished_mac|tls_transcript)"
+NET_MUTATION_OPERATORS = ((" >= ", " > "), (" > ", " >= "), (" <= ", " < "), (" < ", " <= "),
+                          (" == ", " != "), (" != ", " == "), (" && ", " || "), (" || ", " && "))
+
+
+def net_mutants(root, pattern=None):
+    """Every single-operator mutant of the network code's decisions: each
+    comparison flipped to its neighbour, each && and || swapped, each !
+    dropped, on a line that decides (if, while, for, return, ?:)."""
+    wanted = re.compile(pattern) if pattern else re.compile(NET_MUTATION_FAMILIES)
+    excluded = re.compile(NET_MUTATION_EXCLUDED)
+    mutants = []
+    for relative in ("src/net/net.c", "src/net/wait.c"):
+        source = (root / relative).read_text()
+        code = re.sub(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\'',
+                      lambda m: re.sub(r"[^\n]", " ", m.group(0)), source, flags=re.S)
+        lines = code.split("\n")
+        original = source.split("\n")
+        at = 0
+        while at < len(lines):
+            line = lines[at]
+            if line and not line[0].isspace() and line[0] not in "#}":
+                head = at
+                while head + 1 < len(lines) and "{" not in lines[head] and \
+                        not lines[head].rstrip().endswith(";") and head - at < 8:
+                    head += 1
+                if head < len(lines) and lines[head].strip() == "{":
+                    name = re.search(r"(\w+)\s*\(", " ".join(lines[at:head + 1]))
+                    name = name.group(1) if name else "?"
+                    stop = head + 1
+                    while stop < len(lines) and not lines[stop].startswith("}"):
+                        stop += 1
+                    if wanted.match(name) and not excluded.match(name):
+                        for number in range(head + 1, stop):
+                            text = lines[number]
+                            if not re.search(r"\b(if|while|for)\b|return|\?", text) and \
+                                    not re.match(r"\s*(\|\||&&)", text):
+                                continue
+                            seen = collections.Counter()
+                            changes = [(m.start(), a, b) for a, b in NET_MUTATION_OPERATORS
+                                       for m in re.finditer(re.escape(a), text)]
+                            changes += [(m.start(), "!", "") for m in
+                                        re.finditer(r"(?<![\w)\]])!(?=[\w(])", text)]
+                            for column, a, b in sorted(changes):
+                                seen[a] += 1
+                                mutants.append({
+                                    "file": relative, "line": number + 1, "column": column,
+                                    "from": a, "to": b, "function": name,
+                                    "text": original[number].strip(),
+                                    "key": (name, original[number].strip(), a.strip() or "!",
+                                            seen[a])})
+                    at = stop
+            at += 1
+    return mutants
+
+
+def harness_net_mutation(argv):
+    """Mutation testing of the network code against its checks.
+
+    Each decision in src/net/net.c and src/net/wait.c is flipped once (a
+    comparison to its neighbour, && and || swapped, a ! dropped) in a copy of
+    the tree, and the oracle is run on the copy: CHECK_net, built and run
+    natively, then the harnesses that lift the mutated function's family
+    (--oracle full). A mutant no check notices is a decision no check holds.
+    Survivors listed in NET_MUTATION_EQUIVALENT, each with the reason no input
+    can tell it apart, do not count. Linux x86-64 only.
+
+        python3 test/differential.py --harness net_mutation [--functions REGEX]
+            [--jobs N] [--oracle checks|full] [--limit N] [--list]
+    """
+    import concurrent.futures
+    options = {"--functions": None, "--jobs": str(max(1, (os.cpu_count() or 2) // 4)),
+               "--oracle": "checks", "--limit": "0"}
+    listing = "--list" in argv
+    argv = [word for word in argv if word != "--list"]
+    while argv:
+        if argv[0] in options and len(argv) > 1:
+            options[argv[0]] = argv[1]
+            argv = argv[2:]
+        else:
+            print("net_mutation: unknown argument %s" % argv[0])
+            return 2
+    if platform.system() != "Linux" or platform.machine() != "x86_64":
+        print("net mutation: NOT RUN -- builds CHECK_net natively on Linux x86-64")
+        return 2
+    mutants = net_mutants(HARNESS_ROOT, options["--functions"])
+    if int(options["--limit"]):
+        mutants = mutants[:int(options["--limit"])]
+    if listing:
+        for mutant in mutants:
+            print("%s:%d %s %r -> %r | %s" % (mutant["file"], mutant["line"], mutant["function"],
+                                               mutant["from"], mutant["to"], mutant["text"]))
+        return 0
+    families = (
+        (r"^http_(path_simplify|dot_segment)$", ["net_bounded_proof http_path", "http_urls"]),
+        (r"^http_(chunk_line|chunk_extensions_valid|trailer_line)$", ["net_bounded_proof http_chunk"]),
+        (r"^http_(header_end|response_fields|field_name|line_valid|token_byte)$",
+         ["net_bounded_proof http_head", "http_response_framing"]),
+        (r"^http_(split_into|scheme_length|web_scheme|host_byte|absolutize|origin_form|put_url)$",
+         ["net_bounded_proof http_url", "http_urls"]),
+        (r"^http_", ["http_response_framing", "http_urls", "https_downgrade", "http_fuzz"]),
+        (r"^dns_copy_name$", ["net_bounded_proof dns_copy_name", "dns_fuzz"]),
+        (r"^dns_", ["dns_fuzz"]),
+        (r"^tls_asn1_", ["net_bounded_proof tls_asn1", "net_exhaustive_proof --slices 4 der",
+                         "tls_der_fuzz"]),
+        (r"^tls_oid_content_der$", ["net_exhaustive_proof --slices 4 oid"]),
+        (r"^tls_(public_suffix|suffix_in)$", ["public_suffixes", "tls_hostnames"]),
+        (r"^tls_(host_match|general_name_match|name_allowed|dns_within|email_within)$",
+         ["tls_hostnames", "tls_chains"]),
+        (r"^tls_(date_value|date_now|parse_validity)$", ["tls_dates", "tls_chains"]),
+        (r"^tls_", ["tls_der_fuzz", "tls_hs_fuzz", "tls_verify_fuzz", "tls_chains"]),
+        (r"^netlink_(attributes|find_span|finding_take)$", ["net_bounded_proof netlink_find",
+                                                            "netlink_fuzz"]),
+        (r"^netlink_", ["netlink_fuzz"]),
+        (r"^dhcp_walk$", ["net_exhaustive_proof --slices 8 walk", "dhcp_fuzz"]),
+        (r"^dhcp_(mask_valid|prefix_of|address_unicast)$", ["net_exhaustive_proof --slices 4 mask"]),
+        (r"^dhcp_prefix_clear$", ["net_exhaustive_proof --slices 8 clear"]),
+        (r"^dhcp_lease_timers$", ["net_exhaustive_proof --slices 4 timers", "net_dhcp_exchange"]),
+        (r"^dhcp_", ["net_dhcp_exchange", "net_parser_work_states", "dhcp_fuzz"]),
+        (r"^network_", ["net_wait_states", "net_clock_fault", "net_parser_work_states"]),
+    )
+    compiler = shutil.which("cc") or shutil.which("gcc")
+    build = [compiler, "-O2", "-static", "-nostdlib", "-nostartfiles", "-fno-stack-protector",
+             "-fno-builtin", "-march=x86-64", "-w", "-T", "src/build/spark.ld",
+             "-Wl,-e,_start", "-Wl,--build-id=none", "-Wl,--no-warn-rwx-segments",
+             "-DCHECK_net", "-fwhole-program", "-o"]
+    workspace = Path(tempfile.mkdtemp(prefix="net-mutation-", dir=str(HARNESS_ROOT.parent)))
+
+    def tree_copy(target):
+        #   Hard links for everything but the file mutated, so a copy is cheap
+        #   and the original is never written.
+        subprocess.run(["cp", "-al", str(HARNESS_ROOT), str(target)], check=True)
+        shutil.rmtree(target / ".git", ignore_errors=True)
+
+    def judge(index_mutant):
+        index, mutant = index_mutant
+        tree = workspace / ("m%d" % index)
+        tree_copy(tree)
+        path = tree / mutant["file"]
+        lines = path.read_text().split("\n")
+        line = lines[mutant["line"] - 1]
+        column, before, after = mutant["column"], mutant["from"], mutant["to"]
+        if line[column:column + len(before)] != before:
+            shutil.rmtree(tree, ignore_errors=True)
+            return index, "stale", ""
+        lines[mutant["line"] - 1] = line[:column] + after + line[column + len(before):]
+        path.unlink()
+        path.write_text("\n".join(lines))
+        try:
+            built = subprocess.run(build + [str(tree / "chk"), "test/checks.c"], cwd=tree,
+                                   capture_output=True, text=True, timeout=600)
+            if built.returncode:
+                return index, "invalid", ""
+            ran = subprocess.run([str(tree / "chk")], cwd=tree, capture_output=True,
+                                 text=True, timeout=300)
+            if ran.returncode or not re.search(r" 0 failures\s*$", ran.stdout):
+                caught = re.search(r"FAIL ([^\n]*)", ran.stdout)
+                return index, "killed", "CHECK_net" + (": " + caught.group(1)[:80] if caught else "")
+            if options["--oracle"] == "full":
+                for family, harnesses in families:
+                    if not re.match(family, mutant["function"]):
+                        continue
+                    for harness in harnesses:
+                        words = harness.split()
+                        environment = dict(os.environ, MOONWATER_FUZZ_RUNS="20000",
+                                           MOONWATER_FUZZ_SECONDS="3")
+                        ran = subprocess.run([sys.executable, str(tree / "test/differential.py"),
+                                              "--harness"] + words, cwd=tree, env=environment,
+                                             capture_output=True, text=True, timeout=1800)
+                        if ran.returncode not in (0, 2):
+                            return index, "killed", harness
+                    break
+            return index, "survived", ""
+        except subprocess.TimeoutExpired:
+            return index, "killed", "timeout"
+        finally:
+            shutil.rmtree(tree, ignore_errors=True)
+
+    checks = Checks()
+    outcomes = collections.Counter()
+    survivors = []
+    started = time.monotonic()
+    try:
+        with concurrent.futures.ThreadPoolExecutor(int(options["--jobs"])) as pool:
+            for index, outcome, by in pool.map(judge, enumerate(mutants)):
+                outcomes[outcome] += 1
+                if outcome == "survived":
+                    survivors.append(mutants[index])
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+    explained = [m for m in survivors if m["key"] in NET_MUTATION_EQUIVALENT]
+    unexplained = [m for m in survivors if m["key"] not in NET_MUTATION_EQUIVALENT]
+    for mutant in unexplained:
+        print("  SURVIVED %s:%d %s %r -> %r | %s" % (
+            mutant["file"], mutant["line"], mutant["function"], mutant["from"],
+            mutant["to"], mutant["text"][:100]))
+    print("  %d mutants: %d killed, %d survived (%d of them equivalent with a reason), "
+          "%d did not build, %d stale; %.0f s" % (
+              len(mutants), outcomes["killed"], outcomes["survived"], len(explained),
+              outcomes["invalid"], outcomes["stale"], time.monotonic() - started))
+    checks(outcomes["killed"] > 0, "the oracle kills mutants at all")
+    checks(not unexplained, "every mutant is killed or explained as equivalent")
+    return checks.verdict("net mutation", "net-mutation")
+
+
 def harness_net_math_proof(argv):
     """Machine-check finite arithmetic lemmas used by src/net/net.c."""
     del argv
@@ -82274,6 +82493,7 @@ HARNESS_CHECKS = {
     "net_dhcp_exchange": harness_net_dhcp_exchange,
     "net_exhaustive_proof": harness_net_exhaustive_proof,
     "net_bounded_proof": harness_net_bounded_proof,
+    "net_mutation": harness_net_mutation,
     "net_lease_transitions": harness_net_lease_transitions,
     "net_math_proof": harness_net_math_proof,
     "wire_constants": harness_wire_constants,
