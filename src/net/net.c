@@ -9737,17 +9737,27 @@ static PURE bipolar http_header_end(p8 address_to bytes, positive size)
    anywhere else would itself be the differential.  Response splitting is still relevant to a client: a poisoned
    keep-alive cache or an intercepting proxy can otherwise make the bytes
    authenticated by TLS describe a different response from the one consumed
-   here. */
+   here.
+
+   The default reads a head as GNU wget 1.25.0 and curl 8.22.0 both do, and
+   refuses what either of them refuses where a second reading would frame or
+   redirect differently: it takes a Content-Length that repeats one number
+   ("3" twice, "3, 3"), a folded line after an ordinary field, and any byte
+   but NUL and a bare CR in the reason phrase (only the code is read); it
+   refuses Content-Length values that disagree, an empty element of a list, a
+   fold after Content-Length, Transfer-Encoding or a redirect's Location, and
+   a control in any field.  STRICT_TIGHT refuses every repeat, list, fold and
+   status-line control. */
 static bool http_token_byte(p8 byte)
 {
         return byte_is_alnum(byte) ||
                memory_first_of("!#$%&'*+-.^_`|~", byte, 15);
 }
 
-/* One line of a head or of a trailer, its line end gone.  A status line is
-   text with no control but tab; a field is a token, a colon, and a value
-   held to the same.  The token also refuses obs-fold, whitespace before the
-   colon, and an empty field name. */
+/* One line of a head or of a trailer, its line end gone.  A field is a
+   token, a colon, and a value that is text with no control but tab.  The
+   token also refuses obs-fold, whitespace before the colon, and an empty
+   field name. */
 static bipolar http_field_name(p8 address_to line, positive stop)
 {
         positive name = string_span_max((string_address)line, stop,
@@ -9760,10 +9770,29 @@ static bipolar http_field_name(p8 address_to line, positive stop)
         return (bipolar)name;
 }
 
+/* A status line is never read past its code (http_status_code), so the
+   default takes what wget and curl take in its reason phrase -- DEL, ESC and
+   bytes past 0x7f included -- and refuses only a NUL and a CR, the two curl
+   refuses; nothing of it is printed or stored.  STRICT_TIGHT holds it to
+   text with no control but tab.  (Plain C, not #if: a hosted lift that
+   forgets to define the tier fails to build instead of running as the tight
+   one.) */
 static bool http_line_valid(p8 address_to line, positive stop, bool field)
 {
-        return field ? http_field_name(line, stop) >= 0
-                     : memory_text_span(line, stop) == stop;
+        positive at = 0;
+
+        if (field)
+                return http_field_name(line, stop) >= 0;
+        for (;;)
+        {
+                at += memory_text_span(line + at, stop - at);
+                if (at == stop)
+                        return true;
+                if (MOONWATER_STRICT_NET >= STRICT_TIGHT || !line[at] ||
+                    line[at] == '\r')
+                        return false;
+                at++;
+        }
 }
 
 //      One header's value, by name, without regard to its case.
@@ -9948,6 +9977,8 @@ typedef struct
         string_address length;
         positive transfer_size;
         positive length_size;
+        //      The number every Content-Length named, at the default tier.
+        positive length_value;
 } http_framing_fields;
 
 static bool http_response_is_redirect(b32 code)
@@ -9961,9 +9992,72 @@ static bool http_response_is_success(b32 code)
         return code >= 200 && code < 300;
 }
 
+/* One Content-Length value at the default tier, as wget and curl read it: a
+   comma list of decimal numbers with blanks around each, every number the
+   same as each other and as every Content-Length before it.  An empty
+   element, a sign, any other byte, or a number that disagrees is refused
+   (curl refuses each; GNU wget reads the first number and ignores the rest).
+   The first number's digits are the span the framing reads, so a list of one
+   number frames exactly as the number alone. */
+static bool http_length_values(const p8 address_to value, positive size,
+                               http_framing_fields address_to fields)
+{
+        byte_reader reader = byte_reader_open(value, size);
+
+        for (;;)
+        {
+                byte_reader look;
+                const p8 address_to digits;
+                positive count = 0;
+                positive number = 0;
+
+                for (look = reader; byte_is_blank(byte_reader_u8(address_of look));
+                     look = reader)
+                        byte_reader_skip(address_of reader, 1);
+                digits = byte_reader_here(address_of reader);
+                for (look = reader;; look = reader, count++)
+                {
+                        p8 byte = byte_reader_u8(address_of look);
+
+                        if (!byte_reader_ok(address_of look) || !byte_is_digit(byte))
+                                break;
+                        if (!positive_append_digit(address_of number,
+                                                   (positive)(byte - '0'),
+                                                   positive_max))
+                                return false;
+                        byte_reader_skip(address_of reader, 1);
+                }
+                if (!count)
+                        return false;
+                if (!fields->length)
+                {
+                        fields->length = (string_address)digits;
+                        fields->length_size = count;
+                        fields->length_value = number;
+                }
+                else if (number != fields->length_value)
+                        return false;
+                for (look = reader; byte_is_blank(byte_reader_u8(address_of look));
+                     look = reader)
+                        byte_reader_skip(address_of reader, 1);
+                if (!byte_reader_left(address_of reader))
+                        return byte_reader_ok(address_of reader);
+                if (byte_reader_u8(address_of reader) != ',')
+                        return false;
+        }
+}
+
 /* Validate each line and collect the framing fields in the same walk.
    Unknown fields still undergo the full grammar and control-byte checks;
-   their names need no repeated comparison with fields of other lengths. */
+   their names need no repeated comparison with fields of other lengths.
+   A folded line (one that begins with a blank) continues the field before
+   it, whose value here is its first line either way: the default reads one
+   after an ordinary field, or straight after the status line, as wget and
+   curl do, and refuses one after Content-Length or Transfer-Encoding (curl
+   refuses both; GNU wget reads the length and prints a chunked body raw)
+   and after the Location of a redirect, which the two follow to different
+   places (wget to "/a%20%20%20/b", curl to "/a%20/b" for "/a" folded onto
+   "/b"). */
 static bool http_response_fields(p8 address_to bytes, positive size,
                                  http_response address_to response,
                                  http_framing_fields address_to fields)
@@ -9971,6 +10065,7 @@ static bool http_response_fields(p8 address_to bytes, positive size,
         positive at = 0;
         bool status = true;
         bool redirect = http_response_is_redirect(response->code);
+        bool framing_before = false;
 
         memory_zero(fields, sizeof *fields);
         while (at < size)
@@ -9993,6 +10088,14 @@ static bool http_response_fields(p8 address_to bytes, positive size,
                         status = false;
                         continue;
                 }
+                if (byte_is_blank(bytes[line]))
+                {
+                        if (MOONWATER_STRICT_NET >= STRICT_TIGHT || framing_before ||
+                            memory_text_span(bytes + line, stop - line) !=
+                                stop - line)
+                                return false;
+                        continue;
+                }
 
                 bipolar name = http_field_name(bytes + line, stop - line);
                 string_address address_to value = null;
@@ -10000,21 +10103,32 @@ static bool http_response_fields(p8 address_to bytes, positive size,
 
                 if (name < 0)
                         return false;
+                framing_before = false;
                 if (name == 17 && !memory_compare_ascii_case(
                         bytes + line, "transfer-encoding", 17))
                 {
+                        framing_before = true;
                         value = address_of fields->transfer;
                         length = address_of fields->transfer_size;
                 }
                 else if (name == 14 && !memory_compare_ascii_case(
                         bytes + line, "content-length", 14))
                 {
+                        framing_before = true;
+                        if (MOONWATER_STRICT_NET < STRICT_TIGHT)
+                        {
+                                if (!http_length_values(bytes + line + 15,
+                                                        stop - line - 15, fields))
+                                        return false;
+                                continue;
+                        }
                         value = address_of fields->length;
                         length = address_of fields->length_size;
                 }
                 else if (redirect && name == 8 && !memory_compare_ascii_case(
                         bytes + line, "location", 8))
                 {
+                        framing_before = true;
                         value = address_of response->location;
                         length = address_of response->location_length;
                 }

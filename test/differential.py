@@ -49969,7 +49969,7 @@ static bipolar system_call_3(positive a, positive b, positive c, positive d)
         abort();
         return -1;
 }
-"""
+""" + byte_reader_source() + positive_append_digit_source()
 
     driver = r"""
 static void emit_hex(const p8 *bytes, positive length)
@@ -50246,6 +50246,51 @@ int main(void)
          b"HTTP/1.1 200 OK\r\nContent-Length: 5, 5\r\n\r\nhello", None),
         ("cl-list-different", "frame",
          b"HTTP/1.1 200 OK\r\nContent-Length: 5, 6\r\n\r\nhello!", None),
+        ("cl-list-triple-same", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 5, 5, 5\r\n\r\nhello", b"hello"),
+        ("cl-list-spread-same", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 5 ,5\r\n\r\nhello", b"hello"),
+        ("cl-field-and-list-same", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Length: 5, 5\r\n\r\nhello",
+         b"hello"),
+        ("cl-list-leading-zero-same", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 05, 5\r\n\r\nhello", b"hello"),
+        ("cl-list-trailing-comma", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 5,\r\n\r\nhello", None),
+        ("cl-list-leading-comma", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: ,5\r\n\r\nhello", None),
+        ("cl-list-empty-middle", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 5,,5\r\n\r\nhello", None),
+        ("cl-list-then-different-field", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 5, 5\r\nContent-Length: 6\r\n\r\nhello!",
+         None),
+        ("cl-three-fields-last-differs", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Length: 5\r\n"
+         b"Content-Length: 4\r\n\r\nhello", None),
+        ("reason-phrase-del", "frame",
+         b"HTTP/1.1 200 O\x7fK\r\nContent-Length: 0\r\n\r\n", None),
+        ("reason-phrase-esc", "frame",
+         b"HTTP/1.1 200 O\x1b[2JK\r\nContent-Length: 0\r\n\r\n", None),
+        ("reason-phrase-nul", "frame",
+         b"HTTP/1.1 200 O\x00K\r\nContent-Length: 0\r\n\r\n", None),
+        ("obs-fold-first-field", "frame",
+         b"HTTP/1.1 200 OK\r\n X: y\r\nContent-Length: 0\r\n\r\n", None),
+        ("obs-fold-chain", "frame",
+         b"HTTP/1.1 200 OK\r\nX: a\r\n b\r\n\tc\r\nContent-Length: 0\r\n\r\n", None),
+        ("obs-fold-after-cl-chain", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n a\r\n b\r\n\r\n", None),
+        ("obs-fold-te", "frame",
+         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n , gzip\r\n\r\n0\r\n\r\n",
+         None),
+        ("obs-fold-control", "frame",
+         b"HTTP/1.1 200 OK\r\nX: a\r\n b\x01c\r\nContent-Length: 0\r\n\r\n", None),
+        ("obs-fold-location-on-200", "frame",
+         b"HTTP/1.1 200 OK\r\nLocation: /a\r\n /b\r\nContent-Length: 0\r\n\r\n", None),
+        ("cl-list-overflow", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 5, 18446744073709551621\r\n\r\nhello",
+         None),
+        ("cl-list-sign", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 5, +5\r\n\r\nhello", None),
         ("cl-hex", "frame",
          b"HTTP/1.1 200 OK\r\nContent-Length: 0x5\r\n\r\nhello", None),
         ("cl-padded", "full",
@@ -50304,6 +50349,13 @@ int main(void)
         "chunk-size-leading-zeros", "chunk-lf-only-delim",
         "cl-padded", "status-no-reason", "field-obs-text-value",
         "chunk-size-trailing-blank", "chunk-uppercase-hex",
+        #   What GNU wget 1.25.0 and curl 8.22.0 both take in a head, so the
+        #   default does (TIGHT_REFUSES has every one of them).
+        "reason-phrase-control", "reason-phrase-del", "reason-phrase-esc",
+        "content-length-equal-twice", "cl-list-same", "cl-list-triple-same",
+        "cl-list-spread-same", "cl-field-and-list-same", "cl-list-leading-zero-same",
+        "obs-fold-date", "obs-fold-first-field", "obs-fold-chain",
+        "obs-fold-location-on-200",
     }
     #       Moonwater policy where http.client disagrees on the same bytes.
     DELIBERATE = {
@@ -50311,16 +50363,35 @@ int main(void)
             "RFC 9112 forbids TE with Content-Length; Moonwater refuses both",
         "duplicate-content-length":
             "duplicate framing fields are refused before a length is chosen",
-        "reason-phrase-control":
-            "a control byte in the status line is refused: it would reach logs and terminals",
-        "content-length-equal-twice":
-            "duplicate framing fields are refused before a length is chosen",
+        "cl-list-trailing-comma":
+            "an empty element in a Content-Length list is malformed (curl refuses it too)",
+        "cl-list-leading-comma":
+            "an empty element in a Content-Length list is malformed (curl refuses it too)",
+        "cl-list-empty-middle":
+            "an empty element in a Content-Length list is malformed (curl refuses it too)",
+        "cl-list-then-different-field":
+            "Content-Length values that disagree are refused, as curl does (wget reads the first)",
+        "cl-three-fields-last-differs":
+            "Content-Length values that disagree are refused, as curl does (wget reads the first)",
+        "cl-list-overflow":
+            "a number past 2^64 is not the 5 before it; GNU wget and curl both read the first",
+        "cl-list-sign":
+            "a Content-Length element is plain DIGIT (curl refuses +5 too)",
+        "reason-phrase-nul":
+            "a NUL in the status line is refused (curl refuses it too)",
+        "obs-fold-after-cl-chain":
+            "a fold after Content-Length is refused: curl refuses it, wget reads the length",
+        "obs-fold-te":
+            "a fold after Transfer-Encoding is refused: curl refuses it, wget prints the chunks raw",
+        "obs-fold-control":
+            "response field values reject embedded controls (NUL/CR/LF), a folded line too",
         "content-length-conflict-twice":
             "duplicate framing fields are refused before a length is chosen",
         "bare-cr-in-location":
             "response field values reject embedded controls (NUL/CR/LF)",
         "obs-fold-location":
-            "obsolete line folding is refused so a proxy cannot split views",
+            "a redirect's folded Location is refused: GNU wget follows it to "
+            "/a%20%20%20/b and curl to /a%20/b",
         "space-before-colon":
             "field names are exact tokens; whitespace before ':' is not a name",
         "te-not-chunked":
@@ -50343,8 +50414,6 @@ int main(void)
             "response field values reject embedded controls (NUL/CR/LF)",
         "bare-cr-status-line":
             "a bare CR mid-status-line is not a field separator",
-        "obs-fold-date":
-            "obsolete line folding is refused so a proxy cannot split views",
         "obs-fold-cl":
             "obsolete line folding is refused so a proxy cannot split views",
         "tab-before-colon":
@@ -50383,8 +50452,6 @@ int main(void)
             "chunk framing allows LF-only delimiters like response headers",
         "cl-negative":
             "Content-Length is plain DIGIT; a sign is malformed",
-        "cl-list-same":
-            "a list in Content-Length is a duplicate framing field by another spelling",
         "cl-list-different":
             "a list in Content-Length is a duplicate framing field by another spelling",
         "cl-hex":
@@ -50408,8 +50475,37 @@ int main(void)
     #       all of them: a real server sends 204 with Content-Length: 0, both
     #       tools ignore a 204's declared body and print a 205's, and this
     #       client closes the connection after one response, so a declared
-    #       body left unread can never be taken for the next response.
+    #       body left unread can never be taken for the next response; both
+    #       read a Content-Length that repeats one number, a fold after an
+    #       ordinary field and any reason-phrase byte but NUL and CR (measured
+    #       on the box against GNU wget 1.25.0 and curl 8.22.0, 2026-10-09).
     TIGHT_REFUSES = {
+        "reason-phrase-control":
+            "a control byte in the status line would reach logs and terminals",
+        "reason-phrase-del":
+            "a control byte in the status line would reach logs and terminals",
+        "reason-phrase-esc":
+            "a control byte in the status line would reach logs and terminals",
+        "content-length-equal-twice":
+            "duplicate framing fields are refused before a length is chosen",
+        "cl-list-same":
+            "a list in Content-Length is a duplicate framing field by another spelling",
+        "cl-list-triple-same":
+            "a list in Content-Length is a duplicate framing field by another spelling",
+        "cl-list-spread-same":
+            "a list in Content-Length is a duplicate framing field by another spelling",
+        "cl-field-and-list-same":
+            "duplicate framing fields are refused before a length is chosen",
+        "cl-list-leading-zero-same":
+            "a list in Content-Length is a duplicate framing field by another spelling",
+        "obs-fold-date":
+            "obsolete line folding is refused so a proxy cannot split views",
+        "obs-fold-first-field":
+            "obsolete line folding is refused so a proxy cannot split views",
+        "obs-fold-chain":
+            "obsolete line folding is refused so a proxy cannot split views",
+        "obs-fold-location-on-200":
+            "obsolete line folding is refused so a proxy cannot split views",
         "204-with-content-length":
             "RFC 9110 15.3.5 forbids Content-Length on 204",
         "204-with-transfer-encoding":
@@ -50503,7 +50599,7 @@ int main(void)
             "%s %s %s\n" % (name, mode, wire.hex() or "00")
             for name, mode, wire, _ in CASES)
 
-        def probe(strict):
+        def probe(strict, text=stdin):
             """The matrix through the lifted framing at a MOONWATER_STRICT
             tier: (verdict lines, None), or (None, why it failed)."""
             binary = work / ("http_response_framing_%d" % strict)
@@ -50515,7 +50611,7 @@ int main(void)
             if built.returncode:
                 return None, ("the response framing probe did not build:\n" +
                               built.stderr[-3000:])
-            ran = subprocess.run([str(binary)], input=stdin,
+            ran = subprocess.run([str(binary)], input=text,
                                  capture_output=True, text=True, timeout=60)
             if ran.returncode or ran.stderr.strip():
                 return None, ("the probe aborted:\n" +
@@ -50591,6 +50687,145 @@ int main(void)
                 checks(py_body == want_body,
                        "%s: http.client body %r != %r" % (
                            name, py_body, want_body))
+
+        #       Generated heads against a model written from the structure
+        #       that made them, at both tiers. The model knows nothing of
+        #       net.c: it says what wget and curl both take (the default
+        #       reads an identical duplicate Content-Length, a list of one
+        #       number, a fold after an ordinary field or a non-redirect's
+        #       Location, and any reason-phrase byte but NUL and a bare CR),
+        #       what curl refuses or the two read apart (a pair that
+        #       disagrees, an empty list element, a fold after a framing field
+        #       or a redirect's Location) and what only the tight tier refuses
+        #       (every one of those, and a 204 or 205 whose declaration cannot
+        #       describe no content).
+        def head_spec(rng):
+            spec = {"code": rng.choice([200, 200, 204, 205, 302, 304, 404]),
+                    "reason": rng.choice(["plain"] * 12 + ["none", "ctl", "del",
+                                                           "esc", "nul", "cr"]),
+                    "fields": [], "folds": {}}
+            for _ in range(rng.choice([0, 1, 1, 1, 2, 3])):
+                base = rng.choice([0, 3, 3, 7])
+                elements = []
+                for _ in range(rng.choice([1, 1, 1, 2, 3])):
+                    roll = rng.random()
+                    if roll < 0.10:
+                        elements.append(str(base + 1))
+                    elif roll < 0.15:
+                        elements.append("")
+                    elif roll < 0.18:
+                        elements.append("x")
+                    elif roll < 0.30:
+                        elements.append("0" + str(base))
+                    else:
+                        elements.append(str(base))
+                spec["fields"].append(("content-length", elements))
+            for _ in range(rng.choice([0, 0, 0, 0, 0, 1, 1, 2])):
+                spec["fields"].append(("transfer-encoding", [rng.choice(
+                    ["chunked", "chunked", "gzip"])]))
+            if spec["code"] in (300, 301, 302, 303, 307, 308) or rng.random() < 0.15:
+                for _ in range(rng.choice([1, 1, 1, 2])):
+                    spec["fields"].append(("location", ["/next"]))
+            for _ in range(rng.choice([0, 1, 2])):
+                spec["fields"].append(("x-pad", ["v"]))
+            rng.shuffle(spec["fields"])
+            spec["folds"] = {at: rng.choice([1, 1, 2]) for at in
+                             range(-1, len(spec["fields"]))
+                             if rng.random() < 0.12}
+            return spec
+
+        def head_wire(spec):
+            reason = {"plain": b" OK", "none": b"", "ctl": b" O\x01K",
+                      "del": b" O\x7fK", "esc": b" O\x1b[2JK",
+                      "nul": b" O\x00K", "cr": b" O\rK"}[spec["reason"]]
+            out = b"HTTP/1.1 %d%s\r\n" % (spec["code"], reason)
+
+            def folds(at):
+                return b"".join([b" folded\r\n", b"\tmore\r\n"][:spec["folds"].get(at, 0)])
+
+            out += folds(-1)
+            for at, (name, elements) in enumerate(spec["fields"]):
+                value = ", ".join(elements) if name != "transfer-encoding" else elements[0]
+                if name == "content-length" and at % 2:
+                    value = " ,".join(elements)
+                out += b"%s: %s\r\n" % (name.title().encode(), value.encode()) + folds(at)
+            return out + b"\r\n"
+
+        def head_model(spec, tier):
+            """None for a refusal, else the body length declared (or -1)."""
+            redirect = spec["code"] in (300, 301, 302, 303, 307, 308)
+            framing = ("content-length", "transfer-encoding") + (
+                ("location",) if redirect else ())
+            if spec["reason"] in ("nul", "cr"):
+                return None
+            if spec["reason"] in ("ctl", "del", "esc") and tier == 2:
+                return None
+            names = [name for name, _ in spec["fields"]]
+            for at in spec["folds"]:
+                if tier == 2:
+                    return None
+                if at >= 0 and names[at] in framing:
+                    return None
+            if names.count("transfer-encoding") > 1:
+                return None
+            if "transfer-encoding" in names:
+                if "content-length" in names or \
+                        [e for n, e in spec["fields"]
+                         if n == "transfer-encoding"][0][0] != "chunked":
+                    return None
+            if redirect and names.count("location") > 1:
+                return None
+            length = -1
+            lists = [e for n, e in spec["fields"] if n == "content-length"]
+            if lists:
+                flat = [x for e in lists for x in e]
+                if any(not x.isdigit() for x in flat):
+                    return None
+                if tier == 2 and (len(lists) > 1 or len(lists[0]) > 1):
+                    return None
+                if len({int(x) for x in flat}) > 1:
+                    return None
+                length = int(flat[0])
+            if tier == 2 and ((spec["code"] == 204 and
+                               ("transfer-encoding" in names or lists)) or
+                              (spec["code"] == 205 and length > 0)):
+                return None
+            return length
+
+        generator = random.Random(0x7157)
+        specs = [head_spec(generator) for _ in range(4000)]
+        wires = []
+        for spec in specs:
+            model = head_model(spec, 1)
+            wires.append(head_wire(spec) +
+                         b"x" * (max(model, 0) if model is not None else 3))
+        text = "".join("g%d frame %s\n" % (n, wire.hex())
+                       for n, wire in enumerate(wires))
+        for tier in (1, 2):
+            said, failure = probe(tier, text)
+            if failure:
+                checks(False, "generated heads, tier %d: %s" % (tier, failure))
+                continue
+            said = {line.split("\t")[0]: line.split("\t") for line in said.splitlines()}
+            wrong = 0
+            accepted = 0
+            for n, spec in enumerate(specs):
+                expect = head_model(spec, tier)
+                row = said["g%d" % n]
+                ours = row[1] == "ACCEPT"
+                accepted += ours
+                body = binascii.unhexlify(row[2]) if row[2] != "-" else None
+                good = ours == (expect is not None) and (
+                    not ours or expect < 0 or body == b"x" * expect)
+                if not good:
+                    wrong += 1
+                    if wrong <= 5:
+                        checks(False, "generated head %d at tier %d: model %s, tier says "
+                               "%s %r for %r" % (
+                                   n, tier, "refuse" if expect is None else
+                                   "accept %d" % expect, row[1], body, wires[n][:200]))
+            checks(wrong == 0, "generated heads at tier %d: %d of %d differ from the model "
+                   "(%d accepted)" % (tier, wrong, len(specs), accepted))
 
     if not curl_seen:
         print("http response framing: curl NOT RUN -- curl is not installed")
@@ -50805,7 +51040,7 @@ static bool memory_from_hex_exact(address_any into, const p8 *text, positive byt
         return true;
 }
 typedef struct { p8 *bytes; positive room; positive used; } byte_store;
-""" + digits + appends + r"""
+""" + digits + appends + positive_append_digit_source() + r"""
 static bool fuzz_reserve(byte_store *store, positive wanted, positive step)
 {
         (void)step;
@@ -51913,15 +52148,28 @@ def harness_wget_mutation(argv):
             #   wget/curl or by this client, never read two ways.
             ("a duplicated equal Content-Length", [length.replace(
                 b"Content-Length: 15\r\n", b"Content-Length: 15\r\nContent-Length: 15\r\n")],
+             False, (0, payload)),
+            ("a Content-Length list of one number", [length.replace(
+                b"Content-Length: 15\r\n", b"Content-Length: 15, 15\r\n")],
+             False, (0, payload)),
+            ("a Content-Length list that disagrees", [length.replace(
+                b"Content-Length: 15\r\n", b"Content-Length: 15, 3\r\n")],
              False, None),
             ("conflicting Content-Length values", [length.replace(
                 b"Content-Length: 15\r\n", b"Content-Length: 15\r\nContent-Length: 3\r\n")],
              False, None),
             ("an obs-fold continuation line in the head", [length.replace(
                 b"Connection: close\r\n", b"X-Fold: a\r\n b\r\nConnection: close\r\n")],
+             False, (0, payload)),
+            ("an obs-fold line after Content-Length", [length.replace(
+                b"Content-Length: 15\r\n", b"Content-Length: 15\r\n 4\r\n")],
              False, None),
             ("a control byte in the reason phrase",
-             [length.replace(b"200 OK", b"200 O\x01K")], False, None),
+             [length.replace(b"200 OK", b"200 O\x01K")], False, (0, payload)),
+            ("DEL and ESC in the reason phrase",
+             [length.replace(b"200 OK", b"200 O\x7f\x1b[2JK")], False, (0, payload)),
+            ("a NUL in the reason phrase",
+             [length.replace(b"200 OK", b"200 O\x00K")], False, None),
             ("a bare CR in the reason phrase",
              [length.replace(b"200 OK", b"200 O\rK")], False, None),
             ("a bare LF ends the status line, a second Content-Length follows",
@@ -51945,26 +52193,28 @@ def harness_wget_mutation(argv):
             procedures.append(("FIN cuts a response at byte %d" % at,
                                [length[:at]], False, None))
 
-        #       Where the built shell's wget refuses what GNU wget accepts.
-        #       These refusals predate the harness and stay listed, not
-        #       settled: wget and curl both accept an identical duplicate
-        #       Content-Length and a control byte in the reason phrase, so
-        #       whether the default should is the user's decision. Anything
-        #       else must answer as GNU wget does, and never accept what curl
-        #       refuses.
+        #       Where the built shell's wget refuses what GNU wget accepts:
+        #       only what curl refuses as well (a Content-Length pair or list
+        #       that disagrees, a NUL or bare CR in the status line, a fold
+        #       after a framing field). What both tools accept -- an
+        #       identical duplicate Content-Length, a list of one number, a
+        #       fold after an ordinary field, a control byte in the reason
+        #       phrase -- the default accepts and only MOONWATER_STRICT 2
+        #       refuses. Anything else must answer as GNU wget does, and never
+        #       accept what curl refuses.
         #       A FIN inside the status line or a header is not a response:
         #       GNU wget 1.25.0 exits 0 with nothing written for some of
         #       those cut points, which lets whoever can cut a connection turn
         #       a download into an empty success. This client fails them all.
         STRICTER_THAN_WGET = {
+            "a Content-Length list that disagrees":
+                "values that disagree are refused, as curl does (wget reads the first)",
+            "an obs-fold line after Content-Length":
+                "a fold after a framing field is refused; curl refuses it too",
+            "a NUL in the reason phrase":
+                "a NUL in the status line is refused; curl refuses it too",
             "conflicting Content-Length values":
                 "duplicate framing fields are refused before a length is chosen",
-            "a duplicated equal Content-Length":
-                "duplicate framing fields are refused before a length is chosen",
-            "an obs-fold continuation line in the head":
-                "obsolete line folding is refused so a proxy cannot split views",
-            "a control byte in the reason phrase":
-                "a control byte in the status line would reach logs and terminals",
             "a bare CR in the reason phrase":
                 "a bare CR mid-status-line is not a field separator",
             "a bare LF ends the status line, a second Content-Length follows":
@@ -53349,6 +53599,16 @@ def byte_reader_source():
         text, "typedef struct\n{\n        const p8 address_to bytes;\n"
               "        positive left;",
         "/* Stable storage owns its mapping outside these mechanisms.")
+
+
+def positive_append_digit_source():
+    """lib.util.c's positive_append_digit, the checked one-more-digit step the
+    decimal readers run, for a hosted lift of a parser that reads a number
+    through byte_reader. Needs the shim's p8/positive types and bool."""
+    text = (HARNESS_ROOT / "src/lib.util.c").read_text()
+    return src_slice(
+        text, "/* One more decimal digit on a number",
+        "/* The decimal digits at the front of bytes[0, length)")
 
 
 def byte_store_source():
@@ -61047,7 +61307,8 @@ def harness_msan_net(argv):
         i = text.index(first)
         return text[i:text.index(following, i)]
 
-    # Shared hosted typedefs/macros for freestanding net.c lifts.
+    # Shared hosted typedefs/macros for freestanding net.c lifts. The tier is
+    # the default's, as a build with no header has it; the HTTP head reads it.
     base_shim = r"""
 #include <stdio.h>
 #include <stdlib.h>
@@ -61056,6 +61317,15 @@ def harness_msan_net(argv):
 #include <stddef.h>
 #include <stdbool.h>
 #include <ctype.h>
+#define STRICT_REFERENCE 0
+#define STRICT_SAFE 1
+#define STRICT_TIGHT 2
+#ifndef MOONWATER_STRICT
+#define MOONWATER_STRICT STRICT_SAFE
+#endif
+#ifndef MOONWATER_STRICT_NET
+#define MOONWATER_STRICT_NET MOONWATER_STRICT
+#endif
 typedef uint8_t p8;
 """ + HOSTED_WIDE_TYPES + r"""
 #define memory_compare memcmp
@@ -61081,7 +61351,7 @@ static positive memory_span_without_byte(const void *block, p8 byte,
 """ + HOSTED_SPAN_BYTE + r"""
 """ + HOSTED_STRING_HELPERS + r"""
 """ + HOSTED_NETWORK_LOADS + r"""
-""" + byte_store_source() + byte_reader_source()
+""" + byte_store_source() + byte_reader_source() + positive_append_digit_source()
 
     # --- 1a. Generic wire-header pad prove (original). ---
     pad_source = r"""
@@ -61382,10 +61652,27 @@ int main(void)
                 failures++;
         }
 
+        /* A fold after an ordinary field is read at the default tier (as
+           wget and curl do) and refused at the tight one; after a framing
+           field it is refused at both. */
         hend = http_header_end((p8 *)fold, (positive)strlen(fold));
-        if (hend < 0 || http_header_block_valid((p8 *)fold, (positive)hend)) {
-                fprintf(stderr, "msan http: FAIL obs-fold must refuse\n");
+        if (hend < 0 ||
+            http_header_block_valid((p8 *)fold, (positive)hend) !=
+                (MOONWATER_STRICT_NET < STRICT_TIGHT)) {
+                fprintf(stderr, "msan http: FAIL obs-fold after an ordinary field\n");
                 failures++;
+        }
+        {
+                const char *framed =
+                        "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n 4\r\n\r\n";
+
+                hend = http_header_end((p8 *)framed, (positive)strlen(framed));
+                if (hend < 0 ||
+                    http_header_block_valid((p8 *)framed, (positive)hend)) {
+                        fprintf(stderr, "msan http: FAIL obs-fold after "
+                                "Content-Length must refuse\n");
+                        failures++;
+                }
         }
 
         /* NUL in field name: walk still bounded; validity refuses. */
@@ -63603,9 +63890,14 @@ int main(void)
         return 0;
 }
 ''', ["http_header_end", "http_token_byte", "http_field_name", "http_line_valid",
-      "http_response_is_redirect", "http_response_fields"],
+      "http_response_is_redirect", "http_length_values", "http_response_fields"],
  "typedef struct { b32 code; p8 body_kind; positive body_length; string_address location; positive location_length; } http_response;\n"
- "typedef struct { string_address transfer; string_address length; positive transfer_size; positive length_size; } http_framing_fields;\n"),
+ "typedef struct { string_address transfer; string_address length; positive transfer_size; positive length_size; positive length_value; } http_framing_fields;\n"
+ "#define positive_max (~(positive)0)\n"
+ "static bool positive_append_digit(positive *value, positive digit, positive limit)\n"
+ "{ positive made; if (__builtin_mul_overflow(*value, 10, &made) ||\n"
+ "  __builtin_add_overflow(made, digit, &made) || made > limit) return false;\n"
+ "  *value = made; return true; }\n"),
 ("http_chunk", 17, r'''
 /* PRODUCTION */
 #define N 10
@@ -64333,6 +64625,7 @@ def harness_security_hygiene(argv):
         ("radio_bss_read", ("elements",)),
         ("bowl_signature_read", ("bytes",)),
         ("net_arp_claims", ("packet",)),
+        ("http_length_values", ("value",)),
     )
     #   The kernel log is anybody's to read on this image (DMESG_RESTRICT is
     #   off) and the ring-0 terminal draws it, so every part of a host_kmsg
