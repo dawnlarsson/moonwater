@@ -9505,6 +9505,10 @@ static bipolar tls_read_until(
 #define HTTP_IDLE_SECONDS 30
 #define HTTP_HEAD_SECONDS 30
 #define HTTP_BODY_SECONDS 300
+//      STRICT_TIGHT's most for a body that declared no length -- one ended by
+//      the close, or chunked -- written as it arrives: 1 GiB. GNU wget takes
+//      such a body until the peer stops, which the default does too.
+#define HTTP_UNDECLARED_MOST ((positive)1 << 30)
 
 #define HTTP_OK 0
 #define HTTP_BAD_URL (-1)
@@ -9528,6 +9532,13 @@ static bipolar tls_read_until(
 //      STRICT_TIGHT only: a redirect that leaves public address space for
 //      an address that is not public.
 #define HTTP_PRIVATE (-17)
+//      STRICT_TIGHT only: a name (not an address, not localhost) the
+//      resolver answered with this machine, "this network" or the link-local
+//      block the clouds' metadata service lives in.
+#define HTTP_REBOUND (-18)
+//      STRICT_TIGHT only: a body that declared no length ran past
+//      HTTP_UNDECLARED_MOST.
+#define HTTP_UNDECLARED (-19)
 
 typedef byte_store http_buffer;
 #define http_forget(buffer) byte_store_release(buffer)
@@ -10621,6 +10632,10 @@ typedef struct
         positive read_nanoseconds;
         // Whole-body budget; zero began is reserved for bounded unit readers.
         network_deadline deadline;
+        // The most payload a body that declared no length may deliver, and
+        // what a chunked one has delivered so far; zero for no ceiling.
+        positive undeclared_most;
+        positive undeclared_seen;
 } http_body;
 
 static bipolar http_body_read(http_body address_to body, p8 address_to into,
@@ -10628,19 +10643,37 @@ static bipolar http_body_read(http_body address_to body, p8 address_to into,
 static bipolar http_copy(http_body address_to body, bipolar dest, positive want,
                          bool exact);
 static bipolar http_copy_chunked(http_body address_to body, bipolar dest);
+static bipolar http_body_borrow(http_body address_to body, positive room,
+                                p8 address_to address_to data,
+                                positive address_to got);
 
 /* A final response's body, by the framing its head declared.  A memory store
    refuses a close-delimited body beyond its limit as it arrives, so an EOF
-   that lands exactly on the limit is still a complete body. */
+   that lands exactly on the limit is still a complete body.  So does a body's
+   ceiling on what declared no length (undeclared_most): exactly that many
+   bytes and then the close is a body, and one byte more is
+   HTTP_UNDECLARED, asked for only once the ceiling is reached and never
+   written. */
 static bipolar http_copy_body(http_body address_to body, bipolar dest,
                               const http_response address_to response)
 {
-        bool exact = response->body_kind == HTTP_BODY_LENGTH;
+        bipolar copied;
+        p8 address_to more = null;
+        positive got = 0;
 
         if (response->body_kind == HTTP_BODY_CHUNKED)
                 return http_copy_chunked(body, dest);
-        return http_copy(body, dest,
-                         exact ? response->body_length : positive_max, exact);
+        if (response->body_kind == HTTP_BODY_LENGTH)
+                return http_copy(body, dest, response->body_length, true);
+        copied = http_copy(body, dest,
+                           body->undeclared_most ? body->undeclared_most
+                                                 : positive_max,
+                           false);
+        if (copied || !body->undeclared_most)
+                return copied;
+        if (http_body_borrow(body, 1, address_of more, address_of got))
+                return HTTP_NO_REPLY;
+        return got ? HTTP_UNDECLARED : HTTP_OK;
 }
 
 //      One progress wait, shortened by a whole-body budget when one is active;
@@ -10674,10 +10707,6 @@ static inline INLINE bool http_body_wait(
         }
         return address_to seconds || address_to nanoseconds;
 }
-
-static bipolar http_body_borrow(http_body address_to body, positive room,
-                                p8 address_to address_to data,
-                                positive address_to got);
 
 /* Payload copied into the caller's bytes: the stash's and TLS's through
    http_body_borrow, a plaintext socket's by a read that asks the clock and
@@ -11000,6 +11029,14 @@ static bipolar http_copy_chunked(http_body address_to body, bipolar dest)
                         return HTTP_MALFORMED;
                 if (!size)
                         return http_copy_trailers(body);
+                /* A chunk past the ceiling on an undeclared body is refused
+                   before a byte of it is written. */
+                if (body->undeclared_most)
+                {
+                        if (size > body->undeclared_most - body->undeclared_seen)
+                                return HTTP_UNDECLARED;
+                        body->undeclared_seen += size;
+                }
                 {
                         bipolar copied = http_copy(body, dest, size, true);
 
@@ -11396,6 +11433,26 @@ static bool http_address_public(p32 ip)
                (a != 192 || b || (p8)(ip >> 8)) && (a != 198 || (b & 0xfe) != 18);
 }
 
+/* Whether host is a name that the resolver answered with an address no
+   name of a real service has: this network (0/8), loopback (127/8) or
+   link-local (169.254/16, where the clouds keep the metadata service that
+   hands out the machine's credentials). That answer is what DNS rebinding
+   looks like -- a name its owner, or an on-path forger of plain DNS, points
+   at the machine itself so a fetch of an untrusted URL reads what only the
+   machine may -- and STRICT_TIGHT refuses it on every hop, the first one
+   too. An address written in the URL is the writer's own choice and is
+   taken, as is localhost, which never asks a resolver. A name inside the
+   network (10/8, 172.16/12, 192.168/16, 100.64/10) is ordinary on an
+   intranet, and only the redirect rule keeps a chain that has reached public
+   space from going back to one. */
+static bool http_name_rebound(string_address host, p32 ip)
+{
+        p8 a = (p8)(ip >> 24);
+
+        return string_to_host(host) < 0 && !http_host_loopback(host) &&
+               (!a || a == 127 || (a == 169 && (p8)(ip >> 16) == 254));
+}
+
 #define TLS_AIA_SECONDS 5
 
 /*
@@ -11534,16 +11591,23 @@ typedef struct
         positive head_seconds;
         positive body_seconds;
         positive body_most;
+        //      The most a streamed body that declared no length may write,
+        //      or zero for no ceiling: GNU wget's default has none, and
+        //      neither has this client's; the tight tier's is
+        //      HTTP_UNDECLARED_MOST. A body held in memory is held to
+        //      body_most in every tier already.
+        positive undeclared_most;
 } http_manners;
 
 static const http_manners http_manners_fetch = {
     (string_address)"dawning", '0', false, false, true,
-    HTTP_HEAD_SECONDS, HTTP_BODY_SECONDS, HTTP_FETCH_MAX};
+    HTTP_HEAD_SECONDS, HTTP_BODY_SECONDS, HTTP_FETCH_MAX, 0};
 static const http_manners http_manners_wget = {
     (string_address)"Wget", '1', true, true, false,
-    HTTP_HEAD_SECONDS, HTTP_BODY_SECONDS, HTTP_FETCH_MAX};
+    HTTP_HEAD_SECONDS, HTTP_BODY_SECONDS, HTTP_FETCH_MAX,
+    MOONWATER_STRICT_NET >= STRICT_TIGHT ? HTTP_UNDECLARED_MOST : 0};
 static const http_manners http_manners_zone = {
-    (string_address)"Moonwater", '1', false, true, false, 10, 10, 4096};
+    (string_address)"Moonwater", '1', false, true, false, 10, 10, 4096, 0};
 
 /* The head of the response a fetch ended on, for the caller that reads a
    header of it. */
@@ -11614,6 +11678,12 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                             how->version_minor, how->agent, address_of used);
                 if (!status && !(ip = http_lookup(host)))
                         status = HTTP_NO_HOST;
+                /* GNU wget and curl connect wherever a name resolves, so the
+                   default does; the tight tier refuses a name rebound onto
+                   this machine or its link, on the first hop as on any. */
+                if (!status && MOONWATER_STRICT_NET >= STRICT_TIGHT &&
+                    http_name_rebound(host, ip))
+                        status = HTTP_REBOUND;
 #if MOONWATER_STRICT_NET >= STRICT_TIGHT
                 /* Once a chain has reached public space no later hop may
                    go back inside: a name that resolves, or a Location that
@@ -11717,6 +11787,7 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                             .scratch = head,
                             .store = reset || into ? address_of whole : null,
                             .store_limit = reset ? 0 : how->body_most,
+                            .undeclared_most = into ? 0 : how->undeclared_most,
                         };
 
                         /* The idle timer catches a stopped peer; this absolute

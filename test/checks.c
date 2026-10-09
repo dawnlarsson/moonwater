@@ -57214,6 +57214,32 @@ static fn fetching(void)
                                           sizeof name, address_of port, address_of path,
                                           address_of tls) == HTTP_OK &&
                           string_equals(name, (string_address) "127.1."));
+                /* A name the resolver rebinds onto this machine, "this
+                   network" or the link-local block, which the tight tier
+                   refuses on every hop; an address in the URL, localhost and
+                   an intranet answer are not that. */
+                check("a name answered with loopback, 0/8 or link-local is rebound",
+                      http_name_rebound((string_address) "evil.example", 0x7f000001) &&
+                          http_name_rebound((string_address) "evil.example", 0x7fffffff) &&
+                          http_name_rebound((string_address) "evil.example", 0x00000001) &&
+                          http_name_rebound((string_address) "evil.example", 0xa9fea9fe) &&
+                          http_name_rebound((string_address) "a", 0xa9fe0000) &&
+                          http_name_rebound((string_address) "127.0.0.1.", 0x7f000001));
+                check("an address, localhost, or a name answered inside the network "
+                      "or outside it is not rebound",
+                      !http_name_rebound((string_address) "127.0.0.1", 0x7f000001) &&
+                          !http_name_rebound((string_address) "169.254.169.254",
+                                             0xa9fea9fe) &&
+                          !http_name_rebound((string_address) "localhost", 0x7f000001) &&
+                          !http_name_rebound((string_address) "a.LocalHost.", 0x7f000001) &&
+                          !http_name_rebound((string_address) "evil.example", 0x0a000001) &&
+                          !http_name_rebound((string_address) "evil.example", 0xc0a80001) &&
+                          !http_name_rebound((string_address) "evil.example", 0x64400001) &&
+                          !http_name_rebound((string_address) "evil.example", 0xa9fd0001) &&
+                          !http_name_rebound((string_address) "evil.example", 0xa9ff0001) &&
+                          !http_name_rebound((string_address) "evil.example", 0x08080808) &&
+                          !http_name_rebound((string_address) "evil.example", 0x80000001) &&
+                          !http_name_rebound((string_address) "evil.example", 0x01000000));
                 check("a spelled address needs room for its dotted quad",
                       http_split_into((string_address) "http://1/", name, 8,
                                       address_of port, address_of path,
@@ -59274,6 +59300,72 @@ static fn http_tls_resource_exhaustion(void)
                           !net_memory_reserve_fail && !store.used &&
                           !store.bytes);
                 http_forget(address_of store);
+        }
+
+        /* The ceiling on a body that declared no length, with a small one:
+           exactly that many bytes and then the end is a body, one more is
+           HTTP_UNDECLARED and is never written, and a chunk that would pass
+           it is refused before a byte of it is; no ceiling takes it all.
+           The shipped ceiling is the tight tier's wget's alone. */
+        {
+                static p8 seventeen[] = "abcdefghijklmnopq";
+                static p8 chunked_exact[] = "8\r\nabcdefgh\r\n8\r\nijklmnop\r\n0\r\n\r\n";
+                static p8 chunked_over[] =
+                    "8\r\nabcdefgh\r\n8\r\nijklmnop\r\n1\r\nq\r\n0\r\n\r\n";
+                static p8 chunked_whole[] = "11\r\nabcdefghijklmnopq\r\n0\r\n\r\n";
+                http_response close_body = {.code = 200, .body_kind = HTTP_BODY_CLOSE};
+                http_response chunked = {.code = 200, .body_kind = HTTP_BODY_CHUNKED};
+                p8 out[64];
+                //      Never written: no read reaches a socket here.
+                p8 scratch[64];
+                struct
+                {
+                        p8 address_to wire;
+                        positive length;
+                        const http_response address_to response;
+                        positive most;
+                        bipolar want;
+                        positive written;
+                } rows[] = {
+                    {seventeen, 16, address_of close_body, 16, HTTP_OK, 16},
+                    {seventeen, 17, address_of close_body, 16, HTTP_UNDECLARED, 16},
+                    {seventeen, 17, address_of close_body, 0, HTTP_OK, 17},
+                    {seventeen, 0, address_of close_body, 16, HTTP_OK, 0},
+                    {chunked_exact, sizeof chunked_exact - 1, address_of chunked, 16,
+                     HTTP_OK, 16},
+                    {chunked_over, sizeof chunked_over - 1, address_of chunked, 16,
+                     HTTP_UNDECLARED, 16},
+                    {chunked_whole, sizeof chunked_whole - 1, address_of chunked, 16,
+                     HTTP_UNDECLARED, 0},
+                    {chunked_over, sizeof chunked_over - 1, address_of chunked, 0,
+                     HTTP_OK, 17},
+                };
+
+                for (positive at = 0; at < array_count(rows); at++)
+                {
+                        http_body body = {
+                            .stash = rows[at].wire,
+                            .stash_used = rows[at].length,
+                            .scratch = scratch,
+                            .output = out,
+                            .undeclared_most = rows[at].most,
+                        };
+                        bipolar status = http_copy_body(address_of body, -1,
+                                                        rows[at].response);
+
+                        check("a body that declared no length is held to its ceiling",
+                              status == rows[at].want &&
+                                  (positive)(body.output - out) == rows[at].written &&
+                                  !memory_compare(out, "abcdefghijklmnopq",
+                                                  rows[at].written));
+                }
+                check("only the tight tier's wget has a ceiling on an undeclared body",
+                      HTTP_UNDECLARED_MOST == (positive)1 << 30 &&
+                          http_manners_wget.undeclared_most ==
+                              (MOONWATER_STRICT_NET >= STRICT_TIGHT
+                                   ? HTTP_UNDECLARED_MOST : 0) &&
+                          !http_manners_fetch.undeclared_most &&
+                          !http_manners_zone.undeclared_most);
         }
 
         if (net_as_emulated())

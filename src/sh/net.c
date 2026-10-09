@@ -627,6 +627,10 @@ static b32 net_fetch(void)
         else if (status == HTTP_NO_REPLY)
                 string_format(net_out, "fetch: no reply from %w\n",
                               writer_terminal_quoted_name, name);
+        else if (status == HTTP_REBOUND)
+                string_format(net_out, "fetch: refused %w: the name resolved to this "
+                                   "machine or its link-local network\n",
+                              writer_terminal_quoted_name, name);
         else if (status == HTTP_STATUS && http_response_is_redirect(code))
                 string_format(net_out, "fetch: %p, which is a redirect this does not "
                                    "follow\n", (positive)code);
@@ -783,6 +787,17 @@ static COLD b32 net_wget_failed(bipolar status, b32 code, p8 address_to where,
                                      "wget: refused a redirect to %w, an address "
                                      "that is not public\n",
                                      writer_terminal_quoted_name, where);
+        case HTTP_REBOUND:
+                return string_report(log_error, WGET_GENERIC,
+                                     "wget: refused %w: the name resolved to this "
+                                     "machine or its link-local network\n",
+                                     writer_terminal_quoted_name, host);
+        case HTTP_UNDECLARED:
+                return string_report(log_error, WGET_GENERIC,
+                                     "wget: %w sent more than %p bytes with no "
+                                     "length declared; refused\n",
+                                     writer_terminal_quoted_name, host,
+                                     (positive)HTTP_UNDECLARED_MOST);
         case HTTP_DOWNGRADE:
                 return string_report(log_error, WGET_GENERIC,
                                      "wget: refused an HTTPS to HTTP redirect "
