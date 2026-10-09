@@ -2071,9 +2071,12 @@ static COLD bipolar net_arp_conflict(p32 index, p8 address_to hardware,
                                 goto failed;
                         if (!ready)
                                 break;
+                        //      Readiness is a hint: the frame can be gone by
+                        //      the time it is read, and a blocking receive
+                        //      would then sleep past the probe's deadline.
                         got = socket_receive((b32)handle, reply, sizeof reply,
-                                             0, 0, 0);
-                        if (got == NETWORK_INTERRUPTED)
+                                             MSG_DONTWAIT, 0, 0);
+                        if (got == NETWORK_INTERRUPTED || got == NETWORK_TRY_AGAIN)
                                 continue;
                         if (got < 0)
                                 goto failed;

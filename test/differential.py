@@ -62837,6 +62837,37 @@ def harness_security_hygiene(argv):
 
     net = (HARNESS_ROOT / "src/net/net.c").read_text()
     checks_c = (HARNESS_ROOT / "test/checks.c").read_text()
+
+    #   No network call may sleep past a deadline. Readiness is only a hint (a
+    #   datagram can be gone between the poll and the read), so every receive in
+    #   the network sources is nonblocking, and the one send that has no
+    #   deadline, network_stream_send_all, is no production caller's.
+    def uncommented(text):
+        return re.sub(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"',
+                      lambda match: "\n" * match.group(0).count("\n"), text,
+                      flags=re.S)
+
+    blocking = []
+    unbounded = []
+    network_sources = [HARNESS_ROOT / "src/sh/net.c"] + sorted(
+        (HARNESS_ROOT / "src/net").glob("*.c")) + sorted(
+        (HARNESS_ROOT / "src/waterlink").glob("*.c"))
+    for path in network_sources + [HARNESS_ROOT / "src/sh/tools.c",
+                                   HARNESS_ROOT / "src/sh/host.c"]:
+        text = uncommented(path.read_text())
+        for call in re.finditer(r"\bsocket_receive\s*\(", text):
+            statement = text[call.start():text.index(";", call.start())]
+            if "MSG_DONTWAIT" not in statement:
+                blocking.append("%s:%d" % (path.relative_to(HARNESS_ROOT),
+                                           text.count("\n", 0, call.start()) + 1))
+        for call in re.finditer(r"\bnetwork_stream_send_all\s*\(", text):
+            line = text.count("\n", 0, call.start()) + 1
+            if path.name != "wait.c" or "static bool" not in text[call.start() - 12:call.start()]:
+                unbounded.append("%s:%d" % (path.relative_to(HARNESS_ROOT), line))
+    checks(not blocking, "a blocking socket_receive in the network sources: " + ", ".join(blocking))
+    checks(not unbounded,
+           "network_stream_send_all has no deadline; use network_stream_send_all_for or _until: "
+           + ", ".join(unbounded))
     verify = inspect.getsource(harness_tls_verify_fuzz)
     checks("tls_verify_one(" in verify and "fuzz_prove_wr2_gts()" in verify and
            "tls_verify_hosted_source(" in verify and "Mocked signature" not in verify,
