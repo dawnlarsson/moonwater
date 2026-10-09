@@ -50910,6 +50910,7 @@ typedef const p8 *const_string;
 #define min(a, b) ((a) < (b) ? (a) : (b))
 #define memory_copy memmove
 #define memory_copy_apart memcpy
+#define memory_compare memcmp
 #define memory_fill(at, v, n) memset((at), (int)(v), (n))
 #define string_get(s) (*(const unsigned char *)(s))
 #define string_is(source, value) (*(source) == (value))
@@ -51015,6 +51016,11 @@ static b32 memory_compare_ascii_case(const void *one, const void *two, positive 
 static positive positive_into(p8 *into, positive value)
 {
         return (positive)sprintf((char *)into, "%lu", value);
+}
+static positive host_into(p8 *into, p32 host)
+{
+        return (positive)sprintf((char *)into, "%u.%u.%u.%u", host >> 24,
+                                 host >> 16 & 255, host >> 8 & 255, host & 255);
 }
 static positive string_digits_max(string_address source, positive bound,
                                   positive *used)
@@ -51660,6 +51666,17 @@ static void fuzz_url(const p8 *data, positive size)
         for (p8 *at = host; *at; at++)
                 if (!known_is_alnum(*at) && *at != '-' && *at != '.' && *at != '_')
                         fuzz_die("split let a byte into the host");
+        {
+                /* An address split answers is written one way: the dotted
+                   quad, which only the default reaches from a spelling. */
+                p32 numeric;
+                p8 quad[16];
+                if (http_ipv4_spelling(host, strlen((char *)host), &numeric)) {
+                        quad[host_into(quad, numeric)] = 0;
+                        if (strcmp((char *)quad, (char *)host))
+                                fuzz_die("split answered an address in a spelling of its own");
+                }
+        }
         if (!http_get_request(request, sizeof request, (string_address)host, port,
                               path, tls, '1', (string_address)"Wget", &used))
                 fuzz_request(request, used);
@@ -51790,7 +51807,8 @@ def http_fuzz_seeds():
             ("inside_then_public", (b"inside.example/p", b"public.example/q")),
             ("public_twice", (b"public.example/p", b"public.example/q")),
             ("public_inside_public", (b"public.example/p", b"inside.example/q",
-                                      b"public.example/r"))):
+                                      b"public.example/r")),
+            ("public_then_spelled", (b"public.example/p", b"0x7f.1/q"))):
         for lane in (0, 1):
             scheme = b"https://" if lane else b"http://"
             wire = hop.join(b"HTTP/1.1 302 Found\r\nLocation: " + scheme + where +
@@ -51822,7 +51840,9 @@ def http_fuzz_seeds():
             ("bare_web_scheme", b"https:443", b"http:80"),
             ("bare_other_scheme", b"ftp:21", b"smtp:25"),
             ("long", b"http://h/" + b"a" * 2100, b"b" * 2100),
-            ("escapes", b"h:8/a b\\c\xc3\xa9?d e", b"//h b/c d\xff")):
+            ("escapes", b"h:8/a b\\c\xc3\xa9?d e", b"//h b/c d\xff"),
+            ("spelled", b"http://0x7f.1:8/a", b"//2130706433:9/b"),
+            ("spelled_edge", b"0377.0xffffff", b"http://1.2.65536/")):
         seeds["url_%s.bin" % name] = b"\x03\x00" + url + b"\x00" + location
     return seeds
 
@@ -52454,6 +52474,14 @@ def harness_wget_hostile(argv):
         case("DELIBERATE: a %00 in a Location is refused", hop(b"/a%00b"),
              "http://127.0.0.1:PORT/x", [GET(b"/x")], code=1, refs=(), saved=None),
     ]
+    #   inet_aton's spellings of 127.0.0.1 reach it with the dotted quad in
+    #   Host, as curl sends it (GNU wget sends the spelling; both connect).
+    for spelling in ("127.1", "0x7f.1", "0177.0.0.1", "2130706433", "0x7f000001",
+                     "127.0.1", "0177.1", "0X7F.0X0.0.01"):
+        CASES.append(case("the address %s is 127.0.0.1" % spelling, answer(ok()),
+                          "http://%s:PORT/" % spelling, [GET(b"/")], host=b"127.0.0.1"))
+    CASES.append(case("a Location naming 127.1", hop(b"http://127.1:PORT/z"),
+                      "http://127.0.0.1:PORT/x", [GET(b"/x"), GET(b"/z")], host=b"127.0.0.1"))
 
     #   The address policy of the tight tier, in a network namespace of its
     #   own where 8.8.8.8 and 8.8.4.4 are loopback addresses: a chain that has
@@ -52502,6 +52530,11 @@ def harness_wget_hostile(argv):
             #   tight tier refuses it after public space as it refuses
             #   127.0.0.1; a resolver that said 8.8.4.4 once made it public.
             ("public to localhost", "8.8.8.8", b"http://LocalHost.:PORT/z", False),
+            #   inet_aton's spelling of loopback is loopback: the default
+            #   follows it as GNU wget and curl do, and the tight tier, which
+            #   refuses every such spelling but the dotted quad, never asks.
+            ("public to a legacy spelling of loopback", "8.8.8.8",
+             b"http://2130706433:PORT/z", False),
         ]
         failures = 0
         for name, first, location, follows in rows:
@@ -52512,8 +52545,10 @@ def harness_wget_hostile(argv):
             server.close()
             want = [GET(b"/x"), GET(b"/z")] if follows or not args.tight else [GET(b"/x")]
             code = 0 if follows or not args.tight else 1
+            said = b"not a url this understands" if b"2130706433" in location else \
+                b"not public"
             good = server.lines == want and done.returncode == code and (
-                follows or not args.tight or b"not public" in done.stderr)
+                follows or not args.tight or said in done.stderr)
             if not good:
                 failures += 1
                 print("FAIL %s %s: lines %r exit %d (%s)" % (
@@ -52556,58 +52591,64 @@ def harness_wget_hostile(argv):
                         "tight" if args.tight else "default", who, host, done.returncode,
                         server.locals, asked))
             failures += row_failed
-        #   Host spellings against the references, at the default tier: how
-        #   each client reads 127.0.0.1 spelled the ways inet_aton reads it
-        #   (fewer parts, hex, octal, one number, the root's dot), and the
-        #   authority forms this client refuses. A row says what this client
-        #   does -- "literal" (127.0.0.1 reached, nobody asked), "name" (the
-        #   resolver asked, 8.8.4.4 reached) or "refused" (nothing asked or
-        #   reached) -- and why, where GNU wget or curl is known to differ.
-        #   This client is held to its column; the references' answers are
-        #   printed, and one that has come to agree is said.
+        #   Host spellings against the references: how each client reads
+        #   127.0.0.1 spelled the ways inet_aton reads it (fewer parts, hex,
+        #   octal, one number, the root's dot), and the authority forms this
+        #   client refuses. A row says what this client does -- "literal"
+        #   (127.0.0.1 reached, nobody asked), "name" (the resolver asked,
+        #   8.8.4.4 reached) or "refused" (nothing asked or reached) -- and
+        #   why, where GNU wget or curl is known to differ. This client is
+        #   held to its column at each tier; the references' answers are
+        #   printed beside the default's, and one that has come to agree is
+        #   said.
         spelled = []
-        if not args.tight:
-            quad = [127, 0, 0, 1]
+        quad = [127, 0, 0, 1]
 
-            def octet(value, form):
-                return {"dec": "%d" % value, "zero": "0%d" % value, "hex": "0x%x" % value,
-                        "HEX": "0X%X" % value, "oct": "0%o" % value}[form]
-            numeric = set()
-            while len(numeric) < 10:
-                parts = spell.choice([quad, [127, 0, 1], [127, 1], [0x7f000001]])
-                forms = [spell.choice(["dec", "dec", "zero", "hex", "HEX", "oct"])
-                         for _ in parts]
-                text = ".".join(octet(v, f) for v, f in zip(parts, forms))
-                try:
-                    same = socket.inet_aton(text) == bytes(quad)
-                except OSError:
-                    same = False
-                if text != "127.0.0.1" and same:
-                    numeric.add(text + spell.choice(["", "", "."]))
-            shorthand = ("a host that is not four plain decimal octets is a name to this "
-                         "client, as the resolver is asked; inet_aton, under GNU wget and "
-                         "curl, reads it as 127.0.0.1 (needs a decision: parity would "
-                         "canonicalize it once in http_split_into)")
-            spelled = [("http://127.0.0.1:PORT/", "literal", None)] + [
-                ("http://%s:PORT/" % text, "name", shorthand) for text in sorted(numeric)] + [
-                ("http://u@127.0.0.1:PORT/", "refused",
-                 "userinfo is refused; both send it as Authorization or drop it"),
-                ("http://127.0.0.1:PORT\\@x/", "refused",
-                 "a backslash is refused; both read x as the host"),
-                ("http://ex%61mple.com:PORT/", "refused",
-                 "a percent-encoded host is refused; both decode it"),
-                ("http://b\u00fccher.example:PORT/", "refused",
-                 "a host outside the DNS alphabet is refused; both apply IDNA"),
-                ("http:PORT", "refused",
-                 "http: without // is refused (SECURITY.md); both reach a host named http"),
-                ("http:/127.0.0.1:PORT/", "refused", "curl reads one slash as two"),
-                ("http://127.0.0.1.:PORT/", "name",
-                 "the root's dot makes a name, as GNU wget reads it; curl reads the address"),
-                ("HTTP://127.0.0.1:PORT/", "literal", None),
-                ("http://Example.COM.:PORT/", "name", None),
-            ]
+        def octet(value, form):
+            return {"dec": "%d" % value, "zero": "0%d" % value, "hex": "0x%x" % value,
+                    "HEX": "0X%X" % value, "oct": "0%o" % value}[form]
+        numeric = set()
+        while len(numeric) < 10:
+            parts = spell.choice([quad, [127, 0, 1], [127, 1], [0x7f000001]])
+            forms = [spell.choice(["dec", "dec", "zero", "hex", "HEX", "oct"])
+                     for _ in parts]
+            text = ".".join(octet(v, f) for v, f in zip(parts, forms))
+            try:
+                same = socket.inet_aton(text) == bytes(quad)
+            except OSError:
+                same = False
+            if text != "127.0.0.1" and same:
+                numeric.add(text + spell.choice(["", "", "."]))
+        #   Without the root's dot the spelling is the address, written as
+        #   the dotted quad once (curl's Host; GNU wget sends the spelling);
+        #   the tight tier refuses it. With the dot it is a name, as GNU wget
+        #   reads it (curl still takes the address).
+        shorthand = ("inet_aton's spelling of an address is that address, as GNU wget "
+                     "and curl read it")
+        rooted = "the root's dot makes a name, as GNU wget reads it; curl reads the address"
+        spelled = [("http://127.0.0.1:PORT/", "literal", None)] + [
+            ("http://%s:PORT/" % text, "name" if text.endswith(".") else
+             "refused" if args.tight else "literal",
+             rooted if text.endswith(".") else shorthand)
+            for text in sorted(numeric)] + [
+            ("http://u@127.0.0.1:PORT/", "refused",
+             "userinfo is refused; both send it as Authorization or drop it"),
+            ("http://127.0.0.1:PORT\\@x/", "refused",
+             "a backslash is refused; both read x as the host"),
+            ("http://ex%61mple.com:PORT/", "refused",
+             "a percent-encoded host is refused; both decode it"),
+            ("http://b\u00fccher.example:PORT/", "refused",
+             "a host outside the DNS alphabet is refused; both apply IDNA"),
+            ("http:PORT", "refused",
+             "http: without // is refused (SECURITY.md); both reach a host named http"),
+            ("http:/127.0.0.1:PORT/", "refused", "curl reads one slash as two"),
+            ("http://127.0.0.1.:PORT/", "name", rooted),
+            ("HTTP://127.0.0.1:PORT/", "literal", None),
+            ("http://Example.COM.:PORT/", "name", None),
+        ]
         references = [(who, path) for who, path in (("wget", shutil.which("wget")),
-                                                    ("curl", shutil.which("curl"))) if path]
+                                                    ("curl", shutil.which("curl"))) if path
+                      and not args.tight]
         for url, want, why in spelled:
             answers = {}
             for who, path in [("mw", str(farm / "wget"))] + references:
@@ -52631,9 +52672,11 @@ def harness_wget_hostile(argv):
                                                                          asked))
             if answers["mw"] != want:
                 failures += 1
-                print("FAIL default spelling %r: this client %s, wanted %s" % (
-                    url, answers["mw"], want))
+                print("FAIL %s spelling %r: this client %s, wanted %s" % (
+                    "tight" if args.tight else "default", url, answers["mw"], want))
             others = {who: seen for who, seen in answers.items() if who != "mw"}
+            if not others:
+                continue
             if any(seen != want for seen in others.values()):
                 print("NOTE spelling %r: this client %s; %s%s" % (
                     url, want, ", ".join("%s %s" % kv for kv in sorted(others.items())),
@@ -52862,7 +52905,12 @@ int main(void)
     #       refusal still turns up hundreds of times.
     users = [""] * 12 + ["user@", "u:p@", "@"]
     hosts = ["example.com", "Example.COM", "a-b.c_d", "127.0.0.1", "h", "x" * 254] * 3 + [
-        "", "bad!host", "h%41", "[::1]", "x" * 255, "\u00e9.test"]
+        "", "bad!host", "h%41", "[::1]", "x" * 255, "\u00e9.test",
+        #   inet_aton's spellings and their neighbours (http_ipv4_spelling).
+        "127.1", "0x7f.1", "0X7F.0.0.1", "0177.0.0.1", "2130706433", "0x7f000001",
+        "010.0.0.1", "127.000.000.001", "1.2.3", "4294967295", "4294967296", "0",
+        "1.2.3.4.5", "0x", "0x.1", "08.1", "127.0.0.1.", "127.1.", "256.1", "1.256",
+        "1.65535", "1.65536", "1.2.65536", "0xffffffff", "0x100000000", "1..2", ".1"]
     ports = ["", "", "", ":80", ":443", ":8080", ":65535", ":08", ":1"] * 2 + [
         ":0", ":65536", ":", ":+1", ":1x", ":99999999999999999999"]
     paths = ["", "/", "/a/b", "/a%20b", "/a;b,c", "/\u00e9", "/a:b@c", "/%0d%0a"] * 2 + [
@@ -52900,11 +52948,39 @@ int main(void)
         shape = random_urls.randrange(7)
         tail = pick(segments) + pick(queries) + pick(fragments)
         references.add([tail, "/" + tail, "//other.example" + pick(ports) + "/" + tail,
-                        pick(["HTTP://", "https://", "Https://"]) + "h2" + pick(ports) + "/" + tail,
+                        pick(["HTTP://", "https://", "Https://"]) +
+                        pick(["h2"] * 4 + ["127.1", "0x7f.0.0.1", "2130706433"]) +
+                        pick(ports) + "/" + tail,
                         pick(["ftp://h/", "mailto:x", "a:b", "javascript:x"]) + tail,
                         pick(["http:", "https:"]) + tail,
                         pick(["?", "#"]) + tail][shape])
     references = sorted(references)
+
+    def inet_aton_quad(host):
+        """The dotted quad inet_aton (glibc's, through Python) reads host as,
+        or None. A bare "0x" part, which glibc reads as zero and nothing
+        writes, stays a name to this client."""
+        import socket
+        if not host or re.search(r"(^|\.)0[xX](\.|$)", host) or \
+                any(c not in string.ascii_letters + string.digits + "." for c in host):
+            return None
+        try:
+            return socket.inet_ntoa(socket.inet_aton(host))
+        except OSError:
+            return None
+
+    def url_host(url):
+        """The host http_split_into reads: after a web scheme's //, or from
+        the start of a URL typed without one, up to / : ? or #."""
+        found = re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", url)
+        return re.split(r"[/:?#]", url[found.end():] if found else url, maxsplit=1)[0]
+
+    def respelled(url):
+        """Whether url's host is inet_aton's spelling of an address other
+        than that address's own dotted quad: canonicalized by default,
+        refused at the tight tier."""
+        quad = inet_aton_quad(url_host(url))
+        return quad is not None and quad != url_host(url)
 
     def encode(text):
         return text.encode("utf-8").hex() or "-"
@@ -52950,7 +53026,8 @@ int main(void)
             return "refuse"
         tls = scheme.group(1).lower() == "https"
         target = (parts.path or "/") + ("?" + parts.query if "?" in url.split("#", 1)[0] else "")
-        return (tls, host, int(port) if colon else 443 if tls else 80, dot_free(target))
+        return (tls, inet_aton_quad(host) or host, int(port) if colon else 443 if tls else 80,
+                dot_free(target))
 
     def same(got, want):
         return got is not None and got == want
@@ -53043,7 +53120,8 @@ int main(void)
         for key, why in DELIBERATE.items():
             checks(seen[key] > 0, "DELIBERATE %s never generated (%s)" % (key, why))
         #   The tight tier: the default's answer, but no scheme token
-        #   without "//" in front of the authority.
+        #   without "//" in front of the authority, and no host that is
+        #   inet_aton's spelling of an address other than its dotted quad.
         tiers = collections.Counter()
         for url, default, tight in zip(urls, answers, tight_answers):
             scheme = scheme_shape.match(url)
@@ -53055,14 +53133,30 @@ int main(void)
                        "%r: http(s): without // was taken: %s" % (url, default))
                 tiers["default took, tight refused" if default != "BAD" else
                       "both refused"] += 1
+            elif respelled(url) and default != "BAD":
+                checks(tight == "BAD", "%r: the tight tier took a respelled address: %s"
+                       % (url, tight))
+                checks(default.split("\t")[1] ==
+                       inet_aton_quad(url_host(url)).encode().hex(),
+                       "%r: the default did not write the dotted quad: %s" % (url, default))
+                tiers["address respelled by default, refused tight"] += 1
             else:
                 checks(tight == default, "%r: the tiers differ: default %s, tight %s" % (
                     url, default, tight))
         for (base, reference), default, tight in zip(pairs, answers[len(urls):],
                                                      tight_answers[len(urls):]):
-            checks(tight == default, "%r + %r: the tiers resolve differently" % (base, reference))
+            if respelled(reference_join(base, reference)) and default != "BAD":
+                checks(tight == "BAD", "%r + %r: the tight tier followed a respelled "
+                       "address: %s" % (base, reference, tight))
+                tiers["a Location's address respelled, refused tight"] += 1
+            else:
+                checks(tight == default, "%r + %r: the tiers resolve differently"
+                       % (base, reference))
         checks(tiers["default took, tight refused"] > 0 and tiers["both refused"] > 0,
                "both halves of the scheme-token rule seen: %r" % dict(tiers))
+        checks(tiers["address respelled by default, refused tight"] > 0 and
+               tiers["a Location's address respelled, refused tight"] > 0,
+               "both halves of the address-spelling rule seen: %r" % dict(tiers))
 
         #   http_url_escape: after the authority a space, a backslash and every
         #   byte past 0x7f is %XX in upper case, and nothing else moves. The
@@ -64055,9 +64149,19 @@ int main(void)
         }
         return 0;
 }
-''', ["http_host_byte", "http_scheme_length", "http_web_scheme", "http_split_into"],
+''', ["http_host_byte", "http_scheme_length", "http_web_scheme", "http_ipv4_spelling",
+      "http_split_into"],
  "#define HTTP_OK 0\n#define HTTP_BAD_URL (-1)\n#define HTTP_SCHEME (-12)\n#define HTTP_PORT 80\n"
- "#define HTTP_HTTPS_PORT 443\n#define HTTP_URL_MAX 2048\n"),
+ "#define HTTP_HTTPS_PORT 443\n#define HTTP_URL_MAX 2048\n"
+ "/* lib.c's host_into: the dotted quad, no terminator, its length. */\n"
+ "static positive host_into(p8 *into, p32 host)\n"
+ "{ positive n = 0;\n"
+ "  for (int k = 3; k >= 0; k--) { p8 octet = (p8)(host >> (8 * k));\n"
+ "    if (octet >= 100) into[n++] = (p8)('0' + octet / 100);\n"
+ "    if (octet >= 10) into[n++] = (p8)('0' + octet / 10 % 10);\n"
+ "    into[n++] = (p8)('0' + octet % 10);\n"
+ "    if (k) into[n++] = '.'; }\n"
+ "  return n; }\n"),
 ("http_path", 12, r'''
 /* PRODUCTION */
 #define N 8
@@ -64741,6 +64845,7 @@ def harness_security_hygiene(argv):
         ("net_arp_claims", ("packet",)),
         ("http_length_values", ("value",)),
         ("http_url_escape", ("url",)),
+        ("http_ipv4_spelling", ("host",)),
     )
     #   The kernel log is anybody's to read on this image (DMESG_RESTRICT is
     #   off) and the ring-0 terminal draws it, so every part of a host_kmsg

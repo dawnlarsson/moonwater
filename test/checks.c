@@ -57157,6 +57157,74 @@ static fn fetching(void)
         check("the port is read", port == 8080);
         check("the path after a port", string_equals(path, (string_address) "/x"));
 
+        /* inet_aton's spellings: the address GNU wget and curl connect to,
+           written as the dotted quad by default, refused at the tight tier;
+           the edge of each part's share, and what is no such spelling. */
+        {
+                static const struct
+                {
+                        const char *host;
+                        bool spelling;
+                        p32 address;
+                } spellings[] = {
+                    {"127.1", true, 0x7f000001}, {"0x7f.1", true, 0x7f000001},
+                    {"0177.0.0.1", true, 0x7f000001}, {"2130706433", true, 0x7f000001},
+                    {"0X7F.0X0.0.01", true, 0x7f000001}, {"0", true, 0},
+                    {"4294967295", true, 0xffffffff}, {"0xffffffff", true, 0xffffffff},
+                    {"1.16777215", true, 0x01ffffff}, {"1.2.65535", true, 0x0102ffff},
+                    {"255.255.255.255", true, 0xffffffff}, {"010.0.0.1", true, 0x08000001},
+                    {"4294967296", false, 0}, {"1.16777216", false, 0},
+                    {"1.2.65536", false, 0}, {"256.1", false, 0}, {"1.2.3.256", false, 0},
+                    {"1.2.3.4.5", false, 0}, {"0x", false, 0}, {"0x.1", false, 0},
+                    {"08", false, 0}, {"1.2.3.", false, 0}, {"1..2", false, 0},
+                    {".1", false, 0}, {"", false, 0}, {"1a", false, 0},
+                    {"99999999999999999999", false, 0},
+                };
+
+                for (positive at = 0; at < array_count(spellings); at++)
+                {
+                        p32 address = 0xdeadbeef;
+                        bool spelled = http_ipv4_spelling(
+                            (const p8 address_to)spellings[at].host,
+                            string_length((string_address)spellings[at].host),
+                            address_of address);
+
+                        check("an inet_aton spelling is read as inet_aton reads it",
+                              spelled == spellings[at].spelling &&
+                                  (!spelled || address == spellings[at].address));
+                }
+                check("a spelled address is the dotted quad by default and refused tight",
+                      MOONWATER_STRICT_NET >= STRICT_TIGHT
+                          ? http_split_into((string_address) "http://0x7f.1:8080/x", name,
+                                            sizeof name, address_of port, address_of path,
+                                            address_of tls) == HTTP_BAD_URL
+                          : http_split_into((string_address) "http://0x7f.1:8080/x", name,
+                                            sizeof name, address_of port, address_of path,
+                                            address_of tls) == HTTP_OK &&
+                                string_equals(name, (string_address) "127.0.0.1") &&
+                                port == 8080 &&
+                                string_equals(path, (string_address) "/x"));
+                check("the dotted quad itself and a name ending in the root's dot are "
+                      "left alone in every tier",
+                      http_split_into((string_address) "http://10.0.0.1/", name,
+                                      sizeof name, address_of port, address_of path,
+                                      address_of tls) == HTTP_OK &&
+                          string_equals(name, (string_address) "10.0.0.1") &&
+                          http_split_into((string_address) "http://127.1./", name,
+                                          sizeof name, address_of port, address_of path,
+                                          address_of tls) == HTTP_OK &&
+                          string_equals(name, (string_address) "127.1."));
+                check("a spelled address needs room for its dotted quad",
+                      http_split_into((string_address) "http://1/", name, 8,
+                                      address_of port, address_of path,
+                                      address_of tls) == HTTP_BAD_URL &&
+                          (MOONWATER_STRICT_NET >= STRICT_TIGHT ||
+                           (http_split_into((string_address) "http://1/", name, 9,
+                                            address_of port, address_of path,
+                                            address_of tls) == HTTP_OK &&
+                            string_equals(name, (string_address) "0.0.0.1"))));
+        }
+
         check("a bare host gets a slash",
               http_split_into((string_address) "http://dawning.dev", name, sizeof name,
                          address_of port, address_of path, address_of tls) == HTTP_OK);

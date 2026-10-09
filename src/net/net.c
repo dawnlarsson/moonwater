@@ -9631,6 +9631,70 @@ static bipolar http_url_escape(string_address url, positive length, bool bare_ho
         return HTTP_OK;
 }
 
+/* inet_aton's spellings of an IPv4 address, which GNU wget (through the C
+   library) and curl (its own URL parser) both connect to: one to four parts
+   joined by '.', each decimal, 0x hex or 0 octal, every part but the last one
+   byte and the last filling the bytes left ("127.1", "0x7f.1", "0177.0.0.1",
+   "2130706433").  A trailing '.', an empty part, an 8 or 9 in an octal part,
+   a bare "0x" (which glibc reads as 0) or a part past its share is no such
+   spelling, and the host stays a name for the resolver.  The address is in
+   host order, as http_address_public reads one. */
+static bool http_ipv4_spelling(const p8 address_to host, positive length,
+                               p32 address_to ip)
+{
+        byte_reader reader = byte_reader_open(host, length);
+        p64 address = 0;
+        positive parts = 0;
+
+        for (;;)
+        {
+                byte_reader look = reader;
+                p8 first = byte_reader_u8(address_of look);
+                p8 second = byte_reader_u8(address_of look);
+                positive base = 10;
+                positive digits = 0;
+                p64 value = 0;
+
+                if (first == '0' && (second | 0x20) == 'x')
+                {
+                        base = 16;
+                        byte_reader_skip(address_of reader, 2);
+                }
+                else if (first == '0' && byte_is_digit(second))
+                {
+                        base = 8;
+                        byte_reader_skip(address_of reader, 1);
+                }
+                for (;; digits++)
+                {
+                        look = reader;
+                        positive digit = digit_known(byte_reader_u8(address_of look),
+                                                     base);
+
+                        if (!byte_reader_ok(address_of look) || digit >= base)
+                                break;
+                        value = value * base + digit;
+                        if (value > 0xffffffffu)
+                                return false;
+                        reader = look;
+                }
+                if (!digits)
+                        return false;
+                parts++;
+                if (!byte_reader_left(address_of reader))
+                {
+                        if (value >> (8 * (5 - parts)))
+                                return false;
+                        address_to ip = (p32)(address << (8 * (5 - parts)) | value);
+                        return true;
+                }
+                if (parts == 4 || value > 255 ||
+                    byte_reader_u8(address_of reader) != '.')
+                        return false;
+                address = address << 8 | value;
+        }
+}
+
 /*
         http://host[:port][/path] taken apart.
 
@@ -9640,6 +9704,14 @@ static bipolar http_url_escape(string_address url, positive length, bool bare_ho
         port the kernel picked. A URL the client could not carry through
         http_run -- HTTP_URL_MAX bytes or more -- is refused here too, so no
         caller derives an output name or a message from one.
+
+        A host that inet_aton reads as an address is that address, written
+        once here as the dotted quad, so the Host field, TLS's choice of an IP
+        identity over a DNS one, the lookup and the address policy all see the
+        same four octets: curl does the same (GNU wget connects to the address
+        and sends the spelling as written in Host). STRICT_TIGHT refuses every
+        such spelling but the dotted quad itself, as the ambiguity it is: a
+        filter that reads "0x7f.1" as a name is not the parser that connects.
 */
 static bipolar http_split_into(string_address url, p8 address_to host, positive room,
                                p16 address_to port, string_address address_to path,
@@ -9703,6 +9775,24 @@ static bipolar http_split_into(string_address url, p8 address_to host, positive 
                 return HTTP_BAD_URL;
 
         string_address host_at = at;
+        positive host_length = length;
+        p8 quad[16];
+        p32 numeric;
+
+        if (http_ipv4_spelling(host_at, length, address_of numeric))
+        {
+                positive quad_length = host_into(quad, numeric);
+
+                if (quad_length != length ||
+                    memory_compare(quad, host_at, length))
+                {
+                        if (MOONWATER_STRICT_NET >= STRICT_TIGHT ||
+                            quad_length + 1 >= room)
+                                return HTTP_BAD_URL;
+                        host_at = quad;
+                        host_length = quad_length;
+                }
+        }
         at += length;
 
         if (string_is(at, ':'))
@@ -9729,8 +9819,8 @@ static bipolar http_split_into(string_address url, p8 address_to host, positive 
            transaction, not a half-written host paired with a default port;
            callers which log or retry after an error cannot accidentally use
            pieces of a rejected authority. */
-        memory_copy(host, host_at, length);
-        host[length] = end;
+        memory_copy(host, host_at, host_length);
+        host[host_length] = end;
         address_to port = selected_port;
         address_to tls = selected_tls;
         address_to path = string_get(at) && !string_is(at, '#')
