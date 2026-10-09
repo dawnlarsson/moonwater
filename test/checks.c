@@ -55130,6 +55130,381 @@ static fn link_candidates(void)
         }
 }
 
+/*
+        Which link a lease is looked for on, and whether it is wireless.
+        Messages are built the way the kernel writes them and fed to the
+        visitor in the order a dump would bring them.
+*/
+typedef struct
+{
+        string_address name;
+        p32 index;
+        p32 flags;
+        p16 kind;
+        //      0 nothing, 1 link info of kind "wlan", 2 link info of kind
+        //      "bridge", 3 the wireless extension attribute, 4 kind "wla"
+        p8 wireless;
+        positive hardware_width;
+        positive downs_width;
+} link_spec;
+
+static bool link_feed(netlink_visitor visit, address_any context,
+                      const link_spec address_to spec)
+{
+        netlink_buffer message = {0};
+        p8 hardware[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+        p32 downs = 9;
+        bool built = netlink_begin(&message, RTM_NEWLINK, 0, 1,
+                                   sizeof(netlink_link)) &&
+                     netlink_attribute_add(&message, IFLA_IFNAME, spec->name,
+                                           string_length(spec->name) + 1);
+        bool wanted;
+
+        if (spec->hardware_width)
+                built &= netlink_attribute_add(&message, IFLA_ADDRESS, hardware,
+                                               spec->hardware_width);
+        if (spec->downs_width)
+                built &= netlink_attribute_add(&message, IFLA_CARRIER_DOWN_COUNT,
+                                               &downs, spec->downs_width);
+        if (spec->wireless == 1 || spec->wireless == 2 || spec->wireless == 4)
+        {
+                positive nested = netlink_nested_begin(&message, IFLA_LINKINFO);
+
+                built &= netlink_attribute_add(
+                    &message, IFLA_INFO_KIND,
+                    spec->wireless == 1 ? "wlan" : spec->wireless == 4 ? "wla"
+                                                                       : "bridge",
+                    spec->wireless == 1 ? 4 : spec->wireless == 4 ? 3 : 6);
+                netlink_nested_end(&message, nested);
+        }
+        if (spec->wireless == 3)
+                built &= netlink_attribute_add(&message, IFLA_WIRELESS, hardware, 4);
+        check("a synthetic link builds", built && !message.failed);
+        if (!built)
+        {
+                netlink_forget(&message);
+                return false;
+        }
+        netlink_link address_to link = netlink_body(&message);
+
+        link->index = spec->index;
+        link->kind = spec->kind;
+        link->flags = spec->flags;
+        wanted = visit((netlink_header address_to)message.bytes, context);
+        netlink_forget(&message);
+        return wanted;
+}
+
+static bool link_see(netlink_search address_to search,
+                     const link_spec address_to spec)
+{
+        return link_feed(netlink_link_seen, search, spec);
+}
+
+static fn link_choice(void)
+{
+        static const link_spec wired_idle = {"eth0", 1, 0, NETLINK_LINK_ETHER, 0, 6, 4};
+        static const link_spec wired_up = {"eth1", 2, IFF_RUNNING, NETLINK_LINK_ETHER, 0, 6, 4};
+        static const link_spec wifi_up = {"wlan0", 3, IFF_RUNNING, NETLINK_LINK_ETHER, 1, 6, 4};
+        static const link_spec wifi_idle = {"wlan1", 4, 0, NETLINK_LINK_ETHER, 1, 6, 4};
+        static const link_spec wired_up_later = {"eth2", 5, IFF_RUNNING, NETLINK_LINK_ETHER, 0, 6, 4};
+        static const link_spec wifi_up_later = {"wlan2", 6, IFF_RUNNING, NETLINK_LINK_ETHER, 1, 6, 4};
+
+        /* Carrier beats none, in either order; with both, prefer decides, and
+           with no preference the first stays. */
+        static const struct
+        {
+                p8 prefer;
+                const link_spec *first, *second;
+                p32 expect;
+        } orders[] = {
+            {NETLINK_PREFER_ANY, &wired_idle, &wired_up, 2},
+            {NETLINK_PREFER_ANY, &wired_up, &wired_idle, 2},
+            {NETLINK_PREFER_ANY, &wired_up, &wired_up_later, 2},
+            {NETLINK_PREFER_ANY, &wifi_up, &wired_up, 3},
+            {NETLINK_PREFER_ANY, &wired_up, &wifi_up, 2},
+            {NETLINK_PREFER_WIRED, &wifi_up, &wired_up, 2},
+            {NETLINK_PREFER_WIRED, &wired_up, &wifi_up, 2},
+            {NETLINK_PREFER_WIRED, &wired_up, &wired_up_later, 2},
+            {NETLINK_PREFER_WIRED, &wifi_up, &wifi_up_later, 3},
+            {NETLINK_PREFER_WIRED, &wired_idle, &wifi_up, 3},
+            {NETLINK_PREFER_WIRED, &wifi_up, &wired_idle, 3},
+            {NETLINK_PREFER_WIFI, &wired_up, &wifi_up, 3},
+            {NETLINK_PREFER_WIFI, &wifi_up, &wired_up, 3},
+            {NETLINK_PREFER_WIFI, &wifi_up, &wifi_up_later, 3},
+            {NETLINK_PREFER_WIFI, &wired_up, &wired_up_later, 2},
+            {NETLINK_PREFER_WIFI, &wifi_idle, &wired_up, 2},
+            {NETLINK_PREFER_WIFI, &wired_up, &wifi_idle, 2},
+        };
+
+        for (positive row = 0; row < array_count(orders); row++)
+        {
+                netlink_search search = {.skip_loopback = true,
+                                         .prefer = orders[row].prefer};
+
+                check("a dump keeps walking while it looks for the best link",
+                      link_see(&search, orders[row].first) &&
+                          link_see(&search, orders[row].second));
+                check("the best link wins by carrier, then by preference, then by order",
+                      search.found && search.index == orders[row].expect);
+        }
+
+        /* No wired links when the caller says so. */
+        {
+                netlink_search search = {.skip_loopback = true, .skip_wired = true};
+
+                link_see(&search, &wired_up);
+                check("a wired link is no candidate when wired is off", !search.found);
+                link_see(&search, &wifi_idle);
+                check("a wireless one is", search.found && search.wireless &&
+                                               search.index == 4);
+        }
+
+        /* The skip list is exactly skip_count long, and at most eight. */
+        for (positive count = 0; count <= 8; count++)
+        {
+                netlink_search search = {.skip_loopback = true, .skip_count = (p8)count,
+                                         .skip = {3, 4, 5, 6, 7, 8, 9, 2}};
+                link_spec at = wired_up;
+
+                at.index = 2;
+                link_see(&search, &at);
+                check("an index on the skip list is skipped, one past its count is not",
+                      search.found == (count < 8));
+        }
+        {
+                netlink_search search = {.skip_loopback = true, .skip_count = 1,
+                                         .skip = {5}};
+                link_spec at = wired_up;
+
+                at.index = 0;
+                link_see(&search, &at);
+                check("only skip_count entries are compared", search.found);
+        }
+        {
+                netlink_search search = {.skip_loopback = true, .skip_count = 9,
+                                         .skip = {1, 2, 3, 4, 5, 6, 7, 8}};
+                link_spec at = wired_up;
+
+                at.index = 9;
+                link_see(&search, &at);
+                check("the skip list is never read past its eight", search.found);
+        }
+
+        /* By name: the one named, only, and the first of it. */
+        {
+                netlink_search search = {.wanted = "wlan0"};
+
+                check("a link looked for by name is not another, and the dump goes on",
+                      link_see(&search, &wired_up) && !search.found);
+                check("it is taken when named, and the dump stops",
+                      !link_see(&search, &wifi_up) && search.found &&
+                          search.wireless && search.index == 3);
+                link_see(&search, &wifi_up_later);
+                check("a second of the name changes nothing",
+                      search.index == 3);
+        }
+
+        /* What the message says of its link. */
+        {
+                static const struct { positive hardware, downs; bool has, counted; } widths[] = {
+                    {6, 4, true, true}, {4, 8, false, false}, {8, 2, false, false},
+                    {0, 0, false, false}, {6, 0, true, false}, {0, 4, false, true}};
+
+                for (positive row = 0; row < array_count(widths); row++)
+                {
+                        netlink_search search = {.skip_loopback = true};
+                        link_spec at = wired_up;
+
+                        at.hardware_width = widths[row].hardware;
+                        at.downs_width = widths[row].downs;
+                        link_see(&search, &at);
+                        check("a hardware address is taken at six bytes and no other length",
+                              search.found && search.has_hardware == widths[row].has &&
+                                  (!widths[row].has ||
+                                   !memory_compare(search.hardware, "\1\2\3\4\5\6", 6)));
+                        check("the carrier count is taken at four bytes and no other length",
+                              search.carrier_counted == widths[row].counted &&
+                                  (!widths[row].counted || search.carrier_downs == 9));
+                }
+        }
+        {
+                static const struct { string_address name; p8 how; bool wireless; } kinds[] = {
+                    {"eth0", 0, false}, {"eth0", 1, true}, {"eth0", 2, false},
+                    {"eth0", 3, true}, {"eth0", 4, false}, {"wl0", 0, true},
+                    {"wlan0", 0, true}, {"wifi0", 0, true}, {"w0", 0, false},
+                    {"wx0", 0, false}, {"awifi", 0, false}};
+
+                for (positive row = 0; row < array_count(kinds); row++)
+                {
+                        netlink_search search = {.skip_loopback = true};
+                        link_spec at = wired_up;
+
+                        at.name = kinds[row].name;
+                        at.wireless = kinds[row].how;
+                        link_see(&search, &at);
+                        check("a link is wireless by its kind, its extension or its name",
+                              search.found && search.wireless == kinds[row].wireless);
+                }
+        }
+        {
+                netlink_search search = {.skip_loopback = true};
+                link_spec loopback = wired_up;
+
+                loopback.flags |= IFF_LOOPBACK;
+                link_see(&search, &loopback);
+                check("loopback is never a candidate", !search.found);
+        }
+}
+
+/* The wired links, as `moonwater wired` lists them: Ethernet that is not
+   loopback and not wireless, in the order met, a handful at most. */
+static fn wired_listing(void)
+{
+        netlink_wired wired = {0};
+        link_spec spec = {"eth0", 1, IFF_RUNNING, NETLINK_LINK_ETHER, 0, 6, 0};
+        link_spec loopback = {"lo", 1, IFF_LOOPBACK | IFF_RUNNING, NETLINK_LINK_ETHER, 0, 0, 0};
+        link_spec tunnel = {"tun0", 2, IFF_RUNNING, 65534, 0, 0, 0};
+        link_spec radio = {"hwsim0", 3, IFF_RUNNING, NETLINK_LINK_ETHER, 3, 6, 0};
+        link_spec station = {"wlan0", 4, IFF_RUNNING, NETLINK_LINK_ETHER, 1, 6, 0};
+        link_spec bridge = {"br0", 5, 0, NETLINK_LINK_ETHER, 2, 6, 0};
+
+        check("a link walk goes on after each link",
+              link_feed(netlink_wired_seen, &wired, &loopback) &&
+                  link_feed(netlink_wired_seen, &wired, &tunnel) &&
+                  link_feed(netlink_wired_seen, &wired, &radio) &&
+                  link_feed(netlink_wired_seen, &wired, &station));
+        check("loopback, other framings and wireless links are not wired",
+              wired.count == 0);
+        check("an Ethernet link of kind bridge is wired",
+              link_feed(netlink_wired_seen, &wired, &bridge) && wired.count == 1 &&
+                  wired.link[0].index == 5 && wired.link[0].flags == 0 &&
+                  !string_compare_max(wired.link[0].name, "br0", 4));
+        for (positive at = 0; at < NETLINK_WIRED_MOST + 3; at++)
+        {
+                p8 name[IFNAME_SIZE] = "eth";
+
+                name[3] = (p8)('a' + at);
+                name[4] = 0;
+                spec.name = (string_address)name;
+                spec.index = 10 + (p32)at;
+                link_feed(netlink_wired_seen, &wired, &spec);
+        }
+        check("at most a handful are listed",
+              wired.count == NETLINK_WIRED_MOST);
+        check("in the order met, with their flags",
+              wired.link[1].index == 10 && wired.link[1].flags == IFF_RUNNING &&
+                  !string_compare_max(wired.link[1].name, "etha", 5) &&
+                  wired.link[NETLINK_WIRED_MOST - 1].index ==
+                      10 + NETLINK_WIRED_MOST - 2);
+}
+
+/*
+        The addresses on a link that this client put there: protocol dhcp, a
+        local address, the link asked about, IPv4. The one asked after is a
+        lease; the others are kept, up to a handful.
+*/
+static fn lease_stamps(void)
+{
+        netlink_lease_search search;
+        netlink_buffer message = {0};
+        bool built = true;
+
+        static const struct
+        {
+                p8 family;
+                p32 index;
+                p8 prefix;
+                int proto;          /* -1 no attribute */
+                positive proto_size;
+                p32 host;
+                positive local_size; /* 0 no attribute */
+                bool leased;
+                positive others;
+        } rows[] = {
+            {AF_INET, 7, 24, IFA_PROTO_DHCP, 1, 0x0a000005, 4, true, 0},
+            {AF_INET, 7, 16, IFA_PROTO_DHCP, 1, 0x0a000005, 4, false, 1},
+            {AF_INET, 7, 24, IFA_PROTO_DHCP, 1, 0x0a000006, 4, false, 1},
+            {AF_INET, 8, 24, IFA_PROTO_DHCP, 1, 0x0a000005, 4, false, 0},
+            {10, 7, 24, IFA_PROTO_DHCP, 1, 0x0a000005, 4, false, 0},
+            {AF_INET, 7, 24, 3, 1, 0x0a000005, 4, false, 0},
+            {AF_INET, 7, 24, IFA_PROTO_DHCP, 2, 0x0a000005, 4, false, 0},
+            {AF_INET, 7, 24, -1, 0, 0x0a000005, 4, false, 0},
+            {AF_INET, 7, 24, IFA_PROTO_DHCP, 1, 0x0a000005, 3, false, 0},
+            {AF_INET, 7, 24, IFA_PROTO_DHCP, 1, 0x0a000005, 0, false, 0},
+        };
+
+        for (positive row = 0; row < array_count(rows); row++)
+        {
+                p8 proto = (p8)rows[row].proto;
+                p32 host = network_order_32(rows[row].host);
+                netlink_address address_to body;
+
+                memory_fill(address_of search, 0, sizeof search);
+                search.index = 7;
+                search.host = 0x0a000005;
+                search.prefix = 24;
+                built = netlink_begin(&message, RTM_NEWADDR, 0, 1,
+                                      sizeof(netlink_address));
+                if (rows[row].proto >= 0)
+                        built &= netlink_attribute_add(&message, IFA_PROTO, &proto,
+                                                       rows[row].proto_size);
+                if (rows[row].local_size)
+                        built &= netlink_attribute_add(&message, IFA_LOCAL, &host,
+                                                       rows[row].local_size);
+                check("a synthetic address builds", built);
+                if (!built)
+                        break;
+                body = netlink_body(&message);
+                body->family = rows[row].family;
+                body->index = rows[row].index;
+                body->prefix = rows[row].prefix;
+                check("an address is a lease of this client only when it says so, whole",
+                      netlink_lease_seen((netlink_header address_to)message.bytes,
+                                         &search) &&
+                          search.leased == rows[row].leased &&
+                          search.others == rows[row].others);
+                if (rows[row].others)
+                        check("another lease is remembered with its prefix",
+                              search.other_host[0] == rows[row].host &&
+                                  search.other_prefix[0] == rows[row].prefix);
+                netlink_forget(&message);
+        }
+
+        /* A handful of others, in the order met, and no more. */
+        memory_fill(address_of search, 0, sizeof search);
+        search.index = 7;
+        search.host = 0x0a000005;
+        search.prefix = 24;
+        for (positive at = 0; at < NETLINK_LEASES_MAX + 3; at++)
+        {
+                p8 proto = IFA_PROTO_DHCP;
+                p32 host = network_order_32(0x0a000100 + (p32)at);
+                netlink_address address_to body;
+
+                built = netlink_begin(&message, RTM_NEWADDR, 0, 1,
+                                      sizeof(netlink_address)) &&
+                        netlink_attribute_add(&message, IFA_PROTO, &proto, 1) &&
+                        netlink_attribute_add(&message, IFA_LOCAL, &host, 4);
+                check("a synthetic address builds", built);
+                if (!built)
+                        break;
+                body = netlink_body(&message);
+                body->family = AF_INET;
+                body->index = 7;
+                body->prefix = (p8)(16 + at);
+                netlink_lease_seen((netlink_header address_to)message.bytes, &search);
+                netlink_forget(&message);
+        }
+        check("only a handful of other leases are kept", search.others == NETLINK_LEASES_MAX);
+        for (positive at = 0; at < NETLINK_LEASES_MAX; at++)
+                check("and in the order they came",
+                      search.other_host[at] == 0x0a000100 + at &&
+                          search.other_prefix[at] == 16 + at);
+        check("the one asked about was none of them", !search.leased);
+        netlink_forget(&message);
+}
+
 static fn talking(void)
 {
         netlink_search search;
@@ -70835,6 +71210,9 @@ b32 main(void)
         net_group(netlink_multipart_identity);
         net_group(netlink_nonblocking_retries);
         net_group(link_candidates);
+        net_group(link_choice);
+        net_group(wired_listing);
+        net_group(lease_stamps);
         net_group(talking);
         net_group(resolving);
         net_group(resolving_edges);
