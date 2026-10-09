@@ -680,7 +680,11 @@ static bool logger_send_once(logger_control address_to control,
                 return socket_send((b32)control->handle, bytes, length,
                                    MSG_NOSIGNAL, null, 0) == (bipolar)length;
 
-        return network_stream_send_all(control->handle, bytes, length);
+        /*      The socket's send timeout bounds one call, not the line: a
+                peer taking a byte every few seconds would hold the logger
+                for as long as it liked. One absolute budget covers the line. */
+        return network_stream_send_all_for(control->handle, bytes, length,
+                                           LOGGER_STREAM_TIMEOUT_SECONDS, 0);
 }
 #endif
 

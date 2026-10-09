@@ -54450,6 +54450,17 @@ static positive memory_span_byte_reverse(const void *block, p8 byte, positive si
                 i++;
         return i;
 }
+#define memory_load_unaligned(type, source) \
+        ({ type _loaded; memcpy(&_loaded, (source), sizeof _loaded); _loaded; })
+#define memory_store_unaligned(type, destination, value) \
+        ({ type _stored = (value); memcpy((destination), &_stored, sizeof _stored); })
+static p64 network_load_64(const p8 *bytes)
+{
+        p64 value = 0;
+        for (int i = 0; i < 8; i++)
+                value = value << 8 | bytes[i];
+        return value;
+}
 static p16 network_load_16(const p8 *bytes)
 {
         return (p16)(((p16)bytes[0] << 8) | (p16)bytes[1]);
