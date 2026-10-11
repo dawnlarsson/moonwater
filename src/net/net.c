@@ -15458,32 +15458,6 @@ static COLD bool net_filter_install(net_filter address_to filter)
                              (positive)address_of program) == 0;
 }
 
-/* Every descriptor closed but the ones named, which may come in any order
-   or twice; descriptors_none fills a slot that names none. */
-static COLD bool net_apart_descriptors_keep(p32 address_to keep, positive count)
-{
-        p32 from = 0;
-
-        for (positive at = 1; at < count; at++)
-                for (positive back = at; back && keep[back - 1] > keep[back]; back--)
-                {
-                        p32 held = keep[back];
-
-                        keep[back] = keep[back - 1];
-                        keep[back - 1] = held;
-                }
-        for (positive at = 0; at < count && keep[at] != descriptors_none; at++)
-        {
-                if (keep[at] < from)
-                        continue;
-                if (keep[at] > from &&
-                    system_call_3(syscall(close_range), from, keep[at] - 1, 0) < 0)
-                        return false;
-                from = keep[at] + 1;
-        }
-        return system_call_3(syscall(close_range), from, ~(p32)0, 0) >= 0;
-}
-
 /*
         Root becomes nobody, as the DHCP exchange does. A user namespace that
         maps root and not nobody (unshare -r, which the address-policy rows of
@@ -15537,7 +15511,7 @@ static DEAD_END COLD fn net_apart_child(net_apart_task task, address_any context
         dns_tls_held = dns_tls_mode() + 1;
         clock_floor_held = clock_trust_floor();
         net_filter_build(address_of filter, clock);
-        if (!net_apart_descriptors_keep(kept, array_count(kept)) ||
+        if (!descriptors_close_outside(0, kept, array_count(kept)) ||
             !net_apart_nobody() || !net_apart_tie(parent) ||
             !net_filter_install(address_of filter))
                 system_call_1(syscall(exit_group), NET_APART_EXIT_UNCONFINED);
