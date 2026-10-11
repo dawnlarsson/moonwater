@@ -303,6 +303,13 @@ static bipolar term_session(b32 address_to master, positive address_to oom_kills
                 // A fork shares no memory, so this is the shell's alone.
                 term_oom_adjust(TERM_OOM_SHELL);
 
+                // What the shell is asked to do by the keyboard is its own to decide: a
+                // program started in the background by a script ignores these, and the
+                // shell on this pty would inherit that and not be interrupted.
+                process_signal_default(SIGINT);
+                process_signal_default(SIGQUIT);
+                process_signal_default(SIGHUP);
+
                 //      Boot may still be looking for an installed disk, and
                 //      may have a question for whoever is at this window.
                 host_terminal_opening();
@@ -342,15 +349,16 @@ static b32 term_input(b32 master, const struct window_key address_to key)
         the far end's line discipline hands over in one read, which is its
         four kilobyte buffer: a quarter of that was four reads, four wakeups
         of the writer and four passes of the loop for every one the pty
-        needed. Answers whether anything came; gone is set when the pty will
-        say no more.
+        needed. Answers whether anything came, and stops after budget bytes so a
+        far end that never pauses cannot keep the caller from drawing; gone is
+        set when the pty will say no more.
 
         Nothing waiting is EAGAIN and only EAGAIN. Everything else is the
         shell gone -- zero, or EIO once the session went with it -- and
         reading that as nothing waiting left this spinning on a dead pty
         forever, with a zombie behind it and a window nothing could dismiss.
 */
-static b32 term_drain(b32 master, b32 address_to gone)
+static b32 term_drain(b32 master, b32 address_to gone, positive budget)
 {
         p8 from_shell[4096];
         b32 changed = false;
@@ -368,6 +376,11 @@ static b32 term_drain(b32 master, b32 address_to gone)
                         term_bytes(from_shell, (positive)got);
 
                         changed = true;
+                        budget = budget > (positive)got ? budget - (positive)got : 0;
+
+                        if (!budget)
+                                return changed;
+
                         continue;
                 }
 
@@ -513,7 +526,7 @@ static b32 screen_term()
                         }
                 }
 
-                changed = term_drain(master, address_of gone);
+                changed = term_drain(master, address_of gone, positive_max);
 
                 // A report the far end asked for, which is bytes going the
                 // way keys go.

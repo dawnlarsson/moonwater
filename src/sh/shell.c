@@ -916,6 +916,7 @@ static bool floodlight_parent_supervised;
 #ifndef SHELL_UTILITY_PROGRAM
 #include "../canvas/font.c"
 #include "../canvas/compositor.c"
+#include "../canvas/terminal.c"
 #endif
 #include "edit.c"
 #include "system.c"

@@ -98763,6 +98763,384 @@ b32 main()
 }
 #endif
 
+#ifdef CHECK_terminal
+#include "../src/lib.util.c"
+#include "../src/moonwater/spark.c"
+#include "../src/canvas/window.c"
+#include "../src/canvas/term.c"
+#include "../src/sh/pty.c"
+#define BOWL_DEFAULT_PATH "/fixture/bin"
+#include "../src/canvas/terminfo.c"
+static fn host_terminal_opening() {}
+static bipolar shell_exec_file(string_address path, string_address address_to arguments, positive count,
+                               string_address address_to environment)
+{
+        (void)path, (void)arguments, (void)count, (void)environment;
+        return -1;
+}
+static fn kill_name(positive number, p8 address_to into) { positive_into_string(into, number); }
+static fn bowl_session_prepare(string_address home, string_address runtime) { (void)home, (void)runtime; }
+static string_address address_to bowl_environment(string_address address_to inherited) { return inherited; }
+#include "../src/canvas/screen.c"
+#include "../src/canvas/font.c"
+#include "../src/canvas/compositor.c"
+#include "../src/canvas/terminal.c"
+
+#define SHARED_counted
+#include "checks.c"
+#undef SHARED_counted
+
+/*
+        The terminal's frames against a full draw.
+
+        A frame draws only the cells that differ from what its buffer holds
+        and names only the rows the compositor has to read again, so the two
+        ways it can be wrong are a cell left as it was and a row left out of
+        the damage. Both show in one comparison: a model of the compositor
+        keeps a screen and copies into it, from each committed buffer, what
+        the damage says, and after every frame the screen and the buffer
+        drawn into have to be the picture that drawing every cell of the
+        grid from nothing makes.
+
+        What goes in is the emulator's own work -- text, colours, wide and
+        drawn characters, erases, scrolls, lines put in and taken out -- with
+        the wheel and resizes between, and the frames come at random with the
+        other buffer released or not, so buffers are drawn a frame behind, two
+        behind, and not at all.
+
+        The font is the first argument: the repository carries none.
+*/
+static p64 render_state = 0x9e3779b97f4a7c15ull;
+
+static p32 render_next(p32 below)
+{
+        XORSHIFT64(render_state);
+        return below ? (p32)((render_state >> 11) % below) : 0;
+}
+
+static p32 address_to render_map(positive bytes)
+{
+        long mapped = system_call_6(syscall(mmap), 0, bytes, 3, 0x22, (positive)-1, 0);
+
+        return mapped < 0 && mapped > -4096 ? 0 : (p32 address_to)mapped;
+}
+
+// What the emulator is told next: a piece of everything a terminal is sent.
+static const char address_to render_pieces[] = {
+    "hello world",
+    "The quick brown fox",
+    "\r\n",
+    "\r\n",
+    "\r\n",
+    "\t",
+    "\b",
+    "\x1b[H",
+    "\x1b[2J",
+    "\x1b[K",
+    "\x1b[1K",
+    "\x1b[2K",
+    "\x1b[1;31m",
+    "\x1b[42m",
+    "\x1b[0m",
+    "\x1b[7m",
+    "\x1b[1m",
+    "\x1b[4m",
+    "\x1b[9m",
+    "\x1b[2m",
+    "\x1b[8m",
+    "\x1b[38;5;208m",
+    "\x1b[48;5;24m",
+    "\x1b[3A",
+    "\x1b[2B",
+    "\x1b[5C",
+    "\x1b[4D",
+    "\x1b[5;7H",
+    "\x1b[2L",
+    "\x1b[2M",
+    "\x1b[3P",
+    "\x1b[3@",
+    "\x1b[2S",
+    "\x1b[2T",
+    "\x1b[2;6r",
+    "\x1b[r",
+    "\x1b[?1049h",
+    "\x1b[?1049l",
+    "\x1b[?25l",
+    "\x1b[?25h",
+    "\x1b[5 q",
+    "\x1b[2 q",
+    "\xe4\xb8\xad\xe6\x96\x87",
+    "\xe2\x94\x80\xe2\x94\x82\xe2\x94\x8c",
+    "\xe2\x96\x88\xe2\x96\x91",
+    "caf\xc3\xa9",
+    "0123456789abcdefghijklmnopqrstuvwxyz0123456789",
+    "\x1b[1;1H\x1b[44m\x1b[K",
+};
+#define RENDER_PIECES array_count(render_pieces)
+
+/*
+        The compositor, as far as the terminal can tell: a screen it copies
+        the committed buffer's damage into, as compositor_commit and
+        compositor_scene would.
+*/
+static p32 address_to render_screen;
+
+static fn render_apply(const p32 address_to buffer)
+{
+        struct surface address_to surface = terminal.surface;
+        positive count = surface->damage_count;
+
+        if (!count || count > SURFACE_DAMAGE_MAX)
+        {
+                memory_copy(render_screen, buffer, (positive)terminal.width * terminal.height * 4);
+                return;
+        }
+
+        for (positive at = 0; at < count; at++)
+        {
+                struct surface_damage rectangle = surface->damage[at];
+                long x1 = rectangle.x < 0 ? 0 : rectangle.x, y1 = rectangle.y < 0 ? 0 : rectangle.y;
+                long x2 = (long)rectangle.x + rectangle.width, y2 = (long)rectangle.y + rectangle.height;
+
+                x2 = x2 > (long)terminal.width ? (long)terminal.width : x2;
+                y2 = y2 > (long)terminal.height ? (long)terminal.height : y2;
+                for (long y = y1; y < y2 && x1 < x2; y++)
+                        memory_copy(render_screen + y * terminal.width + x1, buffer + y * terminal.width + x1,
+                                    (positive)(x2 - x1) * 4);
+        }
+}
+
+// The picture of the cells in the frame just drawn, every one of them, from nothing.
+static fn render_reference(p32 address_to into, const struct window_cell address_to cells)
+{
+        unsigned int first, shown, total;
+
+        memory_fill_u32(into, (positive)terminal.width * terminal.height, 0x123456);
+        for (unsigned int row = 0; row < ROWS; row++)
+                terminal_row(into, row, cells + (unsigned long)row * COLUMNS, null, 0, COLUMNS);
+        terminal_extent(&first, &shown, &total);
+        terminal_bar(into, first, shown, total);
+}
+
+// A new surface of the size the grid needs, and nothing on any screen yet. The
+// mappings are made once, for the largest grid the steps below ask for.
+static fn render_surface(void)
+{
+        static unsigned long reserved;
+        static struct surface address_to page;
+        unsigned int pixels_h, pixels_w = terminal_pixels(COLUMNS, ROWS, &pixels_h);
+        unsigned long slot = SURFACE_PAGE_ROUND((unsigned long)pixels_w * pixels_h * 4);
+
+        if (!page)
+        {
+                reserved = SURFACE_PAGE_ROUND((unsigned long)60 * 40 * 16 * 40 * 4);
+                page = (struct surface address_to)system_call_6(syscall(mmap), 0, WINDOW_PIXELS + reserved * 2, 3, 0x22,
+                                                                (positive)-1, 0);
+                render_screen = render_map(reserved);
+        }
+
+        memory_zero(page, WINDOW_PIXELS);
+        terminal.surface = page;
+        // A connection that is not one: the commit's message goes nowhere.
+        terminal.surface->window.handle = 0xffffffffu;
+        terminal.width = pixels_w;
+        terminal.height = pixels_h;
+        terminal.shown = -1;
+        terminal.committed[0] = terminal.committed[1] = 0;
+        terminal_frames();
+        memory_fill_u32(render_screen, (positive)pixels_w * pixels_h, 0xdeadbe);
+        (void)slot;
+}
+
+static b32 render_step(positive address_to compared, positive address_to wrong, positive step)
+{
+        p32 what = render_next(100);
+        p8 bytes[256];
+
+        if (what < 55)
+        {
+                const char address_to piece = render_pieces[render_next(RENDER_PIECES)];
+                positive length = string_length((string_address)piece);
+
+                memory_copy(bytes, piece, length);
+                cursor_hide();
+                term_bytes(bytes, length);
+                to_shell_length = 0;
+                cursor_show();
+                return true;
+        }
+
+        if (what < 65)
+        {
+                terminal_view_scroll((int)render_next(9) - 4);
+                return true;
+        }
+
+        if (what < 68)
+        {
+                // Another size: the emulator regrids, a new surface is made, nothing is on the screen.
+                window->columns = 1 + render_next(50);
+                window->rows = 1 + render_next(14);
+                cursor_hide();
+                regrid(-1);
+                terminal_view_clamp();
+                render_surface();
+                cursor_show();
+                return true;
+        }
+
+        {
+                // A frame: the buffer not on the screen is released, or it is not.
+                int slot = terminal.shown < 0 ? 0 : 1 - terminal.shown;
+
+                if (render_next(3))
+                        terminal.surface->release_serial = terminal.committed[slot];
+                else
+                        terminal.surface->release_serial = terminal.committed[slot] - 1;
+
+                if (!terminal_frame())
+                {
+                        // Only a buffer that was not released may be refused.
+                        (void)step;
+                        return terminal.committed[slot] && (int)(terminal.surface->release_serial - terminal.committed[slot]) < 0;
+                }
+
+                {
+                        p32 address_to buffer = surface_slot(terminal.surface, (unsigned int)terminal.shown,
+                                                            terminal.width, terminal.height);
+                        static p32 address_to reference;
+
+                        if (!reference)
+                                reference = render_map((positive)60 * 40 * 16 * 40 * 4);
+
+                        render_apply(buffer);
+                        render_reference(reference, terminal.frame[terminal.shown]);
+                        address_to compared += 1;
+                        if (memory_compare(render_screen, reference, (positive)terminal.width * terminal.height * 4) ||
+                            memory_compare(buffer, reference, (positive)terminal.width * terminal.height * 4))
+                        {
+                                address_to wrong += 1;
+                                if (address_to wrong < 4)
+                                {
+                                        positive pixels = (positive)terminal.width * terminal.height, at = 0;
+
+                                        string_format(log, "  frame %p: the screen or the buffer is not the full draw\n", step);
+                                        while (at < pixels && render_screen[at] == reference[at] && buffer[at] == reference[at])
+                                                at++;
+                                        string_format(log, "    first pixel %p,%p (cell %p,%p of %p by %p): screen %p buffer %p full %p, damage %p, shown %b\n",
+                                                      at % terminal.width, at / terminal.width, at % terminal.width / terminal.cell_w,
+                                                      at / terminal.width / terminal.cell_h, (positive)COLUMNS, (positive)ROWS,
+                                                      (positive)render_screen[at], (positive)buffer[at], (positive)reference[at],
+                                                      (positive)terminal.surface->damage_count, (bipolar)terminal.shown);
+                                }
+                        }
+                }
+        }
+
+        return true;
+}
+
+/*
+        What the keyboard says, turned into what the shell is sent: the
+        compositor's key events with the codes and characters its keymap
+        gives, against the bytes the kernel's window sent for the same
+        keys. A letter with Control is the control code, the key labelled
+        Backspace is DEL, Return is a carriage return, and the keys that are
+        no character are the sequences ANSI names, with what was held written
+        into them.
+*/
+static fn check_keys(void)
+{
+        static const struct
+        {
+                p32 code, character, flags;
+                const char address_to sent;
+                positive length;
+        } keys[] = {
+            {30, 'a', SURFACE_KEY_DOWN, "a", 1},
+            {30, 'A', SURFACE_KEY_DOWN | SURFACE_KEY_SHIFT, "A", 1},
+            {46, 'c', SURFACE_KEY_DOWN | SURFACE_KEY_CONTROL, "\x03", 1},
+            {32, 'd', SURFACE_KEY_DOWN | SURFACE_KEY_CONTROL, "\x04", 1},
+            {38, 'l', SURFACE_KEY_DOWN | SURFACE_KEY_CONTROL | SURFACE_KEY_REPEAT, "\x0c", 1},
+            {28, '\r', SURFACE_KEY_DOWN, "\r", 1},
+            {28, '\n', SURFACE_KEY_DOWN, "\r", 1},
+            {14, '\b', SURFACE_KEY_DOWN, "\x7f", 1},
+            {14, 127, SURFACE_KEY_DOWN, "\x7f", 1},
+            {15, '\t', SURFACE_KEY_DOWN, "\t", 1},
+            {15, '\t', SURFACE_KEY_DOWN | SURFACE_KEY_SHIFT, "\x1b[Z", 3},
+            {1, 27, SURFACE_KEY_DOWN, "\x1b", 1},
+            {103, 0, SURFACE_KEY_DOWN, "\x1b[A", 3},
+            {108, 0, SURFACE_KEY_DOWN, "\x1b[B", 3},
+            {103, 0, SURFACE_KEY_DOWN | SURFACE_KEY_SHIFT, "\x1b[1;2A", 6},
+            {106, 0, SURFACE_KEY_DOWN | SURFACE_KEY_CONTROL, "\x1b[1;5C", 6},
+            {45, 'x', SURFACE_KEY_DOWN | SURFACE_KEY_ALT, "\x1bx", 2},
+            {111, 0, SURFACE_KEY_DOWN, "\x1b[3~", 4},
+            {104, 0, SURFACE_KEY_DOWN, "\x1b[5~", 4},
+            {59, 0, SURFACE_KEY_DOWN, "\x1bOP", 3},
+            {57, ' ', SURFACE_KEY_DOWN | SURFACE_KEY_CONTROL, "\0", 1},
+            {26, '[', SURFACE_KEY_DOWN | SURFACE_KEY_CONTROL, "\x1b", 1},
+            {30, 'a', 0, "", 0},
+            {29, 0, SURFACE_KEY_DOWN | SURFACE_KEY_CONTROL, "", 0},
+        };
+
+        for (positive at = 0; at < array_count(keys); at++)
+        {
+                struct surface_event event = {SURFACE_EVENT_KEY, (unsigned short)keys[at].flags, 0,
+                                              (int)keys[at].code, (int)keys[at].character};
+                b32 dirty = false, closing = false;
+                unsigned int resize[3] = {0, 0, 0};
+
+                to_shell_length = 0;
+                terminal_receive(-1, &event, &dirty, &closing, resize);
+                check("keys: the shell is sent the bytes the kernel's window sent",
+                      to_shell_length == keys[at].length &&
+                          !memory_compare(to_shell, keys[at].sent, keys[at].length));
+        }
+        to_shell_length = 0;
+}
+
+b32 main()
+{
+        string_address paths[1];
+        positive compared = 0, wrong = 0, refused = 0;
+
+        if (program_argument_count() < 2)
+        {
+                string_format(log, "  NOT RUN: the terminal's frames, no font was given\n");
+                return test_report(null);
+        }
+
+        paths[0] = program_argument(1);
+        check("fonts: the face loads", terminal_fonts(paths, 1, null, 16));
+        if (failures)
+                return test_report(null);
+
+        for (unsigned int at = 0; at < 256; at++)
+                terminal_colour[at] = window_cell_colour(at);
+        terminal.bar_grab = -1;
+
+        window = window_grid_open(30, 8, 80, 256);
+        check("grid: a ring in the program's own memory", window != null);
+        if (!window)
+                return test_report(null);
+        grid_take();
+        full_reset();
+        render_surface();
+        cursor_show();
+
+        for (positive step = 0; step < 40000; step++)
+                if (!render_step(&compared, &wrong, step))
+                        refused++;
+
+        check_keys();
+        check("frames: a buffer is refused only while the compositor may still be reading it", !refused);
+        check("frames: some were drawn", compared > 1000);
+        check("frames: the screen and the buffer are always the full draw", !wrong);
+        string_format(log, "  %p frames compared\n", compared);
+        return test_report(null);
+}
+#endif
+
 #ifdef CHECK_probe
 #include "../src/lib.util.c"
 #include "../src/moonwater/spark.c"

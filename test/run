@@ -9496,6 +9496,36 @@ if [ -z "${TEST_RUNNER:-}" ] && command -v python3 > /dev/null 2>&1; then
         fi
 fi
 
+#       The terminal that draws its own pixels (src/canvas/terminal.c): a frame
+#       draws only the cells that changed in the buffer it has and tells the
+#       compositor only the rows it has to read again. The check keeps a model
+#       of the compositor's screen, runs the emulator through a stream of
+#       everything a terminal is sent with resizes, the wheel and frames at
+#       random between, and holds the screen and the buffer to a full draw
+#       of the grid after every frame. It needs a monospace font, which the
+#       repository does not carry: the first of the usual places has one.
+group render
+render_font=
+for candidate in /usr/share/fonts/TTF/Hack-Regular.ttf /usr/share/fonts/TTF/DejaVuSansMono.ttf \
+        /usr/share/fonts/dejavu/DejaVuSansMono.ttf /usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf \
+        /usr/share/fonts/noto/NotoSansMono-Regular.ttf; do
+        if [ -f "$candidate" ]; then
+                render_font=$candidate
+                break
+        fi
+done
+if [ -n "${TEST_RUNNER:-}" ]; then
+        :
+elif [ -z "$render_font" ]; then
+        note "terminal frames: NOT RUN, no monospace font in the usual places"
+elif ! freestanding_check terminal "$work/terminal-check"; then
+        lost 'terminal frames: the check did not build' ''
+elif "$work/terminal-check" "$render_font" > "$work/terminal-check.out" 2>&1; then
+        won
+else
+        lost 'terminal frames against a full draw' "$(grep 'FAIL\|first pixel' "$work/terminal-check.out" | head -3 | tr '\n' ' ')"
+fi
+
 #       And the same emulator under libFuzzer with ASan/UBSan: what no grammar
 #       names. Five seconds here; MOONWATER_FUZZ_SECONDS lengthens it. Not
 #       run without clang, libFuzzer and objcopy, which is not a failure.
@@ -15972,9 +16002,9 @@ MOONWATER_CANVAS_COVERAGE=${coverage_serial#-serial file:}
 export MOONWATER_CANVAS_COVERAGE
 qmp_guest_module "$work"
 
-#       CANVAS_ONLY=m1 runs the userspace compositor's boot alone, for a
+#       CANVAS_ONLY=m1 (or m5) runs the userspace compositor's boot alone, for a
 #       parent and a fix compared in one sitting; the lane runs all of it.
-if [ "${CANVAS_ONLY:-}" != m1 ]; then
+if [ -z "${CANVAS_ONLY:-}" ]; then
 PYTHONPATH=$work python3 - "$image" > "$work/answers" 2>"$work/why" <<'PY'
 import os, re, subprocess, sys, time
 from qmp_guest import *
@@ -18160,6 +18190,7 @@ else
 fi
 fi
 
+if [ "${CANVAS_ONLY:-}" != m5 ]; then
 #       The compositor in userspace (canvas milestone M1).
 #
 #       A script on a stick, typed into the boot terminal, starts
@@ -18611,6 +18642,294 @@ else
                 same "$name" "$want" "$got"
         done < "$work/m1-answers"
         sed -n 's/^m1 hand-back/  canvas       hand-back/p' "$work/m1-why"
+fi
+fi
+
+#       The terminal on the compositor in userspace (canvas milestone M5).
+#
+#       /terminal is a program that makes its own pixels: it runs a shell on
+#       a pty, keeps the cells in its own memory and draws them into a surface
+#       with the text engine. A script on a stick starts the compositor and
+#       one terminal on it, with a font from the host (the repository carries
+#       none), and the rest is read the way a person would: keys and the
+#       pointer through the guest's devices, the screen from a screendump,
+#       and what the shell is told through the serial line, which the typed
+#       line never reaches.
+#
+#       Not run without a monospace font on the host: the terminal refuses to
+#       start without one and there is nothing to read.
+m5_font=
+m5_bold=
+for candidate in /usr/share/fonts/TTF/Hack-Regular.ttf /usr/share/fonts/TTF/DejaVuSansMono.ttf \
+        /usr/share/fonts/dejavu/DejaVuSansMono.ttf /usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf \
+        /usr/share/fonts/noto/NotoSansMono-Regular.ttf; do
+        if [ -f "$candidate" ]; then
+                m5_font=$candidate
+                m5_bold=$(printf '%s' "$candidate" | sed 's/Regular/Bold/;s/Mono\.ttf/Mono-Bold.ttf/')
+                break
+        fi
+done
+if [ -n "${CANVAS_ONLY:-}" ] && [ "$CANVAS_ONLY" != m5 ]; then
+        :
+elif [ -z "$m5_font" ]; then
+        note "the terminal on the compositor: NOT RUN, no monospace font in the usual places"
+else
+[ -f "$m5_bold" ] || m5_bold=$m5_font
+PYTHONPATH=$work python3 - "$image" "$m5_font" "$m5_bold" > "$work/m5-answers" 2>"$work/m5-why" <<'PY'
+import os, re, shutil, sys, time
+from qmp_guest import *
+
+image, font, bold = sys.argv[1:4]
+work = os.environ["MOONWATER_CANVAS_WORK"] + "/m5"
+stick = work + "/stick"
+os.makedirs(stick, exist_ok=True)
+shutil.copy(font, stick + "/font.ttf")
+shutil.copy(bold, stick + "/bold.ttf")
+out = []
+
+#   The compositor, one terminal, and a count of the terminal's wakeups over
+#   five idle seconds: a terminal with nothing to do is asleep. The script
+#   ends the compositor itself, after the time the rows below take, because
+#   no key typed while the compositor has the card reaches anything else.
+open(stick + "/m5", "w").write(r"""exec > /dev/ttyS0 2>&1
+/compositor &
+c=$!
+sleep 2
+/terminal -f /mnt/font.ttf -b /mnt/bold.ttf -s 16 &
+t=$!
+sleep 3
+echo m5-ready
+a=$(sed -n 's/^voluntary_ctxt_switches:[^0-9]*//p' /proc/$t/status)
+sleep 5
+b=$(sed -n 's/^voluntary_ctxt_switches:[^0-9]*//p' /proc/$t/status)
+echo "m5 idle wakeups: $((b - a))"
+echo "m5 memory: $(grep -E '^(VmSize|VmRSS|RssAnon|RssFile|RssShmem)' /proc/$t/status | tr -s ' \t\n' ' ')"
+echo m5-idle-done
+sleep 110
+kill $c
+wait $c
+echo m5-done
+""")
+
+guest = Guest(desktop(image) + [
+    "-drive", "if=none,id=stick,format=raw,file=fat:ro:" + stick + ",readonly=on",
+    "-device", "usb-storage,drive=stick,removable=on",
+    "-no-reboot", "-display", "none", "-serial", "file:" + work + "/serial",
+    "-append", "console=ttyS0 drm_client_lib.active= moonwater.cursor_plane=0 " + os.environ.get("CANVAS_APPEND", "")],
+    work + "/qmp", work + "/mon", work)
+time.sleep(25)
+
+def serial():
+    return open(work + "/serial", "rb").read()
+
+def wait_for(marker, seconds):
+    stop = time.time() + seconds
+    while time.time() < stop:
+        if marker in serial():
+            return True
+        time.sleep(0.2)
+    return False
+
+def picture(name):
+    shot(name, 1)
+    width, height, data = load(name)
+    def at(x, y):
+        o = (y * width + x) * 3
+        return data[o], data[o + 1], data[o + 2]
+    return width, height, at
+
+DESKTOP = (0x1b, 0x27, 0x33)
+
+def window(width, height, at):
+    """The terminal's body, as (left, top, right, bottom) of its black: the
+    desktop around it is 1b2733 and the body is black where nothing is drawn."""
+    y = height // 2
+    left = next((x for x in range(width) if at(x, y) != DESKTOP), None)
+    right = next((x for x in range(width - 1, -1, -1) if at(x, y) != DESKTOP), None)
+    if left is None:
+        return None
+    x = (left + right) // 2
+    top = next((v for v in range(height) if at(x, v) == (0, 0, 0)), None)
+    bottom = next((v for v in range(height - 1, -1, -1) if at(x, v) == (0, 0, 0)), None)
+    return left, top, right, bottom
+
+def lit(at, x0, y0, x1, y1):
+    n = 0
+    for y in range(y0, y1):
+        for x in range(x0, x1):
+            r, g, b = at(x, y)
+            n += r + g + b > 300
+    return n
+
+def click(x, y):
+    send([{"type": "abs", "data": {"axis": "x", "value": -(-x * 32767 // W)}},
+          {"type": "abs", "data": {"axis": "y", "value": -(-y * 32767 // H)}}])
+    time.sleep(0.1)
+    send([{"type": "btn", "data": {"down": True, "button": "left"}}])
+    time.sleep(0.05)
+    send([{"type": "btn", "data": {"down": False, "button": "left"}}])
+    time.sleep(0.5)
+
+def drag(x0, y0, x1, y1):
+    moveto(x0, y0)
+    send([{"type": "btn", "data": {"down": True, "button": "left"}}])
+    time.sleep(0.1)
+    for i in range(1, 7):
+        moveto(x0 + (x1 - x0) * i // 6, y0 + (y1 - y0) * i // 6)
+        time.sleep(0.15)
+    send([{"type": "btn", "data": {"down": False, "button": "left"}}])
+    time.sleep(1)
+
+def type_shell(line):
+    shifted = {'"': "apostrophe", "$": "4", ">": "dot", "?": "slash", "|": "backslash"}
+    plain = {" ": "spc", ".": "dot", "/": "slash", "-": "minus", ";": "semicolon",
+             "\n": "ret", "'": "apostrophe", "=": "equal"}
+    for character in line:
+        if character in shifted:
+            chord("shift", shifted[character])
+        elif character.isupper():
+            chord("shift", character.lower())
+        else:
+            key(plain.get(character, character))
+
+def sizes():
+    return re.findall(rb"(?<![0-9])(\d+) (\d+)\r?\n", serial()[serial().rfind(b"m5-idle-done"):])
+
+type_text("mkdir -p /mnt\n")
+time.sleep(1)
+type_text("mount -r -t vfat /dev/sda1 /mnt\n")
+time.sleep(2)
+type_text("sh /mnt/m5\n")
+ready = wait_for(b"m5-idle-done", 60)
+time.sleep(0.5)
+idle = re.findall(rb"m5 idle wakeups: (-?\d+)", serial())
+out.append(("M5 idle: a terminal with nothing to do wakes no more than once in five seconds",
+            "0 or 1" if idle and int(idle[-1]) <= 1 else (idle[-1].decode() if idle else "no answer"), "0 or 1"))
+
+mem = re.findall(rb"m5 memory: ([^\r\n]*)", serial())
+print("m5 memory: " + (mem[-1].decode() if mem else "not read"), file=sys.stderr)
+
+w, h, at = picture("m5-first")
+box = window(w, h, at)
+if not box or box[1] is None:
+    out.append(("M5 the terminal is on the screen", "no window found", "yes"))
+    box = (w // 2 - 300, h // 2 - 200, w // 2 + 300, h // 2 + 200)
+left, top, right, bottom = box
+first = lit(at, left, top, left + 120, top + 16)
+out.append(("M5.3 the terminal shows text: the prompt is drawn in its first row",
+            "yes" if first > 12 else "%d lit pixels" % first, "yes"))
+out.append(("and its paper is black below it",
+            "yes" if at(left + 20, top + 120) == (0, 0, 0) and at(right - 40, bottom - 10) == (0, 0, 0) else "no", "yes"))
+
+# Keys go to the surface with focus, which a click gives.
+click((left + right) // 2, (top + bottom) // 2)
+before = lit(at, left, top, left + 400, top + 16)
+type_text("echo m5-typed")
+time.sleep(0.3)
+w, h, at = picture("m5-typed")
+after = lit(at, left, top, left + 400, top + 16)
+out.append(("M5.3 a typed key's echo is on the screen",
+            "yes" if after > before + 40 else "%d then %d lit pixels" % (before, after), "yes"))
+type_shell("\n")
+time.sleep(1)
+
+# The size the shell is told, and the order it is told in.
+type_shell("stty size > /dev/ttyS0\n")
+time.sleep(1.5)
+start = sizes()
+out.append(("M5 the shell is told 24 rows by 80 columns",
+            "%s %s" % (start[-1][0].decode(), start[-1][1].decode()) if start else "no answer", "24 80"))
+
+type_shell("sh -c 'trap \"stty size > /dev/ttyS0\" WINCH; while true; do sleep 1; done'\n")
+time.sleep(1.5)
+w, h, at = picture("m5-before-resize")
+box = window(w, h, at) or box
+left, top, right, bottom = box
+count = len(sizes())
+drag(right - 2, (top + bottom) // 2, right - 202, (top + bottom) // 2)
+time.sleep(1)
+w, h, at = picture("m5-narrow")
+narrow = window(w, h, at)
+told = sizes()[count:]
+out.append(("M5.6 shrinking from the right edge: the window is narrower and its rows are the same",
+            "yes" if narrow and narrow[2] < right - 120 and abs(narrow[3] - bottom) <= 2 else str(narrow), "yes"))
+out.append(("and the shell is told the new size before SIGWINCH reaches it: fewer columns, 24 rows",
+            "%s %s" % (told[-1][0].decode(), told[-1][1].decode()) if told and int(told[-1][1]) < 80 and told[-1][0] == b"24"
+            else (" ".join("%s/%s" % (a.decode(), b.decode()) for a, b in told) or "no answer"), "24 60"
+            if told and int(told[-1][1]) < 80 and told[-1][0] == b"24" else "24 fewer than 80"))
+left, top, right, bottom = narrow or box
+
+count = len(sizes())
+drag((left + right) // 2, bottom + 1, (left + right) // 2, bottom + 151)
+time.sleep(1)
+w, h, at = picture("m5-tall")
+tall = window(w, h, at)
+told = sizes()[count:]
+out.append(("M5.6 growing from the bottom edge: the window is taller and the shell has more rows",
+            "yes" if tall and tall[3] > bottom + 100 and told and int(told[-1][0]) > 24 else
+            "%s %s" % (tall, told[-1] if told else "no answer"), "yes"))
+if tall:
+    left, top, right, bottom = tall
+
+# Control-C reaches the foreground job, through the pty's line discipline.
+# The loop that reports its size is still the foreground job.
+chord("ctrl", "c")
+time.sleep(1)
+type_shell('sh -c "sleep 20; echo stringran-on > /dev/ttyS0"\n')
+time.sleep(2)
+chord("ctrl", "c")
+time.sleep(1)
+type_shell("echo interrupted-$? > /dev/ttyS0\n")
+text = b""
+for _ in range(40):
+    text = serial()
+    if re.search(rb"interrupted-\d+", text):
+        break
+    time.sleep(0.5)
+stopped = re.findall(rb"interrupted-(\d+)", text)
+out.append(("M5 Control-C stops the job running in the terminal",
+            stopped[-1].decode() if stopped else "no answer", "130"))
+out.append(("and the rest of its string never runs", str(text.count(b"stringran-on")), "0"))
+
+# The scrollback: the wheel moves the view and the bar says where it is.
+type_shell("seq 1 300\n")
+time.sleep(1.5)
+w, h, at = picture("m5-seq")
+for _ in range(4):
+    send([{"type": "btn", "data": {"down": True, "button": "wheel-up"}},
+          {"type": "btn", "data": {"down": False, "button": "wheel-up"}}])
+    time.sleep(0.2)
+time.sleep(0.5)
+w, h, again = picture("m5-wheel")
+moved = sum(1 for y in range(top, bottom, 3) for x in range(left, left + 60, 2) if at(x, y) != again(x, y))
+out.append(("M5 the wheel scrolls back through what was said",
+            "yes" if moved > 150 else "%d pixels differ" % moved, "yes"))
+bar = sum(1 for y in range(top, bottom) if again(right - 3, y) == (0x4c, 0x67, 0x85))
+out.append(("and the bar's thumb is in the gutter",
+            "yes" if bar > 8 else "%d thumb pixels" % bar, "yes"))
+
+done = wait_for(b"m5-done", 130)
+out.append(("M5 the compositor ends and the kernel desktop is back", "yes" if done else "no", "yes"))
+
+try:
+    guest.quit()
+    guest.wait(10)
+except Exception:
+    guest.kill()
+
+for name, got, want in out:
+    print("%s|%s|%s" % (name, got, want))
+PY
+
+if [ ! -s "$work/m5-answers" ]; then
+        same "the terminal boot answered" "yes" "no"
+        sed 's/^/    /' "$work/m5-why" | tail -5
+else
+        while IFS='|' read -r name got want; do
+                same "$name" "$want" "$got"
+        done < "$work/m5-answers"
+        sed -n 's/^m5 memory:/  canvas       terminal memory:/p' "$work/m5-why"
+fi
 fi
 
 counted
