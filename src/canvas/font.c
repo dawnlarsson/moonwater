@@ -330,7 +330,8 @@ typedef struct
         b32 band, rows, stride, width, grain, wound, x, y;
         b32 cell_x, cell_y;
         p32 cover, area, gathered, used[4];
-        bool clip, gather, overflow, track;
+        b32 floor_y, height_y, wide_x;
+        bool clip, gather, overflow, track, mark, direct;
 
         p8 ramp[256];
         p32 ramp_colour, ramp_contrast, plain;
@@ -899,6 +900,41 @@ static inline b64 font_exact(b64 value)
         return value > ((b64)1 << 36) ? (b64)1 << 36 : value < -((b64)1 << 36) ? -((b64)1 << 36) : value;
 }
 
+static inline positive font_coordinates(font_engine address_to e, const font_face address_to face,
+                                        p32 first, p32 count, positive p, bool checked)
+{
+        const p8 address_to data = face->data;
+
+        for (p32 axis = 0; axis < 2; axis++)
+        {
+                p32 brief = axis ? 4 : 2, same = axis ? 32 : 16;
+                b64 value = 0;
+
+                for (p32 i = first; i < first + count; i++)
+                {
+                        p32 flag = e->on[i];
+
+                        if (flag & brief)
+                        {
+                                b64 step = checked ? font_u8(face, p) : data[p];
+
+                                p++;
+                                value += flag & same ? step : -step;
+                        }
+                        else if (!(flag & same))
+                        {
+                                value += checked ? font_i16(face, p) : (b16)((p32)data[p] << 8 | data[p + 1]);
+                                p += 2;
+                        }
+                        if (axis)
+                                e->points[i].y = value * (1 << FONT_EXACT);
+                        else
+                                e->points[i].x = value * (1 << FONT_EXACT);
+                }
+        }
+        return p;
+}
+
 static b32 font_outline(font_engine address_to e, const font_face address_to face,
                         p32 glyph, p32 depth)
 {
@@ -949,29 +985,14 @@ static b32 font_outline(font_engine address_to e, const font_face address_to fac
                 if (i < count)
                         return FONT_BAD;
 
-                for (p32 axis = 0; axis < 2; axis++)
-                {
-                        p32 brief = axis ? 4 : 2, same = axis ? 32 : 16;
-                        b64 value = 0;
-
-                        for (i = first; i < first + count; i++)
-                        {
-                                if (e->on[i] & brief)
-                                {
-                                        b64 step = font_u8(face, p++);
-                                        value += e->on[i] & same ? step : -step;
-                                }
-                                else if (!(e->on[i] & same))
-                                {
-                                        value += font_i16(face, p);
-                                        p += 2;
-                                }
-                                if (axis)
-                                        e->points[i].y = value * (1 << FONT_EXACT);
-                                else
-                                        e->points[i].x = value * (1 << FONT_EXACT);
-                        }
-                }
+                //      Four bytes a point is the most the coordinates can
+                //      take: when that much lies inside the file nothing
+                //      below needs a bounds test, and the same bytes are read
+                //      that the tested reads would have read.
+                if (p + 4 * (positive)count + 2 <= face->size)
+                        p = font_coordinates(e, face, first, count, p, false);
+                else
+                        p = font_coordinates(e, face, first, count, p, true);
                 if (p > limit)
                         return FONT_BAD;
 
@@ -1206,18 +1227,32 @@ static inline fn font_cell_add(font_engine address_to e, b32 row, b32 column, b3
 
         cells[column] += (p32)(2 * FONT_ONE * cover - area);
         cells[column + 1] += (p32)area;
-        e->touched[row] |= (p64)1 << (column >> e->grain) | (p64)1 << ((column + 1) >> e->grain);
+        if (e->mark)
+                e->touched[row] |= (p64)1 << (column >> e->grain) | (p64)1 << ((column + 1) >> e->grain);
 }
 
-static fn font_span(font_engine address_to e, b32 row, b32 xa, b32 xb, b32 cover)
+//      The blocks from the one holding column first to the one holding last.
+static inline fn font_mark(font_engine address_to e, b32 row, b32 first, b32 last)
+{
+        if (e->mark)
+                e->touched[row] |= ((p64)2 << (last >> e->grain)) - ((p64)1 << (first >> e->grain));
+}
+
+//      A span inside one column: the cover is the height, the area the
+//      height times the x where the edge enters and leaves.
+static inline fn font_span_one(font_engine address_to e, p32 address_to cells, b32 row, b32 column,
+                               b32 xa, b32 xb, b32 cover)
+{
+        b32 area = cover * ((xa & (FONT_ONE - 1)) + (xb & (FONT_ONE - 1)));
+
+        cells[column] += (p32)(2 * FONT_ONE * cover - area);
+        cells[column + 1] += (p32)area;
+        font_mark(e, row, column, column + 1);
+}
+
+static fn font_span_many(font_engine address_to e, p32 address_to cells, b32 row, b32 xa, b32 xb, b32 cover)
 {
         b32 column = xa >> FONT_SHIFT, last = xb >> FONT_SHIFT, mask = FONT_ONE - 1;
-
-        if (column == last)
-        {
-                font_cell_add(e, row, column, cover, cover * ((xa & mask) + (xb & mask)));
-                return;
-        }
 
         //      The cover each column takes is its share of the x travelled,
         //      by a remainder walk: one division for the first column and
@@ -1231,8 +1266,12 @@ static fn font_span(font_engine address_to e, b32 row, b32 xa, b32 xb, b32 cover
         b64 lift = size * FONT_ONE / travel, spare = size * FONT_ONE % travel;
         b32 sign = cover < 0 ? -1 : 1, from = xa & mask;
 
+        font_mark(e, row, right ? column : last, right ? last + 1 : column + 1);
+
         b32 part = (b32)done * sign;
-        font_cell_add(e, row, column, part, part * (from + leave));
+        b32 area = part * (from + leave);
+        cells[column] += (p32)(2 * FONT_ONE * part - area);
+        cells[column + 1] += (p32)area;
         for (column += step; column != last; column += step)
         {
                 b64 piece = lift;
@@ -1245,10 +1284,23 @@ static fn font_span(font_engine address_to e, b32 row, b32 xa, b32 xb, b32 cover
                 }
                 done += piece;
                 part = (b32)piece * sign;
-                font_cell_add(e, row, column, part, part * FONT_ONE);
+                cells[column] += (p32)(part * FONT_ONE);
+                cells[column + 1] += (p32)(part * FONT_ONE);
         }
         part = cover - (b32)done * sign;
-        font_cell_add(e, row, last, part, part * (enter + (xb & mask)));
+        area = part * (enter + (xb & mask));
+        cells[last] += (p32)(2 * FONT_ONE * part - area);
+        cells[last + 1] += (p32)area;
+}
+
+static inline fn font_span(font_engine address_to e, b32 row, b32 xa, b32 xb, b32 cover)
+{
+        p32 address_to cells = e->cells + (positive)row * (positive)e->stride;
+
+        if ((xa ^ xb) >> FONT_SHIFT)
+                font_span_many(e, cells, row, xa, xb, cover);
+        else
+                font_span_one(e, cells, row, xa >> FONT_SHIFT, xa, xb, cover);
 }
 
 static inline fn font_floor_divide(b64 numerator, b64 denominator, b64 address_to quotient,
@@ -1395,26 +1447,118 @@ static fn font_edge(font_engine address_to e, b32 x0, b32 y0, b32 x1, b32 y1)
         }
 }
 
-//      A piece inside one cell, the common case, adds to the cell in hand.
-static inline fn font_piece(font_engine address_to e, b32 x0, b32 y0, b32 x1, b32 y1)
+//      font_edge for a piece that lies wholly inside the band's rows and the
+//      bitmap's columns when nothing is clipped or gathered, which is every
+//      piece of a glyph that fits one band: none of the checks, and a piece
+//      inside one row, which is most of them, goes straight to its span.
+static fn font_trace(font_engine address_to e, b32 x0, b32 y0, b32 x1, b32 y1)
 {
-        b32 row = (y0 >> FONT_SHIFT) - e->band;
+        b32 sign = 1;
 
-        if (!e->clip && !e->gather && !(((x0 ^ x1) | (y0 ^ y1)) >> FONT_SHIFT) && x0 >= 0 && y0 >= 0)
+        if (y0 == y1)
+                return;
+        if (y0 > y1)
         {
-                if ((p32)row >= (p32)e->rows || y0 == y1)
-                        return;
-                if (row != e->cell_y || x0 >> FONT_SHIFT != e->cell_x)
-                {
-                        font_flush(e);
-                        e->cell_x = x0 >> FONT_SHIFT;
-                        e->cell_y = row;
-                }
-                e->cover += (p32)(y1 - y0);
-                e->area += (p32)((y1 - y0) * ((x0 & (FONT_ONE - 1)) + (x1 & (FONT_ONE - 1))));
+                b32 t = x0;
+                x0 = x1, x1 = t, t = y0, y0 = y1, y1 = t, sign = -1;
+        }
+        if ((y0 >> FONT_SHIFT) == ((y1 - 1) >> FONT_SHIFT))
+        {
+                font_span(e, (y0 >> FONT_SHIFT) - e->band, x0, x1, (y1 - y0) * sign);
                 return;
         }
-        font_edge(e, x0, y0, x1, y1);
+
+        b64 dx = (b64)x1 - x0, dy = (b64)y1 - y0, half = dy >> 1, at = 0, carry = half, lift = 0, spare = -1;
+        b32 ya = y0, xa = x0;
+
+        while (ya < y1)
+        {
+                b32 yb = (ya & ~(FONT_ONE - 1)) + FONT_ONE;
+
+                if (ya & (FONT_ONE - 1) || yb > y1)
+                {
+                        yb = yb > y1 ? y1 : yb;
+                        if (yb == y1)
+                                at = dx;
+                        else
+                                font_floor_divide(dx * (yb - y0) + half, dy, &at, &carry);
+                }
+                else
+                {
+                        if (spare < 0)
+                                font_floor_divide(dx * FONT_ONE, dy, &lift, &spare);
+                        at += lift;
+                        carry += spare;
+                        if (carry >= dy)
+                        {
+                                carry -= dy;
+                                at++;
+                        }
+                }
+
+                b32 xb = x0 + (b32)at;
+                font_span(e, (ya >> FONT_SHIFT) - e->band, xa, xb, (yb - ya) * sign);
+                ya = yb;
+                xa = xb;
+        }
+}
+
+//      The cell the path is in, kept in registers while a conic or a line
+//      walks, with the band's edges every piece is tested against.
+typedef struct
+{
+        b32 floor, height, wide, band, cell_x, cell_y;
+        p32 cover, area;
+} font_hand;
+
+static inline fn font_pick_up(const font_engine address_to e, font_hand address_to h)
+{
+        *h = (font_hand){e->floor_y, e->height_y, e->wide_x, e->band, e->cell_x, e->cell_y, e->cover, e->area};
+}
+
+static inline fn font_put_down(font_engine address_to e, const font_hand address_to h)
+{
+        e->cell_x = h->cell_x, e->cell_y = h->cell_y, e->cover = h->cover, e->area = h->area;
+}
+
+//      A piece known to be inside the band and the bitmap: across cells it
+//      is traced, inside one it adds to the cell in hand, which is written
+//      when the path leaves it.
+static inline fn font_piece_in(font_engine address_to e, font_hand address_to h, b32 x0, b32 y0, b32 x1, b32 y1)
+{
+        if (((x0 ^ x1) | (y0 ^ y1)) >> FONT_SHIFT)
+        {
+                font_trace(e, x0, y0, x1, y1);
+                return;
+        }
+        if (y0 == y1)
+                return;
+
+        b32 row = (y0 >> FONT_SHIFT) - h->band, column = x0 >> FONT_SHIFT;
+
+        if (row != h->cell_y || column != h->cell_x)
+        {
+                if (h->cover | h->area)
+                        font_cell_add(e, h->cell_y, h->cell_x, (b32)h->cover, (b32)h->area);
+                h->cover = h->area = 0;
+                h->cell_x = column;
+                h->cell_y = row;
+        }
+        h->cover += (p32)(y1 - y0);
+        h->area += (p32)((y1 - y0) * ((x0 & (FONT_ONE - 1)) + (x1 & (FONT_ONE - 1))));
+}
+
+//      Any piece: the plain ones inside the band and the bitmap go the short
+//      way (inside says the caller has already seen that they do), the rest,
+//      clipped, gathered or across a band's edge, to font_edge.
+static inline fn font_piece(font_engine address_to e, font_hand address_to h, bool inside,
+                            b32 x0, b32 y0, b32 x1, b32 y1)
+{
+        if (inside || (e->direct && (p32)(y0 - h->floor) <= (p32)h->height && (p32)(y1 - h->floor) <= (p32)h->height &&
+                       (p32)x0 <= (p32)h->wide && (p32)x1 <= (p32)h->wide))
+                font_piece_in(e, h, x0, y0, x1, y1);
+        else
+                font_edge(e, x0, y0, x1, y1);
 }
 
 //      A quadratic in n even steps, the fewest that leave each piece's
@@ -1448,24 +1592,60 @@ static fn font_extent(font_engine address_to e, b32 xa, b32 xb, b32 xc, b32 ya, 
         }
 }
 
+//      The pieces of a conic: its points from the forward differences, each
+//      joined to the one before, the last to the conic's end.
+static inline fn font_pieces(font_engine address_to e, font_hand address_to h, bool inside,
+                             b32 x0, b32 y0, b32 x, b32 y, b64 n, b64 ux, b64 sx, b64 bx,
+                             b64 uy, b64 sy, b64 by, b64 hx, b64 hy)
+{
+        //      The first point and the last take half a step more than the
+        //      rest, both of them on a conic of two pieces.
+        b64 first = n == 2 ? 2 : 1;
+        b32 px = x0, py = y0, qx, qy;
+
+        ux += sx, sx += bx, uy += sy, sy += by;
+        qx = x0 + (b32)((ux + first * hx) >> 32), qy = y0 + (b32)((uy + first * hy) >> 32);
+        font_piece(e, h, inside, px, py, qx, qy);
+        px = qx, py = qy;
+        for (b64 i = 2; i < n - 1; i++)
+        {
+                ux += sx, sx += bx, uy += sy, sy += by;
+                qx = x0 + (b32)(ux >> 32), qy = y0 + (b32)(uy >> 32);
+                font_piece(e, h, inside, px, py, qx, qy);
+                px = qx, py = qy;
+        }
+        if (n > 2)
+        {
+                ux += sx, sx += bx, uy += sy, sy += by;
+                qx = x0 + (b32)((ux + hx) >> 32), qy = y0 + (b32)((uy + hy) >> 32);
+                font_piece(e, h, inside, px, py, qx, qy);
+                px = qx, py = qy;
+        }
+        font_piece(e, h, inside, px, py, x, y);
+}
+
 static fn font_conic(font_engine address_to e, b32 cx, b32 cy, b32 x, b32 y)
 {
         b32 x0 = e->x, y0 = e->y;
         b32 low = e->band * FONT_ONE, high = (e->band + e->rows) * FONT_ONE;
+        font_hand h;
 
         e->x = x;
         e->y = y;
         if ((y0 >= high && cy >= high && y >= high) || (y0 < low && cy < low && y < low))
                 return;
-        font_extent(e, x0, cx, x, y0, cy, y);
+        if (e->track && !e->gather)
+                font_extent(e, x0, cx, x, y0, cy, y);
 
         b64 ax = (b64)x0 - 2 * (b64)cx + x, ay = (b64)y0 - 2 * (b64)cy + y;
         b64 bow = ax < 0 ? -ax : ax, rise = ay < 0 ? -ay : ay;
 
+        font_pick_up(e, &h);
         bow = bow > rise ? bow : rise;
         if (bow <= FONT_STRAIGHT)
         {
-                font_piece(e, x0, y0, x, y);
+                font_piece(e, &h, false, x0, y0, x, y);
+                font_put_down(e, &h);
                 return;
         }
 
@@ -1488,27 +1668,33 @@ static fn font_conic(font_engine address_to e, b32 cx, b32 cy, b32 x, b32 y)
         b64 ux = ((b64)1 << 31) + shx, sx = font_scaled(2 * ((b64)cx - x0) * n + ax, reciprocal), bx = font_scaled(2 * ax, reciprocal);
         b64 uy = ((b64)1 << 31) + shy, sy = font_scaled(2 * ((b64)cy - y0) * n + ay, reciprocal), by = font_scaled(2 * ay, reciprocal);
 
-        //      The first point and the last take half a step more than the
-        //      rest, both of them on a conic of two pieces.
-        b32 px = x0, py = y0;
-        for (b64 i = 1; i < n; i++)
-        {
-                ux += sx, sx += bx, uy += sy, sy += by;
+        //      The pieces stay within a few 1024ths of the three points'
+        //      box, so a conic whose points are well inside the band and the
+        //      bitmap needs no test on any of its pieces.
+        bool inside = e->direct;
+        b32 near = 8;
 
-                b64 extra = (i == 1) + (i == n - 1);
-                b32 qx = x0 + (b32)((ux + extra * (shx >> 1)) >> 32), qy = y0 + (b32)((uy + extra * (shy >> 1)) >> 32);
-                font_piece(e, px, py, qx, qy);
-                px = qx;
-                py = qy;
-        }
-        font_piece(e, px, py, x, y);
+        inside = inside && (p32)(x0 - near) <= (p32)(h.wide - 2 * near) && (p32)(cx - near) <= (p32)(h.wide - 2 * near) &&
+                 (p32)(x - near) <= (p32)(h.wide - 2 * near);
+        inside = inside && (p32)(y0 - h.floor - near) <= (p32)(h.height - 2 * near) &&
+                 (p32)(cy - h.floor - near) <= (p32)(h.height - 2 * near) &&
+                 (p32)(y - h.floor - near) <= (p32)(h.height - 2 * near);
+        if (inside)
+                font_pieces(e, &h, true, x0, y0, x, y, n, ux, sx, bx, uy, sy, by, shx >> 1, shy >> 1);
+        else
+                font_pieces(e, &h, false, x0, y0, x, y, n, ux, sx, bx, uy, sy, by, shx >> 1, shy >> 1);
+        font_put_down(e, &h);
 }
 
 static fn font_line(font_engine address_to e, b32 x, b32 y)
 {
-        if (e->y != y)
+        font_hand h;
+
+        if (e->y != y && e->track && !e->gather)
                 font_extent(e, e->x, x, x, e->y, y, y);
-        font_piece(e, e->x, e->y, x, y);
+        font_pick_up(e, &h);
+        font_piece(e, &h, false, e->x, e->y, x, y);
+        font_put_down(e, &h);
         e->x = x;
         e->y = y;
 }
@@ -1525,17 +1711,17 @@ static fn font_line(font_engine address_to e, b32 x, b32 y)
 */
 //      Whether any two contours wound alike have boxes that meet, which
 //      the spans are needed for; each contour's winding kept for the walk.
-//      Past 64 contours the boxes are not compared and the spans decide.
+//      The windings come first, and the boxes only of contours that have
+//      another wound as they are. Past 64 contours the boxes are not
+//      compared and the spans decide.
 static bool font_tracking(font_engine address_to e)
 {
         b32 box[64][4];
-        p32 first = 0;
-        bool meet = e->contour_count > 64;
+        p32 first = 0, alike[2] = {0, 0};
 
         for (p32 c = 0; c < e->contour_count; first = e->ends[c++] + 1u)
         {
                 b64 area = 0;
-                b32 b[4] = {0x7fffffff, 0x7fffffff, -0x7fffffff, -0x7fffffff};
 
                 for (p32 i = first; i <= e->ends[c] && i < e->point_count; i++)
                 {
@@ -1543,17 +1729,35 @@ static bool font_tracking(font_engine address_to e)
                         const font_point address_to q = &e->points[i == e->ends[c] ? first : i + 1];
 
                         area += (b64)p->x * q->y - (b64)q->x * p->y;
+                }
+                e->winds[c] = area < 0;
+                alike[area < 0]++;
+        }
+        if (e->contour_count > 64)
+                return true;
+        if (alike[0] < 2 && alike[1] < 2)
+                return false;
+
+        bool meet = false;
+
+        first = 0;
+        for (p32 c = 0; c < e->contour_count && !meet; first = e->ends[c++] + 1u)
+        {
+                b32 b[4] = {0x7fffffff, 0x7fffffff, -0x7fffffff, -0x7fffffff};
+
+                if (alike[e->winds[c]] < 2)
+                        continue;
+                for (p32 i = first; i <= e->ends[c] && i < e->point_count; i++)
+                {
+                        const font_point address_to p = &e->points[i];
+
                         b[0] = p->x < b[0] ? (b32)p->x : b[0], b[1] = p->y < b[1] ? (b32)p->y : b[1];
                         b[2] = p->x > b[2] ? (b32)p->x : b[2], b[3] = p->y > b[3] ? (b32)p->y : b[3];
                 }
-                e->winds[c] = area < 0;
-                if (c < 64)
-                {
-                        memory_copy(box[c], b, sizeof(b));
-                        for (p32 k = 0; k < c && !meet; k++)
-                                meet = e->winds[k] == e->winds[c] && box[k][0] < b[2] && b[0] < box[k][2] &&
-                                       box[k][1] < b[3] && b[1] < box[k][3];
-                }
+                memory_copy(box[c], b, sizeof(b));
+                for (p32 k = 0; k < c && !meet; k++)
+                        meet = e->winds[k] == e->winds[c] && box[k][0] < b[2] && b[0] < box[k][2] &&
+                               box[k][1] < b[3] && b[1] < box[k][3];
         }
         return meet;
 }
@@ -2009,6 +2213,7 @@ static fn font_raster(font_engine address_to e, b32 width, b32 height,
                 e->grain++;
         memory_zero(e->shared, ((positive)height + 63) / 64 * 8);
         e->track = font_tracking(e);
+        e->mark = width + 2 > 64;
 
         b32 most = FONT_BAND / e->stride < FONT_ROWS ? FONT_BAND / e->stride : FONT_ROWS;
         for (e->band = 0; e->band < height; e->band += e->rows)
@@ -2019,14 +2224,17 @@ static fn font_raster(font_engine address_to e, b32 width, b32 height,
                 for (b32 r = 0; r < e->rows; r++)
                         e->near[r] = e->seen[0][0][r] = e->seen[1][0][r] = 0x7fffffff,
                         e->far[r] = e->seen[0][1][r] = e->seen[1][1][r] = -0x7fffffff;
+                e->floor_y = e->band * FONT_ONE, e->height_y = e->rows * FONT_ONE, e->wide_x = width * FONT_ONE;
+                e->direct = !e->clip;
                 font_walk(e);
+                e->direct = false;
                 font_flush(e);
 
                 for (b32 r = 0; r < e->rows; r++)
                 {
                         p32 address_to cells = e->cells + (positive)r * (positive)e->stride, sum = 0;
                         p8 address_to row = out + (positive)(height - 1 - e->band - r) * stride;
-                        p64 touched = e->touched[r];
+                        p64 touched = e->mark ? e->touched[r] : ~(p64)0;
 
                         //      A run of blocks no edge touched is one level; a
                         //      run of touched ones is summed, made bytes and
@@ -2081,15 +2289,26 @@ static b32 font_shape(font_engine address_to e, const font_face address_to face,
                       ? font_i16(face, face->hmtx + 4 * (positive)glyph + 2)
                       : font_i16(face, face->hmtx + 4 * (positive)face->metrics +
                                            2 * (positive)(glyph - face->metrics));
-        b64 shift = (lsb - e->left_side) * (1 << FONT_EXACT), units = (b64)face->units << FONT_EXACT;
+        b64 shift = (lsb - e->left_side) * (1 << FONT_EXACT);
         b64 nudge = (b64)phase * (FONT_ONE / FONT_PHASES);
+
+        //      value * size / 2^14 / units to the nearest, halves away from
+        //      zero, is the floor of ((|value * size| + units * 2^13) >> 14)
+        //      over units, and that floor is a multiply-high by the
+        //      reciprocal rounded up, exact while the quotient times units
+        //      stays under 2^64, which units of 16384 or fewer and a
+        //      numerator under 2^48 do.
+        p64 reciprocal = ~(p64)0 / face->units + 1, bias = (p64)face->units << 13;
 
         for (p32 i = 0; i < e->point_count; i++)
         {
-                b64 x = font_exact(e->points[i].x + shift), y = e->points[i].y;
+                b64 x = font_exact(e->points[i].x + shift) * size * (FONT_ONE / 64), y = e->points[i].y * size * (FONT_ONE / 64);
+                p64 mx = x < 0 ? -(p64)x : (p64)x, my = y < 0 ? -(p64)y : (p64)y;
+                b64 qx = (b64)(((unsigned __int128)((mx + bias) >> 14) * reciprocal) >> 64);
+                b64 qy = (b64)(((unsigned __int128)((my + bias) >> 14) * reciprocal) >> 64);
 
-                e->points[i].x = font_divide(x * size * (FONT_ONE / 64), units) + nudge;
-                e->points[i].y = font_divide(y * size * (FONT_ONE / 64), units);
+                e->points[i].x = (x < 0 ? -qx : qx) + nudge;
+                e->points[i].y = y < 0 ? -qy : qy;
         }
         if (style & 1)
                 font_fit(e, face, size);
