@@ -1827,7 +1827,7 @@ static b32 compositor_main()
 /*
         A test client: surface [-x X] [-y Y] [-w WIDTH] [-h HEIGHT]
         [-c RRGGBB] [-r ROLE] [-p] [-n] [-2] [-F COMMITS] [-W WRITERS] [-O OFFSET]
-        [-f FONT.ttf] [-t TEXT] [-s SECONDS].
+        [-X COUNT] [-f FONT.ttf] [-t TEXT] [-s SECONDS].
 
         A window of one colour at X, Y, a line of TEXT drawn with font.c on
         it when FONT is given, pointer events asked for with -p, and every
@@ -1838,7 +1838,8 @@ static b32 compositor_main()
         connection when -W is given. -O writes OFFSET over its first buffer's
         offset in the page and commits, and -2 sends a second create on
         its connection and reports the answer: what a program that means
-        harm does with the page and the socket.
+        harm does with the page and the socket. -X draws the line COUNT more
+        times and says how much address space that took, which is none.
 */
 static bipolar surface_number(string_address text, b32 hex)
 {
@@ -1880,6 +1881,38 @@ static positive surface_map_file(string_address path, positive address_to size)
         return (positive)mapped;
 }
 
+// The pages mapped, from /proc/self/statm.
+static long surface_pages(void)
+{
+        char text[64] = {0};
+        bipolar handle = system_open_at(AT_FDCWD, "/proc/self/statm", FILE_READ | O_CLOEXEC);
+        long pages = 0;
+
+        if (handle < 0)
+                return -1;
+        system_read_once(handle, text, sizeof(text) - 1);
+        system_close(handle);
+        for (unsigned int at = 0; text[at] >= '0' && text[at] <= '9'; at++)
+                pages = pages * 10 + (text[at] - '0');
+        return pages;
+}
+
+/*
+        One engine for the life of the program, mapped when the first line is
+        drawn and let go of at the end: it is 766 KB of address space of which
+        a start touches 4 KB and a line of text a few tens, so what a draw
+        costs is the pages it writes, and a second draw costs none. The font
+        is read in place from its file for the length of the call.
+*/
+static long surface_engine;
+
+static void surface_text_free(void)
+{
+        if (surface_engine)
+                compositor_call(syscall(munmap), (positive)surface_engine, sizeof(font_engine), 0, 0, 0, 0);
+        surface_engine = 0;
+}
+
 static void surface_text(struct surface *surface, unsigned int slot, string_address path,
                          string_address text, unsigned int colour)
 {
@@ -1887,25 +1920,34 @@ static void surface_text(struct surface *surface, unsigned int slot, string_addr
         positive bytes = surface_map_file(path, address_of size);
         font_face face;
         const font_face address_to faces[1] = {&face};
-        long engine = compositor_call(syscall(mmap), 0, sizeof(font_engine), 3, 0x22, (positive)-1, 0);
         static p8 atlas[256 * 256];
         font_target target = {surface_buffer(surface, slot), surface->window.width,
                               (b32)surface->window.width, (b32)surface->window.height};
         p32 em = 16 << 6;
         b32 got;
 
-        if (!bytes || (engine < 0 && engine > -4096) ||
-            font_load(&face, (const p8 address_to)bytes, size, 0) != 0)
+        if (!surface_engine)
+        {
+                long engine = compositor_call(syscall(mmap), 0, sizeof(font_engine), 3, 0x22, (positive)-1, 0);
+
+                if (!(engine < 0 && engine > -4096))
+                        surface_engine = engine;
+        }
+
+        if (!bytes || !surface_engine || font_load(&face, (const p8 address_to)bytes, size, 0) != 0)
         {
                 log_direct(str("surface: no font\n"));
+                if (bytes)
+                        compositor_call(syscall(munmap), bytes, size, 0, 0, 0, 0);
                 return;
         }
 
-        font_start((font_engine address_to)engine, atlas, 256, 256);
-        got = font_draw((font_engine address_to)engine, faces, 1, (const p8 address_to)text,
+        font_start((font_engine address_to)surface_engine, atlas, 256, 256);
+        got = font_draw((font_engine address_to)surface_engine, faces, 1, (const p8 address_to)text,
                         string_length(text), em, 0, &target, 8 << 16,
                         8 + font_metrics_at(&face, em).baseline,
                         0xffffff, colour);
+        compositor_call(syscall(munmap), bytes, size, 0, 0, 0, 0);
         string_format(log, "surface: text drawn %b px wide\n", (bipolar)(got >> 16));
         log_flush();
 }
@@ -1915,7 +1957,7 @@ static b32 surface_main()
         bipolar x = -1, y = -1, width = 320, height = 200, colour = 0x3366aa, role = SURFACE_ROLE_APP;
         bipolar seconds = -1;
         b32 pointer = 0, never = 0, twice = 0;
-        bipolar flood = 0, offset = -1, writers = 1;
+        bipolar flood = 0, offset = -1, writers = 1, again = 0;
         b32 child = 0;
         string_address font = null, text = (string_address) "Moonwater";
         struct surface *surface;
@@ -1952,6 +1994,7 @@ static b32 surface_main()
                 case 'F': flood = surface_number(value, 0); break;
                 case 'O': offset = surface_number(value, 0); break;
                 case 'W': writers = surface_number(value, 0); break;
+                case 'X': again = surface_number(value, 0); break;
                 case 'f': font = value; break;
                 case 't': text = value; break;
                 }
@@ -1973,6 +2016,19 @@ static b32 surface_main()
 
         if (font)
                 surface_text(surface, 0, font, text, (unsigned int)colour & 0xffffff);
+
+        // The size of the address space before and after COUNT more draws, in pages.
+        if (font && again > 0)
+        {
+                long before = surface_pages(), size;
+
+                for (bipolar draw = 0; draw < again; draw++)
+                        surface_text(surface, 0, font, text, (unsigned int)colour & 0xffffff);
+                size = surface_pages();
+                string_format(log, "surface: %b draws changed the mapped pages by %b\n", again,
+                              (bipolar)(size - before));
+                log_flush();
+        }
 
         if (x >= 0)
                 surface->window.x = (int)x;
@@ -2069,6 +2125,7 @@ static b32 surface_main()
                         break;
         }
 
+        surface_text_free();
         surface_close(surface);
         return 0;
 }
