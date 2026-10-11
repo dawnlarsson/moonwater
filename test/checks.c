@@ -101769,6 +101769,39 @@ static void check_compositor_gs1(void) {
     }
 }
 
+/* The scene is the painter's picture: surfaces drawn bottom to top over a
+   desktop, inside the damage, and no pixel outside it. Random surfaces (some
+   off the screen, some framed, some not, some one over another), random
+   damage, byte for byte. */
+static void check_compositor_scene(void) {
+    enum { W=200, H=150 };
+    static u32 seen[W*H], want[W*H], body[COMPOSITOR_CLIENTS][96*80];
+    u64 seed=0x9e3779b97f4a7c15ull;
+    #define RND(n) (seed^=seed<<13,seed^=seed>>7,seed^=seed<<17,(int)(seed%(u64)(n)))
+    int equal=1;
+    for(int scene=0;scene<4000;scene++) {
+        struct compositor_frame frames[COMPOSITOR_CLIENTS];
+        unsigned count=scene%61==60?COMPOSITOR_CLIENTS:(unsigned)RND(7);
+        for(unsigned i=0;i<count;i++) {
+            int w=1+RND(96),h=1+RND(80);
+            for(int p=0;p<w*h;p++)body[i][p]=0x400000u|(u32)(i<<16)|(u32)p;
+            frames[i]=(struct compositor_frame){RND(W+60)-40,RND(H+60)-40,w,h,1,
+                RND(4)!=0,RND(2),1,body[i],(unsigned long)w};
+        }
+        int x1=RND(W),y1=RND(H),x2=x1+1+RND(W),y2=y1+1+RND(H);
+        if(x2>W)x2=W;
+        if(y2>H)y2=H;
+        for(int p=0;p<W*H;p++)seen[p]=want[p]=0xdeadbeefu;
+        struct compositor_target a={want,W,W,H,x1,y1,x2,y2},b={seen,W,W,H,x1,y1,x2,y2};
+        compositor_fill(&a,0,0,W,H,COMPOSITOR_INK_DESKTOP);
+        for(unsigned i=0;i<count;i++)compositor_draw(&a,&frames[i]);
+        compositor_scene(&b,frames,count);
+        equal&=!memcmp(seen,want,sizeof(seen));
+    }
+    check(equal);
+    #undef RND
+}
+
 static void check_pane_layout(void) {
     static u32 screen[256*256];
     const u32 ink[]={0x102030,0x203040,0x304050,0x405060,0x506070,0x607080,0,0};
@@ -102093,6 +102126,7 @@ int main(void) {
     check_pane_layout();
     check_golden_gs1(palette);
     check_compositor_gs1();
+    check_compositor_scene();
     for(unsigned i=0;i<sizeof(font_bits);i++)font_bits[i]=(i*29+i/16*73)&255;
     struct window_cell cells[96];unsigned seed=123;
     for(unsigned trial=0;trial<2400;trial++) {

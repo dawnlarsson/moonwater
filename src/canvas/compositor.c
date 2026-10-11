@@ -142,6 +142,10 @@ static const unsigned char compositor_close_bits[8] = {
 static void compositor_bits(const struct compositor_target *t, int x, int y, int scale,
                             const unsigned char *bits, unsigned int rows, unsigned int colour)
 {
+        // A glyph the damage does not touch is not walked.
+        if (x >= t->x2 || x + 8 * scale <= t->x1 || y >= t->y2 || y + (int)rows * scale <= t->y1)
+                return;
+
         for (unsigned int row = 0; row < rows; row++)
                 for (unsigned int column = 0; column < 8; column++)
                         if (bits[row] & (0x80u >> column))
@@ -178,6 +182,111 @@ static void compositor_draw(const struct compositor_target *t,
 
         compositor_blit(t, frame->x, frame->y + title, frame->width, frame->height,
                         frame->pixels, frame->pitch);
+}
+
+#define COMPOSITOR_CLIENTS 32
+
+/*
+        The scene: inside the target's damage, each surface where nothing
+        above it covers it and the desktop where nothing is, every pixel
+        written once and none read. The frames are bottom first.
+
+        The damage is cut into bands at the top and bottom edge of every
+        surface, so in one band each surface covers the same columns from
+        the band's top to its bottom. The columns are given out from the top
+        surface down: each takes what it covers of the spans still unclaimed
+        and leaves the rest, which are never more than one more than there
+        are surfaces. What no surface claims is desktop. The target is
+        drawn on through a clip of the cell, so the picture is the one the
+        surfaces drawn bottom to top over a desktop would be.
+*/
+static void compositor_scene(const struct compositor_target *t,
+                             const struct compositor_frame *frames, unsigned int count)
+{
+        int edge[2 * COMPOSITOR_CLIENTS + 2];
+        int box[COMPOSITOR_CLIENTS][4];
+        unsigned int edges = 2;
+
+        edge[0] = t->y1;
+        edge[1] = t->y2;
+
+        for (unsigned int at = 0; at < count; at++)
+        {
+                int width, height;
+
+                compositor_outline(&frames[at], &box[at][0], &box[at][1], &width, &height);
+                box[at][2] = box[at][0] + width;
+                box[at][3] = box[at][1] + height;
+
+                for (unsigned int side = 1; side < 4; side += 2)
+                        if (box[at][side] > t->y1 && box[at][side] < t->y2)
+                        {
+                                unsigned int place = edges++;
+
+                                for (; place && edge[place - 1] > box[at][side]; place--)
+                                        edge[place] = edge[place - 1];
+                                edge[place] = box[at][side];
+                        }
+        }
+
+        for (unsigned int band = 0; band + 1 < edges; band++)
+        {
+                int top = edge[band], bottom = edge[band + 1];
+                int span[COMPOSITOR_CLIENTS + 1][2];
+                unsigned int spans = 1;
+
+                if (bottom <= top)
+                        continue;
+
+                span[0][0] = t->x1;
+                span[0][1] = t->x2;
+
+                for (unsigned int at = count; at-- && spans;)
+                {
+                        if (box[at][1] >= bottom || box[at][3] <= top)
+                                continue;
+
+                        for (unsigned int s = 0; s < spans; s++)
+                        {
+                                int low = span[s][0], high = span[s][1];
+                                int x1 = low > box[at][0] ? low : box[at][0];
+                                int x2 = high < box[at][2] ? high : box[at][2];
+                                struct compositor_target cell = *t;
+
+                                if (x2 <= x1)
+                                        continue;
+
+                                cell.x1 = x1;
+                                cell.y1 = top;
+                                cell.x2 = x2;
+                                cell.y2 = bottom;
+                                compositor_draw(&cell, &frames[at]);
+
+                                if (low < x1 && x2 < high)
+                                {
+                                        span[s][1] = x1;
+                                        span[spans][0] = x2;
+                                        span[spans++][1] = high;
+                                }
+                                else if (low < x1)
+                                        span[s][1] = x1;
+                                else if (x2 < high)
+                                        span[s][0] = x2;
+                                else
+                                {
+                                        // Claimed whole; the last span takes its place.
+                                        spans--;
+                                        span[s][0] = span[spans][0];
+                                        span[s][1] = span[spans][1];
+                                        s--;
+                                }
+                        }
+                }
+
+                for (unsigned int s = 0; s < spans; s++)
+                        compositor_fill(t, span[s][0], top, span[s][1] - span[s][0], bottom - top,
+                                        COMPOSITOR_INK_DESKTOP);
+        }
 }
 
 /* ---- end of the backend ---- */
@@ -311,8 +420,9 @@ struct compositor_poll
 #define COMPOSITOR_POLLERR 8
 #define COMPOSITOR_POLLHUP 16
 
-#define COMPOSITOR_CLIENTS 32
 #define COMPOSITOR_INPUTS 16
+#define COMPOSITOR_DAMAGE 8
+#define COMPOSITOR_BURST 64
 #define COMPOSITOR_EAGAIN 11
 #define COMPOSITOR_EPERM 1
 #define COMPOSITOR_EINVAL 22
@@ -349,8 +459,8 @@ static struct
         unsigned long scanout_bytes, scanout_pitch; // pitch in bytes
         unsigned int fb, crtc, cursor_handle;
         int width, height;
-        unsigned int *shadow;
-        int damage_x1, damage_y1, damage_x2, damage_y2;
+        int damage[COMPOSITOR_DAMAGE][4]; // x1, y1, x2, y2: what changed, apart
+        unsigned int damages;
 
         int listener, signals;
         int inputs[COMPOSITOR_INPUTS];
@@ -374,31 +484,75 @@ static long compositor_call(positive number, positive a, positive b, positive c,
         return (long)system_call_6(number, a, b, c, d, e, f);
 }
 
+/*
+        What changed, as a few rectangles that do not overlap. A rectangle
+        joins one it overlaps or lines up with, which costs nothing, and
+        stays apart from the rest, so two windows at opposite corners are
+        two small rectangles and not the screen between them. When the list
+        is full the rectangle joins whichever grows least.
+*/
+static long compositor_area(const int *rectangle)
+{
+        return (long)(rectangle[2] - rectangle[0]) * (rectangle[3] - rectangle[1]);
+}
+
+static long compositor_joined(const int *a, const int *b, int *into)
+{
+        into[0] = a[0] < b[0] ? a[0] : b[0];
+        into[1] = a[1] < b[1] ? a[1] : b[1];
+        into[2] = a[2] > b[2] ? a[2] : b[2];
+        into[3] = a[3] > b[3] ? a[3] : b[3];
+        return compositor_area(into);
+}
+
 static void compositor_damage(int x, int y, int width, int height)
 {
-        int x2 = x + width, y2 = y + height;
+        int rectangle[4] = {x < 0 ? 0 : x, y < 0 ? 0 : y,
+                            x + width > compositor.width ? compositor.width : x + width,
+                            y + height > compositor.height ? compositor.height : y + height};
+        int joined[4];
+        unsigned int at = 0;
 
-        x = x < 0 ? 0 : x;
-        y = y < 0 ? 0 : y;
-        x2 = x2 > compositor.width ? compositor.width : x2;
-        y2 = y2 > compositor.height ? compositor.height : y2;
-
-        if (x2 <= x || y2 <= y)
+        if (rectangle[2] <= rectangle[0] || rectangle[3] <= rectangle[1])
                 return;
 
-        if (compositor.damage_x2 <= compositor.damage_x1)
+        while (at < compositor.damages)
         {
-                compositor.damage_x1 = x;
-                compositor.damage_y1 = y;
-                compositor.damage_x2 = x2;
-                compositor.damage_y2 = y2;
+                int *other = compositor.damage[at];
+
+                if (compositor_joined(rectangle, other, joined) <=
+                    compositor_area(rectangle) + compositor_area(other))
+                {
+                        memory_copy(rectangle, joined, sizeof(joined));
+                        memory_copy(other, compositor.damage[--compositor.damages], sizeof(joined));
+                        at = 0;
+                }
+                else
+                        at++;
+        }
+
+        if (compositor.damages == COMPOSITOR_DAMAGE)
+        {
+                unsigned int best = 0;
+                long least = -1;
+
+                for (at = 0; at < COMPOSITOR_DAMAGE; at++)
+                {
+                        long grown = compositor_joined(rectangle, compositor.damage[at], joined) -
+                                     compositor_area(compositor.damage[at]);
+
+                        if (least < 0 || grown < least)
+                        {
+                                least = grown;
+                                best = at;
+                        }
+                }
+
+                compositor_joined(rectangle, compositor.damage[best], compositor.damage[best]);
                 return;
         }
 
-        compositor.damage_x1 = x < compositor.damage_x1 ? x : compositor.damage_x1;
-        compositor.damage_y1 = y < compositor.damage_y1 ? y : compositor.damage_y1;
-        compositor.damage_x2 = x2 > compositor.damage_x2 ? x2 : compositor.damage_x2;
-        compositor.damage_y2 = y2 > compositor.damage_y2 ? y2 : compositor.damage_y2;
+        memory_copy(compositor.damage[compositor.damages++], rectangle, sizeof(rectangle));
 }
 
 static void compositor_frame_of(const struct compositor_client *client,
@@ -430,53 +584,49 @@ static void compositor_damage_client(const struct compositor_client *client)
 }
 
 /*
-        The damage, composed in RAM and copied out. The scanout is a mapping
-        of the card's memory, so it is only ever written, a row of the damage
-        at a time, and then the card is told which rectangle changed: a
-        virtual card copies nothing to its host without that.
+        The damage, composed straight onto the scanout and then announced.
+        The scanout is a mapping of the card's memory, so it is only ever
+        written: every pixel of the damage once, by the stores of
+        memory_fill_u32_rect and memory_copy (full 64-byte lines where a row
+        is long enough, a masked store or two overlapping ones at the ends),
+        none non-temporal and none a read. The card is then told the
+        rectangles that changed, in one call: a virtual card copies nothing
+        to its host without that.
 */
 static void compositor_present(void)
 {
-        struct compositor_target target = {
-            compositor.shadow, (unsigned long)compositor.width, compositor.width,
-            compositor.height, compositor.damage_x1, compositor.damage_y1,
-            compositor.damage_x2, compositor.damage_y2};
-        unsigned short clip[4];
-        struct compositor_dirty dirty = {compositor.fb, 0, 0, 1, (unsigned long)clip};
+        struct compositor_frame frames[COMPOSITOR_CLIENTS];
+        unsigned short clip[COMPOSITOR_DAMAGE][4];
+        struct compositor_dirty dirty = {compositor.fb, 0, 0, compositor.damages, (unsigned long)clip};
+        unsigned int count = 0;
 
-        if (compositor.damage_x2 <= compositor.damage_x1)
+        if (!compositor.damages)
                 return;
-
-        compositor_fill(&target, target.x1, target.y1, target.x2 - target.x1,
-                        target.y2 - target.y1, COMPOSITOR_INK_DESKTOP);
 
         for (unsigned int at = 0; at < compositor.stacked; at++)
         {
                 struct compositor_client *client = compositor.stack[at];
-                struct compositor_frame frame;
 
-                if (!client->shown || (client->style & WINDOW_MINIMIZED))
-                        continue;
-
-                compositor_frame_of(client, &frame);
-                compositor_draw(&target, &frame);
+                if (client->shown && !(client->style & WINDOW_MINIMIZED))
+                        compositor_frame_of(client, &frames[count++]);
         }
 
-        for (int row = target.y1; row < target.y2; row++)
-                memory_copy((p8 address_to)compositor.scanout + (unsigned long)row * compositor.scanout_pitch +
-                                (unsigned long)target.x1 * 4,
-                            compositor.shadow + (unsigned long)row * (unsigned long)compositor.width +
-                                (unsigned long)target.x1,
-                            (unsigned long)(target.x2 - target.x1) * 4);
+        for (unsigned int at = 0; at < compositor.damages; at++)
+        {
+                const int *rectangle = compositor.damage[at];
+                struct compositor_target target = {
+                    compositor.scanout, compositor.scanout_pitch / 4, compositor.width,
+                    compositor.height, rectangle[0], rectangle[1], rectangle[2], rectangle[3]};
 
-        clip[0] = (unsigned short)target.x1;
-        clip[1] = (unsigned short)target.y1;
-        clip[2] = (unsigned short)target.x2;
-        clip[3] = (unsigned short)target.y2;
+                compositor_scene(&target, frames, count);
+
+                for (unsigned int side = 0; side < 4; side++)
+                        clip[at][side] = (unsigned short)rectangle[side];
+                compositor.painted += (unsigned long)compositor_area(rectangle);
+        }
+
         system_control(compositor.card, COMPOSITOR_DIRTYFB, address_of dirty);
-
-        compositor.painted += (unsigned long)(target.x2 - target.x1) * (unsigned long)(target.y2 - target.y1);
-        compositor.damage_x1 = compositor.damage_x2 = 0;
+        compositor.damages = 0;
 }
 
 /*
@@ -575,18 +725,14 @@ static b32 compositor_card_open(void)
 
         long mapped = compositor_call(syscall(mmap), 0, dumb.size, 3, 1,
                                       (positive)compositor.card, map.offset);
-        long shadow = compositor_call(syscall(mmap), 0,
-                                      (positive)compositor.width * (positive)compositor.height * 4,
-                                      3, 0x22, (positive)-1, 0);
 
-        if ((mapped < 0 && mapped > -4096) || (shadow < 0 && shadow > -4096))
+        if (mapped < 0 && mapped > -4096)
                 return -COMPOSITOR_ENOSPC;
 
         compositor.scanout = (unsigned int *)mapped;
         compositor.scanout_bytes = dumb.size;
         compositor.scanout_pitch = dumb.pitch;
         compositor.fb = fb.fb_id;
-        compositor.shadow = (unsigned int *)shadow;
 
         compositor_damage(0, 0, compositor.width, compositor.height);
         compositor_present();
@@ -920,7 +1066,7 @@ static int compositor_create(struct compositor_client *client, struct surface_re
                 return -COMPOSITOR_EINVAL;
 
         slot = SURFACE_PAGE_ROUND((unsigned long)request->width * request->height * 4);
-        bytes = WINDOW_PIXELS + slot * 2;
+        bytes = WINDOW_PIXELS + slot * request->buffer_slots;
 
         size = compositor_call(syscall(lseek), (positive)file, 0, 2, 0, 0, 0);
         seals = compositor_call(syscall(fcntl), (positive)file, COMPOSITOR_F_GET_SEALS, 0, 0, 0, 0);
