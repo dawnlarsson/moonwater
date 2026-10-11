@@ -495,6 +495,14 @@ static struct {
 	unsigned char after[GUARD];
 } parse;
 
+/* Where a write's bytes land before they are copied into parse.line under
+ * lock. Writers only: stage_lock is never taken by a reader, so a fault in
+ * the copy from the caller holds up writers and nobody else. The size is the
+ * same as parse.line's, and a write longer than that is refused before it
+ * is copied, so nothing lands past it. */
+static char staged[LINE];
+static DEFINE_MUTEX(stage_lock);
+
 /*
  * The two bytes the guards are filled with, worked out once.
  *
@@ -950,7 +958,7 @@ static ssize_t floodlight_write(struct file *file, const char __user *from,
 	struct light *row;
 	int rule;
 	unsigned int i;
-	bool allow, was;
+	bool allow, was, faulted;
 	long answer;
 
 	/* Before anything else, so an unprivileged caller cannot even make the
@@ -961,6 +969,16 @@ static ssize_t floodlight_write(struct file *file, const char __user *from,
 	if (count >= LINE)
 		return -EINVAL;
 
+	/*
+	 * The copy from the caller can fault, and a fault takes as long as the
+	 * page behind the address takes to service. It lands in staged[], under
+	 * stage_lock alone, so the readers wait for the memcpy into parse.line
+	 * and not for that. stage_lock stays held until the memcpy is done, so
+	 * a second writer cannot overwrite staged[] in between.
+	 */
+	mutex_lock(&stage_lock);
+	faulted = copy_from_user(staged, from, count);
+
 	/* Held across the parse as well as the change, because the buffer the
 	 * line is parsed in is floodlight's own and there is one of it. */
 	mutex_lock(&lock);
@@ -970,20 +988,13 @@ static ssize_t floodlight_write(struct file *file, const char __user *from,
 		goto out;
 	}
 
-	/*
-	 * The copy happens with the lock held, because the buffer it lands in
-	 * is floodlight's own and there is one of it. That means a caller can
-	 * hold the lock for as long as the fault behind an unmapped address
-	 * takes to service, and every reader waits. It is allowed to stay that
-	 * way because getting here at all needs CAP_SYS_ADMIN, and somebody who
-	 * has that can seal the register or change the policy outright -- a
-	 * stalled read is not the worst thing available to them.
-	 */
-	line = parse.line;
-	if (copy_from_user(line, from, count)) {
+	if (faulted) {
 		answer = -EFAULT;
 		goto out;
 	}
+
+	line = parse.line;
+	memcpy(line, staged, count);
 
 	line[count] = 0;
 
@@ -1139,8 +1150,10 @@ out:
 	/* Nothing is left in it between commands: the line held a policy
 	 * somebody typed, and there is no reason for it to still be here. */
 	memset(parse.line, 0, LINE);
+	memset(staged, 0, LINE);
 
 	mutex_unlock(&lock);
+	mutex_unlock(&stage_lock);
 	return answer;
 }
 

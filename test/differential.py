@@ -35923,9 +35923,33 @@ static bool mock_copy_fails;
 static char mock_log[16384];
 static unsigned mock_log_length;
 
-static pthread_mutex_t mock_mutex = PTHREAD_MUTEX_INITIALIZER;
-static void mutex_lock(int *m) { (void)m; pthread_mutex_lock(&mock_mutex); mock_lock_depth++; }
-static void mutex_unlock(int *m) { (void)m; mock_lock_depth--; pthread_mutex_unlock(&mock_mutex); }
+/* One pthread mutex per kernel mutex, found by address. A single mutex here
+   made any second lock taken under the first a self-deadlock, which the
+   kernel's separate locks are not (floodlight takes stage_lock, then lock). */
+#define MOCK_LOCKS 8
+static struct { int *key; pthread_mutex_t mu; } mock_locks[MOCK_LOCKS] = {
+    {0, PTHREAD_MUTEX_INITIALIZER}, {0, PTHREAD_MUTEX_INITIALIZER},
+    {0, PTHREAD_MUTEX_INITIALIZER}, {0, PTHREAD_MUTEX_INITIALIZER},
+    {0, PTHREAD_MUTEX_INITIALIZER}, {0, PTHREAD_MUTEX_INITIALIZER},
+    {0, PTHREAD_MUTEX_INITIALIZER}, {0, PTHREAD_MUTEX_INITIALIZER},
+};
+static pthread_mutex_t mock_locks_guard = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t *mock_lock_of(int *m) {
+    pthread_mutex_t *found = NULL;
+    unsigned i;
+    pthread_mutex_lock(&mock_locks_guard);
+    for (i = 0; i < MOCK_LOCKS && !found; i++)
+        if (mock_locks[i].key == m) found = &mock_locks[i].mu;
+    for (i = 0; i < MOCK_LOCKS && !found; i++)
+        if (!mock_locks[i].key) { mock_locks[i].key = m; found = &mock_locks[i].mu; }
+    pthread_mutex_unlock(&mock_locks_guard);
+    if (!found) abort();
+    return found;
+}
+/* The depth is shared by every thread, and two of these locks can be held at
+   once, so it is counted atomically rather than under any one of them. */
+static void mutex_lock(int *m) { pthread_mutex_lock(mock_lock_of(m)); __sync_fetch_and_add(&mock_lock_depth, 1); }
+static void mutex_unlock(int *m) { __sync_fetch_and_sub(&mock_lock_depth, 1); pthread_mutex_unlock(mock_lock_of(m)); }
 static bool capable(int what) { (void)what; return mock_root; }
 static unsigned current_uid(void) { return mock_uid; }
 static unsigned from_kuid(int *ns, unsigned uid) { (void)ns; return uid; }
