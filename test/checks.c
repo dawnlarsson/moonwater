@@ -74541,10 +74541,30 @@ static fn tls_revocation_ceilings(void)
 
 typedef fn (*net_group_body)(void);
 
+/* `--only NAME` (any number of them) runs those groups and no other: what a
+   guest of another machine runs where a whole CHECK_net would take an hour
+   of emulation. */
+static bool net_group_wanted(string_address name)
+{
+        bool any = false;
+
+        for (positive at = 1; at + 1 < program_argument_count(); at++)
+                if (!string_compare(program_argument(at), (string_address) "--only"))
+                {
+                        any = true;
+                        if (!string_compare(program_argument(at + 1), name))
+                                return true;
+                }
+        return !any;
+}
+
 static fn net_group(string_address name, net_group_body body)
 {
-        positive before = net_descriptors_open();
+        positive before;
 
+        if (!net_group_wanted(name))
+                return;
+        before = net_descriptors_open();
         body();
         checks++;
         if (net_descriptors_open() > before)
@@ -87604,6 +87624,18 @@ static bool kernel_settings_read_only(string_address path)
                (facts.flags & MS_RDONLY) != 0;
 }
 
+/* The same of a setting only some kernels have (/proc/sysrq-trigger needs
+   CONFIG_MAGIC_SYSRQ): read-only where it is there, as the seal leaves it,
+   and nothing to bind where it is not. */
+static bool kernel_settings_read_only_if_there(string_address path)
+{
+        file_mount_facts facts;
+        bipolar asked = system_call_2(syscall(statfs), (positive)path,
+                                      (positive)address_of facts);
+
+        return asked == -ENOENT || (asked >= 0 && (facts.flags & MS_RDONLY) != 0);
+}
+
 /*
         The host kernel's settings stay the host's: sysfs is mounted read-only
         and /proc/sys, with the rest of its list, is bound read-only over
@@ -87692,7 +87724,8 @@ static fn kernel_settings(void)
                                 exit(1);
 
                         b32 wrong = kernel_settings_read_only("/proc/sys/kernel") &&
-                                            kernel_settings_read_only("/proc/sysrq-trigger") &&
+                                            kernel_settings_read_only_if_there(
+                                                "/proc/sysrq-trigger") &&
                                             kernel_settings_read_only("/sys/kernel") &&
                                             !kernel_settings_read_only("/proc/self")
                                         ? 0

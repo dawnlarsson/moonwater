@@ -59861,6 +59861,119 @@ def harness_dns_oracle(argv):
     return checks.verdict("dns oracle", "dns-oracle")
 
 
+def harness_guest_confinement(argv):
+    """The seccomp deaths qemu-user cannot show, on the machine itself.
+
+    qemu-user cannot install a seccomp filter for the program it runs, so on
+    arm64 and riscv64 the net and bowl lanes check only that the confined
+    children refuse to run there. This boots the image of that machine
+    (bootaa64.efi, bootriscv64.efi) on QEMU's virt board, carries CHECK_net
+    and CHECK_bowl built for it in on a stick, and runs CHECK_net's three
+    confinement groups (the client filter's decisions, the child dying of
+    each call it may not make, fetching through it) and CHECK_bowl whole
+    (the Wi-Fi station's filter, its statuses, and its confinement in a user
+    namespace) as root on that kernel. Each has to print its verdict with no
+    failure and no NOT RUN.
+
+        python3 test/differential.py --harness guest_confinement --image dist/bootaa64.efi
+    """
+    import threading
+    parser = argparse.ArgumentParser(prog="differential.py --harness guest_confinement")
+    parser.add_argument("--image", required=True)
+    parser.add_argument("--timeout", type=int, default=3600)
+    args = parser.parse_args(argv)
+    image = Path(args.image).resolve()
+    machines = {
+        "aa64": ("arm64", "aarch64-linux-gnu-gcc", ["-mno-outline-atomics"],
+                 ["qemu-system-aarch64", "-machine", "virt,gic-version=3",
+                  "-cpu", "max,pauth-impdef=on"], "ttyAMA0"),
+        "riscv64": ("riscv64", "riscv64-linux-gnu-gcc",
+                    ["-march=rv64imafd_zicsr_zicntr", "-mabi=lp64d"],
+                    ["qemu-system-riscv64", "-machine", "virt", "-cpu", "max"], "ttyS0"),
+    }
+    key = next((k for k in machines if image.name.endswith(k + ".efi")), None)
+    if not key or not image.exists():
+        print("guest confinement: NOT RUN -- no arm64 or riscv64 image at %s" % image)
+        return 2
+    machine, cc, flags, emulator, console = machines[key]
+    if not shutil.which(cc) or not shutil.which(emulator[0]):
+        print("guest confinement: NOT RUN -- needs %s and %s" % (cc, emulator[0]))
+        return 2
+    checks = Checks()
+    with tempfile.TemporaryDirectory(prefix="guest-confinement-") as temporary:
+        work = Path(temporary)
+        stick = work / "stick"
+        stick.mkdir()
+        for name, section in (("netchk", "CHECK_net"), ("bowlchk", "CHECK_bowl")):
+            built = subprocess.run(
+                [cc, "-O2", "-static", "-nostdlib", "-nostartfiles", "-fno-stack-protector",
+                 "-fno-builtin", *flags, "-w", "-T", "src/build/spark.ld", "-Wl,-e,_start",
+                 "-Wl,--build-id=none", "-Wl,--no-warn-rwx-segments", "-D" + section,
+                 "-o", str(stick / name), "test/checks.c"],
+                cwd=HARNESS_ROOT, capture_output=True, text=True)
+            checks(built.returncode == 0, "%s builds for %s: %s" % (section, machine, built.stderr[-300:]))
+            if built.returncode:
+                return checks.verdict("guest confinement", "guest-confinement-" + machine)
+        commands = (
+            "mkdir -p /mnt/stick && mount -r -t vfat /dev/sda1 /mnt/stick\n"
+            "cd /tmp\n"
+            "echo @@net; /mnt/stick/netchk --only net_apart_filter_decisions "
+            "--only net_apart_confinement --only net_apart_fetching 2>&1; echo @@done\n"
+            "echo @@bowl; /mnt/stick/bowlchk 2>&1; echo @@done\n"
+            "poweroff\n")
+        guest = subprocess.Popen(
+            emulator + ["-m", "1G", "-smp", "2", "-kernel", str(image), "-no-reboot",
+                        "-display", "none", "-serial", "stdio", "-device", "qemu-xhci",
+                        "-drive", "if=none,id=stick,format=raw,file=fat:ro:%s,readonly=on" % stick,
+                        "-device", "usb-storage,drive=stick,removable=on",
+                        "-append", "console=%s drm_client_lib.active=" % console],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        transcript = bytearray()
+
+        def read():
+            while True:
+                chunk = guest.stdout.read1(65536)
+                if not chunk:
+                    return
+                transcript.extend(chunk)
+        reader = threading.Thread(target=read, daemon=True)
+        reader.start()
+        started = time.monotonic()
+        #   The shell's prompt after init, then a moment for the machine
+        #   script, then the commands.
+        while time.monotonic() - started < args.timeout and guest.poll() is None:
+            if b"Run /init as init process" in transcript and b"$ " in transcript[
+                    transcript.find(b"Run /init as init process"):]:
+                break
+            time.sleep(1)
+        time.sleep(20)
+        try:
+            guest.stdin.write(commands.encode())
+            guest.stdin.flush()
+        except OSError:
+            pass
+        try:
+            guest.wait(timeout=max(60, args.timeout - (time.monotonic() - started)))
+        except subprocess.TimeoutExpired:
+            guest.kill()
+            guest.wait()
+        reader.join(timeout=5)
+        text = transcript.decode("latin-1").replace("\r", "")
+        (Path(os.environ.get("MOONWATER_GUEST_TRANSCRIPT", work / "transcript"))).write_text(text)
+        for label in ("net", "bowl"):
+            at = text.rfind("@@" + label + "\n")
+            part = text[at:text.find("@@done", at)] if at >= 0 else ""
+            verdict = re.search(r"(\d+) checks, (\d+) failures", part)
+            checks(verdict is not None and verdict.group(2) == "0" and int(verdict.group(1)) > 0,
+                   "%s on %s: %s" % (label, machine, verdict.group(0) if verdict else "no verdict"))
+            for line in part.splitlines():
+                if "FAIL" in line or "NOT RUN" in line:
+                    checks(False, "%s on %s: %s" % (label, machine, line.strip()))
+            if verdict:
+                print("guest confinement: %s on %s, %s" % (label, machine, verdict.group(0)))
+    return checks.verdict("guest confinement", "guest-confinement-" + machine)
+
+
 #       Public HTTPS hosts for x509_corpus: the popular sites, CDNs, clouds and
 #       registries, and a deliberate spread of governments, banks and national
 #       CAs (Certum, D-Trust, Actalis, HARICA, NetLock, e-Szigno, TWCA, SECOM,
@@ -89466,6 +89579,7 @@ HARNESS_CHECKS = {
     "ct_logs": harness_ct_logs,
     "tls_ct": harness_tls_ct,
     "dns_oracle": harness_dns_oracle,
+    "guest_confinement": harness_guest_confinement,
     "waterlink_noise": harness_waterlink_noise,
     "waterlink_mdns": harness_waterlink_mdns,
     "waterlink_sanitized": harness_waterlink_sanitized,

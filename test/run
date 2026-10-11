@@ -13922,6 +13922,13 @@ never transcript 'no missing command' 'failed with error: No such file or direct
 #       runs here. A program's illegal instruction is init's restart line.
 #       arm64's emulated boot above is already -cpu max.
 #
+#       The seccomp deaths qemu-user cannot show: CHECK_net's confinement
+#       groups and CHECK_bowl run as root inside this machine's own guest.
+if [ "$boot_emulator" != qemu-system-x86_64 ]; then
+        python3 test/differential.py --harness guest_confinement --image "$image" ||
+                lost 'guest confinement' 'a confinement check failed in the guest'
+fi
+
 if [ "$boot_emulator" = qemu-system-riscv64 ]; then
         { sleep 15; cat "$work/commands"; } |
                 timeout 360 qemu-system-riscv64 -m 2G -smp 2 -machine virt -cpu max \
