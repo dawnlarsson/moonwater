@@ -68819,6 +68819,11 @@ def harness_security_hygiene(argv):
         "dns_resolve_wanted": {"http_lookup_wanted", "dns_apart_task"},
         "http_lookup_wanted": {"http_run"},
         "sntp_query_at": {"sntp_apart_task"},
+        "net_resolve_v4": {"http_lookup", "dns_apart_task"},
+        "dns_resolve_any": {"dns_resolve_wanted", "net_resolve_v4"},
+        "dns_resolve_at": {"dns_resolve_any", "dns_apart_task"},
+        "http_lookup": {"http_lookup_wanted", "tls_plain_get", "nts_ke",
+                        "sntp_apart_task"},
         "sntp_exchange": {"sntp_query_at"},
     }
     apart_tasks = {"http_apart_task": "src/net/net.c",

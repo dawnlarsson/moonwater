@@ -17190,9 +17190,9 @@ static bool locale_nts_server_ok(string_address host, string_address server)
 
         if (!server[0] || string_equals(server, host))
                 return true;
-        ip = http_lookup(server);
+        ip = http_lookup_apart(server);
         return ip && (http_address_public(ip) ||
-                      !http_address_public(http_lookup(host)));
+                      !http_address_public(http_lookup_apart(host)));
 }
 
 static fn locale_nts_why_set(string_address host, string_address why)

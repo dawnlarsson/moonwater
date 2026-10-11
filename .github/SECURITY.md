@@ -256,8 +256,10 @@ never a pass.
 - **The clients' network half runs apart (`net_apart`, `src/net/net.c`).**
   wget (`--spider` too), fetch, `host`, the NTS key establishment and every
   SNTP or NTS time query the machine's NTP child makes as root
-  (`nts_ke_apart`, `sntp_query_apart`) and the zone question the machine
-  asks at boot as root (`locale_auto_ask`) parse TLS, X.509, HTTP, NTP and
+  (`nts_ke_apart`, `sntp_query_apart`), the zone question the machine asks
+  at boot as root (`locale_auto_ask`) and the plain lookups of hostid,
+  logger, a Waterlink service and NTS's time server (`net_resolve_v4_apart`)
+  parse TLS, X.509, HTTP, NTP and
   DNS from whoever answers, so that half runs in a forked child; bowl's
   downloads exec wget and get it too, and a DNS over TLS lookup or a
   revocation list a fetch needs is made inside the same child.
@@ -662,11 +664,16 @@ architecture gate above. CI is parked (`workflow_dispatch` only).
   unauthenticated, so the join orders by what the saved network asks for and has
   taught it, and the handshake's message 3 authenticates the elements the
   choice was made from.
-- **Parsing still in the asking process:** the HTTP/TLS clients, `host`, the
-  NTS key establishment and every time query run apart (Decisions), but a DNS
-  answer read for `hostid`, logger or a Waterlink service name is parsed
-  where it was asked (`dns_resolve_any`: `byte_reader`, `dns_fuzz`, the
-  exhaustive and bounded proofs). Each can become a task for `net_apart`.
+- **Parsing still in the asking process:** every client that asks a server
+  -- the HTTP/TLS clients, `host`, the NTS key establishment, every time
+  query, and the name lookups of hostid, logger, a Waterlink service and
+  NTS's time server -- runs apart (Decisions), and DHCP has its own confined
+  child. What still reads bytes from the air or the wire where it lives: the
+  Wi-Fi station (scan elements, EAPOL-Key and SAE frames, as root, beside the
+  nl80211 socket that installs the keys it derives), Waterlink's datagrams
+  and its mDNS reader (in its daemon), and netlink from the kernel. Each is a
+  `byte_reader` parser under fuzzing (`wifi_scan_fuzz`, `wifi_eapol_fuzz`,
+  `wifi_sae_fuzz`, `netlink_fuzz`, Waterlink's own), not a confined one.
 - **Evidence:** a corpus beyond generated seeds; ASan/UBSan and native
   namespace runs as required jobs; MSan beyond hosted lifts; a second oracle for
   DNS; an independent review once those are reproducible.

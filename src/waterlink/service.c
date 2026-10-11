@@ -541,8 +541,8 @@ static bool link_parse_place(string_address text, p8 address_to address,
                 {
                         p32 found = 0;
 
-                        if (net_resolve_v4((string_address)host, address_of found,
-                                           3) != DNS_OK)
+                        if (net_resolve_v4_apart((string_address)host,
+                                                 address_of found, 3) != DNS_OK)
                                 return false;
                         link_address_v4(address, found);
                 }

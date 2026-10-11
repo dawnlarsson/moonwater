@@ -15914,10 +15914,13 @@ static COLD bipolar nts_ke_apart(string_address host, p16 port, bool bootstrap,
 }
 
 /*
-        A name asked as `host` asks it, apart: the DNS answer, and the TLS
-        and X.509 of a resolver over TLS, are read in a confined child, which
-        answers with a status and an address. The status is believed only as
-        one the resolver returns.
+        A name asked apart: the DNS answer, and the TLS and X.509 of a
+        resolver over TLS, are read in a confined child, which answers with a
+        status and an address. The status is believed only as one the
+        resolver returns. `host` asks under the DNS over TLS setting or of
+        the server it names (dns_resolve_apart); hostid, logger, a Waterlink
+        service and NTS's check of the time server it was named ask in plain,
+        as net_resolve_v4 does (net_resolve_v4_apart, http_lookup_apart).
 */
 typedef struct
 {
@@ -15929,6 +15932,8 @@ typedef struct
 {
         bipolar server;
         string_address name;
+        positive seconds;
+        bool plain;
 } dns_apart_ask;
 
 static COLD bool dns_apart_task(address_any context, bipolar answer)
@@ -15938,25 +15943,23 @@ static COLD bool dns_apart_task(address_any context, bipolar answer)
         p32 found = 0;
 
         said.status =
-            ask->server >= 0
+            ask->plain ? net_resolve_v4(ask->name, address_of found, ask->seconds)
+            : ask->server >= 0
                 ? dns_resolve_at((p32)ask->server, DNS_PORT, ask->name,
-                                 address_of found, 5)
+                                 address_of found, ask->seconds)
                 : dns_resolve_wanted((string_address) "/etc/resolv.conf",
-                                     ask->name, address_of found, 3);
+                                     ask->name, address_of found, ask->seconds);
         said.found = said.status == DNS_OK ? found : 0;
         return system_write_all((positive)answer, address_of said, sizeof said) ==
                sizeof said;
 }
 
-//      server, or -1 for the setting's resolvers; a status the resolver
-//      returns, DNS_CONFINE or DNS_APART.
-static COLD bipolar dns_resolve_apart(bipolar server, string_address name,
-                                      p32 address_to found)
+static COLD bipolar dns_apart_ask_apart(dns_apart_ask address_to ask,
+                                        p32 address_to found)
 {
-        dns_apart_ask ask = {server, name};
         byte_store got = {0};
         dns_apart_said said;
-        bipolar ran = net_apart(dns_apart_task, address_of ask, -1, address_of got,
+        bipolar ran = net_apart(dns_apart_task, ask, -1, address_of got,
                                 sizeof said, false);
         bool whole = ran == NET_APART_OK && got.used == sizeof said;
 
@@ -15971,6 +15974,41 @@ static COLD bipolar dns_resolve_apart(bipolar server, string_address name,
         if (said.status == DNS_OK)
                 address_to found = said.found;
         return (bipolar)said.status;
+}
+
+//      server, or -1 for the setting's resolvers; a status the resolver
+//      returns, DNS_CONFINE or DNS_APART.
+static COLD bipolar dns_resolve_apart(bipolar server, string_address name,
+                                      p32 address_to found)
+{
+        dns_apart_ask ask = {server, name, server >= 0 ? 5 : 3, false};
+
+        return dns_apart_ask_apart(address_of ask, found);
+}
+
+//      net_resolve_v4, apart; an address is itself without a child.
+static COLD bipolar net_resolve_v4_apart(string_address name,
+                                         p32 address_to found, positive seconds)
+{
+        dns_apart_ask ask = {-1, name, seconds, true};
+        bipolar numeric = string_to_host(name);
+
+        if (numeric >= 0)
+        {
+                address_to found = (p32)numeric;
+                return DNS_OK;
+        }
+        return dns_apart_ask_apart(address_of ask, found);
+}
+
+//      http_lookup, apart.
+static COLD p32 http_lookup_apart(string_address host)
+{
+        p32 ip = 0;
+
+        if (string_to_host(host) < 0 && http_host_loopback(host))
+                return HOST_LOOPBACK;
+        return net_resolve_v4_apart(host, address_of ip, 3) == DNS_OK ? ip : 0;
 }
 
 #endif // STANDARD_MODERN_C_NET_APART
