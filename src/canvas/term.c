@@ -3687,13 +3687,17 @@ static fn grid_take()
 }
 
 #ifndef KERNEL_MODE
+// The pixels a cell is, which is the kernel's face until a program that draws
+// its own glyphs says what its font made them.
+static unsigned int term_cell_w = WINDOW_CELL_W, term_cell_h = WINDOW_CELL_H;
+
 // The pty is told the grid, so a program that asks has the size it is drawn
 // in, and a resize reaches it as SIGWINCH.
 static fn grid_tell(b32 master)
 {
         winsize size = {(unsigned short)ROWS, (unsigned short)COLUMNS,
-                        (unsigned short)(COLUMNS * WINDOW_CELL_W),
-                        (unsigned short)(ROWS * WINDOW_CELL_H)};
+                        (unsigned short)(COLUMNS * term_cell_w),
+                        (unsigned short)(ROWS * term_cell_h)};
 
         system_control(master, TIOCSWINSZ, address_of size);
 }
