@@ -18160,6 +18160,18 @@ open(stick + "/m2", "w").write(r"""exec > /dev/ttyS0 2>&1
 /compositor &
 c=$!
 sleep 2
+/surface -x 40 -y 40 -w 300 -h 200 -c 336699 -s 90 > /tmp/a.out &
+a=$!
+sleep 1
+/surface -x 99999 -y 99999 -w 200 -h 100 -c 996633 -s 90 > /tmp/c.out &
+sleep 1
+/surface -n -x 400 -y 400 -w 200 -h 100 -s 90 > /tmp/b.out &
+sleep 1
+echo m2-ready
+sleep 5
+kill -9 $a
+echo m2-killed-a
+sleep 5
 /surface -F 1000000 -W 3 -x 500 -y 300 -w 800 -h 600 -c 663399 -s 90 > /tmp/f.out &
 f=$!
 sleep 1
@@ -18170,6 +18182,10 @@ echo "m2 flood: second client $n"
 kill -9 $f
 wait $f
 sleep 1
+kill -0 $c && echo "m2 alive: yes" || echo "m2 alive: no"
+/surface -x 1700 -y 600 -w 100 -h 100 -s 1 > /tmp/e.out
+n=$(grep -c 'surface: [0-9]* at' /tmp/e.out)
+echo "m2 after: new client $n"
 /surface -O 2147479552 -x 1000 -y 700 -w 64 -h 32 -s 3 > /tmp/o.out &
 sleep 1
 /surface -x 1200 -y 700 -w 64 -h 32 -s 1 > /tmp/o2.out
@@ -18180,6 +18196,9 @@ echo "m2 offset: alive $l next client $n"
 t1=$(grep -c 'second create answered -16' /tmp/t.out)
 t2=$(grep -c 'compositor has gone' /tmp/t.out)
 echo "m2 twice: $t1 gone $t2"
+k1=$(grep -c 'surface: event 6' /tmp/b.out)
+k2=$(grep -c 'surface: event 6' /tmp/c.out)
+echo "m2 keys: nothing-shown $k1 visible $k2"
 kill $c
 wait $c
 echo m2-done
@@ -18308,13 +18327,33 @@ out.append(("and the keyboard reaches the terminal again",
             "yes" if wait_for(b"m1-typed-", 10) else "no", "yes"))
 
 type_text("sh /mnt/m2\n")
+ready2 = wait_for(b"m2-ready", 40)
+time.sleep(0.5)
+width, height, off = picture("m2-off")
+#   200 by 100 with its frame, asked for at (99999, 99999), is put with its
+#   body at (W-202, H-124): its titlebar is the rows from there down 20.
+out.append(("M2.1 a window asked for far off the output is put on it, its titlebar at the corner",
+            off(W - 100, H - 114), "2b3a4c"))
+#   Not where the first compositor's click went: a tablet that is told the
+#   place it already has reports nothing, and a pointer that starts in the
+#   middle of the output would press there.
+click(120, 160)
+wait_for(b"m2-killed-a", 20)
+time.sleep(1)
+type_text("a")
 done2 = wait_for(b"m2-done", 60)
 text = serial().decode("latin1")
 def said(pattern):
     found = re.findall(pattern, text)
     return found[-1] if found else "none"
+keys = re.findall(r"m2 keys: nothing-shown (\d+) visible (\d+)", text)
+out.append(("M2.2 keys go to the topmost window that shows something, not to one that never committed",
+            "%s %s" % (keys[-1][0], "yes" if int(keys[-1][1]) > 0 else "no") if keys else "no end", "0 yes"))
 out.append(("M2.3 a client that floods commits does not starve the creation of another",
             said(r"m2 flood: second client (\d+)"), "1"))
+out.append(("M2.4 the compositor outlives a client killed mid-flood and serves the next",
+            "%s %s" % (said(r"m2 alive: (\w+)"), said(r"m2 after: new client (\d+)")), "yes 1"))
+
 out.append(("M2.5 a buffer offset written over the page's header does not stop the compositor",
             "%s %s" % (said(r"m2 offset: alive (\w+)"), said(r"m2 offset: alive \w+ next client (\d+)")), "yes 1"))
 out.append(("M2.6 a second create is answered EBUSY and the surface it came on stays",

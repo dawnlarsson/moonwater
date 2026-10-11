@@ -434,9 +434,8 @@ struct compositor_poll
 #define COMPOSITOR_POLLHUP 16
 
 #define COMPOSITOR_INPUTS 16
-#define COMPOSITOR_BURST 16
 #define COMPOSITOR_DAMAGE 8
-#define COMPOSITOR_BURST 64
+#define COMPOSITOR_BURST 16
 #define COMPOSITOR_EAGAIN 11
 #define COMPOSITOR_EPERM 1
 #define COMPOSITOR_EINVAL 22
@@ -464,6 +463,7 @@ struct compositor_client
         unsigned int shown;  // committed once, so there is something to show
         unsigned int committed; // the sequence that put slot there
         unsigned int wake;   // events written since the last wake
+        unsigned int arrived; // the count of connections when it came
 };
 
 static struct
@@ -488,8 +488,9 @@ static struct
         int drag_x, drag_y;
         int pointer_x, pointer_y;
         unsigned int modifiers;
-        unsigned int next_id, placed;
+        unsigned int next_id, placed, connections;
         unsigned long painted; // pixels composed, all frames
+        positive period, presented; // a frame in nanoseconds, and when the last one went out
 } compositor;
 
 static long compositor_call(positive number, positive a, positive b, positive c,
@@ -718,6 +719,7 @@ static b32 compositor_card_open(void)
         compositor.width = mode.hdisplay;
         compositor.height = mode.vdisplay;
         compositor.crtc = crtc;
+        compositor.period = 1000000000ull / (mode.vrefresh >= 24 && mode.vrefresh <= 1000 ? mode.vrefresh : 60);
 
         struct compositor_dumb dumb = {(unsigned int)compositor.height,
                                        (unsigned int)compositor.width, 32, 0, 0, 0, 0};
@@ -1001,6 +1003,26 @@ static int compositor_title_height(const struct compositor_client *client)
         return client->style & WINDOW_FRAME ? COMPOSITOR_TITLE : 0;
 }
 
+/*
+        Where a surface may be put: all of it on the output when it fits, and
+        its top left when it does not, so a person can always reach its
+        titlebar. A position asked for outside that is moved in, not refused
+        (canvas spec 02 section 7), and the program is told where it is.
+*/
+static void compositor_place(struct compositor_client *client, int x, int y)
+{
+        int border = client->style & WINDOW_FRAME ? COMPOSITOR_BORDER : 0;
+        int high_x = compositor.width - (int)client->width - border;
+        int high_y = compositor.height - (int)client->height - compositor_title_height(client) - border * 2;
+
+        x = x > high_x ? high_x : x;
+        y = y > high_y ? high_y : y;
+        client->x = x < border ? border : x;
+        client->y = y < border ? border : y;
+        client->page->window.x = client->asked_x = client->x;
+        client->page->window.y = client->asked_y = client->y;
+}
+
 static void compositor_destroy(struct compositor_client *client)
 {
         unsigned int at = 0;
@@ -1025,9 +1047,15 @@ static void compositor_destroy(struct compositor_client *client)
                 compositor.drag = null;
         if (compositor.focus == client)
         {
+                // The topmost surface there is to see; keys never go to one
+                // that has shown nothing or is put away.
                 compositor.focus = null;
-                if (compositor.stacked)
-                        compositor_focus(compositor.stack[compositor.stacked - 1]);
+                for (at = compositor.stacked; at--;)
+                        if (compositor.stack[at]->shown && !(compositor.stack[at]->style & WINDOW_MINIMIZED))
+                        {
+                                compositor_focus(compositor.stack[at]);
+                                break;
+                        }
         }
 
         if (client->page)
@@ -1066,6 +1094,8 @@ static int compositor_create(struct compositor_client *client, struct surface_re
             (request->protocol != 0 && request->protocol != SURFACE_PROTOCOL) ||
             request->flags & ~(SURFACE_REQUEST_FOCUS | SURFACE_REQUEST_TRANSIENT) ||
             (request->buffer_slots != 1 && request->buffer_slots != 2) ||
+            request->parent || request->rel_x || request->rel_y || request->anchor ||
+            request->exclusive || request->surface_id || request->bytes ||
             !request->width || !request->height ||
             request->width > (unsigned int)compositor.width ||
             request->height > (unsigned int)compositor.height)
@@ -1100,16 +1130,13 @@ static int compositor_create(struct compositor_client *client, struct surface_re
         client->height = request->height;
         client->slots = request->buffer_slots;
 
-        // Placed in a cascade from where the kernel puts a new window.
-        client->x = 80 + (int)(compositor.placed % 8) * 32;
-        client->y = 80 + (int)(compositor.placed % 8) * 32;
-        compositor.placed++;
-        client->asked_x = client->x;
-        client->asked_y = client->y;
         client->style = WINDOW_FRAME;
 
-        page->window.x = client->x;
-        page->window.y = client->y;
+        // Placed in a cascade from where the kernel puts a new window.
+        compositor_place(client, 80 + (int)(compositor.placed % 8) * 32,
+                         80 + (int)(compositor.placed % 8) * 32);
+        compositor.placed++;
+
         page->window.z = (int)compositor.stacked;
         page->window.width = request->width;
         page->window.height = request->height;
@@ -1174,22 +1201,20 @@ static void compositor_commit(struct compositor_client *client)
         client->sequence = sequence;
         slot = slot < client->slots ? slot : 0;
 
-        // A move the program asked for since the last one it was given.
-        if (x != client->asked_x || y != client->asked_y)
-        {
-                x = x < -WINDOW_COORD_MAX ? -WINDOW_COORD_MAX : x > WINDOW_COORD_MAX ? WINDOW_COORD_MAX : x;
-                y = y < -WINDOW_COORD_MAX ? -WINDOW_COORD_MAX : y > WINDOW_COORD_MAX ? WINDOW_COORD_MAX : y;
-                compositor_damage_client(client);
-                client->x = client->asked_x = x;
-                client->y = client->asked_y = y;
-                whole = 1;
-        }
-
         style &= WINDOW_FRAME | WINDOW_MINIMIZED;
         if (style != client->style)
         {
                 compositor_damage_client(client);
                 client->style = style;
+                whole = 1;
+        }
+
+        // A move the program asked for since the last one it was given, or
+        // a frame it put on or took off, which moves the edges.
+        if (x != client->asked_x || y != client->asked_y || whole)
+        {
+                compositor_damage_client(client);
+                compositor_place(client, x, y);
                 whole = 1;
         }
 
@@ -1306,6 +1331,25 @@ static void compositor_accept(void)
                         if (compositor.clients[at].handle < 0)
                                 free_slot = &compositor.clients[at];
 
+                // With every slot taken, the connection that has waited longest
+                // without making a surface gives its slot up: a program that
+                // only connects cannot keep the rest from making theirs.
+                if (!free_slot)
+                {
+                        struct compositor_client *idle = null;
+
+                        for (unsigned int other = 0; other < COMPOSITOR_CLIENTS; other++)
+                                if (!compositor.clients[other].page &&
+                                    (!idle || compositor.clients[other].arrived - idle->arrived > 0x80000000u))
+                                        idle = &compositor.clients[other];
+
+                        if (idle)
+                        {
+                                compositor_destroy(idle);
+                                free_slot = idle;
+                        }
+                }
+
                 if (!free_slot)
                 {
                         system_close(handle);
@@ -1314,6 +1358,7 @@ static void compositor_accept(void)
 
                 memory_zero(free_slot, sizeof(*free_slot));
                 free_slot->handle = (int)handle;
+                free_slot->arrived = ++compositor.connections;
         }
 }
 
@@ -1368,11 +1413,24 @@ static void compositor_local(const struct compositor_client *client, int *x, int
         *y = compositor.pointer_y - client->y - compositor_title_height(client);
 }
 
+// The pointer stays on the output, wherever the motions of a burst took it.
+static void compositor_pointer_clamp(void)
+{
+        compositor.pointer_x = compositor.pointer_x < 0 ? 0
+                               : compositor.pointer_x >= compositor.width ? compositor.width - 1
+                                                                        : compositor.pointer_x;
+        compositor.pointer_y = compositor.pointer_y < 0 ? 0
+                               : compositor.pointer_y >= compositor.height ? compositor.height - 1
+                                                                         : compositor.pointer_y;
+}
+
 static void compositor_motion(void)
 {
-        struct compositor_client *under = compositor_under(compositor.pointer_x, compositor.pointer_y);
+        struct compositor_client *under;
         int x, y;
 
+        compositor_pointer_clamp();
+        under = compositor_under(compositor.pointer_x, compositor.pointer_y);
         compositor_cursor_move();
 
         if (compositor.drag)
@@ -1411,8 +1469,11 @@ static void compositor_motion(void)
 
 static void compositor_button(unsigned int code, int down)
 {
-        struct compositor_client *under = compositor_under(compositor.pointer_x, compositor.pointer_y);
+        struct compositor_client *under;
         int x, y;
+
+        compositor_pointer_clamp();
+        under = compositor_under(compositor.pointer_x, compositor.pointer_y);
 
         if (!down)
         {
@@ -1484,6 +1545,9 @@ static void compositor_input_read(unsigned int at)
                 {
                         system_close(compositor.inputs[at]);
                         compositor.inputs[at] = -1;
+
+                        // A press that was held on it will never be released.
+                        compositor_button(COMPOSITOR_BTN_LEFT, 0);
                 }
 
                 if (got <= 0)
@@ -1531,13 +1595,6 @@ static void compositor_input_read(unsigned int at)
                         else if (event->type == COMPOSITOR_EV_KEY && event->code < 256)
                                 compositor_key(event->code, event->value);
                 }
-
-                compositor.pointer_x = compositor.pointer_x < 0 ? 0
-                                       : compositor.pointer_x >= compositor.width ? compositor.width - 1
-                                                                                : compositor.pointer_x;
-                compositor.pointer_y = compositor.pointer_y < 0 ? 0
-                                       : compositor.pointer_y >= compositor.height ? compositor.height - 1
-                                                                                 : compositor.pointer_y;
         }
 
         if (moved)
@@ -1679,6 +1736,7 @@ static b32 compositor_main()
                 struct compositor_poll wanted[2 + COMPOSITOR_INPUTS + COMPOSITOR_CLIENTS];
                 struct compositor_client *polled[COMPOSITOR_CLIENTS];
                 unsigned int count = 0, clients = 0, inputs;
+                long awaited;
 
                 wanted[count++] = (struct compositor_poll){compositor.signals, COMPOSITOR_POLLIN, 0};
                 wanted[count++] = (struct compositor_poll){compositor.listener, COMPOSITOR_POLLIN, 0};
@@ -1693,7 +1751,24 @@ static b32 compositor_main()
                                                                           COMPOSITOR_POLLIN, 0};
                         }
 
-                if (compositor_call(syscall(ppoll), (positive)wanted, count, 0, 0, 0, 0) < 0)
+                // With nothing to show the wait is for ever. With something
+                // to show it is until a frame has gone by since the last one
+                // went out, so a program that commits faster than the card
+                // can scan costs one composition a frame and not one a commit.
+                if (compositor.damages)
+                {
+                        positive now = clock_monotonic_nanoseconds();
+                        long wait[2] = {0, now - compositor.presented < compositor.period
+                                               ? (long)(compositor.period - (now - compositor.presented))
+                                               : 0};
+
+                        awaited = compositor_call(syscall(ppoll), (positive)wanted, count,
+                                                  (positive)wait, 0, 0, 0);
+                }
+                else
+                        awaited = compositor_call(syscall(ppoll), (positive)wanted, count, 0, 0, 0, 0);
+
+                if (awaited < 0)
                         continue;
 
                 if (wanted[0].returned)
@@ -1710,7 +1785,18 @@ static b32 compositor_main()
                 if (wanted[1].returned)
                         compositor_accept();
 
-                compositor_present();
+                // Dated when it starts: a card that holds the call for the rest
+                // of the frame has used the frame up.
+                if (compositor.damages)
+                {
+                        positive now = clock_monotonic_nanoseconds();
+
+                        if (now - compositor.presented >= compositor.period)
+                        {
+                                compositor.presented = now;
+                                compositor_present();
+                        }
+                }
 
                 // One wake a program per pass, however many events it got.
                 for (unsigned int at = 0; at < COMPOSITOR_CLIENTS; at++)
@@ -1740,12 +1826,19 @@ static b32 compositor_main()
 // surface ----------------------------------------------------------
 /*
         A test client: surface [-x X] [-y Y] [-w WIDTH] [-h HEIGHT]
-        [-c RRGGBB] [-r ROLE] [-p] [-f FONT.ttf] [-t TEXT] [-s SECONDS].
+        [-c RRGGBB] [-r ROLE] [-p] [-n] [-2] [-F COMMITS] [-W WRITERS] [-O OFFSET]
+        [-f FONT.ttf] [-t TEXT] [-s SECONDS].
 
         A window of one colour at X, Y, a line of TEXT drawn with font.c on
         it when FONT is given, pointer events asked for with -p, and every
         event it is sent written to standard output, one line each. It lives
-        until its close box is pressed, the compositor goes, or SECONDS.
+        until its close box is pressed, the compositor goes, or SECONDS. -n
+        never commits, and -F commits COMMITS times in a row, whole window
+        each, as fast as it can, from WRITERS processes sharing the
+        connection when -W is given. -O writes OFFSET over its first buffer's
+        offset in the page and commits, and -2 sends a second create on
+        its connection and reports the answer: what a program that means
+        harm does with the page and the socket.
 */
 static bipolar surface_number(string_address text, b32 hex)
 {
@@ -1821,8 +1914,8 @@ static b32 surface_main()
 {
         bipolar x = -1, y = -1, width = 320, height = 200, colour = 0x3366aa, role = SURFACE_ROLE_APP;
         bipolar seconds = -1;
-        b32 pointer = 0, twice = 0;
-        bipolar offset = -1, flood = 0, writers = 1;
+        b32 pointer = 0, never = 0, twice = 0;
+        bipolar flood = 0, offset = -1, writers = 1;
         b32 child = 0;
         string_address font = null, text = (string_address) "Moonwater";
         struct surface *surface;
@@ -1837,9 +1930,10 @@ static b32 surface_main()
 
                 if (option[0] != '-' || !option[1] || option[2])
                         continue;
-                if (option[1] == 'p' || option[1] == '2')
+                if (option[1] == 'p' || option[1] == 'n' || option[1] == '2')
                 {
                         pointer |= option[1] == 'p';
+                        never |= option[1] == 'n';
                         twice |= option[1] == '2';
                         continue;
                 }
@@ -1887,7 +1981,8 @@ static b32 surface_main()
         if (pointer)
                 surface->window.want = WINDOW_WANT_POINTER;
         surface->buffer_index = 0;
-        surface_commit(surface);
+        if (!never)
+                surface_commit(surface);
 
         // WRITERS processes on the one connection, each committing COMMITS times.
         for (bipolar at = 1; at < writers && flood && !child; at++)
@@ -1902,7 +1997,6 @@ static b32 surface_main()
 
         if (child)
                 return 0;
-
 
         // What a hostile program does: writes where the compositor wrote
         // its offsets, and commits.
