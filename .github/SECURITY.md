@@ -761,8 +761,18 @@ credentials, never against a public network.
 5. **Ambient authority:** hostile cwd, umask, descriptors, signals, terminal and
    limits at start; local races for ports and state endpoints; logs and terminal
    control sequences as sinks.
+   *Checked 2026-10-11 for descriptors:* wget with standard input, output and
+   error closed, or error alone, fetches whole (its confined child's answer
+   pipe never lands on a descriptor the child also writes its words to).
 6. **Entropy:** clone, restore and fork at each random acquisition; counter and
    key rollback; never repair repetition with public values.
+   *Checked 2026-10-11 for fork:* every random value the network code uses
+   -- TLS client random and ECDHE scalars, DNS ids and ports, DHCP and SNTP
+   transaction tags, NTS identifiers and nonces, SAE and Waterlink
+   ephemerals -- is a `getrandom` call at the moment of use
+   (`system_random_fill`, `network_transaction_secure`); no userspace pool
+   exists to be copied by the forks of `net_apart`, the Wi-Fi station or the
+   mDNS reader, and libc's `rand` is used by none of them.
 7. **Control loops:** cycles across DHCP, DNS, TLS, redirects, rekey and Wi-Fi
    that no per-parser limit bounds; backoff with jitter and a quiet-period
    recovery bound.
