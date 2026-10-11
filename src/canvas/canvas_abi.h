@@ -355,4 +355,26 @@ struct surface_message {
 _Static_assert(sizeof(struct surface_request) == 56, "surface request ABI");
 _Static_assert(sizeof(struct surface_message) == 64, "surface message ABI");
 
+// The request's fields at their numbers (canvas spec 01 section 5.1), and the
+// message around it: a field that moves is a protocol that is not 2.
+#define SURFACE_REQUEST_AT(field, offset)                                      \
+        _Static_assert(__builtin_offsetof(struct surface_request, field) == (offset), \
+                       "surface request ABI " #field)
+SURFACE_REQUEST_AT(size, 0);
+SURFACE_REQUEST_AT(protocol, 4);
+SURFACE_REQUEST_AT(role, 8);
+SURFACE_REQUEST_AT(width, 12);
+SURFACE_REQUEST_AT(height, 16);
+SURFACE_REQUEST_AT(buffer_slots, 20);
+SURFACE_REQUEST_AT(flags, 24);
+SURFACE_REQUEST_AT(parent, 28);
+SURFACE_REQUEST_AT(rel_x, 32);
+SURFACE_REQUEST_AT(rel_y, 36);
+SURFACE_REQUEST_AT(anchor, 40);
+SURFACE_REQUEST_AT(exclusive, 44);
+SURFACE_REQUEST_AT(surface_id, 48);
+SURFACE_REQUEST_AT(bytes, 52);
+_Static_assert(__builtin_offsetof(struct surface_message, status) == 4, "surface message ABI");
+_Static_assert(__builtin_offsetof(struct surface_message, request) == 8, "surface message ABI");
+
 #endif // CANVAS_ABI_INCLUDED

@@ -550,19 +550,59 @@ struct surface
 
 _Static_assert(sizeof(struct window) == 1288, "window page ABI");
 _Static_assert(sizeof(struct surface_event) == 16, "surface event ABI");
-_Static_assert(__builtin_offsetof(struct surface, magic) == 1288, "surface ABI");
-_Static_assert(__builtin_offsetof(struct surface, role_requested) == 1296, "surface ABI");
-_Static_assert(__builtin_offsetof(struct surface, surface_id) == 1336, "surface ABI");
-_Static_assert(__builtin_offsetof(struct surface, configure_serial) == 1348, "surface ABI");
-_Static_assert(__builtin_offsetof(struct surface, buffer_slots) == 1364, "surface ABI");
-_Static_assert(__builtin_offsetof(struct surface, buffer_offset) == 1388, "surface ABI");
-_Static_assert(__builtin_offsetof(struct surface, damage_count) == 1400, "surface ABI");
-_Static_assert(__builtin_offsetof(struct surface, style_count) == 1532, "surface ABI");
-_Static_assert(__builtin_offsetof(struct surface, style_applied) == 1668, "surface ABI");
-_Static_assert(__builtin_offsetof(struct surface, event_head) == 1796, "surface ABI");
-_Static_assert(__builtin_offsetof(struct surface, event) == 1812, "surface ABI");
-_Static_assert(__builtin_offsetof(struct surface, theme_generation) == 2836, "surface ABI");
+_Static_assert(sizeof(struct surface_damage) == 16, "surface ABI");
+_Static_assert(sizeof(struct surface_style) == 8, "surface ABI");
+
+/* Every field of canvas spec 01 section 4.1, at its number: a field that
+   moves is a version that is not 2. */
+#define SURFACE_AT(field, offset)                                              \
+        _Static_assert(__builtin_offsetof(struct surface, field) == (offset), "surface ABI " #field)
+SURFACE_AT(magic, 1288);
+SURFACE_AT(protocol, 1292);
+SURFACE_AT(header_size, 1294);
+SURFACE_AT(role_requested, 1296);
+SURFACE_AT(role_state, 1300);
+SURFACE_AT(role_result, 1304);
+SURFACE_AT(layer, 1308);
+SURFACE_AT(anchor_requested, 1312);
+SURFACE_AT(anchor_applied, 1316);
+SURFACE_AT(exclusive_requested, 1320);
+SURFACE_AT(exclusive_applied, 1324);
+SURFACE_AT(lock_applied, 1328);
+SURFACE_AT(parent, 1332);
+SURFACE_AT(surface_id, 1336);
+SURFACE_AT(rel_x, 1340);
+SURFACE_AT(rel_y, 1344);
+SURFACE_AT(configure_serial, 1348);
+SURFACE_AT(acked_serial, 1352);
+SURFACE_AT(applied_width, 1356);
+SURFACE_AT(applied_height, 1360);
+SURFACE_AT(buffer_slots, 1364);
+SURFACE_AT(buffer_index, 1368);
+SURFACE_AT(buffer_kind, 1372);
+SURFACE_AT(buffer_format, 1376);
+SURFACE_AT(buffer_stride, 1380);
+SURFACE_AT(buffer_size, 1384);
+SURFACE_AT(buffer_offset, 1388);
+SURFACE_AT(release_serial, 1396);
+SURFACE_AT(damage_count, 1400);
+SURFACE_AT(damage, 1404);
+SURFACE_AT(style_count, 1532);
+SURFACE_AT(style_serial, 1536);
+SURFACE_AT(style_request, 1540);
+SURFACE_AT(style_applied, 1668);
+SURFACE_AT(event_head, 1796);
+SURFACE_AT(event_tail, 1800);
+SURFACE_AT(event_dropped, 1804);
+SURFACE_AT(reserved, 1808);
+SURFACE_AT(event, 1812);
+SURFACE_AT(theme_generation, 2836);
+SURFACE_AT(theme_foreground, 2840);
+SURFACE_AT(theme_background, 2844);
+SURFACE_AT(theme_cursor, 2848);
+SURFACE_AT(theme_palette, 2852);
 _Static_assert(sizeof(struct surface) == SURFACE_HEADER, "surface ABI");
+_Static_assert(SURFACE_HEADER <= WINDOW_PIXELS, "the header ends before the first buffer");
 
 // Where a slot's pixels start, and how much a page of two slots holds.
 #define SURFACE_PAGE_ROUND(bytes) (((bytes) + 4095u) & ~4095u)
