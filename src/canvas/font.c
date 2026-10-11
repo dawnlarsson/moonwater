@@ -2880,12 +2880,25 @@ static font_bitmap font_cached(font_engine address_to e, const font_face address
         worst of it only from 1.41 to 1.23).
 
         The two tables are the program's, made once: 256 bytes into 16-bit
-        light, and all 65536 lights back to the byte nearest in sRGB, that is
-        the byte whose decision threshold, the light of the half step
-        between two bytes, the light has not reached.
+        light, and the way back to the byte nearest in sRGB, that is the byte
+        whose decision threshold, the light of the half step between two
+        bytes, the light has not reached. The way back is a word for every
+        sixteen lights (8 KB, where a byte for each light was 64 KB): the byte
+        at the first of the sixteen in the low half, and in the high half
+        where in the sixteen the next byte begins, 16 when none does. The
+        sRGB curve's steepest part is its linear foot, a byte in 19.9 lights,
+        so no sixteen lights hold two steps, and every one of the 65536
+        answers is the table's answer before it.
 */
 static p16 font_to_linear[256];
-static p8 font_to_srgb[65536];
+static p16 font_to_srgb[4096];
+
+static inline p32 font_srgb(p32 light)
+{
+        p32 word = font_to_srgb[light >> 4];
+
+        return (word & 255) + ((light & 15) >= (word >> 8));
+}
 
 static f64 font_srgb_to_linear(f64 x)
 {
@@ -2916,13 +2929,23 @@ static fn font_tables()
                 return;
         }
 
-        p32 s = 0;
-        f64 next = font_srgb_to_linear(0.5 / 255) * 65535;
-        for (p32 v = 0; v < 65536; v++)
+        //      The lights where each byte begins: the first whole light the
+        //      half step below it has been reached by.
+        p32 s = 0, begins[257];
+
+        for (p32 b = 1; b < 256; b++)
         {
-                while (s < 255 && next <= v)
-                        next = font_srgb_to_linear((++s + 0.5) / 255) * 65535;
-                font_to_srgb[v] = (p8)s;
+                f64 half = font_srgb_to_linear((b - 0.5) / 255) * 65535;
+
+                begins[b] = (p32)half + ((f64)(p32)half < half);
+        }
+        begins[0] = 0;
+        begins[256] = 1 << 20;
+        for (p32 k = 0; k < 4096; k++)
+        {
+                while (s < 255 && begins[s + 1] <= k * 16)
+                        s++;
+                font_to_srgb[k] = (p16)(s | (begins[s + 1] <= k * 16 + 15 ? begins[s + 1] - k * 16 : 16) << 8);
         }
         for (s = 0; s < 256; s++)
                 font_to_linear[s] = (p16)(font_srgb_to_linear(s / 255.0) * 65535 + 0.5);
@@ -2977,14 +3000,30 @@ static p32 font_mix(const font_engine address_to e, p32 back, p32 fore, p32 a)
 {
         p32 mixed = 0;
 
+        //      No light leaves the ground, and all of it is the ink: the
+        //      round trip through light returns every byte it is given.
+        if (a == 0)
+                return back & 0xffffff;
+        if (a == 255)
+                return fore & 0xffffff;
+
+        //      How much of the plain mix, in 64ths, a channel takes: all of
+        //      it without linear light, none of it for dark text, which then
+        //      needs no plain mix, and all of it for the lightest, which
+        //      needs no light.
+        p32 weight = e->linear ? e->plain : 64;
+
         for (p32 shift = 0; shift < 24; shift += 8)
         {
-                p32 b = back >> shift & 255, f = fore >> shift & 255;
-                p32 plain = (b * (255 - a) + f * a + 127) / 255;
-                p32 value = e->linear ? font_to_srgb[(font_to_linear[b] * (255 - a) + font_to_linear[f] * a + 127) / 255]
-                                      : plain;
+                p32 b = back >> shift & 255, f = fore >> shift & 255, value = 0, plain = 0;
 
-                value = e->linear ? (value * (64 - e->plain) + plain * e->plain + 32) >> 6 : value;
+                if (weight < 64)
+                        value = font_srgb((font_to_linear[b] * (255 - a) + font_to_linear[f] * a + 127) / 255);
+                if (weight)
+                {
+                        plain = (b * (255 - a) + f * a + 127) / 255;
+                        value = weight == 64 ? plain : (value * (64 - weight) + plain * weight + 32) >> 6;
+                }
                 mixed |= value << shift;
         }
         return mixed;
@@ -3071,13 +3110,16 @@ static fn font_blend(font_engine address_to e, const font_target address_to targ
                 return;
         }
         for (positive r = 0; r < height; r++)
+        {
+                const p8 address_to row = from + r * glyph.stride;
+                p32 address_to ground = into + r * stride;
+
                 for (positive c = 0; c < width; c++)
                 {
-                        p32 a = from[r * glyph.stride + c];
-
-                        if (a)
-                                into[r * stride + c] = font_mix(e, into[r * stride + c], colour, e->ramp[a]);
+                        if (row[c])
+                                ground[c] = font_mix(e, ground[c], colour, e->ramp[row[c]]);
                 }
+        }
 }
 
 /*

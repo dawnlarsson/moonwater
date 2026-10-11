@@ -97986,19 +97986,90 @@ static fn check_layout(const font_face address_to one, const font_face address_t
         The sRGB tables: every byte survives the round trip, light is
         monotone, a blend at no coverage is the ground and at full the ink,
         half of black over white is 188, half the light, and half of white
-        over black 128, the light text's mix of the bytes.
+        over black 128, the light text's mix of the bytes. The way back is
+        8 KB of words for 65536 lights, so each light's answer is held to the
+        definition -- the bytes whose half-step light it has reached, counted
+        -- and a blend to the formula written out over the definition, for
+        every coverage level, and ground and ink bytes from the whole range.
 */
+static p32 light_begins[257];
+
+static p32 light_byte(p32 light)
+{
+        p32 low = 0, high = 255;
+
+        while (low < high)
+        {
+                p32 middle = (low + high + 1) / 2;
+
+                if (light_begins[middle] <= light)
+                        low = middle;
+                else
+                        high = middle - 1;
+        }
+        return low;
+}
+
+static p32 light_mix(p32 back, p32 fore, p32 a, bool linear, p32 weight)
+{
+        p32 mixed = 0;
+
+        for (p32 shift = 0; shift < 24; shift += 8)
+        {
+                p32 b = back >> shift & 255, f = fore >> shift & 255;
+                p32 plain = (b * (255 - a) + f * a + 127) / 255;
+                p32 value = linear ? light_byte((font_to_linear[b] * (255 - a) + font_to_linear[f] * a + 127) / 255) : plain;
+
+                value = linear ? (value * (64 - weight) + plain * weight + 32) >> 6 : value;
+                mixed |= value << shift;
+        }
+        return mixed;
+}
+
 static fn check_light()
 {
         bool round = true, rising = true;
 
         for (p32 s = 0; s < 256; s++)
         {
-                round = round && font_to_srgb[font_to_linear[s]] == s;
+                round = round && font_srgb(font_to_linear[s]) == s;
                 rising = rising && (!s || font_to_linear[s] > font_to_linear[s - 1]);
         }
         check("sRGB: every byte survives the round trip through 16-bit light", round);
         check("sRGB: light rises with every byte", rising && font_to_linear[255] == 65535);
+
+        for (p32 s = 1; s < 256; s++)
+        {
+                f64 half = font_srgb_to_linear((s - 0.5) / 255) * 65535;
+
+                light_begins[s] = (p32)half + ((f64)(p32)half < half);
+        }
+        light_begins[0] = 0;
+        bool back = true;
+        for (p32 light = 0; light < 65536; light++)
+                back = back && font_srgb(light) == light_byte(light);
+        check("sRGB: all 65536 lights go back to the byte whose half step they have reached", back);
+
+        bool same = true;
+        static const struct { bool linear; p32 weight; } modes[] = {{true, 0}, {true, 21}, {true, 43}, {true, 63}, {true, 64}, {false, 0}};
+        for (p32 m = 0; m < 6; m++)
+        {
+                engine.linear = modes[m].linear;
+                engine.plain = modes[m].weight;
+                for (p32 b = 0; b < 256; b += b < 248 ? 7 : 1)
+                        for (p32 f = 0; f < 256; f += f < 240 ? 11 : 1)
+                                for (p32 a = 0; a < 256; a++)
+                                {
+                                        p32 ground = b | (b ^ 0x5a) << 8 | (b * 7 & 255) << 16 | 0xab000000u;
+                                        p32 ink = f | (f * 3 & 255) << 8 | (f ^ 0xa5) << 16;
+
+                                        same = same && font_mix(&engine, ground, ink, a) ==
+                                                           light_mix(ground, ink, a, modes[m].linear, modes[m].weight);
+                                }
+        }
+        engine.linear = true;
+        engine.plain = 0;
+        check("blend: every coverage level of a spread of grounds and inks is the formula over the definition", same);
 
         bool ends = true;
         for (p32 s = 0; s < 256; s += 17)
