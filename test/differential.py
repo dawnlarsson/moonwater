@@ -45167,6 +45167,43 @@ def harness_moonwater_cli(argv):
         check(seen["wired on"]["status"] == 0 and block("on-word") == ["on"],
               "wired on writes its word", repr(seen["wired on"]))
 
+        # What a saved network carries beside its password, in
+        # /root/wifi.rules: the wpa2 word an add says, until an add without
+        # it; what a join learnt (pmf, sae), while the password stays; and
+        # nothing of a network that is not saved, or no longer is.
+        lines, finished = session(
+            "rm -f /root/wifi /root/wifi.rules\n" +
+            say("wifi add scen-r passpass1 wpa2") +
+            "echo '@@ rules-1'; cat /root/wifi.rules; echo '@@end'\n" +
+            "printf 'pmf scen-r\\nsae scen-r\\nwpa2 scen-r\\npmf gone-net\\nbogus line\\n' > /root/wifi.rules\n" +
+            say("wifi add scen-r passpass1 wpa2") +
+            "echo '@@ rules-2'; cat /root/wifi.rules; echo '@@end'\n" +
+            say("wifi add scen-r passpass1") +
+            "echo '@@ rules-3'; cat /root/wifi.rules; echo '@@end'\n" +
+            say("wifi add scen-r passpass2") +
+            "echo '@@ rules-4'; wc -c < /root/wifi.rules; echo '@@end'\n" +
+            say("wifi add scen-r - wpa3") +
+            "printf 'pmf scen-r\\nwpa2 scen-r\\n' > /root/wifi.rules\n" +
+            say("wifi remove scen-r") +
+            "echo '@@ rules-5'; wc -c < /root/wifi.rules; echo '@@end'\n" +
+            "ls -l /root/wifi.rules | cut -c1-10\n")
+        seen = answers(lines)
+        check(finished, "the wifi rules session finished", "")
+        check(block("rules-1") == ["wpa2 scen-r"],
+              "wifi add with wpa2 says so beside the list", repr(block("rules-1")))
+        check(block("rules-2") == ["pmf scen-r", "sae scen-r", "wpa2 scen-r"],
+              "the same password keeps what the join learnt, and a network not saved has no rules",
+              repr(block("rules-2")))
+        check(block("rules-3") == ["pmf scen-r", "sae scen-r"],
+              "an add without wpa2 takes its word back", repr(block("rules-3")))
+        check(block("rules-4") == ["0"],
+              "another password forgets what the join learnt", repr(block("rules-4")))
+        check(seen["wifi add scen-r - wpa3"]["status"] == 2,
+              "a word after the password that is not wpa2 is a usage", repr(seen.get("wifi add scen-r - wpa3")))
+        check(block("rules-5") == ["0"] and "-rw-------" in lines,
+              "wifi remove forgets every rule of the network, and the file is root's alone",
+              repr((block("rules-5"), lines[-3:])))
+
         # The switches the kernel keeps in sysfs, against a /sys of plain
         # files the sandbox owns: what a verb writes is read back from them.
         fake = sandbox / "sys"
@@ -60850,7 +60887,8 @@ def harness_bowl_sig_fuzz(argv):
 def harness_tls_fuzz(argv):
     """tls_der_fuzz, tls_hs_fuzz, tls_verify_fuzz, waterlink_pre_fuzz,
     waterlink_fuzz, dhcp_fuzz, sntp_fuzz, dns_fuzz, netlink_fuzz,
-    crypto_fuzz, bowl_sig_fuzz, wifi_eapol_fuzz, wifi_scan_fuzz and http_fuzz in turn: `sh test/run fuzz`.
+    crypto_fuzz, bowl_sig_fuzz, wifi_eapol_fuzz, wifi_scan_fuzz, wifi_sae_fuzz and http_fuzz
+    in turn: `sh test/run fuzz`.
 
     Continuous by default, an hour a target with no run cap, unless
     MOONWATER_FUZZ_SECONDS / MOONWATER_FUZZ_RUNS say otherwise. With
@@ -60868,13 +60906,14 @@ def harness_tls_fuzz(argv):
     os.environ.setdefault("MOONWATER_FUZZ_RUNS", "20000" if report else "-1")
     os.environ.setdefault("MOONWATER_FUZZ_SECONDS", "5" if report else "3600")
     runs, seconds, _ = tls_fuzz_budget()
-    print("tls fuzz: der then hs then verify then waterlink pre then waterlink then dhcp then sntp then wifi eapol then wifi scan then dns then netlink then crypto then bowl sig then http "
+    print("tls fuzz: der then hs then verify then waterlink pre then waterlink then dhcp then sntp then wifi eapol then wifi scan then wifi sae then dns then netlink then crypto then bowl sig then http "
           "(runs=%d seconds=%d)" % (runs, seconds))
     seeds = {corpus: len(tls_fuzz_seeds(corpus))
              for corpus in ("tls_der", "tls_hs", "waterlink", "dhcp", "sntp", "dns", "netlink", "crypto", "http")}
     seeds["waterlink_pre"] = len(waterlink_pre_seeds())
     seeds["wifi_eapol"] = len(wifi_eapol_fuzz_seeds())
     seeds["wifi_scan"] = len(wifi_scan_fuzz_seeds())
+    seeds["wifi_sae"] = len(wifi_sae_fuzz_seeds())
     seeds["bowl_sig"] = len(bowl_sig_fuzz_seeds())
     targets = []
     for name, corpus, harness in (
@@ -60887,6 +60926,7 @@ def harness_tls_fuzz(argv):
             ("sntp_fuzz", "sntp", harness_sntp_fuzz),
             ("wifi_eapol_fuzz", "wifi_eapol", harness_wifi_eapol_fuzz),
             ("wifi_scan_fuzz", "wifi_scan", harness_wifi_scan_fuzz),
+            ("wifi_sae_fuzz", "wifi_sae", harness_wifi_sae_fuzz),
             ("dns_fuzz", "dns", harness_dns_fuzz),
             ("netlink_fuzz", "netlink", harness_netlink_fuzz),
             ("crypto_fuzz", "crypto", harness_crypto_fuzz),
@@ -64593,6 +64633,7 @@ def harness_security_hygiene(argv):
                 "tls_der_fuzz", "tls_hs_fuzz", "tls_fuzz", "msan_net", "pathname_race",
                 "dhcp_fuzz", "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "tls_peer",
                 "http_fuzz", "http_urls", "wifi_eapol_fuzz", "wifi_scan_fuzz", "wifi_key_state",
+                "wifi_sae_fuzz",
                 "bowl_sig_fuzz", "wget_mutation", "wget_hostile", "sntp_era", "net_netem",
                 "net_dependency_closure", "net_math_proof", "net_clock_fault", "net_wait_states", "net_parser_work_states",
                 "net_dhcp_exchange", "net_lease_transitions", "net_exhaustive_proof", "net_bounded_proof",
@@ -64613,7 +64654,7 @@ def harness_security_hygiene(argv):
         checks(name + ": skipped (soft)" in run, "test/run: no soft skip for " + name)
     for name in ("tls_der_fuzz", "tls_hs_fuzz", "pathname_race", "dhcp_fuzz",
                  "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "http_fuzz", "wifi_eapol_fuzz",
-                 "wifi_scan_fuzz", "bowl_sig_fuzz"):
+                 "wifi_scan_fuzz", "wifi_sae_fuzz", "bowl_sig_fuzz"):
         checks(name + ": skipped (soft)" in run, "test/run: no soft skip for " + name)
 
     names = set()
@@ -64759,7 +64800,11 @@ def harness_security_hygiene(argv):
         ("tls_asn1_skip", ("bytes",)),
         ("tls_asn1_take", ("bytes",)),
         ("wifi_gtk_take", ("plain",)),
+        ("wifi_sae_frame_read", ("frame",)),
+        ("wifi_assoc_status_read", ("frame",)),
         ("radio_rsn_security", ("element",)),
+        ("radio_ies_security", ("elements",)),
+        ("radio_ies_element", ("elements",)),
         ("radio_bss_read", ("elements",)),
         ("bowl_signature_read", ("bytes",)),
         ("net_arp_claims", ("packet",)),
@@ -69561,6 +69606,9 @@ typedef struct
 #define NL80211_KEYTYPE_PAIRWISE 1
 #define WIFI_EAPOL_HDR 99
 #define PACKET_HOST 0
+#ifndef STRICT_TIGHT
+#define STRICT_TIGHT 2
+#endif
 
 static const p8 *fz_at;
 static positive fz_left;
@@ -69718,6 +69766,44 @@ static bipolar nl80211_authorize(nl80211 *session, p32 index, p8 *mac)
         fz_authorized = true;
         return 0;
 }
+
+/* The group management keys the access point made, under their key ids, and
+   the ones the station put in: one goes in only on a link that asked for
+   protection, only as the access point made it, and never twice the same. */
+static p8 fz_igtk_made[64][17];
+static positive fz_igtk_made_count;
+static p8 fz_sta_igtk[2][16];
+static bool fz_sta_igtk_set[2];
+static int fz_igtk_installs;
+static bipolar fz_igtk_error;
+static bool fz_protected;
+static void fz_igtk_add(p8 idx, const p8 *key)
+{
+        if (fz_igtk_made_count < 64)
+        {
+                fz_igtk_made[fz_igtk_made_count][0] = idx;
+                memcpy(fz_igtk_made[fz_igtk_made_count++] + 1, key, 16);
+        }
+}
+static bipolar nl80211_new_igtk(nl80211 *session, p32 index, p8 idx, p8 *key, p8 *seq)
+{
+        bool made = false;
+
+        (void)session, (void)index, (void)seq;
+        if (!fz_protected || (idx != 4 && idx != 5))
+                abort();
+        for (positive at = 0; at < fz_igtk_made_count; at++)
+                made |= fz_igtk_made[at][0] == idx && !memcmp(fz_igtk_made[at] + 1, key, 16);
+        if (!made || (fz_sta_igtk_set[idx - 4] && !memcmp(key, fz_sta_igtk[idx - 4], 16)))
+                abort();
+        if (fz_igtk_error)
+                return fz_igtk_error;
+        fz_igtk_installs++;
+        fz_installs++;
+        memcpy(fz_sta_igtk[idx - 4], key, 16);
+        fz_sta_igtk_set[idx - 4] = true;
+        return 0;
+}
 """
 
 WIFI_EAPOL_FUZZ_DRIVER = r"""
@@ -69751,6 +69837,31 @@ static wifi_link fz_link;
 static p8 fz_pmk[32], fz_anonce[32], fz_ptk[64], fz_pending[64], fz_rsc[8];
 static p64 fz_replay, fz_verified;
 static bool fz_pending_set, fz_ptk_set, fz_clean;
+/* Mode 0 is WPA2-PSK: key descriptor version 2 and HMAC-SHA1. Mode 1 is
+   PSK-SHA256 with management frame protection: version 3, AES-CMAC, and an
+   IGTK in message 3 and group message 1. Mode 2 is SAE: version 0, the same
+   CMAC and IGTK, and an RSN extension element when the access point says
+   hash-to-element. Message 3 carries the access point's own RSN element (and
+   extension element), which the station saw when it chose it -- or saw
+   nothing, joining by name, and holds it to nothing. */
+static int fz_mode;
+static p8 fz_ap_rsn[64], fz_ap_rsnx[3], fz_ap_igtk[16], fz_ap_igtk_id;
+static positive fz_ap_rsn_length, fz_ap_rsnx_length;
+static bool fz_seen, fz_extension;
+static p16 fz_version(void)
+{
+        return fz_mode == 0 ? 2 : fz_mode == 1 ? 3 : 0;
+}
+static void fz_mic(const p8 *kck, p8 *frame, positive n, p8 *out)
+{
+        p8 hash[20];
+
+        if (fz_mode)
+                crypto_aes_cmac((p8 *)kck, frame, n, hash);
+        else
+                crypto_hmac(DIGEST_SHA1, 20, (p8 *)kck, 16, frame, n, hash);
+        memcpy(out, hash, 16);
+}
 /* A message 1 in the access point's name with another ANonce, answered as
    wpa_supplicant answers it: the handshake in progress cannot finish, and
    only a message 1 of the access point's own starts one that can. What is
@@ -69774,7 +69885,7 @@ static positive fz_frame(p8 *f, p16 info, const p8 *nonce, const p8 *data, posit
         f[1] = 3;
         network_store_16(f + 2, (p16)(95 + n));
         f[4] = 2;
-        network_store_16(f + 5, info);
+        network_store_16(f + 5, (p16)((info & ~7) | fz_version()));
         network_store_16(f + 7, 16);
         network_store_64(f + 9, fz_replay);
         if (nonce)
@@ -69784,12 +69895,7 @@ static positive fz_frame(p8 *f, p16 info, const p8 *nonce, const p8 *data, posit
         if (n)
                 memcpy(f + 99, data, n);
         if (kck)
-        {
-                p8 hash[20];
-
-                crypto_hmac(DIGEST_SHA1, 20, (p8 *)kck, 16, f, 99 + n, hash);
-                memcpy(f + 81, hash, 16);
-        }
+                fz_mic(kck, f, 99 + n, f + 81);
         return 99 + n;
 }
 
@@ -69801,14 +69907,19 @@ static bool fz_held_moved(const wifi_link *before)
                before->replay_set != fz_link.replay_set ||
                before->installed != fz_link.installed ||
                before->gtk_installed != fz_link.gtk_installed ||
-               memcmp(before->ptk, fz_link.ptk, 64) || memcmp(before->gtk, fz_link.gtk, 64);
+               before->igtk_installed != fz_link.igtk_installed ||
+               memcmp(before->ptk, fz_link.ptk, 64) || memcmp(before->gtk, fz_link.gtk, 64) ||
+               memcmp(before->igtk, fz_link.igtk, 32);
 }
 
 /* After any frame: one the station did not answer moved nothing it holds and
-   put no key in, and the replay counter moved only with an answer. */
+   put no key in, and the replay counter moved only with an answer. A frame
+   whose keys the driver refused one of may leave the others in, unanswered,
+   for the access point to send again under the same counter. */
 static void fz_after(const wifi_link *before, int installs)
 {
-        if ((!fz_sends && (installs != fz_installs || fz_held_moved(before))) ||
+        if ((!fz_sends && !fz_key_error && !fz_igtk_error &&
+             (installs != fz_installs || fz_held_moved(before))) ||
             (memcmp(before->replay, fz_link.replay, 8) && fz_sends != 1))
                 abort();
 }
@@ -69860,35 +69971,56 @@ static bipolar fz_receive(const p8 *frame, positive length, const socket_address
    it answers and a MIC under kck. */
 static void fz_answer(p16 info, const p8 *kck)
 {
-        p8 copy[512], hash[20];
+        p8 copy[512], hash[16];
 
+        info = (p16)((info & ~7) | fz_version());
         if (fz_sends != 1 || fz_sent_length < 99 || network_load_16(fz_sent + 5) != info ||
             network_load_64(fz_sent + 9) != fz_replay)
                 abort();
         memcpy(copy, fz_sent, fz_sent_length);
         memset(copy + 81, 0, 16);
-        crypto_hmac(DIGEST_SHA1, 20, (p8 *)kck, 16, copy, fz_sent_length, hash);
+        fz_mic(kck, copy, fz_sent_length, hash);
         if (memcmp(hash, fz_sent + 81, 16))
                 abort();
 }
 
-/* The GTK KDE after the RSN element for message 3, alone for group message
-   1, padded and wrapped under the KEK. */
+/* The IGTK KDE: 00-0F-AC:9, the key id, the packet number, the key. */
+static positive fz_igtk_kde(p8 *plain, p8 idx, const p8 *key)
+{
+        positive n = 0;
+
+        plain[n++] = 0xdd, plain[n++] = 28;
+        plain[n++] = 0, plain[n++] = 0x0f, plain[n++] = 0xac, plain[n++] = 9;
+        plain[n++] = idx, plain[n++] = 0;
+        memcpy(plain + n, fz_rsc, 6);
+        n += 6;
+        memcpy(plain + n, key, 16);
+        return n + 16;
+}
+
+/* The access point's RSN element and, when it has one, its extension
+   element, then the GTK KDE for message 3; the GTK KDE alone for group
+   message 1; an IGTK KDE after it where the network protects its management
+   frames; padded and wrapped under the KEK. */
 static positive fz_key_data(p8 *out, const p8 *kek, bool rsn)
 {
-        p8 plain[64];
+        p8 plain[160];
         positive n = 0;
 
         if (rsn)
         {
-                memcpy(plain, wifi_rsn_ie, sizeof wifi_rsn_ie);
-                n = sizeof wifi_rsn_ie;
+                memcpy(plain, fz_ap_rsn, fz_ap_rsn_length);
+                n = fz_ap_rsn_length;
+                memcpy(plain + n, fz_ap_rsnx, fz_ap_rsnx_length);
+                n += fz_ap_rsnx_length;
         }
         plain[n++] = 0xdd, plain[n++] = 22;
         plain[n++] = 0, plain[n++] = 0x0f, plain[n++] = 0xac, plain[n++] = 1;
         plain[n++] = fz_ap_gtk_idx, plain[n++] = 0;
         memcpy(plain + n, fz_ap_gtk, 16);
         n += 16;
+        if (fz_mode)
+                n += fz_igtk_kde(plain + n, fz_ap_igtk_id, fz_ap_igtk);
         if (n % 8)
         {
                 plain[n++] = 0xdd;
@@ -69906,15 +70038,83 @@ static void fz_new_gtk(void)
         fz_ap_gtk[1] ^= 0x5a;
         fz_ap_gtk_idx = (fz_ap_gtk_idx + 1) & 3;
         fz_made_add(fz_ap_gtk_idx, fz_ap_gtk);
+        if (!fz_mode)
+                return;
+        fz_take(fz_ap_igtk, 16);
+        fz_ap_igtk[0] ^= fz_gtk_draws;
+        fz_ap_igtk_id = fz_ap_igtk_id == 4 ? 5 : 4;
+        fz_igtk_add(fz_ap_igtk_id, fz_ap_igtk);
+}
+
+/* Whether the station holds the access point's current IGTK, which it must
+   after a handshake on a protected link and need not on another. */
+static bool fz_igtk_held(void)
+{
+        return !fz_mode || (fz_sta_igtk_set[fz_ap_igtk_id - 4] &&
+                            !memcmp(fz_sta_igtk[fz_ap_igtk_id - 4], fz_ap_igtk, 16));
 }
 
 int LLVMFuzzerTestOneInput(const p8 *data, positive size)
 {
+        p8 how;
+
         fz_at = data, fz_left = size;
         memset(&fz_link, 0, sizeof fz_link);
         fz_link.eapol = 3, fz_link.session.handle = 4, fz_link.index = 7;
         memcpy(fz_link.sta, fz_sta, 6);
         memcpy(fz_link.bssid, fz_ap, 6);
+        //      The network: its kind, then whether the access point says
+        //      hash-to-element and whether the station saw its elements
+        //      (bit 0 not set: no scan, a join by name) and in which frame.
+        how = fz_byte();
+        fz_mode = how % 3;
+        fz_link.akm = fz_mode == 2 ? 8 : fz_mode == 1 ? 6 : 2;
+        fz_link.version = wifi_key_version(fz_link.akm);
+        fz_link.pmf = fz_mode ? WIFI_PMF_CAPABLE | WIFI_PMF_REQUIRED : 0;
+        fz_protected = fz_link.pmf != 0;
+        fz_link.rsn_length = (p8)wifi_rsn_build(fz_link.rsn, fz_link.akm, fz_link.pmf, 0);
+        fz_ap_rsn_length = wifi_rsn_build(fz_ap_rsn, fz_link.akm,
+                                          fz_mode == 1 ? WIFI_PMF_CAPABLE : fz_link.pmf, 0);
+        fz_ap_rsnx_length = 0;
+        fz_extension = fz_mode == 2 && (how & 4);
+        if (fz_extension)
+        {
+                static const p8 rsnx[3] = {244, 1, 0x20};
+
+                memcpy(fz_ap_rsnx, rsnx, 3);
+                fz_ap_rsnx_length = 3;
+                memcpy(fz_link.rsn + fz_link.rsn_length, rsnx, 3);
+                fz_link.rsn_length += 3;
+        }
+        fz_seen = !(how & 16);
+        if (fz_seen)
+        {
+                positive which = (how >> 5) % 3;
+
+                for (positive frame = 0; frame < 2; frame++)
+                        if (which == 2 || which == frame)
+                        {
+                                memcpy(fz_link.seen.rsn[frame], fz_ap_rsn, fz_ap_rsn_length);
+                                fz_link.seen.rsn_length[frame] = (p16)fz_ap_rsn_length;
+                                memcpy(fz_link.seen.rsnx[frame], fz_ap_rsnx, fz_ap_rsnx_length);
+                                fz_link.seen.rsnx_length[frame] = (p16)fz_ap_rsnx_length;
+                        }
+                //      A forged frame in the other's place, which took the
+                //      protection away: what the access point really sends
+                //      still matches the one that is its own.
+                if (which < 2)
+                {
+                        positive other = 1 - which;
+
+                        fz_link.seen.rsn_length[other] = (p16)wifi_rsn_build(
+                            fz_link.seen.rsn[other], fz_link.akm == 8 ? 2 : fz_link.akm, 0, 0);
+                }
+        }
+        fz_igtk_made_count = 0;
+        fz_igtk_installs = 0;
+        fz_igtk_error = 0;
+        memset(fz_sta_igtk_set, 0, sizeof fz_sta_igtk_set);
+        fz_ap_igtk_id = 5;
         fz_take(fz_pmk, 32);
         memcpy(fz_link.pmk, fz_pmk, 32);
         fz_replay = fz_byte();
@@ -69937,7 +70137,7 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
 
         for (int ops = 0; fz_left && ops < 24; ops++)
         {
-                p8 op = fz_byte() % 11;
+                p8 op = fz_byte() % 12;
                 p8 frame[512], wrapped[CRYPTO_WRAP_MOST + 8];
                 positive n;
                 bipolar step;
@@ -69949,11 +70149,11 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                         fz_replay++;
                         step = fz_deliver(frame, fz_frame(frame, 0x008a, fz_anonce, 0, 0, 0));
                         if (step != 0 || fz_sends != 1 ||
-                            network_load_16(fz_sent + 97) != sizeof wifi_rsn_ie ||
-                            memcmp(fz_sent + 99, wifi_rsn_ie, sizeof wifi_rsn_ie))
+                            network_load_16(fz_sent + 97) != fz_link.rsn_length ||
+                            memcmp(fz_sent + 99, fz_link.rsn, fz_link.rsn_length))
                                 abort();
                         wifi_ptk(fz_pmk, (p8 *)fz_ap, (p8 *)fz_sta, fz_anonce, fz_sent + 17,
-                                 fz_pending);
+                                 fz_pending, fz_link.akm);
                         fz_answer(0x010a, fz_pending);
                         fz_pending_set = true;
                         fz_pending_bent = false;
@@ -69970,7 +70170,7 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                         step = fz_deliver(frame, n);
                         if (fz_clean && !fz_pending_bent &&
                             (step != 1 || !fz_authorized ||
-                             memcmp(fz_sta_tk, fz_pending + 32, 16)))
+                             memcmp(fz_sta_tk, fz_pending + 32, 16) || !fz_igtk_held()))
                                 abort();
                         if (step == 1)
                         {
@@ -69991,7 +70191,7 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                         n = fz_frame(frame, 0x1382, 0, wrapped, n, fz_ptk);
                         fz_g1_length = n;
                         step = fz_deliver(frame, n);
-                        if (fz_clean && step != 2)
+                        if (fz_clean && (step != 2 || !fz_igtk_held()))
                                 abort();
                         if (step == 2)
                         {
@@ -70012,12 +70212,7 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                                 network_store_64(fz_m3 + 9, fz_replay);
                                 memcpy(frame, fz_m3, n);
                                 memset(frame + 81, 0, 16);
-                                {
-                                        p8 hash[20];
-
-                                        crypto_hmac(DIGEST_SHA1, 20, fz_ptk, 16, frame, n, hash);
-                                        memcpy(frame + 81, hash, 16);
-                                }
+                                fz_mic(fz_ptk, frame, n, frame + 81);
                         }
                         else
                         {
@@ -70145,15 +70340,22 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                         bool unwraps = mode == 0;
                         bool clean = fz_clean && (group || !fz_pending_bent);
                         bool want = false, cut = false;
+                        bool rsn_first = false, rsn_good = false, rsnx_first = false, rsnx_good = false;
                         p8 plain[CRYPTO_WRAP_MOST], kek[16], want_key[16], want_idx = 0;
+                        p8 igtk_key[16], igtk_id = 0;
 
                         //      The key data, element by element: what the
                         //      station must take is the first GTK KDE whose
-                        //      key id is in 0..3, before anything cut short.
+                        //      key id is in 0..3, before anything cut short;
+                        //      the first IGTK KDE whose key id is 4 or 5,
+                        //      on a link with protection; and message 3 is
+                        //      taken only when its first RSN element (and,
+                        //      with hash-to-element, its first extension
+                        //      element) is the access point's.
                         n = 0;
                         for (positive item = 0; item < items && !cut; item++)
                         {
-                                p8 kind = fz_byte() % 9;
+                                p8 kind = fz_byte() % 10;
 
                                 if (kind == 0 || kind == 1 || kind == 8)
                                 {
@@ -70185,16 +70387,36 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                                 }
                                 else if (kind == 2)     /* the IGTK KDE */
                                 {
-                                        plain[n++] = 0xdd, plain[n++] = 28;
-                                        plain[n++] = 0x00, plain[n++] = 0x0f;
-                                        plain[n++] = 0xac, plain[n++] = 0x09;
-                                        fz_take(plain + n, 24);
-                                        n += 24;
+                                        p8 pick = fz_byte();
+                                        p8 id = pick % 3 == 0 ? 4 : pick % 3 == 1 ? 5 : fz_byte();
+                                        p8 key[16];
+
+                                        fz_take(key, 16);
+                                        n += fz_igtk_kde(plain + n, id, key);
+                                        if ((id == 4 || id == 5) && !igtk_id)
+                                        {
+                                                igtk_id = id;
+                                                memcpy(igtk_key, key, 16);
+                                        }
                                 }
-                                else if (kind == 3)     /* the RSN element */
+                                else if (kind == 3)     /* the RSN element, the access point's or one bent */
                                 {
-                                        memcpy(plain + n, wifi_rsn_ie, sizeof wifi_rsn_ie);
-                                        n += sizeof wifi_rsn_ie;
+                                        p8 bend = fz_byte();
+
+                                        memcpy(plain + n, fz_ap_rsn, fz_ap_rsn_length);
+                                        if (bend & 1)
+                                                plain[n + 2 + (bend >> 1) % (fz_ap_rsn_length - 2)] ^= 0x10;
+                                        if (!rsn_first)
+                                                rsn_good = !(bend & 1);
+                                        rsn_first = true;
+                                        n += fz_ap_rsn_length;
+                                }
+                                else if (kind == 9 && fz_ap_rsnx_length)        /* the extension element */
+                                {
+                                        memcpy(plain + n, fz_ap_rsnx, fz_ap_rsnx_length);
+                                        rsnx_good |= !rsnx_first;
+                                        rsnx_first = true;
+                                        n += fz_ap_rsnx_length;
                                 }
                                 else if (kind == 4)     /* padding */
                                         plain[n++] = 0xdd, plain[n++] = 0;
@@ -70250,6 +70472,8 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                         }
 
                         fz_replay++;
+                        if (unwraps && igtk_id)
+                                fz_igtk_add(igtk_id, igtk_key);
                         if (group)
                         {
                                 if (unwraps && want)
@@ -70260,7 +70484,10 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                                 }
                                 n = fz_frame(frame, 0x1382, 0, wrapped, n, fz_ptk);
                                 step = fz_deliver(frame, n);
-                                if (clean && step != (unwraps && want ? 2 : 0))
+                                if (clean && (step != (unwraps && want ? 2 : 0) ||
+                                              (step == 2 && fz_mode && igtk_id &&
+                                               (!fz_sta_igtk_set[igtk_id - 4] ||
+                                                memcmp(fz_sta_igtk[igtk_id - 4], igtk_key, 16)))))
                                         abort();
                                 if (step == 2)
                                 {
@@ -70271,6 +70498,8 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                         }
                         else
                         {
+                                bool shown = !fz_seen || (rsn_good && (!fz_extension || rsnx_good));
+
                                 memcpy(fz_ap_tk, fz_pending + 32, 16);
                                 if (unwraps)
                                 {
@@ -70280,13 +70509,19 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                                 }
                                 n = fz_frame(frame, 0x13ca, fz_anonce, wrapped, n, fz_pending);
                                 step = fz_deliver(frame, n);
-                                if (clean && (step != (unwraps ? 1 : 0) ||
-                                              (unwraps && (!fz_authorized ||
-                                                           memcmp(fz_sta_tk, fz_pending + 32, 16) ||
-                                                           (want && (!fz_sta_gtk_set[want_idx] ||
-                                                                     memcmp(fz_sta_gtk[want_idx],
-                                                                            want_key, 16)))))))
+                                if (clean && (step != (!unwraps ? 0 : shown ? 1 : WIFI_REFUSE_ELEMENTS) ||
+                                              (unwraps && !shown && (fz_sends || fz_authorized != fz_ptk_set)) ||
+                                              (unwraps && shown &&
+                                               (!fz_authorized ||
+                                                memcmp(fz_sta_tk, fz_pending + 32, 16) ||
+                                                (want && (!fz_sta_gtk_set[want_idx] ||
+                                                          memcmp(fz_sta_gtk[want_idx], want_key, 16))) ||
+                                                (fz_mode && igtk_id &&
+                                                 (!fz_sta_igtk_set[igtk_id - 4] ||
+                                                  memcmp(fz_sta_igtk[igtk_id - 4], igtk_key, 16)))))))
                                         abort();
+                                if (unwraps && !shown && step == WIFI_REFUSE_ELEMENTS)
+                                        continue;
                                 if (step == 1)
                                 {
                                         fz_answer(0x030a, fz_pending);
@@ -70302,6 +70537,70 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                                                 fz_ap_gtk_idx = want_idx;
                                         }
                                 }
+                        }
+                        if (step > 0 && fz_mode && igtk_id)
+                        {
+                                memcpy(fz_ap_igtk, igtk_key, 16);
+                                fz_ap_igtk_id = igtk_id;
+                        }
+                }
+                else if (op == 11 && fz_pending_set)    /* message 3 naming less than the access point offered */
+                {
+                        //      The access point's own element with WPA3 taken
+                        //      away (bit 0) and its protection kept (bit 1)
+                        //      or not, and its extension element left out
+                        //      (bit 2): a station that saw the access point
+                        //      offer more takes none of them, sends nothing
+                        //      and keys nothing.
+                        p8 plain[160];
+                        p8 how = fz_byte();
+                        p8 protection = fz_mode == 1 ? WIFI_PMF_CAPABLE : fz_link.pmf;
+                        positive k;
+                        bool shown;
+
+                        k = wifi_rsn_build(plain, fz_link.akm == 8 && (how & 1) ? 2 : fz_link.akm,
+                                           how & 2 ? protection : 0, 0);
+                        shown = !fz_seen;
+                        for (positive frame_at = 0; frame_at < 2; frame_at++)
+                                shown |= fz_link.seen.rsn_length[frame_at] == k &&
+                                         !memcmp(fz_link.seen.rsn[frame_at], plain, k);
+                        if (!(how & 4))
+                        {
+                                memcpy(plain + k, fz_ap_rsnx, fz_ap_rsnx_length);
+                                k += fz_ap_rsnx_length;
+                        }
+                        else
+                                shown &= !fz_seen || !fz_extension;
+                        plain[k++] = 0xdd, plain[k++] = 22;
+                        plain[k++] = 0, plain[k++] = 0x0f, plain[k++] = 0xac, plain[k++] = 1;
+                        plain[k++] = fz_ap_gtk_idx, plain[k++] = 0;
+                        memcpy(plain + k, fz_ap_gtk, 16);
+                        k += 16;
+                        if (k % 8)
+                        {
+                                plain[k++] = 0xdd;
+                                while (k % 8)
+                                        plain[k++] = 0;
+                        }
+                        fz_wrap(fz_pending + 16, plain, k, wrapped);
+                        memcpy(fz_ap_tk, fz_pending + 32, 16);
+                        fz_made_add(4, fz_ap_tk);
+                        fz_made_add(fz_ap_gtk_idx, fz_ap_gtk);
+                        fz_replay++;
+                        n = fz_frame(frame, 0x13ca, fz_anonce, wrapped, k + 8, fz_pending);
+                        step = fz_deliver(frame, n);
+                        if (fz_clean && !fz_pending_bent &&
+                            (step != (shown ? 1 : WIFI_REFUSE_ELEMENTS) || (!shown && fz_sends)))
+                                abort();
+                        if (step == 1)
+                        {
+                                fz_answer(0x030a, fz_pending);
+                                memcpy(fz_ptk, fz_pending, 64);
+                                memcpy(fz_m3, frame, n);
+                                fz_m3_length = n;
+                                fz_verified = fz_replay;
+                                fz_ptk_set = true;
+                                fz_pending_set = false;
                         }
                 }
                 else if (op == 10)      /* a message 1 framed every way */
@@ -70340,7 +70639,7 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                         {
                                 memcpy(fz_anonce, nonce, 32);
                                 wifi_ptk(fz_pmk, (p8 *)fz_ap, (p8 *)fz_sta, fz_anonce, fz_sent + 17,
-                                         fz_pending);
+                                         fz_pending, fz_link.akm);
                                 fz_answer(0x010a, fz_pending);
                                 fz_pending_set = true;
                                 fz_pending_bent = false;
@@ -70487,6 +70786,142 @@ int main(void)
                             "reply retry does not reinstall the key",
                             idx, zero, pairwise);
         }
+
+        /* The group management key of a link with protection (PSK-SHA256,
+           mode 1, and SAE, mode 2), in both of its slots, zero bytes a key
+           like any other, held to the same rules as the group key. */
+        for (int mode = 1; mode < 3; mode++)
+        for (int idx = 4; idx < 6; idx++)
+        for (int zero = 0; zero < 2; zero++)
+        for (int pairwise = 0; pairwise < 2; pairwise++) {
+                p8 kind[1] = {(p8)mode};
+                int igtk_installs;
+
+                (void)LLVMFuzzerTestOneInput(kind, 1);
+                memset(fz_ptk, 0x42, sizeof fz_ptk);
+                memset(fz_anonce, 0x24, sizeof fz_anonce);
+                memcpy(fz_link.anonce, fz_anonce, 32);
+                memcpy(fz_link.pending, fz_ptk, 64);
+                memcpy(fz_link.ptk, fz_ptk, 64);
+                fz_link.pending_set = pairwise;
+                fz_link.installed = !pairwise;
+                fz_made_add(4, fz_ptk + 32);
+                fz_made_add(fz_ap_gtk_idx, fz_ap_gtk);
+                fz_ap_igtk_id = (p8)idx;
+                memset(fz_ap_igtk, zero ? 0 : 0x6b, sizeof fz_ap_igtk);
+                fz_igtk_add(fz_ap_igtk_id, fz_ap_igtk);
+                state_check(state_gtk(pairwise) == (pairwise ? 1 : 2) &&
+                            fz_sta_igtk_set[idx - 4] && !memcmp(fz_sta_igtk[idx - 4], fz_ap_igtk, 16) &&
+                            (fz_link.igtk_installed & (1u << (idx - 4))),
+                            "first IGTK is installed", idx, zero, pairwise);
+                igtk_installs = fz_igtk_installs;
+                state_check(state_gtk(false) == 2 && fz_igtk_installs == igtk_installs,
+                            "a group message with the same IGTK never reinstalls it", idx, zero, pairwise);
+                fz_ap_igtk[3] ^= 1;
+                fz_igtk_add(fz_ap_igtk_id, fz_ap_igtk);
+                state_check(state_gtk(false) == 2 && fz_igtk_installs == igtk_installs + 1 &&
+                            !memcmp(fz_sta_igtk[idx - 4], fz_ap_igtk, 16),
+                            "a changed IGTK replaces the installed one", idx, zero, pairwise);
+
+                /* Roaming drops it: the same bytes from the next access point
+                   go into the new association. */
+                wifi_roam(&fz_link, (p8 *)fz_ap);
+                memcpy(fz_link.seen.rsn[0], fz_ap_rsn, fz_ap_rsn_length);
+                fz_link.seen.rsn_length[0] = (p16)fz_ap_rsn_length;
+                memset(fz_sta_igtk_set, 0, sizeof fz_sta_igtk_set);
+                memset(fz_sta_gtk_set, 0, sizeof fz_sta_gtk_set);
+                memcpy(fz_link.ptk, fz_ptk, 64);
+                fz_link.installed = true;
+                igtk_installs = fz_igtk_installs;
+                state_check(!fz_link.igtk_installed && state_gtk(false) == 2 &&
+                            fz_igtk_installs == igtk_installs + 1 && fz_sta_igtk_set[idx - 4],
+                            "roaming clears the installed IGTK", idx, zero, pairwise);
+
+                /* A refusal by the driver fails the group handshake: nothing
+                   answered, the replay counter not consumed, and the same
+                   counter again installs it. */
+                wifi_roam(&fz_link, (p8 *)fz_ap);
+                memset(fz_sta_igtk_set, 0, sizeof fz_sta_igtk_set);
+                memset(fz_sta_gtk_set, 0, sizeof fz_sta_gtk_set);
+                memcpy(fz_link.ptk, fz_ptk, 64);
+                fz_link.installed = true;
+                fz_igtk_error = -5;
+                state_check(state_gtk(false) == -5 && !fz_sta_igtk_set[idx - 4] &&
+                            !fz_link.igtk_installed && !fz_link.replay_set && fz_sends == 0,
+                            "an IGTK the driver refuses fails the group handshake", idx, zero, pairwise);
+                fz_igtk_error = 0;
+                fz_replay--;
+                state_check(state_gtk(false) == 2 && fz_sta_igtk_set[idx - 4] && fz_link.replay_set,
+                            "and the same counter again puts it in", idx, zero, pairwise);
+
+                /* A link that asked for no protection takes none, whatever
+                   the key data holds. */
+                wifi_roam(&fz_link, (p8 *)fz_ap);
+                memset(fz_sta_igtk_set, 0, sizeof fz_sta_igtk_set);
+                memset(fz_sta_gtk_set, 0, sizeof fz_sta_gtk_set);
+                memcpy(fz_link.ptk, fz_ptk, 64);
+                fz_link.installed = true;
+                fz_link.pmf = 0;
+                fz_protected = false;
+                igtk_installs = fz_igtk_installs;
+                state_check(state_gtk(false) == 2 && fz_igtk_installs == igtk_installs &&
+                            !fz_link.igtk_installed,
+                            "a link without protection never takes an IGTK", idx, zero, pairwise);
+        }
+
+        /* Message 3 is held to the RSN element the access point showed. */
+        for (int mode = 0; mode < 3; mode++) {
+                p8 kind[1] = {(p8)mode};
+                int installs;
+
+                (void)LLVMFuzzerTestOneInput(kind, 1);
+                memset(fz_ptk, 0x42, sizeof fz_ptk);
+                memset(fz_anonce, 0x24, sizeof fz_anonce);
+                memcpy(fz_link.anonce, fz_anonce, 32);
+                memcpy(fz_link.pending, fz_ptk, 64);
+                fz_link.pending_set = true;
+                fz_made_add(4, fz_ptk + 32);
+                fz_made_add(fz_ap_gtk_idx, fz_ap_gtk);
+                fz_link.seen.rsn[0][5] ^= 1;
+                fz_link.seen.rsn[1][5] ^= 1;
+                installs = fz_installs;
+                state_check(state_gtk(true) == WIFI_REFUSE_ELEMENTS && fz_sends == 0 &&
+                            fz_installs == installs && !fz_authorized && fz_link.pending_set,
+                            "a message 3 that shows another RSN element is neither answered nor keyed",
+                            mode, 0, 1);
+                fz_link.seen.rsn[0][5] ^= 1;
+                fz_link.seen.rsn[1][5] ^= 1;
+                fz_replay--;
+                state_check(state_gtk(true) == 1 && fz_authorized,
+                            "and the access point's own, at the same counter, is", mode, 0, 1);
+                memset(&fz_link.seen, 0, sizeof fz_link.seen);
+        }
+
+        /* And to the extension element: hash-to-element's, left out of
+           message 3 where the beacon had it, is a downgrade. */
+        {
+                p8 kind[1] = {14};      /* SAE (14 % 3), hash-to-element (4), seen */
+                int installs;
+
+                (void)LLVMFuzzerTestOneInput(kind, 1);
+                memset(fz_ptk, 0x42, sizeof fz_ptk);
+                memset(fz_anonce, 0x24, sizeof fz_anonce);
+                memcpy(fz_link.anonce, fz_anonce, 32);
+                memcpy(fz_link.pending, fz_ptk, 64);
+                fz_link.pending_set = true;
+                fz_made_add(4, fz_ptk + 32);
+                fz_made_add(fz_ap_gtk_idx, fz_ap_gtk);
+                fz_ap_rsnx_length = 0;
+                installs = fz_installs;
+                state_check(state_gtk(true) == WIFI_REFUSE_ELEMENTS && fz_sends == 0 &&
+                            fz_installs == installs && fz_link.seen.rsnx_length[0] == 3,
+                            "a message 3 without the extension element the beacon had is refused",
+                            2, 0, 1);
+                fz_ap_rsnx_length = 3;
+                fz_replay--;
+                state_check(state_gtk(true) == 1 && fz_authorized,
+                            "and with it, taken", 2, 0, 1);
+        }
         printf("wifi key state %d/%d\n", state_checks - state_failures, state_checks);
         return state_failures != 0;
 }
@@ -70534,7 +70969,9 @@ def wifi_eapol_fuzz_seeds():
         return op(0, draw(32), draw(32)) + op(1)
 
     seeds = {"empty.bin": b""}
-    start = draw(32) + b"\x05"
+    # The first byte is the network (wifi_eapol_fuzz's mode and how the
+    # station saw the access point); 0 is WPA2-PSK seen in its latest frame.
+    start = b"\x00" + draw(32) + b"\x05"
     seeds["handshake.bin"] = start + handshake()
     seeds["group_rekey.bin"] = start + handshake() + op(2, draw(16)) + op(2, draw(16))
     seeds["ptk_rekey.bin"] = start + handshake() + op(0, draw(32), draw(32)) + op(1)
@@ -70591,6 +71028,36 @@ def wifi_eapol_fuzz_seeds():
                             op(10, b"\x1c\x00\x00", draw(32)) +
                             op(10, b"\x24\x04\x00", draw(32), draw(4), b"\x00\x04") +
                             op(10, b"\x00\x00\x00", draw(32)) + op(1))
+    # PSK-SHA256 with protection (the network byte 1 mod 3) and SAE (2 mod
+    # 3): an IGTK in message 3 and in every group message, the CMAC, the
+    # elements message 3 is held to -- seen in the latest frame (bits 5 and 6
+    # 0), the beacon (1), both (2), a forged frame beside the real one, or
+    # not at all (bit 4) -- and an extension element for hash-to-element
+    # (bit 2).
+    for name, network in (("pmf", 0x01), ("pmf_beacon", 0x22), ("pmf_unseen", 0x10),
+                          ("sae", 0x02), ("sae_h2e", 0x0e), ("sae_both", 0x44),
+                          ("sae_unseen", 0x14)):
+        begin = bytes((network,)) + draw(32) + b"\x05" + draw(32)
+
+        def group():
+            return op(2, draw(16), draw(16))
+
+        seeds[name + "_handshake.bin"] = begin + handshake() + group() + group()
+        seeds[name + "_rekeys.bin"] = (begin + handshake() + group() + op(0, draw(32), draw(32)) +
+                                       op(1) + op(3) + op(4) + group() + op(4))
+        seeds[name + "_elements.bin"] = (begin + op(0, draw(32), draw(32)) + op(11, b"\x00") +
+                                         op(11, b"\x05") + op(11, b"\x06") + op(11, b"\x07") +
+                                         op(11, b"\x02") + group())
+        seeds[name + "_no_extension.bin"] = (begin + op(0, draw(32), draw(32)) +
+                                             op(9, b"\x00", b"\x02", b"\x03\x00", gtk(0, 1)) +
+                                             op(1) + group())
+        seeds[name + "_key_data.bin"] = (begin + op(0, draw(32), draw(32)) +
+                                         op(9, b"\x00", b"\x04", b"\x03\x00", b"\x09",
+                                            b"\x02\x00" + draw(16), gtk(0, 1)) +
+                                         op(9, b"\x01", b"\x03", b"\x02\x01" + draw(16), gtk(0, 2),
+                                            b"\x02\x02\x07" + draw(16)) +
+                                         op(0, draw(32), draw(32)) +
+                                         op(9, b"\x00", b"\x02", b"\x03\x05", gtk(0, 3)))
     return seeds
 
 
@@ -70628,6 +71095,782 @@ def harness_wifi_eapol_fuzz(argv):
         write_tally("wifi-eapol-fuzz", 0, 1)
         return 1
     return tls_fuzz_run("wifi eapol", wifi_eapol_fuzz_seeds(), source, 2048)
+
+
+#       wifi_sae_fuzz: what the lift of host.c's SAE exchange stands on --
+#       the netlink message readers net.c has, an entropy and a clock and a
+#       budget file the driver owns, and a count of the commits taken in.
+WIFI_SAE_FUZZ_SHIM = r"""
+#ifndef STRICT_TIGHT
+#define STRICT_TIGHT 2
+#endif
+#ifndef NLA_TYPE_MASK
+#define NLA_TYPE_MASK 0x3fff
+#endif
+#ifndef memory_load_unaligned
+#define memory_load_unaligned(type, at) \
+        ({ type loaded_; memcpy(&loaded_, (at), sizeof loaded_); loaded_; })
+#endif
+#define AT_FDCWD (-100)
+#define HOST_CLOCK_BOOTTIME 7
+#define NET_STATE_DIR "/run/moonwater"
+typedef struct
+{
+        b32 handle;
+        p16 family;
+        p32 mlme;
+        p32 scan;
+} nl80211;
+
+/* The input's bytes, and a fixed stream while the exchange's two sides are
+   made once for the whole run. */
+static const p8 *fz_at;
+static positive fz_left;
+static bool fz_fixed;
+static p64 fz_fixed_draws = 0x9e3779b97f4a7c15ull;
+static p8 fz_byte(void)
+{
+        if (!fz_left)
+                return 0;
+        fz_left--;
+        return *fz_at++;
+}
+static bipolar system_random_fill(address_any into, positive length, positive flags)
+{
+        p8 *bytes = into;
+
+        (void)flags;
+        for (positive at = 0; at < length; at++)
+        {
+                //      xorshift64 for the fixed stream: no period short
+                //      enough to hand two commits the same draws.
+                fz_fixed_draws ^= fz_fixed_draws << 13;
+                fz_fixed_draws ^= fz_fixed_draws >> 7;
+                fz_fixed_draws ^= fz_fixed_draws << 17;
+                bytes[at] = fz_fixed ? (p8)(fz_fixed_draws >> 24) : fz_byte();
+        }
+        return 0;
+}
+
+/* The budget's clock and file. */
+static p64 fz_now_ms;
+static p64 system_clock_ns(b32 clock)
+{
+        (void)clock;
+        return (fz_now_ms + 86400000ull) * 1000000ull;
+}
+static p8 fz_file[4096];
+static positive fz_file_size;
+static bool fz_file_there;
+static bipolar file_read_once_at(b32 directory, const void *path, address_any into, positive room)
+{
+        (void)directory, (void)path;
+        if (!fz_file_there)
+                return -2;
+        memcpy(into, fz_file, fz_file_size < room ? fz_file_size : room);
+        return (bipolar)(fz_file_size < room ? fz_file_size : room);
+}
+static void host_state_ready(void) {}
+static bipolar host_write_file(const void *path, const p8 *bytes, positive length, positive mode,
+                               bool sync)
+{
+        (void)path, (void)mode, (void)sync;
+        if (length > sizeof fz_file)
+                abort();
+        memcpy(fz_file, bytes, length);
+        fz_file_size = length;
+        fz_file_there = true;
+        return 0;
+}
+"""
+
+WIFI_SAE_FUZZ_DRIVER = r"""
+/* Every commit taken in goes through here: counted, and answered from what
+   the run worked out once for the commits it knows (the multiplications
+   are what is expensive, and checks.c holds them to the standard's
+   values), and worked out in full for any other. */
+static int fz_takes;
+#define FZ_KNOWN 4
+static p8 fz_known_scalar[FZ_KNOWN][32], fz_known_element[FZ_KNOWN][64];
+static wifi_sae fz_known_after[FZ_KNOWN];
+static positive fz_known_count;
+static bool fz_sae_take(wifi_sae *sae, const p8 *scalar, const p8 *element)
+{
+        fz_takes++;
+        for (positive at = 0; at < fz_known_count; at++)
+                if (!memcmp(scalar, fz_known_scalar[at], 32) && !memcmp(element, fz_known_element[at], 64))
+                {
+                        memcpy(sae, &fz_known_after[at], sizeof *sae);
+                        return true;
+                }
+        return wifi_sae_take(sae, scalar, element);
+}
+#define wifi_sae_take(sae, scalar, element) fz_sae_take(sae, scalar, element)
+"""
+
+WIFI_SAE_FUZZ_MODEL = r"""
+static const p8 fz_ap[6] = {2, 0, 0, 0, 1, 0}, fz_sta[6] = {2, 0, 0, 0, 2, 0};
+static const p8 fz_stranger[6] = {2, 0, 0, 0, 9, 0};
+#define FZ_FAMILY 0x1c
+#define FZ_INDEX 7
+#define FZ_PORT 0x5ae
+static wifi_sae fz_sta_sae, fz_ap_sae;
+static bool fz_ready;
+
+/* The two sides, made once: one password element, the station's commit and
+   the access point's, each taken in by the other, which must agree; and
+   commits of three others who know the element, which the station takes in
+   to a KCK the access point does not have. */
+static void fz_prepare(void)
+{
+        wifi_sae sta, ap;
+
+        if (fz_ready)
+                return;
+        fz_ready = true;
+        fz_fixed = true;
+        memset(&fz_sta_sae, 0, sizeof fz_sta_sae);
+        if (!wifi_sae_pwe((p8 *)"fuzz-password", 13, (p8 *)fz_sta, (p8 *)fz_ap, fz_sta_sae.pwe) ||
+            !wifi_sae_commit(&fz_sta_sae))
+                abort();
+        memcpy(&fz_ap_sae, &fz_sta_sae, sizeof fz_ap_sae);
+        if (!wifi_sae_commit(&fz_ap_sae))
+                abort();
+        memcpy(&sta, &fz_sta_sae, sizeof sta);
+        memcpy(&ap, &fz_ap_sae, sizeof ap);
+        if (!wifi_sae_commit_good(&sta, ap.scalar, ap.element) ||
+            !wifi_sae_commit_good(&ap, sta.scalar, sta.element) ||
+            !(wifi_sae_take)(&sta, ap.scalar, ap.element) || !(wifi_sae_take)(&ap, sta.scalar, sta.element) ||
+            memcmp(sta.kck, ap.kck, 32) || memcmp(sta.pmk, ap.pmk, 32) || memcmp(sta.pmkid, ap.pmkid, 16))
+        {
+                fprintf(stderr, "the two sides of the exchange do not agree\n");
+                abort();
+        }
+        memcpy(fz_known_scalar[0], ap.scalar, 32);
+        memcpy(fz_known_element[0], ap.element, 64);
+        memcpy(&fz_known_after[0], &sta, sizeof sta);
+        memcpy(&fz_ap_sae, &ap, sizeof ap);
+        fz_known_count = 1;
+        for (positive at = 1; at < FZ_KNOWN; at++)
+        {
+                wifi_sae other;
+
+                memcpy(&other, &fz_sta_sae, sizeof other);
+                if (!wifi_sae_commit(&other))
+                        abort();
+                memcpy(fz_known_scalar[at], other.scalar, 32);
+                memcpy(fz_known_element[at], other.element, 64);
+                memcpy(&fz_known_after[at], &fz_sta_sae, sizeof fz_sta_sae);
+                if (!(wifi_sae_take)(&fz_known_after[at], other.scalar, other.element))
+                        abort();
+                fz_known_count++;
+        }
+        fz_fixed = false;
+}
+
+/* One generic netlink message in a heap block exactly its size: the header,
+   the command, and the attributes given. */
+static p8 *fz_message(p16 type, p32 port, p8 command, p32 index, bool timed_out,
+                      const p8 *frame, positive frame_length, positive *whole)
+{
+        positive size = 16 + 4 + (index ? 8 : 0) + (timed_out ? 4 : 0) +
+                        (frame ? 4 + ((frame_length + 3) & ~(positive)3) : 0);
+        p8 *message = calloc(1, size);
+        p32 head[4] = {(p32)size, type, 1, port};
+        positive at = 20;
+
+        memcpy(message, head, 16);
+        message[16] = command;
+        message[17] = 1;
+        if (index)
+        {
+                p16 attribute[2] = {8, 3};
+
+                memcpy(message + at, attribute, 4);
+                memcpy(message + at + 4, &index, 4);
+                at += 8;
+        }
+        if (timed_out)
+        {
+                p16 attribute[2] = {4, 65};
+
+                memcpy(message + at, attribute, 4);
+                at += 4;
+        }
+        if (frame)
+        {
+                p16 attribute[2] = {(p16)(4 + frame_length), 51};
+
+                memcpy(message + at, attribute, 4);
+                memcpy(message + at + 4, frame, frame_length);
+        }
+        *whole = size;
+        return message;
+}
+
+/* An authentication frame of SAE from a sender. */
+static positive fz_auth(p8 *into, const p8 *from, p16 transaction, p16 status, const p8 *body,
+                        positive length)
+{
+        memset(into, 0, 30);
+        into[0] = 0xb0;
+        memcpy(into + 4, fz_sta, 6);
+        memcpy(into + 10, from, 6);
+        memcpy(into + 16, from, 6);
+        into[24] = 3;
+        into[26] = (p8)transaction, into[27] = (p8)(transaction >> 8);
+        into[28] = (p8)status, into[29] = (p8)(status >> 8);
+        memcpy(into + 30, body, length);
+        return 30 + length;
+}
+
+/* What the exchange is expected to have done, kept beside it. */
+typedef struct
+{
+        bool done;
+        bipolar result;
+        bool token_sent;
+        bool taken;
+        positive taken_which;
+        positive frames;
+        p8 body[200];
+        positive body_length;
+} fz_want;
+
+static void fz_confirm_body(p8 *body, positive *length)
+{
+        p8 counter[2] = {1, 0};
+
+        body[0] = 2, body[1] = 0, body[2] = 0, body[3] = 0, body[4] = 1, body[5] = 0;
+        wifi_sae_confirm(fz_known_after[0].kck, counter, fz_sta_sae.scalar, fz_sta_sae.element,
+                         fz_ap_sae.scalar, fz_ap_sae.element, body + 6);
+        *length = 38;
+}
+
+/* One message through the exchange and the model, and the two held to each
+   other; the commits taken are counted, never more than one. */
+static void fz_step(wifi_sae_turn *turn, fz_want *want, p8 *message, positive whole)
+{
+        wifi_sae_turn before = *turn;
+        bool more;
+
+        turn->body_length = 0;
+        more = wifi_sae_news((netlink_header *)message, turn);
+        if (more != !turn->done || fz_takes > 1 || turn->frames > WIFI_SAE_FRAMES_MOST + 1)
+        {
+                fprintf(stderr, "the exchange went past its bounds\n");
+                abort();
+        }
+        if (before.done && memcmp(&before, turn, offsetof(wifi_sae_turn, body)))
+        {
+                fprintf(stderr, "an exchange that ended was moved\n");
+                abort();
+        }
+        (void)whole;
+        if (turn->done != want->done || (want->done && turn->result != want->result) ||
+            turn->token_sent != want->token_sent || turn->taken != want->taken ||
+            turn->frames != want->frames || turn->body_length != want->body_length ||
+            memcmp(turn->body, want->body, want->body_length))
+        {
+                fprintf(stderr, "the exchange: done %d/%d result %ld/%ld token %d/%d taken %d/%d "
+                                "frames %lu/%lu body %lu/%lu\n",
+                        turn->done, want->done, (long)turn->result, (long)want->result,
+                        turn->token_sent, want->token_sent, turn->taken, want->taken,
+                        (unsigned long)turn->frames, (unsigned long)want->frames,
+                        (unsigned long)turn->body_length, (unsigned long)want->body_length);
+                abort();
+        }
+        //      The PMK is the access point's only through its own commit,
+        //      and a result of 0 is that commit and its confirm.
+        if (turn->done && !turn->result &&
+            (want->taken_which != 0 || memcmp(turn->sae->pmk, fz_known_after[0].pmk, 32)))
+                abort();
+        free(message);
+}
+
+static void fz_end(fz_want *want, bipolar result)
+{
+        if (!want->done)
+                want->done = true, want->result = result;
+}
+
+/*
+        One exchange: its method (hunt or hash-to-element) and then messages
+        the input chooses, each a heap block of its own size -- the access
+        point's commit and confirm, forged ones and malformed ones, tokens
+        of every length in and out of their container, refusals, the link
+        sent away, the kernel's timeout and errors, frames from another
+        sender and of other commands, bytes of no shape, and floods of each.
+*/
+static void exchange_model(void)
+{
+        wifi_sae sae;
+        wifi_sae_turn turn;
+        fz_want want;
+        bool h2e = fz_byte() & 1;
+
+        memcpy(&sae, &fz_sta_sae, sizeof sae);
+        memset(&turn, 0, sizeof turn);
+        turn.sae = &sae;
+        turn.bssid = fz_ap;
+        turn.index = FZ_INDEX;
+        turn.family = FZ_FAMILY;
+        turn.port = FZ_PORT;
+        turn.h2e = h2e;
+        memset(&want, 0, sizeof want);
+        fz_takes = 0;
+        for (positive steps = 0; fz_left && steps < 200; steps++)
+        {
+                p8 op = fz_byte() % 16;
+                p8 frame[400], body[300];
+                positive length = 0, whole, repeat = op == 15 ? 1 + fz_byte() % 70 : 1;
+                p16 status = h2e ? WIFI_SAE_H2E_STATUS : 0;
+
+                if (op == 15)
+                        op = fz_byte() % 15;
+                for (positive again = 0; again < repeat; again++)
+                {
+                        p8 *message = 0;
+                        bool auth = false;
+
+                        want.body_length = 0;
+                        switch (op)
+                        {
+                        case 0: /* the access point's commit, or one of another who knows the element */
+                        case 1:
+                        {
+                                positive which = op == 0 ? 0 : 1 + fz_byte() % (FZ_KNOWN - 1);
+
+                                body[0] = WIFI_SAE_GROUP, body[1] = 0;
+                                memcpy(body + 2, fz_known_scalar[which], 32);
+                                memcpy(body + 34, fz_known_element[which], 64);
+                                length = fz_auth(frame, fz_ap, 1, status, body, 98);
+                                message = fz_message(FZ_FAMILY, 0, NL80211_CMD_AUTHENTICATE, FZ_INDEX,
+                                                     false, frame, length, &whole);
+                                auth = true;
+                                if (!want.done && ++want.frames > WIFI_SAE_FRAMES_MOST)
+                                        fz_end(&want, -111);
+                                else if (!want.done && !want.taken)
+                                {
+                                        want.taken = true;
+                                        want.taken_which = which;
+                                        if (which == 0)
+                                                fz_confirm_body(want.body, &want.body_length);
+                                        else
+                                        {
+                                                p8 counter[2] = {1, 0};
+
+                                                want.body[0] = 2, want.body[1] = 0, want.body[2] = 0;
+                                                want.body[3] = 0, want.body[4] = 1, want.body[5] = 0;
+                                                wifi_sae_confirm(fz_known_after[which].kck, counter,
+                                                                 fz_sta_sae.scalar, fz_sta_sae.element,
+                                                                 fz_known_scalar[which],
+                                                                 fz_known_element[which], want.body + 6);
+                                                want.body_length = 38;
+                                        }
+                                }
+                                break;
+                        }
+                        case 2: /* a commit to pass over: off the curve, out of range, our own, another group, the other method */
+                        {
+                                p8 how = fz_byte() % 7;
+                                p16 group = WIFI_SAE_GROUP;
+                                p16 sent = status;
+
+                                memcpy(body + 2, fz_known_scalar[0], 32);
+                                memcpy(body + 34, fz_known_element[0], 64);
+                                if (how == 0)
+                                        body[34 + 63] ^= 1;
+                                else if (how == 1)
+                                        memset(body + 2, 0, 32);
+                                else if (how == 2)
+                                        memset(body + 2, 0, 31), body[33] = 1;
+                                else if (how == 3)
+                                        memset(body + 2, 0xff, 32);
+                                else if (how == 4)
+                                {
+                                        memcpy(body + 2, fz_sta_sae.scalar, 32);
+                                        memcpy(body + 34, fz_sta_sae.element, 64);
+                                }
+                                else if (how == 5)
+                                        group = 20;
+                                else
+                                        sent = h2e ? 0 : WIFI_SAE_H2E_STATUS;
+                                body[0] = (p8)group, body[1] = 0;
+                                length = fz_auth(frame, fz_ap, 1, sent, body, 98);
+                                message = fz_message(FZ_FAMILY, 0, NL80211_CMD_AUTHENTICATE, FZ_INDEX,
+                                                     false, frame, length, &whole);
+                                if (!want.done && ++want.frames > WIFI_SAE_FRAMES_MOST)
+                                        fz_end(&want, -111);
+                                else if (!want.done && !want.taken && how == 6)
+                                        fz_end(&want, -111);
+                                break;
+                        }
+                        case 3: /* a token asked for: of every length, in its container or not */
+                        {
+                                positive token = fz_byte() % (WIFI_SAE_TOKEN_MOST + 2);
+                                bool boxed = fz_byte() & 1;
+                                positive at = 2;
+                                positive raw;
+                                bool reads;
+
+                                body[0] = WIFI_SAE_GROUP, body[1] = 0;
+                                if (boxed)
+                                {
+                                        body[at++] = 255;
+                                        body[at++] = (p8)(1 + token);
+                                        body[at++] = WIFI_SAE_TOKEN_EXTENSION;
+                                }
+                                for (positive one = 0; one < token; one++)
+                                        body[at++] = fz_byte();
+                                //      A bare token never begins like a container.
+                                if (!boxed && token)
+                                        body[2] &= 0x7f;
+                                raw = at - 2;
+                                length = fz_auth(frame, fz_ap, 1, WIFI_SAE_TOKEN_STATUS, body, at);
+                                message = fz_message(FZ_FAMILY, 0, NL80211_CMD_AUTHENTICATE, FZ_INDEX,
+                                                     false, frame, length, &whole);
+                                //      Read only as the method has it: the
+                                //      container's contents, or the rest of the
+                                //      frame, of one byte to the most.
+                                reads = h2e ? boxed && token && token <= WIFI_SAE_TOKEN_MOST
+                                            : raw && raw <= WIFI_SAE_TOKEN_MOST;
+                                if (!want.done && ++want.frames > WIFI_SAE_FRAMES_MOST)
+                                        fz_end(&want, -111);
+                                else if (!want.done && reads)
+                                {
+                                        if (want.token_sent || want.taken)
+                                                fz_end(&want, -111);
+                                        else
+                                        {
+                                                want.token_sent = true;
+                                                want.body_length = wifi_sae_commit_body(
+                                                    &fz_sta_sae, body + (h2e ? 5 : 2), h2e ? token : raw,
+                                                    want.body, h2e);
+                                        }
+                                }
+                                break;
+                        }
+                        case 4: /* the access point's confirm, or one a bit off */
+                        case 5:
+                        {
+                                p8 counter[2] = {fz_byte(), fz_byte()};
+
+                                body[0] = counter[0], body[1] = counter[1];
+                                wifi_sae_confirm(fz_ap_sae.kck, counter, fz_ap_sae.scalar, fz_ap_sae.element,
+                                                 fz_sta_sae.scalar, fz_sta_sae.element, body + 2);
+                                if (op == 5)
+                                        body[2 + fz_byte() % 32] ^= (p8)(1 + fz_byte() % 255);
+                                length = fz_auth(frame, fz_ap, 2, 0, body, 34);
+                                message = fz_message(FZ_FAMILY, 0, NL80211_CMD_AUTHENTICATE, FZ_INDEX,
+                                                     false, frame, length, &whole);
+                                if (!want.done && ++want.frames > WIFI_SAE_FRAMES_MOST)
+                                        fz_end(&want, -111);
+                                else if (!want.done && want.taken)
+                                        fz_end(&want, op == 4 && want.taken_which == 0 ? 0 : -13);
+                                break;
+                        }
+                        case 6: /* a refusal */
+                        {
+                                p16 transaction = 1 + (fz_byte() & 1);
+                                p16 refused = (p16)(1 + fz_byte());
+
+                                if (refused == WIFI_SAE_TOKEN_STATUS || refused == WIFI_SAE_H2E_STATUS)
+                                        refused = 1;
+                                length = fz_auth(frame, fz_ap, transaction, refused, body, 0);
+                                message = fz_message(FZ_FAMILY, 0, NL80211_CMD_AUTHENTICATE, FZ_INDEX,
+                                                     false, frame, length, &whole);
+                                if (!want.done && ++want.frames > WIFI_SAE_FRAMES_MOST)
+                                        fz_end(&want, -111);
+                                else
+                                        fz_end(&want, want.taken ? -13 : -111);
+                                break;
+                        }
+                        case 7: /* the link sent away */
+                                message = fz_message(FZ_FAMILY, 0,
+                                                     fz_byte() & 1 ? NL80211_CMD_DEAUTHENTICATE
+                                                                   : NL80211_CMD_DISASSOCIATE,
+                                                     FZ_INDEX, false, 0, 0, &whole);
+                                fz_end(&want, want.taken ? -13 : -111);
+                                break;
+                        case 8: /* the kernel gave up */
+                                message = fz_message(FZ_FAMILY, 0, NL80211_CMD_AUTHENTICATE, FZ_INDEX,
+                                                     true, 0, 0, &whole);
+                                if (!want.done && ++want.frames > WIFI_SAE_FRAMES_MOST)
+                                        fz_end(&want, -111);
+                                else
+                                        fz_end(&want, -110);
+                                break;
+                        case 9: /* the access point's commit, from someone else */
+                                body[0] = WIFI_SAE_GROUP, body[1] = 0;
+                                memcpy(body + 2, fz_known_scalar[0], 32);
+                                memcpy(body + 34, fz_known_element[0], 64);
+                                length = fz_auth(frame, fz_stranger, 1, status, body, 98);
+                                message = fz_message(FZ_FAMILY, 0, NL80211_CMD_AUTHENTICATE, FZ_INDEX,
+                                                     false, frame, length, &whole);
+                                if (!want.done && ++want.frames > WIFI_SAE_FRAMES_MOST)
+                                        fz_end(&want, -111);
+                                break;
+                        case 10: /* an error: ours, another's, or none */
+                        {
+                                p8 how = fz_byte() % 3;
+                                p8 error[36];
+                                b32 code = how == 2 ? 0 : -16;
+                                p32 head[4] = {36, 2, 0, how == 1 ? FZ_PORT + 1 : FZ_PORT};
+
+                                memset(error, 0, sizeof error);
+                                memcpy(error, head, 16);
+                                memcpy(error + 16, &code, 4);
+                                message = malloc(36);
+                                memcpy(message, error, 36);
+                                whole = 36;
+                                if (how == 0)
+                                        fz_end(&want, want.taken ? -13 : -111);
+                                break;
+                        }
+                        case 11: /* another family, another link, another command */
+                        {
+                                p8 how = fz_byte() % 3;
+
+                                message = fz_message(how == 0 ? FZ_FAMILY + 1 : FZ_FAMILY, 0,
+                                                     how == 2 ? NL80211_CMD_ASSOCIATE
+                                                              : NL80211_CMD_DEAUTHENTICATE,
+                                                     how == 1 ? FZ_INDEX + 1 : FZ_INDEX, false, 0, 0,
+                                                     &whole);
+                                break;
+                        }
+                        case 12: /* bytes of no shape as the frame */
+                        {
+                                positive size = fz_byte() % 200;
+
+                                for (positive one = 0; one < size; one++)
+                                        frame[one] = fz_byte();
+                                //      Not by chance one this reads.
+                                if (size >= 30)
+                                        frame[24] = 0;
+                                message = fz_message(FZ_FAMILY, 0, NL80211_CMD_AUTHENTICATE, FZ_INDEX,
+                                                     false, frame, size, &whole);
+                                if (!want.done && ++want.frames > WIFI_SAE_FRAMES_MOST)
+                                        fz_end(&want, -111);
+                                break;
+                        }
+                        case 13: /* an authentication event with no frame */
+                                message = fz_message(FZ_FAMILY, 0, NL80211_CMD_AUTHENTICATE, FZ_INDEX,
+                                                     false, 0, 0, &whole);
+                                if (!want.done && ++want.frames > WIFI_SAE_FRAMES_MOST)
+                                        fz_end(&want, -111);
+                                break;
+                        default: /* the access point's commit cut, or with a byte after a confirm */
+                        {
+                                positive cut = fz_byte() % 128;
+
+                                body[0] = WIFI_SAE_GROUP, body[1] = 0;
+                                memcpy(body + 2, fz_known_scalar[0], 32);
+                                memcpy(body + 34, fz_known_element[0], 64);
+                                length = fz_auth(frame, fz_ap, 1, status, body, 98);
+                                if (cut >= length)
+                                        cut = length - 1;
+                                message = fz_message(FZ_FAMILY, 0, NL80211_CMD_AUTHENTICATE, FZ_INDEX,
+                                                     false, frame, cut, &whole);
+                                if (!want.done && ++want.frames > WIFI_SAE_FRAMES_MOST)
+                                        fz_end(&want, -111);
+                                //      Cut inside the header or the group it is
+                                //      nobody's; with the group whole it is a
+                                //      refusal or nothing, and never a commit.
+                                break;
+                        }
+                        }
+                        (void)auth;
+                        fz_step(&turn, &want, message, whole);
+                }
+        }
+}
+
+/*
+        The budget against a model of it: a schedule of exchanges asked for,
+        each an access point of eight and a time step, every one allowed
+        exactly when the access point has had fewer than WIFI_SAE_PEER_MOST
+        and all of them fewer than WIFI_SAE_ALL_MOST in the window before
+        it; and the file it keeps cut, padded, rotten and in the future.
+*/
+static void budget_model(void)
+{
+        p64 at[256];
+        p8 who[256];
+        positive count = 0;
+        p8 bssid[8][6];
+
+        fz_now_ms = 1000000;
+        fz_file_there = false;
+        fz_file_size = 0;
+        if (fz_byte() & 1)
+        {
+                //      A file somebody left: any bytes.
+                fz_file_size = fz_byte() % 400;
+                for (positive one = 0; one < fz_file_size; one++)
+                        fz_file[one] = fz_byte();
+                fz_file_there = true;
+                //      What the model cannot know of it, the budget may
+                //      count; only an empty start is held to the model.
+                for (positive one = 0; one < 4 && fz_left; one++)
+                {
+                        p8 address[6] = {2, 0, 0, 0, 7, (p8)one};
+
+                        (void)wifi_sae_budget(address);
+                }
+                return;
+        }
+        for (positive one = 0; one < 8; one++)
+        {
+                memset(bssid[one], 0, 6);
+                bssid[one][0] = 2, bssid[one][5] = (p8)one;
+        }
+        for (positive step = 0; fz_left && step < 256; step++)
+        {
+                p8 pick = fz_byte();
+                positive peer = 0, all = 0;
+                bool allowed;
+
+                fz_now_ms += (pick >> 3) * (pick & 0x80 ? 1000 : 50);
+                for (positive one = 0; one < count; one++)
+                        if (fz_now_ms - at[one] < WIFI_SAE_WINDOW_MS)
+                        {
+                                all++;
+                                peer += who[one] == (pick & 7);
+                        }
+                allowed = wifi_sae_budget(bssid[pick & 7]);
+                if (allowed != (peer < WIFI_SAE_PEER_MOST && all < WIFI_SAE_ALL_MOST))
+                {
+                        fprintf(stderr, "the budget allowed %d with %lu and %lu in the window\n",
+                                allowed, (unsigned long)peer, (unsigned long)all);
+                        abort();
+                }
+                if (allowed && count < 256)
+                {
+                        at[count] = fz_now_ms;
+                        who[count++] = pick & 7;
+                }
+        }
+}
+
+int LLVMFuzzerTestOneInput(const p8 *data, positive size)
+{
+        fz_prepare();
+        fz_at = data, fz_left = size;
+        if (fz_byte() & 1)
+                budget_model();
+        else
+                exchange_model();
+        return 0;
+}
+"""
+
+
+def wifi_sae_fuzz_source(net, host, checks):
+    """The SAE lift: net.c's hosted crypto, its netlink message readers,
+    host.c's nl80211 constants and finders and the SAE section from the
+    password element to the budget, with every commit taken counted."""
+    crypto = crypto_fuzz_source(net, checks, False)
+    if CRYPTO_FUZZ_DRIVER_C not in crypto:
+        raise ValueError("crypto_fuzz_source no longer ends in its driver")
+    crypto = crypto.replace(CRYPTO_FUZZ_DRIVER_C, "")
+    headers = src_slice(net, "#define NETLINK_HEADER 16", "#define RTM_NEWLINK 16")
+    header = src_slice(net, "//      Every field here is the machine's own byte order.",
+                            "//      ifinfomsg.")
+    attribute = src_slice(net, "//      rtattr", "/*\n        A message being built")
+    finding = src_slice(net, "typedef bool (address_to netlink_attribute_visitor)",
+                             "/* The fixed body a family puts after the header.")
+    status = src_slice(net, "static COLD bipolar netlink_status(",
+                            "/*\n        The messages of one datagram in turn")
+    constants = src_slice(host, "#define GENL_ID_CTRL 16", "typedef struct\n{\n        b32 handle;")
+    finds = src_slice(host, "static COLD p32 nl80211_find_u32(",
+                            "/* The command of a generic netlink message,")
+    command = src_slice(host, "/* The command of a generic netlink message,",
+                              "/* Whether a hardware address is one")
+    sae = src_slice(host, "/*\n        WPA3-Personal's SAE",
+                          "/*\n        One authentication frame of the exchange")
+    exchange = src_slice(host, "/*\n        One authentication frame of the exchange",
+                               "static COLD bipolar nl80211_authenticate(")
+    return "\n".join((crypto, "#include <ctype.h>", "#include <stddef.h>", WIFI_SAE_FUZZ_SHIM,
+                      headers, header, attribute, finding, status, constants, finds, command,
+                      sae, WIFI_SAE_FUZZ_DRIVER, exchange, WIFI_SAE_FUZZ_MODEL))
+
+
+def wifi_sae_fuzz_seeds():
+    """Exchanges in the driver's language: a method byte, then ops -- the
+    access point's commit (0) and confirm (4), others' commits (1), commits
+    to pass over (2), tokens (3), confirms a bit off (5), refusals (6), the
+    link sent away (7), the kernel's timeout (8), a stranger's commit (9),
+    errors (10), other messages (11), bytes (12), an empty event (13), cut
+    frames (14) and floods of any (15) -- and budget schedules (odd first
+    byte)."""
+    rng = random.Random(1916)
+
+    def draw(size):
+        return bytes(rng.getrandbits(8) for _ in range(size))
+
+    seeds = {"empty.bin": b""}
+    for method in (0, 1):
+        tag = "h2e" if method else "hunt"
+        base = bytes((0, method))
+        seeds["%s_joins.bin" % tag] = base + bytes((0, 4, 1, 0))
+        seeds["%s_token.bin" % tag] = base + bytes((3, 32, method)) + draw(32) + bytes((0, 4, 1, 0))
+        seeds["%s_token_twice.bin" % tag] = (base + bytes((3, 16, method)) + draw(16) +
+                                             bytes((3, 16, method)) + draw(16))
+        seeds["%s_token_sizes.bin" % tag] = (base + bytes((3, 0, method, 3, 64, method)) + draw(64) +
+                                             bytes((3, 65, method)) + draw(65) +
+                                             bytes((3, 62, 1 - method)) + draw(62))
+        seeds["%s_forged_first.bin" % tag] = base + bytes((1, 0, 0, 4, 1, 0))
+        seeds["%s_pass_over.bin" % tag] = (base + b"".join(bytes((2, how)) for how in range(6)) +
+                                           bytes((0, 4, 1, 0)))
+        seeds["%s_other_method.bin" % tag] = base + bytes((2, 6, 0))
+        seeds["%s_confirm_first.bin" % tag] = base + bytes((4, 1, 0, 0, 5, 1, 0, 3, 4))
+        seeds["%s_flood.bin" % tag] = base + bytes((15, 69, 1, 2, 15, 69, 12, 40)) + draw(40)
+        seeds["%s_refused.bin" % tag] = base + bytes((6, 0, 76, 0, 6, 1, 1))
+        seeds["%s_ends.bin" % tag] = base + bytes((9, 10, 1, 10, 2, 11, 0, 11, 1, 11, 2, 13,
+                                                   14, 40, 7, 0, 8))
+        seeds["%s_error.bin" % tag] = base + bytes((0, 10, 0))
+    seeds["budget_one_peer.bin"] = b"\x01\x00" + bytes((0x08,)) * 10
+    seeds["budget_many.bin"] = b"\x01\x00" + bytes(((at % 8) | 0x08) for at in range(40))
+    seeds["budget_window.bin"] = b"\x01\x00" + bytes((0x08,)) * 7 + bytes((0xff,)) * 4 + bytes((0x08,)) * 4
+    seeds["budget_rotten.bin"] = b"\x01\x01\x40" + draw(64)
+    return seeds
+
+
+def harness_wifi_sae_fuzz(argv):
+    """libFuzzer over host.c's SAE exchange as the access point's frames move
+    it: wifi_sae_news and the frame reader under it, with the commit and
+    confirm computations and the budget, lifted by their anchors over net.c's
+    hosted crypto and its netlink readers. The input is an exchange -- the
+    method, then the access point's commit and confirm, commits of others who
+    know the password element, commits to pass over (off the curve, out of
+    range, a reflection, another group or method), tokens of every length in
+    and out of their container, refusals, the link sent away, timeouts,
+    netlink errors, strangers, other messages, shapeless bytes, cut frames,
+    floods of any -- or a schedule for the budget. Each message is a heap
+    block exactly its size. Held: at most one commit is taken in (the two
+    multiplications), at most WIFI_SAE_FRAMES_MOST events are read, one
+    token round, the first confirm decides, nothing moves an exchange that
+    ended, every frame to send is the one the model builds, a result of 0
+    is the access point's own commit and confirm and its PMK; and the
+    budget allows an exchange exactly when the access point has had fewer
+    than WIFI_SAE_PEER_MOST and all fewer than WIFI_SAE_ALL_MOST in the
+    window, and survives any file left at its name. The two sides are made
+    once and must agree. Bounded fixed-seed; 2 when clang/libFuzzer is
+    absent.
+
+        python3 test/differential.py --harness wifi_sae_fuzz
+    """
+    del argv
+    try:
+        source = wifi_sae_fuzz_source((HARNESS_ROOT / "src/net/net.c").read_text(),
+                                      (HARNESS_ROOT / "src/sh/host.c").read_text(),
+                                      (HARNESS_ROOT / "test/checks.c").read_text())
+    except (ValueError, RuntimeError) as exc:
+        print("  FAIL wifi sae fuzz: " + str(exc))
+        write_tally("wifi-sae-fuzz", 0, 1)
+        return 1
+    return tls_fuzz_run("wifi sae", wifi_sae_fuzz_seeds(), source, 4096)
 
 
 def wifi_scan_fuzz_seeds():
@@ -70757,6 +72000,26 @@ def wifi_scan_fuzz_seeds():
     seeds["visit_wiphy_bit.bin"] = visitor(
         2, attribute(1, u32(1)), attribute(217, b"\x00\x80"))
     seeds["visit_disassoc_zero.bin"] = visitor(6, attribute(3, u32(3)), attribute(51, bytes(26)))
+    # What a join is told: PSK-SHA256, SAE and both, with and without
+    # protection, an RSN extension element that says hash-to-element or does
+    # not, and a probe response that takes protection away beside a beacon
+    # that offers it.
+    rsnx = element(244, b"\x20")
+    seeds["ies_sha256_pmf.bin"] = b"\x01\x00\x00\x00" + ssid + element(48, rsn(6, caps=0x00c0))
+    seeds["ies_sae_h2e.bin"] = b"\x01\x00\x00\x00" + ssid + element(48, rsn(8, caps=0x00c0)) + rsnx
+    seeds["ies_sae_no_h2e.bin"] = (b"\x01\x00\x00\x00" + ssid + element(48, rsn(8, caps=0x00c0)) +
+                                   element(244, b"\x01"))
+    seeds["ies_h2e_before_rsn.bin"] = b"\x01\x00\x00\x00" + ssid + rsnx + element(48, rsn(2, 8, caps=0x0080))
+    seeds["ies_empty_rsnx.bin"] = b"\x01\x00\x00\x00" + ssid + element(48, rsn(8)) + element(244, b"")
+    seeds["ies_stripped_response.bin"] = b"\x01\x0c\x00\x00" + ssid + element(48, rsn(2, 8, caps=0x0080)) + rsnx
+    seeds["rsn_sae_ext.bin"] = b"\x03" + rsn(24, caps=0x00c0)
+    seeds["rsn_vendor.bin"] = b"\x03" + b"\x01\x00\x00\x0f\xac\x04\x01\x00\x00\x0f\xac\x04\x01\x00\x00\x50\x6f\x01"
+    seeds["rsn_gcmp_group.bin"] = b"\x03" + rsn(2, group=b"\x00\x0f\xac\x08", caps=0x0080)
+    # Mode 7: twins that offer no protection of a network that taught the
+    # join it has it.
+    seeds["downgrade_twins.bin"] = b"\x07" + bytes((9, 0)) + bytes(rng.getrandbits(8) for _ in range(12))
+    seeds["downgrade_given_up.bin"] = b"\x07" + bytes((62, 5)) + bytes(rng.getrandbits(8) for _ in range(64))
+    seeds["downgrade_untaught.bin"] = b"\x07" + bytes((5, 2)) + bytes(6)
     seeds["pick_five_quick.bin"] = b"\x05" + bytes((4, 0)) + bytes((10, 0)) * 5
     seeds["pick_four_slow.bin"] = b"\x05" + bytes((3, 6)) + bytes((10, 19)) * 4
     seeds["pick_given_up.bin"] = b"\x05" + bytes((2, 1)) + bytes((20, 3, 69, 0, 5, 39))
@@ -70766,6 +72029,13 @@ def wifi_scan_fuzz_seeds():
 
 WIFI_SCAN_FUZZ_PRELUDE = r"""
 #define RADIO_SSID_MOST 32
+#ifndef STRICT_TIGHT
+#define STRICT_SAFE 1
+#define STRICT_TIGHT 2
+#endif
+#ifndef MOONWATER_STRICT_NET
+#define MOONWATER_STRICT_NET STRICT_SAFE
+#endif
 typedef struct
 {
         b32 handle;
@@ -70835,56 +72105,80 @@ static bool radio_air_scan(nl80211 *session, p32 index, p8 *ssid, positive ssid_
 """
 
 WIFI_SCAN_FUZZ_DRIVER = r"""
+/* A cipher suite counted the long way. */
+static p8 cipher_model(const p8 *suite)
+{
+        if (suite[0] != 0x00 || suite[1] != 0x0f || suite[2] != 0xac)
+                return WIFI_CIPHER_OTHER;
+        return suite[3] == 4 ? WIFI_CIPHER_CCMP : suite[3] == 2 ? WIFI_CIPHER_TKIP : WIFI_CIPHER_OTHER;
+}
+
 /* The parser as it stood before it read through byte_reader, kept as the
    model: an RSN element's group cipher, pairwise ciphers, key management
-   and capabilities, counted the long way. */
-static p8 rsn_model(const p8 *element, positive length)
+   and capabilities, counted the long way, and what it offers a join. What
+   is cut short is WPA2 as the join always asked it, CCMP and PSK. */
+static p8 rsn_model(const p8 *element, positive length, wifi_rsn_caps *caps)
 {
         positive at = 2 + 4;
         positive count;
-        bool ccmp = false, psk = false, other = false, sae = false, eap = false, owe = false;
-        bool group_ccmp;
+        bool psk = false, sae = false, ft = false, eap = false, owe = false;
         positive which;
         unsigned capabilities = 0;
 
+        memset(caps, 0, sizeof *caps);
+        caps->group = WIFI_CIPHER_CCMP;
+        caps->pairwise = WIFI_CIPHER_CCMP;
+        caps->akms = WIFI_AKM_PSK;
         if (length < at + 2)
                 return RADIO_WPA2;
-        group_ccmp = element[2] == 0x00 && element[3] == 0x0f && element[4] == 0xac &&
-                     element[5] == 4;
         count = element[at] | (element[at + 1] << 8);
         at += 2;
         if (length < at + 4 * count + 2)
                 return RADIO_WPA2;
+        caps->group = cipher_model(element + 2);
+        caps->pairwise = 0;
+        caps->akms = 0;
         for (which = 0; which < count; which++, at += 4)
-                if (element[at] == 0x00 && element[at + 1] == 0x0f && element[at + 2] == 0xac &&
-                    element[at + 3] == 4)
-                        ccmp = true;
+                caps->pairwise |= cipher_model(element + at);
         count = element[at] | (element[at + 1] << 8);
         at += 2;
         for (which = 0; which < count && at + 4 <= length; which++, at += 4)
         {
                 p8 suite = element[at + 3];
                 if (element[at] != 0x00 || element[at + 1] != 0x0f || element[at + 2] != 0xac)
-                        continue;
-                if (suite == 2)
-                        psk = true;
-                else if (suite == 4 || suite == 6)
-                        other = true;
-                else if (suite == 8 || suite == 9 || suite == 24 || suite == 25)
-                        sae = true;
-                else if (suite == 18)
-                        owe = true;
+                        caps->akms |= WIFI_AKM_OTHER;
+                else if (suite == 2)
+                        psk = true, caps->akms |= WIFI_AKM_PSK;
+                else if (suite == 6)
+                        psk = true, caps->akms |= WIFI_AKM_PSK_SHA256;
+                else if (suite == 8)
+                        sae = true, caps->akms |= WIFI_AKM_SAE;
                 else
-                        eap = true;
+                {
+                        caps->akms |= WIFI_AKM_OTHER;
+                        if (suite == 4 || suite == 9 || suite == 24 || suite == 25)
+                                ft = true;
+                        else if (suite == 18)
+                                owe = true;
+                        else
+                                eap = true;
+                }
         }
         if (which == count && at + 2 <= length)
                 capabilities = element[at] | (element[at + 1] << 8);
-        if (!psk && !other)
-                return sae ? RADIO_WPA3 : owe ? RADIO_OWE : eap ? RADIO_EAP : RADIO_WPA2;
-        if (!psk)
-                return sae ? RADIO_WPA3 : RADIO_FT256;
-        if (!group_ccmp || !ccmp)
+        caps->pmf = (p8)((capabilities & 0x80 ? WIFI_PMF_CAPABLE : 0) |
+                         (capabilities & 0x40 ? WIFI_PMF_REQUIRED : 0));
+        if (!psk && !sae && (ft || owe || eap))
+                return ft ? RADIO_FT : owe ? RADIO_OWE : RADIO_EAP;
+        if (!psk && !sae)
+        {
+                caps->akms |= WIFI_AKM_PSK;
+                psk = true;
+        }
+        if (caps->group != WIFI_CIPHER_CCMP || !(caps->pairwise & WIFI_CIPHER_CCMP))
                 return RADIO_TKIP;
+        if (!psk)
+                return RADIO_WPA3;
         if (capabilities & 0x40)
                 return RADIO_PMF;
         return sae ? RADIO_WPA23 : RADIO_WPA2;
@@ -70893,13 +72187,21 @@ static p8 rsn_model(const p8 *element, positive length)
 /* What a beacon's elements say, counted the long way: the first name element
    (the one the kernel joins by: a later one is not this access point's name,
    and one over 32 bytes or empty leaves it with none), the first RSN element, a WPA vendor
-   element, and what the capability bit says when there is neither. */
+   element, and what the capability bit says when there is neither; what the
+   RSN element offers, with hash-to-element from the first RSN extension
+   element; and the two elements whole, as message 3 is held to them. */
 static void elements_model(const p8 *ies, positive size, p16 capability,
-                           p8 *ssid, p8 *ssid_length, p8 *security)
+                           p8 *ssid, p8 *ssid_length, p8 *security, wifi_rsn_caps *caps,
+                           const p8 **rsn_at, positive *rsn_length,
+                           const p8 **rsnx_at, positive *rsnx_length)
 {
-        bool rsn = false, wpa = false, named = false;
+        bool rsn = false, wpa = false, named = false, extension = false;
+        p8 h2e = 0;
         *ssid_length = 0;
         *security = RADIO_OPEN;
+        memset(caps, 0, sizeof *caps);
+        *rsn_at = *rsnx_at = 0;
+        *rsn_length = *rsnx_length = 0;
         for (positive at = 0; at + 2 <= size;)
         {
                 p8 id = ies[at];
@@ -70919,14 +72221,25 @@ static void elements_model(const p8 *ies, positive size, p16 capability,
                 else if (id == 48 && !rsn)
                 {
                         rsn = true;
-                        *security = rsn_model(data, span);
+                        *security = rsn_model(data, span, caps);
+                        *rsn_at = ies + at;
+                        *rsn_length = 2 + span;
+                }
+                else if (id == 244 && !extension)
+                {
+                        extension = true;
+                        h2e = span && (data[0] & 0x20) ? 1 : 0;
+                        *rsnx_at = ies + at;
+                        *rsnx_length = 2 + span;
                 }
                 else if (id == 221 && span >= 4 && data[0] == 0x00 && data[1] == 0x50 &&
                          data[2] == 0xf2 && data[3] == 1)
                         wpa = true;
                 at += 2 + span;
         }
-        if (!rsn)
+        if (rsn)
+                caps->h2e = h2e;
+        else
                 *security = wpa ? RADIO_WPA : (capability & 0x10) ? RADIO_WEP : RADIO_OPEN;
 }
 
@@ -70962,8 +72275,9 @@ static void check_one(netlink_header *header)
         radio_air air;
 
         if (radio_bss_read(header, &one) &&
-            (one.ssid_length > RADIO_SSID_MOST || one.security > RADIO_FT256 ||
-             one.beacon_security > RADIO_FT256))
+            (one.ssid_length > RADIO_SSID_MOST || one.security > RADIO_FT ||
+             one.beacon_security > RADIO_FT || one.caps.h2e > 1 || one.caps.pmf > 3 ||
+             one.caps.akms > 15 || one.caps.group > 7 || one.caps.pairwise > 7))
         {
                 fprintf(stderr, "a scan row out of range\n");
                 abort();
@@ -71113,20 +72427,23 @@ typedef struct
         b32 mbm;
         p32 fail_ms;
         p32 frequency;
+        p8 protection;
 } air_station;
 static air_station air_world[AIR_TWINS + 1];
 static positive air_world_count;
+static wifi_rsn_caps air_caps;
+static wifi_seen air_seen;
 
 static void radio_air_dump(nl80211 *session, p32 index, netlink_visitor visit,
                            address_any context)
 {
-        static const p8 ies[] = {0, 9, 'm', 'o', 'o', 'n', 'w', 'a', 't', 'e', 'r',
-                                 48, 20, 1, 0, 0, 0x0f, 0xac, 4, 1, 0, 0, 0x0f, 0xac, 4,
-                                 1, 0, 0, 0x0f, 0xac, 2, 0, 0};
-
         (void)session, (void)index;
         for (positive at = 0; at < air_world_count; at++)
         {
+                //      WPA2, with the capabilities each station has.
+                p8 ies[] = {0, 9, 'm', 'o', 'o', 'n', 'w', 'a', 't', 'e', 'r',
+                            48, 20, 1, 0, 0, 0x0f, 0xac, 4, 1, 0, 0, 0x0f, 0xac, 4,
+                            1, 0, 0, 0x0f, 0xac, 2, air_world[at].protection, 0};
                 p8 nest[160], body[200], *stop, *message;
                 p8 *put = nest;
                 p32 seen = 100;
@@ -71180,7 +72497,7 @@ static void pick_model(const p8 *data, positive size)
                 air_station *one = null;
 
                 if (radio_bss_choose(&session, 7, (p8 *)"moonwater", 9, true, chosen, &frequency,
-                                     true) != 1)
+                                     true, 0, false, &air_caps, &air_seen) != 1)
                         abort();
                 for (positive at = 0; at <= twins && !one; at++)
                         if (!memcmp(air_world[at].bssid, chosen, 6))
@@ -71199,6 +72516,56 @@ static void pick_model(const p8 *data, positive size)
                 air_now_ms += one->fail_ms;
                 radio_avoid_add(chosen);
                 air_now_ms += 1000;
+        }
+}
+
+/* Mode 7: twins that offer less than the network has taught the join. The
+   real access point offers protection, and a saved network that once saw
+   it offered (WIFI_RULE_PMF) has up to sixty-three twins by its name that
+   do not, louder or quieter, the real one given up on or not: the join
+   chooses the real one first, and is told what it offers and showed. With
+   no such rule, it chooses among them all by signal, as before. */
+static void downgrade_model(const p8 *data, positive size)
+{
+        positive twins = size ? 1 + data[0] % AIR_TWINS : 1;
+        bool given_up = size > 1 && (data[1] & 1);
+        bool taught = !(size > 1 && (data[1] & 2));
+        positive turn = size > 1 ? data[1] >> 2 : 0;
+        nl80211 session = {0};
+        p8 chosen[6];
+        p32 frequency = 0;
+        air_station *real = 0;
+
+        air_now_ms = 0;
+        air_avoid_there = false;
+        air_avoid_size = 0;
+        air_world_count = twins + 1;
+        for (positive at = 0; at <= twins; at++)
+        {
+                air_station *one = air_world + (at + turn) % (twins + 1);
+                positive from = 2 + at;
+
+                memset(one, 0, sizeof *one);
+                one->bssid[0] = 2;
+                one->bssid[4] = 0x5b;
+                one->bssid[5] = (p8)at;
+                one->frequency = 2412 + 5 * (p32)(at % 13);
+                one->mbm = !at ? -7000 : -100 * (b32)(from < size ? data[from] % 70 : 30);
+                one->protection = !at ? 0x80 : 0;
+                if (!at)
+                        real = one;
+        }
+        if (given_up)
+                radio_avoid_add(real->bssid);
+        if (radio_bss_choose(&session, 7, (p8 *)"moonwater", 9, true, chosen, &frequency, true,
+                             taught ? WIFI_RULE_PMF : 0, false, &air_caps, &air_seen) != 1)
+                abort();
+        if (taught && (memcmp(chosen, real->bssid, 6) || !(air_caps.pmf & WIFI_PMF_CAPABLE) ||
+                       air_caps.akms != WIFI_AKM_PSK || air_seen.rsn_length[0] != 22 ||
+                       air_seen.rsn[0][0] != 48 || air_seen.rsn[0][20] != 0x80))
+        {
+                fprintf(stderr, "a twin that offers no protection was chosen over the real one\n");
+                abort();
         }
 }
 
@@ -71227,7 +72594,8 @@ static void gate_model(void)
                 air_scans = 0;
                 air_scan_age_ms = cases[at].age;
                 answer = radio_bss_choose(&session, 7, (p8 *)"moonwater", 9, true, chosen,
-                                          &frequency, cases[at].force);
+                                          &frequency, cases[at].force, 0, false, &air_caps,
+                                          &air_seen);
                 //      Nothing was in the air before or after: not in range.
                 //      Declined to scan, and told so: not a failure of its own.
                 if (answer != 0 || (air_scans != 0) != cases[at].scanned ||
@@ -71257,7 +72625,8 @@ static void gate_model(void)
                 p32 frequency = 0;
 
                 if (radio_bss_choose(&session, 7, (p8 *)"moonwater", 9, true, chosen, &frequency,
-                                     false) != 1 || air_scans != 1)
+                                     false, 0, false, &air_caps, &air_seen) != 1 ||
+                    air_scans != 1)
                 {
                         fprintf(stderr, "a given-up access point in the cache is not doubted\n");
                         abort();
@@ -71408,9 +72777,14 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         gate_model();
         if (!size)
                 return 0;
-        mode = data[0] % 7;
+        mode = data[0] % 8;
         data++;
         size--;
+        if (mode == 7)
+        {
+                downgrade_model(data, size);
+                return 0;
+        }
         if (mode == 6)
         {
                 visitors_model(data, size);
@@ -71430,10 +72804,17 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         {
                 /* An RSN element alone, against the model. */
                 p8 *copy = malloc(size ? size : 1);
+                wifi_rsn_caps got, want;
+
                 memcpy(copy, data, size);
-                if (radio_rsn_security(copy, size) != rsn_model(copy, size))
+                if (radio_rsn_security(copy, size, &got) != rsn_model(copy, size, &want))
                 {
                         fprintf(stderr, "radio_rsn_security disagrees with the model\n");
+                        abort();
+                }
+                if (memcmp(&got, &want, sizeof got))
+                {
+                        fprintf(stderr, "the RSN element's offer disagrees with the model\n");
                         abort();
                 }
                 free(copy);
@@ -71456,7 +72837,13 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                 positive ies_size = size;
                 p16 capability = 0;
                 p8 key = 0, sstr[RADIO_SSID_MOST + 1], sl = 0, sec = 0;
-                static const p8 forged[] = {0, 1, 'x'};
+                static const p8 bare[] = {0, 1, 'x'};
+                //      And one with an RSN element that offers no protection,
+                //      which is what a downgrade needs the join to read.
+                static const p8 stripped[] = {0, 1, 'x', 48, 20, 1, 0, 0, 0x0f, 0xac, 4, 1, 0,
+                                              0, 0x0f, 0xac, 4, 1, 0, 0, 0x0f, 0xac, 2, 0, 0};
+                const p8 *forged = bare;
+                positive forged_size = sizeof bare;
 
                 if (mode == 0)
                 {
@@ -71482,11 +72869,13 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                         if (key & 4)
                         {
                                 /* A probe response in the real access point's
-                                   name with no RSN element, as the latest
-                                   frame, and the real beacon's elements
-                                   beside it. */
+                                   name with no RSN element, or with one that
+                                   offers no protection, as the latest frame,
+                                   and the real beacon's elements beside it. */
+                                if (key & 8)
+                                        forged = stripped, forged_size = sizeof stripped;
                                 at = put_attribute(at, NL80211_BSS_INFORMATION_ELEMENTS,
-                                                   forged, sizeof forged);
+                                                   forged, forged_size);
                                 at = put_attribute(at, NL80211_BSS_BEACON_IES, ies, ies_size);
                         }
                         else
@@ -71506,27 +72895,62 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                         check_one(header);
                         if (mode == 1 && radio_bss_read(header, &one))
                         {
-                                elements_model(ies, ies_size, capability, sstr, &sl, &sec);
+                                wifi_rsn_caps caps;
+                                wifi_seen seen;
+                                const p8 *rsn_at, *rsnx_at;
+                                positive rsn_length, rsnx_length;
+
+                                elements_model(ies, ies_size, capability, sstr, &sl, &sec, &caps,
+                                               &rsn_at, &rsn_length, &rsnx_at, &rsnx_length);
+                                radio_bss_seen(header, &seen);
                                 if (key & 4)
                                 {
                                         /* The latest frame says what it says, and
                                            the beacon's own elements are kept
                                            apart: what the real access point
-                                           asks of a station is still there. */
-                                        p8 bare_ssid[RADIO_SSID_MOST + 1], bare_length = 0, bare = 0;
+                                           asks of a station is still there, and
+                                           what either offers is what the join
+                                           is told. */
+                                        p8 bare_ssid[RADIO_SSID_MOST + 1], bare_length = 0, bare_class = 0;
+                                        wifi_rsn_caps forged_caps;
+                                        const p8 *forged_rsn, *forged_rsnx;
+                                        positive forged_rsn_length, forged_rsnx_length;
 
-                                        elements_model(forged, sizeof forged, capability,
-                                                       bare_ssid, &bare_length, &bare);
-                                        if (one.ssid_length != bare_length || one.security != bare ||
-                                            one.beacon_security != sec)
+                                        elements_model(forged, forged_size, capability, bare_ssid,
+                                                       &bare_length, &bare_class, &forged_caps,
+                                                       &forged_rsn, &forged_rsn_length, &forged_rsnx,
+                                                       &forged_rsnx_length);
+                                        caps.akms |= forged_caps.akms;
+                                        caps.pmf |= forged_caps.pmf;
+                                        caps.group |= forged_caps.group;
+                                        caps.pairwise |= forged_caps.pairwise;
+                                        caps.h2e |= forged_caps.h2e;
+                                        if (one.ssid_length != bare_length || one.security != bare_class ||
+                                            one.beacon_security != sec || memcmp(&one.caps, &caps, sizeof caps))
                                         {
                                                 fprintf(stderr, "a beacon's elements were not kept apart\n");
+                                                abort();
+                                        }
+                                        if (seen.rsn_length[0] != forged_rsn_length ||
+                                            (forged_rsn_length && memcmp(seen.rsn[0], forged_rsn, forged_rsn_length)) ||
+                                            seen.rsn_length[1] != rsn_length ||
+                                            (rsn_length && memcmp(seen.rsn[1], rsn_at, rsn_length)) ||
+                                            seen.rsnx_length[1] != rsnx_length ||
+                                            (rsnx_length && memcmp(seen.rsnx[1], rsnx_at, rsnx_length)))
+                                        {
+                                                fprintf(stderr, "the elements seen are not the two frames'\n");
                                                 abort();
                                         }
                                 }
                                 else if (one.ssid_length != sl || memcmp(one.ssid, sstr, sl) ||
                                          one.security != sec || one.beacon_security != sec ||
-                                         one.frequency != 2412 || one.seen != 9)
+                                         one.frequency != 2412 || one.seen != 9 ||
+                                         memcmp(&one.caps, &caps, sizeof caps) ||
+                                         seen.rsn_length[0] != rsn_length ||
+                                         (rsn_length && memcmp(seen.rsn[0], rsn_at, rsn_length)) ||
+                                         seen.rsnx_length[0] != rsnx_length ||
+                                         (rsnx_length && memcmp(seen.rsnx[0], rsnx_at, rsnx_length)) ||
+                                         seen.rsn_length[1] || seen.rsnx_length[1])
                                 {
                                         fprintf(stderr, "a scan row is not what its elements say\n");
                                         abort();
@@ -71603,15 +73027,19 @@ def harness_wifi_scan_fuzz(argv):
                                    "/* Whether the station the machine is associated through is authorized")
         pick = src_slice(host, "/*\n        The access points given up on",
                                    "static radio_heard address_to radio_air_find(")
+        caps = src_slice(host, "/*\n        What an access point's RSN element offers",
+                               "/* The RSN element a station offers")
+        seen = src_slice(host, "#define WIFI_ELEMENT_ROOM",
+                               "/* Whether an element of message 3 is one of the two seen")
     except ValueError as error:
         print("  FAIL wifi scan fuzz lift: " + str(error))
         write_tally("wifi-scan-fuzz", 0, 1)
         return 1
     return tls_fuzz_run("wifi scan", wifi_scan_fuzz_seeds(),
                         NET_ZONE_FUZZ_SHIM + byte_reader_source() + wait + netlink +
-                        WIFI_SCAN_FUZZ_PRELUDE + constants + records + family_info + finds +
-                        command + news + groups + iface_seen + wiphy_seen + station_seen +
-                        link_news + scan + WIFI_PICK_FUZZ_PRELUDE + pick +
+                        WIFI_SCAN_FUZZ_PRELUDE + caps + seen + constants + records +
+                        family_info + finds + command + news + groups + iface_seen + wiphy_seen +
+                        station_seen + link_news + scan + WIFI_PICK_FUZZ_PRELUDE + pick +
                         WIFI_SCAN_FUZZ_DRIVER, 4096)
 
 
@@ -71638,7 +73066,8 @@ def harness_wifi_air(argv):
              went in on standard input
       join   a wrong password is "did not accept the password", an open
              network joins with nothing on standard input, and a network
-             that asks for WPA3 alone is saved and not tried
+             that asks for WPA3 alone is joined, refuses a wrong password in
+             words and takes the right one again
       air    bare moonwater wifi against a model of radio_wifi_status once
              the scan the joins left has expired: every network strongest
              first, marked joined or saved, its name made safe; then with
@@ -71646,9 +73075,21 @@ def harness_wifi_air(argv):
              is not joined, there and in moonwater status
       watch  ip watch leases the station and never the radio's monitor
              (hwsim0) or an access point in the machine's own namespace
-      twin   a stronger twin of a saved WPA2 network, open or WPA3 alone: the
-             machine stays off it with the real one gone and joins the real
-             one, never the twin, when it is back
+      twin   a stronger twin of a saved WPA2 network, open or WPA3 alone
+             under a password its owner never chose: the machine stays off
+             it with the real one gone and joins the real one, never the
+             twin, when it is back
+      pmf    management frame protection: deauthentication and
+             disassociation frames spoofed by a third radio (hwsim_radio
+             inject) are believed by a link without it and ignored by one
+             with it, required or optional; a twin without it of a network
+             that offered it is never joined, and bare wifi says why; TKIP is
+             refused in words that say what to change
+      sae    WPA3: the exchange with wpa_supplicant's access point alone and
+             beside WPA2 (whose PSK is not the password, so only WPA3 can
+             join), spoofed frames ignored, a wrong password said at once;
+             and (--hostapd) hostapd with each password element method and
+             an anti-clogging token, held to its own log
       reassoc the link held while idle; the access point gone and back,
              joined again; a twin by the same name taking over when the
              first goes, and the first again after it
@@ -71661,11 +73102,10 @@ def harness_wifi_air(argv):
              seconds and not by every pass, one with a wrong password is
              tried at growing intervals and not back to back, and a join
              that works leaves no record
-      class  WPA2 that asks for protected management frames, for TKIP as
-             its group cipher or (--hostapd with CONFIG_IEEE80211R) for
-             FT-PSK alone is said and not tried, by the name of what it asks
-             for, and ranks behind a plain WPA2 twin of its name that is
-             much the quieter
+      class  (--hostapd) WPA2 that asks for TKIP as its group cipher or
+             (with CONFIG_IEEE80211R) for FT-PSK alone is said and not tried,
+             by the name of what it asks for, and ranks behind a plain WPA2
+             twin of its name that is much the quieter
       rekey  (--hostapd, a hostapd built with CONFIG_TESTING_OPTIONS) the
              access point's group and pairwise rekeys and resent messages
              answered with the link and its data intact; an access point
@@ -71901,15 +73341,23 @@ def harness_wifi_air(argv):
     lines = []
     lines.append("t0=$(uptime_now); moonwater wifi add \"$ap1\" %s > /tmp/sc.got 2>&1; scen_status 'join wrong password' 1 $?; echo \"wifi-time wrong-password $(took $t0)\"" % q(wrong))
     # The access point sends the machine away some three seconds after it
-    # gives up on message 2; the join used to wait out eight on its own.
-    lines.append("echo \"wifi-time wrong-password-handshake $(took $(associated_at))\"")
-    lines.append("scen_count 'join wrong password said within 6 s of associating' 1 \"$(awk -v t=\"$(took $(associated_at))\" 'BEGIN { print (t < 6) }')\"")
+    # gives up on message 2; the join used to wait out eight on its own. A
+    # WPA3 network turns the password away in the exchange before any
+    # association, which is said at once; the clock then runs from the add.
+    lines.append("a1=$(associated_at); case $(awk -v a=\"$a1\" -v t=\"$t0\" 'BEGIN { print (a < t) }') in 1) a1=$t0 ;; esac")
+    lines.append("echo \"wifi-time wrong-password-handshake $(took $a1)\"")
+    lines.append("scen_count 'join wrong password said within 6 s of associating' 1 \"$(awk -v t=\"$(took $a1)\" 'BEGIN { print (t < 6) }')\"")
     lines.append("scen_count 'join wrong password says so' 1 \"$(grep -c 'saved, but the network did not accept the password' /tmp/sc.got)\"")
     lines.append("t0=$(uptime_now); moonwater wifi add \"$ap2\" < /dev/null > /tmp/sc.got 2>&1; scen_status 'join open' 0 $?; echo \"wifi-time open $(took $t0)\"")
     lines.append("scen_count 'join open joined' 1 \"$(grep -c -x -F \"[Moonwater] wifi joined $ap2\" /tmp/sc.got)\"")
-    lines.append("moonwater wifi add \"$ap3\" %s > /tmp/sc.got 2>&1; scen_status 'join WPA3 alone' 1 $?" % q(sae["password"]))
-    lines.append("scen_count 'join WPA3 alone refused' 1 \"$(grep -c 'saved, but it asks for WPA3, which moonwater cannot join yet' /tmp/sc.got)\"")
-    lines.append("scen_count 'join WPA3 still joined to the open one' 1 \"$(moonwater status 2>/dev/null | grep -c -x -F \"  wifi joined $ap2\")\"")
+    lines.append("t0=$(uptime_now); moonwater wifi add \"$ap3\" %s > /tmp/sc.got 2>&1; scen_status 'join WPA3 alone' 0 $?; echo \"wifi-time wpa3 $(took $t0)\"" % q(sae["password"]))
+    lines.append("scen_count 'join WPA3 alone joined' 1 \"$(joined \"$ap3\")\"")
+    lines.append("moonwater wifi add \"$ap3\" %s > /tmp/sc.got 2>&1; scen_status 'join WPA3 alone, wrong password' 1 $?" % q(sae["password"] + "x"))
+    lines.append("scen_count 'join WPA3 wrong password says so' 1 \"$(grep -c 'saved, but the network did not accept the password' /tmp/sc.got)\"")
+    lines.append("printf '%%s\\n' %s | moonwater wifi add \"$ap3\" - > /tmp/sc.got 2>&1; scen_status 'join WPA3 alone, right password again' 0 $?" % q(sae["password"]))
+    # The machine is left on the open network, as the rest of the lane expects.
+    lines.append("moonwater wifi add \"$ap2\" < /dev/null > /tmp/sc.got 2>&1; scen_status 'join open again' 0 $?")
+    lines.append("scen_count 'join WPA3 then back on the open one' 1 \"$(moonwater status 2>/dev/null | grep -c -x -F \"  wifi joined $ap2\")\"")
     family("join", lines)
 
     # ---- air
@@ -71965,8 +73413,10 @@ def harness_wifi_air(argv):
         if kind == "open":
             body.append("key_mgmt=NONE")
         else:
+            #       WPA3 by the real name with a password its owner never
+            #       chose: the machine may try it and must be turned away.
             body += ["proto=RSN", "pairwise=CCMP", "group=CCMP", "key_mgmt=SAE", "ieee80211w=2",
-                     "sae_password=\"%s\"" % good["password"]]
+                     "sae_password=\"%s\"" % (good["password"] + "-not-it")]
         body.append("}")
         lines.append("/mnt/stick/hwsim_radio new > /dev/null; tn=$(station $S); tm%d=$(cat /sys/class/net/$tn/address); "
                      "it%d=$(/mnt/stick/hwsim_radio move $NS $tn)" % (at, at))
@@ -71991,6 +73441,173 @@ def harness_wifi_air(argv):
     lines.append("dmesg | grep -a -e \"$S:\" | tail -40 | sed 's/^/twin-log /'")
     lines.append("kill $(cat /tmp/twin0.pid) $(cat /tmp/twin1.pid); rm -f /root/wifi")
     family("twin", lines)
+
+    # ---- pmf: management frame protection (802.11w). A radio in range that
+    # knows no key sends deauthentication and disassociation frames in the
+    # access point's name (hwsim_radio inject): an access point that requires
+    # protection and a station that negotiated it must ignore them, and one
+    # that offers none must be believed, which shows the frames land. A saved
+    # network that once offered protection is never joined through a twin
+    # that does not; TKIP and WPA1 are refused in words that say what to fix.
+    lines = []
+    pm_word = "pmf-password-1"
+    chan = {"req": 1, "opt": 6, "off": 11}
+
+    def pmf_ap(tag, ssid, channel, extra, mgmt=None, globals_=()):
+        body = list(globals_) + ["network={", "ssid=%s" % ssid.encode().hex(), "mode=2",
+                "frequency=%d" % (2407 + 5 * channel), "proto=RSN"] + \
+            (mgmt or ["key_mgmt=WPA-PSK", "psk=\"%s\"" % pm_word]) + extra + ["}"]
+        return [
+            "/mnt/stick/hwsim_radio new > /dev/null; tn=$(station $S); %sm=$(cat /sys/class/net/$tn/address); "
+            "%si=$(/mnt/stick/hwsim_radio move $NS $tn)" % (tag, tag),
+            "printf '%%s\\n' %s > /tmp/%s.conf" % (" ".join(q(line) for line in body), tag),
+            "$A $W -B -d -i $%si -c /tmp/%s.conf -D nl80211 -f /tmp/%s.log -P /tmp/%s.pid" % (tag, tag, tag, tag),
+            "for i in $(seq 40); do grep -q AP-ENABLED /tmp/%s.log 2>/dev/null && break; sleep 0.25; done" % tag,
+            "$A /mnt/stick/hwsim_radio power $%si 12" % tag,
+        ]
+
+    def spoof(tag, kind, times, channel):
+        return ("$A /mnt/stick/hwsim_radio inject $ai %d %s $sta $%sm $%sm 7 %d"
+                % (2407 + 5 * channel, kind, tag, tag, times))
+
+    def dm(text):
+        return "$(dmesg | grep -c \"%s\")" % text
+
+    def join_word(name):
+        return "printf '%%s\\n' %s | moonwater wifi add %s - > /tmp/sc.got 2>&1" % (q(pm_word), name)
+
+    lines.append("rm -f /root/wifi /root/wifi.rules /run/moonwater/wifi.avoid /run/moonwater/wifi.last")
+    lines.append("/mnt/stick/hwsim_radio new > /dev/null; tn=$(station $S); ai=$(/mnt/stick/hwsim_radio move $NS $tn); "
+                 "$A /mnt/stick/hwsim_radio power $ai 20")
+    lines.append("sta=$(cat /sys/class/net/$S/address)")
+    # The contrast first: no protection offered, a spoofed deauthentication believed.
+    lines += pmf_ap("pa", "pmfoff", chan["off"], ["ieee80211w=0", "pairwise=CCMP", "group=CCMP"])
+    lines.append(join_word("pmfoff") + "; scen_status 'pmf join, none offered' 0 $?")
+    lines.append("scen_count 'pmf none offered, joined' 1 \"$(joined pmfoff)\"")
+    lines.append("d0=%s; a0=%s" % (dm("$S: deauthenticated from $pam"), dm("$S: authenticate with $pam")))
+    lines.append(spoof("pa", "deauth", 3, chan["off"]))
+    lines.append("for i in $(seq 40); do [ \"%s\" -gt \"$d0\" ] && break; sleep 0.25; done" % dm("$S: deauthenticated from $pam"))
+    lines.append("scen_count 'pmf none offered, a spoofed deauthentication is believed' 1 \"$([ \"%s\" -gt \"$d0\" ] && echo 1 || echo 0)\"" % dm("$S: deauthenticated from $pam"))
+    lines.append("for i in $(seq 120); do [ \"$(joined pmfoff)\" = 1 ] && [ \"%s\" -gt \"$a0\" ] && break; sleep 0.5; done" % dm("$S: authenticate with $pam"))
+    lines.append("scen_count 'pmf none offered, joined again after it' 1 \"$(joined pmfoff)\"")
+    lines.append("kill $(cat /tmp/pa.pid); rm -f /root/wifi /root/wifi.rules")
+    # Required by the access point.
+    lines += pmf_ap("pb", "pmfreq", chan["req"], ["ieee80211w=2", "pairwise=CCMP", "group=CCMP"])
+    lines.append(join_word("pmfreq") + "; scen_status 'pmf join, required' 0 $?")
+    lines.append("scen_count 'pmf required, joined' 1 \"$(joined pmfreq)\"")
+    lines.append("scen_count 'pmf required, the network is remembered as offering it' 1 \"$(grep -c -x 'pmf pmfreq' /root/wifi.rules)\"")
+    lines.append("d0=%s; a0=%s" % (dm("$S: deauthenticated from $pbm"), dm("$S: authenticate with $pbm")))
+    lines.append(spoof("pb", "deauth", 5, chan["req"]))
+    lines.append(spoof("pb", "disassoc", 5, chan["req"]))
+    lines.append("sleep 3")
+    lines.append("scen_count 'pmf required, spoofed deauthentication ignored' 0 \"$(( %s - d0 ))\"" % dm("$S: deauthenticated from $pbm"))
+    lines.append("scen_count 'pmf required, spoofed disassociation ignored' 0 \"%s\"" % dm("$S: disassociated from $pbm"))
+    lines.append("scen_count 'pmf required, still joined' 1 \"$(joined pmfreq)\"")
+    lines.append("scen_count 'pmf required, never left the access point' 0 \"$(( %s - a0 ))\"" % dm("$S: authenticate with $pbm"))
+    # A twin of the same name that offers no protection is never joined.
+    lines.append("kill $(cat /tmp/pb.pid)")
+    lines.append("for i in $(seq 60); do [ \"$(joined pmfreq)\" = 0 ] && break; sleep 0.5; done")
+    lines += pmf_ap("pc", "pmfreq", chan["off"], ["ieee80211w=0", "pairwise=CCMP", "group=CCMP"])
+    lines.append("$A /mnt/stick/hwsim_radio power $pci 19; n0=%s; sleep 25" % dm("$S: associated"))
+    lines.append("scen_count 'pmf downgrade twin never joined' 0 \"$(( %s - n0 ))\"" % dm("$S: associated"))
+    lines.append("scen_count 'pmf downgrade twin, not joined' 0 \"$(joined pmfreq)\"")
+    lines.append("scen_count 'pmf downgrade twin, bare wifi says why' 1 \"$(moonwater wifi 2>&1 | scen_strip | grep -c 'no longer offers management frame protection')\"")
+    lines.append("kill $(cat /tmp/pc.pid)")
+    lines += pmf_ap("pb", "pmfreq", chan["req"], ["ieee80211w=2", "pairwise=CCMP", "group=CCMP"])
+    lines.append("for i in $(seq 120); do [ \"$(joined pmfreq)\" = 1 ] && break; sleep 0.5; done")
+    lines.append("scen_count 'pmf real access point back, joined' 1 \"$(joined pmfreq)\"")
+    lines.append("kill $(cat /tmp/pb.pid); rm -f /root/wifi /root/wifi.rules")
+    # Optional: negotiated when both offer it.
+    lines += pmf_ap("pd", "pmfopt", chan["opt"], ["ieee80211w=1", "pairwise=CCMP", "group=CCMP"])
+    lines.append(join_word("pmfopt") + "; scen_status 'pmf join, optional' 0 $?")
+    lines.append("d0=%s" % dm("$S: deauthenticated from $pdm"))
+    lines.append(spoof("pd", "deauth", 5, chan["opt"]))
+    lines.append("sleep 3")
+    lines.append("scen_count 'pmf optional, spoofed deauthentication ignored' 0 \"$(( %s - d0 ))\"" % dm("$S: deauthenticated from $pdm"))
+    lines.append("scen_count 'pmf optional, still joined' 1 \"$(joined pmfopt)\"")
+    lines.append("scen_count 'pmf optional, the network is remembered as offering it' 1 \"$(grep -c -x 'pmf pmfopt' /root/wifi.rules 2>/dev/null)\"")
+    lines.append("kill $(cat /tmp/pd.pid); rm -f /root/wifi")
+    # TKIP is refused with words that say what to change.
+    lines += pmf_ap("pe", "pmftkip", chan["off"], ["pairwise=TKIP CCMP", "group=TKIP"])
+    lines.append(join_word("pmftkip") + "; scen_status 'pmf TKIP group refused' 1 $?")
+    lines.append("scen_count 'pmf TKIP group says so' 1 \"$(grep -c 'saved, but it asks for TKIP, which is broken and never joined; set the access point to WPA2 or WPA3 with AES (CCMP)' /tmp/sc.got)\"")
+    lines.append("kill $(cat /tmp/pe.pid); rm -f /root/wifi /root/wifi.rules")
+    family("pmf", lines)
+
+    # ---- sae: WPA3-Personal. The join is an SAE exchange (commit, commit,
+    # confirm, confirm) through the kernel's authentication command, the
+    # PMK it makes and a four-way handshake on it, with protected
+    # management frames required. Against wpa_supplicant's own access point:
+    # WPA3 alone, WPA2 and WPA3 together, and a wrong password turned away
+    # at once; against hostapd, each password element method and the
+    # anti-clogging token a busy access point asks for.
+    lines = []
+    sae_word = "sae-password-1"
+    sae_mgmt = ["key_mgmt=SAE", "sae_password=\"%s\"" % sae_word]
+    lines.append("rm -f /root/wifi /root/wifi.rules /run/moonwater/wifi.avoid /run/moonwater/wifi.last")
+    lines += pmf_ap("sa", "saeonly", chan["opt"], ["ieee80211w=2", "pairwise=CCMP", "group=CCMP"], sae_mgmt)
+    lines.append("t0=$(uptime_now); printf '%%s\\n' %s | moonwater wifi add saeonly - > /tmp/sc.got 2>&1; scen_status 'sae join, WPA3 alone' 0 $?; echo \"wifi-time sae $(took $t0)\"" % q(sae_word))
+    lines.append("scen_count 'sae WPA3 alone, joined' 1 \"$(joined saeonly)\"")
+    lines.append("d0=%s; a0=%s" % (dm("$S: deauthenticated from $sam"), dm("$S: authenticate with $sam")))
+    lines.append(spoof("sa", "deauth", 5, chan["opt"]))
+    lines.append(spoof("sa", "disassoc", 5, chan["opt"]))
+    lines.append("sleep 3")
+    lines.append("scen_count 'sae spoofed management frames ignored' 0 \"$(( %s - d0 + %s - a0 ))\"" % (dm("$S: deauthenticated from $sam"), dm("$S: authenticate with $sam")))
+    lines.append("scen_count 'sae still joined' 1 \"$(joined saeonly)\"")
+    lines.append("scen_count 'sae WPA3 remembered, and as offering protection' 2 \"$(grep -c -x -e 'pmf saeonly' -e 'sae saeonly' /root/wifi.rules)\"")
+    lines.append("t0=$(uptime_now); moonwater wifi add saeonly %s > /tmp/sc.got 2>&1; scen_status 'sae wrong password' 1 $?; echo \"wifi-time sae-wrong $(took $t0)\"" % q(sae_word + "x"))
+    lines.append("scen_count 'sae wrong password says so' 1 \"$(grep -c 'saved, but the network did not accept the password' /tmp/sc.got)\"")
+    lines.append("scen_count 'sae wrong password said within 8 s' 1 \"$(awk -v t=\"$(took $t0)\" 'BEGIN { print (t < 8) }')\"")
+    lines.append("kill $(cat /tmp/sa.pid); rm -f /root/wifi /root/wifi.rules")
+    # Both at once: WPA3 is used, and a network that answers one of them only is still joined.
+    lines += pmf_ap("sb", "saetrans", chan["req"], ["ieee80211w=1", "pairwise=CCMP", "group=CCMP"],
+                    ["key_mgmt=WPA-PSK SAE", "psk=\"%s\"" % (sae_word + "-psk-is-another"), "sae_password=\"%s\"" % sae_word])
+    lines.append(join_word("saetrans").replace(q(pm_word), q(sae_word)) + "; scen_status 'sae join, WPA2 and WPA3' 0 $?")
+    #       The PSK of this access point is not the password given, so a join
+    #       that took the WPA2 side of it would have been turned away: joining
+    #       is WPA3 having been used.
+    lines.append("scen_count 'sae transition, joined with WPA3 (the PSK is another one)' 1 \"$(joined saetrans)\"")
+    lines.append("d0=%s" % dm("$S: deauthenticated from $sbm"))
+    lines.append(spoof("sb", "deauth", 5, chan["req"]))
+    lines.append("sleep 3")
+    lines.append("scen_count 'sae transition, spoofed deauthentication ignored' 0 \"$(( %s - d0 ))\"" % dm("$S: deauthenticated from $sbm"))
+    lines.append("kill $(cat /tmp/sb.pid); rm -f /root/wifi /root/wifi.rules")
+    # hostapd itself, which says more of what it does: WPA3 alone with each
+    # password element method it speaks, and once with a token demanded of
+    # every commit; its own log is what says how far the exchange went.
+    if hostapd:
+        lines.append("H=\"$L /mnt/stick/hostapd\"")
+        for at, (pwe_mode, channel, token) in enumerate(((0, 11, False), (2, 1, False), (0, 6, True),
+                                                         (1, 3, False), (1, 8, True))):
+            tag = "sh%d" % at
+            word = "hostapd-sae-%d" % at
+            what = "sae_pwe=%d%s" % (pwe_mode, ", anti-clogging token" if token else "")
+            #       An access point that says it takes hash-to-element (sae_pwe 1 and 2)
+            #       gets it, and one that does not (0) gets the hunt.
+            lines.append("/mnt/stick/hwsim_radio new > /dev/null; r=$(station $S); "
+                         "%sm=$(cat /sys/class/net/$r/address); %si=$(/mnt/stick/hwsim_radio move $NS $r)" % (tag, tag))
+            conf = ["driver=nl80211", "ssid2=%s" % ("saeh%d" % at).encode().hex(), "hw_mode=g",
+                    "channel=%d" % channel, "wpa=2", "wpa_key_mgmt=SAE", "rsn_pairwise=CCMP",
+                    "ieee80211w=2", "sae_password=%s" % word, "sae_pwe=%d" % pwe_mode]
+            #       An access point under load asks for a token before it does
+            #       the curve: a threshold of 0 is always.
+            if token:
+                conf.append("sae_anti_clogging_threshold=0")
+            lines.append("printf '%%s\\n' \"interface=$%si\" %s > /tmp/%s.conf" % (tag, " ".join(q(c) for c in conf), tag))
+            lines.append("$A $H -B -dd -t -P /tmp/%s.pid -f /tmp/%s.log /tmp/%s.conf" % (tag, tag, tag))
+            lines.append("for i in $(seq 40); do grep -q AP-ENABLED /tmp/%s.log 2>/dev/null && break; sleep 0.25; done" % tag)
+            lines.append("$A /mnt/stick/hwsim_radio power $%si 14" % tag)
+            lines.append("printf '%%s\\n' %s | moonwater wifi add saeh%d - > /tmp/sc.got 2>&1; scen_status 'sae hostapd, %s' 0 $?" % (q(word), at, what))
+            lines.append("scen_count 'sae hostapd %d, joined' 1 \"$(joined saeh%d)\"" % (at, at))
+            lines.append("scen_count 'sae hostapd %d used %s' 1 \"$(grep -c 'SAE: Derive keys - H2E=%d' /tmp/%s.log | awk '{ print ($1 > 0) }')\""
+                         % (at, "hash-to-element" if pwe_mode else "the hunt", 1 if pwe_mode else 0, tag))
+            lines.append("sleep 1; scen_count 'sae hostapd %d took the exchange to Accepted and the handshake to its end' 1 "
+                         "\"$(grep -c -e 'SAE: State Confirmed -> Accepted' -e 'EAPOL-4WAY-HS-COMPLETED' /tmp/%s.log | awk '{ print ($1 > 1) }')\"" % (at, tag))
+            if token:
+                lines.append("scen_count 'sae hostapd %d asked for a token and was given it' 1 \"$(grep -c 'SAE: Request anti-clogging token' /tmp/%s.log | awk '{ print ($1 > 0) }')\"" % (at, tag))
+                lines.append("grep -a -e 'SAE:' -e 'nti-clogging' /tmp/%s.log | grep -a -v -e 'pwd-' -e 'counter' -e 'nl80211' | head -40 | sed 's/^/sae-hostapd-%d /'" % (tag, at))
+            lines.append("kill $(cat /tmp/%s.pid); rm -f /root/wifi /root/wifi.rules" % tag)
+    family("sae", lines)
 
     # ---- starve: twins of the saved WPA2 network that ask for WPA2 as it
     # does, every one louder, under another password: each takes message 2
@@ -72103,12 +73720,17 @@ def harness_wifi_air(argv):
     # ---- class: WPA2 that asks for what the join cannot give is said, and
     # not tried, with what it asks for as its name; and none of them ranks
     # ahead of a plain WPA2 twin of the name that is much the quieter.
+    # (Protected management frames, which this family once held to the
+    # same, are joined now: the pmf family.)
     lines = []
     extra = []
-    powers = {"pmf": 14, "tkip": 13, "ft": 12}
-    kinds = ["pmf"] + (["tkip", "ft"] if hostapd else [])
-    words = {"pmf": "PMF", "tkip": "TKIP", "ft": "FT/256"}
-    lines.append("moonwater wifi remove \"$ap0\" > /dev/null 2>&1; rm -f /root/wifi /run/moonwater/wifi.avoid /run/moonwater/wifi.last")
+    powers = {"tkip": 13, "ft": 12}
+    kinds = ["tkip", "ft"] if hostapd else []
+    words = {"tkip": "TKIP", "ft": "FT/EXT"}
+    clauses = {"tkip": "TKIP, which is broken and never joined; set the access point to WPA2 "
+                       "or WPA3 with AES (CCMP)",
+               "ft": "FT/EXT, which moonwater cannot join yet"}
+    lines.append("moonwater wifi remove \"$ap0\" > /dev/null 2>&1; rm -f /root/wifi /root/wifi.rules /run/moonwater/wifi.avoid /run/moonwater/wifi.last")
     lines.append("H=\"$L /mnt/stick/hostapd\"")
     for at, kind in enumerate(kinds):
         ssid = name(plain, taken)
@@ -72116,56 +73738,50 @@ def harness_wifi_air(argv):
         extra.append((kind, ssid, password))
         lines.append("cl%d=\"$(printf '%s')\"" % (at, octal(ssid)))
         lines.append("/mnt/stick/hwsim_radio new > /dev/null; r=$(station $S); cr%d=$(/mnt/stick/hwsim_radio move $NS $r)" % at)
-        if kind in ("ft", "tkip"):
-            # wpa_supplicant's own access point picks its group cipher from its
-            # pairwise ones and has no FT, so these two are hostapd's: a TKIP
-            # pairwise cipher beside CCMP makes TKIP the group cipher, which a
-            # station that offers CCMP as the group's is refused for.
-            conf = ["driver=nl80211", "ssid2=%s" % ssid.hex(), "hw_mode=g", "channel=%d" % (1, 6, 11)[at],
-                    "wpa=2", "wpa_passphrase=%s" % password]
-            if kind == "ft":
-                conf += ["wpa_key_mgmt=FT-PSK", "rsn_pairwise=CCMP", "mobility_domain=a1b2",
-                         "ft_psk_generate_local=1", "nas_identifier=cl.example"]
-            else:
-                conf += ["wpa_key_mgmt=WPA-PSK", "rsn_pairwise=CCMP TKIP"]
-            lines.append("printf '%%s\\n' \"interface=$cr%d\" %s > /tmp/cl%d.conf" % (at, " ".join(q(c) for c in conf), at))
-            lines.append("$A $H -B -dd -t -P /tmp/cl%d.pid -f /tmp/cl%d.log /tmp/cl%d.conf" % (at, at, at))
+        # wpa_supplicant's own access point picks its group cipher from its
+        # pairwise ones and has no FT, so these two are hostapd's: a TKIP
+        # pairwise cipher beside CCMP makes TKIP the group cipher, which a
+        # station that offers CCMP as the group's is refused for.
+        conf = ["driver=nl80211", "ssid2=%s" % ssid.hex(), "hw_mode=g", "channel=%d" % (1, 6, 11)[at],
+                "wpa=2", "wpa_passphrase=%s" % password]
+        if kind == "ft":
+            conf += ["wpa_key_mgmt=FT-PSK", "rsn_pairwise=CCMP", "mobility_domain=a1b2",
+                     "ft_psk_generate_local=1", "nas_identifier=cl.example"]
         else:
-            body = ["network={", "ssid=%s" % ssid.hex(), "mode=2", "frequency=%d" % (2407 + 5 * (1, 6, 11)[at]),
-                    "proto=RSN", "key_mgmt=WPA-PSK", "psk=\"%s\"" % password,
-                    "pairwise=CCMP", "group=CCMP", "ieee80211w=2", "}"]
-            lines.append("printf '%%s\\n' %s > /tmp/cl%d.conf" % (" ".join(q(line) for line in body), at))
-            lines.append("$A $W -B -i $cr%d -c /tmp/cl%d.conf -D nl80211 -f /tmp/cl%d.log -P /tmp/cl%d.pid" % (at, at, at, at))
+            conf += ["wpa_key_mgmt=WPA-PSK", "rsn_pairwise=CCMP TKIP"]
+        lines.append("printf '%%s\\n' \"interface=$cr%d\" %s > /tmp/cl%d.conf" % (at, " ".join(q(c) for c in conf), at))
+        lines.append("$A $H -B -dd -t -P /tmp/cl%d.pid -f /tmp/cl%d.log /tmp/cl%d.conf" % (at, at, at))
         lines.append("for i in $(seq 40); do grep -q AP-ENABLED /tmp/cl%d.log 2>/dev/null && break; sleep 0.25; done" % at)
         lines.append("$A /mnt/stick/hwsim_radio power $cr%d %d" % (at, powers[kind]))
     lines.append("sleep 31")
     for at, (kind, ssid, password) in enumerate(extra):
         lines.append("t0=$(uptime_now); moonwater wifi add \"$cl%d\" %s > /tmp/sc.got 2>&1; scen_status 'class %s refused' 1 $?; echo \"wifi-time class-%s $(took $t0)\"" % (at, q(password), kind, kind))
-        lines.append("scen_count 'class %s says what it asks for' 1 \"$(grep -c 'saved, but it asks for %s, which moonwater cannot join yet' /tmp/sc.got)\"" % (kind, words[kind]))
+        lines.append("scen_count 'class %s says what it asks for' 1 \"$(grep -c -F 'saved, but it asks for %s' /tmp/sc.got)\"" % (kind, clauses[kind]))
         lines.append("scen_count 'class %s refused without a join' 1 \"$(awk -v t=\"$(took $t0)\" 'BEGIN { print (t < 12) }')\"" % kind)
         lines.append("scen_count 'class %s is listed under its name' 1 \"$(moonwater wifi 2>&1 | scen_strip | grep -F -e \"$cl%d\" | grep -c ' %s ')\"" % (kind, at, words[kind]))
     # The twins: a plain WPA2 network by the name of the first, much the
     # quieter, and the first itself, much the louder and asking for more:
     # the machine joins the plain one, having authenticated with the other
     # not at all.
-    kind, ssid, password = extra[0]
-    lines.append("/mnt/stick/hwsim_radio new > /dev/null; r=$(station $S); tm=$(cat /sys/class/net/$r/address); ctw=$(/mnt/stick/hwsim_radio move $NS $r)")
-    body = ["network={", "ssid=%s" % ssid.hex(), "mode=2", "frequency=%d" % (2407 + 5 * 9),
-            "proto=RSN", "pairwise=CCMP", "group=CCMP", "key_mgmt=WPA-PSK", "psk=\"%s\"" % password, "}"]
-    lines.append("printf '%%s\\n' %s > /tmp/cltwin.conf" % " ".join(q(line) for line in body))
-    lines.append("$A $W -B -i $ctw -c /tmp/cltwin.conf -D nl80211 -f /tmp/cltwin.log -P /tmp/cltwin.pid")
-    lines.append("for i in $(seq 40); do grep -q AP-ENABLED /tmp/cltwin.log 2>/dev/null && break; sleep 0.25; done")
-    lines.append("$A /mnt/stick/hwsim_radio power $ctw 3")
-    lines.append("sleep 31; q0=$(dmesg | grep -c \"$S: authenticate with\")")
-    lines.append("t0=$(uptime_now); moonwater wifi add \"$cl0\" %s > /tmp/sc.got 2>&1; scen_status 'class twin joined' 0 $?; echo \"wifi-time class-twin $(took $t0)\"" % q(password))
-    lines.append("scen_count 'class the plain one joined' 1 \"$(joined \"$cl0\")\"")
-    lines.append("scen_count 'class one authentication, with the plain one' 1 \"$(( $(dmesg | grep -c \"$S: authenticate with\") - q0 ))\"")
-    lines.append("scen_count 'class authenticated with the plain one' 1 \"$(dmesg | grep -a \"$S: authenticate with\" | tail -1 | grep -c \"$tm\")\"")
-    for at in range(len(extra)):
-        lines.append("moonwater wifi remove \"$cl%d\" > /dev/null 2>&1" % at)
-        lines.append("kill $(cat /tmp/cl%d.pid) 2>/dev/null" % at)
-    lines.append("kill $(cat /tmp/cltwin.pid); rm -f /root/wifi")
-    family("class", lines)
+    if extra:
+        kind, ssid, password = extra[0]
+        lines.append("/mnt/stick/hwsim_radio new > /dev/null; r=$(station $S); tm=$(cat /sys/class/net/$r/address); ctw=$(/mnt/stick/hwsim_radio move $NS $r)")
+        body = ["network={", "ssid=%s" % ssid.hex(), "mode=2", "frequency=%d" % (2407 + 5 * 9),
+                "proto=RSN", "pairwise=CCMP", "group=CCMP", "key_mgmt=WPA-PSK", "psk=\"%s\"" % password, "}"]
+        lines.append("printf '%%s\\n' %s > /tmp/cltwin.conf" % " ".join(q(line) for line in body))
+        lines.append("$A $W -B -i $ctw -c /tmp/cltwin.conf -D nl80211 -f /tmp/cltwin.log -P /tmp/cltwin.pid")
+        lines.append("for i in $(seq 40); do grep -q AP-ENABLED /tmp/cltwin.log 2>/dev/null && break; sleep 0.25; done")
+        lines.append("$A /mnt/stick/hwsim_radio power $ctw 3")
+        lines.append("sleep 31; q0=$(dmesg | grep -c \"$S: authenticate with\")")
+        lines.append("t0=$(uptime_now); moonwater wifi add \"$cl0\" %s > /tmp/sc.got 2>&1; scen_status 'class twin joined' 0 $?; echo \"wifi-time class-twin $(took $t0)\"" % q(password))
+        lines.append("scen_count 'class the plain one joined' 1 \"$(joined \"$cl0\")\"")
+        lines.append("scen_count 'class one authentication, with the plain one' 1 \"$(( $(dmesg | grep -c \"$S: authenticate with\") - q0 ))\"")
+        lines.append("scen_count 'class authenticated with the plain one' 1 \"$(dmesg | grep -a \"$S: authenticate with\" | tail -1 | grep -c \"$tm\")\"")
+        for at in range(len(extra)):
+            lines.append("moonwater wifi remove \"$cl%d\" > /dev/null 2>&1" % at)
+            lines.append("kill $(cat /tmp/cl%d.pid) 2>/dev/null" % at)
+        lines.append("kill $(cat /tmp/cltwin.pid); rm -f /root/wifi")
+        family("class", lines)
 
     # ---- rekey: hostapd, whose control socket starts rekeys on demand.
     # Two access points by one name, the first much the stronger, each
@@ -82682,6 +84298,7 @@ HARNESS_CHECKS = {
     "tls_verify_fuzz": harness_tls_verify_fuzz,
     "sntp_fuzz": harness_sntp_fuzz,
     "wifi_eapol_fuzz": harness_wifi_eapol_fuzz,
+    "wifi_sae_fuzz": harness_wifi_sae_fuzz,
     "wifi_key_state": harness_wifi_key_state,
     "wifi_scan_fuzz": harness_wifi_scan_fuzz,
     "bowl_sig_fuzz": harness_bowl_sig_fuzz,

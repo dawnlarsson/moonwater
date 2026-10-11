@@ -81347,6 +81347,504 @@ static fn wpa_key(void)
                       !memory_compare(pmk, this_is, 32));
 }
 
+/*
+        WPA3 and the key frames of descriptor version 3, against values made
+        by a reference written from the standard in Python (every SAE
+        step, from the hunt for the password element to the confirm) and, for
+        the CMAC, against RFC 4493's own. The password element is found for
+        each password, the commit taken in gives the KCK, the PMK, the PMKID
+        and the confirms, and a commit built here must satisfy
+        scalar * PWE + element = rand * PWE. The malformed commits, out of
+        range or off the curve or our own sent back, are refused.
+*/
+static const p8 sae0_pwe[64] = {0x6b, 0x79, 0x1a, 0x30, 0xa9, 0xdc, 0xb6, 0xc3, 0x98, 0x79, 0x52, 0xf8, 0xfc, 0xdb, 0xd6, 0xcc, 0xf8, 0xfe, 0x5d, 0xf5, 0xe3, 0x70, 0xd7, 0x0d, 0x65, 0xfb, 0x0d, 0x98, 0xf9, 0x7f, 0xe8, 0x18, 0x63, 0x1b, 0xac, 0xff, 0x14, 0xf7, 0x0e, 0x78, 0x74, 0x99, 0xc2, 0x7c, 0x0a, 0x74, 0x1e, 0x36, 0x58, 0xf3, 0xf6, 0xb2, 0xf2, 0x74, 0x5a, 0xd1, 0xc1, 0xac, 0x14, 0xa1, 0xbf, 0xf9, 0x10, 0x6c};
+static const p8 sae0_rand[32] = {0xf7, 0xc9, 0xe2, 0xb3, 0x4f, 0xb9, 0x24, 0x28, 0xd4, 0x94, 0xae, 0xb1, 0x51, 0x86, 0xe1, 0xf4, 0x58, 0xa9, 0x2d, 0xa4, 0x8c, 0xf7, 0x10, 0x60, 0x27, 0xda, 0x8b, 0x52, 0x8c, 0x74, 0x09, 0x90};
+static const p8 sae0_scalar[32] = {0xb7, 0xff, 0x4e, 0xa3, 0xfa, 0xdb, 0x69, 0x40, 0x2e, 0x73, 0x44, 0x50, 0xfb, 0x1f, 0x0d, 0xcb, 0x7a, 0x0a, 0xfe, 0x67, 0xcc, 0x78, 0x27, 0x01, 0x33, 0xee, 0xb1, 0x58, 0xbf, 0x68, 0x1a, 0xaf};
+static const p8 sae0_element[64] = {0xb5, 0xeb, 0x84, 0x93, 0x2b, 0x12, 0x5b, 0xb1, 0x73, 0x91, 0x68, 0x42, 0xa3, 0x28, 0xe5, 0xe6, 0x78, 0x5f, 0x8b, 0xc6, 0xd4, 0x4b, 0x20, 0x2d, 0xfb, 0x42, 0xa8, 0x71, 0xca, 0xbd, 0xb0, 0x28, 0x69, 0x53, 0xa6, 0x8e, 0x29, 0x54, 0x70, 0xde, 0xa2, 0x4a, 0xe1, 0x1e, 0x15, 0x35, 0x00, 0x1f, 0xe4, 0x5b, 0x99, 0x98, 0xd3, 0xab, 0x78, 0x3e, 0x96, 0x19, 0xd6, 0x6c, 0xd6, 0x2a, 0xde, 0x73};
+static const p8 sae0_peer_scalar[32] = {0xb8, 0x30, 0xa1, 0x9e, 0x54, 0x8e, 0x1d, 0x28, 0xfc, 0x5b, 0xe0, 0xf6, 0xce, 0x53, 0x70, 0xe0, 0x5b, 0xba, 0x84, 0x1d, 0x95, 0xd7, 0xd0, 0x51, 0xd0, 0xfd, 0xbc, 0x3d, 0xb0, 0xc7, 0x2f, 0x11};
+static const p8 sae0_peer_element[64] = {0x30, 0x6f, 0xd9, 0x47, 0xa5, 0x80, 0xca, 0x60, 0x7c, 0xf9, 0x47, 0x85, 0xc5, 0xe7, 0x95, 0x90, 0xbe, 0x6f, 0x75, 0x1d, 0x53, 0x37, 0xbb, 0x38, 0xeb, 0xc1, 0xbf, 0x56, 0xf4, 0xc2, 0x38, 0x5e, 0x19, 0x62, 0x13, 0x85, 0xa5, 0x84, 0xb0, 0x20, 0xfa, 0x97, 0x87, 0x9c, 0x00, 0xe1, 0x82, 0xb9, 0x9b, 0xe2, 0xea, 0x02, 0x32, 0xb9, 0x25, 0x4a, 0x9d, 0x27, 0x97, 0xf3, 0x4e, 0x8b, 0x73, 0x44};
+static const p8 sae0_kck[32] = {0x8a, 0x72, 0x79, 0xfd, 0x98, 0x2d, 0xcc, 0x65, 0xdc, 0xca, 0xb4, 0x60, 0x52, 0xc3, 0x0b, 0xb4, 0xe9, 0xb0, 0xd6, 0x09, 0x60, 0x56, 0x09, 0x45, 0x31, 0x86, 0x5b, 0x01, 0xf3, 0xb4, 0x95, 0x86};
+static const p8 sae0_pmk[32] = {0xff, 0xe0, 0x94, 0x47, 0xc7, 0x2c, 0x92, 0x39, 0xba, 0xa7, 0x88, 0x2b, 0x82, 0xef, 0x5d, 0x1f, 0x7b, 0x52, 0xc2, 0xfd, 0x93, 0x8b, 0x27, 0xa4, 0x4e, 0x2b, 0x62, 0x8c, 0xb5, 0x93, 0xa8, 0x3a};
+static const p8 sae0_pmkid[16] = {0x70, 0x2f, 0xf0, 0x43, 0x4f, 0x69, 0x86, 0x68, 0x2a, 0xcf, 0x25, 0x47, 0xc9, 0x72, 0x7e, 0xac};
+static const p8 sae0_confirm[32] = {0x5b, 0x7b, 0x31, 0x79, 0x99, 0x3f, 0xe3, 0x8e, 0x01, 0x87, 0x46, 0x99, 0xef, 0x13, 0x66, 0x7e, 0x46, 0xff, 0x60, 0xde, 0xd0, 0x33, 0x99, 0x53, 0xaf, 0xde, 0x07, 0xd5, 0x0a, 0x35, 0x03, 0x9b};
+static const p8 sae0_peer_confirm[32] = {0x7c, 0x3b, 0xea, 0x76, 0x1a, 0xb1, 0x1b, 0xa2, 0x5a, 0x14, 0xd9, 0x1f, 0xa8, 0x06, 0x2b, 0x80, 0xf0, 0xc2, 0x18, 0x71, 0x09, 0xce, 0x69, 0x74, 0xf5, 0xa5, 0xa3, 0x7c, 0x87, 0x62, 0x05, 0x11};
+static const p8 sae1_pwe[64] = {0x33, 0xcb, 0x00, 0x39, 0x98, 0x8a, 0xf7, 0xb2, 0xc4, 0x51, 0xd5, 0x83, 0x03, 0x12, 0x09, 0xfa, 0xa4, 0x2f, 0x3d, 0xc8, 0x54, 0xd0, 0xb0, 0x7d, 0x19, 0x38, 0xe8, 0x0a, 0xeb, 0x45, 0x08, 0x49, 0xa9, 0x36, 0x11, 0x26, 0x28, 0x36, 0xa9, 0xea, 0xe0, 0xee, 0xca, 0xe6, 0x1b, 0x76, 0xb5, 0x9b, 0xfd, 0x5f, 0xa6, 0xaf, 0xda, 0xe1, 0x8e, 0xdd, 0xd7, 0x1f, 0x87, 0x55, 0x7f, 0xae, 0x61, 0x07};
+static const p8 sae1_rand[32] = {0xe9, 0x7b, 0xda, 0x0b, 0x84, 0x04, 0x5d, 0x1f, 0x80, 0xa7, 0x24, 0x5c, 0x28, 0x59, 0x2a, 0xb6, 0x82, 0x64, 0xe4, 0x6b, 0x8b, 0x13, 0xc6, 0x0a, 0x7c, 0x28, 0x63, 0x81, 0xfc, 0xdc, 0x1f, 0x54};
+static const p8 sae1_scalar[32] = {0xde, 0x19, 0xc2, 0x8c, 0x0b, 0x03, 0x30, 0x93, 0x08, 0x47, 0x44, 0x8b, 0x79, 0xb3, 0x0c, 0x75, 0x19, 0x5d, 0xb9, 0xd1, 0xd1, 0x01, 0xcd, 0xdd, 0x4e, 0x7f, 0x30, 0x4e, 0x0d, 0x5b, 0x0b, 0x62};
+static const p8 sae1_element[64] = {0x6a, 0x80, 0x5a, 0xee, 0x75, 0xed, 0x03, 0x66, 0x28, 0xdd, 0x4a, 0x2b, 0x1a, 0xc1, 0x5c, 0xf8, 0x68, 0xeb, 0xb8, 0x3d, 0x0c, 0x15, 0xa0, 0x11, 0xa1, 0x7c, 0x6e, 0xd6, 0xc7, 0x1b, 0x31, 0xc5, 0xe7, 0xb1, 0x87, 0x8f, 0x12, 0x60, 0xf8, 0xf6, 0x47, 0x20, 0x99, 0xc6, 0xbf, 0x85, 0x8c, 0x74, 0xb8, 0x25, 0x52, 0x26, 0xdd, 0xc6, 0xfc, 0xe9, 0x7b, 0x5c, 0x61, 0x35, 0x2e, 0x78, 0xf1, 0xb0};
+static const p8 sae1_peer_scalar[32] = {0x55, 0xb6, 0x00, 0x3e, 0x5e, 0x8f, 0x8d, 0x3f, 0xdf, 0xa5, 0xd8, 0x48, 0x04, 0x26, 0x97, 0x46, 0x95, 0xbf, 0x02, 0xf3, 0xea, 0xa1, 0xe3, 0x81, 0xf1, 0x92, 0xb3, 0x62, 0x53, 0x0a, 0xae, 0xb4};
+static const p8 sae1_peer_element[64] = {0xb2, 0xcf, 0x72, 0xb0, 0xbc, 0x05, 0xdb, 0xf9, 0xea, 0x28, 0x92, 0xdc, 0xff, 0x40, 0xcc, 0xc9, 0xba, 0x3b, 0x2b, 0x20, 0x32, 0xd7, 0xab, 0x57, 0x1a, 0x8b, 0xa8, 0xac, 0x2a, 0x54, 0xff, 0x1a, 0xa9, 0x3d, 0xcd, 0x3f, 0xba, 0x73, 0x51, 0xdf, 0x9c, 0x31, 0xd5, 0xf2, 0xbe, 0xe1, 0xb7, 0xaa, 0xd3, 0xf1, 0x22, 0xa3, 0xb6, 0xa2, 0xd3, 0x2c, 0x2d, 0x4f, 0x55, 0xf8, 0x01, 0x65, 0x62, 0x8e};
+static const p8 sae1_kck[32] = {0x14, 0x55, 0xfa, 0x30, 0xd0, 0xfa, 0xfc, 0x3f, 0xca, 0x12, 0xa2, 0xa6, 0x76, 0xc6, 0xf5, 0x1f, 0xc1, 0x4e, 0x07, 0x48, 0x6d, 0xad, 0xd4, 0xf0, 0x8f, 0xbf, 0x80, 0x37, 0x19, 0xd7, 0xc4, 0x3a};
+static const p8 sae1_pmk[32] = {0xce, 0x92, 0x8d, 0x71, 0x70, 0x50, 0x32, 0x23, 0xa9, 0x7a, 0x2d, 0xa1, 0xb5, 0x20, 0x43, 0xcb, 0xb7, 0x16, 0xd3, 0x6a, 0x3a, 0x6f, 0x15, 0x7f, 0x3d, 0xfb, 0x77, 0x2e, 0x7e, 0xa3, 0x96, 0x06};
+static const p8 sae1_pmkid[16] = {0x33, 0xcf, 0xc2, 0xcb, 0x69, 0x92, 0xbd, 0xd1, 0xe7, 0xed, 0x1c, 0xd3, 0x7d, 0xd9, 0xa3, 0xbb};
+static const p8 sae1_confirm[32] = {0x8c, 0xd0, 0x01, 0xc6, 0xf7, 0x7c, 0x88, 0xab, 0xf2, 0x4f, 0x11, 0x34, 0x37, 0xdf, 0x81, 0xec, 0x5d, 0x71, 0x60, 0x48, 0xc0, 0x85, 0x53, 0xb2, 0x1f, 0x94, 0x6d, 0xa4, 0x49, 0x7d, 0xfc, 0xec};
+static const p8 sae1_peer_confirm[32] = {0xc4, 0x4d, 0xc5, 0xfe, 0x7f, 0xc8, 0xf1, 0xab, 0x56, 0xa1, 0xf4, 0xe3, 0x6e, 0x1c, 0x44, 0x93, 0x99, 0x65, 0x4f, 0x36, 0x86, 0x9d, 0x38, 0x0c, 0x97, 0xa2, 0x76, 0x98, 0x4f, 0x5e, 0xdb, 0xe9};
+static const p8 sae2_pwe[64] = {0xc2, 0x8f, 0xac, 0xcf, 0x97, 0x5a, 0x8e, 0x0c, 0x91, 0x11, 0x23, 0xf1, 0x4d, 0x3f, 0x65, 0xb6, 0x58, 0xec, 0x84, 0x7a, 0x57, 0x3e, 0xb0, 0xce, 0x39, 0x7c, 0xf3, 0x75, 0x0c, 0x33, 0x95, 0x19, 0x42, 0x54, 0x71, 0x97, 0xe6, 0x98, 0xe5, 0xa0, 0xce, 0x5d, 0x5b, 0x2f, 0xfe, 0x31, 0xa9, 0xa8, 0x31, 0xea, 0xd2, 0x88, 0x8f, 0xbc, 0xb6, 0xec, 0xbc, 0x6e, 0x48, 0xd6, 0x96, 0x30, 0x66, 0x4c};
+static const p8 sae2_rand[32] = {0x79, 0x4a, 0xb1, 0xa1, 0xb0, 0xf3, 0xdd, 0x97, 0xcf, 0x4d, 0x81, 0x41, 0x06, 0x0a, 0x1b, 0x5b, 0x5f, 0x70, 0xb9, 0xe3, 0x8b, 0x45, 0x62, 0xe8, 0x0d, 0x20, 0x39, 0x97, 0x70, 0xf7, 0xd3, 0x3b};
+static const p8 sae2_scalar[32] = {0x7c, 0x93, 0x46, 0xa2, 0x3a, 0xdb, 0x06, 0xa9, 0x3f, 0x27, 0x00, 0x49, 0x62, 0xd9, 0xfa, 0xf1, 0xa8, 0x65, 0x8b, 0x24, 0xf8, 0x21, 0xdf, 0x50, 0x21, 0x0a, 0xd0, 0x57, 0x7e, 0x67, 0x24, 0x52};
+static const p8 sae2_element[64] = {0x9a, 0xee, 0x1f, 0xea, 0x01, 0x2d, 0x8a, 0x5e, 0x9a, 0xf8, 0x89, 0x04, 0xc8, 0x12, 0x6d, 0x76, 0x88, 0xbb, 0xf0, 0x11, 0x9d, 0xa9, 0x20, 0x9b, 0xbe, 0xf3, 0xf5, 0xae, 0xbb, 0x03, 0x14, 0xf0, 0x86, 0xac, 0xeb, 0x86, 0xf4, 0x7e, 0x8e, 0x3b, 0xe6, 0x72, 0xdc, 0xb4, 0x51, 0x76, 0x83, 0xe6, 0xb5, 0x83, 0xfc, 0xf4, 0x96, 0x18, 0x9e, 0x9f, 0x06, 0xc2, 0xee, 0x1f, 0x2a, 0x87, 0x3e, 0x4c};
+static const p8 sae2_peer_scalar[32] = {0x80, 0x90, 0x5d, 0x81, 0x94, 0x9d, 0x9b, 0x8a, 0x8f, 0x3e, 0xc3, 0x30, 0x1a, 0x83, 0x2b, 0xa5, 0xaf, 0x88, 0xa7, 0x09, 0xe9, 0xde, 0xfa, 0x85, 0x98, 0x2b, 0x11, 0x2a, 0x0a, 0x20, 0xd1, 0xbc};
+static const p8 sae2_peer_element[64] = {0x53, 0xba, 0xe1, 0xc2, 0xb8, 0xf7, 0x20, 0xf2, 0xe0, 0x71, 0x49, 0xb3, 0xa1, 0x02, 0xf0, 0x90, 0x80, 0xe7, 0xbd, 0xf2, 0x3e, 0xc3, 0x02, 0x4f, 0x9a, 0x8c, 0xb2, 0xa0, 0x0e, 0x16, 0x62, 0x3b, 0x2f, 0x15, 0xd9, 0x77, 0x1c, 0x0b, 0xd7, 0x5e, 0x3e, 0xe0, 0xac, 0x12, 0x23, 0x75, 0xbd, 0x86, 0x83, 0x23, 0xec, 0x48, 0x35, 0x30, 0x5e, 0x8d, 0x7e, 0x80, 0x94, 0x78, 0xf8, 0x66, 0x0a, 0x55};
+static const p8 sae2_kck[32] = {0x05, 0xbf, 0xef, 0xbb, 0xa9, 0xf1, 0xb1, 0x51, 0x1a, 0x6c, 0xc7, 0x17, 0x97, 0xa1, 0x92, 0x11, 0x5a, 0xba, 0x05, 0x78, 0x73, 0x5b, 0xbb, 0xb5, 0xb1, 0xcf, 0x99, 0x40, 0x5e, 0xf4, 0xf9, 0x94};
+static const p8 sae2_pmk[32] = {0xfd, 0xe3, 0x80, 0x5c, 0x91, 0xd9, 0x1c, 0xc7, 0xcb, 0x06, 0x58, 0x9a, 0x9c, 0x41, 0x5a, 0x45, 0x64, 0x87, 0x8b, 0x86, 0x66, 0x58, 0x81, 0x7b, 0xd4, 0x1e, 0x4a, 0xd7, 0xd3, 0xf3, 0x06, 0x88};
+static const p8 sae2_pmkid[16] = {0xfd, 0x23, 0xa4, 0x23, 0xcf, 0x78, 0xa2, 0x33, 0xce, 0x65, 0xc3, 0x79, 0x7d, 0x5d, 0x26, 0x97};
+static const p8 sae2_confirm[32] = {0x78, 0x43, 0x83, 0x70, 0x28, 0xff, 0x91, 0x36, 0xe6, 0x58, 0xdf, 0xcb, 0x9b, 0x03, 0x39, 0x8c, 0x1c, 0x59, 0x69, 0x85, 0xe4, 0x6a, 0x6b, 0x4a, 0xd9, 0x80, 0xc8, 0x44, 0x1e, 0xec, 0x04, 0xbe};
+static const p8 sae2_peer_confirm[32] = {0x05, 0x48, 0x9b, 0x4f, 0x43, 0xd7, 0x20, 0xf4, 0x1f, 0xb0, 0x0e, 0xe3, 0x06, 0xe8, 0xf1, 0x5d, 0x01, 0x9e, 0x27, 0x6b, 0xff, 0x67, 0x13, 0x9e, 0xc1, 0xd7, 0x00, 0x95, 0x72, 0x19, 0xbd, 0x42};
+static const p8 sae3_pwe[64] = {0x66, 0x72, 0x57, 0xe7, 0x41, 0x35, 0xd8, 0xf7, 0x91, 0x57, 0xf8, 0x15, 0x79, 0x69, 0x4d, 0xc2, 0x23, 0xb6, 0xd8, 0x1d, 0x23, 0xfb, 0xf8, 0x52, 0xcd, 0xf9, 0xb4, 0x15, 0xb9, 0x21, 0x41, 0xc6, 0x3e, 0xf6, 0x35, 0x04, 0x13, 0x32, 0xef, 0xd0, 0xc8, 0xf1, 0xb1, 0xa9, 0x61, 0x53, 0xf9, 0x8c, 0x7b, 0xf2, 0x9c, 0xf3, 0xde, 0xb8, 0x41, 0xa4, 0x5e, 0x4a, 0xd9, 0x68, 0x0e, 0x3c, 0xb4, 0x80};
+static const p8 sae3_rand[32] = {0x11, 0xc0, 0xac, 0xa2, 0xb8, 0x48, 0x6b, 0x24, 0xbf, 0x53, 0x34, 0x80, 0xc3, 0x31, 0x22, 0xf4, 0x7b, 0x5f, 0x25, 0x46, 0xe8, 0x40, 0x29, 0x92, 0x17, 0x88, 0xac, 0xd2, 0xe3, 0x90, 0xb6, 0xa2};
+static const p8 sae3_scalar[32] = {0xc6, 0x51, 0xf1, 0x64, 0x70, 0x4c, 0x0b, 0x8f, 0xfc, 0x04, 0x7c, 0xb7, 0x1b, 0xda, 0x66, 0x6a, 0xb3, 0xb7, 0x30, 0xd9, 0x5f, 0x27, 0x63, 0x3d, 0x85, 0x70, 0x97, 0x29, 0x2f, 0x3f, 0xf1, 0x1e};
+static const p8 sae3_element[64] = {0x7e, 0x2c, 0x21, 0x6d, 0x0a, 0xae, 0x76, 0x07, 0x25, 0x35, 0xb7, 0x66, 0xc2, 0x7a, 0x50, 0xf6, 0x79, 0x6c, 0x3e, 0x4f, 0x3c, 0x93, 0x35, 0x3c, 0xaa, 0x0a, 0x34, 0x0c, 0x59, 0xce, 0x3e, 0x19, 0x46, 0xbc, 0xd9, 0x60, 0x21, 0x61, 0xdd, 0x2f, 0xc4, 0x4f, 0xab, 0xa5, 0x4e, 0x7a, 0x61, 0xb6, 0x7a, 0x00, 0x99, 0x7c, 0x7d, 0x90, 0x6a, 0x42, 0xfb, 0x50, 0xef, 0x09, 0x19, 0x90, 0xd3, 0xbe};
+static const p8 sae3_peer_scalar[32] = {0x16, 0x91, 0x16, 0xf8, 0xc9, 0xd5, 0x05, 0x8a, 0x53, 0xda, 0x85, 0x80, 0xa0, 0x5f, 0xd4, 0x0e, 0x0c, 0xa0, 0x63, 0xf5, 0x5c, 0x04, 0x29, 0xb2, 0x5b, 0x0d, 0xa0, 0x5a, 0x3a, 0x95, 0x17, 0x90};
+static const p8 sae3_peer_element[64] = {0x21, 0x28, 0x3c, 0x73, 0xc2, 0xf7, 0xdd, 0xfb, 0xda, 0x7a, 0x4e, 0xf0, 0x14, 0xff, 0xbf, 0x80, 0xc0, 0x9b, 0x15, 0x27, 0x22, 0x03, 0xba, 0xf0, 0xbd, 0x65, 0x79, 0x26, 0xd5, 0x7e, 0x34, 0xef, 0xec, 0x09, 0xee, 0x02, 0x77, 0x69, 0xc9, 0x7d, 0x0f, 0xb9, 0x5a, 0x30, 0x3f, 0x58, 0x8d, 0x02, 0xde, 0x95, 0x7a, 0xfa, 0xfc, 0x81, 0xad, 0x00, 0xd3, 0xfb, 0xb4, 0xf9, 0x9a, 0x07, 0x08, 0xdc};
+static const p8 sae3_kck[32] = {0xad, 0xf1, 0x4e, 0xfd, 0xe4, 0x4c, 0xd8, 0xb7, 0x3b, 0xa8, 0x2c, 0xfa, 0x30, 0xfa, 0x6d, 0x2c, 0x8a, 0x41, 0x33, 0x51, 0x4b, 0x1e, 0x5a, 0xc5, 0xf6, 0x57, 0x0f, 0xf9, 0x22, 0x4f, 0x80, 0x98};
+static const p8 sae3_pmk[32] = {0x2e, 0x95, 0x53, 0xca, 0xc7, 0x33, 0x28, 0x1e, 0x0c, 0x78, 0x37, 0xca, 0xa3, 0x22, 0x5f, 0x40, 0x38, 0xa7, 0x35, 0x6c, 0x61, 0x34, 0xea, 0x00, 0x95, 0x0a, 0x88, 0xfb, 0xcc, 0x66, 0xe6, 0x7c};
+static const p8 sae3_pmkid[16] = {0xdc, 0xe3, 0x08, 0x5d, 0x3a, 0x21, 0x11, 0x1a, 0x4f, 0xdf, 0x02, 0x37, 0xbc, 0x3a, 0x3a, 0x78};
+static const p8 sae3_confirm[32] = {0x6b, 0x28, 0x79, 0x77, 0x8c, 0x3c, 0xbf, 0xc4, 0x94, 0x86, 0xf4, 0x35, 0x9d, 0x87, 0xc7, 0x50, 0x2c, 0x47, 0x47, 0x80, 0xbd, 0x02, 0x43, 0x97, 0xe5, 0xb7, 0x30, 0x3b, 0x30, 0x97, 0x67, 0x43};
+static const p8 sae3_peer_confirm[32] = {0x89, 0x1e, 0x90, 0x02, 0x2b, 0xff, 0xce, 0xee, 0x6a, 0x29, 0x7a, 0xb4, 0x97, 0xe2, 0x3f, 0x53, 0x79, 0xe0, 0xde, 0xfb, 0x80, 0xce, 0x15, 0x98, 0xf5, 0x01, 0xa1, 0xd2, 0xc7, 0x5a, 0x13, 0x9a};
+static const p8 kdf_pmk[32] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f};
+static const p8 kdf_anonce[32] = {0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x6b, 0x6c, 0x6d, 0x6e, 0x6f, 0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7a, 0x7b, 0x7c, 0x7d, 0x7e, 0x7f, 0x80, 0x81, 0x82, 0x83};
+static const p8 kdf_snonce[32] = {0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce, 0xcf, 0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xda, 0xdb, 0xdc, 0xdd, 0xde, 0xdf, 0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7};
+static const p8 kdf_ptk[48] = {0xf9, 0xf1, 0xe7, 0x2f, 0x64, 0x83, 0xe3, 0x04, 0xe1, 0x07, 0x17, 0xe1, 0x85, 0xad, 0x39, 0xbe, 0x33, 0x50, 0xf0, 0xc0, 0x45, 0xa1, 0xca, 0x99, 0xd4, 0xfc, 0x43, 0x3f, 0xc6, 0xfb, 0x84, 0x98, 0x5c, 0x8c, 0x5e, 0x99, 0x96, 0x0f, 0xde, 0x49, 0x50, 0x01, 0xbd, 0x5a, 0x87, 0xfa, 0x58, 0xb0};
+
+static bool wls_same(const p8 address_to a, const p8 address_to b, positive n)
+{
+        return !memory_compare(a, b, n);
+}
+
+static fn wifi_key_checks(void)
+{
+        static const p8 key[16] = {0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6,
+                                   0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f, 0x3c};
+        static const p8 message[64] = {
+            0x6b, 0xc1, 0xbe, 0xe2, 0x2e, 0x40, 0x9f, 0x96, 0xe9, 0x3d, 0x7e, 0x11, 0x73, 0x93, 0x17, 0x2a,
+            0xae, 0x2d, 0x8a, 0x57, 0x1e, 0x03, 0xac, 0x9c, 0x9e, 0xb7, 0x6f, 0xac, 0x45, 0xaf, 0x8e, 0x51,
+            0x30, 0xc8, 0x1c, 0x46, 0xa3, 0x5c, 0xe4, 0x11, 0xe5, 0xfb, 0xc1, 0x19, 0x1a, 0x0a, 0x52, 0xef,
+            0xf6, 0x9f, 0x24, 0x45, 0xdf, 0x4f, 0x9b, 0x17, 0xad, 0x2b, 0x41, 0x7b, 0xe6, 0x6c, 0x37, 0x10};
+        static const p8 tag0[16] = {0xbb, 0x1d, 0x69, 0x29, 0xe9, 0x59, 0x37, 0x28,
+                                    0x7f, 0xa3, 0x7d, 0x12, 0x9b, 0x75, 0x67, 0x46};
+        static const p8 tag16[16] = {0x07, 0x0a, 0x16, 0xb4, 0x6b, 0x4d, 0x41, 0x44,
+                                     0xf7, 0x9b, 0xdd, 0x9d, 0xd0, 0x4a, 0x28, 0x7c};
+        static const p8 tag40[16] = {0xdf, 0xa6, 0x67, 0x47, 0xde, 0x9a, 0xe6, 0x30,
+                                     0x30, 0xca, 0x32, 0x61, 0x14, 0x97, 0xc8, 0x27};
+        static const p8 tag64[16] = {0x51, 0xf0, 0xbe, 0xbf, 0x7e, 0x3b, 0x9d, 0x92,
+                                     0xfc, 0x49, 0x74, 0x17, 0x79, 0x36, 0x3c, 0xfe};
+        static const p8 access[6] = {2, 0, 0, 0, 1, 0};
+        static const p8 station[6] = {2, 0, 0, 0, 2, 0};
+        p8 mac[16];
+        p8 ptk[64];
+        p8 rsn[48];
+        static const p8 rsn_pmf[28] = {0x30, 0x1a, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04, 0x01, 0x00,
+                                       0x00, 0x0f, 0xac, 0x04, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x02,
+                                       0xc0, 0x00, 0x00, 0x00, 0x00, 0x0f, 0xac, 0x06};
+        static const p8 rsn_plain[22] = {0x30, 0x14, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04,
+                                         0x01, 0x00, 0x00, 0x0f, 0xac, 0x04, 0x01, 0x00,
+                                         0x00, 0x0f, 0xac, 0x02, 0x00, 0x00};
+
+        crypto_aes_cmac((p8 address_to)key, (p8 address_to)message, 0, mac);
+        check("AES-CMAC of nothing (RFC 4493)", wls_same(mac, tag0, 16));
+        crypto_aes_cmac((p8 address_to)key, (p8 address_to)message, 16, mac);
+        check("AES-CMAC of one block (RFC 4493)", wls_same(mac, tag16, 16));
+        crypto_aes_cmac((p8 address_to)key, (p8 address_to)message, 40, mac);
+        check("AES-CMAC of forty bytes (RFC 4493)", wls_same(mac, tag40, 16));
+        crypto_aes_cmac((p8 address_to)key, (p8 address_to)message, 64, mac);
+        check("AES-CMAC of four blocks (RFC 4493)", wls_same(mac, tag64, 16));
+
+        memory_fill(ptk, 0, sizeof(ptk));
+        wifi_ptk((p8 address_to)kdf_pmk, (p8 address_to)access, (p8 address_to)station,
+                 (p8 address_to)kdf_anonce, (p8 address_to)kdf_snonce, ptk, 6);
+        check("the PTK of PSK-SHA256 by the KDF of 802.11-2016", wls_same(ptk, kdf_ptk, 48));
+        //      SAE's PTK is the same KDF, which a key descriptor version of 0 must not turn
+        //      back into the HMAC-SHA1 of PSK.
+        memory_fill(ptk, 0, sizeof(ptk));
+        wifi_ptk((p8 address_to)kdf_pmk, (p8 address_to)access, (p8 address_to)station,
+                 (p8 address_to)kdf_anonce, (p8 address_to)kdf_snonce, ptk, 8);
+        check("and the PTK of SAE is that one too", wls_same(ptk, kdf_ptk, 48));
+        check("the key descriptor version is 2 for PSK, 3 for PSK-SHA256 and 0 (as the suite defines) for SAE",
+              wifi_key_version(2) == 2 && wifi_key_version(6) == 3 && wifi_key_version(8) == 0);
+
+        check("the RSN element without protection is what it always was",
+              wifi_rsn_build(rsn, 2, 0, null) == 22 && wls_same(rsn, rsn_plain, 22));
+        check("the RSN element with protection capable and required is wpa_supplicant's",
+              wifi_rsn_build(rsn, 2, 3, null) == 28 && wls_same(rsn, rsn_pmf, 28));
+}
+
+/*
+        Hash-to-element against the same Python reference: the simplified SWU map
+        of six values of u (zero, where m is zero, among them), and PT and the
+        element of two stations for four names and passwords.
+*/
+static const p8 h2e0_pt[64] = {0x14, 0x15, 0x5e, 0x65, 0x7b, 0xd5, 0xa6, 0x00, 0xa5, 0x21, 0x64, 0xe2, 0xe5, 0xd7, 0x39, 0xde, 0xd8, 0x17, 0xee, 0x75, 0xc5, 0x29, 0x23, 0xd9, 0x82, 0x8d, 0x50, 0x7c, 0xa7, 0x32, 0xa9, 0xe2, 0xcc, 0xee, 0x48, 0x04, 0xfa, 0x6e, 0x05, 0x1e, 0x21, 0x38, 0x3a, 0xb8, 0xb0, 0xb8, 0x8d, 0x61, 0x4a, 0x60, 0x04, 0xc5, 0x67, 0xde, 0xd4, 0xef, 0x68, 0xca, 0xf4, 0xed, 0x53, 0xba, 0x50, 0x5c};
+static const p8 h2e0_pwe[64] = {0x65, 0x23, 0x5c, 0x01, 0x83, 0xc1, 0xf9, 0x44, 0xb0, 0x5d, 0xae, 0x89, 0x99, 0x3f, 0x38, 0x9e, 0x70, 0x16, 0x8c, 0x0d, 0xa5, 0x97, 0xe7, 0x8c, 0xc1, 0x42, 0x95, 0xd6, 0x15, 0x6c, 0x00, 0x11, 0xf9, 0x6b, 0x6b, 0x7c, 0x1b, 0x5a, 0x2d, 0x09, 0x47, 0x17, 0x66, 0x2e, 0x88, 0x52, 0x7c, 0x96, 0x69, 0xca, 0xf4, 0x42, 0x92, 0x80, 0x4c, 0x25, 0x4e, 0x7f, 0xed, 0x05, 0x38, 0x38, 0x59, 0x0e};
+static const p8 h2e1_pt[64] = {0xf7, 0x56, 0x1a, 0xfa, 0x28, 0x1c, 0x05, 0xbe, 0x91, 0x02, 0x4b, 0x77, 0x86, 0xa8, 0xae, 0x72, 0xca, 0x02, 0xc0, 0x54, 0x7e, 0x72, 0xb2, 0x91, 0x10, 0x49, 0x76, 0x3f, 0x6d, 0x20, 0x5f, 0x0b, 0x32, 0x6c, 0x75, 0xde, 0x96, 0xf3, 0xce, 0xb3, 0xd1, 0x96, 0xd8, 0x91, 0x50, 0x53, 0x5b, 0x28, 0x4e, 0x5f, 0xbe, 0xe3, 0x47, 0xe1, 0x7a, 0x46, 0xa6, 0xe6, 0xef, 0x59, 0x85, 0x0e, 0x8a, 0x64};
+static const p8 h2e1_pwe[64] = {0xb9, 0x5b, 0x64, 0x57, 0x14, 0xf1, 0x93, 0xa7, 0xca, 0x61, 0x25, 0x39, 0x9f, 0xed, 0x3e, 0xb0, 0xed, 0xce, 0xa3, 0xc9, 0xbb, 0x86, 0x3d, 0x64, 0x09, 0xbb, 0x56, 0x1a, 0x53, 0x3f, 0xea, 0xed, 0x83, 0x6c, 0x46, 0x93, 0xc2, 0x97, 0x87, 0x12, 0xfd, 0xaa, 0x21, 0xee, 0x31, 0x10, 0x8a, 0x7a, 0x18, 0x73, 0x43, 0xe7, 0x80, 0xa3, 0x6d, 0xae, 0xe1, 0x9f, 0x96, 0xb4, 0xcf, 0x7f, 0x94, 0x1e};
+static const p8 h2e2_pt[64] = {0xac, 0x0d, 0xa4, 0x15, 0x7e, 0xa3, 0xe1, 0xd8, 0x5d, 0x4a, 0xce, 0xcb, 0x43, 0x58, 0x84, 0x63, 0xa1, 0x90, 0x9d, 0x43, 0x98, 0xac, 0x65, 0x53, 0xa4, 0xbe, 0x7c, 0x8f, 0x51, 0xdd, 0x02, 0x96, 0xb1, 0xab, 0x62, 0x38, 0x8a, 0x35, 0x6c, 0x22, 0xf1, 0x91, 0x72, 0xfc, 0x64, 0xb5, 0x84, 0xe3, 0xfa, 0x51, 0x52, 0x27, 0x1f, 0x16, 0x7c, 0x60, 0xf2, 0x1e, 0xd9, 0x72, 0x16, 0x63, 0xdf, 0x9f};
+static const p8 h2e2_pwe[64] = {0x29, 0x5e, 0x14, 0x2b, 0xa3, 0x10, 0xdd, 0x00, 0x47, 0xda, 0xf7, 0x8c, 0xbf, 0xaa, 0x64, 0x19, 0xd2, 0x2a, 0x48, 0xd2, 0x35, 0xda, 0x93, 0x27, 0x57, 0x90, 0x6e, 0xb5, 0x02, 0x79, 0x6d, 0x51, 0x75, 0x9d, 0x9d, 0x73, 0x88, 0x32, 0x0c, 0xcb, 0xa2, 0xf1, 0x72, 0xea, 0x74, 0x33, 0xc6, 0xf5, 0x83, 0x47, 0xe3, 0xd5, 0x4b, 0xaf, 0x3c, 0x7a, 0x49, 0x3f, 0x5b, 0x15, 0x50, 0x55, 0x69, 0xa6};
+static const p8 h2e3_pt[64] = {0xdf, 0xaa, 0xaa, 0xca, 0xed, 0x6b, 0xad, 0x8f, 0x02, 0x16, 0x28, 0x05, 0x8b, 0xaa, 0x46, 0x84, 0x64, 0x23, 0x6b, 0x08, 0xb1, 0xcf, 0x3c, 0xfc, 0x86, 0x3e, 0xd6, 0xeb, 0x25, 0x71, 0xd8, 0x12, 0xd6, 0xd1, 0xc1, 0x4b, 0x78, 0x68, 0x1e, 0x78, 0x65, 0x05, 0x2d, 0xbf, 0xe9, 0xab, 0x15, 0xaa, 0x74, 0xb1, 0xad, 0x30, 0xb0, 0x25, 0x20, 0xaa, 0x97, 0x7b, 0xa9, 0xd5, 0x91, 0x0a, 0x71, 0x81};
+static const p8 h2e3_pwe[64] = {0x30, 0x44, 0x18, 0x71, 0x65, 0xaa, 0x8b, 0x75, 0xd9, 0x82, 0x4d, 0x4a, 0x5f, 0xd6, 0xc2, 0x31, 0x4f, 0xab, 0xa3, 0x75, 0x20, 0xc0, 0x43, 0xed, 0xa4, 0x08, 0x47, 0x8c, 0x89, 0x17, 0xe6, 0x46, 0x68, 0x6c, 0x91, 0x30, 0xdb, 0x81, 0x2c, 0x69, 0x2e, 0xe1, 0x37, 0xf3, 0xb9, 0x72, 0x30, 0x96, 0xa6, 0x14, 0xde, 0x33, 0x27, 0x55, 0xd6, 0x4a, 0x97, 0xc4, 0x83, 0x5e, 0xf1, 0x79, 0xbf, 0x06};
+static const p8 sswu0_u[32] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+static const p8 sswu0_p[64] = {0xa5, 0x28, 0xbd, 0x86, 0x96, 0xbd, 0xaf, 0x99, 0x6c, 0x65, 0xb9, 0x82, 0xd9, 0x49, 0x59, 0xd3, 0x14, 0x6f, 0xe6, 0xa0, 0x20, 0x69, 0x30, 0x90, 0xbd, 0xba, 0x13, 0x13, 0x23, 0x75, 0xf2, 0x24, 0x0e, 0x5f, 0xb7, 0x3d, 0x16, 0x79, 0x1c, 0xe3, 0x58, 0xfb, 0x5a, 0xdb, 0x2d, 0x33, 0x66, 0x8a, 0x3b, 0x24, 0x09, 0x9f, 0xd8, 0xd4, 0x01, 0xf6, 0x68, 0x5e, 0x0e, 0x99, 0x4f, 0xb4, 0xd7, 0x56};
+static const p8 sswu1_u[32] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+static const p8 sswu1_p[64] = {0xdb, 0x46, 0x98, 0xc8, 0x49, 0x7d, 0xef, 0x7b, 0x64, 0x76, 0x53, 0xb9, 0x3f, 0xac, 0xc5, 0x1d, 0x5c, 0xdd, 0x38, 0x4d, 0x64, 0x27, 0x95, 0xb7, 0x7e, 0x59, 0x6b, 0x88, 0x9f, 0x6f, 0xac, 0xc7, 0x27, 0xe8, 0x6f, 0x68, 0x7c, 0xa9, 0x4e, 0x26, 0xb6, 0x55, 0x50, 0x8b, 0x3b, 0xfe, 0xc3, 0x6e, 0x3e, 0x73, 0xa4, 0x74, 0xc9, 0xf7, 0x91, 0x49, 0x31, 0xf0, 0x9c, 0x6e, 0x91, 0xd3, 0xfa, 0x5b};
+static const p8 sswu2_u[32] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+static const p8 sswu2_p[64] = {0xea, 0xcd, 0xd1, 0x85, 0x01, 0xea, 0x13, 0x40, 0x3e, 0x4f, 0x3b, 0x60, 0x9b, 0xcb, 0xed, 0x7c, 0xde, 0x8d, 0xac, 0xbc, 0xc1, 0x08, 0xe1, 0x0a, 0xcc, 0xf2, 0x3e, 0xde, 0xaf, 0xf6, 0x78, 0x9f, 0x99, 0x9c, 0xba, 0xc0, 0xbc, 0x3d, 0x06, 0x75, 0x57, 0x49, 0x3e, 0xdb, 0x9b, 0x22, 0xfe, 0xb1, 0x62, 0x3c, 0x7a, 0x64, 0xcb, 0x69, 0x25, 0x58, 0x01, 0xba, 0x63, 0x4d, 0xbb, 0xe7, 0x95, 0x5a};
+static const p8 sswu3_u[32] = {0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe};
+static const p8 sswu3_p[64] = {0xdb, 0x46, 0x98, 0xc8, 0x49, 0x7d, 0xef, 0x7b, 0x64, 0x76, 0x53, 0xb9, 0x3f, 0xac, 0xc5, 0x1d, 0x5c, 0xdd, 0x38, 0x4d, 0x64, 0x27, 0x95, 0xb7, 0x7e, 0x59, 0x6b, 0x88, 0x9f, 0x6f, 0xac, 0xc7, 0xd8, 0x17, 0x90, 0x96, 0x83, 0x56, 0xb1, 0xda, 0x49, 0xaa, 0xaf, 0x74, 0xc4, 0x01, 0x3c, 0x91, 0xc1, 0x8c, 0x5b, 0x8c, 0x36, 0x08, 0x6e, 0xb6, 0xce, 0x0f, 0x63, 0x91, 0x6e, 0x2c, 0x05, 0xa4};
+static const p8 sswu4_u[32] = {0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef};
+static const p8 sswu4_p[64] = {0xc9, 0x8a, 0x04, 0x68, 0xfd, 0x11, 0x62, 0xee, 0xad, 0xef, 0x0d, 0x18, 0xe5, 0x04, 0x71, 0xf1, 0xe6, 0xfc, 0xd0, 0xb8, 0x1b, 0x5f, 0x09, 0xe2, 0xa7, 0xef, 0x8b, 0x79, 0xc1, 0xb5, 0xf2, 0xe3, 0x02, 0x52, 0x2e, 0x18, 0x42, 0xcd, 0x0e, 0xb8, 0xef, 0xce, 0x62, 0x9e, 0x89, 0x9c, 0x9e, 0x81, 0xbc, 0x8b, 0xd5, 0x45, 0x05, 0xdc, 0x35, 0xdf, 0x41, 0x30, 0x2f, 0x03, 0x92, 0x1b, 0xcf, 0x09};
+static const p8 sswu5_u[32] = {0x7f, 0xff, 0xff, 0xff, 0x80, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+static const p8 sswu5_p[64] = {0x91, 0xf5, 0xe3, 0x9a, 0x5a, 0x89, 0x47, 0x6f, 0xec, 0xc0, 0x0d, 0x7b, 0x1f, 0x42, 0x8e, 0x39, 0x23, 0x7d, 0xce, 0x46, 0x52, 0xfc, 0xfe, 0x18, 0x87, 0xfb, 0xa3, 0xf7, 0x47, 0xbe, 0x61, 0x77, 0x09, 0x2b, 0xaf, 0x09, 0x59, 0x63, 0x30, 0x89, 0xb1, 0xfb, 0xa8, 0x12, 0x3f, 0xb5, 0x3d, 0x0e, 0x12, 0x94, 0x17, 0xa3, 0x89, 0x9a, 0x29, 0x03, 0x3e, 0xd6, 0x18, 0x4c, 0x91, 0x95, 0xc3, 0x3f};
+
+static fn wifi_h2e_checks(void)
+{
+        static const p8 access[6] = {2, 0, 0, 0, 1, 0};
+        static const p8 station[6] = {2, 0, 0, 0, 2, 0};
+        static const struct
+        {
+                string_address ssid;
+                positive ssid_length;
+                string_address password;
+                const p8 *pt, *pwe;
+        } h2e[] = {
+            {"saeh2", 5, "hostapd-sae-2", h2e0_pt, h2e0_pwe},
+            {"Example", 7, "password1", h2e1_pt, h2e1_pwe},
+            {"a", 1, "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", h2e2_pt, h2e2_pwe},
+            {"\xe6\x97\xa5\xe6\x9c\xac-", 7, "p\xc3\xa4ssw\xc3\xb6rd", h2e3_pt, h2e3_pwe},
+        };
+        static const p8 *const sswu_u[6] = {sswu0_u, sswu1_u, sswu2_u, sswu3_u, sswu4_u, sswu5_u};
+        static const p8 *const sswu_p[6] = {sswu0_p, sswu1_p, sswu2_p, sswu3_p, sswu4_p, sswu5_p};
+        p64 u[CRYPTO_FE_MAX], x[CRYPTO_FE_MAX], y[CRYPTO_FE_MAX];
+        p8 point[64];
+        p8 element[64];
+        p8 got[64];
+
+        for (positive at = 0; at < 6; at++)
+        {
+                crypto_fe_load_be(u, (p8 address_to)sswu_u[at], 4);
+                wifi_sae_sswu(x, y, u);
+                crypto_fe_store_be(got, x, 4);
+                crypto_fe_store_be(got + 32, y, 4);
+                check("the simplified SWU map of a value of u", wls_same(got, sswu_p[at], 64));
+        }
+        for (positive at = 0; at < sizeof(h2e) / sizeof(h2e[0]); at++)
+        {
+                check("PT of a network's name and password",
+                      wifi_sae_pt((p8 address_to)h2e[at].ssid, h2e[at].ssid_length,
+                                  (p8 address_to)h2e[at].password, string_length(h2e[at].password),
+                                  point) &&
+                              wls_same(point, h2e[at].pt, 64));
+                check("the element of two stations from PT",
+                      wifi_sae_pwe_from_pt((p8 address_to)h2e[at].pt, (p8 address_to)station,
+                                           (p8 address_to)access, element) &&
+                              wls_same(element, h2e[at].pwe, 64));
+                check("and it does not depend on which address is ours",
+                      wifi_sae_pwe_from_pt((p8 address_to)h2e[at].pt, (p8 address_to)access,
+                                           (p8 address_to)station, element) &&
+                              wls_same(element, h2e[at].pwe, 64));
+        }
+}
+
+static fn wifi_sae_checks(void)
+{
+        static const struct
+        {
+                string_address password;
+                const p8 *pwe, *rand, *scalar, *element, *peer_scalar, *peer_element, *kck, *pmk,
+                    *pmkid, *confirm, *peer_confirm;
+        } sae[] = {
+            {"abcdefgh12345678", sae0_pwe, sae0_rand, sae0_scalar, sae0_element, sae0_peer_scalar,
+             sae0_peer_element, sae0_kck, sae0_pmk, sae0_pmkid, sae0_confirm, sae0_peer_confirm},
+            {"mekmitasdigoat", sae1_pwe, sae1_rand, sae1_scalar, sae1_element, sae1_peer_scalar,
+             sae1_peer_element, sae1_kck, sae1_pmk, sae1_pmkid, sae1_confirm, sae1_peer_confirm},
+            {"password1", sae2_pwe, sae2_rand, sae2_scalar, sae2_element, sae2_peer_scalar,
+             sae2_peer_element, sae2_kck, sae2_pmk, sae2_pmkid, sae2_confirm, sae2_peer_confirm},
+            {"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", sae3_pwe, sae3_rand, sae3_scalar,
+             sae3_element, sae3_peer_scalar, sae3_peer_element, sae3_kck, sae3_pmk, sae3_pmkid,
+             sae3_confirm, sae3_peer_confirm},
+        };
+        static const p8 access[6] = {2, 0, 0, 0, 1, 0};
+        static const p8 station[6] = {2, 0, 0, 0, 2, 0};
+        p8 rsn[48];
+        bool parity = true;
+
+        check("the RSN element of SAE carries the PMKID and BIP-CMAC-128",
+              wifi_rsn_build(rsn, 8, 3, (p8 address_to)sae0_pmkid) == 44 && rsn[1] == 42 &&
+                      rsn[19] == 8 && rsn[20] == 0xc0 && rsn[22] == 1 &&
+                      wls_same(rsn + 24, sae0_pmkid, 16) && rsn[43] == 6);
+
+        for (positive at = 0; at < sizeof(sae) / sizeof(sae[0]); at++)
+        {
+                wifi_sae side;
+                wifi_sae other;
+                p8 sum[64];
+                p8 want[32];
+                p8 bad[64];
+                p8 zeros[32];
+                p8 one[32];
+
+                memory_fill(address_of side, 0, sizeof(side));
+                memory_fill(zeros, 0, 32);
+                memory_fill(one, 0, 32);
+                one[31] = 1;
+                check("the password element of a password, by hunting and pecking",
+                      wifi_sae_pwe((p8 address_to)sae[at].password,
+                                   string_length(sae[at].password), (p8 address_to)station,
+                                   (p8 address_to)access, side.pwe) &&
+                              wls_same(side.pwe, sae[at].pwe, 64));
+                //      The same element whichever address is named first.
+                memory_fill(address_of other, 0, sizeof(other));
+                check("and it does not depend on which address is ours",
+                      wifi_sae_pwe((p8 address_to)sae[at].password,
+                                   string_length(sae[at].password), (p8 address_to)access,
+                                   (p8 address_to)station, other.pwe) &&
+                              wls_same(other.pwe, sae[at].pwe, 64));
+                memory_copy(side.rand, sae[at].rand, 32);
+                memory_copy(side.scalar, sae[at].scalar, 32);
+                memory_copy(side.element, sae[at].element, 64);
+                check("the commit of the access point is taken in",
+                      wifi_sae_commit_good(address_of side, sae[at].peer_scalar,
+                                           sae[at].peer_element) &&
+                          wifi_sae_take(address_of side, (p8 address_to)sae[at].peer_scalar,
+                                        (p8 address_to)sae[at].peer_element));
+                check("and it gives the KCK, the PMK and the PMKID",
+                      wls_same(side.kck, sae[at].kck, 32) && wls_same(side.pmk, sae[at].pmk, 32) &&
+                              wls_same(side.pmkid, sae[at].pmkid, 16));
+                sum[0] = 1, sum[1] = 0;
+                wifi_sae_confirm(side.kck, sum, side.scalar, side.element, side.peer_scalar,
+                                 side.peer_element, want);
+                check("our confirm", wls_same(want, sae[at].confirm, 32));
+                sum[0] = 7;
+                wifi_sae_confirm(side.kck, sum, side.peer_scalar, side.peer_element, side.scalar,
+                                 side.element, want);
+                check("and the one the access point sends, with its own counter",
+                      wls_same(want, sae[at].peer_confirm, 32));
+
+                //      A commit made here: scalar * PWE + element = rand * PWE.
+                memory_fill(address_of other, 0, sizeof(other));
+                memory_copy(other.pwe, sae[at].pwe, 64);
+                parity = wifi_sae_commit(address_of other) &&
+                         wifi_sae_multiply(sum, other.scalar, other.pwe) &&
+                         wifi_sae_multiply(bad, other.rand, other.pwe);
+                if (parity)
+                {
+                        crypto_point one_point, two_point, total;
+                        p64 x[CRYPTO_FE_MAX], y[CRYPTO_FE_MAX];
+
+                        crypto_fe_load_be(x, sum, 4);
+                        crypto_fe_load_be(y, sum + 32, 4);
+                        crypto_point_set_xy(address_of one_point, x, y, address_of crypto_p256_field);
+                        crypto_fe_load_be(x, other.element, 4);
+                        crypto_fe_load_be(y, other.element + 32, 4);
+                        crypto_point_set_xy(address_of two_point, x, y, address_of crypto_p256_field);
+                        crypto_point_add(address_of total, address_of one_point, address_of two_point);
+                        crypto_point_affine(address_of total);
+                        crypto_fe_store_be(want, total.x, 4);
+                        parity = wls_same(want, bad, 32);
+                }
+                check("a commit made here is scalar * PWE + element = rand * PWE", parity);
+
+                //      Malformed commits are refused, before any of the
+                //      multiplications a commit taken in costs.
+                check("a commit whose scalar is zero is refused",
+                      !wifi_sae_commit_good(address_of side, zeros, sae[at].peer_element));
+                check("one whose scalar is one is refused",
+                      !wifi_sae_commit_good(address_of side, one, sae[at].peer_element));
+                memory_copy(bad, sae[at].peer_element, 64);
+                bad[63] ^= 1;
+                check("one whose element is off the curve is refused",
+                      !wifi_sae_commit_good(address_of side, sae[at].peer_scalar, bad));
+                memory_copy(bad, sae[at].peer_element, 64);
+                memory_fill(bad, 0xff, 5);
+                check("one whose element's x is not under p is refused",
+                      !wifi_sae_commit_good(address_of side, sae[at].peer_scalar, bad));
+                check("one that is our own sent back is refused",
+                      !wifi_sae_commit_good(address_of side, side.scalar, side.element));
+                check("our scalar with another element, or our element with another scalar, "
+                      "is no reflection",
+                      wifi_sae_commit_good(address_of side, side.scalar, sae[at].peer_element) &&
+                          wifi_sae_commit_good(address_of side, sae[at].peer_scalar, side.element));
+        }
+        {
+                //      The order itself, and above it, are not scalars.
+                static const p8 order[32] = {
+                    0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff,
+                    0xff, 0xff, 0xff, 0xff, 0xff, 0xbc, 0xe6, 0xfa, 0xad, 0xa7, 0x17,
+                    0x9e, 0x84, 0xf3, 0xb9, 0xca, 0xc2, 0xfc, 0x63, 0x25, 0x51};
+                wifi_sae side;
+
+                memory_fill(address_of side, 0, sizeof(side));
+                memory_copy(side.pwe, sae0_pwe, 64);
+                memory_copy(side.rand, sae0_rand, 32);
+                memory_copy(side.scalar, sae0_scalar, 32);
+                memory_copy(side.element, sae0_element, 64);
+                check("a commit whose scalar is the group order is refused",
+                      !wifi_sae_commit_good(address_of side, order, sae0_peer_element));
+        }
+}
+
+/*
+        The access point's authentication frames as the exchange reads them
+        (wifi_sae_frame_read), to SECURITY.md's list for a new parser: empty
+        and shortest, every byte cut, every transaction and the statuses
+        that mean something, another sender or network, a protected frame,
+        another algorithm or group, a token of one byte, of the most and one
+        over, in a container and not, and what may and may not follow; and
+        the association response's status (wifi_assoc_status_read).
+*/
+static positive wifi_auth_frame(p8 address_to into, const p8 address_to from, p16 transaction,
+                                p16 status, const p8 address_to body, positive length)
+{
+        memory_fill(into, 0, 30);
+        into[0] = 0xb0;
+        memory_copy(into + 4, "\x02\x00\x00\x00\x02\x00", 6);
+        memory_copy(into + 10, from, 6);
+        memory_copy(into + 16, from, 6);
+        into[24] = 3;
+        into[26] = (p8)transaction;
+        into[27] = (p8)(transaction >> 8);
+        into[28] = (p8)status;
+        into[29] = (p8)(status >> 8);
+        if (length)
+                memory_copy(into + 30, body, length);
+        return 30 + length;
+}
+
+static fn wifi_sae_frame_checks(void)
+{
+        static const p8 access[6] = {2, 0, 0, 0, 1, 0};
+        static const p8 other[6] = {2, 0, 0, 0, 3, 0};
+        p8 frame[30 + 2 + WIFI_SAE_TOKEN_MOST + 96 + 8];
+        p8 body[2 + WIFI_SAE_TOKEN_MOST + 96 + 8];
+        wifi_sae_frame read;
+        positive size;
+        positive at;
+        bool all;
+        p16 status;
+
+        check("nothing at all is no frame", !wifi_sae_frame_read(frame, 0, access, false, address_of read));
+        //      A commit: group 19, scalar, element.
+        body[0] = WIFI_SAE_GROUP, body[1] = 0;
+        memory_copy(body + 2, sae0_peer_scalar, 32);
+        memory_copy(body + 34, sae0_peer_element, 64);
+        size = wifi_auth_frame(frame, access, 1, 0, body, 98);
+        check("a commit is read: group, scalar and element, where they are in the frame",
+              wifi_sae_frame_read(frame, size, access, false, address_of read) &&
+                  read.transaction == 1 && !read.status && read.group == WIFI_SAE_GROUP &&
+                  read.scalar == frame + 32 && read.element == frame + 64);
+        all = true;
+        for (at = 0; at < size; at++)
+                all &= !wifi_sae_frame_read(frame, at, access, false, address_of read);
+        check("a commit cut at any byte is refused", all);
+        frame[size] = 221, frame[size + 1] = 2, frame[size + 2] = 1, frame[size + 3] = 2;
+        check("with a whole element after it, it is still read",
+              wifi_sae_frame_read(frame, size + 4, access, false, address_of read) &&
+                  read.scalar == frame + 32);
+        check("with an element cut short after it, it is not",
+              !wifi_sae_frame_read(frame, size + 3, access, false, address_of read) &&
+                  !wifi_sae_frame_read(frame, size + 1, access, false, address_of read));
+        size = wifi_auth_frame(frame, access, 1, WIFI_SAE_H2E_STATUS, body, 98);
+        check("a hash-to-element commit is read the same",
+              wifi_sae_frame_read(frame, size, access, true, address_of read) &&
+                  read.status == WIFI_SAE_H2E_STATUS && read.scalar == frame + 32);
+        body[0] = 20;
+        size = wifi_auth_frame(frame, access, 1, 0, body, 2 + 48 + 96);
+        check("a commit of another group is read for its group alone",
+              wifi_sae_frame_read(frame, size, access, false, address_of read) &&
+                  read.group == 20 && !read.scalar && !read.element);
+        body[0] = WIFI_SAE_GROUP;
+        size = wifi_auth_frame(frame, other, 1, 0, body, 98);
+        check("one from another address is no frame of the access point's",
+              !wifi_sae_frame_read(frame, size, access, false, address_of read));
+        size = wifi_auth_frame(frame, access, 1, 0, body, 98);
+        memory_copy(frame + 16, other, 6);
+        check("nor is one in another network",
+              !wifi_sae_frame_read(frame, size, access, false, address_of read));
+        size = wifi_auth_frame(frame, access, 1, 0, body, 98);
+        frame[1] = 0x40;
+        check("nor a protected one", !wifi_sae_frame_read(frame, size, access, false, address_of read));
+        frame[1] = 0;
+        frame[0] = 0x10;
+        check("nor one that is no authentication frame",
+              !wifi_sae_frame_read(frame, size, access, false, address_of read));
+        frame[0] = 0xb0;
+        frame[24] = 0;
+        check("nor one of another algorithm", !wifi_sae_frame_read(frame, size, access, false, address_of read));
+        frame[24] = 3;
+        for (p16 transaction = 0; transaction < 5; transaction++)
+        {
+                size = wifi_auth_frame(frame, access, transaction, 1, body, 0);
+                check("a refusal is read for its status in transactions 1 and 2, and nothing else is",
+                      wifi_sae_frame_read(frame, size, access, false, address_of read) ==
+                          (transaction == 1 || transaction == 2) &&
+                          (!(transaction == 1 || transaction == 2) || read.status == 1));
+        }
+
+        //      A confirm: send-confirm and 32 bytes, and nothing after them.
+        body[0] = 7, body[1] = 0;
+        memory_copy(body + 2, sae0_peer_confirm, 32);
+        size = wifi_auth_frame(frame, access, 2, 0, body, 34);
+        check("a confirm is read",
+              wifi_sae_frame_read(frame, size, access, false, address_of read) &&
+                  read.transaction == 2 && read.send_confirm == 7 && read.confirm == frame + 32);
+        all = true;
+        for (at = 0; at < size; at++)
+                all &= !wifi_sae_frame_read(frame, at, access, false, address_of read);
+        check("a confirm cut at any byte is refused", all);
+        frame[size] = 0;
+        check("and one with a byte after it", !wifi_sae_frame_read(frame, size + 1, access, false, address_of read));
+
+        //      A token asked for: the rest of the frame, or a container.
+        body[0] = WIFI_SAE_GROUP, body[1] = 0;
+        for (positive length = 0; length <= WIFI_SAE_TOKEN_MOST + 1; length++)
+        {
+                memory_fill(body + 2, (p8)length, length);
+                size = wifi_auth_frame(frame, access, 1, WIFI_SAE_TOKEN_STATUS, body, 2 + length);
+                check("a token of one byte to the most is taken, and none and one over are not",
+                      wifi_sae_frame_read(frame, size, access, false, address_of read) ==
+                          (length && length <= WIFI_SAE_TOKEN_MOST) &&
+                          (!length || length > WIFI_SAE_TOKEN_MOST ||
+                           (read.token == frame + 32 && read.token_length == length)));
+                body[2] = 255, body[3] = (p8)(1 + length), body[4] = WIFI_SAE_TOKEN_EXTENSION;
+                memory_fill(body + 5, (p8)length, length);
+                size = wifi_auth_frame(frame, access, 1, WIFI_SAE_TOKEN_STATUS, body, 5 + length);
+                check("and for hash-to-element in its container the same",
+                      wifi_sae_frame_read(frame, size, access, true, address_of read) ==
+                          (length && length <= WIFI_SAE_TOKEN_MOST) &&
+                          (!length || length > WIFI_SAE_TOKEN_MOST ||
+                           (read.token == frame + 35 && read.token_length == length)));
+        }
+        body[2] = 255, body[3] = 9, body[4] = WIFI_SAE_TOKEN_EXTENSION;
+        size = wifi_auth_frame(frame, access, 1, WIFI_SAE_TOKEN_STATUS, body, 5 + 8);
+        check("a container cut short, or with a byte after it, or of another kind, is refused",
+              !wifi_sae_frame_read(frame, size - 1, access, true, address_of read) &&
+                  !wifi_sae_frame_read(frame, size + 1, access, true, address_of read) &&
+                  (frame[34] = 92, !wifi_sae_frame_read(frame, size, access, true, address_of read)));
+        size = wifi_auth_frame(frame, access, 1, WIFI_SAE_TOKEN_STATUS, body, 2 + 8);
+        frame[32] = 1;
+        check("and a hash-to-element exchange takes no token out of its container",
+              !wifi_sae_frame_read(frame, size, access, true, address_of read));
+
+        //      The association response: capabilities, then the status.
+        memory_fill(frame, 0, sizeof(frame));
+        frame[0] = 0x10;
+        memory_copy(frame + 10, access, 6);
+        frame[26] = 17;
+        check("an association response's status is read",
+              wifi_assoc_status_read(frame, 30, access, address_of status) && status == 17);
+        frame[0] = 0x30;
+        check("and a reassociation response's", wifi_assoc_status_read(frame, 28, access, address_of status) &&
+                                                    status == 17);
+        all = true;
+        for (at = 0; at < 28; at++)
+                all &= !wifi_assoc_status_read(frame, at, access, address_of status);
+        check("one cut before its status is refused", all);
+        frame[0] = 0xb0;
+        check("and an authentication frame is none",
+              !wifi_assoc_status_read(frame, 30, access, address_of status));
+        frame[0] = 0x10;
+        check("and one from another address is none",
+              !wifi_assoc_status_read(frame, 30, other, address_of status));
+}
+
 //      AES-128's inverse and RFC 3394's unwrap, which hold the key data of
 //      every group key and every rekey. FIPS-197 C.1 is the cipher's own
 //      vector; RFC 3394 4.1 is the wrap's, 128 bits of key data under a
@@ -81444,20 +81942,21 @@ static fn wifi_ptk_checks(void)
         p8 other[64];
 
         wifi_ptk((p8 address_to)pmk, (p8 address_to)ap, (p8 address_to)sta,
-                 (p8 address_to)anonce, (p8 address_to)snonce, ptk);
+                 (p8 address_to)anonce, (p8 address_to)snonce, ptk, 2);
         check("the pairwise key of an access point and a station past 0x7f is 802.11i's",
               !memory_compare(ptk, expect, 64));
         wifi_ptk((p8 address_to)pmk, (p8 address_to)sta, (p8 address_to)ap,
-                 (p8 address_to)snonce, (p8 address_to)anonce, other);
+                 (p8 address_to)snonce, (p8 address_to)anonce, other, 2);
         check("and the same from either side of the handshake",
               !memory_compare(other, expect, 64));
 }
 
 //      What an access point's RSN element asks of a station, and whether the
-//      join can answer it: key management 2, CCMP both ways, no demand for
-//      protected management frames. Anything else that asks for WPA2 is a
-//      class of its own, named for what it asks, and ranks behind a plain
-//      WPA2 twin of the same name however loud.
+//      join can answer it: key management 2, 6 or 8, CCMP both ways, with
+//      protected management frames or without. Anything else is a class of
+//      its own, named for what it asks, and ranks behind a twin of the same
+//      name that the join can answer however loud. And what it offers a join,
+//      counted here the long way.
 static positive wifi_rsn_element(p8 address_to into, p32 group, const p32 address_to pairwise,
                                  positive pairs, const p32 address_to keys, positive count,
                                  b32 capabilities)
@@ -81499,48 +81998,76 @@ static fn wifi_rsn_checks(void)
         static const p32 ft_sae[] = {0x000fac04, 0x000fac08};
         static const p32 owe[] = {0x000fac12};
         static const p32 eap[] = {0x000fac01};
+        static const p32 sae_ext[] = {0x000fac18};
+        static const p32 vendor[] = {0x00506f01};
         p8 element[128];
         positive size;
+        wifi_rsn_caps caps;
 
-#define RSN_CASE(name, group, pairwise, pairs, keys, count, capabilities, class)   \
-        size = wifi_rsn_element(element, group, pairwise, pairs, keys, count,       \
-                                capabilities);                                    \
-        check(name, radio_rsn_security(element, size) == (class))
+#define RSN_A_PSK WIFI_AKM_PSK
+#define RSN_A_256 WIFI_AKM_PSK_SHA256
+#define RSN_A_SAE WIFI_AKM_SAE
+#define RSN_A_ANY WIFI_AKM_OTHER
+#define RSN_CASE(name, group_suite, pairwise_suites, pairs, keys, count, capabilities, class, \
+                 want_akms, want_pmf, want_group, want_pairwise)                          \
+        size = wifi_rsn_element(element, group_suite, pairwise_suites, pairs, keys, count, \
+                                capabilities);                                           \
+        check(name, radio_rsn_security(element, size, address_of caps) == (class) &&        \
+                        caps.akms == (want_akms) && caps.pmf == (want_pmf) &&               \
+                        caps.group == (want_group) && caps.pairwise == (want_pairwise) &&   \
+                        !caps.h2e)
 
-        RSN_CASE("WPA2 as an ordinary network has it", 0x000fac04, ccmp, 1, psk, 1, 0x000c, RADIO_WPA2);
-        RSN_CASE("WPA2 with no capabilities field", 0x000fac04, ccmp, 1, psk, 1, (b32)-1, RADIO_WPA2);
-        RSN_CASE("WPA2 that is capable of PMF", 0x000fac04, ccmp, 1, psk, 1, 0x0080, RADIO_WPA2);
-        RSN_CASE("WPA2 that requires PMF", 0x000fac04, ccmp, 1, psk, 1, 0x00c0, RADIO_PMF);
-        RSN_CASE("WPA2 that requires PMF and is not capable", 0x000fac04, ccmp, 1, psk, 1, 0x0040, RADIO_PMF);
-        RSN_CASE("WPA2 with a TKIP group", 0x000fac02, ccmp, 1, psk, 1, 0x000c, RADIO_TKIP);
-        RSN_CASE("WPA2 with TKIP alone pairwise", 0x000fac04, tkip, 1, psk, 1, 0x000c, RADIO_TKIP);
-        RSN_CASE("WPA2 with TKIP and CCMP pairwise and a CCMP group", 0x000fac04, both, 2, psk, 1, 0x000c, RADIO_WPA2);
-        RSN_CASE("FT-PSK alone", 0x000fac04, ccmp, 1, ft, 1, 0x000c, RADIO_FT256);
-        RSN_CASE("PSK-SHA256 alone", 0x000fac04, ccmp, 1, sha, 1, 0x000c, RADIO_FT256);
-        RSN_CASE("PSK and FT-PSK", 0x000fac04, ccmp, 1, psk_ft, 2, 0x000c, RADIO_WPA2);
-        RSN_CASE("PSK-SHA256 and PSK", 0x000fac04, ccmp, 1, psk_sha, 2, 0x000c, RADIO_WPA2);
-        RSN_CASE("PSK and SAE", 0x000fac04, ccmp, 1, psk_sae, 2, 0x0080, RADIO_WPA23);
-        RSN_CASE("PSK and SAE that requires PMF", 0x000fac04, ccmp, 1, psk_sae, 2, 0x00c0, RADIO_PMF);
-        RSN_CASE("PSK and SAE with a TKIP group", 0x000fac02, ccmp, 1, psk_sae, 2, 0x0080, RADIO_TKIP);
-        RSN_CASE("SAE alone", 0x000fac04, ccmp, 1, sae, 1, 0x00c0, RADIO_WPA3);
-        RSN_CASE("FT-PSK and SAE", 0x000fac04, ccmp, 1, ft_sae, 2, 0x00c0, RADIO_WPA3);
-        RSN_CASE("OWE", 0x000fac04, ccmp, 1, owe, 1, 0x000c, RADIO_OWE);
-        RSN_CASE("802.1X", 0x000fac04, ccmp, 1, eap, 1, 0x000c, RADIO_EAP);
-        RSN_CASE("no key management at all", 0x000fac04, ccmp, 1, psk, 0, 0x000c, RADIO_WPA2);
+        RSN_CASE("WPA2 as an ordinary network has it", 0x000fac04, ccmp, 1, psk, 1, 0x000c, RADIO_WPA2, RSN_A_PSK, 0, 1, 1);
+        RSN_CASE("WPA2 with no capabilities field", 0x000fac04, ccmp, 1, psk, 1, (b32)-1, RADIO_WPA2, RSN_A_PSK, 0, 1, 1);
+        RSN_CASE("WPA2 that is capable of PMF", 0x000fac04, ccmp, 1, psk, 1, 0x0080, RADIO_WPA2, RSN_A_PSK, WIFI_PMF_CAPABLE, 1, 1);
+        RSN_CASE("WPA2 that requires PMF", 0x000fac04, ccmp, 1, psk, 1, 0x00c0, RADIO_PMF, RSN_A_PSK, WIFI_PMF_CAPABLE | WIFI_PMF_REQUIRED, 1, 1);
+        RSN_CASE("WPA2 that requires PMF and is not capable", 0x000fac04, ccmp, 1, psk, 1, 0x0040, RADIO_PMF, RSN_A_PSK, WIFI_PMF_REQUIRED, 1, 1);
+        RSN_CASE("WPA2 with a TKIP group", 0x000fac02, ccmp, 1, psk, 1, 0x000c, RADIO_TKIP, RSN_A_PSK, 0, 2, 1);
+        RSN_CASE("WPA2 with TKIP alone pairwise", 0x000fac04, tkip, 1, psk, 1, 0x000c, RADIO_TKIP, RSN_A_PSK, 0, 1, 2);
+        RSN_CASE("WPA2 with TKIP and CCMP pairwise and a CCMP group", 0x000fac04, both, 2, psk, 1, 0x000c, RADIO_WPA2, RSN_A_PSK, 0, 1, 3);
+        RSN_CASE("FT-PSK alone", 0x000fac04, ccmp, 1, ft, 1, 0x000c, RADIO_FT, RSN_A_ANY, 0, 1, 1);
+        RSN_CASE("PSK-SHA256 alone", 0x000fac04, ccmp, 1, sha, 1, 0x000c, RADIO_WPA2, RSN_A_256, 0, 1, 1);
+        RSN_CASE("PSK-SHA256 that requires PMF", 0x000fac04, ccmp, 1, sha, 1, 0x00c0, RADIO_PMF, RSN_A_256, WIFI_PMF_CAPABLE | WIFI_PMF_REQUIRED, 1, 1);
+        RSN_CASE("PSK and FT-PSK", 0x000fac04, ccmp, 1, psk_ft, 2, 0x000c, RADIO_WPA2, RSN_A_PSK | RSN_A_ANY, 0, 1, 1);
+        RSN_CASE("PSK-SHA256 and PSK", 0x000fac04, ccmp, 1, psk_sha, 2, 0x000c, RADIO_WPA2, RSN_A_PSK | RSN_A_256, 0, 1, 1);
+        RSN_CASE("PSK and SAE", 0x000fac04, ccmp, 1, psk_sae, 2, 0x0080, RADIO_WPA23, RSN_A_PSK | RSN_A_SAE, WIFI_PMF_CAPABLE, 1, 1);
+        RSN_CASE("PSK and SAE that requires PMF", 0x000fac04, ccmp, 1, psk_sae, 2, 0x00c0, RADIO_PMF, RSN_A_PSK | RSN_A_SAE, WIFI_PMF_CAPABLE | WIFI_PMF_REQUIRED, 1, 1);
+        RSN_CASE("PSK and SAE with a TKIP group", 0x000fac02, ccmp, 1, psk_sae, 2, 0x0080, RADIO_TKIP, RSN_A_PSK | RSN_A_SAE, WIFI_PMF_CAPABLE, 2, 1);
+        RSN_CASE("SAE alone", 0x000fac04, ccmp, 1, sae, 1, 0x00c0, RADIO_WPA3, RSN_A_SAE, WIFI_PMF_CAPABLE | WIFI_PMF_REQUIRED, 1, 1);
+        RSN_CASE("SAE alone with a TKIP group", 0x000fac02, ccmp, 1, sae, 1, 0x00c0, RADIO_TKIP, RSN_A_SAE, WIFI_PMF_CAPABLE | WIFI_PMF_REQUIRED, 2, 1);
+        RSN_CASE("FT-PSK and SAE", 0x000fac04, ccmp, 1, ft_sae, 2, 0x00c0, RADIO_WPA3, RSN_A_SAE | RSN_A_ANY, WIFI_PMF_CAPABLE | WIFI_PMF_REQUIRED, 1, 1);
+        RSN_CASE("SAE's extended-key suite alone", 0x000fac04, ccmp, 1, sae_ext, 1, 0x00c0, RADIO_FT, RSN_A_ANY, WIFI_PMF_CAPABLE | WIFI_PMF_REQUIRED, 1, 1);
+        RSN_CASE("OWE", 0x000fac04, ccmp, 1, owe, 1, 0x000c, RADIO_OWE, RSN_A_ANY, 0, 1, 1);
+        RSN_CASE("802.1X", 0x000fac04, ccmp, 1, eap, 1, 0x000c, RADIO_EAP, RSN_A_ANY, 0, 1, 1);
+        RSN_CASE("a vendor's key management alone, taken as WPA2", 0x000fac04, ccmp, 1, vendor, 1, 0x000c, RADIO_WPA2, RSN_A_PSK | RSN_A_ANY, 0, 1, 1);
+        RSN_CASE("no key management at all", 0x000fac04, ccmp, 1, psk, 0, 0x000c, RADIO_WPA2, RSN_A_PSK, 0, 1, 1);
+        RSN_CASE("no key management and a TKIP group", 0x000fac02, ccmp, 1, psk, 0, 0x000c, RADIO_TKIP, RSN_A_PSK, 0, 2, 1);
 #undef RSN_CASE
 
         size = wifi_rsn_element(element, 0x000fac04, ccmp, 1, psk, 1, 0x00c0);
-        check("a capabilities field cut to one byte says nothing: WPA2",
-              radio_rsn_security(element, size - 1) == RADIO_WPA2);
-        check("an element cut inside its suites is WPA2, as one with none",
-              radio_rsn_security(element, 9) == RADIO_WPA2 &&
-                  radio_rsn_security(element, 3) == RADIO_WPA2);
-        check("what the join can answer is open, WPA2 and WPA2/3, and no class of "
-              "WPA2 that asks for more",
+        check("a capabilities field cut to one byte says nothing: WPA2 with no protection",
+              radio_rsn_security(element, size - 1, address_of caps) == RADIO_WPA2 &&
+                  caps.pmf == 0 && caps.akms == RSN_A_PSK);
+        size = wifi_rsn_element(element, 0x000fac02, tkip, 1, psk, 1, 0x00c0);
+        check("an element cut inside its suites is WPA2 with CCMP and PSK, as one with none, "
+              "whatever cipher it had begun to name",
+              radio_rsn_security(element, 9, address_of caps) == RADIO_WPA2 &&
+                  caps.akms == RSN_A_PSK && caps.group == WIFI_CIPHER_CCMP &&
+                  caps.pairwise == WIFI_CIPHER_CCMP && !caps.pmf &&
+                  radio_rsn_security(element, 3, address_of caps) == RADIO_WPA2 &&
+                  caps.akms == RSN_A_PSK && caps.group == WIFI_CIPHER_CCMP);
+#undef RSN_A_PSK
+#undef RSN_A_256
+#undef RSN_A_SAE
+#undef RSN_A_ANY
+        check("what the join can answer is open, WPA2, WPA3, both, and any of them with "
+              "protection required, and no class that asks for more",
               radio_security_joinable(RADIO_OPEN) && radio_security_joinable(RADIO_WPA2) &&
                   radio_security_joinable(RADIO_WPA23) && !radio_security_joinable(RADIO_TKIP) &&
-                  !radio_security_joinable(RADIO_PMF) && !radio_security_joinable(RADIO_FT256) &&
-                  !radio_security_joinable(RADIO_WPA3) && !radio_security_joinable(RADIO_EAP));
+                  radio_security_joinable(RADIO_PMF) && !radio_security_joinable(RADIO_FT) &&
+                  radio_security_joinable(RADIO_WPA3) && !radio_security_joinable(RADIO_EAP) &&
+                  !radio_security_joinable(RADIO_OWE) && !radio_security_joinable(RADIO_WPA) &&
+                  !radio_security_joinable(RADIO_WEP));
         //      The row of a name is its strongest access point, and says a
         //      name can be joined when any by that name can: a louder twin
         //      that asks for more must not make `wifi add` refuse the real
@@ -81554,10 +82081,10 @@ static fn wifi_rsn_checks(void)
                 memory_copy(one.ssid, "net", 3);
                 one.ssid_length = 3;
                 one.mbm = -3000;
-                one.security = RADIO_PMF;
-                one.beacon_security = RADIO_PMF;
+                one.security = RADIO_FT;
+                one.beacon_security = RADIO_FT;
                 radio_air_keep(address_of air, address_of one);
-                check("a name of one access point that asks for PMF is not joinable",
+                check("a name of one access point that asks for FT alone is not joinable",
                       air.count == 1 && !air.heard[0].joinable);
                 one.mbm = -7000;
                 one.security = RADIO_WPA2;
@@ -81566,7 +82093,7 @@ static fn wifi_rsn_checks(void)
                 radio_air_keep(address_of air, address_of one);
                 check("a quieter twin of plain WPA2 makes it joinable, the row staying the louder",
                       air.count == 1 && air.heard[0].joinable &&
-                          air.heard[0].security == RADIO_PMF && air.heard[0].mbm == -3000);
+                          air.heard[0].security == RADIO_FT && air.heard[0].mbm == -3000);
                 memory_zero(address_of air, sizeof air);
                 radio_air_keep(address_of air, address_of one);
                 one.mbm = -1000;
@@ -81578,10 +82105,12 @@ static fn wifi_rsn_checks(void)
                       air.count == 1 && air.heard[0].joinable &&
                           air.heard[0].security == RADIO_TKIP);
         }
-        check("a saved network with a password is satisfied by WPA2 and WPA2/3 only",
+        check("a saved network with a password is satisfied by WPA2, WPA3, both and either "
+              "with protection required, and nothing else",
               radio_security_fits(true, RADIO_WPA2) && radio_security_fits(true, RADIO_WPA23) &&
-                  !radio_security_fits(true, RADIO_TKIP) && !radio_security_fits(true, RADIO_PMF) &&
-                  !radio_security_fits(true, RADIO_FT256) &&
+                  !radio_security_fits(true, RADIO_TKIP) && radio_security_fits(true, RADIO_PMF) &&
+                  !radio_security_fits(true, RADIO_FT) && radio_security_fits(true, RADIO_WPA3) &&
+                  !radio_security_fits(true, RADIO_OPEN) && !radio_security_fits(true, RADIO_WPA) &&
                   !radio_security_fits(false, RADIO_WPA2) && radio_security_fits(false, RADIO_OPEN));
 }
 
@@ -83323,6 +83852,10 @@ b32 main(void)
         machine_names();
         labels();
         wpa_key();
+        wifi_key_checks();
+        wifi_sae_checks();
+        wifi_h2e_checks();
+        wifi_sae_frame_checks();
         wifi_unwrap_checks();
         wifi_ptk_checks();
         wifi_rsn_checks();
@@ -85322,6 +85855,187 @@ static fn boot_links(void)
         check("An external disk is asked about at the tight tier", !host_lone_taken(true, true));
 }
 
+/*
+        What a Wi-Fi join asks of an access point (wifi_join_plan), at every
+        tier in this one build: named networks with what each tier must do
+        with them, then every combination of what an access point can offer,
+        the rules a saved network can carry and the two kinds of secret, held
+        to what the tiers promise. Last, the plan the join itself makes, at
+        this build's MOONWATER_STRICT_NET, which the tight build of this
+        check (sh test/run net) holds to the tight tier.
+*/
+typedef struct
+{
+        string_address name;
+        p8 akms;
+        p8 pmf;
+        p8 group;
+        p8 pairwise;
+        p8 rules;
+        bool key_only;
+        //      What the safe tier and the tight one do: the suite and its
+        //      fallback, or the refusal.
+        bipolar safe;
+        p8 safe_fallback;
+        bipolar tight;
+        p8 tight_fallback;
+} wifi_plan_case;
+
+static fn wifi_plans(void)
+{
+        enum
+        {
+                C = WIFI_CIPHER_CCMP,
+                T = WIFI_CIPHER_TKIP,
+                OTHER_CIPHER = WIFI_CIPHER_OTHER,
+                PSK = WIFI_AKM_PSK,
+                S256 = WIFI_AKM_PSK_SHA256,
+                SAE = WIFI_AKM_SAE,
+                ANY = WIFI_AKM_OTHER,
+                CAP = WIFI_PMF_CAPABLE,
+                REQ = WIFI_PMF_REQUIRED,
+        };
+        static const wifi_plan_case cases[] = {
+            {"WPA2 with no protection", PSK, 0, C, C, 0, false, 2, 0, WIFI_REFUSE_NO_PMF, 0},
+            {"WPA2 with no protection saved with wpa2", PSK, 0, C, C, WIFI_RULE_WPA2, false, 2, 0,
+             WIFI_REFUSE_NO_PMF, 0},
+            {"WPA2 with protection", PSK, CAP, C, C, 0, false, 2, 0, WIFI_REFUSE_WPA2, 0},
+            {"WPA2 with protection saved with wpa2", PSK, CAP, C, C, WIFI_RULE_WPA2, false, 2, 0, 2, 0},
+            {"WPA2 that requires protection", PSK, CAP | REQ, C, C, WIFI_RULE_WPA2, false, 2, 0, 2, 0},
+            {"PSK-SHA256 beside PSK with protection", PSK | S256, CAP, C, C, WIFI_RULE_WPA2, false, 6, 0,
+             6, 0},
+            {"PSK-SHA256 beside PSK without it", PSK | S256, 0, C, C, 0, false, 2, 0, WIFI_REFUSE_NO_PMF,
+             0},
+            {"PSK-SHA256 alone without protection", S256, 0, C, C, 0, false, 6, 0, WIFI_REFUSE_NO_PMF, 0},
+            {"WPA3", SAE, CAP | REQ, C, C, 0, false, 8, 0, 8, 0},
+            {"WPA3 with a key of hex digits", SAE, CAP | REQ, C, C, 0, true, WIFI_REFUSE_KEY_ONLY, 0,
+             WIFI_REFUSE_KEY_ONLY, 0},
+            {"WPA2 and WPA3", PSK | SAE, CAP, C, C, 0, false, 8, 2, 8, 0},
+            {"WPA2 and WPA3 saved with wpa2", PSK | SAE, CAP, C, C, WIFI_RULE_WPA2, false, 8, 2, 8, 2},
+            {"WPA2 and WPA3 with a key of hex digits", PSK | SAE, CAP, C, C, 0, true, 2, 0,
+             WIFI_REFUSE_WPA2, 0},
+            {"WPA2 and WPA3, joined with WPA3 before", PSK | SAE, CAP, C, C, WIFI_RULE_SAE, false, 8, 0, 8,
+             0},
+            {"WPA2 alone by a name once joined with WPA3", PSK, CAP, C, C, WIFI_RULE_SAE, false,
+             WIFI_REFUSE_SAE_GONE, 0, WIFI_REFUSE_SAE_GONE, 0},
+            {"no protection by a name that offered it", PSK, 0, C, C, WIFI_RULE_PMF, false,
+             WIFI_REFUSE_PMF_GONE, 0, WIFI_REFUSE_PMF_GONE, 0},
+            {"protection by a name that offered it", PSK, CAP, C, C, WIFI_RULE_PMF, false, 2, 0,
+             WIFI_REFUSE_WPA2, 0},
+            {"a TKIP group", PSK, 0, T, C, 0, false, WIFI_REFUSE_TKIP, 0, WIFI_REFUSE_TKIP, 0},
+            {"TKIP alone pairwise", PSK, 0, C, T, 0, false, WIFI_REFUSE_TKIP, 0, WIFI_REFUSE_TKIP, 0},
+            {"TKIP beside CCMP pairwise", PSK, CAP, C, C | T, WIFI_RULE_WPA2, false, 2, 0, 2, 0},
+            {"another group cipher", PSK, CAP, OTHER_CIPHER, C, 0, false, WIFI_REFUSE_CIPHER, 0,
+             WIFI_REFUSE_CIPHER, 0},
+            {"two group ciphers between two frames", PSK, CAP, C | T, C, 0, false, WIFI_REFUSE_TKIP, 0,
+             WIFI_REFUSE_TKIP, 0},
+            {"FT alone", ANY, CAP, C, C, 0, false, WIFI_REFUSE_SUITE, 0, WIFI_REFUSE_SUITE, 0},
+            {"nothing at all", 0, 0, C, C, 0, false, WIFI_REFUSE_SUITE, 0, WIFI_REFUSE_SUITE, 0},
+        };
+        wifi_plan plan;
+        positive plans = 0;
+        positive refusals = 0;
+        bool held = true;
+
+        for (positive at = 0; at < array_count(cases); at++)
+        {
+                const wifi_plan_case address_to one = cases + at;
+                wifi_rsn_caps caps = {.akms = one->akms, .pmf = one->pmf, .group = one->group,
+                                      .pairwise = one->pairwise};
+
+                for (positive tier = STRICT_REFERENCE; tier <= STRICT_LOCKED; tier++)
+                {
+                        bipolar want = tier >= STRICT_TIGHT ? one->tight : one->safe;
+                        p8 fallback = tier >= STRICT_TIGHT ? one->tight_fallback : one->safe_fallback;
+                        bipolar got = wifi_join_plan(tier, address_of caps, one->rules, one->key_only,
+                                                     address_of plan);
+                        bool right = want < 0 ? got == want
+                                              : !got && plan.akm == want &&
+                                                    plan.fallback == fallback &&
+                                                    plan.pmf == (want == 8 || one->pmf ? (CAP | REQ) : 0);
+
+                        if (!right)
+                                string_format(log, "  wifi plan: %s at tier %p gave %b\n",
+                                              one->name, tier, got);
+                        held &= right;
+                }
+        }
+        check("each named network is planned as each tier says", held);
+        held = true;
+
+        //      Every offer, rule and secret, at every tier.
+        for (positive tier = STRICT_REFERENCE; tier <= STRICT_LOCKED; tier++)
+        for (p8 akms = 0; akms < 16; akms++)
+        for (p8 pmf = 0; pmf < 4; pmf++)
+        for (p8 group = 1; group < 8; group++)
+        for (p8 pairwise = 0; pairwise < 8; pairwise++)
+        for (p8 rules = 0; rules < 8; rules++)
+        for (p8 key_only = 0; key_only < 2; key_only++)
+        {
+                wifi_rsn_caps caps = {.akms = akms, .pmf = pmf, .group = group, .pairwise = pairwise};
+                bool tight = tier >= STRICT_TIGHT;
+                bipolar got = wifi_join_plan(tier, address_of caps, rules, key_only, address_of plan);
+                wifi_plan other;
+                bipolar beside = wifi_join_plan(tight ? STRICT_SAFE : STRICT_TIGHT, address_of caps,
+                                                rules, key_only, address_of other);
+
+                if (got)
+                {
+                        refusals++;
+                        held &= got >= WIFI_REFUSE_FIRST && got <= WIFI_REFUSE_LAST &&
+                                !plan.akm && !plan.pmf && !plan.fallback;
+                        //      What the default tier refuses, the tight one does.
+                        held &= tight || beside != 0;
+                        continue;
+                }
+                plans++;
+                //      Only CCMP, only a suite offered, never WPA3 from a key.
+                held &= group == C && (pairwise & C);
+                held &= plan.akm == 8 ? (akms & SAE) && !key_only
+                        : plan.akm == 6 ? (akms & S256) != 0
+                                        : plan.akm == 2 && (akms & PSK);
+                held &= !plan.fallback || (plan.akm == 8 && (plan.fallback == 2 || plan.fallback == 6) &&
+                                           (akms & (plan.fallback == 2 ? PSK : S256)));
+                //      Protection: always with WPA3, with WPA2 exactly when
+                //      offered, and asked as required.
+                held &= plan.pmf == (plan.akm == 8 || pmf ? (CAP | REQ) : 0);
+                //      What the network taught is never given up.
+                held &= !(rules & WIFI_RULE_PMF) || pmf;
+                held &= !(rules & WIFI_RULE_SAE) || (plan.akm == 8 && !plan.fallback);
+                //      WPA3 whenever it can be had.
+                held &= plan.akm == 8 || !(akms & SAE) || key_only;
+                //      The tight tier: protection, and WPA2 only for a network
+                //      saved with wpa2, as the plan and as the fallback.
+                held &= !tight || ((plan.pmf & REQ) && (plan.akm == 8 || (rules & WIFI_RULE_WPA2)) &&
+                                   (!plan.fallback || ((rules & WIFI_RULE_WPA2) && pmf)));
+                //      Below it, the owner's word changes nothing.
+                if (!tight)
+                {
+                        wifi_plan without;
+
+                        held &= !wifi_join_plan(tier, address_of caps, rules & ~WIFI_RULE_WPA2,
+                                                key_only, address_of without) &&
+                                !memory_compare(address_of without, address_of plan, sizeof(plan));
+                }
+        }
+        check("every offer, rule and secret at every tier keeps what the tiers promise", held);
+        check("and both answers come up", plans > 1000 && refusals > 1000);
+
+        //      The join's own: this build's tier.
+        {
+                wifi_rsn_caps plain = {.akms = PSK, .pmf = 0, .group = C, .pairwise = C};
+                wifi_rsn_caps guarded = {.akms = PSK, .pmf = CAP, .group = C, .pairwise = C};
+
+                check("the join asks this build's tier: WPA2 with no protection",
+                      wifi_join_plan(MOONWATER_STRICT_NET, address_of plain, 0, false, address_of plan) ==
+                          (MOONWATER_STRICT_NET >= STRICT_TIGHT ? WIFI_REFUSE_NO_PMF : 0));
+                check("and WPA2 with protection, not saved with wpa2",
+                      wifi_join_plan(MOONWATER_STRICT_NET, address_of guarded, 0, false,
+                                     address_of plan) ==
+                          (MOONWATER_STRICT_NET >= STRICT_TIGHT ? WIFI_REFUSE_WPA2 : 0));
+        }
+}
+
 b32 main(void)
 {
         names();
@@ -85343,6 +86057,7 @@ b32 main(void)
         secret_arguments();
 #endif
         boot_links();
+        wifi_plans();
         json();
         oci();
         nix();
@@ -122114,6 +122829,12 @@ void probe_fill_32(void *d)
             hwsim_radio in PID CMD...   run CMD inside it
             hwsim_radio dhcp IF SECONDS a DHCP server in raw frames on IF: one
                                         address, 192.168.77.100, leased for SECONDS
+            hwsim_radio inject IF MHZ KIND TO FROM BSSID REASON TIMES
+                                        IF becomes a monitor on that channel and sends
+                                        TIMES unprotected management frames of KIND
+                                        (deauth or disassoc) from the address FROM to
+                                        TO in BSSID's network: the spoof a radio in
+                                        range can send, as it heard no key
 
         The access points live in a namespace of their own so that the
         station's machine sees only its station, and the DHCP server, with
@@ -122393,6 +123114,81 @@ static int hwsim_dhcp(const char *name, unsigned lease)
         }
 }
 
+static int hwsim_mac(const char *text, unsigned char *mac)
+{
+        unsigned v[6];
+
+        if (sscanf(text, "%x:%x:%x:%x:%x:%x", v, v + 1, v + 2, v + 3, v + 4, v + 5) != 6)
+                return -1;
+        for (int i = 0; i < 6; i++)
+                mac[i] = (unsigned char)v[i];
+        return 0;
+}
+
+/* The monitor and the frames of `inject`. The radio is an ordinary station
+   interface until this makes it a monitor, which mac80211 lets send what
+   it is handed behind a radiotap header. */
+static int hwsim_inject(int handle, char **words)
+{
+        unsigned index = if_nametoindex(words[2]);
+        unsigned monitor = NL80211_IFTYPE_MONITOR;
+        unsigned frequency = (unsigned)atoi(words[3]);
+        unsigned reason = (unsigned)atoi(words[8]);
+        unsigned times = (unsigned)atoi(words[9]);
+        unsigned char frame[8 + 26];
+        char attributes[64];
+        struct ifreq request;
+        struct sockaddr_ll self;
+        int family, answer, length, raw;
+        int disassoc = !strcmp(words[4], "disassoc");
+
+        if (!index || (!disassoc && strcmp(words[4], "deauth")))
+                return fprintf(stderr, "hwsim_radio: inject: no %s or kind %s\n", words[2],
+                               words[4]), 1;
+        family = hwsim_family(handle, "nl80211");
+        if (family < 0)
+                return fprintf(stderr, "hwsim_radio: no nl80211\n"), 1;
+        length = hwsim_put(attributes, 0, NL80211_ATTR_IFINDEX, &index, 4);
+        length = hwsim_put(attributes, length, NL80211_ATTR_IFTYPE, &monitor, 4);
+        answer = hwsim_ask(handle, family, NL80211_CMD_SET_INTERFACE, attributes, length, 0);
+        if (answer < 0)
+                return fprintf(stderr, "hwsim_radio: monitor: %s\n", strerror(-answer)), 1;
+        memset(&request, 0, sizeof request);
+        strncpy(request.ifr_name, words[2], IFNAMSIZ - 1);
+        raw = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
+        if (raw < 0 || ioctl(raw, SIOCGIFFLAGS, &request) < 0)
+                return perror("hwsim_radio: inject"), 1;
+        request.ifr_flags |= IFF_UP;
+        if (ioctl(raw, SIOCSIFFLAGS, &request) < 0)
+                return perror("hwsim_radio: up"), 1;
+        length = hwsim_put(attributes, 0, NL80211_ATTR_IFINDEX, &index, 4);
+        length = hwsim_put(attributes, length, NL80211_ATTR_WIPHY_FREQ, &frequency, 4);
+        answer = hwsim_ask(handle, family, NL80211_CMD_SET_CHANNEL, attributes, length, 0);
+        if (answer < 0)
+                return fprintf(stderr, "hwsim_radio: channel: %s\n", strerror(-answer)), 1;
+
+        memset(frame, 0, sizeof frame);
+        frame[2] = 8;                      // radiotap: version 0, length 8, no fields
+        frame[8] = disassoc ? 0xa0 : 0xc0; // management: disassociation or deauthentication
+        if (hwsim_mac(words[5], frame + 8 + 4) || hwsim_mac(words[6], frame + 8 + 10) ||
+            hwsim_mac(words[7], frame + 8 + 16))
+                return fprintf(stderr, "hwsim_radio: inject: a bad address\n"), 1;
+        frame[8 + 24] = (unsigned char)reason;
+        memset(&self, 0, sizeof self);
+        self.sll_family = AF_PACKET;
+        self.sll_protocol = htons(ETH_P_ALL);
+        self.sll_ifindex = (int)index;
+        if (bind(raw, (struct sockaddr *)&self, sizeof self) < 0)
+                return perror("hwsim_radio: inject bind"), 1;
+        for (unsigned at = 0; at < times; at++)
+        {
+                if (send(raw, frame, sizeof frame, 0) != (ssize_t)sizeof frame)
+                        return perror("hwsim_radio: inject send"), 1;
+                usleep(50000);
+        }
+        return 0;
+}
+
 int main(int count, char **words)
 {
         int handle = socket(AF_NETLINK, SOCK_RAW, NETLINK_GENERIC);
@@ -122461,6 +123257,8 @@ int main(int count, char **words)
         }
         if (count == 4 && !strcmp(words[1], "dhcp"))
                 return hwsim_dhcp(words[2], (unsigned)atoi(words[3]));
+        if (count == 10 && !strcmp(words[1], "inject"))
+                return hwsim_inject(handle, words);
         if (count == 2 && !strcmp(words[1], "new"))
         {
                 family = hwsim_family(handle, "MAC80211_HWSIM");
@@ -122507,7 +123305,8 @@ int main(int count, char **words)
                 return 0;
         }
         fprintf(stderr, "usage: hwsim_radio new | power IF DBM | hold | move PID IF |"
-                        " in PID CMD... | dhcp IF SECONDS\n");
+                        " in PID CMD... | dhcp IF SECONDS | inject IF MHZ KIND TO FROM BSSID"
+                        " REASON TIMES\n");
         return 2;
 }
 #endif /* CHECK_hwsim_radio */

@@ -168,6 +168,69 @@ never a pass.
 - **Bad URL spellings:** `http:` and `https:` without `//` are refused in every
   tier (a host named `https` is not worth a plaintext connection to the wrong
   place); the tight tier refuses every leading scheme token (`ftp:21`).
+- **WIFI-D1, TKIP and WPA1 are never joined:** a group cipher of TKIP (the
+  WPA/WPA2 mixed setting) or a pairwise set with no CCMP is refused before
+  anything is sent, in words that name the fix ("set the access point to
+  WPA2 or WPA3 with AES (CCMP)"); any other cipher is refused as not offered.
+- **WIFI-D2, what a join asks for (`wifi_join_plan`):** WPA3 (SAE, group 19)
+  whenever the access point offers it and the saved secret is a password (a
+  key of 64 hex digits is a PSK and cannot do SAE), with management frame
+  protection required; WPA2 (PSK-SHA256 when it is offered with protection,
+  else PSK) when it is not, with protection whenever it is offered. A network
+  that offers both is tried as WPA2 after WPA3 only when the exchange came to
+  nothing for a reason that is not the password. What the join reads it from
+  is both frames the kernel keeps of the access point (its latest, which a
+  probe response from anybody can be, and its last beacon), taking what either
+  offers: a forged frame can then add an offer, which costs a join a forger
+  could stop anyway, but not take one away. Message 3 of the handshake carries
+  the access point's own RSN element and RSN extension element under the MIC;
+  one that matches neither frame the join chose it from is refused unanswered
+  (`WIFI_REFUSE_ELEMENTS`, 802.11-2020 12.7.6.4, as wpa_supplicant does), so a
+  stripped offer is caught at the handshake.
+- **WIFI-D3, protection is asked for as required:** the kernel takes no
+  optional form from a driver with no connect of its own (mac80211's kind), so
+  a join that sees protection offered asks for `NL80211_MFP_REQUIRED`, and the
+  kernel then drops unprotected deauthentication and disassociation frames.
+  The IGTK (BIP-CMAC-128, key ids 4 and 5) is installed as the GTK is: only
+  on a link that asked for protection, only from a frame whose MIC checked,
+  once per key (zero bytes are a key; `igtk_installed`), before the group
+  handshake is answered or its replay counter consumed, and dropped on a roam.
+- **WIFI-D4, what a network teaches is kept (`/root/wifi.rules`, 0600, written
+  beside itself):** an access point of a saved name that offered protection
+  makes every later access point of the name without it refused
+  (`WIFI_REFUSE_PMF_GONE`), and one joined with WPA3 makes WPA2 refused
+  (`WIFI_REFUSE_SAE_GONE`): a twin that offers less is what a forged
+  deauthentication or an offline password guess needs. The choice of access
+  point ranks such twins last. Both are forgotten by `wifi remove` and by
+  `wifi add` with another password (its owner saying the network changed),
+  and kept by an add with the same one, which a machine script makes at every
+  boot. Trust on first use: the first join of a network has nothing to hold it
+  to but message 3.
+- **WIFI-D5, the tight tier (`MOONWATER_STRICT_NET >= STRICT_TIGHT`, which
+  `sec_net_hardened` and `sec_net_locked` select):** every secured join has
+  protected management frames, so a WPA2 network without them is refused
+  (`WIFI_REFUSE_NO_PMF`) whatever the saved network says, and WPA2 is joined
+  only for a network saved with `moonwater wifi add SSID - wpa2`
+  (`WIFI_REFUSE_WPA2`), with no fall back from WPA3 to WPA2 without it. The
+  owner's `wpa2` changes nothing below the tight tier. Default **not decided
+  by the owner**: whether `wpa2` should lift the protection requirement too
+  (one line in `wifi_join_plan`).
+- **WIFI-D6, SAE's password element and side channels:** hash-to-element
+  (12.4.4.2.3: PT by two simplified SWU maps of RFC 9380, Z = -10, square roots
+  by the fixed exponent (p + 1) / 4, choices by mask) whenever the access point
+  says it takes it in its RSN extension element, which every 6 GHz network and
+  every one set to it alone does; hunting and pecking otherwise, as every WPA3
+  station has: each pass is worked out whole, at least 40 of them (255 at
+  most) whatever pass lands, the test for a square and the choice of the root
+  and of the pass by mask and fixed exponent, the Dragonblood advice. What the
+  password still decides: the HMAC's block count (its length), and, below 2^-40,
+  more than 40 passes. The secret scalar multiplications are
+  `crypto_point_scalar_private`; the peer's commit is checked for range, the
+  curve and reflection before any multiplication. Not built: password
+  identifiers, groups other than 19 (a refusal of group 19 ends the join),
+  SAE-PK, the extended-key suites (AKM 24 and 25), FT. A network that offers
+  hash-to-element is never hunted for: the extension element of message 3 is
+  held to what was seen, so stripping it from the beacon is caught.
 
 ## Evidence
 
@@ -189,9 +252,9 @@ ARM64 and RISC-V mandatory with UBSan trapping.
 | HTTP, URL | `localhost` and `*.localhost` reach 127.0.0.1 without a resolver (RFC 6761; `wget_hostile` with a stub resolver, curl held to the same rows); host spellings named against GNU wget and curl; the scheme rule at both tiers (`http_urls`); sink-side validation of host, target, headers; userinfo, schemes, fragments refused; one framing reading; redirect and HTTPS-downgrade bounds; body deadline; per-hop host, address, SNI and Host identity; `http_response_framing` (with `http.client` and curl), `wget_mutation` and `wget_hostile` (GNU wget and curl as live oracles), `https_downgrade`, `http_fuzz` | CNAME, multi-address and interface-scope identity; `inet_aton` shorthands (`0x7f.1`, `127.1`) are names here and addresses to wget and curl (decision); SNTP, logger and Waterlink peers still ask DNS for localhost; the tight tier bounds each hop, not the redirect chain |
 | TLS, X.509 | transcript, Finished, AEAD, record sequence, state ordering; strict DER; CertificateEntry extensions refused; delivery schedules and FIN/RST cuts (`tls_peer --schedule`); SAN and name constraints, key usage, EKU, dates; chains against OpenSSL and Go `crypto/x509`; record nonce coverage over every value in every sequence byte lane and guarded unaligned buffers; record-header coverage over every 16-bit length and 8-bit type; `tls_chains` (also wget's status and words for each refusal), `tls_hostnames`, `tls_dates`, `public_suffixes`, `anchors`, `tls_peer`, `tls_der_fuzz`, `tls_hs_fuzz`, `tls_verify_fuzz`; `x509_corpus` by hand over 643 hosts | name constraints in more shapes |
 | Crypto | OpenSSL vectors and every `lib.c` architecture body: `crypto_vectors` (`--wycheproof DIR` by hand), `crypto_fuzz` | none known |
-| Wi-Fi | RSN, EAPOL-Key, replay counters, source address, scan parsing; all four GTK slots, zero-valued first keys, driver refusal/retry and roam reset (`wifi_key_state`); the strongest 64 names kept and the associated row never evicted; one BSS donates every field of a row; `wifi_scan_fuzz`, `wifi_eapol_fuzz`, `wifi_air` | management-frame protection and WPA3 (separate branch); a forger outranking every retained row |
+| Wi-Fi | RSN, EAPOL-Key, replay counters, source address, scan parsing; all four GTK slots and both IGTK slots, zero-valued first keys, driver refusal/retry and roam reset, message 3's elements held to the beacon's (`wifi_key_state`); the strongest 64 names kept and the associated row never evicted; one BSS donates every field of a row; the RSN offer of both frames against a model, a twin offering less ranked last (`wifi_scan_fuzz`); PSK, PSK-SHA256 with protection and SAE key frames (HMAC-SHA1 and AES-CMAC MICs, descriptor versions 2, 3 and 0, IGTK KDEs, elements bent or stripped in message 3) under `wifi_eapol_fuzz`; the SAE exchange's frame reader, state and bounds and the budget against a model (`wifi_sae_fuzz`); SAE (hunt and hash-to-element), the KDF PTK and CMAC against a Python reference and RFC 4493 (`CHECK_waterlink_service`); `wifi_join_plan` at every tier over every offer, rule and secret (`CHECK_bowl`, again in its tight build); `wifi_air` (hwsim: the pmf and sae families, spoofed deauthentication, hostapd 2.11 with each password element method and a token) | a forger outranking every retained row; a second physical chipset; the first join of a network is trust on first use |
 | Waterlink | Noise handshake, cookie, replay window, grants, revocation; mDNS reads Internet class only, RCODE zero, TTL nonzero, an SRV with a non-root target and a nonzero port, exposes only a PTR and SRV intersection, and shares a packet-sized compression-pointer budget across every name; the reply and answer budgets move only after a successful send; `IP_MULTICAST_IF` failure refuses the send; a source holds at most `LINK_GREET_SOURCE` of the 16 greeting slots; legacy verifier migration is all-write plus `fsync`, and until it succeeds the listener stays off while commands keep the groups (their save is the scrub); every elapsed time is ordered first; `waterlink_fuzz` rejects a wake/fill cycle that remains immediately due without output; `sh test/run waterlink link`, `waterlink_sanitized`, `waterlink_fuzz` (MSan with `MOONWATER_MSAN=1`) | handshake flood under netem; address rotation reaches the global greeting ceiling |
-| Saved state | wifi and bluetooth lists written beside themselves and renamed, opened nonblocking, regular files only; no hash of a group secret on disk; `sh test/run cli link` | |
+| Saved state | wifi and bluetooth lists and the wifi rules written beside themselves and renamed, opened nonblocking, regular files only, the rules 0600 and kept to the saved networks; no hash of a group secret on disk; `sh test/run cli link` | |
 | Secrets, boot choice | `history_secret_line` rows including what the denylist does not see (`CHECK_bowl`); `link group NAME -` and `wifi add` at a terminal (`moonwater_cli`, `link`); the tight tier's refusal of both argument forms (`CHECK_bowl` again at `MOONWATER_STRICT` 2); `host_link_external`, `host_disk_external` failing closed and `host_lone_taken` (`CHECK_bowl`); a fixed NVMe install still taken and another build still asked about (`install` lane) | a USB install in a guest (found only when it enumerates before the census, racy in QEMU); the `removable` files of a real PCI port need hardware |
 | Terminal, JSON reader | `term_fuzz` (grid, write cuts, resizes, keys, pointer between writes; the cursor stays on the grid; it fails on a planted clamp bug) and `bowl_json_fuzz`, ASan/UBSan, smoke in `term` and `bowl` | KERNEL_MODE emulator build, MSan |
 | Shell, OS boundary | generated Bash and Dash differential; private edit files; `edit` draws a file's controls, DEL and invalid UTF-8 as `?` and drops C1 controls spelled in UTF-8, in rows and status line (`edit` lane, `hostile`); PTY setup; tar pinned parents; hostile environment and privilege matrices; `pathname_race`; effect-based coreutils (`sh test/run shell builtins files tar`) | |
@@ -308,6 +371,7 @@ ledger at the top of its section).
 | TLS | `TLS_RECORD_MAX`, `TLS_HS_MAX`, 64 extensions, 8 certificates |
 | HTTP | `HTTP_URL_MAX`, `HTTP_HEAD_MAX`, `HTTP_FETCH_MAX` (16 MiB in memory), `HTTP_HOPS`, `HTTP_WRITE_SPANS`; `HTTP_BODY_SECONDS` (300 s) bounds a stored body in every tier and a streamed one at the tight tier, where the default keeps GNU wget's idle timer alone |
 | Waterlink | 8 instances a packet; at most the packet's byte length in shared mDNS compression-pointer jumps; `LINK_GREET_SOURCE` 8 of 16 greeting slots; one reply and one answer an interval |
+| Wi-Fi | SAE, cheap input to dear crypto: one peer commit taken in (two scalar multiplications) an exchange, after checks that cost nothing; one token round, `WIFI_SAE_TOKEN_MOST` 64 bytes; `WIFI_SAE_FRAMES_MOST` 64 authentication events read, `WIFI_SAE_SECONDS` 10 s; `WIFI_SAE_PEER_MOST` 6 exchanges with one access point and `WIFI_SAE_ALL_MOST` 24 with all in any `WIFI_SAE_WINDOW_MS` 60 s, by the boot clock in `/run/moonwater/wifi.sae`, one over refused before the work; 40 to `WIFI_SAE_PASSES_MOST` 255 hunting passes. EAPOL: a 512-byte frame, `CRYPTO_WRAP_MOST` of key data. Scan: `RADIO_AIR_MOST` 64 names; `RADIO_AVOID_MOST` 64 access points given up on, an hour each. `RADIO_RULES_ROOM` 4,096 bytes of rules, three a saved network |
 
 ## A new parser or fix
 
@@ -343,18 +407,33 @@ architecture gate above. CI is parked (`workflow_dispatch` only).
 ## Open
 
 - **Closed, unmerged work:** NTS (#18) and the clock floor of #17 (a floor,
-  SNTP_WALL_LEAST, is in the SNTP client); WPA3 and 802.11w (#19); DNS over TLS
-  (#20); DHCP over a raw socket (#21); wget and curl parity of defaults (#22).
-  Their branches are gone; each pull request keeps its head
-  (`git fetch origin pull/N/head`).
+  SNTP_WALL_LEAST, is in the SNTP client); DNS over TLS (#20); DHCP over a raw
+  socket (#21); wget and curl parity of defaults (#22). Their branches are
+  gone; each pull request keeps its head (`git fetch origin pull/N/head`).
+  WPA3 and 802.11w (#19) are in, rewritten on this tree (WIFI-D1 to D6).
+- **Wi-Fi:** a network at 6 GHz alone is not scanned for by a join (its
+  channels are listened to, which outlasts the scan's five seconds); WPA3's
+  password identifiers, groups other than 19, SAE-PK, AKM 24 and 25 and FT are
+  not built. The first join of a network is trust on first use (WIFI-D4), and
+  a WPA2/WPA3 network never joined with WPA3 can be pushed to WPA2 at the
+  default tier by an attacker who stops the exchange (a refusal or
+  deauthentication forged before the confirm); the access point's Transition
+  Disable indication is not read. EAPOL message 1 is unauthenticated by
+  design; a roam the driver made on its own has no elements to hold the next
+  message 3 to. SAE's commits are unauthenticated before the confirm, so a
+  forger in range can make an exchange fail (the budget bounds what that
+  costs, not that it happens). hwsim has no firmware and no real rekeys; a
+  second physical chipset is unproved. The SAE budget's file being unwritable
+  leaves exchanges counted per exchange only.
 - **No change planned:** plain SNTP is accepted anywhere the build and clock
   window allow; a forged clock step before the SNTP window is undone only by
   authenticated time; HEAD is not exercised; a response cut inside its status
   line or a header fails in both tiers (GNU wget and curl disagree with each
   other there); an endless close-delimited body at the default tier can fill the
   disk; the radio lock is held across a whole join; the elements a scan reads are
-  unauthenticated, so the join only orders by what the saved network asks for and
-  the handshake authenticates.
+  unauthenticated, so the join orders by what the saved network asks for and has
+  taught it, and the handshake's message 3 authenticates the elements the
+  choice was made from.
 - **Evidence:** a corpus beyond generated seeds; ASan/UBSan and native
   namespace runs as required jobs; MSan beyond hosted lifts; a second oracle for
   DNS; an independent review once those are reproducible.

@@ -3111,6 +3111,76 @@ static bool crypto_aes_key_unwrap(p8 address_to kek, p8 address_to wrap,
         return unwrapped;
 }
 
+/* AES-128 of one block under the FIPS-197 schedule round. lib.c's AES runs
+   in GCM's counter mode, and the keystream of a counter is that block
+   encrypted, so one block of zeros through it is the cipher. */
+static fn crypto_aes128_encrypt(const p8 address_to round, const p8 address_to in,
+                                p8 address_to out)
+{
+        p8 counter[16];
+        p8 zero[16];
+
+        memory_copy(counter, in, 16);
+        memory_fill(zero, 0, 16);
+        aes128_ctr_blocks(round, counter, zero, out, 1);
+        crypto_forget(counter, sizeof(counter));
+}
+
+/* A CMAC subkey: the block doubled in GF(2^128), the carry folded back by
+   mask rather than by a branch on the key. */
+static fn crypto_cmac_double(p8 address_to block)
+{
+        p8 carry = (p8)(0 - (block[0] >> 7));
+
+        for (positive at = 0; at < 15; at++)
+                block[at] = (p8)((block[at] << 1) | (block[at + 1] >> 7));
+        block[15] = (p8)((block[15] << 1) ^ (carry & 0x87));
+}
+
+/*
+        AES-CMAC (RFC 4493) under a 128-bit key: K1 is AES(0) doubled and K2
+        is K1 doubled; the blocks are chained, and the last is XORed with K1
+        when it is whole and with K2 after 10* padding when it is not or
+        there is none. The MIC of the key frames of WPA's descriptor
+        version 3 and of SAE.
+*/
+static fn crypto_aes_cmac(p8 address_to key, const p8 address_to data, positive length,
+                          p8 address_to out)
+{
+        p8 round[176];
+        p8 subkey[2][16];
+        p8 state[16];
+        p8 last[16];
+        positive blocks = length ? (length + 15) / 16 : 1;
+        positive tail = length - (blocks - 1) * 16;
+        bool whole = length && tail == 16;
+
+        crypto_aes128_expand(key, round);
+        memory_fill(state, 0, 16);
+        crypto_aes128_encrypt(round, state, subkey[0]);
+        crypto_cmac_double(subkey[0]);
+        memory_copy(subkey[1], subkey[0], 16);
+        crypto_cmac_double(subkey[1]);
+        for (positive at = 0; at + 1 < blocks; at++)
+        {
+                for (positive byte = 0; byte < 16; byte++)
+                        state[byte] ^= data[at * 16 + byte];
+                crypto_aes128_encrypt(round, state, state);
+        }
+        memory_fill(last, 0, 16);
+        if (tail)
+                memory_copy(last, data + (blocks - 1) * 16, tail);
+        if (!whole)
+                last[tail] = 0x80;
+        for (positive byte = 0; byte < 16; byte++)
+                state[byte] ^= last[byte] ^ subkey[whole ? 0 : 1][byte];
+        crypto_aes128_encrypt(round, state, out);
+        crypto_forget(round, sizeof(round));
+        crypto_forget(subkey, sizeof(subkey));
+        crypto_forget(state, sizeof(state));
+        crypto_forget(last, sizeof(last));
+}
+
 /*
         GHASH over a span, the last partial block zero padded. The multiply
         is ghash_blocks in lib.c over the table ghash_key made; GCM's
@@ -3696,6 +3766,27 @@ static fn crypto_fe_inv_public(p64 address_to d, const p64 address_to a,
                 }
         }
         crypto_fe_mul(d, crypto_limbs_is_one(u, n) ? x1 : x2, f->square, f);
+}
+
+/* d = a^e in Montgomery form for an exponent e that is public and as wide as
+   the field: a square every bit and a multiply where e has a one, so what
+   is spent follows e and never a. SAE's square roots ((p + 1) / 4) and its
+   test for a square take their exponents from the modulus alone. */
+static fn crypto_fe_power(p64 address_to d, const p64 address_to a,
+                          const p64 address_to e, const crypto_field address_to f)
+{
+        p64 result[CRYPTO_FE_MAX];
+        positive n = f->n;
+
+        memory_copy(result, f->one, n * 8);
+        for (positive bit = n * 64; bit; bit--)
+        {
+                crypto_fe_sqr(result, result, f);
+                if ((e[(bit - 1) / 64] >> ((bit - 1) % 64)) & 1)
+                        crypto_fe_mul(result, result, a, f);
+        }
+        memory_copy(d, result, n * 8);
+        crypto_forget(result, sizeof(result));
 }
 
 /* Jacobian points: (X, Y, Z) is the affine (X/Z^2, Y/Z^3), coordinates in
