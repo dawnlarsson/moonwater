@@ -7100,12 +7100,12 @@ typedef struct
         p8 ssid[32];
         p8 bssid[6];
         p8 unused[2];
-        b64 status;
+        bipolar status;
 } radio_ask;
 
 typedef struct
 {
-        b64 answer;
+        bipolar answer;
         p64 count;
         p8 avoid[RADIO_ASK_AVOID_ROOM];
 } radio_answer;
@@ -7131,7 +7131,7 @@ static COLD fn radio_station_ask(radio_ask address_to ask, radio_answer address_
 }
 
 //      A question about a name or an access point, its answer's number.
-static COLD b64 radio_station_number(p32 what, const p8 address_to ssid, positive ssid_length,
+static COLD bipolar radio_station_number(p32 what, const p8 address_to ssid, positive ssid_length,
                                      const p8 address_to bssid, p8 mask, p8 rules)
 {
         radio_ask ask;
@@ -7210,7 +7210,7 @@ static COLD fn radio_station_said(positive which)
 
         memory_fill(address_of ask, 0, sizeof(ask));
         ask.what = RADIO_ASK_SAID;
-        ask.status = (b64)which;
+        ask.status = (bipolar)which;
         radio_station_ask(address_of ask, address_of answer);
 }
 
@@ -10757,6 +10757,182 @@ static COLD fn radio_avoid_add(p8 address_to bssid)
                         0600, false);
 }
 
+typedef struct
+{
+        p8 address_to ssid;
+        positive ssid_length;
+        radio_avoid address_to avoid;
+        positive avoid_count;
+        radio_heard best;
+        //      When the best was given up on until, 0 for never.
+        p64 until;
+        bool found;
+        bool secured;
+        bool fits;
+        //      What the saved network has taught the join, whether its secret
+        //      is a key of 64 hex digits, and the best's elements as seen.
+        p8 rules;
+        bool key_only;
+        wifi_seen seen;
+} radio_pick;
+
+/* Whether what an access point's frame asks of a station is what a saved
+   network wants: WPA2 or WPA3 for one with a password, nothing for one
+   without. */
+static bool radio_security_fits(bool secured, p8 security)
+{
+        return secured ? security == RADIO_WPA2 || security == RADIO_WPA23 ||
+                             security == RADIO_WPA3 || security == RADIO_PMF
+                       : security == RADIO_OPEN;
+}
+
+/* The strongest the kernel still lists by the name, one given up on only
+   if no other is, and the one given up on longest ago before the rest. */
+static bool radio_pick_seen(netlink_header address_to header, address_any context)
+{
+        radio_pick address_to pick = (radio_pick address_to)context;
+        radio_heard one;
+        p64 until = 0;
+        bool fits;
+
+        if (!radio_bss_read(header, address_of one) || one.seen > RADIO_AIR_STALE_MS ||
+            !wifi_mac_set(one.bssid) || one.ssid_length != pick->ssid_length ||
+            memory_compare(one.ssid, pick->ssid, pick->ssid_length))
+                return true;
+        for (positive at = 0; at < pick->avoid_count; at++)
+                if (!memory_compare(pick->avoid[at].bssid, one.bssid, 6))
+                        until = pick->avoid[at].until;
+        //      What the saved network asks of an access point: WPA2 for one
+        //      with a password, nothing for one without. A twin by the same
+        //      name that offers anything else, and beacons louder than the
+        //      real one, is the last resort and not the first: the kernel
+        //      will not join it, and asking cost a join its whole timeout.
+        //      The frame the kernel keeps the elements of is the latest, a
+        //      probe response as well as a beacon, and any station can send
+        //      one in the real access point's name without an RSN element:
+        //      what its last beacon asked counts as well, so one forged
+        //      response does not push the real one out behind a twin. And
+        //      of a secured one, what the join's plan would refuse: a twin
+        //      that offers less than the network taught it (protection,
+        //      WPA3) is exactly what a downgrade needs, and goes last.
+        fits = radio_security_fits(pick->secured, one.security) ||
+               radio_security_fits(pick->secured, one.beacon_security);
+        if (pick->secured && fits)
+        {
+                wifi_plan plan;
+
+                fits = wifi_join_plan(MOONWATER_STRICT_NET, address_of one.caps, pick->rules,
+                                      pick->key_only, address_of plan) == 0;
+        }
+        if (pick->found && (fits < pick->fits ||
+                            (fits == pick->fits &&
+                             (until > pick->until ||
+                              (until == pick->until && one.mbm <= pick->best.mbm)))))
+                return true;
+        pick->best = one;
+        pick->found = true;
+        pick->until = until;
+        pick->fits = fits;
+        radio_bss_seen(header, address_of pick->seen);
+        return true;
+}
+
+/* Whether the last choice of an access point answered "none" from the scan of
+   a moment ago and not from one of its own. */
+static bool radio_scan_declined;
+//      And whether the one it chose had been given up on (declared with
+//      nl80211_join, which asks).
+static bool radio_pick_given_up;
+
+/*
+        The access point a join asks for by its BSSID. A join by name alone
+        took whatever the kernel's cache named, and the cache keeps an
+        access point for thirty seconds after it last heard it: after a
+        disconnect that was the one that had just stopped answering, and
+        authentication with it timed out, again and again. So the cache is
+        trusted for anything but an access point given up on, and when it
+        has nothing else by the name it is flushed and the air scanned for
+        the name -- by a join that was asked for, always, and by the
+        machine's own pass (force false) only when the cache has an access
+        point to doubt or no scan asked for this name came in the last
+        thirty seconds, as radio_air_take holds a status to: a saved network
+        out of range was scanned for, five seconds of it, again for every
+        network and every pass. 1 with one
+        chosen, 0 when the scan, or the one a moment ago, heard none by this
+        name, -1 when no scan could be had: the join then goes by name. With
+        one chosen, caps is what it offers and seen what it showed.
+*/
+static COLD bipolar radio_bss_choose(nl80211 address_to session, p32 index,
+                                     p8 address_to ssid, positive ssid_length, bool secured,
+                                     p8 address_to bssid, p32 address_to frequency,
+                                     bool force, p8 rules, bool key_only,
+                                     wifi_rsn_caps address_to caps, wifi_seen address_to seen)
+{
+        radio_scan_declined = false;
+        radio_avoid avoid[RADIO_AVOID_MOST];
+        radio_pick pick = {.ssid = ssid,
+                           .ssid_length = ssid_length,
+                           .avoid = avoid,
+                           .secured = secured,
+                           .rules = rules,
+                           .key_only = key_only};
+        bipolar heard = 1;
+        bool scanned = false;
+
+        pick.avoid_count = radio_avoid_load(avoid);
+        radio_air_dump(session, index, radio_pick_seen, address_of pick);
+        if ((!pick.found || pick.until || !pick.fits) &&
+            (force || pick.found || radio_scan_age(ssid, ssid_length) > RADIO_AIR_STALE_MS))
+        {
+                scanned = true;
+                heard = radio_air_scan(session, index, ssid, ssid_length,
+                                       RADIO_SCAN_JOIN_WIDE)
+                            ? 1
+                            : -1;
+                pick.found = false;
+                radio_air_dump(session, index, radio_pick_seen, address_of pick);
+        }
+        //      Nothing by the name and no scan asked for: not in range as of
+        //      the scan a moment ago, which is no new failure to wait longer for.
+        radio_scan_declined = !pick.found && !scanned;
+        radio_pick_given_up = pick.found && pick.until != 0;
+        if (!pick.found)
+                return heard > 0 ? 0 : -1;
+        memory_copy(bssid, pick.best.bssid, 6);
+        address_to frequency = pick.best.frequency;
+        address_to caps = pick.best.caps;
+        address_to seen = pick.seen;
+        return 1;
+}
+
+/* A channel's number from its frequency, as the kernel numbers it
+   (ieee80211_freq_khz_to_channel), and 0 off every band. The sum here
+   before took 5000 from anything at 4900 MHz or over in unsigned
+   arithmetic: the 4.9 GHz band printed as channel 858993439, the 6 GHz
+   band's channel 2 as 187 and 60 GHz as 6 GHz channels by the thousand. */
+static p32 radio_channel(p32 mhz)
+{
+        return mhz == 2484                    ? 14
+               : mhz >= 2407 && mhz < 2484    ? (mhz - 2407) / 5
+               : mhz >= 4910 && mhz <= 4980   ? (mhz - 4000) / 5
+               : mhz >= 5000 && mhz < 5925    ? (mhz - 5000) / 5
+               : mhz == 5935                  ? 2
+               : mhz >= 5950 && mhz <= 7115   ? (mhz - 5950) / 5
+               : mhz >= 58320 && mhz <= 70200 ? (mhz - 56160) / 2160
+                                              : 0;
+}
+
+static radio_heard address_to radio_air_find(radio_air address_to air, string_address ssid)
+{
+        positive length = string_length(ssid);
+
+        for (positive at = 0; at < air->count; at++)
+                if (air->heard[at].ssid_length == length &&
+                    !memory_compare(air->heard[at].ssid, ssid, length))
+                        return air->heard + at;
+        return null;
+}
+
 /*
         The station's filter: its architecture, then the calls that need no
         more than their number, then the four whose arguments decide, then
@@ -10980,7 +11156,7 @@ static COLD fn radio_broker_answer(radio_ask address_to ask, radio_answer addres
                 radio_avoid_add(ask->bssid);
                 break;
         case RADIO_ASK_SCAN_AGE:
-                answer->answer = (b64)radio_scan_age(ssid, ssid_length);
+                answer->answer = (bipolar)radio_scan_age(ssid, ssid_length);
                 break;
         case RADIO_ASK_SCAN_NOTE:
                 if (ssid)
@@ -11106,179 +11282,6 @@ static COLD bipolar radio_join_apart(p8 address_to ssid, positive ssid_length,
         got = system_read_retry((positive)told[0], address_of status, sizeof(status));
         system_close(told[0]);
         return got == (bipolar)sizeof(status) ? (bipolar)status : WIFI_REFUSE_APART;
-}
-
-typedef struct
-{
-        p8 address_to ssid;
-        positive ssid_length;
-        radio_avoid address_to avoid;
-        positive avoid_count;
-        radio_heard best;
-        //      When the best was given up on until, 0 for never.
-        p64 until;
-        bool found;
-        bool secured;
-        bool fits;
-        //      What the saved network has taught the join, whether its secret
-        //      is a key of 64 hex digits, and the best's elements as seen.
-        p8 rules;
-        bool key_only;
-        wifi_seen seen;
-} radio_pick;
-
-/* Whether what an access point's frame asks of a station is what a saved
-   network wants: WPA2 or WPA3 for one with a password, nothing for one
-   without. */
-static bool radio_security_fits(bool secured, p8 security)
-{
-        return secured ? security == RADIO_WPA2 || security == RADIO_WPA23 ||
-                             security == RADIO_WPA3 || security == RADIO_PMF
-                       : security == RADIO_OPEN;
-}
-
-/* The strongest the kernel still lists by the name, one given up on only
-   if no other is, and the one given up on longest ago before the rest. */
-static bool radio_pick_seen(netlink_header address_to header, address_any context)
-{
-        radio_pick address_to pick = (radio_pick address_to)context;
-        radio_heard one;
-        p64 until = 0;
-        bool fits;
-
-        if (!radio_bss_read(header, address_of one) || one.seen > RADIO_AIR_STALE_MS ||
-            !wifi_mac_set(one.bssid) || one.ssid_length != pick->ssid_length ||
-            memory_compare(one.ssid, pick->ssid, pick->ssid_length))
-                return true;
-        for (positive at = 0; at < pick->avoid_count; at++)
-                if (!memory_compare(pick->avoid[at].bssid, one.bssid, 6))
-                        until = pick->avoid[at].until;
-        //      What the saved network asks of an access point: WPA2 for one
-        //      with a password, nothing for one without. A twin by the same
-        //      name that offers anything else, and beacons louder than the
-        //      real one, is the last resort and not the first: the kernel
-        //      will not join it, and asking cost a join its whole timeout.
-        //      The frame the kernel keeps the elements of is the latest, a
-        //      probe response as well as a beacon, and any station can send
-        //      one in the real access point's name without an RSN element:
-        //      what its last beacon asked counts as well, so one forged
-        //      response does not push the real one out behind a twin. And
-        //      of a secured one, what the join's plan would refuse: a twin
-        //      that offers less than the network taught it (protection,
-        //      WPA3) is exactly what a downgrade needs, and goes last.
-        fits = radio_security_fits(pick->secured, one.security) ||
-               radio_security_fits(pick->secured, one.beacon_security);
-        if (pick->secured && fits)
-        {
-                wifi_plan plan;
-
-                fits = wifi_join_plan(MOONWATER_STRICT_NET, address_of one.caps, pick->rules,
-                                      pick->key_only, address_of plan) == 0;
-        }
-        if (pick->found && (fits < pick->fits ||
-                            (fits == pick->fits &&
-                             (until > pick->until ||
-                              (until == pick->until && one.mbm <= pick->best.mbm)))))
-                return true;
-        pick->best = one;
-        pick->found = true;
-        pick->until = until;
-        pick->fits = fits;
-        radio_bss_seen(header, address_of pick->seen);
-        return true;
-}
-
-/* Whether the last choice of an access point answered "none" from the scan of
-   a moment ago and not from one of its own. */
-static bool radio_scan_declined;
-
-/*
-        The access point a join asks for by its BSSID. A join by name alone
-        took whatever the kernel's cache named, and the cache keeps an
-        access point for thirty seconds after it last heard it: after a
-        disconnect that was the one that had just stopped answering, and
-        authentication with it timed out, again and again. So the cache is
-        trusted for anything but an access point given up on, and when it
-        has nothing else by the name it is flushed and the air scanned for
-        the name -- by a join that was asked for, always, and by the
-        machine's own pass (force false) only when the cache has an access
-        point to doubt or no scan asked for this name came in the last
-        thirty seconds, as radio_air_take holds a status to: a saved network
-        out of range was scanned for, five seconds of it, again for every
-        network and every pass. 1 with one
-        chosen, 0 when the scan, or the one a moment ago, heard none by this
-        name, -1 when no scan could be had: the join then goes by name. With
-        one chosen, caps is what it offers and seen what it showed.
-*/
-static COLD bipolar radio_bss_choose(nl80211 address_to session, p32 index,
-                                     p8 address_to ssid, positive ssid_length, bool secured,
-                                     p8 address_to bssid, p32 address_to frequency,
-                                     bool force, p8 rules, bool key_only,
-                                     wifi_rsn_caps address_to caps, wifi_seen address_to seen)
-{
-        radio_scan_declined = false;
-        radio_avoid avoid[RADIO_AVOID_MOST];
-        radio_pick pick = {.ssid = ssid,
-                           .ssid_length = ssid_length,
-                           .avoid = avoid,
-                           .secured = secured,
-                           .rules = rules,
-                           .key_only = key_only};
-        bipolar heard = 1;
-        bool scanned = false;
-
-        pick.avoid_count = radio_avoid_load(avoid);
-        radio_air_dump(session, index, radio_pick_seen, address_of pick);
-        if ((!pick.found || pick.until || !pick.fits) &&
-            (force || pick.found || radio_scan_age(ssid, ssid_length) > RADIO_AIR_STALE_MS))
-        {
-                scanned = true;
-                heard = radio_air_scan(session, index, ssid, ssid_length,
-                                       RADIO_SCAN_JOIN_WIDE)
-                            ? 1
-                            : -1;
-                pick.found = false;
-                radio_air_dump(session, index, radio_pick_seen, address_of pick);
-        }
-        //      Nothing by the name and no scan asked for: not in range as of
-        //      the scan a moment ago, which is no new failure to wait longer for.
-        radio_scan_declined = !pick.found && !scanned;
-        radio_pick_given_up = pick.found && pick.until != 0;
-        if (!pick.found)
-                return heard > 0 ? 0 : -1;
-        memory_copy(bssid, pick.best.bssid, 6);
-        address_to frequency = pick.best.frequency;
-        address_to caps = pick.best.caps;
-        address_to seen = pick.seen;
-        return 1;
-}
-
-/* A channel's number from its frequency, as the kernel numbers it
-   (ieee80211_freq_khz_to_channel), and 0 off every band. The sum here
-   before took 5000 from anything at 4900 MHz or over in unsigned
-   arithmetic: the 4.9 GHz band printed as channel 858993439, the 6 GHz
-   band's channel 2 as 187 and 60 GHz as 6 GHz channels by the thousand. */
-static p32 radio_channel(p32 mhz)
-{
-        return mhz == 2484                    ? 14
-               : mhz >= 2407 && mhz < 2484    ? (mhz - 2407) / 5
-               : mhz >= 4910 && mhz <= 4980   ? (mhz - 4000) / 5
-               : mhz >= 5000 && mhz < 5925    ? (mhz - 5000) / 5
-               : mhz == 5935                  ? 2
-               : mhz >= 5950 && mhz <= 7115   ? (mhz - 5950) / 5
-               : mhz >= 58320 && mhz <= 70200 ? (mhz - 56160) / 2160
-                                              : 0;
-}
-
-static radio_heard address_to radio_air_find(radio_air address_to air, string_address ssid)
-{
-        positive length = string_length(ssid);
-
-        for (positive at = 0; at < air->count; at++)
-                if (air->heard[at].ssid_length == length &&
-                    !memory_compare(air->heard[at].ssid, ssid, length))
-                        return air->heard + at;
-        return null;
 }
 
 /* A name made safe to print, and how many columns it takes. */

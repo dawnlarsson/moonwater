@@ -51595,6 +51595,7 @@ typedef struct { positive began; positive budget; } network_deadline;
 #define TLS_REVOKED (-6)
 #define TLS_UNCHECKED (-7)
 #define TLS_CLOCK (-8)
+#define TLS_UNLOGGED (-9)
 #define ENOSPC 28
 #define NETWORK_INTERRUPTED (-4)
 #define syscall(name) 0
@@ -53002,6 +53003,7 @@ static bipolar network_stream_read_some_for(bipolar h, p8 *into, positive room,
 #define TLS_REVOKED (-6)
 #define TLS_UNCHECKED (-7)
 #define TLS_CLOCK (-8)
+#define TLS_UNLOGGED (-9)
 typedef struct
 {
         p8 *receive;
@@ -76800,6 +76802,28 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
 """
 
 
+def radio_station_lift(host):
+    """What a lift of host.c's Wi-Fi state readers needs of the station's
+    channel: its questions' numbers and types as host.c has them, and the
+    station's end, which in a lift is never open (-1), so the asks below are
+    never made."""
+    return src_slice(host, "//      A socket of whole messages for the broker's channel",
+                     "//      The station's end of its broker's channel; -1 everywhere else.") + r"""
+static b32 radio_station = -1;
+static void radio_station_ask(radio_ask *ask, radio_answer *answer)
+{
+        (void)ask;
+        memset(answer, 0, sizeof(*answer));
+}
+static bipolar radio_station_number(p32 what, const p8 *ssid, positive ssid_length,
+                                const p8 *bssid, p8 mask, p8 rules)
+{
+        (void)what; (void)ssid; (void)ssid_length; (void)bssid; (void)mask; (void)rules;
+        return 0;
+}
+"""
+
+
 def wifi_sae_fuzz_source(net, host, checks):
     """The SAE lift: net.c's hosted crypto, its netlink message readers,
     host.c's nl80211 constants and finders and the SAE section from the
@@ -76827,7 +76851,8 @@ def wifi_sae_fuzz_source(net, host, checks):
                                "static COLD bipolar nl80211_authenticate(")
     return "\n".join((crypto, "#include <ctype.h>", "#include <stddef.h>", WIFI_SAE_FUZZ_SHIM,
                       headers, header, attribute, finding, status, constants, finds, command,
-                      sae, WIFI_SAE_FUZZ_DRIVER, exchange, WIFI_SAE_FUZZ_MODEL))
+                      radio_station_lift(host), sae, WIFI_SAE_FUZZ_DRIVER, exchange,
+                      WIFI_SAE_FUZZ_MODEL))
 
 
 def wifi_sae_fuzz_seeds():
@@ -78065,13 +78090,14 @@ def harness_wifi_scan_fuzz(argv):
                                "/* The RSN element a station offers")
         seen = src_slice(host, "#define WIFI_ELEMENT_ROOM",
                                "/* Whether an element of message 3 is one of the two seen")
+        station = radio_station_lift(host)
     except ValueError as error:
         print("  FAIL wifi scan fuzz lift: " + str(error))
         write_tally("wifi-scan-fuzz", 0, 1)
         return 1
     return tls_fuzz_run("wifi scan", wifi_scan_fuzz_seeds(),
                         NET_ZONE_FUZZ_SHIM + byte_reader_source() + wait + netlink +
-                        WIFI_SCAN_FUZZ_PRELUDE + caps + seen + constants + records +
+                        WIFI_SCAN_FUZZ_PRELUDE + station + caps + seen + constants + records +
                         family_info + finds + command + news + groups + iface_seen + wiphy_seen +
                         station_seen + link_news + scan + WIFI_PICK_FUZZ_PRELUDE + pick +
                         WIFI_SCAN_FUZZ_DRIVER, 4096)
