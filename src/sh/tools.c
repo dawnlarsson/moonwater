@@ -17106,6 +17106,11 @@ static b32 tools_dmesg_follow(tools_dmesg_state address_to state,
                 bipolar got = system_read_retry((positive)handle,
                                                 record_bytes,
                                                 sizeof(record_bytes));
+                //      Records overwritten before they were read: the next
+                //      read starts at the oldest one left, as util-linux
+                //      reads on.
+                if (got == -32)
+                        continue;
                 if (got < 0)
                 {
                         system_close(handle);

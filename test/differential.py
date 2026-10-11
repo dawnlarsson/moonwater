@@ -78472,6 +78472,11 @@ def harness_wifi_air(argv):
     # Said reversed, so the lane can tell an image without the hwsim profile
     # from one whose scenarios failed.
     prep.append("[ -d /sys/module/mac80211_hwsim ] && echo hwsm-on | rev")
+    # The kernel's ring is a few dozen kilobytes and an hour of scenarios
+    # wraps it, so a count of lines taken before a step and after it could
+    # go down: the scenarios read their own copy, followed from the start.
+    prep.append("command dmesg --follow > /tmp/kmsg.all 2>&1 &")
+    prep.append("dmesg() { cat /tmp/kmsg.all; }")
     prep.append("for i in $(seq 40); do [ -b /dev/sda1 ] && break; sleep 0.25; done")
     prep.append("mkdir -p /mnt/stick && mount -r -t vfat /dev/sda1 /mnt/stick")
     prep.append("L=\"/mnt/stick/lib/ld-linux-x86-64.so.2 --library-path /mnt/stick/lib\"")
@@ -78775,7 +78780,10 @@ def harness_wifi_air(argv):
     lines.append("$A /mnt/stick/hwsim_radio power $pci 19; n0=%s; sleep 25" % dm("$S: associated"))
     lines.append("scen_count 'pmf downgrade twin never joined' 0 \"$(( %s - n0 ))\"" % dm("$S: associated"))
     lines.append("scen_count 'pmf downgrade twin, not joined' 0 \"$(joined pmfreq)\"")
-    lines.append("moonwater wifi > /tmp/sc.got 2>&1; n=$(scen_strip < /tmp/sc.got | grep -c 'no longer offers management frame protection'); "
+    # Bare wifi lists the air as last heard until that is 30 seconds old,
+    # and the machine's pass may have scanned just before the twin came up.
+    lines.append("for i in $(seq 20); do moonwater wifi > /tmp/sc.got 2>&1; n=$(scen_strip < /tmp/sc.got | grep -c 'no longer offers management frame protection'); "
+                 "[ \"$n\" = 1 ] && break; sleep 2; done; "
                  "scen_count 'pmf downgrade twin, bare wifi says why' 1 \"$n\"; [ \"$n\" = 1 ] || sed 's/^/pmf-said /' /tmp/sc.got")
     lines.append("kill $(cat /tmp/pc.pid)")
     lines += pmf_ap("pb", "pmfreq", chan["req"], ["ieee80211w=2", "pairwise=CCMP", "group=CCMP"])
@@ -79091,7 +79099,7 @@ def harness_wifi_air(argv):
         # one it can find and end by then, or the link is left with a keeper
         # whose keys are of an association that is gone, deaf to the
         # group rekey, whose MIC it cannot check.
-        lines.append("moonwater wifi add \"$rk\" %s > /tmp/sc.a 2>&1 & moonwater wifi add \"$rk\" %s > /tmp/sc.b 2>&1 & wait" % (q(word), q(word)))
+        lines.append("moonwater wifi add \"$rk\" %s > /tmp/sc.a 2>&1 & a=$!; moonwater wifi add \"$rk\" %s > /tmp/sc.b 2>&1 & b=$!; wait $a $b" % (q(word), q(word)))
         lines.append("sleep 4; scen_count 'rekey two adds together, joined' 1 \"$(joined \"$rk\")\"")
         lines.append("scen_count 'rekey two adds together, one keeper' 1 \"$(awk -v i=\"$(stat -c %i /run/moonwater/wifi.keeper)\" '$6 ~ (\":\" i \"$\") { n++ } END { print n + 0 }' /proc/locks)\"")
         lines.append("g2=$(grep -c 'group key handshake completed' /tmp/rk0.log); $HC -i $j0 raw REKEY_GTK > /dev/null; sleep 6")
