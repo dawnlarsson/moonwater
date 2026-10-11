@@ -1932,9 +1932,21 @@ static COLD bipolar net_dhcp_apart(string_address device, p8 address_to hardware
         //      News that waited for the ACK waits for the conflict probe too
         //      (net_arp_conflict), or it would cut that at once and throw the
         //      lease away after all: the loop reads it as soon as the lease
-        //      is in place.
-        if (heard && ended == -2 && answer.status == DHCP_OK)
-                net_news_holdoff_until = net_seconds() + NET_NEWS_HOLDOFF_SECONDS;
+        //      is in place. Whether this wait saw it or not -- a watcher slow
+        //      to be scheduled finds the answer and the news ready together,
+        //      and reads the answer first.
+        if (heard && pending && answer.status == DHCP_OK && watching &&
+            net_events_watch >= 0)
+        {
+                system_poll_descriptor news = {(b32)net_events_watch,
+                                               SYSTEM_POLL_READ, 0};
+                timespec now = {0, 0};
+
+                if (ended == -2 ||
+                    system_poll_wait(address_of news, 1, address_of now, null) > 0)
+                        net_news_holdoff_until =
+                            net_seconds() + NET_NEWS_HOLDOFF_SECONDS;
+        }
         if (!heard)
         {
                 if (watching && ended == -2)

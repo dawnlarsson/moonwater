@@ -12776,20 +12776,24 @@ static bipolar dhcp_ask(string_address device, p8 address_to hardware,
                                             transaction, hardware, lease->address,
                                             lease->server, 0, true);
 
+                        //      A server will hold the offered address for
+                        //      this client until the ACK window is over:
+                        //      whoever waits for the exchange is told, so
+                        //      that link news lets the ACK come first. Told
+                        //      before the send, so that no news the REQUEST
+                        //      sets off can be read first.
+                        dhcp_say(DHCP_REQUESTED, lease);
                         if (socket_send(
                                 (b32)handle, packet, length, 0,
                                 address_of where, sizeof where) < 0)
+                        {
                                 /* The REQUEST never left.  Start the next
                                    discovery attempt immediately instead of
                                    spending its whole reply budget waiting for
                                    an answer that cannot exist. */
+                                dhcp_say(DHCP_UNANSWERED, lease);
                                 break;
-
-                        //      A server now holds the offered address for
-                        //      this client until its ACK window is over:
-                        //      whoever waits for the exchange is told, so
-                        //      that link news lets the ACK come first.
-                        dhcp_say(DHCP_REQUESTED, lease);
+                        }
 
                         //      An ACK is given at least the usual quarter.
                         if (!network_deadline_begin(

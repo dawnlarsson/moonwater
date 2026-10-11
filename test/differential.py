@@ -63242,12 +63242,13 @@ int main(void)
         check(!completed.rebinding && completed.transaction == network_load_32(sent[0].bytes + 4), "the same transaction");
         check(completed.seconds == 0 && completed.nanoseconds == 250000000, "an ACK gets at least a quarter second");
         check(!strcmp(order, "TSFUuf") && recorded == 0, "both sockets closed, nothing said without a pipe");
-        /* Run apart, it says its REQUEST is out once the REQUEST has left,
-           naming the offer; a completion that answers says no more. */
+        /* Run apart, it says its REQUEST is out just before the REQUEST
+           leaves (so no news the REQUEST sets off is read first), naming
+           the offer; a completion that answers says no more. */
         reset(); dhcp_apart = 9; play(1); complete_result = finals[f].result;
         check(dhcp_ask("x", hardware, &lease) == finals[f].expect, "the answer is the same apart");
-        check(recorded == 1 && records[0].said.status == DHCP_REQUESTED && records[0].after_sends == 2,
-              "one REQUESTED record, after the REQUEST left");
+        check(recorded == 1 && records[0].said.status == DHCP_REQUESTED && records[0].after_sends == 1 &&
+              sends == 2, "one REQUESTED record, just before the REQUEST left");
         check(!memcmp(&records[0].said.lease, &offer_lease, sizeof offer_lease), "the record names the offer");
     }
     /* A silent server after the REQUEST: the next attempt discovers again. */
@@ -63260,15 +63261,16 @@ int main(void)
     check(dhcp_ask("x", hardware, &lease) == DHCP_NO_OFFER && sends == 21 && recorded == 2,
           "REQUESTED then UNANSWERED");
     check(records[0].said.status == DHCP_REQUESTED && records[1].said.status == DHCP_UNANSWERED &&
-          records[0].after_sends == 2 && records[1].after_sends == 2 &&
+          records[0].after_sends == 1 && records[1].after_sends == 2 &&
           !memcmp(&records[1].said.lease, &offer_lease, sizeof offer_lease),
           "the unanswered window is said before the next DISCOVER, naming the offer");
     reset(); dhcp_apart = 9; play(1); fail_begin_at = 1; fail_begin_at_valid = true;
     check(dhcp_ask("x", hardware, &lease) == DHCP_NO_OFFER && completes == 0 && recorded == 2 &&
           records[1].said.status == DHCP_UNANSWERED, "a window that cannot start is unanswered");
     reset(); dhcp_apart = 9; play(1); fail_send_at = 1;
-    check(dhcp_ask("x", hardware, &lease) == DHCP_NO_OFFER && recorded == 0,
-          "a REQUEST that never left says nothing");
+    check(dhcp_ask("x", hardware, &lease) == DHCP_NO_OFFER && recorded == 2 &&
+          records[0].said.status == DHCP_REQUESTED && records[1].said.status == DHCP_UNANSWERED &&
+          records[1].after_sends == 2, "a REQUEST that never left is unanswered at once");
     /* The ACK window of a later attempt is its own wait. */
     reset(); for (int i = 0; i < 13; i++) play(0);
     play(1); complete_result = DHCP_OK; spread_byte = 255;
