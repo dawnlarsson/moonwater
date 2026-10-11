@@ -21995,14 +21995,24 @@ __asm__(
     "7:  madd x0, x8, x4, x9\n" ASM_RET
     ASM_END(memory_blend_u32_rect)
 
-    //       memory_fill_u32_rect: a row of four or more words is 32 bytes a
-    //       stp, then the last 16 ending at the row's end over what came
-    //       before; under four, its first and last words and the middle one
-    //       of three. On an M2 core, against a memory_fill_u32 a row: 34-50%
-    //       for cells and slivers, 72% for a line's blank run, 92-95% for a
-    //       panel 1000 wide. The x86_64 block carries the contract.
+    //       memory_fill_u32_rect: a row of four to eight words is two
+    //       overlapping 16-byte stores, to twelve a 32 and a 16, to sixteen
+    //       two 32s, each the first and the last of the row with nothing
+    //       between; a longer row is 32 bytes a stp, then the last 16 ending
+    //       at the row's end over what came before; under four, its first
+    //       and last words and the middle one of three. On an M2 core,
+    //       against a memory_fill_u32 a row: 33-46% for cells and slivers,
+    //       79% for a line's blank run, 93% for a panel 1000 wide; against
+    //       clang's loop, 40% at 9 by 19 words, 88% at 16 by 35 (109% with
+    //       the sixteen-byte tail the rows of 16 had), 49% at 31 by 70, and a
+    //       tie at 256 by 64 and 92% at 1000 by 40, where the rows are the
+    //       store bandwidth. The x86_64 block carries the contract.
     ASM_FUNC(memory_fill_u32_rect)
     "cbz x2, 9f\n   cbz x3, 9f\n   lsl x1, x1, #2\n   dup v0.4s, w4\n   add x5, x0, x2, lsl #2\n   cmp x2, #4\n   b.lo 7f\n"
+    "cmp x2, #16\n   b.hi 1f\n   cmp x2, #8\n   b.ls 5f\n   cmp x2, #12\n   b.ls 6f\n"
+    "10: stp q0, q0, [x0]\n   stp q0, q0, [x5, #-32]\n   add x0, x0, x1\n   add x5, x5, x1\n   subs x3, x3, #1\n   b.ne 10b\n" ASM_RET
+    "6:  stp q0, q0, [x0]\n   stur q0, [x5, #-16]\n   add x0, x0, x1\n   add x5, x5, x1\n   subs x3, x3, #1\n   b.ne 6b\n" ASM_RET
+    "5:  str q0, [x0]\n   stur q0, [x5, #-16]\n   add x0, x0, x1\n   add x5, x5, x1\n   subs x3, x3, #1\n   b.ne 5b\n" ASM_RET
     "1:  mov x6, x0\n   add x7, x0, #32\n   cmp x7, x5\n   b.hi 3f\n"
     "2:  stp q0, q0, [x6], #32\n   add x7, x6, #32\n   cmp x7, x5\n   b.ls 2b\n"
     "3:  add x7, x6, #16\n   cmp x7, x5\n   b.hi 4f\n   str q0, [x6]\n"
