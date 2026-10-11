@@ -18151,6 +18151,26 @@ stick = work + "/stick"
 os.makedirs(stick, exist_ok=True)
 out = []
 
+#   The fail states, in the same guest once the first compositor has gone: a
+#   window asked for far off the output, one that never commits, the first
+#   of three destroyed while it has the keyboard, a client that floods
+#   commits while another is made and then dies mid-flood. The windows write
+#   what they are sent to files; the script reports what is in them.
+open(stick + "/m2", "w").write(r"""exec > /dev/ttyS0 2>&1
+/compositor &
+c=$!
+sleep 2
+/surface -O 2147479552 -x 1000 -y 700 -w 64 -h 32 -s 3 > /tmp/o.out &
+sleep 1
+/surface -x 1200 -y 700 -w 64 -h 32 -s 1 > /tmp/o2.out
+n=$(grep -c 'surface: [0-9]* at' /tmp/o2.out)
+kill -0 $c && l=yes || l=no
+echo "m2 offset: alive $l next client $n"
+kill $c
+wait $c
+echo m2-done
+""")
+
 open(stick + "/m1", "w").write(r"""exec > /dev/ttyS0 2>&1
 /compositor &
 c=$!
@@ -18273,6 +18293,15 @@ type_text("0\n")
 out.append(("and the keyboard reaches the terminal again",
             "yes" if wait_for(b"m1-typed-", 10) else "no", "yes"))
 
+type_text("sh /mnt/m2\n")
+done2 = wait_for(b"m2-done", 60)
+text = serial().decode("latin1")
+def said(pattern):
+    found = re.findall(pattern, text)
+    return found[-1] if found else "none"
+out.append(("M2.5 a buffer offset written over the page's header does not stop the compositor",
+            "%s %s" % (said(r"m2 offset: alive (\w+)"), said(r"m2 offset: alive \w+ next client (\d+)")), "yes 1"))
+
 qcmd({"execute": "quit"})
 try:
     guest.wait(10)
@@ -18280,6 +18309,10 @@ except Exception:
     guest.kill()
 
 for name, got, want in out:
+    if isinstance(got, tuple):
+        got = " ".join(got)
+    if isinstance(want, tuple):
+        want = " ".join(want)
     print("%s|%s|%s" % (name, got, want))
 PY
 

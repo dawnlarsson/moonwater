@@ -579,7 +579,8 @@ static void compositor_frame_of(const struct compositor_client *client,
         frame->framed = (client->style & WINDOW_FRAME) != 0;
         frame->focused = client == compositor.focus;
         frame->closable = 1;
-        frame->pixels = surface_buffer(client->page, client->slot);
+        // Not surface_buffer: the page is the program's, and its buffer_offset is whatever it last wrote.
+        frame->pixels = surface_slot(client->page, client->slot, client->width, client->height);
         frame->pitch = client->width;
 }
 
@@ -1816,6 +1817,7 @@ static b32 surface_main()
         bipolar x = -1, y = -1, width = 320, height = 200, colour = 0x3366aa, role = SURFACE_ROLE_APP;
         bipolar seconds = -1;
         b32 pointer = 0;
+        bipolar offset = -1;
         string_address font = null, text = (string_address) "Moonwater";
         struct surface *surface;
         positive until;
@@ -1846,6 +1848,7 @@ static b32 surface_main()
                 case 'c': colour = surface_number(value, 1); break;
                 case 'r': role = surface_number(value, 0); break;
                 case 's': seconds = surface_number(value, 0); break;
+                case 'O': offset = surface_number(value, 0); break;
                 case 'f': font = value; break;
                 case 't': text = value; break;
                 }
@@ -1876,6 +1879,14 @@ static b32 surface_main()
                 surface->window.want = WINDOW_WANT_POINTER;
         surface->buffer_index = 0;
         surface_commit(surface);
+
+        // What a hostile program does: writes where the compositor wrote
+        // its offsets, and commits.
+        if (offset >= 0)
+        {
+                surface->buffer_offset[0] = (unsigned int)offset;
+                surface_commit(surface);
+        }
 
         string_format(log, "surface: %p at %b,%b\n", (positive)surface->surface_id,
                       (bipolar)surface->window.x, (bipolar)surface->window.y);
