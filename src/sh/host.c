@@ -18029,13 +18029,14 @@ static bipolar locale_ntp_plain(bool by_hand)
                 {
                         heard_from[0] = array_count(locale_ntp_fallback);
                         heard_count = 1;
-                        //      A person who named the server and asked
-                        //      takes its word, as ntpdate does; the
-                        //      machine's own walk wants a second server
-                        //      for a step past two seconds.
-                        if (unset || by_hand ||
-                            sntp_within(heard[0].offset_ns,
-                                        SNTP_OFFSET_SYNCED_NS))
+                        //      Plain time is unauthenticated: one server's
+                        //      word moves a clock that is set by two
+                        //      seconds at most, by hand or not, and a
+                        //      further step waits for a second server (or
+                        //      for NTS, or for `date -s` from a person who
+                        //      knows the time).
+                        if (unset || sntp_within(heard[0].offset_ns,
+                                                 SNTP_OFFSET_SYNCED_NS))
                                 return locale_ntp_take((string_address)server,
                                                        heard, false);
                 }

@@ -46196,9 +46196,10 @@ def harness_moonwater_cli(argv):
         # is taken (and then refused by a kernel that will not let a namespace
         # set the clock), RATE is reported as asked too often, DENY and RSTR
         # as the server saying no, and everything else is no answer at all.
-        # A person who asks for the time takes a server's word for a year,
-        # where the machine itself never steps a clock that is set by more
-        # than a day.
+        # A person who asks for the time may be told a year (the window
+        # bounds the answer, not a day), but plain time is unauthenticated:
+        # one server's word moves a set clock by two seconds at most and a
+        # further step waits for a second server's agreement.
         server = r"""
 import json, socket, struct, time
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -46288,8 +46289,15 @@ while True:
             got = ("taken" if "answered, but" in answer else
                    "rated" if "asked too often" in answer else
                    "denied" if "stay away" in answer else
+                   "unconfirmed" if "no second server agreed" in answer else
                    "none" if "no server answered" in answer else answer)
-            want = "taken" if taken else "rated" if rated else "denied" if denied else "none"
+            #   Plain time is unauthenticated: the one server named moves a
+            #   clock that is set by two seconds at most, by hand too, and a
+            #   further step waits for a second server, which none of these
+            #   namespaces can reach (0470d803's rule).
+            far = abs(spec["offset"]) > 2
+            want = ("unconfirmed" if taken and far else "taken" if taken else
+                    "rated" if rated else "denied" if denied else "none")
             check(got == want, f"time sync against {spec} is {want}", got)
 
         # The clock's floor: the latest time this machine already knows it is
