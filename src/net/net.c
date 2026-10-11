@@ -16360,13 +16360,18 @@ static COLD bipolar dns_resolve_apart(bipolar server, string_address name,
         return dns_apart_ask_apart(address_of ask, found);
 }
 
-//      net_resolve_v4, apart; an address is itself without a child.
+/* net_resolve_v4, apart; an address is itself without a child, and so is
+   localhost and every name under it (RFC 6761 6.3), which is never asked of
+   a resolver: what GNU's tools are told by /etc/hosts, and what the HTTP
+   client already does (http_lookup). */
 static COLD bipolar net_resolve_v4_apart(string_address name,
                                          p32 address_to found, positive seconds)
 {
         dns_apart_ask ask = {-1, name, seconds, true};
         bipolar numeric = string_to_host(name);
 
+        if (numeric < 0 && http_host_loopback(name))
+                numeric = HOST_LOOPBACK;
         if (numeric >= 0)
         {
                 address_to found = (p32)numeric;
