@@ -11250,8 +11250,14 @@ static DEAD_END COLD fn radio_broker(b32 told, p8 address_to ssid, positive ssid
         system_close(ends[0]);
         system_call_2(syscall(kill), (positive)station, SIGKILL);
         (void)system_wait4_retry(station, address_of raw, 0, null);
-        if (joined)
+        //      A station that ended of its own -- the link went -- leaves
+        //      nothing kept. One that died (a signal, its filter) left a link
+        //      whose keys nobody keeps: wifi.kept stays, so the machine's next
+        //      pass joins again, and the log says so.
+        if (joined && (raw & 0x7f) == 0)
                 system_remove_at(AT_FDCWD, RADIO_KEPT_PATH, 0);
+        else if (joined)
+                radio_keeper_said("its station died; the link is joined again");
         system_call_1(syscall(exit_group), 0);
         __builtin_unreachable();
 }
