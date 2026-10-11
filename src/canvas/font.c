@@ -134,10 +134,16 @@
                 A glyph's advance, and the adjustment between two glyphs.
 
         fn font_start(font_engine *engine, p8 *atlas, p32 width, p32 height)
-                Readies an engine (684 KB; one per thread) with the
+                Readies an engine (749 KB; one per thread) with the
                 caller's width by height bytes for its atlas, which bounds
-                the largest glyph it will draw by area. The settings at the
-                top of font_engine may be changed between calls.
+                the largest glyph it will draw by area. The engine's memory
+                must be zero (a static, or a new mapping), or an engine that
+                has been started, which is cleared; a fresh one is not
+                written, so only the pages a program draws with are ever
+                resident: 36 KB for a terminal's first glyph, 84 KB for the
+                ninety-five of ASCII, where all of it was 764 KB before the
+                first. The settings at the top of font_engine may be changed
+                between calls.
 
         b32 font_render(font_engine *engine, const font_face *face, p32 glyph,
                         p32 size, p32 phase, p32 flags, p8 *coverage,
@@ -223,7 +229,7 @@
 #define FONT_SHELVES 512
 #define FONT_LOOKUPS 16
 #define FONT_PAIRS 64
-#define FONT_MEMO 2048
+#define FONT_MEMO 512
 #define FONT_GROUP 6144
 #define FONT_NEAR 512
 #define FONT_EVENTS 3840
@@ -283,7 +289,23 @@ typedef struct
 typedef struct
 {
         b64 x, y;
+        p8 on;
 } font_point;
+
+//      What a row of the bitmap being drawn needs, together: the blocks an
+//      edge touched, how far left and right the contour in hand reached,
+//      and how far each winding has reached so far.
+typedef struct
+{
+        p64 touched;
+        b32 near, far, seen[2][2];
+} font_row;
+
+typedef struct
+{
+        p16 last;
+        p8 wind;
+} font_contour;
 
 typedef struct
 {
@@ -310,33 +332,31 @@ typedef struct
         p32 contrast;           // dark text's contrast boost, 1/64 (128)
         bool linear;            // blend in linear light (true)
 
+        //      What a glyph being drawn touches first, together, then the
+        //      arrays it touches the first entries of, each of one kind so
+        //      that a small glyph is a few pages of them and not a page of
+        //      each; the caches, which a program fills as it goes, last.
         p8 address_to atlas;
         p32 atlas_width, atlas_height, shelf_count, shelf_bottom, slot_count;
-        bool scratched;
-        font_shelf shelves[FONT_SHELVES];
-        font_slot slots[FONT_SLOTS];
-
-        font_point points[FONT_POINTS];
-        p8 on[FONT_POINTS];
-        p16 ends[FONT_CONTOURS];
+        bool started, scratched, clip, gather, overflow, track, mark, direct, ramp_ready;
         p32 point_count, contour_count, components;
         b32 left_side;
-
-        p32 cells[FONT_BAND];
-        p64 touched[FONT_ROWS];
-        b32 near[FONT_ROWS], far[FONT_ROWS], seen[2][2][FONT_ROWS];
-        p64 shared[FONT_EDGE / 64 + 1];
-        p8 winds[FONT_CONTOURS];
         b32 band, rows, stride, width, grain, wound, x, y;
         b32 cell_x, cell_y;
-        p32 cover, area, gathered, used[4];
+        p32 cover, area, gathered, used[5];
         b32 floor_y, height_y, wide_x;
-        bool clip, gather, overflow, track, mark, direct;
-
         p8 ramp[256];
         p32 ramp_colour, ramp_contrast, plain;
-        bool ramp_ready;
+        p64 shared[FONT_EDGE / 64 + 1];
+        font_shelf shelves[FONT_SHELVES];
 
+        font_row row[FONT_ROWS];
+        font_contour contour[FONT_CONTOURS];
+        font_point points[FONT_POINTS];
+        p32 cells[FONT_BAND];
+
+        font_slot slots[FONT_SLOTS * 3 / 4];
+        p16 index[FONT_SLOTS];
         font_pairing pairs[FONT_PAIRS];
         font_memo glyph_memo[FONT_MEMO], kern_memo[FONT_MEMO];
 } font_engine;
@@ -912,7 +932,7 @@ static inline positive font_coordinates(font_engine address_to e, const font_fac
 
                 for (p32 i = first; i < first + count; i++)
                 {
-                        p32 flag = e->on[i];
+                        p32 flag = e->points[i].on;
 
                         if (flag & brief)
                         {
@@ -967,7 +987,7 @@ static b32 font_outline(font_engine address_to e, const font_face address_to fac
                         if (last < count || first + last >= FONT_POINTS)
                                 return FONT_BAD;
                         count = last + 1;
-                        e->ends[e->contour_count++] = (p16)(first + last);
+                        e->contour[e->contour_count++].last = (p16)(first + last);
                 }
 
                 positive p = at + 10 + 2 * (positive)contours;
@@ -980,7 +1000,7 @@ static b32 font_outline(font_engine address_to e, const font_face address_to fac
                         p32 repeat = flag & 8 ? font_u8(face, p++) : 0;
 
                         for (p32 r = 0; r <= repeat && i < count; r++)
-                                e->on[first + i++] = (p8)flag;
+                                e->points[first + i++].on = (p8)flag;
                 }
                 if (i < count)
                         return FONT_BAD;
@@ -997,7 +1017,7 @@ static b32 font_outline(font_engine address_to e, const font_face address_to fac
                         return FONT_BAD;
 
                 for (i = first; i < first + count; i++)
-                        e->on[i] &= 1;
+                        e->points[i].on &= 1;
                 e->point_count = first + count;
                 return 0;
         }
@@ -1143,19 +1163,19 @@ static fn font_embolden(font_engine address_to e, f32 strength)
         f64 area = 0;
         p32 first = 0;
 
-        for (p32 c = 0; c < e->contour_count; first = e->ends[c++] + 1u)
-                for (p32 i = first; i <= e->ends[c]; i++)
+        for (p32 c = 0; c < e->contour_count; first = e->contour[c++].last + 1u)
+                for (p32 i = first; i <= e->contour[c].last; i++)
                 {
-                        font_point a = e->points[i], b = e->points[i == e->ends[c] ? first : i + 1];
+                        font_point a = e->points[i], b = e->points[i == e->contour[c].last ? first : i + 1];
 
                         area += (f64)a.x * b.y - (f64)b.x * a.y;
                 }
 
         f32 half = strength * (area < 0 ? 0.5f : -0.5f);
         first = 0;
-        for (p32 c = 0; c < e->contour_count; first = e->ends[c++] + 1u)
+        for (p32 c = 0; c < e->contour_count; first = e->contour[c++].last + 1u)
         {
-                p32 last = e->ends[c];
+                p32 last = e->contour[c].last;
                 if (last <= first)
                         continue;
 
@@ -1228,14 +1248,14 @@ static inline fn font_cell_add(font_engine address_to e, b32 row, b32 column, b3
         cells[column] += (p32)(2 * FONT_ONE * cover - area);
         cells[column + 1] += (p32)area;
         if (e->mark)
-                e->touched[row] |= (p64)1 << (column >> e->grain) | (p64)1 << ((column + 1) >> e->grain);
+                e->row[row].touched |= (p64)1 << (column >> e->grain) | (p64)1 << ((column + 1) >> e->grain);
 }
 
 //      The blocks from the one holding column first to the one holding last.
 static inline fn font_mark(font_engine address_to e, b32 row, b32 first, b32 last)
 {
         if (e->mark)
-                e->touched[row] |= ((p64)2 << (last >> e->grain)) - ((p64)1 << (first >> e->grain));
+                e->row[row].touched |= ((p64)2 << (last >> e->grain)) - ((p64)1 << (first >> e->grain));
 }
 
 //      A span inside one column: the cover is the height, the area the
@@ -1587,8 +1607,8 @@ static fn font_extent(font_engine address_to e, b32 xa, b32 xb, b32 xc, b32 ya, 
         bottom = bottom < 0 ? 0 : bottom, top = top >= e->rows ? e->rows - 1 : top;
         for (b32 r = bottom; r <= top && e->track && !e->gather; r++)
         {
-                e->near[r] = left < e->near[r] ? left : e->near[r];
-                e->far[r] = right > e->far[r] ? right : e->far[r];
+                e->row[r].near = left < e->row[r].near ? left : e->row[r].near;
+                e->row[r].far = right > e->row[r].far ? right : e->row[r].far;
         }
 }
 
@@ -1719,18 +1739,18 @@ static bool font_tracking(font_engine address_to e)
         b32 box[64][4];
         p32 first = 0, alike[2] = {0, 0};
 
-        for (p32 c = 0; c < e->contour_count; first = e->ends[c++] + 1u)
+        for (p32 c = 0; c < e->contour_count; first = e->contour[c++].last + 1u)
         {
                 b64 area = 0;
 
-                for (p32 i = first; i <= e->ends[c] && i < e->point_count; i++)
+                for (p32 i = first; i <= e->contour[c].last && i < e->point_count; i++)
                 {
                         const font_point address_to p = &e->points[i];
-                        const font_point address_to q = &e->points[i == e->ends[c] ? first : i + 1];
+                        const font_point address_to q = &e->points[i == e->contour[c].last ? first : i + 1];
 
                         area += (b64)p->x * q->y - (b64)q->x * p->y;
                 }
-                e->winds[c] = area < 0;
+                e->contour[c].wind = area < 0;
                 alike[area < 0]++;
         }
         if (e->contour_count > 64)
@@ -1741,13 +1761,13 @@ static bool font_tracking(font_engine address_to e)
         bool meet = false;
 
         first = 0;
-        for (p32 c = 0; c < e->contour_count && !meet; first = e->ends[c++] + 1u)
+        for (p32 c = 0; c < e->contour_count && !meet; first = e->contour[c++].last + 1u)
         {
                 b32 b[4] = {0x7fffffff, 0x7fffffff, -0x7fffffff, -0x7fffffff};
 
-                if (alike[e->winds[c]] < 2)
+                if (alike[e->contour[c].wind] < 2)
                         continue;
-                for (p32 i = first; i <= e->ends[c] && i < e->point_count; i++)
+                for (p32 i = first; i <= e->contour[c].last && i < e->point_count; i++)
                 {
                         const font_point address_to p = &e->points[i];
 
@@ -1756,7 +1776,7 @@ static bool font_tracking(font_engine address_to e)
                 }
                 memory_copy(box[c], b, sizeof(b));
                 for (p32 k = 0; k < c && !meet; k++)
-                        meet = e->winds[k] == e->winds[c] && box[k][0] < b[2] && b[0] < box[k][2] &&
+                        meet = e->contour[k].wind == e->contour[c].wind && box[k][0] < b[2] && b[0] < box[k][2] &&
                                box[k][1] < b[3] && b[1] < box[k][3];
         }
         return meet;
@@ -1767,15 +1787,15 @@ static fn font_marks(font_engine address_to e)
         if (e->gather || !e->track)
                 return;
         for (b32 r = 0; r < e->rows; r++)
-                if (e->near[r] < e->far[r])
+                if (e->row[r].near < e->row[r].far)
                 {
-                        b32 address_to low = &e->seen[e->wound][0][r], address_to high = &e->seen[e->wound][1][r];
+                        b32 address_to low = &e->row[r].seen[e->wound][0], address_to high = &e->row[r].seen[e->wound][1];
 
-                        if (e->near[r] < *high && *low < e->far[r])
+                        if (e->row[r].near < *high && *low < e->row[r].far)
                                 e->shared[(e->band + r) >> 6] |= (p64)1 << ((e->band + r) & 63);
-                        *low = e->near[r] < *low ? e->near[r] : *low;
-                        *high = e->far[r] > *high ? e->far[r] : *high;
-                        e->near[r] = 0x7fffffff, e->far[r] = -0x7fffffff;
+                        *low = e->row[r].near < *low ? e->row[r].near : *low;
+                        *high = e->row[r].far > *high ? e->row[r].far : *high;
+                        e->row[r].near = 0x7fffffff, e->row[r].far = -0x7fffffff;
                 }
 }
 
@@ -1786,9 +1806,9 @@ static fn font_walk(font_engine address_to e)
 {
         p32 first = 0;
 
-        for (p32 c = 0; c < e->contour_count; first = e->ends[c++] + 1u)
+        for (p32 c = 0; c < e->contour_count; first = e->contour[c++].last + 1u)
         {
-                p32 last = e->ends[c], i = first, stop = last;
+                p32 last = e->contour[c].last, i = first, stop = last;
                 font_point address_to p = e->points;
                 b32 sx, sy, cx = 0, cy = 0;
                 bool pending = false;
@@ -1797,13 +1817,13 @@ static fn font_walk(font_engine address_to e)
                         break;
                 if (c)
                         font_marks(e);
-                e->wound = e->winds[c];
-                if (e->on[first])
+                e->wound = e->contour[c].wind;
+                if (e->points[first].on)
                 {
                         sx = (b32)p[first].x, sy = (b32)p[first].y;
                         i = first + 1;
                 }
-                else if (e->on[last])
+                else if (e->points[last].on)
                 {
                         sx = (b32)p[last].x, sy = (b32)p[last].y;
                         stop = last - 1;
@@ -1820,7 +1840,7 @@ static fn font_walk(font_engine address_to e)
                 {
                         b32 x = (b32)p[i].x, y = (b32)p[i].y;
 
-                        if (!e->on[i])
+                        if (!e->points[i].on)
                         {
                                 if (pending)
                                         font_conic(e, cx, cy, (cx + x) >> 1, (cy + y) >> 1);
@@ -1942,6 +1962,7 @@ static fn font_union_row(font_engine address_to e, b32 r, b32 width, p8 address_
                 if (points + 2 > 3 * FONT_NEAR || (!joins && chains == FONT_NEAR))
                 {
                         e->used[2] = FONT_NEAR;
+                        e->used[4] = 3 * FONT_NEAR;
                         return;
                 }
                 if (!joins)
@@ -1968,6 +1989,7 @@ static fn font_union_row(font_engine address_to e, b32 r, b32 width, p8 address_
                 }
         s->start[chains] = points;
         e->used[2] = chains > e->used[2] ? chains : e->used[2];
+        e->used[4] = points > e->used[4] ? points : e->used[4];
         if (!chains)
                 return;
 
@@ -2196,7 +2218,7 @@ static fn font_union(font_engine address_to e, b32 width, b32 from, b32 to, b32 
         memory_zero(s->group, (positive)(e->used[0] < FONT_GROUP ? e->used[0] + 1 : FONT_GROUP) * sizeof(s->group[0]));
         memory_zero(s->listed, (positive)(e->used[1] < 2 * FONT_GROUP ? e->used[1] + 1 : 2 * FONT_GROUP) * 2);
         memory_zero(s->listing, sizeof(s->listing));
-        memory_zero(s->point, sizeof(s->point));
+        memory_zero(s->point, (positive)(e->used[4] < 3 * FONT_NEAR ? e->used[4] + 1 : 3 * FONT_NEAR) * sizeof(s->point[0]));
         memory_zero(s->along, near * 8), memory_zero(s->reach, near * 8);
         memory_zero(s->start, (near + 1) * 4), memory_zero(s->cursor, near * 4);
         memory_zero(s->active, near * 4), memory_zero(s->order, near * 4);
@@ -2222,8 +2244,8 @@ static fn font_raster(font_engine address_to e, b32 width, b32 height,
                 e->cover = e->area = 0;
                 e->cell_y = -1;
                 for (b32 r = 0; r < e->rows; r++)
-                        e->near[r] = e->seen[0][0][r] = e->seen[1][0][r] = 0x7fffffff,
-                        e->far[r] = e->seen[0][1][r] = e->seen[1][1][r] = -0x7fffffff;
+                        e->row[r].near = e->row[r].seen[0][0] = e->row[r].seen[1][0] = 0x7fffffff,
+                        e->row[r].far = e->row[r].seen[0][1] = e->row[r].seen[1][1] = -0x7fffffff;
                 e->floor_y = e->band * FONT_ONE, e->height_y = e->rows * FONT_ONE, e->wide_x = width * FONT_ONE;
                 e->direct = !e->clip;
                 font_walk(e);
@@ -2234,12 +2256,12 @@ static fn font_raster(font_engine address_to e, b32 width, b32 height,
                 {
                         p32 address_to cells = e->cells + (positive)r * (positive)e->stride, sum = 0;
                         p8 address_to row = out + (positive)(height - 1 - e->band - r) * stride;
-                        p64 touched = e->mark ? e->touched[r] : ~(p64)0;
+                        p64 touched = e->mark ? e->row[r].touched : ~(p64)0;
 
                         //      A run of blocks no edge touched is one level; a
                         //      run of touched ones is summed, made bytes and
                         //      cleared by the library.
-                        e->touched[r] = 0;
+                        e->row[r].touched = 0;
                         for (b32 x = 0; x < width;)
                         {
                                 b32 block = x >> e->grain;
@@ -2457,13 +2479,13 @@ static fn font_put(font_engine address_to e, f32 x, f32 y, b32 height, bool on)
         if (e->point_count >= FONT_POINTS)
                 return;
         e->points[e->point_count] = (font_point){(b64)(x * FONT_ONE + 0.5f), (b64)((height - y) * FONT_ONE + 0.5f)};
-        e->on[e->point_count++] = on;
+        e->points[e->point_count++].on = on;
 }
 
 static fn font_close(font_engine address_to e)
 {
         if (e->point_count && e->contour_count < FONT_CONTOURS)
-                e->ends[e->contour_count++] = (p16)(e->point_count - 1);
+                e->contour[e->contour_count++].last = (p16)(e->point_count - 1);
 }
 
 //      A quarter of a circle about (cx, cy) from direction (ux, uy) to
@@ -2693,9 +2715,16 @@ static bool font_drawn(font_engine address_to e, p32 code, b32 width, b32 height
 */
 static fn font_reset(font_engine address_to e)
 {
-        memory_zero(e->slots, sizeof(e->slots));
+        memory_zero(e->index, sizeof(e->index));
         e->slot_count = e->shelf_count = e->shelf_bottom = 0;
         e->scratched = false;
+}
+
+//      A slot made, at the place in the index the lookup ended at.
+static fn font_enter(font_engine address_to e, p32 home, font_slot slot)
+{
+        e->slots[e->slot_count] = slot;
+        e->index[home] = (p16)++e->slot_count;
 }
 
 static bool font_room(font_engine address_to e, b32 width, b32 height, p16 address_to x, p16 address_to y)
@@ -2743,15 +2772,21 @@ static font_bitmap font_cached(font_engine address_to e, const font_face address
         if (e->scratched || e->slot_count >= FONT_SLOTS * 3 / 4)
                 font_reset(e);
 
-        p32 at = (p32)(((key ^ cell) * 0x9e3779b97f4a7c15ull) >> 52) & (FONT_SLOTS - 1);
-        while (e->slots[at].key && (e->slots[at].key != key || e->slots[at].cell != cell))
-                at = (at + 1) & (FONT_SLOTS - 1);
+        //      The slots are a list in the order they were made, and an index
+        //      of 16 bits over them is what is hashed: a few glyphs touch a
+        //      few pages of the list and two of the index, not the 128 KB a
+        //      table of slots spread by their hashes would.
+        p32 home = (p32)(((key ^ cell) * 0x9e3779b97f4a7c15ull) >> 52) & (FONT_SLOTS - 1);
+        while (e->index[home])
+        {
+                const font_slot address_to slot = &e->slots[e->index[home] - 1];
 
-        font_slot address_to slot = &e->slots[at];
-        if (slot->key == key)
-                return (font_bitmap){slot->width ? e->atlas + (positive)slot->y * e->atlas_width + slot->x : null,
-                                     slot->x == 0xffff ? 1 : e->atlas_width, slot->left, slot->top,
-                                     slot->width, slot->height};
+                if (slot->key == key && slot->cell == cell)
+                        return (font_bitmap){slot->width ? e->atlas + (positive)slot->y * e->atlas_width + slot->x : null,
+                                             slot->x == 0xffff ? 1 : e->atlas_width, slot->left, slot->top,
+                                             slot->width, slot->height};
+                home = (home + 1) & (FONT_SLOTS - 1);
+        }
 
         b32 dx = 0, dy = 0;
         if (face)
@@ -2768,8 +2803,7 @@ static font_bitmap font_cached(font_engine address_to e, const font_face address
                         if (dx < 0 || dy < 0 || dx + box.width > (b32)(cell >> 48) ||
                             dy + box.height > (b32)(cell >> 32 & 0xffff))
                         {
-                                *slot = (font_slot){.key = key, .cell = cell, .x = 0xffff};
-                                e->slot_count++;
+                                font_enter(e, home, (font_slot){.key = key, .cell = cell, .x = 0xffff});
                                 return (font_bitmap){.stride = 1};
                         }
                 }
@@ -2778,8 +2812,7 @@ static font_bitmap font_cached(font_engine address_to e, const font_face address
                 box = (font_bitmap){.width = (b32)(size >> 16), .height = (b32)(size & 0xffff)};
         if (box.width <= 0 || box.height <= 0)
         {
-                *slot = (font_slot){.key = key, .cell = cell};
-                e->slot_count++;
+                font_enter(e, home, (font_slot){.key = key, .cell = cell});
                 return (font_bitmap){0};
         }
 
@@ -2811,7 +2844,7 @@ static font_bitmap font_cached(font_engine address_to e, const font_face address
                                 font_drawn(e, code, box.width, box.height, e->atlas, box.stride);
                         return box;
                 }
-                slot = &e->slots[(p32)(((key ^ cell) * 0x9e3779b97f4a7c15ull) >> 52) & (FONT_SLOTS - 1)];
+                home = (p32)(((key ^ cell) * 0x9e3779b97f4a7c15ull) >> 52) & (FONT_SLOTS - 1);
         }
 
         box.coverage = e->atlas + (positive)y * e->atlas_width + x;
@@ -2824,8 +2857,7 @@ static font_bitmap font_cached(font_engine address_to e, const font_face address
         else
                 font_drawn(e, code, box.width, box.height, (p8 address_to)box.coverage, box.stride);
 
-        *slot = (font_slot){key, cell, x, y, (p16)box.width, (p16)box.height, (b16)box.left, (b16)box.top};
-        e->slot_count++;
+        font_enter(e, home, (font_slot){key, cell, x, y, (p16)box.width, (p16)box.height, (b16)box.left, (b16)box.top});
         return box;
 }
 
@@ -2899,7 +2931,12 @@ static fn font_tables()
 
 fn font_start(font_engine address_to e, p8 address_to atlas, p32 width, p32 height)
 {
-        memory_zero(e, sizeof(*e));
+        //      An engine that has never run is zero already -- a static, or a
+        //      new mapping -- and clearing it would make every page of its
+        //      684 KB resident, 500 KB more than a terminal ever touches.
+        if (e->started)
+                memory_zero(e, sizeof(*e));
+        e->started = true;
         e->hint_until = 24;
         e->darken = 12;
         e->darken_until = 32;
