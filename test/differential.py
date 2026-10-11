@@ -59539,6 +59539,328 @@ def harness_tls_ct(argv):
     return checks.verdict("tls ct", "tls-ct")
 
 
+DNS_ORACLE_DRIVER = r"""
+#include "../src/lib.util.c"
+#include "../src/net/net.c"
+
+/* Cases from the file named first: an id and a question's length, the
+   request (header and question), the reply; for each, what dns_reply_result
+   says and the address it found. */
+b32 main(void)
+{
+        static p8 cases[1 << 24];
+        bipolar size = file_slurp(program_argument(1), cases, sizeof cases);
+        positive at = 0;
+
+        while (size > 0 && at + 10 <= (positive)size)
+        {
+                p16 id = network_load_16(cases + at);
+                p16 question_length = network_load_16(cases + at + 2);
+                p16 request_length = network_load_16(cases + at + 4);
+                p8 request[600];
+                p8 reply[DNS_MAX_MESSAGE + 64];
+                positive reply_length;
+                p32 found = 0;
+                bipolar status;
+
+                at += 6;
+                memory_copy(request, cases + at, request_length);
+                at += request_length;
+                reply_length = network_load_32(cases + at);
+                at += 4;
+                memory_copy(reply, cases + at, reply_length);
+                at += reply_length;
+                status = dns_reply_result(reply, reply_length, id, request, question_length,
+                                          address_of found);
+                string_format(log, "%p %p\n", (positive)-status, (positive)(status ? 0 : found));
+        }
+        log_flush();
+        return 0;
+}
+"""
+
+
+def dns_oracle_model(reply, ident, request, question_length):
+    """What dns_reply_result answers, read again from RFC 1035 and the
+    resolver's own rules (net.c): the reply's identity, its header, every
+    record framed in every section with nothing after, compression held to
+    a ceiling, 127 jumps a name and a message's worth of jumps a walk, and
+    the address only along the name asked and its CNAME chain, 16 links at
+    most. (status, address)."""
+    OK, MALFORMED, NO_SUCH_NAME, NO_ADDRESS, REFUSED, TRY_TCP = 0, -3, -4, -5, -6, -8
+    size = len(reply)
+    available = min(size, 4096)
+
+    def copy_name(at, budget):
+        ceiling, pos, jumps, ended, out = size, at, 0, None, 0
+        name = b""
+        while True:
+            if pos >= ceiling:
+                return None
+            length = reply[pos]
+            if length & 0xc0 == 0xc0:
+                if pos + 1 >= ceiling:
+                    return None
+                target = (length & 0x3f) << 8 | reply[pos + 1]
+                if ended is None:
+                    ended = pos + 2
+                jumps += 1
+                if target >= pos or jumps > 127:
+                    return None
+                ceiling = pos
+                pos = target
+                continue
+            if length & 0xc0 or pos + 1 + length > ceiling or out + 1 + length > 255:
+                return None
+            name += reply[pos:pos + 1 + length]
+            out += 1 + length
+            if not length:
+                if budget is not None:
+                    if budget[0] < jumps:
+                        return None
+                    budget[0] -= jumps
+                return name, (pos + 1 if ended is None else ended)
+            pos += 1 + length
+
+    def records_end(at, count):
+        budget = [4096]
+        for _ in range(count):
+            got = copy_name(at, budget)
+            if got is None:
+                return None
+            ended = got[1]
+            if ended + 10 > size:
+                return None
+            length = reply[ended + 8] << 8 | reply[ended + 9]
+            if ended + 10 + length > size:
+                return None
+            at = ended + 10 + length
+        return at
+
+    if available < 12 + question_length:
+        return MALFORMED, 0
+    if (reply[0] << 8 | reply[1]) != ident or (reply[4] << 8 | reply[5]) != 1 or \
+            reply[12:12 + question_length] != request[12:12 + question_length]:
+        return MALFORMED, 0
+    flags = reply[2] << 8 | reply[3]
+    if not flags & 0x8000 or flags & (0x7800 | 0x0040):
+        return MALFORMED, 0
+    if flags & 0x0200:
+        return TRY_TCP, 0
+    if size > 4096:
+        return MALFORMED, 0
+    answers = reply[6] << 8 | reply[7]
+    at = 12 + question_length
+    end = records_end(at, answers)
+    if end is not None:
+        end = records_end(end, reply[8] << 8 | reply[9])
+    if end is not None:
+        end = records_end(end, reply[10] << 8 | reply[11])
+    if end is None or end != size:
+        return MALFORMED, 0
+    code = flags & 15
+    if code == 3:
+        return NO_SUCH_NAME, 0
+    if code:
+        return REFUSED, 0
+    budget = [4096]
+    got = copy_name(12, budget)
+    if got is None:
+        return MALFORMED, 0
+    wanted = got[0].lower()
+    for hop in range(min(answers, 16) + 1):
+        pos = at
+        alias = None
+        address = None
+        for _ in range(answers):
+            owner = copy_name(pos, budget)
+            if owner is None:
+                return MALFORMED, 0
+            pos = owner[1]
+            kind = reply[pos] << 8 | reply[pos + 1]
+            klass = reply[pos + 2] << 8 | reply[pos + 3]
+            length = reply[pos + 8] << 8 | reply[pos + 9]
+            data = pos + 10
+            is_wanted = owner[0].lower() == wanted
+            if klass == 1 and is_wanted and kind == 1:
+                if length != 4:
+                    return MALFORMED, 0
+                if address is None:
+                    address = int.from_bytes(reply[data:data + 4], "big")
+            elif klass == 1 and is_wanted and kind == 5:
+                if alias is not None:
+                    return MALFORMED, 0
+                target = copy_name(data, budget)
+                if target is None or target[1] != data + length:
+                    return MALFORMED, 0
+                alias = target[0]
+            pos = data + length
+        if alias is not None and address is not None:
+            return MALFORMED, 0
+        if address is not None:
+            return OK, address
+        if alias is None:
+            return NO_ADDRESS, 0
+        if alias.lower() == wanted:
+            return MALFORMED, 0
+        wanted = alias.lower()
+    return MALFORMED, 0
+
+
+def dns_oracle_cases(seed, count):
+    """Replies to a question, made from a grammar and then, for a third of
+    them, damaged: names asked and not, in any case, compressed backwards,
+    forwards, into a loop or down a long chain; A records of four bytes and
+    not; CNAME chains in order, reversed, looping and too long; glue;
+    authority and additional records; every rcode, opcode and flag; the
+    question echoed wrong; bytes cut and bytes added."""
+    import random
+    rng = random.Random(seed)
+    out = []
+    for _ in range(count):
+        ident = rng.randrange(65536)
+        labels = [rng.choice([b"www", b"Example", b"cdn", b"a" * rng.choice([1, 9, 63])])
+                  for _ in range(rng.randint(1, 4))] + [rng.choice([b"com", b"net", b"ORG"])]
+        qname = b"".join(bytes([len(x)]) + x for x in labels) + b"\x00"
+        question = qname + b"\x00\x01\x00\x01"
+        request = struct_pack_header(ident, 0x0100, 1, 0, 0, 0) + question
+        names = [qname, b"\x05alias\x07example\x03net\x00", b"\x06target\x07example\x03org\x00",
+                 b"\x04glue\x03com\x00", qname.swapcase() if rng.random() < 0.3 else qname]
+        records = []
+        shape = rng.randrange(8)
+        if shape == 0:
+            records.append((names[0], 1, 1, rng.randbytes(4)))
+        elif shape == 1:
+            records += [(names[0], 5, 1, names[1]), (names[1], 1, 1, rng.randbytes(4))]
+        elif shape == 2:
+            records += [(names[1], 1, 1, rng.randbytes(4)), (names[0], 5, 1, names[1])]
+        elif shape == 3:
+            chain = [names[0]] + [b"\x01" + bytes([97 + k]) + b"\x07example\x03com\x00"
+                                  for k in range(rng.randint(1, 20))]
+            records += [(chain[k], 5, 1, chain[k + 1]) for k in range(len(chain) - 1)]
+            records.append((chain[-1], 1, 1, rng.randbytes(4)))
+            rng.shuffle(records)
+        elif shape == 4:
+            records += [(names[0], 5, 1, names[1]), (names[1], 5, 1, names[0])]
+        elif shape == 5:
+            records += [(names[3], 1, 1, rng.randbytes(4)), (names[4], 1, 1, rng.randbytes(4))]
+        elif shape == 6:
+            records += [(names[0], 1, 1, rng.randbytes(rng.choice([0, 3, 5, 16])))]
+        else:
+            records += [(names[0], rng.choice([1, 5, 28, 16]), rng.choice([1, 3, 255]),
+                         rng.randbytes(rng.choice([4, 0, 8])))]
+        if rng.random() < 0.2:
+            records.append((names[0], 1, 1, rng.randbytes(4)))
+        authority = [(names[3], 2, 1, names[2])] if rng.random() < 0.3 else []
+        additional = [(names[2], 1, 1, rng.randbytes(4))] if rng.random() < 0.3 else []
+        flags = 0x8180 | rng.choice([0, 0, 0, 0, 0, 0, 0, 3, 2, 5, 1])
+        if rng.random() < 0.05:
+            flags ^= rng.choice([0x8000, 0x0800, 0x0200, 0x0040, 0x0020, 0x0010])
+        body = bytearray(question)
+        if rng.random() < 0.08:
+            body[1] ^= 0x20
+        offsets = {qname: 12}
+
+        def name(raw):
+            #   The whole name compressed back to where it was first written,
+            #   or written out; a forward or looping pointer now and then.
+            choice = rng.random()
+            if raw in offsets and choice < 0.6:
+                return bytes([0xc0 | offsets[raw] >> 8, offsets[raw] & 255])
+            if choice < 0.605:
+                return bytes([0xc0 | 0x0f, 0xff])
+            if choice < 0.61:
+                return bytes([0xc0 | (12 + len(body)) >> 8, (12 + len(body)) & 255])
+            offsets.setdefault(raw, 12 + len(body))
+            return raw
+
+        for section in (records, authority, additional):
+            for owner, kind, klass, data in section:
+                body += name(owner)
+                if kind in (2, 5) and isinstance(data, bytes) and data.endswith(b"\x00"):
+                    rdata = bytearray()
+                    start = len(body) + 10
+                    rdata += name(data) if rng.random() < 0.5 else data
+                    body += struct.pack(">HHIH", kind, klass, 300, len(rdata)) + rdata
+                else:
+                    body += struct.pack(">HHIH", kind, klass, 300, len(data)) + data
+        reply = bytearray(struct_pack_header(ident if rng.random() > 0.03 else ident ^ 1, flags,
+                                             1, len(records), len(authority), len(additional)))
+        reply += body
+        damage = rng.random()
+        if damage < 0.06:
+            reply = reply[:rng.randrange(len(reply))]
+        elif damage < 0.12:
+            reply += rng.randbytes(rng.randint(1, 4))
+        elif damage < 0.2:
+            for _ in range(rng.randint(1, 3)):
+                reply[rng.randrange(len(reply))] = rng.randrange(256)
+        out.append((ident, len(question), bytes(request), bytes(reply)))
+    return out
+
+
+def struct_pack_header(ident, flags, questions, answers, authorities, additional):
+    return struct.pack(">HHHHHH", ident, flags, questions, answers, authorities, additional)
+
+
+def harness_dns_oracle(argv):
+    """dns_reply_result against an independent reading of DNS replies.
+
+    The model (dns_oracle_model) is written from RFC 1035 and the resolver's
+    contract in net.c, not lifted from it; the cases (dns_oracle_cases) are
+    replies from a grammar, a third of them damaged. Both must give the same
+    status and, for an answer, the same address, for every case.
+
+        python3 test/differential.py --harness dns_oracle [--seed N] [--count N] [--cc CC]
+    """
+    parser = argparse.ArgumentParser(prog="differential.py --harness dns_oracle")
+    parser.add_argument("--seed", type=int, default=0x444e53)
+    parser.add_argument("--count", type=int, default=20000)
+    parser.add_argument("--cc", default=os.environ.get("CC", "cc"))
+    args = parser.parse_args(argv)
+    checks = Checks()
+    cases = dns_oracle_cases(args.seed, args.count)
+    with tempfile.TemporaryDirectory(prefix="dns-oracle-") as temporary:
+        work = Path(temporary)
+        (work / "ctd").mkdir()
+        (work / "ctd" / "driver.c").write_text(DNS_ORACLE_DRIVER.replace("../src", str(HARNESS_ROOT / "src")))
+        built = subprocess.run(spark_shell_command(args.cc, work / "driver")[:-1] +
+                               [str(work / "ctd" / "driver.c")],
+                               cwd=HARNESS_ROOT, capture_output=True, text=True)
+        if built.returncode:
+            print(built.stderr[-3000:])
+            checks(False, "the DNS oracle driver builds")
+            return checks.verdict("dns oracle", "dns-oracle")
+        blob = b"".join(struct.pack(">HHH", ident, qlen, len(request)) + request +
+                        struct.pack(">I", len(reply)) + reply
+                        for ident, qlen, request, reply in cases)
+        (work / "cases").write_bytes(blob)
+        ran = subprocess.run([str(work / "driver"), str(work / "cases")], capture_output=True,
+                             text=True, timeout=600)
+        said = ran.stdout.split("\n")
+        tally = collections.Counter()
+        wrong = 0
+        for at, (ident, qlen, request, reply) in enumerate(cases):
+            want = dns_oracle_model(reply, ident, request, qlen)
+            line = said[at].split() if at < len(said) else []
+            got = (-int(line[0]), int(line[1])) if len(line) == 2 else None
+            tally[want[0]] += 1
+            if got != want:
+                wrong += 1
+                if wrong <= 8:
+                    print("  FAIL case %d: dns_reply_result %s, the model %s, reply %s" % (
+                        at, got, want, reply[:64].hex()))
+            checks.checks += 1
+            checks.failures += got != want
+        #   Not vacuous: every answer the resolver can give comes up.
+        for status, name in ((0, "an address"), (-3, "malformed"), (-4, "no such name"),
+                             (-5, "no address"), (-6, "refused"), (-8, "try TCP")):
+            checks(tally[status] >= 20, "the cases reach %s (%d)" % (name, tally[status]))
+        print("dns oracle: %d replies: %s" % (len(cases), ", ".join(
+            "%s %d" % (k, v) for k, v in sorted(tally.items()))))
+    return checks.verdict("dns oracle", "dns-oracle")
+
+
 #       Public HTTPS hosts for x509_corpus: the popular sites, CDNs, clouds and
 #       registries, and a deliberate spread of governments, banks and national
 #       CAs (Certum, D-Trust, Actalis, HARICA, NetLock, e-Szigno, TWCA, SECOM,
@@ -68429,7 +68751,10 @@ def harness_net_mutation(argv):
         (r"^http_(split_into|scheme_length|web_scheme|host_byte|absolutize|origin_form|put_url)$",
          ["net_bounded_proof http_url", "http_urls"]),
         (r"^http_", ["http_response_framing", "http_urls", "https_downgrade", "http_fuzz"]),
-        (r"^dns_copy_name$", ["net_bounded_proof dns_copy_name", "dns_fuzz"]),
+        (r"^dns_copy_name$", ["net_bounded_proof dns_copy_name", "dns_oracle --count 4000",
+                              "dns_fuzz"]),
+        (r"^dns_(reply_result|reply_identity|records_end|answer_address|message_at)$",
+         ["dns_oracle --count 4000", "dns_fuzz"]),
         (r"^dns_", ["dns_fuzz"]),
         (r"^tls_asn1_", ["net_bounded_proof tls_asn1", "net_exhaustive_proof --slices 4 der",
                          "tls_der_fuzz"]),
@@ -89140,6 +89465,7 @@ HARNESS_CHECKS = {
     "machine_scan": harness_machine_scan,
     "ct_logs": harness_ct_logs,
     "tls_ct": harness_tls_ct,
+    "dns_oracle": harness_dns_oracle,
     "waterlink_noise": harness_waterlink_noise,
     "waterlink_mdns": harness_waterlink_mdns,
     "waterlink_sanitized": harness_waterlink_sanitized,

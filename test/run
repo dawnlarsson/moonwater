@@ -4091,6 +4091,9 @@ lane_net()
         *) net_outcome=1 ;;
         esac
         python3 test/differential.py --harness ct_logs || net_outcome=1
+        #       A DNS reply's reading against an independent one, over replies
+        #       from a grammar, a third damaged.
+        python3 test/differential.py --harness dns_oracle || net_outcome=1
         #       NTS against chrony's server and against servers that are
         #       wrong, in a namespace; NOT RUN without a chronyd built with NTS
         #       (MOONWATER_CHRONYD), which does not downgrade net.
