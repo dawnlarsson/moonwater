@@ -18160,6 +18160,16 @@ open(stick + "/m2", "w").write(r"""exec > /dev/ttyS0 2>&1
 /compositor &
 c=$!
 sleep 2
+/surface -F 1000000 -W 3 -x 500 -y 300 -w 800 -h 600 -c 663399 -s 90 > /tmp/f.out &
+f=$!
+sleep 1
+/surface -x 1500 -y 100 -w 200 -h 100 -c 339966 -s 20 > /tmp/d.out &
+sleep 3
+n=$(grep -c 'surface: [0-9]* at' /tmp/d.out)
+echo "m2 flood: second client $n"
+kill -9 $f
+wait $f
+sleep 1
 /surface -O 2147479552 -x 1000 -y 700 -w 64 -h 32 -s 3 > /tmp/o.out &
 sleep 1
 /surface -x 1200 -y 700 -w 64 -h 32 -s 1 > /tmp/o2.out
@@ -18299,6 +18309,8 @@ text = serial().decode("latin1")
 def said(pattern):
     found = re.findall(pattern, text)
     return found[-1] if found else "none"
+out.append(("M2.3 a client that floods commits does not starve the creation of another",
+            said(r"m2 flood: second client (\d+)"), "1"))
 out.append(("M2.5 a buffer offset written over the page's header does not stop the compositor",
             "%s %s" % (said(r"m2 offset: alive (\w+)"), said(r"m2 offset: alive \w+ next client (\d+)")), "yes 1"))
 

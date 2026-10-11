@@ -434,6 +434,7 @@ struct compositor_poll
 #define COMPOSITOR_POLLHUP 16
 
 #define COMPOSITOR_INPUTS 16
+#define COMPOSITOR_BURST 16
 #define COMPOSITOR_DAMAGE 8
 #define COMPOSITOR_BURST 64
 #define COMPOSITOR_EAGAIN 11
@@ -1232,10 +1233,12 @@ static void compositor_commit(struct compositor_client *client)
         }
 }
 
-// Everything a connection has said, until it would block.
+// What a connection has said, until it would block or has said a burst's worth:
+// a program that never stops talking waits its turn behind the rest, and what
+// is left is still there for the next poll.
 static void compositor_client_read(struct compositor_client *client)
 {
-        for (;;)
+        for (unsigned int burst = 0; burst < COMPOSITOR_BURST; burst++)
         {
                 struct surface_message message;
                 struct surface_iovec part = {&message, sizeof(message)};
@@ -1817,7 +1820,8 @@ static b32 surface_main()
         bipolar x = -1, y = -1, width = 320, height = 200, colour = 0x3366aa, role = SURFACE_ROLE_APP;
         bipolar seconds = -1;
         b32 pointer = 0;
-        bipolar offset = -1;
+        bipolar offset = -1, flood = 0, writers = 1;
+        b32 child = 0;
         string_address font = null, text = (string_address) "Moonwater";
         struct surface *surface;
         positive until;
@@ -1848,7 +1852,9 @@ static b32 surface_main()
                 case 'c': colour = surface_number(value, 1); break;
                 case 'r': role = surface_number(value, 0); break;
                 case 's': seconds = surface_number(value, 0); break;
+                case 'F': flood = surface_number(value, 0); break;
                 case 'O': offset = surface_number(value, 0); break;
+                case 'W': writers = surface_number(value, 0); break;
                 case 'f': font = value; break;
                 case 't': text = value; break;
                 }
@@ -1879,6 +1885,21 @@ static b32 surface_main()
                 surface->window.want = WINDOW_WANT_POINTER;
         surface->buffer_index = 0;
         surface_commit(surface);
+
+        // WRITERS processes on the one connection, each committing COMMITS times.
+        for (bipolar at = 1; at < writers && flood && !child; at++)
+                child = system_fork() == 0;
+
+        for (bipolar at = 0; at < flood; at++)
+        {
+                surface->damage_count = 1;
+                surface->damage[0] = (struct surface_damage){0, 0, (int)width, (int)height};
+                surface_commit(surface);
+        }
+
+        if (child)
+                return 0;
+
 
         // What a hostile program does: writes where the compositor wrote
         // its offsets, and commits.
