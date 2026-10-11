@@ -59134,6 +59134,411 @@ def harness_anchors(argv):
     return checks.verdict("anchors", "anchors")
 
 
+CT_P256_SPKI = bytes.fromhex("3059301306072a8648ce3d020106082a8648ce3d030107034200")
+
+
+def ct_logs_render(listing):
+    """src/net/ct_logs.inc from Chrome's log_list.json (v3) bytes: every log,
+    tiled or not, that is usable, qualified, read-only or retired, in the
+    list's order, its operator numbered in order of first appearance."""
+    import base64
+    import calendar
+    data = json.loads(listing)
+
+    def ms(stamp):
+        return calendar.timegm(time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ")) * 1000
+
+    rows = []
+    operators = []
+    for operator in data["operators"]:
+        for kind in ("logs", "tiled_logs"):
+            for log in operator.get(kind, []):
+                state = next(iter(log["state"]))
+                if state not in ("usable", "qualified", "readonly", "retired"):
+                    continue
+                key = base64.b64decode(log["key"])
+                if len(key) != 91 or not key.startswith(CT_P256_SPKI) or key[26] != 4:
+                    raise ValueError("not a P-256 key: %s" % log["description"])
+                if hashlib.sha256(key).digest() != base64.b64decode(log["log_id"]):
+                    raise ValueError("a log id that is not its key's hash: %s" % log["description"])
+                if operator["name"] not in operators:
+                    operators.append(operator["name"])
+                interval = log.get("temporal_interval")
+                rows.append((log["description"], operator["name"], operators.index(operator["name"]),
+                             base64.b64decode(log["log_id"]), key[27:59], key[59:91],
+                             ms(log["state"]["retired"]["timestamp"]) if state == "retired" else 0,
+                             ms(interval["start_inclusive"]) if interval else 0,
+                             ms(interval["end_exclusive"]) if interval else 0))
+    hexes = lambda b: ", ".join("0x%02x" % x for x in b)
+    lines = ["/*",
+             "        Certificate Transparency logs: Chrome's list %s of %s" % (
+                 data["version"], data["log_list_timestamp"]),
+             "        (https://www.gstatic.com/ct/log_list/v3/log_list.json), sha256",
+             "        %s." % hashlib.sha256(listing).hexdigest(),
+             "        Every log usable, qualified, read-only or retired, tiled or not, its",
+             "        id (the SHA-256 of its key's SubjectPublicKeyInfo), its key (P-256,",
+             "        x and y), its operator numbered in order of first appearance, when",
+             "        it retired and the notAfter interval it takes, in milliseconds since",
+             "        the epoch (0 for none). To regenerate: python3 test/differential.py",
+             "        --harness ct_logs --log-list FILE --write.",
+             "*/",
+             "static const tls_ct_log tls_ct_logs[] = {"]
+    for name, operator, number, log_id, x, y, retired, start, end in rows:
+        lines.append("    /* %s (%s) */" % (name.replace("*/", "* /"), operator.replace("*/", "* /")))
+        lines.append("    {{%s}," % hexes(log_id))
+        lines.append("     {%s}," % hexes(x))
+        lines.append("     {%s}," % hexes(y))
+        lines.append("     %d, %dull, %dull, %dull}," % (number, retired, start, end))
+    lines.append("};")
+    return "\n".join(lines) + "\n", rows
+
+
+def harness_ct_logs(argv):
+    """The Certificate Transparency logs in src/net/ct_logs.inc.
+
+    Without --log-list, parses the file and holds it to what net.c relies on:
+    each id is the SHA-256 of its key's P-256 SubjectPublicKeyInfo, no id
+    twice, operators numbered from 0 without a gap, more than one operator,
+    an interval whose end is after its start. With --log-list FILE (Chrome's
+    log_list.json), the file must be what that list renders to when the
+    header names its digest, and with --write it is rewritten from it.
+
+        python3 test/differential.py --harness ct_logs
+        python3 test/differential.py --harness ct_logs --log-list log_list.json [--write]
+    """
+    parser = argparse.ArgumentParser(prog="differential.py --harness ct_logs")
+    parser.add_argument("--log-list")
+    parser.add_argument("--write", action="store_true")
+    args = parser.parse_args(argv)
+    path = HARNESS_ROOT / "src/net/ct_logs.inc"
+    text = path.read_text()
+    checks = Checks()
+    hexes = r"\{((?:0x[0-9a-f]{2}, ){31}0x[0-9a-f]{2})\}"
+    found = re.findall(r"\{" + hexes + r",\s*" + hexes + r",\s*" + hexes +
+                       r",\s*(\d+), (\d+)ull, (\d+)ull, (\d+)ull\}", text)
+    ids = set()
+    operators = set()
+    for log_id, x, y, operator, retired, start, end in found:
+        raw = lambda group: bytes(int(byte, 16) for byte in group.split(", "))
+        log_id, x, y = raw(log_id), raw(x), raw(y)
+        checks(hashlib.sha256(CT_P256_SPKI + b"\x04" + x + y).digest() == log_id,
+               "a log id that is not its key's hash: %s" % log_id.hex())
+        checks(log_id not in ids, "a log twice: %s" % log_id.hex())
+        ids.add(log_id)
+        operators.add(int(operator))
+        checks((int(start) == 0 and int(end) == 0) or int(end) > int(start),
+               "a log whose interval ends before it starts: %s" % log_id.hex())
+    checks(len(found) >= 20 and len(found) == text.count("    {{"),
+           "%d logs read of %d rows" % (len(found), text.count("    {{")))
+    checks(operators == set(range(len(operators))) and len(operators) >= 2,
+           "operators numbered %s" % sorted(operators))
+    if args.log_list:
+        listing = Path(args.log_list).read_bytes()
+        rendered, rows = ct_logs_render(listing)
+        if hashlib.sha256(listing).hexdigest() in text:
+            checks(rendered == text, "the list the header names does not render ct_logs.inc byte for byte")
+        if args.write:
+            path.write_text(rendered)
+            print("ct logs: wrote %s (%d logs)" % (path, len(rows)))
+    print("ct logs: %d logs, %d operators" % (len(found), len(operators)))
+    return checks.verdict("ct logs", "ct-logs")
+
+
+TLS_CT_DRIVER = r"""
+#include "../src/lib.util.c"
+#include "../src/net/net.c"
+
+/* For each case directory named on the command line, leaf.der and
+   issuer.der: whether tls_ct_holds holds for the leaf under the issuer. */
+b32 main(void)
+{
+        static p8 leaf[16384];
+        static p8 issuer[16384];
+
+        for (positive at = 1; at < program_argument_count(); at++)
+        {
+                p8 path[512];
+                tls_cert certs[2];
+                positive chain[2] = {0, 1};
+                bipolar leaf_length;
+                bipolar issuer_length;
+
+                string_copy_end(string_copy_end(path, program_argument(at)), (string_address) "/leaf.der");
+                leaf_length = file_slurp((string_address)path, leaf, sizeof leaf);
+                string_copy_end(string_copy_end(path, program_argument(at)), (string_address) "/issuer.der");
+                issuer_length = file_slurp((string_address)path, issuer, sizeof issuer);
+                if (leaf_length <= 0 || issuer_length <= 0 ||
+                    tls_parse_cert(leaf, (positive)leaf_length, certs, null) ||
+                    tls_parse_cert(issuer, (positive)issuer_length, certs + 1, null))
+                        string_format(log, "%s parse\n", program_argument(at));
+                else
+                        string_format(log, "%s %p\n", program_argument(at),
+                                      (positive)tls_ct_holds(certs, chain, 1, certs + 1));
+        }
+        log_flush();
+        return 0;
+}
+"""
+
+
+def harness_tls_ct(argv):
+    """Certificate Transparency at the tight tier (tls_ct_holds in src/net/net.c),
+    against an independent reading of RFC 6962 and Chrome's CT policy.
+
+    Six logs of the harness's own (five operators: two logs of one, one log
+    retired a month ago, one whose temporal interval holds no leaf here, one
+    retired with no current log beside it) sign SCTs with Python's
+    cryptography over the precertificate the harness builds, and each case
+    is a leaf and its issuer: the model says whether the leaf is logged --
+    SCTs that verify, from a log that counts now and takes the leaf's
+    notAfter, made by now, two operators at least, one log not retired, two
+    SCTs for 180 days or less and three beyond -- and tls_ct_holds, built
+    with the six logs (TLS_BENCH_CT), has to say the same. The harness's own
+    precertificate is held to cryptography's tbs_precertificate_bytes first.
+    Then end to end: a tight-tier wget built to trust a harness root fetches
+    from openssl s_server a leaf with SCTs from two operators and is refused
+    one without, in wget's words and with its status 5; a default-tier wget
+    takes either.
+
+        python3 test/differential.py --harness tls_ct [--cc CC] [--units]
+    """
+    import datetime
+    import socket
+    import struct
+    try:
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.x509.oid import NameOID
+    except ImportError:
+        print("tls ct: NOT RUN -- needs Python's cryptography")
+        return 2
+    parser = argparse.ArgumentParser(prog="differential.py --harness tls_ct")
+    parser.add_argument("--cc", default=os.environ.get("CC", "cc"))
+    parser.add_argument("--units", action="store_true",
+                        help="the cases through tls_ct_holds only, not wget end to end")
+    args = parser.parse_args(argv)
+    checks = Checks()
+    now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
+    now_ms = int(now.timestamp() * 1000)
+    day = datetime.timedelta(days=1)
+
+    def key(seed):
+        return ec.derive_private_key(0x6d6f6f6e776174657200 + seed, ec.SECP256R1())
+
+    def spki(private):
+        return private.public_key().public_bytes(serialization.Encoding.DER,
+                                                 serialization.PublicFormat.SubjectPublicKeyInfo)
+
+    def der_length(n):
+        return bytes([n]) if n < 0x80 else (bytes([0x81, n]) if n < 0x100 else bytes([0x82, n >> 8, n & 255]))
+
+    #   (operator, retired at, notAfter interval) in milliseconds.
+    logs = [(0, 0, None), (0, 0, None), (1, 0, None),
+            (2, now_ms - 30 * 86400000, None),
+            (3, 0, (now_ms + 400 * 86400000, now_ms + 800 * 86400000)),
+            (4, now_ms - 30 * 86400000, None)]
+    log_keys = [key(100 + at) for at in range(len(logs))]
+    log_ids = [hashlib.sha256(spki(k)).digest() for k in log_keys]
+    issuer_key = key(1)
+    other_key = key(2)
+    leaf_key = key(3)
+    issuer_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "tls ct issuer")])
+    issuer = (x509.CertificateBuilder().subject_name(issuer_name).issuer_name(issuer_name)
+              .public_key(issuer_key.public_key()).serial_number(7)
+              .not_valid_before(now - 400 * day).not_valid_after(now + 4000 * day)
+              .add_extension(x509.BasicConstraints(ca=True, path_length=None), True)
+              .sign(issuer_key, hashes.SHA256()))
+
+    def sct(log, tbs, issuer_spki, stamp=None, version=0, hash_id=4, broken=False, extensions=b""):
+        stamp = now_ms - 3600000 if stamp is None else stamp
+        signed = (b"\x00\x00" + struct.pack(">Q", stamp) + b"\x00\x01" +
+                  hashlib.sha256(issuer_spki).digest() + len(tbs).to_bytes(3, "big") + tbs +
+                  len(extensions).to_bytes(2, "big") + extensions)
+        signature = log_keys[log].sign(signed, ec.ECDSA(hashes.SHA256())) if log >= 0 else \
+            key(999).sign(signed, ec.ECDSA(hashes.SHA256()))
+        if broken:
+            signature = signature[:-1] + bytes([signature[-1] ^ 1])
+        log_id = log_ids[log] if log >= 0 else hashlib.sha256(b"no such log").digest()
+        return (bytes([version]) + log_id + struct.pack(">Q", stamp) +
+                len(extensions).to_bytes(2, "big") + extensions + bytes([hash_id, 3]) +
+                len(signature).to_bytes(2, "big") + signature)
+
+    def leaf_with(lifetime_days, scts, names=1, middle=False, trailing=b""):
+        #   The precertificate first: every field and extension but the
+        #   list, in the order the certificate will have them.
+        before = now - day
+        after = before + lifetime_days * day
+
+        def build(extension):
+            builder = (x509.CertificateBuilder()
+                       .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")]))
+                       .issuer_name(issuer_name).public_key(leaf_key.public_key())
+                       .serial_number(4242 + lifetime_days + names)
+                       .not_valid_before(before).not_valid_after(after))
+            parts = [x509.SubjectAlternativeName(
+                [x509.DNSName("localhost")] +
+                [x509.DNSName("n%03d.ct.example" % at) for at in range(names - 1)] +
+                [x509.IPAddress(__import__("ipaddress").ip_address("127.0.0.1"))])]
+            parts.append(x509.BasicConstraints(ca=False, path_length=None))
+            if extension is not None:
+                parts.insert(1 if middle else len(parts), extension)
+            for part in parts:
+                builder = builder.add_extension(part, critical=isinstance(part, x509.BasicConstraints))
+            return builder.sign(issuer_key, hashes.SHA256())
+        tbs = build(None).tbs_certificate_bytes
+        if scts is None:
+            return build(None), tbs
+        body = b"".join(len(one).to_bytes(2, "big") + one for one in
+                        (make(tbs) for make in scts))
+        listing = len(body).to_bytes(2, "big") + body + trailing
+        value = b"\x04" + der_length(len(listing)) + listing
+        leaf = build(x509.UnrecognizedExtension(x509.ObjectIdentifier("1.3.6.1.4.1.11129.2.4.2"), value))
+        return leaf, tbs
+
+    ispki = spki(issuer_key)
+    ospki = spki(other_key)
+
+    def good(log, **kw):
+        return lambda tbs: sct(log, tbs, ispki, **kw)
+
+    #   name, lifetime in days, SCTs, extra, logged
+    cases = [
+        ("two operators, 90 days", 90, [good(0), good(2)], {}, True),
+        ("two logs of one operator", 90, [good(0), good(1)], {}, False),
+        ("one SCT", 90, [good(2)], {}, False),
+        ("400 days, two SCTs", 400, [good(0), good(2)], {}, False),
+        ("400 days, three SCTs of two operators", 400, [good(0), good(1), good(2)], {}, True),
+        ("180 days, two SCTs", 180, [good(0), good(2)], {}, True),
+        ("a broken signature beside two that hold", 90, [good(0, broken=True), good(1), good(2)], {}, True),
+        ("a broken signature and one that holds", 90, [good(0, broken=True), good(2)], {}, False),
+        ("an SCT from an hour ahead", 90, [lambda tbs: sct(0, tbs, ispki, stamp=now_ms + 3600000), good(2)], {}, False),
+        ("a log nobody listed", 90, [good(-1), good(2)], {}, False),
+        ("a log retired after its SCT", 90, [lambda tbs: sct(3, tbs, ispki, stamp=now_ms - 60 * 86400000), good(2)], {}, True),
+        ("a log retired before its SCT", 90, [lambda tbs: sct(3, tbs, ispki, stamp=now_ms - 86400000), good(2)], {}, False),
+        ("two retired logs and no current one", 90,
+         [lambda tbs: sct(3, tbs, ispki, stamp=now_ms - 60 * 86400000),
+          lambda tbs: sct(5, tbs, ispki, stamp=now_ms - 60 * 86400000)], {}, False),
+        ("a log whose interval holds no such notAfter", 90, [good(4), good(2)], {}, False),
+        ("an SCT of version 2", 90, [good(0, version=1), good(2)], {}, False),
+        ("an SCT hashed with SHA-384", 90, [good(0, hash_id=5), good(2)], {}, False),
+        ("the list between two extensions", 90, [good(0), good(2)], {"middle": True}, True),
+        ("a TBS whose length shrinks a byte without its list", 90, [good(0), good(2)], {"names": 8}, True),
+        ("an SCT over another issuer's key", 90, [lambda tbs: sct(0, tbs, ospki), good(2)], {}, False),
+        ("a byte after the list", 90, [good(0), good(2)], {"trailing": b"\x00"}, False),
+        ("no list", 90, None, {}, False),
+        ("SCT extensions carried and signed", 90, [good(0, extensions=b"\x00\x00\x05\x00\x00\x00\x00\x2a"), good(2)], {}, True),
+        ("sixteen broken before two that hold", 90,
+         [good(0, broken=True)] * 16 + [good(1), good(2)], {}, False),
+    ]
+    with tempfile.TemporaryDirectory(prefix="tls-ct-") as temporary:
+        work = Path(temporary)
+        (work / "logs.h").write_text(
+            "static const tls_ct_log tls_bench_ct_logs[] = {\n" + "".join(
+                "    {{%s}, {%s}, {%s}, %d, %dull, %dull, %dull},\n" % (
+                    ", ".join("0x%02x" % b for b in log_ids[at]),
+                    ", ".join("0x%02x" % b for b in spki(log_keys[at])[27:59]),
+                    ", ".join("0x%02x" % b for b in spki(log_keys[at])[59:91]),
+                    operator, retired, interval[0] if interval else 0, interval[1] if interval else 0)
+                for at, (operator, retired, interval) in enumerate(logs)) + "};\n")
+        (work / "ctd").mkdir()
+        (work / "ctd" / "driver.c").write_text(TLS_CT_DRIVER.replace("../src", str(HARNESS_ROOT / "src")))
+        built = subprocess.run(spark_shell_command(args.cc, work / "driver", None,
+                                                   ('TLS_BENCH_CT="%s"' % (work / "logs.h"),))
+                               [:-1] + [str(work / "ctd" / "driver.c")],
+                               cwd=HARNESS_ROOT, capture_output=True, text=True)
+        if built.returncode:
+            print(built.stderr[-3000:])
+            checks(False, "the CT driver builds")
+            return checks.verdict("tls ct", "tls-ct")
+        names = []
+        for at, (name, lifetime, scts, extra, logged) in enumerate(cases):
+            leaf, tbs = leaf_with(lifetime, scts, **extra)
+            if scts is not None and not extra.get("trailing"):
+                checks(leaf.tbs_precertificate_bytes == tbs,
+                       "%s: the harness's precertificate is cryptography's" % name)
+            folder = work / ("case%02d" % at)
+            folder.mkdir()
+            (folder / "leaf.der").write_bytes(leaf.public_bytes(serialization.Encoding.DER))
+            (folder / "issuer.der").write_bytes(issuer.public_bytes(serialization.Encoding.DER))
+            names.append(str(folder))
+        ran = subprocess.run([str(work / "driver")] + names, capture_output=True, text=True, timeout=120)
+        said = dict(line.split()[-2:] if False else (line.rsplit(" ", 1)[0], line.rsplit(" ", 1)[1])
+                    for line in ran.stdout.splitlines() if " " in line)
+        for at, (name, lifetime, scts, extra, logged) in enumerate(cases):
+            got = said.get(names[at])
+            checks(got == ("1" if logged else "0"),
+                   "%s: tls_ct_holds says %s, the model %s" % (name, got, "logged" if logged else "not"))
+
+        #   End to end, through wget at the tight tier.
+        if args.units:
+            return checks.verdict("tls ct", "tls-ct")
+        if not shutil.which("openssl"):
+            print("tls ct: end to end NOT RUN -- no openssl")
+            return checks.verdict("tls ct", "tls-ct")
+        root_key = ec.generate_private_key(ec.SECP384R1())
+        (work / "root.key").write_bytes(root_key.private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+        anchor = bench_anchor(work)
+        root_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "tls ct root")])
+        intermediate = (x509.CertificateBuilder().subject_name(issuer_name).issuer_name(root_name)
+                        .public_key(issuer_key.public_key()).serial_number(8)
+                        .not_valid_before(now - 400 * day).not_valid_after(now + 3000 * day)
+                        .add_extension(x509.BasicConstraints(ca=True, path_length=0), True)
+                        .sign(root_key, hashes.SHA384()))
+        (work / "inter.pem").write_bytes(intermediate.public_bytes(serialization.Encoding.PEM))
+        (work / "leaf.key").write_bytes(leaf_key.private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+        builds = [subprocess.Popen(spark_shell_command(args.cc, work / name, anchor, defines),
+                                   cwd=HARNESS_ROOT, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.PIPE, text=True)
+                  for name, defines in (
+                      ("shell_tight", ("MOONWATER_STRICT_NET=2", 'TLS_BENCH_CT="%s"' % (work / "logs.h"))),
+                      ("shell", ('TLS_BENCH_CT="%s"' % (work / "logs.h"),)))]
+        errors = [build.communicate()[1] for build in builds]
+        if any(build.returncode for build in builds):
+            print("".join(errors)[-3000:])
+            checks(False, "the tight and default shells build")
+            return checks.verdict("tls ct", "tls-ct")
+        for name in ("shell_tight", "shell"):
+            (work / name.replace("shell", "w")).mkdir()
+            (work / name.replace("shell", "w") / "wget").symlink_to(work / name)
+        for label, scts, tight_logged in (("SCTs from two operators", [good(0), good(2)], True),
+                                          ("no SCTs", None, False)):
+            leaf, _ = leaf_with(90, scts)
+            (work / "leaf.pem").write_bytes(leaf.public_bytes(serialization.Encoding.PEM))
+            for shell, want in (("w_tight", tight_logged), ("w", True)):
+                probe = socket.socket()
+                probe.bind(("127.0.0.1", 0))
+                port = probe.getsockname()[1]
+                probe.close()
+                server = subprocess.Popen(
+                    ["openssl", "s_server", "-accept", "127.0.0.1:%d" % port, "-cert",
+                     str(work / "leaf.pem"), "-key", str(work / "leaf.key"), "-cert_chain",
+                     str(work / "inter.pem"), "-www", "-naccept", "1"],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                for _ in range(8):
+                    ready = server.stdout.readline()
+                    if not ready or b"ACCEPT" in ready:
+                        break
+                fetched = subprocess.run([str(work / shell / "wget"), "-O", "/dev/null",
+                                          "https://127.0.0.1:%d/" % port],
+                                         capture_output=True, timeout=60,
+                                         env={"PATH": "/usr/bin:/bin", "HOME": str(work)})
+                server.kill()
+                server.wait()
+                tier = "tight" if shell == "w_tight" else "default"
+                if want:
+                    checks(fetched.returncode == 0, "%s tier, %s: fetched (%d %s)" % (
+                        tier, label, fetched.returncode, fetched.stderr[-200:]))
+                else:
+                    checks(fetched.returncode == 5 and
+                           b"was not logged as Certificate Transparency asks" in fetched.stderr,
+                           "%s tier, %s: refused in wget's words with status 5 (%d %s)" % (
+                               tier, label, fetched.returncode, fetched.stderr[-200:]))
+    return checks.verdict("tls ct", "tls-ct")
+
+
 #       Public HTTPS hosts for x509_corpus: the popular sites, CDNs, clouds and
 #       registries, and a deliberate spread of governments, banks and national
 #       CAs (Certum, D-Trust, Actalis, HARICA, NetLock, e-Szigno, TWCA, SECOM,
@@ -68036,6 +68441,9 @@ def harness_net_mutation(argv):
         (r"^tls_parse_basic_constraints$", ["net_bounded_proof tls_constraints", "tls_chains"]),
         (r"^tls_parse_key_usage$", ["net_bounded_proof tls_key_usage", "tls_chains"]),
         (r"^tls_(date_now|parse_validity)$", ["tls_dates", "tls_chains"]),
+        (r"^tls_(ct_|der_length_put$|trust_holds$)", ["tls_ct --units"]),
+        (r"^tls_(parse_extensions|parse_cert)$",
+         ["tls_ct --units", "tls_der_fuzz", "tls_verify_fuzz", "tls_chains"]),
         (r"^tls_", ["tls_der_fuzz", "tls_hs_fuzz", "tls_verify_fuzz", "tls_chains"]),
         (r"^netlink_(attributes|find_span|finding_take)$", ["net_bounded_proof netlink_find",
                                                             "netlink_fuzz"]),
@@ -73047,7 +73455,9 @@ for holder in spaces.values():
 
 
 # The helpers every generated guest script starts with: counted questions,
-# a family's tally printed reversed so the console's echo never answers.
+# a family's tally printed reversed so the console's echo never answers, and
+# printed twice a moment apart: the kernel's own console lines land where
+# they land, and one cut a tally in half (backoff 7 of 7, read as missing).
 GUEST_PRELUDE = r'''scen_ok=0
 scen_all=0
 scen_strip() { sed -e 's/^.\[1m\[Moonwater\].\[0m //' -e 's/^\[Moonwater\] //'; }
@@ -73058,7 +73468,7 @@ scen_same() { if cmp -s /tmp/sc.want /tmp/sc.got; then scen_pass; else scen_miss
 scen_same_file() { cp "$2" /tmp/sc.got 2>/dev/null || : > /tmp/sc.got; scen_same "$1"; }
 scen_status() { if [ "$2" = "$3" ]; then scen_pass; else scen_miss "$1: status $3, wanted $2"; head -c 300 /tmp/sc.got 2>/dev/null; echo; fi; }
 scen_count() { if [ "$2" = "$3" ]; then scen_pass; else scen_miss "$1: $3, wanted $2"; fi; }
-scen_done() { printf 'scen-%s-%s-of-%s\n' "$1" "$scen_ok" "$scen_all" | rev; scen_ok=0; scen_all=0; }
+scen_done() { t=$(printf 'scen-%s-%s-of-%s\n' "$1" "$scen_ok" "$scen_all" | rev); printf '%s\n' "$t"; sleep 0.2; printf '%s\n' "$t"; scen_ok=0; scen_all=0; }
 scen_expect_empty() { moonwater bind init 2>&1 | grep -c 'nothing runs at boot' > /tmp/sc.got; printf '1\n' > /tmp/sc.want; scen_same 'settings start from none'; }
 scen_zombies() { n=0; for f in /proc/[0-9]*/status; do s=$(sed -n 's/^State:[[:space:]]*\(.\).*/\1/p' "$f" 2>/dev/null); pp=$(sed -n 's/^PPid:[[:space:]]*//p' "$f" 2>/dev/null); [ "$s" = Z ] && [ "$pp" = 1 ] && n=$((n + 1)); done; echo $n; }
 scen_find() { for p in /proc/[0-9]*; do c=$(tr '\000' ' ' < $p/cmdline 2>/dev/null); case $c in *"$1"*) echo ${p#/proc/};; esac; done; }'''
@@ -77857,7 +78267,8 @@ def harness_wifi_air(argv):
     lines.append("$A /mnt/stick/hwsim_radio power $pci 19; n0=%s; sleep 25" % dm("$S: associated"))
     lines.append("scen_count 'pmf downgrade twin never joined' 0 \"$(( %s - n0 ))\"" % dm("$S: associated"))
     lines.append("scen_count 'pmf downgrade twin, not joined' 0 \"$(joined pmfreq)\"")
-    lines.append("scen_count 'pmf downgrade twin, bare wifi says why' 1 \"$(moonwater wifi 2>&1 | scen_strip | grep -c 'no longer offers management frame protection')\"")
+    lines.append("moonwater wifi > /tmp/sc.got 2>&1; n=$(scen_strip < /tmp/sc.got | grep -c 'no longer offers management frame protection'); "
+                 "scen_count 'pmf downgrade twin, bare wifi says why' 1 \"$n\"; [ \"$n\" = 1 ] || sed 's/^/pmf-said /' /tmp/sc.got")
     lines.append("kill $(cat /tmp/pc.pid)")
     lines += pmf_ap("pb", "pmfreq", chan["req"], ["ieee80211w=2", "pairwise=CCMP", "group=CCMP"])
     lines.append("for i in $(seq 120); do [ \"$(joined pmfreq)\" = 1 ] && break; sleep 0.5; done")
@@ -88691,6 +89102,8 @@ HARNESS_CHECKS = {
     "hostile_strings": harness_hostile_strings,
     "state_cuts": harness_state_cuts,
     "machine_scan": harness_machine_scan,
+    "ct_logs": harness_ct_logs,
+    "tls_ct": harness_tls_ct,
     "waterlink_noise": harness_waterlink_noise,
     "waterlink_mdns": harness_waterlink_mdns,
     "waterlink_sanitized": harness_waterlink_sanitized,

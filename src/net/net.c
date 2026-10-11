@@ -10,8 +10,8 @@
         Each section keeps its own heading and its own include guard, so it
         still says what it is and what it refuses to know about its
         neighbours. wait.c stays beside this because src/sh/tools.c expands
-        it too, and expands it first; anchors.inc stays beside it because it
-        is a table.
+        it too, and expands it first; anchors.inc, ct_logs.inc and
+        suffixes.inc stay beside it because they are tables.
 
         Dawn Larsson - Apache-2.0 license
         github.com/dawnlarsson/moonwater
@@ -5763,12 +5763,16 @@ static bool crypto_rsa_pss_sha256(p8 address_to n_bytes, positive n_length,
 /* Or that the clock is below its floor: it was never set, so no date in a
    certificate can be judged against it. */
 #define TLS_CLOCK (-8)
+/* Or, at the tight tier, that the certificate was not logged as Certificate
+   Transparency asks (tls_ct_holds). */
+#define TLS_UNLOGGED (-9)
 #define TLS_FAULT_EARLY 1
 #define TLS_FAULT_LATE 2
 #define TLS_FAULT_NAME 3
 #define TLS_FAULT_REVOKED 4
 #define TLS_FAULT_UNCHECKED 5
 #define TLS_FAULT_CLOCK 6
+#define TLS_FAULT_UNLOGGED 7
 
 #define TLS_CT_CCS 20
 #define TLS_CT_ALERT 21
@@ -5818,6 +5822,8 @@ static const p8 tls_oid_pkcs1[8] = {0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x
 static const p8 tls_oid_rsa[9] = {0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01,
                                   0x01, 0x01};
 static const p8 tls_oid_san[3] = {0x55, 0x1d, 0x11};
+/* 1.3.6.1.4.1.11129.2.4.2, the embedded SCT list (RFC 6962 3.3). */
+static const p8 tls_oid_scts[10] = {0x2b, 0x06, 0x01, 0x04, 0x01, 0xd6, 0x79, 0x02, 0x04, 0x02};
 static const p8 tls_oid_basic_constraints[3] = {0x55, 0x1d, 0x13};
 static const p8 tls_oid_name_constraints[3] = {0x55, 0x1d, 0x1e};
 static const p8 tls_oid_key_usage[3] = {0x55, 0x1d, 0x0f};
@@ -7536,6 +7542,17 @@ typedef struct
         p8 address_to authority_key;
         positive authority_key_length;
         bool must_staple;
+        /* Certificate Transparency: the SubjectPublicKeyInfo whole (what an
+           SCT's issuer_key_hash hashes), the extensions' [3] and the SCT list
+           extension whole, which the precertificate an SCT signed lacks
+           (tls_ct_precert), and the TLS-encoded list inside it, or null. */
+        p8 address_to spki;
+        positive spki_length;
+        p8 address_to extensions;
+        p8 address_to sct_extension;
+        positive sct_extension_length;
+        p8 address_to scts;
+        positive scts_length;
         p8 curve;
         p8 qx[48];
         p8 qy[48];
@@ -8020,6 +8037,7 @@ static COLD bipolar tls_parse_extensions(p8 address_to der, positive tbs_stop,
            smuggle v3 constraints into a shape whose version says they do not
            exist, leaving different validators to disagree about the same
            signed bytes. */
+        cert->extensions = der + at;
         if (version != 2 ||
             tls_asn1_enter(der, tbs_stop, 0xa3, address_of at,
                            address_of extensions_stop) ||
@@ -8032,6 +8050,7 @@ static COLD bipolar tls_parse_extensions(p8 address_to der, positive tbs_stop,
         while (at < sequence_stop)
         {
                 positive extension_stop = 0;
+                positive extension_at = at;
                 positive oid_at;
                 positive oid_stop = 0;
                 positive value_stop = 0;
@@ -8143,6 +8162,26 @@ static COLD bipolar tls_parse_extensions(p8 address_to der, positive tbs_stop,
                         if (tls_parse_tls_feature(der + at, value_stop - at, cert))
                                 return TLS_FAIL;
                 }
+                else if (!critical &&
+                         tls_oid_is(der + oid_at, oid_stop - oid_at, tls_oid_scts, 10))
+                {
+                        /* An OCTET STRING of the TLS-encoded list. One that is
+                           not is no list: it counts for nothing where CT is
+                           asked and is ignored where it is not, as any other
+                           client ignores it. */
+                        positive list_at = at;
+                        positive list_stop = 0;
+
+                        if (!tls_asn1_enter(der, value_stop, 0x04, address_of list_at,
+                                            address_of list_stop) &&
+                            list_stop == value_stop)
+                        {
+                                cert->scts = der + list_at;
+                                cert->scts_length = list_stop - list_at;
+                                cert->sct_extension = der + extension_at;
+                                cert->sct_extension_length = extension_stop - extension_at;
+                        }
+                }
                 else if (critical)
                         cert->unsupported_critical = true;
 
@@ -8223,8 +8262,10 @@ static COLD bipolar tls_parse_cert(p8 address_to der, positive length,
                           address_of cert->subject, address_of cert->subject_length))
                 return TLS_FAIL;
 
+        cert->spki = der + at;
         if (tls_asn1_enter(der, tbs_stop, 0x30, address_of at, address_of spki_stop))
                 return TLS_FAIL;
+        cert->spki_length = spki_stop - (positive)(cert->spki - der);
         if (tls_asn1_enter(der, spki_stop, 0x30, address_of at, address_of alg_stop))
                 return TLS_FAIL;
         param_at = at;
@@ -9609,6 +9650,26 @@ static COLD bool tls_revocation_holds(tls_conn address_to tls,
                                       const p8 address_to staple,
                                       positive staple_length, p64 now);
 
+/* Whether a verified path's leaf was logged as Certificate Transparency
+   asks, which the tight tier holds a public root's chain to: defined beside
+   the revocation checks. */
+static COLD bool tls_ct_holds(tls_cert address_to certs, const positive address_to path,
+                              positive depth, tls_cert address_to top);
+
+/* A path to an anchor: logged where the tier asks, then not revoked. */
+static COLD bool tls_trust_holds(tls_conn address_to tls, tls_cert address_to certs,
+                                 const positive address_to path, positive depth,
+                                 tls_cert address_to top, const p8 address_to staple,
+                                 positive staple_length, p64 now)
+{
+        if (MOONWATER_STRICT_NET >= STRICT_TIGHT && !tls_ct_holds(certs, path, depth, top))
+        {
+                tls->fault = TLS_FAULT_UNLOGGED;
+                return false;
+        }
+        return tls_revocation_holds(tls, certs, path, depth, top, staple, staple_length, now);
+}
+
 /* The leaf comes first; the rest is a pool, as RFC 8446 section 4.4.2 asks
    clients to treat it. Of 640 public HTTPS hosts openssl verified on
    2026-09-28, 25 served intermediates out of order or an extra certificate
@@ -9763,9 +9824,9 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
 
                         if (tls_anchor_verifies(certs + child, leaf_from,
                                                 address_of root))
-                                return tls_revocation_holds(
-                                    tls, certs, path, depth, address_of root,
-                                    staple, staple_length, now);
+                                return tls_trust_holds(tls, certs, path, depth,
+                                                       address_of root, staple,
+                                                       staple_length, now);
                         if (asked || !certs[child].ca_issuers)
                                 return false;
                         asked = true;
@@ -9781,9 +9842,8 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
                         continue;
                 }
                 if (anchor)
-                        return tls_revocation_holds(tls, certs, path, depth,
-                                                    certs + next, staple,
-                                                    staple_length, now);
+                        return tls_trust_holds(tls, certs, path, depth, certs + next,
+                                               staple, staple_length, now);
                 unusable |= (positive)1 << next;
                 child = next;
                 path[++depth] = next;
@@ -11225,6 +11285,7 @@ static COLD bipolar tls_connect_until(tls_conn address_to tls, bipolar handle,
                          : tls->fault == TLS_FAULT_REVOKED ? TLS_REVOKED
                          : tls->fault == TLS_FAULT_UNCHECKED ? TLS_UNCHECKED
                          : tls->fault == TLS_FAULT_CLOCK ? TLS_CLOCK
+                         : tls->fault == TLS_FAULT_UNLOGGED ? TLS_UNLOGGED
                                                              : TLS_UNTRUSTED;
                 tls_forget(tls);
         }
@@ -11506,12 +11567,15 @@ static bipolar tls_read_until(
 //      STRICT_TIGHT only: a body that declared no length ran past
 //      HTTP_UNDECLARED_MOST.
 #define HTTP_UNDECLARED (-22)
+//      STRICT_TIGHT only: a public certificate not logged as Certificate
+//      Transparency asks (TLS_UNLOGGED).
+#define HTTP_UNLOGGED (-23)
 //      The fetch's network half (http_run_apart) could not be confined, so
 //      nothing was asked; or it ended without a whole answer -- killed by
 //      its filter or a signal, or with an answer the caller could not
 //      believe.
-#define HTTP_CONFINE (-23)
-#define HTTP_APART (-24)
+#define HTTP_CONFINE (-24)
+#define HTTP_APART (-25)
 
 typedef byte_store http_buffer;
 #define http_forget(buffer) byte_store_release(buffer)
@@ -12496,6 +12560,7 @@ static bipolar http_tls_status(bipolar verdict)
                : verdict == TLS_REVOKED ? HTTP_REVOKED
                : verdict == TLS_UNCHECKED ? HTTP_UNCHECKED
                : verdict == TLS_CLOCK ? HTTP_CLOCK
+               : verdict == TLS_UNLOGGED ? HTTP_UNLOGGED
                                         : HTTP_TLS;
 }
 
@@ -13529,6 +13594,341 @@ static COLD bool tls_signed_by(p8 address_to tbs, positive tbs_length,
         part.sig = (p8 address_to)sig;
         part.sig_length = sig_length;
         return tls_verify_one(address_of part, signer);
+}
+
+/*
+        Certificate Transparency (RFC 6962), at the tight tier.
+
+        A certificate a public CA issues is logged before it is issued: the CA
+        sends a precertificate to logs, each answers with a signed certificate
+        timestamp (SCT), and the CA embeds the SCTs in the certificate (the
+        extension 1.3.6.1.4.1.11129.2.4.2). A certificate nobody logged -- one a
+        CA was made to issue quietly, or a forgery under a stolen key -- has
+        none that verify, and is the certificate CT exists to expose.
+        tls_ct_holds asks what Chrome asks (its CT policy, embedded SCTs):
+        every SCT is checked against the log it names in tls_ct_logs, over the
+        precertificate it signed -- the leaf's TBSCertificate without the SCT
+        list, and the SHA-256 of its issuer's SubjectPublicKeyInfo -- and
+        counted only from a log that is usable, qualified or read-only, or
+        retired after the SCT was made, and whose temporal interval holds the
+        leaf's notAfter, made no later than now. Counted SCTs have to come from
+        two operators at least, at least one from a log that has not retired,
+        and number two for a leaf of 180 days or less and three for a longer
+        one.
+
+        SCTs a server sends in TLS or in a stapled OCSP response are not read:
+        a public certificate carries its own. The default and reference tiers
+        do not ask, as GNU wget and curl do not; a chain that ends at the
+        harness's own root (TLS_BENCH_ANCHOR) is asked only when the harness
+        names logs of its own (TLS_BENCH_CT).
+*/
+typedef struct
+{
+        p8 id[32];
+        p8 x[32];
+        p8 y[32];
+        p8 operator;
+        p64 retired; // milliseconds since the epoch; 0 while it is not
+        p64 from;    // the notAfter interval it takes, milliseconds; 0, 0 for any
+        p64 until;
+} tls_ct_log;
+
+#include "ct_logs.inc"
+#ifdef TLS_BENCH_CT
+#include TLS_BENCH_CT
+#endif
+
+#define TLS_CT_SCTS_MOST 16
+#define TLS_CT_SHORT_DAYS 180
+
+//      The log an SCT names, or null.
+static COLD const tls_ct_log address_to tls_ct_log_find(const p8 address_to id)
+{
+        for (positive at = 0; at < array_count(tls_ct_logs); at++)
+                if (!memory_compare(tls_ct_logs[at].id, id, 32))
+                        return tls_ct_logs + at;
+#ifdef TLS_BENCH_CT
+        for (positive at = 0; at < array_count(tls_bench_ct_logs); at++)
+                if (!memory_compare(tls_bench_ct_logs[at].id, id, 32))
+                        return tls_bench_ct_logs + at;
+#endif
+        return null;
+}
+
+//      A DER length's octets for length, written at out; their count.
+static COLD positive tls_der_length_put(p8 address_to out, positive length)
+{
+        if (length < 0x80)
+        {
+                out[0] = (p8)length;
+                return 1;
+        }
+        if (length < 0x100)
+        {
+                out[0] = 0x81;
+                out[1] = (p8)length;
+                return 2;
+        }
+        if (length < 0x10000)
+        {
+                out[0] = 0x82;
+                out[1] = (p8)(length >> 8);
+                out[2] = (p8)length;
+                return 3;
+        }
+        out[0] = 0x83;
+        out[1] = (p8)(length >> 16);
+        out[2] = (p8)(length >> 8);
+        out[3] = (p8)length;
+        return 4;
+}
+
+/*
+        The precertificate's TBSCertificate an embedded SCT signed: the leaf's,
+        with the SCT list extension taken out and the lengths of the
+        extensions, their [3] and the TBS written again. Its length, or 0 when
+        the leaf carries no list or nothing would be left of its extensions.
+        out has room for the leaf's own TBS, which this never exceeds.
+*/
+static COLD positive tls_ct_precert(const tls_cert address_to leaf, p8 address_to out,
+                                    positive room)
+{
+        p8 address_to tbs = leaf->tbs;
+        positive tbs_length = leaf->tbs_length;
+        positive at = 0;
+        positive tbs_stop = 0;
+        positive wrap_stop = 0;
+        positive list_at;
+        positive list_stop = 0;
+        positive cut;
+        positive cut_length = leaf->sct_extension_length;
+        positive prefix;
+        positive kept;
+        positive list_header;
+        positive wrap_header;
+        positive used;
+        p8 head[5];
+
+        if (!leaf->scts || !leaf->extensions || leaf->extensions < tbs ||
+            leaf->sct_extension < leaf->extensions ||
+            tls_asn1_enter(tbs, tbs_length, 0x30, address_of at, address_of tbs_stop) ||
+            tbs_stop != tbs_length)
+                return 0;
+        prefix = (positive)(leaf->extensions - tbs) - at;
+        at = (positive)(leaf->extensions - tbs);
+        if (tls_asn1_enter(tbs, tbs_stop, 0xa3, address_of at, address_of wrap_stop) ||
+            wrap_stop != tbs_stop)
+                return 0;
+        list_at = at;
+        if (tls_asn1_enter(tbs, wrap_stop, 0x30, address_of list_at, address_of list_stop) ||
+            list_stop != wrap_stop)
+                return 0;
+        cut = (positive)(leaf->sct_extension - tbs);
+        if (cut < list_at || cut_length > list_stop - cut)
+                return 0;
+        kept = list_stop - list_at - cut_length;
+        if (!kept)
+                return 0;
+        list_header = 1 + tls_der_length_put(head, kept);
+        wrap_header = 1 + tls_der_length_put(head, list_header + kept);
+        used = prefix + wrap_header + list_header + kept;
+        at = 1 + tls_der_length_put(head, used);
+        if (at + used > room)
+                return 0;
+        out[0] = 0x30;
+        tls_der_length_put(out + 1, used);
+        //      Everything before the extensions, as it was.
+        memory_copy(out + at, tbs + (positive)(leaf->extensions - tbs) - prefix, prefix);
+        at += prefix;
+        out[at++] = 0xa3;
+        at += tls_der_length_put(out + at, list_header + kept);
+        out[at++] = 0x30;
+        at += tls_der_length_put(out + at, kept);
+        memory_copy(out + at, tbs + list_at, cut - list_at);
+        at += cut - list_at;
+        memory_copy(out + at, tbs + cut + cut_length, list_stop - cut - cut_length);
+        at += list_stop - cut - cut_length;
+        return at;
+}
+
+/*
+        One SCT read (RFC 6962 3.2): v1, the log's id, its timestamp in
+        milliseconds, its extensions, and an ECDSA signature with SHA-256 as
+        a DER Ecdsa-Sig-Value. False for any other shape.
+*/
+typedef struct
+{
+        const p8 address_to id;
+        p64 timestamp;
+        const p8 address_to extensions;
+        positive extensions_length;
+        const p8 address_to signature;
+        positive signature_length;
+} tls_ct_sct;
+
+static COLD bool tls_ct_sct_read(byte_reader address_to reader, tls_ct_sct address_to sct)
+{
+        byte_reader extensions;
+        byte_reader signature;
+        p32 high;
+
+        if (byte_reader_u8(reader) != 0)
+                return false;
+        sct->id = byte_reader_take(reader, 32);
+        high = byte_reader_u32(reader);
+        sct->timestamp = (p64)high << 32 | byte_reader_u32(reader);
+        extensions = byte_reader_vector16(reader);
+        sct->extensions = byte_reader_here(address_of extensions);
+        sct->extensions_length = byte_reader_left(address_of extensions);
+        //      SHA-256 (4) and ECDSA (3), the one pair every log uses.
+        if (byte_reader_u8(reader) != 4 || byte_reader_u8(reader) != 3)
+                return false;
+        signature = byte_reader_vector16(reader);
+        sct->signature = byte_reader_here(address_of signature);
+        sct->signature_length = byte_reader_left(address_of signature);
+        return byte_reader_ok(reader) && byte_reader_end(reader) && sct->id &&
+               byte_reader_ok(address_of extensions) && byte_reader_ok(address_of signature) &&
+               sct->signature_length;
+}
+
+/*
+        Whether one SCT verifies under its log's key over the precertificate:
+        sct_version 0, signature_type certificate_timestamp (0), the
+        timestamp, entry_type precert_entry (1), the issuer key hash, the TBS
+        with a 24-bit length, the SCT's extensions with a 16-bit one.
+*/
+static COLD bool tls_ct_sct_verifies(const tls_ct_sct address_to sct,
+                                     const tls_ct_log address_to log,
+                                     const p8 address_to issuer_key_hash,
+                                     const p8 address_to precert, positive precert_length,
+                                     byte_store address_to signed_bytes)
+{
+        static const p8 ecdsa_sha256[8] = {0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02};
+        p8 head[12];
+        p8 lengths[3];
+        tls_cert signer;
+
+        signed_bytes->used = 0;
+        head[0] = 0;
+        head[1] = 0;
+        network_store_64(head + 2, sct->timestamp);
+        head[10] = 0;
+        head[11] = 1;
+        lengths[0] = (p8)(precert_length >> 16);
+        lengths[1] = (p8)(precert_length >> 8);
+        lengths[2] = (p8)precert_length;
+        if (precert_length >= 1u << 24 ||
+            !byte_store_reserve(signed_bytes,
+                                sizeof head + 32 + 3 + precert_length + 2 +
+                                    sct->extensions_length,
+                                4096) ||
+            !byte_store_append_exact(signed_bytes, head, sizeof head) ||
+            !byte_store_append_exact(signed_bytes, issuer_key_hash, 32) ||
+            !byte_store_append_exact(signed_bytes, lengths, 3) ||
+            !byte_store_append_exact(signed_bytes, precert, precert_length))
+                return false;
+        lengths[0] = (p8)(sct->extensions_length >> 8);
+        lengths[1] = (p8)sct->extensions_length;
+        if (!byte_store_append_exact(signed_bytes, lengths, 2) ||
+            !byte_store_append_exact(signed_bytes, sct->extensions, sct->extensions_length))
+                return false;
+        memory_fill(address_of signer, 0, sizeof signer);
+        signer.curve = 1;
+        memory_copy(signer.qx + 16, log->x, 32);
+        memory_copy(signer.qy + 16, log->y, 32);
+        return tls_signed_by(signed_bytes->bytes, signed_bytes->used, (p8 address_to)ecdsa_sha256,
+                             sizeof ecdsa_sha256, sct->signature, sct->signature_length,
+                             address_of signer);
+}
+
+/* Whether a counted SCT's log may count it now: not retired, or retired
+   after it was made; taking the leaf's notAfter; made by now. */
+static CONST COLD bool tls_ct_log_counts(const tls_ct_log address_to log, p64 timestamp,
+                                         p64 not_after_ms, p64 now_ms)
+{
+        return timestamp <= now_ms && (!log->retired || timestamp < log->retired) &&
+               (!log->until || (not_after_ms >= log->from && not_after_ms < log->until));
+}
+
+static COLD bool tls_ct_holds(tls_cert address_to certs, const positive address_to path,
+                              positive depth, tls_cert address_to top)
+{
+        tls_cert address_to leaf = certs;
+        tls_cert address_to issuer = depth ? certs + path[1] : top;
+        byte_store precert = {0};
+        byte_store signed_bytes = {0};
+        byte_reader list;
+        byte_reader entries;
+        p8 issuer_key_hash[32];
+        p8 operators[TLS_CT_SCTS_MOST];
+        positive counted = 0;
+        positive distinct = 0;
+        bool current = false;
+        p64 now_ms;
+        p64 not_before_ms;
+        p64 not_after_ms;
+        positive length;
+        positive seen = 0;
+        bool held;
+
+#ifdef TLS_BENCH_ANCHOR
+#ifndef TLS_BENCH_CT
+        //      The harness's own root, with no logs of its own to ask.
+        if (top->curve == 2 && !memory_compare(top->qx, tls_bench_anchor_x, 48) &&
+            !memory_compare(top->qy, tls_bench_anchor_y, 48))
+                return true;
+#endif
+#endif
+        if (!leaf->scts || !issuer->spki || !issuer->spki_length)
+                return false;
+        //      tls_date_seconds counts from day zero of its calendar, not
+        //      from the epoch an SCT's timestamp counts from.
+        now_ms = (p64)time(null) * 1000;
+        not_before_ms = (tls_date_seconds(leaf->not_before) -
+                         tls_date_seconds(19700101000000ull)) * 1000;
+        not_after_ms = (tls_date_seconds(leaf->not_after) -
+                        tls_date_seconds(19700101000000ull)) * 1000;
+        crypto_sha256_of(issuer->spki, issuer->spki_length, issuer_key_hash);
+        if (!byte_store_reserve(address_of precert, leaf->tbs_length, 4096))
+                return false;
+        length = tls_ct_precert(leaf, precert.bytes, leaf->tbs_length);
+        list = byte_reader_open(leaf->scts, leaf->scts_length);
+        entries = byte_reader_vector16(address_of list);
+        if (!length || !byte_reader_ok(address_of list) || !byte_reader_end(address_of list))
+        {
+                byte_store_release(address_of precert);
+                return false;
+        }
+        while (byte_reader_left(address_of entries) && seen++ < TLS_CT_SCTS_MOST)
+        {
+                byte_reader one = byte_reader_vector16(address_of entries);
+                tls_ct_sct sct;
+                const tls_ct_log address_to log;
+                bool known = false;
+
+                if (!byte_reader_ok(address_of entries) ||
+                    !tls_ct_sct_read(address_of one, address_of sct))
+                        break;
+                log = tls_ct_log_find(sct.id);
+                if (!log || !tls_ct_log_counts(log, sct.timestamp, not_after_ms, now_ms) ||
+                    !tls_ct_sct_verifies(address_of sct, log, issuer_key_hash, precert.bytes,
+                                         length, address_of signed_bytes))
+                        continue;
+                counted++;
+                current |= !log->retired;
+                for (positive at = 0; at < distinct; at++)
+                        known |= operators[at] == log->operator;
+                if (!known)
+                        operators[distinct++] = log->operator;
+        }
+        held = byte_reader_ok(address_of entries) && distinct >= 2 && current &&
+               counted >= (not_after_ms - not_before_ms <=
+                                   (p64)TLS_CT_SHORT_DAYS * 86400 * 1000
+                               ? 2u
+                               : 3u);
+        byte_store_release(address_of precert);
+        byte_store_release(address_of signed_bytes);
+        return held;
 }
 
 /* What a stapled OCSP response says of leaf, which issuer signed (RFC 6960
@@ -15688,7 +16088,7 @@ static COLD bool http_apart_task(address_any context, bipolar answer)
 
 static CONST COLD bool http_apart_status(b64 status)
 {
-        return status <= HTTP_OK && status >= HTTP_UNDECLARED && status != -6;
+        return status <= HTTP_OK && status >= HTTP_UNLOGGED && status != -6;
 }
 
 static COLD bool http_apart_believed(const http_apart_said address_to said,

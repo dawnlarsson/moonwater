@@ -830,6 +830,17 @@ static COLD b32 net_wget_failed(bipolar status, b32 code, p8 address_to where,
                                      "insecurely, use `--no-check-certificate'.\n",
                                      writer_terminal_quoted_name, host,
                                      writer_terminal_quoted_name, host);
+        //      The tight tier's: a public certificate that carries no proof
+        //      it was logged, which is what a certificate issued in secret
+        //      looks like.
+        case HTTP_UNLOGGED:
+                return string_report(log_error, WGET_SSL,
+                                     "ERROR: The certificate of '%w' was not "
+                                     "logged as Certificate Transparency asks "
+                                     "(SCTs from two log operators).\nTo connect "
+                                     "to %w insecurely, use `--no-check-certificate'.\n",
+                                     writer_terminal_quoted_name, host,
+                                     writer_terminal_quoted_name, host);
         case HTTP_PRIVATE:
                 return string_report(log_error, WGET_GENERIC,
                                      "wget: refused a redirect to %w, an address "

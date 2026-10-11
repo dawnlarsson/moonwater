@@ -16667,6 +16667,8 @@ static string_address locale_auto_reason(bipolar status)
                 return (string_address) "TLS failed -- is the clock right?";
         case HTTP_REVOKED:
                 return (string_address) "its certificate is revoked";
+        case HTTP_UNLOGGED:
+                return (string_address) "its certificate was not logged (CT)";
         case HTTP_CLOCK:
                 return (string_address) "the clock is unset";
         case HTTP_STATUS:

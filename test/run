@@ -4081,6 +4081,16 @@ lane_net()
         2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
         *) net_outcome=1 ;;
         esac
+        #       Certificate Transparency at the tight tier: the policy against
+        #       a model over SCTs the harness's own logs sign, and end to end
+        #       through wget; and the log table against its header's list.
+        python3 test/differential.py --harness tls_ct
+        case $? in
+        0) ;;
+        2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
+        *) net_outcome=1 ;;
+        esac
+        python3 test/differential.py --harness ct_logs || net_outcome=1
         #       NTS against chrony's server and against servers that are
         #       wrong, in a namespace; NOT RUN without a chronyd built with NTS
         #       (MOONWATER_CHRONYD), which does not downgrade net.

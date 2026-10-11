@@ -717,7 +717,7 @@ have only `sec_exec_hardened` and `sec_build_hardened`.
 | `sec_lockdown` (kernel) | integrity lockdown from boot, signed modules only, Landlock | confidentiality lockdown |
 | `sec_files` | `STRICT_FILES` 2 and find without `-delete` or `-fprint*` | 3 |
 | `sec_text` | `STRICT_TEXT` 2 | 3 |
-| `sec_net` | `STRICT_NET` 2 and no `wget` or `fetch`; wifi with protected management frames always, and WPA2 only for a network saved with `wpa2`; time from NTS only and names over DNS over TLS only, unless `/root/ntp.nts` or `/root/dns.tls` says otherwise | 3 |
+| `sec_net` | `STRICT_NET` 2 and no `wget` or `fetch`; wifi with protected management frames always, and WPA2 only for a network saved with `wpa2`; time from NTS only and names over DNS over TLS only, unless `/root/ntp.nts` or `/root/dns.tls` says otherwise; a public certificate has to be logged (Certificate Transparency) | 3 |
 | `sec_host` | `STRICT_HOST` 2: a disk is asked about, `kptr_restrict` 2, io_uring refused, Yama 2, widest mmap randomisation | 3: no module loads, no ptrace attach (Yama 3), `hidepid` on /proc, the data partition `nosuid`, `/dev/shm` `noexec` |
 | `sec_bowl` | `STRICT_BOWL` 2 | 3 |
 | `sec_exec` | Floodlight sealed with every command-making switch off | (none) |
