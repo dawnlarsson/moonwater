@@ -858,11 +858,88 @@ static void window_flush(struct window *window)
         Lines already written keep their text; nothing narrower is ever
         asked for, so nothing is ever cut.
 */
+#define WINDOW_PRIVATE 0xffffffffu
+#define WINDOW_STRIDE_STEP 32u
+
+/*
+        The same ring, in the program's own memory.
+
+        A terminal that draws its own pixels needs no compositor to hold its
+        cells: the emulator addresses them through this struct whoever owns
+        the page, so the page is an anonymous mapping, cut for lines
+        max_columns wide and history of them, and only the pages written are
+        ever resident. Its handle names no file, which is what makes
+        window_widen move the lines here and not in a call.
+*/
+static struct window *window_grid_open(unsigned int columns, unsigned int rows,
+                                       unsigned int max_columns, unsigned int history)
+{
+        unsigned long lines = WINDOW_PIXELS + (unsigned long)history * max_columns *
+                                                  sizeof(struct window_cell);
+        unsigned long bytes = (lines + (unsigned long)history * sizeof(unsigned int) + 4095) &
+                              ~4095ul;
+        unsigned int cut = (columns + WINDOW_STRIDE_STEP - 1) / WINDOW_STRIDE_STEP * WINDOW_STRIDE_STEP;
+        // PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS
+        long mapped = window_call(WINDOW_SYS_MMAP, 0, (long)bytes, 3, 0x22, -1, 0);
+        struct window *window;
+
+        if (mapped < 0 && mapped > -4096)
+                return 0;
+
+        window = (struct window *)mapped;
+        window->handle = WINDOW_PRIVATE;
+        window->stride = cut < max_columns ? cut : max_columns;
+        window->history = history;
+        window->head = history + rows;
+        window->lines = (unsigned int)lines;
+        window->columns = window->grid_columns = columns;
+        window->rows = window->grid_rows = rows;
+        window->max_columns = max_columns;
+        window->max_rows = history;
+        window->mapping = (unsigned int)bytes;
+        return window;
+}
+
 static void window_widen(struct window *window, unsigned int columns)
 {
-        if (columns > window->stride)
+        unsigned int was = window->stride, stride;
+
+        if (columns <= was)
+                return;
+
+        if (window->handle != WINDOW_PRIVATE)
+        {
                 window_call(WINDOW_SYS_IOCTL, window->handle, WINDOW_IOCTL_STRIDE,
                             columns, 0, 0, 0);
+                return;
+        }
+
+        /*
+                A step at a time, so a drag that widens the window recuts the
+                lines a few times and not once a column, and never past what
+                the ring was cut for. From the last line down: a line only
+                ever moves further out, past the end of every line below it,
+                so nothing lands on a line that has yet to move.
+        */
+        stride = (columns + WINDOW_STRIDE_STEP - 1) / WINDOW_STRIDE_STEP * WINDOW_STRIDE_STEP;
+        stride = stride < window->max_columns ? stride : window->max_columns;
+
+        if (stride <= was)
+                return;
+
+        for (unsigned int slot = window->history; slot--;)
+        {
+                unsigned int *length = window_lengths(window) + slot;
+                unsigned int kept = *length < was ? *length : was;
+
+                if (kept)
+                        memory_copy(window_cells(window) + (unsigned long)slot * stride,
+                                    window_cells(window) + (unsigned long)slot * was,
+                                    (unsigned long)kept * sizeof(struct window_cell));
+                *length = kept;
+        }
+
+        window->stride = stride;
 }
 
 static void window_close(struct window *window)

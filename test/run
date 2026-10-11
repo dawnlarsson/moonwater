@@ -7692,6 +7692,8 @@ lane_awk()
 #           wrote RESULT  apply a write result (count, again, intr, fatal)
 #           mode          the modes that are set
 #           resize CxR    the window is now this, through the resize path
+#           ring N        the ring is the program's own, lines N cells apart
+#           stride        how far apart the lines are now
 #           pty           what the seam in screen.c makes of a real one
 #
 lane_term()
@@ -8287,6 +8289,24 @@ b32 main()
                         for (positive at = 0; at < sizeof(tab_stop); at++)
                                 wrong += tab_stop[at] != (at % 8 == 0);
                         say_number(wrong);
+                        say_byte('\n');
+                }
+                /*
+                        ring N: the ring is the program's own, lines N cells
+                        apart, as a terminal that keeps its grid in its own
+                        memory lays it out; stride says how far apart they are
+                        now, after a resize that needed more columns.
+                */
+                else if (string_compare(verb, (string_address) "ring") == 0)
+                {
+                        window->handle = WINDOW_PRIVATE;
+                        window->stride = number(argument);
+                        COLUMNS = COLUMNS < window->stride ? COLUMNS : window->stride;
+                        i++;
+                }
+                else if (string_compare(verb, (string_address) "stride") == 0)
+                {
+                        say_number(window->stride);
                         say_byte('\n');
                 }
                 else if (string_compare(verb, (string_address) "resize") == 0)
@@ -9347,6 +9367,18 @@ same 'grown takes back history' '[a]|[b]|[c]|[d]|[e]|4,1' \
                                                  20 3 in 'a\r\nb\r\nc\r\nd\r\ne' resize '20x5' dump cursor
 same 'shrunk and grown back' '[a]|[b]|[c]|[]|[]|2,1' \
                                                  20 5 in 'a\r\nb\r\nc' resize '20x2' resize '20x5' dump cursor
+#       A program that keeps its ring in its own memory lays its lines only as
+#       far apart as the window is wide, and moves them out when the window
+#       grows, a step of 32 columns at a time and never past what the ring was
+#       cut for. What was written is where it was.
+same 'own ring widens in steps' '[0123456789abcdefghij]|[x]|[]|64' \
+                                                 20 3 ring 20 in '0123456789abcdefghij\r\nx' resize '40x3' dump stride
+same 'own ring widens twice' '[0123456789abcdefghij]|[x]|[]|128' \
+                                                 20 3 ring 20 in '0123456789abcdefghij\r\nx' resize '40x3' resize '100x3' dump stride
+same 'own ring stops at its cut' '256' \
+                                                 20 3 ring 20 in 'a' resize '300x3' stride
+same 'own ring keeps the lines above' '[old]|[one]|[two]|[]|128' \
+                                                 20 3 ring 20 in 'old\r\none\r\ntwo' resize '40x4' resize '100x4' dump stride
 #       A window narrower or shorter than one cell is not a grid, and every
 #       wrap and scroll divides by these: no rows at all had put wrapping
 #       forever looking for a row to land on.
