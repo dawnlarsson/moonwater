@@ -17408,8 +17408,13 @@ static bipolar locale_ntp_plain(bool by_hand)
                 {
                         heard_from[0] = array_count(locale_ntp_fallback);
                         heard_count = 1;
-                        if (unset || sntp_within(heard[0].offset_ns,
-                                                SNTP_OFFSET_SYNCED_NS))
+                        //      A person who named the server and asked
+                        //      takes its word, as ntpdate does; the
+                        //      machine's own walk wants a second server
+                        //      for a step past two seconds.
+                        if (unset || by_hand ||
+                            sntp_within(heard[0].offset_ns,
+                                        SNTP_OFFSET_SYNCED_NS))
                                 return locale_ntp_take((string_address)server,
                                                        heard, false);
                 }
