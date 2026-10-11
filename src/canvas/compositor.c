@@ -146,11 +146,24 @@ static void compositor_bits(const struct compositor_target *t, int x, int y, int
         if (x >= t->x2 || x + 8 * scale <= t->x1 || y >= t->y2 || y + (int)rows * scale <= t->y1)
                 return;
 
+        // One fill per run of lit columns in a row, not one per lit pixel.
         for (unsigned int row = 0; row < rows; row++)
-                for (unsigned int column = 0; column < 8; column++)
-                        if (bits[row] & (0x80u >> column))
-                                compositor_fill(t, x + (int)column * scale,
-                                                y + (int)row * scale, scale, scale, colour);
+                for (unsigned int column = 0; column < 8;)
+                {
+                        unsigned int run = 0;
+
+                        if (!(bits[row] & (0x80u >> column)))
+                        {
+                                column++;
+                                continue;
+                        }
+
+                        while (column + run < 8 && (bits[row] & (0x80u >> (column + run))))
+                                run++;
+                        compositor_fill(t, x + (int)column * scale, y + (int)row * scale,
+                                        (int)run * scale, scale, colour);
+                        column += run;
+                }
 }
 
 static void compositor_draw(const struct compositor_target *t,
