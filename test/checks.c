@@ -53498,6 +53498,7 @@ b32 main(void)
 
 #ifdef CHECK_socket
 #include "../src/lib.util.c"
+#include "../src/canvas/window.c"
 /*
         Byte order, and the socket calls that need it.
 
@@ -53823,12 +53824,143 @@ static fn sockets(void)
 }
 #endif
 
+/*
+        The client of Canvas's surface protocol (src/canvas/window.c), on
+        the three machines' real syscalls: the compositor's end of the
+        connection is the other half of a socketpair, so what is checked is
+        what surface_wait does to a SOCK_SEQPACKET with wakes on it. recvmmsg
+        is syscall 299 on x86-64 and 243 on arm64 and riscv64, and a wrong
+        number would be a different call, not a failure to compile.
+*/
+#ifdef LINUX
+static fn surface_interrupt(b32 number) { (void)number; }
+
+static fn surfaces(void)
+{
+        static struct surface page;
+        static const struct { unsigned int width, height; } sizes[] = {
+                {1, 1}, {64, 32}, {96, 48}, {320, 200}, {1023, 1}, {1024, 768}, {1920, 1080},
+                {3840, 2160}, {4096, 4096}, {16384, 16384}, {1, 16384}, {16384, 1}};
+        struct surface_message wake = {SURFACE_WAKE, 0, {0}}, taken;
+        b32 pair[2] = {-1, -1}, gate[2] = {-1, -1};
+        b32 round = 0;
+        long got;
+
+        /*
+                Where a slot is, found from the size and not from the page:
+                the program can write buffer_offset after the compositor has
+                answered, and 0x7ffff000 there once sent the blit out of the
+                compositor's mapping. surface_slot is what the compositor
+                finds a slot with; it has to say what the create laid out.
+        */
+        for (positive at = 0; at < sizeof(sizes) / sizeof(sizes[0]); at++)
+        {
+                positive width = sizes[at].width, height = sizes[at].height;
+                positive first = SURFACE_PAGE_ROUND(width * height * 4);
+
+                page.buffer_offset[0] = (unsigned int)WINDOW_PIXELS;
+                page.buffer_offset[1] = (unsigned int)(WINDOW_PIXELS + first);
+                check("surface_slot 0 is the first page after the header",
+                      (char *)surface_slot(&page, 0, width, height) == (char *)&page + WINDOW_PIXELS);
+                check("surface_slot 1 is a page-rounded slot further",
+                      (char *)surface_slot(&page, 1, width, height) == (char *)&page + WINDOW_PIXELS + first);
+                check("surface_slot agrees with the offsets the create wrote",
+                      surface_slot(&page, 0, width, height) == surface_buffer(&page, 0) &&
+                      surface_slot(&page, 1, width, height) == surface_buffer(&page, 1));
+                check("a slot number is taken modulo two",
+                      surface_slot(&page, 2, width, height) == surface_slot(&page, 0, width, height) &&
+                      surface_slot(&page, 3, width, height) == surface_slot(&page, 1, width, height));
+
+                page.buffer_offset[0] = 0x7ffff000u;
+                page.buffer_offset[1] = 0xffffffffu;
+                check("surface_slot does not read the page's offsets",
+                      (char *)surface_slot(&page, 0, width, height) == (char *)&page + WINDOW_PIXELS &&
+                      (char *)surface_slot(&page, 1, width, height) == (char *)&page + WINDOW_PIXELS + first);
+        }
+
+        check("the header sits below the first buffer", SURFACE_HEADER <= WINDOW_PIXELS);
+
+        check("socketpair", system_call_4(syscall(socketpair), SURFACE_AF_UNIX,
+                                          SURFACE_SOCK_SEQPACKET | SURFACE_SOCK_CLOEXEC, 0,
+                                          (positive)pair) == 0);
+        if (pair[0] < 0)
+                return;
+        page.window.handle = (unsigned int)pair[0];
+
+        //      A wake ends the sleep and is taken: nothing is left on the socket.
+        check("surface_send of a wake", surface_send(pair[1], &wake, -1) == (long)sizeof(wake));
+        check("surface_wait ends on a wake", surface_wait(&page, -1, -1) == 1);
+        got = surface_receive(pair[0], &taken, SURFACE_MSG_DONTWAIT);
+        check("and the wake is gone", got == -11);
+
+        //      Five wakes: every one is taken, however many a call takes at once.
+        for (round = 0; round < 5; round++)
+                surface_send(pair[1], &wake, -1);
+        for (round = 0; round < 8 && surface_wait(&page, -1, 0) > 0; round++)
+                ;
+        got = surface_receive(pair[0], &taken, SURFACE_MSG_DONTWAIT);
+        check("five wakes are all taken", got == -11 && round < 8);
+
+        for (round = 0; round < 5; round++)
+                surface_send(pair[1], &wake, -1);
+        for (round = 0; round < 8; round++)
+                if (surface_wait(&page, -1, -1) < 0)
+                        break;
+                else if (surface_receive(pair[0], &taken, SURFACE_MSG_DONTWAIT) == -11)
+                        break;
+        check("sleeping waits drain them too", round < 8 &&
+              surface_receive(pair[0], &taken, SURFACE_MSG_DONTWAIT) == -11);
+
+        //      The time being up is not the compositor going.
+        check("a wait with nothing to hear times out at zero", surface_wait(&page, -1, 20000000) == 0);
+
+        //      Another descriptor ending the sleep takes nothing off the connection.
+        check("a pipe for the other descriptor", system_pipe(gate, 0) == 0);
+        if (gate[0] >= 0)
+        {
+                check("the other descriptor alone ends the wait",
+                      system_call_3(syscall(write), (positive)gate[1], (positive) "x", 1) == 1 &&
+                      surface_wait(&page, gate[0], 1000000000) == 1);
+                surface_send(pair[1], &wake, -1);
+                check("the wake it left alone is still there",
+                      surface_receive(pair[0], &taken, SURFACE_MSG_DONTWAIT) == (long)sizeof(taken) &&
+                      taken.kind == SURFACE_WAKE);
+                surface_send(pair[1], &wake, -1);
+                check("both ready is two and the wake is taken",
+                      surface_wait(&page, gate[0], 1000000000) == 2 &&
+                      surface_receive(pair[0], &taken, SURFACE_MSG_DONTWAIT) == -11);
+        }
+
+        //      A signal ends a sleep with nothing: the compositor has not gone.
+        {
+                signal_action wanted = {.handler = surface_interrupt}, previous;
+                p64 timer[4] = {0, 20000, 0, 20000};
+
+                check("a handler without SA_RESTART", sigaction(SIGALRM, &wanted, &previous) == 0);
+                system_call_3(syscall(setitimer), 0, (positive)timer, 0);
+                check("a signal in the sleep on the connection is zero", surface_wait(&page, -1, -1) == 0);
+                check("a signal in the sleep with a time is zero", surface_wait(&page, -1, 2000000000) == 0);
+                memory_fill(timer, 0, sizeof(timer));
+                system_call_3(syscall(setitimer), 0, (positive)timer, 0);
+                sigaction(SIGALRM, &previous, 0);
+        }
+
+        //      The far end closing is the one thing that is -1, whichever way the sleep goes.
+        socket_close(pair[1]);
+        check("a closed connection ends the sleep with -1", surface_wait(&page, -1, -1) == -1);
+        check("and ends a timed one", surface_wait(&page, -1, 1000000000) == -1);
+        check("and one with another descriptor", surface_wait(&page, gate[0], 1000000000) == -1);
+        socket_close(pair[0]);
+}
+#endif
+
 b32 main(void)
 {
         byte_order();
         addresses();
 #ifdef LINUX
         sockets();
+        surfaces();
 #endif
         return test_report(null);
 }

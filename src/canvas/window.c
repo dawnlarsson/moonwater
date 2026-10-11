@@ -604,10 +604,22 @@ SURFACE_AT(theme_palette, 2852);
 _Static_assert(sizeof(struct surface) == SURFACE_HEADER, "surface ABI");
 _Static_assert(SURFACE_HEADER <= WINDOW_PIXELS, "the header ends before the first buffer");
 
-// Where a slot's pixels start, and how much a page of two slots holds.
+/* Where a slot's pixels start, and how much a page of two slots holds.
+
+   surface_buffer is the program's: it reads buffer_offset, which the
+   compositor wrote in its answer to the create. The page is the program's
+   to write as well, so the compositor never reads buffer_offset, buffer_size,
+   buffer_stride or mapping back -- an offset the program changed after the
+   create sends the blit anywhere in the compositor's address space, and
+   0x7ffff000 at byte 1388 is a segfault. The compositor finds a slot from
+   the size it checked itself: surface_slot. */
 #define SURFACE_PAGE_ROUND(bytes) (((bytes) + 4095u) & ~4095u)
 #define surface_buffer(surface, slot)                                          \
         window_at((surface), unsigned int, (surface)->buffer_offset[(slot) & 1])
+#define surface_slot(surface, slot, width, height)                             \
+        window_at((surface), unsigned int,                                     \
+                  WINDOW_PIXELS + ((slot) & 1u) *                              \
+                                      SURFACE_PAGE_ROUND((unsigned long)(width) * (height) * 4))
 
 #ifndef KERNEL_MODE
 
@@ -625,6 +637,7 @@ _Static_assert(SURFACE_HEADER <= WINDOW_PIXELS, "the header ends before the firs
 #define WINDOW_SYS_FCNTL 72
 #define WINDOW_SYS_FTRUNCATE 77
 #define WINDOW_SYS_MEMFD_CREATE 319
+#define WINDOW_SYS_RECVMMSG 299
 #else
 // arm64 and riscv share the asm-generic numbering.
 #define WINDOW_SYS_OPENAT 56
@@ -640,6 +653,7 @@ _Static_assert(SURFACE_HEADER <= WINDOW_PIXELS, "the header ends before the firs
 #define WINDOW_SYS_FCNTL 25
 #define WINDOW_SYS_FTRUNCATE 46
 #define WINDOW_SYS_MEMFD_CREATE 279
+#define WINDOW_SYS_RECVMMSG 243
 #endif
 
 /*
@@ -1029,23 +1043,85 @@ static int surface_event(struct surface *surface, struct surface_event *event)
         return 1;
 }
 
+// recvmmsg's header: a msghdr and the length it received.
+struct surface_mmsghdr
+{
+        struct surface_msghdr header;
+        unsigned int length;
+};
+
+#define SURFACE_MSG_WAITFORONE 0x10000
+#define SURFACE_WAKES 2
+
+/*
+        The wakes waiting on the connection, taken in one call and thrown
+        away: what they said is in the page's event ring, and they exist to
+        end a sleep. Answers how many it took, or -1 when the compositor has
+        gone (a zero-length message is the far end closed, and it is repeated,
+        so it is seen in the first batch). flags is MSG_DONTWAIT for a look,
+        or MSG_WAITFORONE for a sleep that ends with the first.
+*/
+static long surface_wakes(long handle, int flags)
+{
+        struct surface_message wake;
+        struct surface_iovec part = {&wake, sizeof(wake)};
+        struct surface_mmsghdr headers[SURFACE_WAKES];
+        long got, taken = 0;
+
+        do
+        {
+                for (int at = 0; at < SURFACE_WAKES; at++)
+                        headers[at] = (struct surface_mmsghdr){{0, 0, &part, 1, 0, 0, 0}, 0};
+
+                got = window_call(WINDOW_SYS_RECVMMSG, handle, (long)headers, SURFACE_WAKES,
+                                  flags, 0, 0);
+
+                for (int at = 0; at < got; at++)
+                        if (!headers[at].length)
+                                return -1;
+
+                taken += got > 0 ? got : 0;
+                flags = SURFACE_MSG_DONTWAIT;
+        } while (got == SURFACE_WAKES);
+
+        // EAGAIN is nothing waiting and EINTR a signal; neither is the far end gone.
+        return got < 0 && got != -11 && got != -4 ? -1 : taken;
+}
+
 /*
         Sleeps until the compositor has written an event, the other descriptor
         has bytes, or the time is up, and empties the wakes that said so.
-        Answers what ppoll does, or -1 when the compositor has gone.
+        Answers what ppoll does -- how many are ready, zero on the time being
+        up or a signal -- or -1 when the compositor has gone.
+
+        With nothing else to wait for it is one call: recvmmsg sleeps for the
+        first wake and takes the rest with it. With a second descriptor or a
+        time it is a ppoll, and the wakes are only looked for when the
+        connection is what ended it.
 */
 static long surface_wait(struct surface *surface, long other, long nanoseconds)
 {
-        struct surface_message message;
-        long ready = window_wait(&surface->window, other, nanoseconds);
-        long got;
+        struct window_poll wanted[2] = {{(int)surface->window.handle, 1, 0}, {(int)other, 1, 0}};
+        long timeout[2] = {nanoseconds / 1000000000, nanoseconds % 1000000000};
+        long ready;
 
-        while ((got = surface_receive(surface->window.handle, &message,
-                                      SURFACE_MSG_DONTWAIT)) > 0)
-                ;
+        if (other < 0 && nanoseconds < 0)
+        {
+                ready = surface_wakes(surface->window.handle, SURFACE_MSG_WAITFORONE);
 
-        // Zero bytes is the far end closed; EAGAIN (-11) is nothing waiting.
-        return got == 0 || (got < 0 && got != -11) ? -1 : ready;
+                return ready > 0 ? 1 : ready;
+        }
+
+        ready = window_call(WINDOW_SYS_PPOLL, (long)wanted, other >= 0 ? 2 : 1,
+                            nanoseconds < 0 ? 0 : (long)timeout, 0, 0, 0);
+
+        if (ready == -4) // EINTR
+                return 0;
+
+        if (ready > 0 && wanted[0].returned && surface_wakes(surface->window.handle, SURFACE_MSG_DONTWAIT) < 0)
+                return -1;
+
+        return ready;
 }
 
 static void surface_close(struct surface *surface)
