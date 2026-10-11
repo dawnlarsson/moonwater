@@ -48287,7 +48287,104 @@ def harness_tls_chains(argv):
          {"distrust": True, "serve_root": True}),
         ("distrust-after: root served first, leaf issued after", 2, good_leaf,
          {"distrust": True, "root_first": True}),
+        #   Revocation. "dp" gives a certificate a CRL distribution point on
+        #   the files server, "crls" makes the CRLs with `openssl ca -gencrl`
+        #   (issuer, serials revoked, an issuingDistributionPoint, dates in
+        #   days, another signer, PEM on the wire), and openssl verify is
+        #   asked with -crl_check (the leaf's) or -crl_check_all and the CRLs
+        #   it could have fetched. "tight" serves the row again to a shell
+        #   built at the tight net tier, which refuses where the default
+        #   passes over a source that gave no usable answer (SOFT_FAIL).
+        ("revocation: the leaf on its issuer's CRL", 2, good_leaf,
+         {"dp": {"leaf": "leaf.crl"}, "crl_check": "leaf",
+          "crls": [{"name": "leaf.crl", "issuer": "second", "revoke": ["leaf"]}]}),
+        ("revocation: the leaf's CRL lists another certificate", 2, good_leaf,
+         {"dp": {"leaf": "leaf.crl"}, "crl_check": "leaf",
+          "keys": ("P-256", "P-384", "RSA-2048"), "spare": True,
+          "crls": [{"name": "leaf.crl", "issuer": "second", "revoke": ["spare"]}]}),
+        ("revocation: the leaf's CRL lists nothing", 2, good_leaf,
+         {"dp": {"leaf": "leaf.crl"}, "crl_check": "leaf",
+          "crls": [{"name": "leaf.crl", "issuer": "second"}]}),
+        ("revocation: a partitioned CRL that names the leaf's point", 2, good_leaf,
+         {"dp": {"leaf": "leaf-7.crl"}, "crl_check": "leaf",
+          "crls": [{"name": "leaf-7.crl", "issuer": "second", "revoke": ["spare"],
+                    "idp": "fullname=URI:http://127.0.0.1:%d/leaf-7.crl\nonlyuser=TRUE\n"}],
+          "spare": True}),
+        ("revocation: the leaf on its partitioned CRL", 2, good_leaf,
+         {"dp": {"leaf": "leaf-7.crl"}, "crl_check": "leaf",
+          "crls": [{"name": "leaf-7.crl", "issuer": "second", "revoke": ["leaf"],
+                    "idp": "fullname=URI:http://127.0.0.1:%d/leaf-7.crl\nonlyuser=TRUE\n"}]}),
+        ("revocation: the leaf's point serves another partition", 2, good_leaf,
+         {"dp": {"leaf": "leaf-7.crl"}, "crl_check": "leaf",
+          "crls": [{"name": "leaf-7.crl", "issuer": "second", "revoke": ["leaf"],
+                    "idp": "fullname=URI:http://127.0.0.1:%d/leaf-8.crl\n"}]}),
+        ("revocation: a partitioned CRL for CA certificates only", 2, good_leaf,
+         {"dp": {"leaf": "leaf-7.crl"}, "crl_check": "leaf",
+          "crls": [{"name": "leaf-7.crl", "issuer": "second",
+                    "idp": "fullname=URI:http://127.0.0.1:%d/leaf-7.crl\nonlyCA=TRUE\n"}]}),
+        ("revocation: the leaf's CRL is past its nextUpdate", 2, good_leaf,
+         {"dp": {"leaf": "leaf.crl"}, "crl_check": "leaf",
+          "crls": [{"name": "leaf.crl", "issuer": "second", "dates": (-10, -1)}]}),
+        ("revocation: the leaf on a CRL past its nextUpdate", 2, good_leaf,
+         {"dp": {"leaf": "leaf.crl"}, "crl_check": "leaf",
+          "crls": [{"name": "leaf.crl", "issuer": "second", "revoke": ["leaf"],
+                    "dates": (-10, -1)}]}),
+        ("revocation: the leaf's CRL is signed by another key of its issuer's name", 2,
+         good_leaf,
+         {"dp": {"leaf": "leaf.crl"}, "crl_check": "leaf",
+          "crlsigner": True,
+          "crls": [{"name": "leaf.crl", "issuer": "second", "signer": "crlsigner",
+                    "revoke": ["leaf"]}]}),
+        ("revocation: the leaf's CRL is not there", 2, good_leaf,
+         {"dp": {"leaf": "absent.crl"}, "crl_check": "leaf"}),
+        ("revocation: the leaf's CRL is served as PEM", 2, good_leaf,
+         {"dp": {"leaf": "leaf.crl"}, "crl_check": "leaf",
+          "crls": [{"name": "leaf.crl", "issuer": "second", "pem": True}]}),
+        ("revocation: the leaf's CRL carries an unknown critical extension", 2, good_leaf,
+         {"dp": {"leaf": "leaf.crl"}, "crl_check": "leaf",
+          "crls": [{"name": "leaf.crl", "issuer": "second",
+                    "extra": "1.2.3.4=critical,DER:05:00\n"}]}),
+        ("revocation: the leaf's CRL is a delta CRL", 2, good_leaf,
+         {"dp": {"leaf": "leaf.crl"}, "crl_check": "leaf",
+          "crls": [{"name": "leaf.crl", "issuer": "second",
+                    "extra": "2.5.29.27=critical,DER:02:02:03:e8\n"}]}),
+        ("revocation: the leaf on a CRL its RSA issuer signed", 2, good_leaf,
+         {"dp": {"leaf": "leaf.crl"}, "crl_check": "leaf",
+          "second_key": "RSA-2048",
+          "crls": [{"name": "leaf.crl", "issuer": "second", "revoke": ["leaf"]}]}),
+        ("revocation: every certificate's CRL lists nothing", 2, good_leaf,
+         {"dp": {"leaf": "leaf.crl", "second": "second.crl", "first": "first.crl"},
+          "crl_check": "all",
+          "crls": [{"name": "leaf.crl", "issuer": "second"},
+                   {"name": "second.crl", "issuer": "first"},
+                   {"name": "first.crl", "issuer": "root"}]}),
+        ("revocation: the intermediate on its issuer's CRL", 2, good_leaf,
+         {"dp": {"leaf": "leaf.crl", "second": "second.crl", "first": "first.crl"},
+          "crl_check": "all",
+          "crls": [{"name": "leaf.crl", "issuer": "second"},
+                   {"name": "second.crl", "issuer": "first", "revoke": ["second"]},
+                   {"name": "first.crl", "issuer": "root"}]}),
+        ("revocation: the first intermediate on the root's CRL", 2, good_leaf,
+         {"dp": {"leaf": "leaf.crl", "second": "second.crl", "first": "first.crl"},
+          "crl_check": "all",
+          "crls": [{"name": "leaf.crl", "issuer": "second"},
+                   {"name": "second.crl", "issuer": "first"},
+                   {"name": "first.crl", "issuer": "root", "revoke": ["first"]}]}),
+        ("revocation: the leaf names its CRL over https", 2, good_leaf,
+         {"dp_url": "https://127.0.0.1:%d/leaf.crl"}),
+        ("revocation: a must-staple leaf whose server staples nothing", 2,
+         good_leaf + "tlsfeature=status_request\n", {}),
+        ("revocation: a leaf whose TLS Feature asks for other extensions", 2,
+         good_leaf + "tlsfeature=status_request_v2\n", {}),
     )
+    #   A revocation row is about the issuer's answer, not the leaf's key, so
+    #   it runs on a P-256 leaf unless it names its own, and again at the
+    #   tight tier; so does the plainest good chain, which names no source.
+    mutations = tuple(
+        (name, depth, leaf_ext, dict({"keys": ("P-256",), "tight": True}, **change))
+        if name.startswith("revocation:") else
+        (name, depth, leaf_ext, dict(change, tight=True) if name == "good" else change)
+        for name, depth, leaf_ext, change in mutations)
     keys = (("P-256", ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1"]),
             ("P-384", ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:secp384r1"]),
             ("RSA-2048", ["-newkey", "rsa:2048"]),
@@ -48317,6 +48414,43 @@ def harness_tls_chains(argv):
         "intermediate sixty-five extensions": "explicit per-certificate extension work ceiling",
         "first intermediate duplicate unknown extension": "RFC 5280 one-instance rule; OpenSSL accepts unknown duplicates",
         "first intermediate sixty-five extensions": "explicit per-certificate extension work ceiling",
+        "revocation: a must-staple leaf whose server staples nothing":
+            "RFC 7633: a leaf that asks for a staple is refused without a good one; "
+            "openssl verify has no handshake to ask",
+    }
+    #       Revocation sources that gave no usable answer -- unreachable, out
+    #       of scope, stale, unsigned, unreadable -- which the default tier
+    #       passes over and openssl -crl_check refuses; the tight tier has to
+    #       refuse them too, and say it could not check.
+    SOFT_FAIL = {
+        "revocation: the leaf's point serves another partition":
+            "its issuingDistributionPoint names another point",
+        "revocation: a partitioned CRL for CA certificates only": "out of its scope",
+        "revocation: the leaf's CRL is past its nextUpdate": "stale",
+        "revocation: the leaf's CRL is signed by another key of its issuer's name":
+            "its signature is not its issuer's",
+        "revocation: the leaf's CRL is not there": "unreachable (404)",
+        "revocation: the leaf's CRL carries an unknown critical extension": "unreadable",
+        "revocation: the leaf's CRL is a delta CRL": "not a whole CRL",
+    }
+    #       Where only the tight tier refuses what openssl accepts.
+    TIGHT_REFUSES = {
+        "revocation: the leaf's CRL is served as PEM":
+            "a CRL is DER on the wire; openssl verify is handed the file, the "
+            "client cannot read it, and the tight tier refuses an unread source",
+    }
+    #       What wget says for a refusal other than not trusted.
+    REVOKED_LINE = "ERROR: The certificate of '127.0.0.1' has been revoked."
+    UNCHECKED_LINE = ("ERROR: Whether the certificate of '127.0.0.1' is revoked "
+                      "could not be checked.")
+    SAYS = {
+        "revocation: the leaf on its issuer's CRL": REVOKED_LINE,
+        "revocation: the leaf on its partitioned CRL": REVOKED_LINE,
+        "revocation: the leaf on a CRL past its nextUpdate": REVOKED_LINE,
+        "revocation: the leaf on a CRL its RSA issuer signed": REVOKED_LINE,
+        "revocation: the intermediate on its issuer's CRL": REVOKED_LINE,
+        "revocation: the first intermediate on the root's CRL": REVOKED_LINE,
+        "revocation: a must-staple leaf whose server staples nothing": UNCHECKED_LINE,
     }
     MUST_ACCEPT = {
         "good", "under the root", "one intermediate", "root served too",
@@ -48342,7 +48476,14 @@ def harness_tls_chains(argv):
         "DNS constraints leave an IP name alone",
         "a DNS constraint is compared without case",
         "two CAs' DNS constraints, the leaf inside both",
-    }
+        "revocation: the leaf's CRL lists another certificate",
+        "revocation: the leaf's CRL lists nothing",
+        "revocation: a partitioned CRL that names the leaf's point",
+        "revocation: the leaf's CRL is served as PEM",
+        "revocation: every certificate's CRL lists nothing",
+        "revocation: the leaf names its CRL over https",
+        "revocation: a leaf whose TLS Feature asks for other extensions",
+    } | set(SOFT_FAIL)
     #       Where wget accepts what OpenSSL refuses, each with its reason and
     #       with Go's crypto/x509 on wget's side of it.
     LOOSER_THAN_OPENSSL = {
@@ -48443,22 +48584,24 @@ def harness_tls_chains(argv):
             print("tls chains: a SHA-1 legacy root served too: NOT RUN -- "
                   "openssl will not sign with SHA-1 here")
             mutations = tuple(m for m in mutations if m[3].get("extra") != "legacy")
-        built = subprocess.run(spark_shell_command(args.cc, work / "shell", bench_anchor(work)),
-                               cwd=HARNESS_ROOT, capture_output=True, text=True)
-        if built.returncode:
-            print(built.stderr[-3000:])
+        #   The shell, the same shell with a distrust-after date on the bench
+        #   root, and the same at the tight net tier, built side by side.
+        anchor = bench_anchor(work)
+        builds = [subprocess.Popen(spark_shell_command(args.cc, work / name, anchor, defines),
+                                   cwd=HARNESS_ROOT, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.PIPE, text=True)
+                  for name, defines in (
+                      ("shell", ()),
+                      ("shell_distrust", ("TLS_BENCH_DISTRUST=20240615235959",)),
+                      ("shell_tight", ("MOONWATER_STRICT_NET=2",)))]
+        failed = [build.communicate()[1] for build in builds]
+        if any(build.returncode for build in builds):
+            print("".join(failed)[-3000:])
             return 1
         (work / "wget").symlink_to(work / "shell")
-        #   The same shell with a distrust-after date on the bench root.
-        built = subprocess.run(spark_shell_command(
-            args.cc, work / "shell_distrust", bench_anchor(work),
-            ("TLS_BENCH_DISTRUST=20240615235959",)), cwd=HARNESS_ROOT,
-            capture_output=True, text=True)
-        if built.returncode:
-            print(built.stderr[-3000:])
-            return 1
-        (work / "distrust").mkdir()
-        (work / "distrust" / "wget").symlink_to(work / "shell_distrust")
+        for place in ("distrust", "tight"):
+            (work / place).mkdir()
+            (work / place / "wget").symlink_to(work / ("shell_" + place))
 
         #   caIssuers locations are served from the work directory.
         import functools
@@ -48493,9 +48636,54 @@ def harness_tls_chains(argv):
         threading.Thread(target=files.serve_forever, daemon=True).start()
         files_port = files.server_address[1]
 
+        def stamp(days):
+            moment = datetime.datetime.now(datetime.timezone.utc) + \
+                datetime.timedelta(days=days)
+            return moment.strftime("%Y%m%d%H%M%SZ")
+
+        def make_crl(spec):
+            """One CRL by `openssl ca -gencrl`, DER at its name on the files
+            server (PEM when it says so); its PEM, for openssl verify."""
+            name = spec["name"]
+            signer = spec.get("signer", spec["issuer"])
+            idp = spec.get("idp", "").replace("%d", str(files_port))
+            (work / (name + ".index")).write_text("")
+            (work / (name + ".number")).write_text("1000\n")
+            (work / (name + ".conf")).write_text(
+                "[ca]\ndefault_ca=crl\n[crl]\ndatabase=%s.index\ncrlnumber=%s.number\n"
+                "default_md=sha384\ncrl_extensions=crl_ext\n[crl_ext]\n"
+                "authorityKeyIdentifier=keyid:always\n%s%s%s" % (
+                    name, name, "issuingDistributionPoint=critical,@idp\n" if idp else "",
+                    spec.get("extra", ""), "[idp]\n" + idp if idp else ""))
+            def ca(*arguments):
+                done = subprocess.run(["openssl", *arguments], cwd=work,
+                                      capture_output=True, text=True)
+                if done.returncode:
+                    raise RuntimeError("openssl %s: %s" % (" ".join(arguments),
+                                                           done.stderr[-600:]))
+
+            for revoked in spec.get("revoke", ()):
+                ca("ca", "-config", name + ".conf", "-revoke", revoked + ".pem",
+                   "-keyfile", signer + ".key", "-cert", signer + ".pem")
+            last, following = spec.get("dates", (-1, 7))
+            ca("ca", "-config", name + ".conf", "-gencrl", "-keyfile", signer + ".key",
+               "-cert", signer + ".pem", "-out", name + ".pem",
+               "-crl_lastupdate", stamp(last), "-crl_nextupdate", stamp(following))
+            ca("crl", "-in", name + ".pem", "-outform",
+               "PEM" if spec.get("pem") else "DER", "-out", name)
+            return (work / (name + ".pem")).read_text()
+
         for mutation, depth, leaf_ext, change in mutations:
             if args.only and args.only not in mutation:
                 continue
+
+            def crl_point(name):
+                if change.get("dp_url") and name == "leaf":
+                    return "crlDistributionPoints=URI:%s\n" % (change["dp_url"] % files_port)
+                where = change.get("dp", {}).get(name)
+                return ("crlDistributionPoints=URI:http://127.0.0.1:%d/%s\n" % (
+                    files_port, where)) if where else ""
+
             for key_name, key in keys:
                 if key_name not in change.get("keys", every_key):
                     continue
@@ -48509,7 +48697,7 @@ def harness_tls_chains(argv):
                         (change.get("first_ca", "CA:TRUE,pathlen:%d" %
                                     change.get("first_pathlen", 1)),
                          change.get("first_key_usage", "keyCertSign,cRLSign")))
-                    first_extensions += change.get("first_extra", "")
+                    first_extensions += change.get("first_extra", "") + crl_point("first")
                     issue("first", p384, "/CN=tls chains first", top,
                           first_extensions,
                           change.get("first_dates", (-1, 90)),
@@ -48526,7 +48714,7 @@ def harness_tls_chains(argv):
                         (change.get("second_ca", "CA:TRUE,pathlen:0"),
                          change.get("second_key_usage", "keyCertSign,cRLSign")))
                     second_extensions += change.get("second_extra", "").replace(
-                        "%d", str(files_port))
+                        "%d", str(files_port)) + crl_point("second")
                     issue("second", dict(keys).get(change.get("second_key"), p384),
                           "/CN=tls chains second", "first",
                           second_extensions,
@@ -48539,15 +48727,29 @@ def harness_tls_chains(argv):
                     if change.get("impostor"):
                         issue("impostor", p384, "/CN=tls chains second", "first",
                               second_extensions)
+                    #   Another key under the second intermediate's own Name,
+                    #   to sign a CRL its issuer did not.
+                    if change.get("crlsigner"):
+                        issue("crlsigner", p384, "/CN=tls chains second", "first",
+                              second_extensions)
+                leaf_extensions = leaf_ext + crl_point("leaf")
                 if change.get("aia"):
-                    leaf_ext += "authorityInfoAccess=caIssuers;URI:%s\n" % (
+                    leaf_extensions += "authorityInfoAccess=caIssuers;URI:%s\n" % (
                         change["aia"] % files_port)
                     for name in chain:
                         openssl("x509", "-in", name + ".pem", "-outform", "DER",
                                 "-out", name + ".der")
-                issue("leaf", key, change.get("leaf_subject", "/CN=127.0.0.1"), issuer, leaf_ext,
-                      change.get("leaf_dates", (-1, 90)),
+                issue("leaf", key, change.get("leaf_subject", "/CN=127.0.0.1"), issuer,
+                      leaf_extensions, change.get("leaf_dates", (-1, 90)),
                       change.get("leaf_digest", "sha384"))
+                #   A certificate the leaf's issuer revokes beside it.
+                if change.get("spare"):
+                    issue("spare", key, "/CN=tls chains spare", issuer, good_leaf)
+                for name in ("leaf.crl", "leaf-7.crl", "second.crl", "first.crl",
+                             "absent.crl"):
+                    if (work / name).exists():
+                        (work / name).unlink()
+                crl_pem = "".join(make_crl(spec) for spec in change.get("crls", ()))
                 if change.get("der_rewrite_oids") or change.get("der_dup_unknown"):
                     mutate_cert_der("leaf", issuer, change,
                                     "der_rewrite_oids", "der_dup_unknown")
@@ -48572,6 +48774,12 @@ def harness_tls_chains(argv):
                           "-verify_ip", "127.0.0.1"]
                 if served or change.get("openssl_untrusted"):
                     verify += ["-untrusted", "untrusted.pem"]
+                if change.get("crl_check"):
+                    verify += ["-crl_check" if change["crl_check"] == "leaf"
+                               else "-crl_check_all"]
+                    (work / "crls.pem").write_text(crl_pem)
+                    if crl_pem:
+                        verify += ["-CRLfile", "crls.pem"]
                 openssl_ok = subprocess.run(verify + ["leaf.pem"], cwd=work,
                                             capture_output=True).returncode == 0
                 if go_verifier:
@@ -48616,7 +48824,7 @@ def harness_tls_chains(argv):
                     continue
                 context.set_ecdh_curve("prime256v1")
 
-                def fetch(context):
+                def fetch(context, binary=None):
                     listener = socket.socket()
                     listener.bind(("127.0.0.1", 0))
                     listener.listen(1)
@@ -48641,7 +48849,8 @@ def harness_tls_chains(argv):
                     server = threading.Thread(target=serve, daemon=True)
                     server.start()
                     fetched = subprocess.run(
-                        [str(work / ("distrust/wget" if change.get("distrust") else "wget")),
+                        [str(binary or work / ("distrust/wget" if change.get("distrust")
+                                               else "wget")),
                          "-q", "-O", "-", "https://127.0.0.1:%d/" %
                          listener.getsockname()[1]], capture_output=True, timeout=30,
                         env={"PATH": "/usr/bin:/bin", "HOME": str(work)})
@@ -48650,6 +48859,24 @@ def harness_tls_chains(argv):
                     return fetched
 
                 fetched = fetch(context)
+                #   The tight tier's verdict: the default's, but a refusal with
+                #   its own words where a source gave no usable answer.
+                if change.get("tight"):
+                    tight = fetch(context, work / "tight" / "wget")
+                    tight_ok = tight.returncode == 0 and tight.stdout.startswith(b"truste")
+                    default_ok = fetched.returncode == 0 and fetched.stdout.startswith(b"truste")
+                    refuses = mutation in SOFT_FAIL or mutation in TIGHT_REFUSES
+                    checks(tight_ok == (default_ok and not refuses),
+                           "%s with a %s leaf: the tight tier %s it (%s)" % (
+                               mutation, key_name, "accepts" if tight_ok else "refuses",
+                               tight.stderr.decode(errors="replace").strip()[:200]))
+                    if refuses and not tight_ok:
+                        checks(tight.returncode == 5 and tight.stderr.decode(
+                                   errors="replace") == UNCHECKED_LINE +
+                               "\nTo connect to 127.0.0.1 insecurely, use "
+                               "`--no-check-certificate'.\n",
+                               "%s with a %s leaf: the tight tier says %r with status %d" % (
+                                   mutation, key_name, tight.stderr[:200], tight.returncode))
                 # The same chain over TLS 1.2, whose Certificate is relaid
                 # for the one chain check: the verdict may not move.
                 context12 = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -48680,7 +48907,7 @@ def harness_tls_chains(argv):
                                 "no subject alternative name",
                                 #   OpenSSL's extfile keeps one of the two, a DNS name.
                                 "duplicate subjectAltName leaf extension") else
-                            "ERROR: The certificate of '127.0.0.1' is not trusted.")
+                            SAYS.get(mutation, "ERROR: The certificate of '127.0.0.1' is not trusted."))
                     checks(fetched.returncode == 5,
                            "%s: wget refuses the certificate with status %d, not GNU wget's 5 (%s)" % (
                                name, fetched.returncode, said.strip()[:200]))
@@ -48696,7 +48923,7 @@ def harness_tls_chains(argv):
                                name, fetched12.stderr.decode(errors="replace")[:200], fetched12.returncode))
                 expected = mutation in MUST_ACCEPT
                 checks(openssl_ok == expected or mutation in DELIBERATE or
-                       mutation in LOOSER_THAN_OPENSSL,
+                       mutation in LOOSER_THAN_OPENSSL or mutation in SOFT_FAIL,
                        "%s: the OpenSSL oracle %s a chain the standards matrix says to %s" % (
                            name, "accepts" if openssl_ok else "refuses",
                            "accept" if expected else "refuse"))
@@ -48711,6 +48938,12 @@ def harness_tls_chains(argv):
                 if mutation in LOOSER_THAN_OPENSSL and ours_ok and not openssl_ok:
                     checks(not go_verifier or go_rows[-1][2],
                            "%s: listed as looser than OpenSSL but Go refuses it too" % name)
+                    continue
+                if mutation in SOFT_FAIL:
+                    checks(ours_ok and not openssl_ok,
+                           "%s: listed as a source the default passes over, but openssl %s "
+                           "it and wget %s it" % (name, "accepts" if openssl_ok else "refuses",
+                                                  "accepts" if ours_ok else "refuses"))
                     continue
                 checks(ours_ok == openssl_ok,
                        "%s: openssl %s it and wget %s it (%s)" % (
@@ -49240,18 +49473,24 @@ def harness_tls_peer(argv):
         server_random = os.urandom(24) + flight.get("sentinel", os.urandom(8))
         extensions = (b"" if flight.get("no_ems") or flight.get("ems_unsent")
                       else b"\0\x17\0\0") + \
-            b"\xff\1\0\1\0" + flight.get("hello_extra", b"")
+            b"\xff\1\0\1\0" + flight.get("hello_extra", b"") + \
+            (b"\0\5\0\0" if flight.get("echo") else b"")
         mine = X25519PrivateKey.generate()
         params = b"\3\0\x1d\x20" + mine.public_key().public_bytes(
             serialization.Encoding.Raw, serialization.PublicFormat.Raw)
-        signature = leaf_key.sign(client_random + server_random + params,
-                                  ec.ECDSA(hashes.SHA256()))
+        signature = flight.get("key", leaf_key).sign(client_random + server_random + params,
+                                                     ec.ECDSA(hashes.SHA256()))
+        listed = b"".join(len(der).to_bytes(3, "big") + der
+                          for der in flight.get("chain", [leaf]))
         messages = [message(2, b"\3\3" + server_random + b"\x20" + os.urandom(32) +
                             b"\xc0\x2b\0" + len(extensions).to_bytes(2, "big") + extensions),
-                    message(11, (len(leaf) + 3).to_bytes(3, "big") +
-                            len(leaf).to_bytes(3, "big") + leaf),
+                    message(11, len(listed).to_bytes(3, "big") + listed),
                     message(12, params + b"\4\3" + len(signature).to_bytes(2, "big") +
                             signature)]
+        #   A CertificateStatus (RFC 6066 8) after the Certificate.
+        if flight.get("status") is not None:
+            messages[2:2] = [message(22, b"\1" + len(flight["status"]).to_bytes(3, "big") +
+                                     flight["status"])]
         if flight.get("request"):
             messages.append(message(13, b"\1\x40\0\2\4\3\0\0"))
         messages[1:1] = flight.get("extra", [])
@@ -49506,8 +49745,9 @@ def harness_tls_peer(argv):
             messages.append(request)
         for part in messages:
             transcript += part
-        signature = leaf_key.sign(b" " * 64 + b"TLS 1.3, server CertificateVerify\0" +
-                                  sha256(transcript), ec.ECDSA(hashes.SHA256()))
+        signature = flight.get("key", leaf_key).sign(
+            b" " * 64 + b"TLS 1.3, server CertificateVerify\0" + sha256(transcript),
+            ec.ECDSA(hashes.SHA256()))
         messages.append(message(15, b"\4\3" + len(signature).to_bytes(2, "big") + signature))
         transcript += messages[-1]
         finished_key = expand_label(server_hs.secret, b"finished", b"", 32)
@@ -49856,7 +50096,364 @@ def harness_tls_peer(argv):
                     b"TLSv1.2" in fetched.stdout)
             checks(ours == expect, "OpenSSL TLS 1.2 server, %s: wget %s it" % (
                 label, "accepts" if ours else "refuses"))
+        tls_peer_stapled(args, work, checks, serve, entry_with, app, close,
+                         length_head, body)
     return checks.verdict("tls peer", "tls-peer")
+
+
+def tls_peer_stapled(args, work, checks, serve, entry_with, app, close, length_head, body):
+    """tls_peer's stapled OCSP rows: a chain under a P-384 root that shells
+    built here trust (TLS_BENCH_ANCHOR), its leaf the scripted server's key,
+    and OCSP responses made by `openssl ocsp` (good, revoked, unknown,
+    another certificate's, a delegated responder with and without
+    id-kp-OCSPSigning, no nextUpdate, a broken signature) and by Python's
+    cryptography where openssl cannot say it (past its nextUpdate). Each is
+    stapled in the leaf's CertificateEntry over TLS 1.3 and, for some, in a
+    CertificateStatus over TLS 1.2, then served by `openssl s_server
+    -status_file` too, and wget's verdict -- at the default tier and the
+    tight one -- is held to `openssl ocsp -respin`'s on the same response:
+    good is taken, revoked is refused with GNU wget's line, and a response
+    openssl will not vouch for is passed over at the default tier and
+    refused at the tight one. Must-staple leaves (RFC 7633) are refused at
+    both without a good staple."""
+    import datetime
+    import shutil
+    import socket
+    import subprocess
+    import threading
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509 import ocsp
+    from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+
+    if not shutil.which("openssl"):
+        print("tls peer: stapled OCSP NOT RUN -- no openssl")
+        return
+    pki = work / "stapled"
+    pki.mkdir()
+    now = datetime.datetime.now(datetime.timezone.utc)
+    day = datetime.timedelta(days=1)
+
+    def named(text):
+        return x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, text)])
+
+    def make(name, subject, key, issuer, issuer_key, extensions, serial):
+        builder = (x509.CertificateBuilder().subject_name(named(subject))
+                   .issuer_name(issuer.subject if issuer else named(subject))
+                   .public_key(key.public_key()).serial_number(serial)
+                   .not_valid_before(now - day).not_valid_after(now + 30 * day)
+                   .add_extension(x509.SubjectKeyIdentifier.from_public_key(
+                       key.public_key()), critical=False))
+        if issuer:
+            builder = builder.add_extension(
+                x509.AuthorityKeyIdentifier.from_issuer_public_key(
+                    issuer_key.public_key()), critical=False)
+        for extension, critical in extensions:
+            builder = builder.add_extension(extension, critical=critical)
+        cert = builder.sign(issuer_key or key, hashes.SHA384())
+        (pki / (name + ".pem")).write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+        (pki / (name + ".key")).write_bytes(key.private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption()))
+        return cert
+
+    def usage(**bits):
+        fields = dict(digital_signature=False, content_commitment=False,
+                      key_encipherment=False, data_encipherment=False,
+                      key_agreement=False, key_cert_sign=False, crl_sign=False,
+                      encipher_only=False, decipher_only=False)
+        fields.update(bits)
+        return x509.KeyUsage(**fields)
+
+    root_key = ec.generate_private_key(ec.SECP384R1())
+    root = make("root", "tls peer root", root_key, None, None,
+                [(x509.BasicConstraints(ca=True, path_length=None), True),
+                 (usage(key_cert_sign=True, crl_sign=True), True)], 1)
+    ca_key = ec.generate_private_key(ec.SECP256R1())
+    ca = make("ca", "tls peer ca", ca_key, root, root_key,
+              [(x509.BasicConstraints(ca=True, path_length=0), True),
+               (usage(key_cert_sign=True, crl_sign=True), True)], 2)
+    leaf_keys = {}
+    leaves = {}
+    for name, serial, extra in (
+            ("leaf", 3, []),
+            ("staple", 4, [(x509.TLSFeature([x509.TLSFeatureType.status_request]), False)]),
+            ("other", 5, []),
+            ("unknown", 8, [])):
+        leaf_keys[name] = ec.generate_private_key(ec.SECP256R1())
+        leaves[name] = make(name, "127.0.0.1", leaf_keys[name], ca, ca_key, [
+            (x509.BasicConstraints(ca=False, path_length=None), True),
+            (usage(digital_signature=True), True),
+            (x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), False),
+            (x509.SubjectAlternativeName([x509.IPAddress(
+                __import__("ipaddress").ip_address("127.0.0.1"))]), False)] + extra, serial)
+    responders = {}
+    for name, serial, purposes in (("responder", 6, [ExtendedKeyUsageOID.OCSP_SIGNING]),
+                                   ("pretender", 7, [ExtendedKeyUsageOID.SERVER_AUTH])):
+        key = ec.generate_private_key(ec.SECP256R1())
+        responders[name] = make(name, "tls peer " + name, key, ca, ca_key, [
+            (usage(digital_signature=True), True),
+            (x509.ExtendedKeyUsage(purposes), False)], serial)
+
+    def run(*arguments):
+        done = subprocess.run(["openssl", *arguments], cwd=pki, capture_output=True,
+                              text=True)
+        if done.returncode:
+            raise RuntimeError("openssl %s: %s" % (" ".join(arguments), done.stderr[-600:]))
+        return done
+
+    #   The responder's database: two leaves good, the other leaf revoked,
+    #   and the unknown one not in it.
+    (pki / "index").write_text("")
+    (pki / "ca.conf").write_text("[ca]\ndefault_ca=c\n[c]\ndatabase=index\n"
+                                 "default_md=sha256\nunique_subject=no\n")
+    for name in ("leaf", "staple"):
+        run("ca", "-config", "ca.conf", "-valid", name + ".pem", "-keyfile", "ca.key",
+            "-cert", "ca.pem")
+    run("ca", "-config", "ca.conf", "-revoke", "other.pem", "-keyfile", "ca.key",
+        "-cert", "ca.pem", "-crl_reason", "keyCompromise")
+
+    def answer(cert, signer="ca", days=("-ndays", "1"), certs=False):
+        """openssl ocsp's response about cert, signed by signer."""
+        run("ocsp", "-issuer", "ca.pem", "-cert", cert + ".pem", "-no_nonce",
+            "-reqout", "request.der")
+        run("ocsp", "-index", "index", "-CA", "ca.pem", "-rsigner", signer + ".pem",
+            "-rkey", signer + ".key", "-reqin", "request.der", "-respout",
+            "response.der", *days, *([] if certs else ["-resp_no_certs"]))
+        return (pki / "response.der").read_bytes()
+
+    def stale(cert):
+        built = (ocsp.OCSPResponseBuilder()
+                 .add_response(cert=leaves[cert], issuer=ca, algorithm=hashes.SHA1(),
+                               cert_status=ocsp.OCSPCertStatus.GOOD,
+                               this_update=now - 10 * day, next_update=now - day,
+                               revocation_time=None, revocation_reason=None)
+                 .responder_id(ocsp.OCSPResponderEncoding.HASH, ca)
+                 .sign(ca_key, hashes.SHA256()))
+        return built.public_bytes(serialization.Encoding.DER)
+
+    good = answer("leaf")
+    broken = bytearray(good)
+    broken[-1] ^= 1
+    #   A delegated answer carries its responder's certificate, as RFC 6960
+    #   4.2.2.2 has it.
+    responses = {
+        "good": good,
+        "revoked": answer("other"),
+        "unknown": answer("unknown"),
+        "stale": stale("leaf"),
+        "no nextUpdate": answer("leaf", days=()),
+        "broken signature": bytes(broken),
+        "delegated": answer("leaf", "responder", certs=True),
+        "delegated without id-kp-OCSPSigning": answer("leaf", "pretender", certs=True),
+        "delegated, revoked": answer("other", "responder", certs=True),
+        "tryLater": bytes.fromhex("3003 0a01 03"),
+        "staple good": answer("staple"),
+    }
+
+    def openssl_says(response, cert):
+        """openssl ocsp -respin's word on response for cert: good, revoked or
+        none (no answer it vouches for)."""
+        (pki / "said.der").write_bytes(response)
+        done = subprocess.run(["openssl", "ocsp", "-respin", "said.der", "-issuer", "ca.pem",
+                               "-cert", cert + ".pem", "-CAfile", "root.pem", "-verify_other",
+                               "ca.pem", "-no_nonce"], cwd=pki, capture_output=True,
+                              text=True)
+        said = done.stdout + done.stderr
+        status = re.search(r"%s\.pem: (good|revoked|unknown)" % cert, said)
+        if "Response verify OK" not in said or not status:
+            return "none"
+        if status.group(1) == "revoked":
+            return "revoked"
+        return "good" if status.group(1) == "good" and "times invalid" not in said else "none"
+
+    #   Where this client and openssl part on the same response, on purpose.
+    DELIBERATE = {
+        "no nextUpdate": "a response with no nextUpdate cannot be told stale, and the "
+                         "CA/Browser Forum requires one; openssl takes it",
+    }
+    #   (row, the leaf served, the staple or None, TLS 1.2). openssl ocsp is
+    #   asked about the staple for the leaf served.
+    ROWS = [
+        ("good", "leaf", "good", False),
+        ("revoked", "other", "revoked", False),
+        ("unknown", "unknown", "unknown", False),
+        ("stale", "leaf", "stale", False),
+        ("no nextUpdate", "leaf", "no nextUpdate", False),
+        ("another certificate's", "leaf", "revoked", False),
+        ("broken signature", "leaf", "broken signature", False),
+        ("delegated", "leaf", "delegated", False),
+        ("delegated without id-kp-OCSPSigning", "leaf",
+         "delegated without id-kp-OCSPSigning", False),
+        ("delegated, revoked", "other", "delegated, revoked", False),
+        ("tryLater", "leaf", "tryLater", False),
+        ("must-staple with a good staple", "staple", "staple good", False),
+        ("must-staple with none", "staple", None, False),
+        ("must-staple with another certificate's", "staple", "good", False),
+        ("TLS 1.2 good", "leaf", "good", True),
+        ("TLS 1.2 revoked", "other", "revoked", True),
+        ("TLS 1.2 stale", "leaf", "stale", True),
+        ("TLS 1.2 echoed, nothing stapled", "leaf", None, True),
+        ("TLS 1.2 must-staple with none", "staple", None, True),
+    ]
+    shells = {}
+    builds = []
+    anchor = bench_anchor(pki)
+    for level, defines in (("default", ()), ("tight", ("MOONWATER_STRICT_NET=2",))):
+        shells[level] = pki / ("shell_" + level)
+        builds.append(subprocess.Popen(
+            spark_shell_command(args.cc, shells[level], anchor, defines), cwd=HARNESS_ROOT,
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True))
+    errors = [build.communicate()[1] for build in builds]
+    if any(build.returncode for build in builds):
+        print("".join(errors)[-3000:])
+        checks(False, "stapled OCSP: the anchored shells build")
+        return
+    for level in shells:
+        (pki / level).mkdir()
+        (pki / level / "wget").symlink_to(shells[level])
+
+    def der(cert):
+        return leaves[cert].public_bytes(serialization.Encoding.DER)
+
+    def fetch(level, flight):
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        listener.settimeout(20)
+        outcome = []
+        server = threading.Thread(target=serve, args=(listener, flight,
+                                                      [app(length_head + body), close],
+                                                      outcome), daemon=True)
+        server.start()
+        fetched = subprocess.run(
+            [str(pki / level / "wget"), "-q", "-O", "-",
+             "https://127.0.0.1:%d/" % listener.getsockname()[1]],
+            capture_output=True, timeout=40, env={"PATH": "/usr/bin:/bin", "HOME": str(work)})
+        server.join(25)
+        listener.close()
+        return fetched
+
+    ca_der = ca.public_bytes(serialization.Encoding.DER)
+    keys = leaf_keys
+    hint = "\nTo connect to 127.0.0.1 insecurely, use `--no-check-certificate'.\n"
+    lines = {"revoked": "ERROR: The certificate of '127.0.0.1' has been revoked." + hint,
+             "none": "ERROR: Whether the certificate of '127.0.0.1' is revoked could "
+                     "not be checked." + hint}
+    for row, cert, staple, tls12 in ROWS:
+        response = responses[staple] if staple else None
+        signing = keys[cert]
+        word = "absent" if response is None else openssl_says(response, cert)
+        must = cert == "staple"
+        if row in DELIBERATE:
+            checks(word == "good", "stapled OCSP, %s: openssl ocsp says %s, not good" % (row, word))
+            word = "none"
+        if tls12:
+            flight = {"tls12": True, "key": signing, "chain": [der(cert), ca_der],
+                      "echo": True, "status": response}
+        else:
+            flight = {"key": signing, "certificate": tls_peer_chain_body(
+                [der(cert), ca_der], {0: response} if response is not None else {})}
+        for level in ("default", "tight"):
+            fetched = fetch(level, flight)
+            ours = fetched.returncode == 0 and fetched.stdout == body
+            refuse = (word == "revoked" or (must and word != "good") or
+                      (level == "tight" and word == "none"))
+            checks(ours == (not refuse),
+                   "stapled OCSP, %s, %s tier: openssl ocsp says %s and wget %s it (%s)" % (
+                       row, level, word, "accepts" if ours else "refuses",
+                       fetched.stderr.decode(errors="replace").strip()[:200]))
+            if refuse and not ours:
+                checks(fetched.returncode == 5 and fetched.stderr.decode(errors="replace") ==
+                       lines["revoked" if word == "revoked" else "none"],
+                       "stapled OCSP, %s, %s tier: wget says %r with status %d" % (
+                           row, level, fetched.stderr[:200], fetched.returncode))
+
+    #   Shapes only the wire can have: a staple on the intermediate's entry
+    #   (read by nobody, as OpenSSL reads only the leaf's), a CertificateStatus
+    #   from a TLS 1.2 server that did not echo status_request, one that is
+    #   not ocsp, and an empty one.
+    ca_entry = {1: good}
+    for row, flight, take in (
+            ("a staple on the intermediate's entry", {
+                "key": keys["leaf"], "certificate": tls_peer_chain_body(
+                    [der("leaf"), ca_der], ca_entry)}, True),
+            ("TLS 1.2 CertificateStatus not echoed", {
+                "tls12": True, "key": keys["leaf"], "chain": [der("leaf"), ca_der],
+                "status": good}, False),
+            ("TLS 1.3 CertificateStatus of another type", {
+                "key": keys["leaf"], "certificate": tls_peer_chain_body(
+                    [der("leaf"), ca_der], {}, b"\0\5\0\4\2\0\0\0")}, False),
+            ("TLS 1.3 an empty CertificateStatus", {
+                "key": keys["leaf"], "certificate": tls_peer_chain_body(
+                    [der("leaf"), ca_der], {}, b"\0\5\0\0")}, False),
+            ("TLS 1.3 an SCT list beside the staple", {
+                "key": keys["leaf"], "certificate": tls_peer_chain_body(
+                    [der("leaf"), ca_der], {}, b"\0\x12\0\0" + tls_peer_status(good))},
+             False)):
+        fetched = fetch("default", flight)
+        ours = fetched.returncode == 0 and fetched.stdout == body
+        checks(ours == take, "stapled OCSP, %s: wget %s it (%s)" % (
+            row, "accepts" if ours else "refuses",
+            fetched.stderr.decode(errors="replace").strip()[:200]))
+
+    #   OpenSSL itself stapling, over both versions.
+    (pki / "chain.pem").write_bytes((pki / "leaf.pem").read_bytes() +
+                                    (pki / "ca.pem").read_bytes())
+    (pki / "other-chain.pem").write_bytes((pki / "other.pem").read_bytes() +
+                                          (pki / "ca.pem").read_bytes())
+    for label, cert, staple, version in (
+            ("good, TLS 1.3", "leaf", "good", "-tls1_3"),
+            ("good, TLS 1.2", "leaf", "good", "-tls1_2"),
+            ("revoked, TLS 1.3", "other", "revoked", "-tls1_3"),
+            ("revoked, TLS 1.2", "other", "revoked", "-tls1_2")):
+        (pki / "status.der").write_bytes(responses[staple])
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+        server = subprocess.Popen(
+            ["openssl", "s_server", "-accept", "127.0.0.1:%d" % port, "-cert",
+             str(pki / (cert + ".pem")), "-key", str(pki / (cert + ".key")), "-cert_chain",
+             str(pki / "ca.pem"), "-status_file", str(pki / "status.der"), version, "-www",
+             "-naccept", "1"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        ready = b""
+        for _ in range(8):
+            ready = server.stdout.readline()
+            if not ready or b"ACCEPT" in ready:
+                break
+        fetched = subprocess.run(
+            [str(pki / "default" / "wget"), "-q", "-O", "-", "https://127.0.0.1:%d/" % port],
+            capture_output=True, timeout=40, env={"PATH": "/usr/bin:/bin", "HOME": str(work)})
+        server.kill()
+        server.wait()
+        ours = b"ACCEPT" in ready and fetched.returncode == 0
+        checks(ours == (staple == "good") and
+               (ours or fetched.stderr.decode(errors="replace") == lines["revoked"]),
+               "openssl s_server stapling %s: wget %s it (%s)" % (
+                   label, "accepts" if ours else "refuses",
+                   fetched.stderr.decode(errors="replace").strip()[:200]))
+
+
+def tls_peer_status(response):
+    """A status_request extension carrying response as a CertificateStatus."""
+    status = b"\1" + len(response).to_bytes(3, "big") + response
+    return b"\0\5" + len(status).to_bytes(2, "big") + status
+
+
+def tls_peer_chain_body(ders, staples, leaf_extensions=None):
+    """A TLS 1.3 Certificate body: an empty context and an entry for each
+    certificate, staples[k] stapled in entry k's extensions, or the leaf's
+    extensions exactly as given."""
+    entries = b""
+    for k, der in enumerate(ders):
+        extensions = (leaf_extensions if k == 0 and leaf_extensions is not None else
+                      tls_peer_status(staples[k]) if staples.get(k) is not None else b"")
+        entries += len(der).to_bytes(3, "big") + der + len(extensions).to_bytes(2, "big") + \
+            extensions
+    return b"\0" + len(entries).to_bytes(3, "big") + entries
 
 
 def harness_https_downgrade(argv):
@@ -50270,6 +50867,8 @@ typedef struct { positive began; positive budget; } network_deadline;
 #define TLS_EXPIRED (-3)
 #define TLS_NOT_YET (-4)
 #define TLS_MISMATCH (-5)
+#define TLS_REVOKED (-6)
+#define TLS_UNCHECKED (-7)
 #define ENOSPC 28
 #define NETWORK_INTERRUPTED (-4)
 #define syscall(name) 0
@@ -51418,6 +52017,8 @@ static bipolar network_stream_read_some_for(bipolar h, p8 *into, positive room,
 #define TLS_EXPIRED (-3)
 #define TLS_NOT_YET (-4)
 #define TLS_MISMATCH (-5)
+#define TLS_REVOKED (-6)
+#define TLS_UNCHECKED (-7)
 typedef struct
 {
         p8 *receive;
@@ -53537,6 +54138,8 @@ def tls_fuzz_seeds(corpus):
         return crypto_fuzz_seeds()
     if corpus == "http":
         return http_fuzz_seeds()
+    if corpus in ("tls_ocsp", "tls_crl"):
+        return tls_revocation_seeds(corpus)
     seeds = {name + ".bin": bytes.fromhex(hx)
              for name, hx in TLS_FUZZ_SEED_HEX[corpus].items()}
     if corpus == "tls_hs":
@@ -53898,11 +54501,12 @@ def tls_der_fuzz_lift_parts(net):
         "static COLD bool tls_cert_current(tls_cert address_to cert, p64 now)",
         "// A TLS handshake length: three bytes, most significant first.\n"
         "static PURE positive tls_load_24")
+    #   Up to the revocation declaration, whose tls_conn this lift has not.
     framing = src_slice(
         net,
         "// A TLS handshake length: three bytes, most significant first.\n"
         "static PURE positive tls_load_24",
-        "static COLD bool tls_verify_chain")
+        "/* Whether the certificates on a verified path are revoked")
     shim = r"""
 #include <stdio.h>
 #include <stdlib.h>
@@ -54787,6 +55391,457 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                         4096)
 
 
+def tls_revocation_seeds(corpus):
+    """Name to bytes for the tls_ocsp and tls_crl corpora, built here by hand
+    so every byte is fixed: a well-formed OCSPResponse or CertificateList and
+    a mutation of each field the parsers hold -- tags, versions, times,
+    hashes, statuses, reasons, scopes, extensions known and unknown, critical
+    and twice, every ceiling and one past it. The signatures are shapes, not
+    signatures: the parsers read them, tls_signed_by checks them. Magic first
+    bytes pick a lane: D1 a SingleResponse, D2 CertificateEntry extensions;
+    E1 a serial's length and bytes before a CRL, E2 an
+    issuingDistributionPoint, E3 cRLDistributionPoints, E4
+    authorityKeyIdentifier, E5 TLS Feature, E6 a length then two
+    GeneralNames to meet."""
+    T = tls_seed_tlv
+    ecdsa = T(0x30, T(0x06, bytes.fromhex("2a8648ce3d040302")))
+    rsa = T(0x30, T(0x06, bytes.fromhex("2a864886f70d01010b")), b"\x05\x00")
+    signature = T(0x03, b"\x00" + T(0x30, T(0x02, b"\x01"), T(0x02, b"\x01")))
+    name = T(0x30, T(0x31, T(0x30, T(0x06, b"\x55\x04\x03"), T(0x0c, b"tls ca"))))
+    uri = T(0x86, b"http://crl.example/7.crl")
+
+    def gt(text="20261009120000Z"):
+        return T(0x18, text.encode())
+
+    def ext(oid, value, critical=False):
+        return tls_seed_ext(oid, value, critical)
+
+    if corpus == "tls_ocsp":
+        sha1 = T(0x30, T(0x06, bytes.fromhex("2b0e03021a")), b"\x05\x00")
+        sha256 = T(0x30, T(0x06, bytes.fromhex("608648016503040201")))
+
+        def cert_id(alg=sha1, size=20, serial=b"\x01\x02"):
+            return T(0x30, alg, T(0x04, b"\x11" * size), T(0x04, b"\x22" * size),
+                     T(0x02, serial))
+
+        def single(status=b"\x80\x00", this=None, nxt=None, extra=b"", ident=None):
+            return T(0x30, ident or cert_id(), status, this or gt(),
+                     T(0xa0, gt("20261016120000Z")) if nxt is None else nxt, extra)
+
+        def data(responses=None, responder=None, extra=b"", version=b""):
+            return T(0x30, version, responder or T(0xa2, T(0x04, b"\x33" * 20)), gt(),
+                     T(0x30, *(responses or [single()])), extra)
+
+        def response(body=None, alg=ecdsa, certs=b"", status=b"\x00"):
+            basic = T(0x30, body or data(), alg, signature, certs)
+            return T(0x30, T(0x0a, status), T(0xa0, T(0x30, T(0x06, bytes.fromhex(
+                "2b0601050507300101")), T(0x04, basic))))
+
+        nonce = bytes.fromhex("2b0601050507300102")
+        revoked = T(0xa1, gt("20261001000000Z"), T(0xa0, T(0x0a, b"\x01")))
+        minimal = bytes.fromhex(TLS_FUZZ_SEED_HEX["tls_der"]["minimal_cert"])
+        seeds = {
+            "good.bin": response(),
+            "revoked.bin": response(data([single(revoked)])),
+            "revoked_no_reason.bin": response(data([single(T(0xa1, gt()))])),
+            "revoked_reason_unused_7.bin": response(data([single(T(0xa1, gt(),
+                                                                   T(0xa0, T(0x0a, b"\x07"))))])),
+            "unknown.bin": response(data([single(b"\x82\x00")])),
+            "good_with_content.bin": response(data([single(b"\x80\x01\x00")])),
+            "by_name.bin": response(data(responder=T(0xa1, name))),
+            "by_key_short.bin": response(data(responder=T(0xa2, T(0x04, b"\x33" * 19)))),
+            "sha256_id.bin": response(data([single(ident=cert_id(sha256, 32))])),
+            "sha256_id_short_hash.bin": response(data([single(ident=cert_id(sha256, 20))])),
+            "unknown_hash.bin": response(data([single(ident=cert_id(T(0x30, T(
+                0x06, bytes.fromhex("2a864886f70d0205")))))])),
+            "serial_padded.bin": response(data([single(ident=cert_id(serial=b"\x00\x01"))])),
+            "two_responses.bin": response(data([single(), single(b"\x82\x00")])),
+            "sixteen_responses.bin": response(data([single()] * 16)),
+            "seventeen_responses.bin": response(data([single()] * 17)),
+            "no_next_update.bin": response(data([single(nxt=b"")])),
+            "next_before_this.bin": response(data([single(nxt=T(0xa0, gt("20260101000000Z")))])),
+            "utctime.bin": response(data([single(this=T(0x17, b"261009120000Z"))])),
+            "fractional_seconds.bin": response(data([single(this=T(0x18, b"20261009120000.5Z"))])),
+            "year_1949.bin": response(data([single(this=gt("19491231235959Z"))])),
+            "year_2050.bin": response(data([single(nxt=T(0xa0, gt("20500101000000Z")))])),
+            "version_present.bin": response(data(version=T(0xa0, T(0x02, b"\x00")))),
+            "nonce.bin": response(data(extra=T(0xa1, T(0x30, ext(nonce, T(0x04, b"n" * 16)))))),
+            "unknown_critical_ext.bin": response(data(extra=T(0xa1, T(0x30, ext(
+                b"\x2a\x03", b"\x05\x00", True))))),
+            "duplicate_ext.bin": response(data(extra=T(0xa1, T(0x30, ext(nonce, b"\x04\x00"),
+                                                              ext(nonce, b"\x04\x00"))))),
+            "empty_ext_list.bin": response(data(extra=T(0xa1, T(0x30)))),
+            "single_critical_ext.bin": response(data([single(extra=T(0xa1, T(0x30, ext(
+                b"\x2a\x03", b"\x05\x00", True))))])),
+            "rsa.bin": response(alg=rsa),
+            "unknown_signature_alg.bin": response(alg=T(0x30, T(0x06, b"\x2b\x65\x70"))),
+            "one_cert.bin": response(certs=T(0xa0, T(0x30, minimal))),
+            "four_certs.bin": response(certs=T(0xa0, T(0x30, *[minimal] * 4))),
+            "five_certs.bin": response(certs=T(0xa0, T(0x30, *[minimal] * 5))),
+            "try_later.bin": bytes.fromhex("3003 0a01 03"),
+            "successful_no_bytes.bin": bytes.fromhex("3003 0a01 00"),
+            "status_two_octets.bin": response(status=b"\x00\x00"),
+            "magic_single_good.bin": b"\xd1" + single(),
+            "magic_single_revoked.bin": b"\xd1" + single(revoked),
+            "magic_entry_status.bin": bytes.fromhex("d2 0005 0009 01 000005 30030a0103"),
+            "magic_entry_status_short.bin": bytes.fromhex("d2 0005 0009 01 000009 30030a0103"),
+            "magic_entry_two_extensions.bin": b"\xd2\x00\x05\x00\x00\x00\x12\x00\x00",
+            "empty.bin": b"",
+        }
+        return seeds
+
+    serial = b"\x01\x02"
+    utc = T(0x17, b"261009120000Z")
+    later = T(0x17, b"261016120000Z")
+
+    def entry(number=serial, extra=b"", when=utc):
+        return T(0x30, T(0x02, number), when, extra)
+
+    def crl(entries=None, extensions=None, version=T(0x02, b"\x01"), alg=ecdsa,
+            outer=None, nxt=later, issuer=name):
+        tbs = T(0x30, version, alg, issuer, utc, nxt,
+                T(0x30, *entries) if entries is not None else b"",
+                T(0xa0, T(0x30, *extensions)) if extensions is not None else b"")
+        return T(0x30, tbs, outer or alg, signature)
+
+    aki = ext(b"\x55\x1d\x23", T(0x30, T(0x80, b"\x44" * 20)))
+    number = ext(b"\x55\x1d\x14", T(0x02, b"\x10\x00"))
+
+    def idp(*fields, critical=True):
+        return ext(b"\x55\x1d\x1c", T(0x30, *fields), critical)
+
+    point = T(0xa0, T(0xa0, uri))
+    reason = lambda code: T(0x30, ext(b"\x55\x1d\x15", T(0x0a, bytes([code]))))
+    seeds = {
+        "empty_list.bin": crl(extensions=[aki, number]),
+        "no_entries_v1.bin": crl(version=b""),
+        "listed.bin": crl([entry(b"\x05"), entry(), entry(b"\x00\x80")], [aki, number]),
+        "not_listed.bin": crl([entry(b"\x05"), entry(b"\x01\x03")], [aki, number]),
+        "empty_revoked_sequence.bin": crl([], [aki, number]),
+        "reason_key_compromise.bin": crl([entry(extra=reason(1))], [number]),
+        "reason_unused_7.bin": crl([entry(extra=reason(7))], [number]),
+        "reason_remove_8.bin": crl([entry(extra=reason(8))], [number]),
+        "reason_11.bin": crl([entry(extra=reason(11))], [number]),
+        "invalidity_date.bin": crl([entry(extra=T(0x30, ext(b"\x55\x1d\x18",
+                                                            gt("20261001000000Z"))))], [number]),
+        "certificate_issuer.bin": crl([entry(extra=T(0x30, ext(b"\x55\x1d\x1d", T(0x30, T(
+            0xa4, name)), True)))], [number]),
+        "entry_unknown_critical.bin": crl([entry(extra=T(0x30, ext(b"\x2a\x03", b"\x05\x00",
+                                                                     True)))], [number]),
+        "entry_duplicate_reason.bin": crl([entry(extra=T(0x30, ext(b"\x55\x1d\x15", b"\x0a\x01\x01"),
+                                                         ext(b"\x55\x1d\x15", b"\x0a\x01\x01")))],
+                                          [number]),
+        "entry_empty_extensions.bin": crl([entry(extra=T(0x30))], [number]),
+        "entry_extension_in_v1.bin": crl([entry(extra=reason(1))], version=b""),
+        "entry_serial_padded.bin": crl([entry(b"\x00\x01\x02")], [number]),
+        "entry_serial_negative.bin": crl([entry(b"\xff\x01")], [number]),
+        "entry_generalized_2020.bin": crl([entry(when=gt("20200101000000Z"))], [number]),
+        "number_twenty_one_octets.bin": crl(extensions=[ext(b"\x55\x1d\x14", T(0x02, b"\x7f" * 21))]),
+        "number_twenty_two_octets.bin": crl(extensions=[ext(b"\x55\x1d\x14", T(0x02, b"\x7f" * 22))]),
+        "number_negative.bin": crl(extensions=[ext(b"\x55\x1d\x14", T(0x02, b"\x80"))]),
+        "idp_user_only.bin": crl([entry()], [number, idp(point, b"\x81\x01\xff")]),
+        "idp_ca_only.bin": crl([entry()], [number, idp(point, b"\x82\x01\xff")]),
+        "idp_user_and_ca.bin": crl(extensions=[idp(point, b"\x81\x01\xff", b"\x82\x01\xff")]),
+        "idp_false_spelled.bin": crl(extensions=[idp(point, b"\x81\x01\x00")]),
+        "idp_reasons.bin": crl(extensions=[idp(point, b"\x83\x02\x07\x80")]),
+        "idp_indirect.bin": crl(extensions=[idp(point, b"\x84\x01\xff")]),
+        "idp_attributes.bin": crl(extensions=[idp(point, b"\x85\x01\xff")]),
+        "idp_relative.bin": crl(extensions=[idp(T(0xa0, T(0xa1, T(0x30, T(0x06, b"\x55\x04\x03"),
+                                                                     T(0x0c, b"x")))))]),
+        "idp_empty.bin": crl(extensions=[idp()]),
+        "idp_no_point.bin": crl(extensions=[idp(b"\x81\x01\xff")]),
+        "delta_indicator.bin": crl(extensions=[number, ext(b"\x55\x1d\x1b", T(0x02, b"\x01"), True)]),
+        "freshest_noncritical.bin": crl(extensions=[number, ext(b"\x55\x1d\x2e", T(0x30, T(
+            0x30, point)))]),
+        "unknown_critical.bin": crl(extensions=[ext(b"\x2a\x03", b"\x05\x00", True)]),
+        "duplicate_number.bin": crl(extensions=[number, number]),
+        "sixteen_extensions.bin": crl(extensions=[ext(bytes([0x2a, k]), b"\x05\x00")
+                                                  for k in range(16)]),
+        "seventeen_extensions.bin": crl(extensions=[ext(bytes([0x2a, k]), b"\x05\x00")
+                                                    for k in range(17)]),
+        "empty_extensions.bin": crl(extensions=[]),
+        "v1_with_extensions.bin": crl(extensions=[number], version=b""),
+        "version_v1_spelled.bin": crl(version=T(0x02, b"\x00")),
+        "algorithms_differ.bin": crl(outer=rsa),
+        "no_next_update.bin": crl(nxt=b""),
+        "next_before_this.bin": crl(nxt=T(0x17, b"260101000000Z")),
+        "rsa.bin": crl([entry()], [number], alg=rsa),
+        "many_entries.bin": crl([entry(bytes([1, k >> 8, k & 0xff])) for k in range(400)],
+                                [number]),
+        "magic_serial_listed.bin": b"\xe1\x02\x01\x02" + crl([entry()], [number]),
+        "magic_scope.bin": b"\xe2" + T(0x30, point, b"\x81\x01\xff"),
+        "magic_points.bin": b"\xe3" + T(0x30, T(0x30, point), T(0x30, T(0xa0, T(
+            0xa0, T(0x86, b"ldap://x"))), T(0x81, b"\x07\x80"))),
+        "magic_points_issuer.bin": b"\xe3" + T(0x30, T(0x30, T(0xa2, T(0xa4, name)))),
+        "magic_points_reasons_only.bin": b"\xe3" + T(0x30, T(0x30, T(0x81, b"\x07\x80"))),
+        "magic_authority_key.bin": b"\xe4" + T(0x30, T(0x80, b"\x44" * 20), T(0xa1, T(
+            0xa4, name)), T(0x82, b"\x05")),
+        "magic_authority_serial_alone.bin": b"\xe4" + T(0x30, T(0x82, b"\x05")),
+        "magic_feature.bin": b"\xe5" + T(0x30, T(0x02, b"\x05"), T(0x02, b"\x11")),
+        "magic_feature_big.bin": b"\xe5" + T(0x30, T(0x02, b"\x01\x00\x00")),
+        "magic_feature_negative.bin": b"\xe5" + T(0x30, T(0x02, b"\xff")),
+        "magic_names_meet.bin": b"\xe6" + bytes([len(uri)]) + uri + T(0x82, b"x") + uri,
+        "empty.bin": b"",
+    }
+    return seeds
+
+
+TLS_REVOCATION_FUZZ_DRIVER = r"""
+/* A fixed now for freshness, as tls_der_fuzz fixes it for dates. */
+enum { FUZZ_REVOCATION_NOW = 20261010000000ull };
+
+static const p8 *fuzz_start;
+static positive fuzz_size;
+
+/* Every pointer a parser keeps lies inside the bytes it was given. */
+static fn fuzz_inside(const p8 *at, positive length)
+{
+        if (at && (at < fuzz_start || length > fuzz_size ||
+                   at > fuzz_start + fuzz_size - length))
+                abort();
+}
+"""
+
+
+def harness_tls_ocsp_fuzz(argv):
+    """Coverage-guided libFuzzer over the stapled OCSP response parsers.
+
+    Lifts tls_parse_ocsp, tls_parse_ocsp_single, the DER cursor under them
+    and tls_entry_status from src/net/net.c with tls_der_fuzz's pieces, and
+    asserts that every span a parse keeps (ResponseData, signature,
+    responder, responses, certificates, hashes, serial) lies inside the
+    input, that a SingleResponse names a hash it knows at that hash's length,
+    and that freshness never holds without a nextUpdate. Seeds come from
+    tls_fuzz_seeds("tls_ocsp"); the magic first bytes are tls_revocation_seeds'.
+    Bounded fixed-seed run; 2 (NOT RUN) without clang/libFuzzer.
+
+        python3 test/differential.py --harness tls_ocsp_fuzz
+    """
+    del argv
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    oids, parsers, policy, framing, shim = tls_der_fuzz_lift_parts(net)
+    driver = TLS_REVOCATION_FUZZ_DRIVER + r"""
+static fn fuzz_single(const p8 *bytes, positive length)
+{
+        tls_ocsp_single single;
+
+        if (tls_parse_ocsp_single(bytes, length, address_of single))
+                return;
+        if ((single.hash != 1 && single.hash != 2) ||
+            single.hash_length != (single.hash == 1 ? 20 : 32) ||
+            single.status > TLS_OCSP_UNKNOWN ||
+            (single.next_update && single.next_update < single.this_update))
+                abort();
+        fuzz_inside(single.name_hash, single.hash_length);
+        fuzz_inside(single.key_hash, single.hash_length);
+        fuzz_inside(single.serial, single.serial_length);
+        if (!single.next_update &&
+            tls_revocation_fresh(single.this_update, 0, FUZZ_REVOCATION_NOW))
+                abort();
+        (void)tls_revocation_fresh(single.this_update, single.next_update,
+                                   FUZZ_REVOCATION_NOW);
+}
+
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+{
+        tls_ocsp ocsp;
+        p8 *buf;
+        positive length = size > 65536 ? 65536 : (positive)size;
+
+        buf = (p8 *)malloc(length ? length : 1);
+        if (!buf)
+                return 0;
+        if (length)
+                memcpy(buf, data, length);
+        fuzz_start = buf;
+        fuzz_size = length;
+        if (!tls_parse_ocsp(buf, length, address_of ocsp))
+        {
+                byte_reader list = byte_reader_open(ocsp.responses,
+                                                    ocsp.responses_length);
+                positive count = 0;
+
+                fuzz_inside(ocsp.tbs, ocsp.tbs_length);
+                fuzz_inside(ocsp.sig_oid, ocsp.sig_oid_length);
+                fuzz_inside(ocsp.sig, ocsp.sig_length);
+                fuzz_inside(ocsp.responder, ocsp.responder_length);
+                fuzz_inside(ocsp.responses, ocsp.responses_length);
+                fuzz_inside(ocsp.certs, ocsp.certs_length);
+                if (!ocsp.sig_length || !ocsp.responses_length ||
+                    (ocsp.by_key && ocsp.responder_length != 20))
+                        abort();
+                while (byte_reader_left(&list))
+                {
+                        positive whole = 0;
+                        const p8 *one = tls_der_whole(&list, 0x30, address_of whole);
+
+                        if (!one || ++count > TLS_OCSP_RESPONSES)
+                                abort();
+                        fuzz_single(one, whole);
+                }
+        }
+        if (length > 1 && buf[0] == 0xd1)
+                fuzz_single(buf + 1, length - 1);
+        if (length > 1 && buf[0] == 0xd2)
+        {
+                for (int asked = 0; asked < 2; asked++)
+                {
+                        const p8 *response = null;
+                        positive response_length = 0;
+
+                        fuzz_start = buf + 1;
+                        fuzz_size = length - 1;
+                        if (tls_entry_status(buf + 1, length - 1, asked,
+                                             address_of response,
+                                             address_of response_length))
+                        {
+                                if (!asked && response)
+                                        abort();
+                                fuzz_inside(response, response_length);
+                        }
+                }
+        }
+        free(buf);
+        return 0;
+}
+"""
+    return tls_fuzz_run("tls ocsp", "tls_ocsp",
+                        shim + oids + "\n" + parsers + policy + framing + driver, 8192)
+
+
+def harness_tls_crl_fuzz(argv):
+    """Coverage-guided libFuzzer over the CRL parsers and their certificate
+    side.
+
+    Lifts tls_parse_crl, tls_parse_crl_scope, tls_crl_covers,
+    tls_revocation_fresh, the certificate's cRLDistributionPoints,
+    authorityKeyIdentifier and TLS Feature parsers and
+    tls_general_names_meet from src/net/net.c with tls_der_fuzz's pieces. A
+    CRL is parsed for a fixed serial (or, after the magic E1, the serial the
+    input names), every span it keeps is held inside the input, its entry
+    count to TLS_CRL_ENTRIES, a listed serial to one the CRL holds, and its
+    scope asked of a CA and an end entity whose distribution points the
+    input gives. Seeds come from tls_fuzz_seeds("tls_crl"). Bounded
+    fixed-seed run; 2 (NOT RUN) without clang/libFuzzer.
+
+        python3 test/differential.py --harness tls_crl_fuzz
+    """
+    del argv
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    oids, parsers, policy, framing, shim = tls_der_fuzz_lift_parts(net)
+    driver = TLS_REVOCATION_FUZZ_DRIVER + r"""
+static fn fuzz_crl(p8 *bytes, positive length, const p8 *serial,
+                   positive serial_length)
+{
+        tls_crl crl;
+        tls_cert cert;
+
+        if (tls_parse_crl(bytes, length, serial, serial_length, address_of crl))
+                return;
+        fuzz_inside(crl.tbs, crl.tbs_length);
+        fuzz_inside(crl.sig_oid, crl.sig_oid_length);
+        fuzz_inside(crl.sig, crl.sig_length);
+        fuzz_inside(crl.issuer, crl.issuer_length);
+        fuzz_inside(crl.authority_key, crl.authority_key_length);
+        fuzz_inside(crl.scope.names, crl.scope.names_length);
+        if (crl.entries > TLS_CRL_ENTRIES || !crl.issuer ||
+            (crl.listed && !crl.entries) ||
+            (crl.next_update && crl.next_update < crl.this_update) ||
+            (!crl.scope.present && crl.scope.names))
+                abort();
+        memory_fill(address_of cert, 0, sizeof cert);
+        for (int ca = 0; ca < 2; ca++)
+        {
+                cert.ca = ca;
+                cert.crl_names = (p8 *)crl.scope.names;
+                cert.crl_names_length = crl.scope.names_length;
+                (void)tls_crl_covers(address_of crl.scope, address_of cert);
+                cert.crl_names = null;
+                if (tls_crl_covers(address_of crl.scope, address_of cert) &&
+                    crl.scope.names)
+                        abort();
+        }
+        (void)tls_revocation_fresh(crl.this_update, crl.next_update,
+                                   FUZZ_REVOCATION_NOW);
+}
+
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+{
+        static const p8 serial[] = {0x01, 0x02};
+        tls_cert cert;
+        tls_crl_scope scope;
+        p8 *buf;
+        p8 *key = null;
+        positive key_length = 0;
+        positive length = size > 65536 ? 65536 : (positive)size;
+
+        buf = (p8 *)malloc(length ? length : 1);
+        if (!buf)
+                return 0;
+        if (length)
+                memcpy(buf, data, length);
+        fuzz_start = buf;
+        fuzz_size = length;
+        fuzz_crl(buf, length, serial, sizeof serial);
+        if (length > 1)
+        {
+                p8 *rest = buf + 1;
+                positive left = length - 1;
+
+                fuzz_start = rest;
+                fuzz_size = left;
+                memory_fill(address_of cert, 0, sizeof cert);
+                switch (buf[0])
+                {
+                case 0xe1:
+                        if (rest[0] < left)
+                                fuzz_crl(rest + 1 + rest[0], left - 1 - rest[0],
+                                         rest + 1, rest[0]);
+                        break;
+                case 0xe2:
+                        if (!tls_parse_crl_scope(rest, left, address_of scope))
+                        {
+                                fuzz_inside(scope.names, scope.names_length);
+                                (void)tls_crl_covers(address_of scope, address_of cert);
+                        }
+                        break;
+                case 0xe3:
+                        if (!tls_parse_crl_points(rest, left, address_of cert))
+                        {
+                                fuzz_inside(cert.crl_url, cert.crl_url_length);
+                                fuzz_inside(cert.crl_names, cert.crl_names_length);
+                                if (cert.crl_url && (cert.crl_url_length < 8 ||
+                                                     !cert.crl_names))
+                                        abort();
+                        }
+                        break;
+                case 0xe4:
+                        if (!tls_parse_authority_key(rest, left, address_of key,
+                                                     address_of key_length))
+                                fuzz_inside(key, key_length);
+                        break;
+                case 0xe5:
+                        (void)tls_parse_tls_feature(rest, left, address_of cert);
+                        break;
+                case 0xe6:
+                        if (rest[0] < left)
+                                (void)tls_general_names_meet(
+                                    byte_reader_open(rest + 1, rest[0]),
+                                    byte_reader_open(rest + 1 + rest[0],
+                                                     left - 1 - rest[0]));
+                        break;
+                default:
+                        break;
+                }
+        }
+        free(buf);
+        return 0;
+}
+"""
+    return tls_fuzz_run("tls crl", "tls_crl",
+                        shim + oids + "\n" + parsers + policy + framing + driver, 16384)
+
+
 def harness_tls_hs_fuzz(argv):
     """Coverage-guided libFuzzer over the whole TLS 1.3 client protocol.
 
@@ -55559,6 +56614,9 @@ def tls_verify_chain_lift(net, now=None, aia=None):
         date = "#include <time.h>\ntypedef struct tm tm;\n" + src_slice(
             net, "static COLD bool tls_date_now(p64 address_to value)",
             "static COLD bool tls_cert_current(")
+    #   Revocation lives with the HTTP client, which this lift has not: a
+    #   path that verifies is not revoked here, and wget is held to its
+    #   revocation answers live (tls_chains, tls_peer).
     return (r"""
 #define array_count(a) (sizeof(a) / sizeof((a)[0]))
 #define TLS_FAULT_EARLY 1
@@ -55567,6 +56625,7 @@ def tls_verify_chain_lift(net, now=None, aia=None):
 typedef struct
 {
         bool check_cert;
+        bool status_requested;
         p8 leaf_qx[48];
         p8 leaf_qy[48];
         p8 leaf_n[CRYPTO_RSA_BYTES];
@@ -55580,6 +56639,13 @@ typedef struct
             "                                   p8 address_to into, positive room)\n{\n" +
             (aia or "        (void)url;\n        (void)length;\n        (void)into;\n"
                     "        (void)room;\n        return 0;\n") + "}\n" +
+            "static COLD bool tls_revocation_holds(tls_conn address_to tls,\n"
+            "        tls_cert address_to certs, const positive address_to path,\n"
+            "        positive depth, tls_cert address_to top, const p8 address_to staple,\n"
+            "        positive staple_length, p64 now)\n{\n"
+            "        (void)tls; (void)certs; (void)path; (void)depth; (void)top;\n"
+            "        (void)staple; (void)staple_length; (void)now;\n"
+            "        return true;\n}\n" +
             src_slice(net, "static COLD bool tls_verify_chain(p8 address_to body",
                          "static COLD bool tls_hello_append("))
 
@@ -61216,10 +62282,10 @@ def harness_bowl_sig_fuzz(argv):
 
 
 def harness_tls_fuzz(argv):
-    """tls_der_fuzz, tls_hs_fuzz, tls_verify_fuzz, waterlink_pre_fuzz,
-    waterlink_fuzz, dhcp_fuzz, dhcp_frame_fuzz, sntp_fuzz, dns_fuzz, netlink_fuzz,
-    crypto_fuzz, bowl_sig_fuzz, wifi_eapol_fuzz, wifi_scan_fuzz, wifi_sae_fuzz and http_fuzz
-    in turn: `sh test/run fuzz`.
+    """tls_der_fuzz, tls_ocsp_fuzz, tls_crl_fuzz, tls_hs_fuzz, tls_verify_fuzz,
+    waterlink_pre_fuzz, waterlink_fuzz, dhcp_fuzz, dhcp_frame_fuzz, sntp_fuzz,
+    dns_fuzz, netlink_fuzz, crypto_fuzz, bowl_sig_fuzz, wifi_eapol_fuzz,
+    wifi_scan_fuzz, wifi_sae_fuzz and http_fuzz in turn: `sh test/run fuzz`.
 
     Continuous by default, an hour a target with no run cap, unless
     MOONWATER_FUZZ_SECONDS / MOONWATER_FUZZ_RUNS say otherwise. With
@@ -61237,10 +62303,11 @@ def harness_tls_fuzz(argv):
     os.environ.setdefault("MOONWATER_FUZZ_RUNS", "20000" if report else "-1")
     os.environ.setdefault("MOONWATER_FUZZ_SECONDS", "5" if report else "3600")
     runs, seconds, _ = tls_fuzz_budget()
-    print("tls fuzz: der then hs then verify then waterlink pre then waterlink then dhcp then dhcp frame then sntp then wifi eapol then wifi scan then wifi sae then dns then netlink then crypto then bowl sig then http "
+    print("tls fuzz: der then ocsp then crl then hs then verify then waterlink pre then waterlink then dhcp then dhcp frame then sntp then wifi eapol then wifi scan then wifi sae then dns then netlink then crypto then bowl sig then http "
           "(runs=%d seconds=%d)" % (runs, seconds))
     seeds = {corpus: len(tls_fuzz_seeds(corpus))
-             for corpus in ("tls_der", "tls_hs", "waterlink", "dhcp", "sntp", "dns", "netlink", "crypto", "http")}
+             for corpus in ("tls_der", "tls_ocsp", "tls_crl", "tls_hs", "waterlink", "dhcp",
+                            "sntp", "dns", "netlink", "crypto", "http")}
     seeds["waterlink_pre"] = len(waterlink_pre_seeds())
     seeds["wifi_eapol"] = len(wifi_eapol_fuzz_seeds())
     seeds["wifi_scan"] = len(wifi_scan_fuzz_seeds())
@@ -61250,6 +62317,8 @@ def harness_tls_fuzz(argv):
     targets = []
     for name, corpus, harness in (
             ("tls_der_fuzz", "tls_der", harness_tls_der_fuzz),
+            ("tls_ocsp_fuzz", "tls_ocsp", harness_tls_ocsp_fuzz),
+            ("tls_crl_fuzz", "tls_crl", harness_tls_crl_fuzz),
             ("tls_hs_fuzz", "tls_hs", harness_tls_hs_fuzz),
             ("tls_verify_fuzz", "tls_der", harness_tls_verify_fuzz),
             ("waterlink_pre_fuzz", "waterlink_pre", harness_waterlink_pre_fuzz),
@@ -61343,7 +62412,8 @@ def harness_msan_net(argv):
          (same lift pieces as tls_der_fuzz)
       4. thin CHECK_net-equivalent probes (align/sizeof + parser shape checks);
          not a full freestanding CHECK_net under MSan
-      5. short tls_der_fuzz / tls_hs_fuzz / sntp_fuzz / wifi_eapol_fuzz /
+      5. short tls_der_fuzz / tls_ocsp_fuzz / tls_crl_fuzz / tls_hs_fuzz /
+         sntp_fuzz / wifi_eapol_fuzz /
          dns_fuzz / netlink_fuzz seed smokes with MOONWATER_MSAN=1
     Returns 2 (NOT RUN) when MSan is unavailable (Apple clang, many qemu
     images).
@@ -62324,6 +63394,8 @@ int main(void)
     os.environ["MOONWATER_MSAN"] = "1"
     try:
         der = harness_tls_der_fuzz([])
+        ocsp = harness_tls_ocsp_fuzz([])
+        crl = harness_tls_crl_fuzz([])
         hs = harness_tls_hs_fuzz([])
         dhcp = harness_dhcp_fuzz([])
         sntp = harness_sntp_fuzz([])
@@ -62346,6 +63418,8 @@ int main(void)
               % (der, hs, sntp, dns, netlink, http))
         return 2
     checks(der == 0, "tls_der_fuzz clean under MSan")
+    checks(ocsp == 0, "tls_ocsp_fuzz clean under MSan")
+    checks(crl == 0, "tls_crl_fuzz clean under MSan")
     checks(hs == 0, "tls_hs_fuzz clean under MSan")
     checks(dhcp == 0, "dhcp_fuzz clean under MSan")
     checks(sntp == 0, "sntp_fuzz clean under MSan")
@@ -63523,7 +64597,9 @@ def harness_net_exhaustive_proof(argv):
             "http_address_public", "dhcp_mask_valid", "dhcp_prefix_of",
             "dhcp_address_unicast", "dhcp_prefix_clear", "dhcp_lease_timers",
             "tls_asn1_length", "tls_oid_content_der", "http_dot_segment",
-            "dhcp_walk", "tls_date_value")])
+            "dhcp_walk", "tls_date_value", "tls_der_integer", "tls_der_named_bits",
+            "tls_date_seconds", "tls_revocation_fresh")])
+    production = re.search(r"#define TLS_REVOCATION_SKEW .*\n", net).group(0) + production
     source = template.replace("/* BYTE_READER */", byte_reader_source()).replace(
         "/* PRODUCTION */", production)
     compiler = shutil.which("cc") or shutil.which("clang")
@@ -63550,7 +64626,10 @@ def harness_net_exhaustive_proof(argv):
                     "timers": 1 << 32,
                     "walk": 2 * sum(8 ** n for n in range(11)),
                     "date": 80 * 100 * 100 + 100 ** 3 + 10000 + 2 * 100 ** 3 +
-                            256 * (17 + 13 * 256 + 17 + 15 * 256)}
+                            256 * (17 + 13 * 256 + 17 + 15 * 256),
+                    "bits": 1 + (1 << 8) + (1 << 16) + (1 << 24) + (1 << 32),
+                    "dates": 4 * (datetime.date(2400, 1, 1) -
+                                  datetime.date(1950, 1, 1)).days}
         for proof, total in expected.items():
             if chosen and proof not in chosen:
                 continue
@@ -63665,6 +64744,30 @@ static int spec_der_length(const p8 *b, unsigned size, unsigned *value)
 }
 /* X.690 8.19: arcs in base 128, the last octet of each with bit 8 clear and
    no arc starting 0x80; at least one octet; nothing after the last arc. */
+/* X.690 8.3.2: INTEGER contents are one octet or more, and their first
+   nine bits are not all the same. */
+static bool spec_integer(const p8 *b, unsigned n)
+{
+        if (!n) return false;
+        if (n == 1) return true;
+        unsigned nine = (unsigned)b[0] << 1 | b[1] >> 7;
+        return nine != 0 && nine != 0x1ff;
+}
+/* X.690 8.6.2 and 11.2.2: a named bit list's BIT STRING contents are an
+   unused count of 0 to 7 and the bits; with no bits the count is 0, and
+   otherwise the last bit is a one and the unused bits after it are zero. */
+static bool spec_named_bits(const p8 *b, unsigned n)
+{
+        if (!n || b[0] > 7) return false;
+        if (n == 1) return b[0] == 0;
+        for (unsigned bit = 0; bit < b[0]; bit++)
+                if (b[n - 1] >> bit & 1) return false;
+        return b[n - 1] >> b[0] & 1;
+}
+static bool spec_leap(unsigned year)
+{
+        return (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+}
 static bool spec_oid(const p8 *b, unsigned n)
 {
         if (!n) return false;
@@ -63825,6 +64928,64 @@ int main(int argc, char **argv)
                                 if (oid != spec_oid(b, n)) fail("oid", word, n);
                         }
                 if (!slice && tls_oid_content_der((p8 *)"", 0)) fail("empty oid", 0, 0);
+        } else if (!strcmp(which, "bits")) {
+                /* Every content of up to four bytes as an INTEGER's and as a
+                   named bit list's. */
+                for (p64 word = from; word < to; word++)
+                        for (unsigned n = 1; n <= 4; n++) {
+                                if (n < 4 && (word >> (8 * n))) continue;
+                                p8 b[4];
+                                for (unsigned i = 0; i < n; i++) b[i] = (p8)(word >> (8 * (n - 1 - i)));
+                                seen++;
+                                byte_reader r = byte_reader_open(b, n);
+                                bool named = tls_der_named_bits(r);
+                                reached += named;
+                                if (tls_der_integer(r) != spec_integer(b, n)) fail("integer", word, n);
+                                if (named != spec_named_bits(b, n)) fail("named bits", word, n);
+                        }
+                if (!slice) {
+                        byte_reader none = byte_reader_open((p8 *)"", 0);
+                        seen++;
+                        if (tls_der_integer(none) || tls_der_named_bits(none)) fail("empty", 0, 0);
+                }
+        } else if (!strcmp(which, "dates")) {
+                /* Every day from 1950 through 2399 at four times of day: its
+                   seconds past 1950-01-01 00:00:00 are the days counted one
+                   by one, times 86,400, and the time; and as a nextUpdate,
+                   with a thisUpdate of 1950-01-01, it holds at 2100-06-15
+                   12:00:00 exactly when it is no more than five minutes
+                   behind it. */
+                static const unsigned month_days[12] = {31, 28, 31, 30, 31, 30,
+                                                        31, 31, 30, 31, 30, 31};
+                static const unsigned times[4][3] = {{0, 0, 0}, {23, 59, 59},
+                                                     {12, 34, 56}, {11, 55, 0}};
+                const p64 first = 19500101000000ull, now = 21000615120000ull;
+                p64 base = tls_date_seconds(first), index = 0, now_index = 0;
+                for (unsigned y = 1950; y < 2100; y++)
+                        now_index += 365 + spec_leap(y);
+                for (unsigned m = 1; m < 6; m++)
+                        now_index += month_days[m - 1] + (m == 2 && spec_leap(2100));
+                now_index += 14;
+                p64 now_seconds = now_index * 86400 + 12 * 3600;
+                for (unsigned y = 1950; y < 2400; y++)
+                        for (unsigned m = 1; m <= 12; m++) {
+                                unsigned limit = month_days[m - 1] + (m == 2 && spec_leap(y));
+                                for (unsigned d = 1; d <= limit; d++, index++) {
+                                        if (index % slices != slice) continue;
+                                        for (unsigned t = 0; t < 4; t++, seen++) {
+                                                p64 packed = (((((p64)y * 100 + m) * 100 + d) * 100 +
+                                                               times[t][0]) * 100 + times[t][1]) * 100 + times[t][2];
+                                                p64 want = index * 86400 + times[t][0] * 3600 +
+                                                           times[t][1] * 60 + times[t][2];
+                                                bool fresh = tls_revocation_fresh(first, packed, now);
+                                                reached += fresh;
+                                                if (tls_date_seconds(packed) - base != want)
+                                                        fail("date seconds", packed, want);
+                                                if (fresh != (now_seconds <= want + 300))
+                                                        fail("fresh", packed, fresh);
+                                        }
+                                }
+                        }
         } else if (!strcmp(which, "dots")) {
                 /* Every string of up to four bytes, then longer ones over the
                    bytes the function tells apart: '.', '%', '2', 'e', 'E' and
@@ -64491,6 +65652,158 @@ int main(void)
         return 0;
 }
 ''', ["dhcp_sum", "dhcp_unframe"], lambda net: dhcp_frame_proof_lift(net)),
+("tls_der_cursor", 9, r'''
+/* PRODUCTION */
+#define N 8
+/* One DER value off any reader of up to N bytes, whatever its tag: the
+   window is inside the reader's bytes past a header of two octets or more,
+   the reader resumes where the window ends, and a refusal leaves the reader
+   failed and empty. The same bytes as INTEGER contents and as a named bit
+   list's: accepted only when DER's one spelling (X.690 8.3.2, 11.2.2). */
+int main(void)
+{
+        p8 bytes[N];
+        positive size = nondet_positive();
+        p8 tag = nondet_p8();
+        __CPROVER_assume(size <= N);
+        byte_reader reader = byte_reader_open(bytes, size);
+        byte_reader inside = tls_der_value(&reader, tag);
+        if (byte_reader_ok(&inside)) {
+                if (inside.left) REACHED();
+                assert(byte_reader_ok(&reader) && bytes[0] == tag);
+                assert(inside.bytes >= bytes + 2 && inside.bytes + inside.left <= bytes + size);
+                assert(reader.bytes == inside.bytes + inside.left &&
+                       reader.left == (positive)(bytes + size - reader.bytes));
+        } else
+                assert(!byte_reader_ok(&reader) && !reader.left);
+        byte_reader whole = byte_reader_open(bytes, size);
+        if (tls_der_integer(whole)) {
+                assert(size >= 1);
+                if (size >= 2)
+                        assert(!(bytes[0] == 0 && bytes[1] < 0x80) &&
+                               !(bytes[0] == 0xff && bytes[1] >= 0x80));
+        }
+        if (tls_der_named_bits(whole)) {
+                assert(size >= 1 && bytes[0] <= 7);
+                if (size > 1) {
+                        p8 last = bytes[size - 1];
+                        assert((last >> bytes[0]) & 1);
+                        assert(!(last & ((1u << bytes[0]) - 1)));
+                } else
+                        assert(!bytes[0]);
+        }
+        return 0;
+}
+''', ["tls_asn1_length", "tls_asn1_enter", "tls_der_value", "tls_der_integer",
+      "tls_der_named_bits"],
+ "#define TLS_OK 0\n#define TLS_FAIL (-1)\n#define positive_max (~(positive)0)\n"),
+("tls_entry_status", 4, r'''
+/* PRODUCTION */
+#define N 20
+/* A CertificateEntry's extensions of any bytes up to N: accepted empty, or
+   when asked as exactly one status_request of type ocsp whose response is
+   at least a byte and ends the extensions -- and that response is handed
+   back inside them, eight bytes in. Unasked, only empty passes. */
+int main(void)
+{
+        p8 bytes[N];
+        positive length = nondet_positive();
+        bool asked = nondet_bool();
+        const p8 *response = (const p8 *)bytes;
+        positive response_length = 99;
+        __CPROVER_assume(length <= N);
+        if (tls_entry_status(bytes, length, asked, &response, &response_length)) {
+                if (!length) {
+                        assert(!response && !response_length);
+                } else {
+                        REACHED();
+                        assert(asked && bytes[0] == 0 && bytes[1] == 5 && bytes[4] == 1);
+                        assert(response == bytes + 8 && response_length >= 1 &&
+                               response_length == length - 8);
+                }
+        }
+        return 0;
+}
+''', ["tls_entry_status"], ""),
+("tls_tls_feature", 12, r'''
+/* PRODUCTION */
+#define N 12
+/* A TLS Feature value of any bytes up to N: when it parses and says
+   must-staple, the INTEGER 5 is in it (02 01 05). */
+int main(void)
+{
+        p8 value[N];
+        positive length = nondet_positive();
+        tls_cert cert = {false};
+        __CPROVER_assume(length <= N);
+        if (tls_parse_tls_feature(value, length, &cert) == TLS_OK && cert.must_staple) {
+                bool five = false;
+                REACHED();
+                for (positive at = 0; at + 3 <= length; at++)
+                        five |= value[at] == 2 && value[at + 1] == 1 && value[at + 2] == 5;
+                assert(five && value[0] == 0x30);
+        }
+        return 0;
+}
+''', ["tls_asn1_length", "tls_asn1_enter", "tls_der_value", "tls_der_peek",
+      "tls_der_integer", "tls_parse_tls_feature"],
+ "#define TLS_OK 0\n#define TLS_FAIL (-1)\n#define positive_max (~(positive)0)\n"
+ "typedef struct { bool must_staple; } tls_cert;\n"),
+("tls_authority_key", 10, r'''
+/* PRODUCTION */
+#define N 12
+/* An authorityKeyIdentifier value of any bytes up to N: when it parses,
+   the key identifier it keeps lies inside it, past its own two-byte
+   header, and an issuer [1] never comes without its serial [2]. */
+int main(void)
+{
+        p8 value[N];
+        positive length = nondet_positive();
+        p8 *key = (p8 *)1;
+        positive key_length = 99;
+        __CPROVER_assume(length <= N);
+        if (tls_parse_authority_key(value, length, &key, &key_length) == TLS_OK) {
+                assert(value[0] == 0x30);
+                if (key) {
+                        REACHED();
+                        assert(key >= value + 4 && key + key_length <= value + length);
+                } else
+                        assert(!key_length);
+        }
+        return 0;
+}
+''', ["tls_asn1_length", "tls_asn1_enter", "tls_der_value", "tls_der_peek",
+      "tls_der_integer", "tls_general_names_valid", "tls_parse_authority_key"],
+ "#define TLS_OK 0\n#define TLS_FAIL (-1)\n#define positive_max (~(positive)0)\n"),
+("tls_crl_scope", 10, r'''
+/* PRODUCTION */
+#define N 12
+/* An issuingDistributionPoint value of any bytes up to N: when it parses,
+   it is not empty, at most one of user, CA and attribute certificates only
+   is set, and the names it keeps are inside it -- a fullName, never a
+   relative name. */
+int main(void)
+{
+        p8 value[N];
+        positive length = nondet_positive();
+        tls_crl_scope scope;
+        __CPROVER_assume(length <= N);
+        if (tls_parse_crl_scope(value, length, &scope) == TLS_OK) {
+                if (scope.user_only || scope.ca_only) REACHED();
+                assert(scope.present && length >= 3 && value[0] == 0x30);
+                assert(scope.user_only + scope.ca_only + scope.attribute_only <= 1);
+                if (scope.names)
+                        assert(!scope.relative && scope.names >= value + 6 &&
+                               scope.names + scope.names_length <= value + length &&
+                               scope.names_length >= 2);
+        }
+        return 0;
+}
+''', ["tls_asn1_length", "tls_asn1_enter", "tls_der_value", "tls_der_peek",
+      "tls_der_flag", "tls_der_named_bits", "tls_general_names_valid",
+      "tls_parse_crl_scope"],
+ lambda net: "#define TLS_OK 0\n#define TLS_FAIL (-1)\n#define positive_max (~(positive)0)\n" +
+ ul_c_typedefs(net, "tls_crl_scope") + "\n"),
 ]
 
 
@@ -65026,7 +66339,7 @@ int main(void) {
 
 NET_DEPENDENCY_PRIMITIVES = frozenset("""
 array_count array_store_release array_store_reserve
-byte_reader_end byte_reader_here byte_reader_left byte_reader_ok byte_reader_open
+byte_reader_dead byte_reader_end byte_reader_here byte_reader_left byte_reader_ok byte_reader_open
 byte_reader_skip byte_reader_take byte_reader_u16 byte_reader_u16le
 byte_reader_u24 byte_reader_u32 byte_reader_u32le byte_reader_u8 byte_reader_vector16
 byte_reader_vector24 byte_reader_vector8 byte_reader_window
@@ -65244,7 +66557,7 @@ def harness_security_hygiene(argv):
     source = Path(__file__).resolve().read_text()
 
     security = ("tls_chains", "https_downgrade", "http_response_framing",
-                "tls_der_fuzz", "tls_hs_fuzz", "tls_fuzz", "msan_net", "pathname_race",
+                "tls_der_fuzz", "tls_ocsp_fuzz", "tls_crl_fuzz", "tls_hs_fuzz", "tls_fuzz", "msan_net", "pathname_race",
                 "dhcp_fuzz", "dhcp_frame_fuzz", "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "tls_peer",
                 "http_fuzz", "http_urls", "wifi_eapol_fuzz", "wifi_scan_fuzz", "wifi_key_state",
                 "wifi_sae_fuzz",
@@ -65266,13 +66579,15 @@ def harness_security_hygiene(argv):
         checks(name in HARNESS_CHECKS, "differential.py: %s is not registered" % name)
         checks("--harness " + name in run, "test/run: no lane asks for --harness " + name)
         checks(name + ": skipped (soft)" in run, "test/run: no soft skip for " + name)
-    for name in ("tls_der_fuzz", "tls_hs_fuzz", "pathname_race", "dhcp_fuzz",
-                 "dhcp_frame_fuzz", "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "http_fuzz", "wifi_eapol_fuzz",
+    for name in ("tls_der_fuzz", "tls_ocsp_fuzz", "tls_crl_fuzz", "tls_hs_fuzz",
+                 "pathname_race", "dhcp_fuzz", "dhcp_frame_fuzz",
+                 "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "http_fuzz", "wifi_eapol_fuzz",
                  "wifi_scan_fuzz", "wifi_sae_fuzz", "bowl_sig_fuzz"):
         checks(name + ": skipped (soft)" in run, "test/run: no soft skip for " + name)
 
     names = set()
-    for corpus in ("tls_der", "tls_hs", "dhcp", "sntp", "dns", "netlink", "http"):
+    for corpus in ("tls_der", "tls_ocsp", "tls_crl", "tls_hs", "dhcp", "sntp", "dns",
+                   "netlink", "http"):
         seeds = tls_fuzz_seeds(corpus)
         names.update(seeds)
         checks(bool(seeds), "tls_fuzz_seeds(%r) is empty" % corpus)
@@ -65430,6 +66745,15 @@ def harness_security_hygiene(argv):
         ("tls_asn1_enter", ("bytes",)),
         ("tls_asn1_skip", ("bytes",)),
         ("tls_asn1_take", ("bytes",)),
+        ("tls_entry_status", ("bytes",)),
+        ("tls12_certificate_status", ("body",)),
+        ("tls_parse_crl_points", ("value",)),
+        ("tls_parse_authority_key", ("value",)),
+        ("tls_parse_tls_feature", ("value",)),
+        ("tls_parse_ocsp_single", ("bytes",)),
+        ("tls_parse_ocsp", ("bytes",)),
+        ("tls_parse_crl_scope", ("value",)),
+        ("tls_parse_crl", ("bytes",)),
         ("wifi_gtk_take", ("plain",)),
         ("wifi_sae_frame_read", ("frame",)),
         ("wifi_assoc_status_read", ("frame",)),
@@ -85037,6 +86361,8 @@ HARNESS_CHECKS = {
     "sntp_era": harness_sntp_era,
     "http_urls": harness_http_urls,
     "tls_der_fuzz": harness_tls_der_fuzz,
+    "tls_ocsp_fuzz": harness_tls_ocsp_fuzz,
+    "tls_crl_fuzz": harness_tls_crl_fuzz,
     "tls_hs_fuzz": harness_tls_hs_fuzz,
     "tls_verify_fuzz": harness_tls_verify_fuzz,
     "sntp_fuzz": harness_sntp_fuzz,

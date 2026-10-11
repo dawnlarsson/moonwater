@@ -5505,9 +5505,17 @@ static bool crypto_rsa_pss_sha256(p8 address_to n_bytes, positive n_length,
 #define TLS_NOT_YET (-4)
 /* Or that no name in it was the host's. */
 #define TLS_MISMATCH (-5)
+/* Or that its issuer says it is revoked, in a CRL or a stapled OCSP
+   response; or that whether it is could not be told where the answer is
+   required: a must-staple leaf without a good staple in every tier, and an
+   unreachable, stale or unreadable source at the tight one. */
+#define TLS_REVOKED (-6)
+#define TLS_UNCHECKED (-7)
 #define TLS_FAULT_EARLY 1
 #define TLS_FAULT_LATE 2
 #define TLS_FAULT_NAME 3
+#define TLS_FAULT_REVOKED 4
+#define TLS_FAULT_UNCHECKED 5
 
 #define TLS_CT_CCS 20
 #define TLS_CT_ALERT 21
@@ -5525,6 +5533,7 @@ static bool crypto_rsa_pss_sha256(p8 address_to n_bytes, positive n_length,
 #define TLS_HS_CLIENT_KEY_EXCHANGE 16
 #define TLS_HS_CERT_VERIFY 15
 #define TLS_HS_FINISHED 20
+#define TLS_HS_CERTIFICATE_STATUS 22
 #define TLS_HS_KEY_UPDATE 24
 
 /* One trust anchor from anchors.inc: hashes that find candidates, then the
@@ -5564,6 +5573,27 @@ static const p8 tls_oid_server_auth[8] = {0x2b, 0x06, 0x01, 0x05,
                                           0x05, 0x07, 0x03, 0x01};
 static const p8 tls_oid_authority_info[8] = {0x2b, 0x06, 0x01, 0x05,
                                              0x05, 0x07, 0x01, 0x01};
+/* Revocation: the certificate's cRLDistributionPoints, authorityKeyIdentifier
+   and TLS Feature (RFC 7633) extensions and id-kp-OCSPSigning; a CRL's
+   cRLNumber, deltaCRLIndicator and issuingDistributionPoint and an entry's
+   reasonCode and invalidityDate; id-pkix-ocsp-basic; and the two hashes an
+   OCSP CertID names its issuer by, SHA-1 and SHA-256. */
+static const p8 tls_oid_crl_points[3] = {0x55, 0x1d, 0x1f};
+static const p8 tls_oid_authority_key[3] = {0x55, 0x1d, 0x23};
+static const p8 tls_oid_tls_feature[8] = {0x2b, 0x06, 0x01, 0x05,
+                                          0x05, 0x07, 0x01, 0x18};
+static const p8 tls_oid_ocsp_signing[8] = {0x2b, 0x06, 0x01, 0x05,
+                                           0x05, 0x07, 0x03, 0x09};
+static const p8 tls_oid_crl_number[3] = {0x55, 0x1d, 0x14};
+static const p8 tls_oid_delta_crl[3] = {0x55, 0x1d, 0x1b};
+static const p8 tls_oid_crl_scope[3] = {0x55, 0x1d, 0x1c};
+static const p8 tls_oid_crl_reason[3] = {0x55, 0x1d, 0x15};
+static const p8 tls_oid_invalidity[3] = {0x55, 0x1d, 0x18};
+static const p8 tls_oid_ocsp_basic[9] = {0x2b, 0x06, 0x01, 0x05, 0x05,
+                                         0x07, 0x30, 0x01, 0x01};
+static const p8 tls_oid_sha1[5] = {0x2b, 0x0e, 0x03, 0x02, 0x1a};
+static const p8 tls_oid_sha256[9] = {0x60, 0x86, 0x48, 0x01, 0x65,
+                                     0x03, 0x04, 0x02, 0x01};
 
 typedef struct
 {
@@ -5591,6 +5621,16 @@ typedef struct
            clock (which side of them the clock is on), that reason. */
         bool untrusted;
         p8 fault;
+        /* status_request went in the hello (only when the chain is checked:
+           a staple is read for revocation and nothing else); a TLS 1.2
+           server echoed it, so a CertificateStatus may follow its
+           Certificate, whose check then waits for it (chain_pending). */
+        bool status_requested;
+        bool status_echoed;
+        bool chain_pending;
+        /* The handshake's deadline while it runs: a revocation fetch nests
+           in it. */
+        const network_deadline address_to deadline;
         /* TLS 1.2 (RFC 5246, 5288, 7627): the suite, the server's random,
            the master secret -- the premaster until the client's flight --
            and the client's key exchange point, made when the server's
@@ -6243,6 +6283,175 @@ static COLD bipolar tls_asn1_enter_oid(p8 address_to bytes, positive size,
                                  address_to stop - address_to at))
                 return TLS_FAIL;
         return TLS_OK;
+}
+
+/*
+        The same DER read through a cursor, for the revocation parsers: a
+        CRL and an OCSP response arrive over plain HTTP and in a handshake,
+        so nothing in them is trusted until a signature over them verifies,
+        and they hold no index into what they read (security_hygiene).
+
+        tls_der_value is one value of the tag at the reader's front: its
+        contents as a reader of their own, and the reader past it. A wrong
+        tag, a length tls_asn1_length refuses or one longer than what is left
+        fails both. tls_der_peek is the tag at the front, or 0 at the end or
+        on a failed reader (no DER tag here is 0). tls_der_whole is one value,
+        header and all, for a signature over it or a byte comparison.
+*/
+static COLD byte_reader tls_der_value(byte_reader address_to reader, p8 tag)
+{
+        p8 address_to bytes = (p8 address_to)byte_reader_here(reader);
+        positive at = 0;
+        positive stop = 0;
+
+        if (!bytes || tls_asn1_enter(bytes, byte_reader_left(reader), tag,
+                                     address_of at, address_of stop))
+        {
+                (void)byte_reader_take(reader, positive_max);
+                return byte_reader_dead();
+        }
+        (void)byte_reader_skip(reader, at);
+        return byte_reader_window(reader, stop - at);
+}
+
+static COLD p8 tls_der_peek(byte_reader reader)
+{
+        return byte_reader_u8(&reader);
+}
+
+static COLD p8 address_to tls_der_whole(byte_reader address_to reader, p8 tag,
+                                        positive address_to length)
+{
+        p8 address_to start = (p8 address_to)byte_reader_here(reader);
+        positive before = byte_reader_left(reader);
+        byte_reader inside = tls_der_value(reader, tag);
+
+        address_to length = 0;
+        if (!byte_reader_ok(&inside))
+                return null;
+        address_to length = before - byte_reader_left(reader);
+        return start;
+}
+
+/* A DER INTEGER's contents: at least one octet, and no first octet that only
+   repeats the sign of the next (X.690 8.3.2). */
+static COLD bool tls_der_integer(byte_reader contents)
+{
+        positive length = byte_reader_left(&contents);
+        p8 first = byte_reader_u8(&contents);
+        p8 second;
+
+        if (!byte_reader_ok(&contents))
+                return false;
+        if (length == 1)
+                return true;
+        second = byte_reader_u8(&contents);
+        return !(first == 0 && !(second & 0x80)) &&
+               !(first == 0xff && (second & 0x80));
+}
+
+/* The one INTEGER whose contents are a single octet below 0x80 and the one
+   ENUMERATED: value, or -1 for anything else (a longer or negative one). */
+static COLD bipolar tls_der_small(byte_reader address_to reader, p8 tag)
+{
+        byte_reader contents = tls_der_value(reader, tag);
+        p8 value = byte_reader_u8(&contents);
+
+        return byte_reader_end(&contents) && value < 0x80 ? value : -1;
+}
+
+/* A BOOLEAN DEFAULT FALSE under an implicit context tag, which DER spells
+   only when TRUE (see tls_asn1_true): absent is false, present has to be
+   one octet 0xff. False with the reader failed for any other spelling. */
+static COLD bool tls_der_flag(byte_reader address_to reader, p8 tag)
+{
+        byte_reader contents;
+
+        if (tls_der_peek(*reader) != tag)
+                return false;
+        contents = tls_der_value(reader, tag);
+        if (byte_reader_u8(&contents) == 0xff && byte_reader_end(&contents))
+                return true;
+        (void)byte_reader_take(reader, positive_max);
+        return false;
+}
+
+/* A named bit list's BIT STRING contents (ReasonFlags), held to DER's one
+   spelling as tls_parse_key_usage holds keyUsage: the unused count is the
+   final octet's trailing zeros, and that octet is not zero. The empty list is
+   one octet, 0. */
+static COLD bool tls_der_named_bits(byte_reader contents)
+{
+        p8 unused = byte_reader_u8(&contents);
+        p8 final;
+        p8 zeros = 0;
+
+        if (!byte_reader_ok(&contents) || unused > 7)
+                return false;
+        if (!byte_reader_left(&contents))
+                return !unused;
+        (void)byte_reader_skip(&contents, byte_reader_left(&contents) - 1);
+        final = byte_reader_u8(&contents);
+        if (!final)
+                return false;
+        while (!(final & 1))
+        {
+                zeros++;
+                final >>= 1;
+        }
+        return zeros == unused;
+}
+
+/* GeneralNames' contents (RFC 5280 4.2.1.6): one name or more, each a whole
+   value under one of the nine context tags the CHOICE defines. */
+static COLD bool tls_general_names_valid(byte_reader names)
+{
+        if (!byte_reader_left(&names))
+                return false;
+        while (byte_reader_left(&names))
+        {
+                p8 tag = tls_der_peek(names);
+
+                if (tag != 0xa0 && tag != 0x81 && tag != 0x82 && tag != 0xa3 &&
+                    tag != 0xa4 && tag != 0xa5 && tag != 0x86 && tag != 0x87 &&
+                    tag != 0x88)
+                        return false;
+                (void)tls_der_value(&names, tag);
+        }
+        return byte_reader_ok(&names);
+}
+
+/* Whether two GeneralNames share a name, byte for byte (RFC 5280 6.3.3
+   (b)(2)(i), a CRL's issuingDistributionPoint against the distribution
+   point the certificate named). Each list is walked TLS_NAMES_MEET names
+   deep at most, so a signed but hostile list costs at most its square. */
+#define TLS_NAMES_MEET 16
+
+static COLD bool tls_general_names_meet(byte_reader one, byte_reader two)
+{
+        for (positive i = 0; byte_reader_left(&one) && i < TLS_NAMES_MEET; i++)
+        {
+                positive length = 0;
+                const p8 address_to name = tls_der_whole(&one, tls_der_peek(one),
+                                                         address_of length);
+                byte_reader other = two;
+
+                if (!name)
+                        return false;
+                for (positive j = 0; byte_reader_left(&other) && j < TLS_NAMES_MEET;
+                     j++)
+                {
+                        positive size = 0;
+                        const p8 address_to candidate = tls_der_whole(
+                            &other, tls_der_peek(other), address_of size);
+
+                        if (!candidate)
+                                break;
+                        if (size == length && !memory_compare(candidate, name, size))
+                                return true;
+                }
+        }
+        return false;
 }
 
 /* DER INTEGERs used for keys and ECDSA signatures are strictly positive and
@@ -7044,6 +7253,24 @@ typedef struct
         /* The first http: caIssuers location, or null (tls_parse_ca_issuers). */
         p8 address_to ca_issuers;
         positive ca_issuers_length;
+        /* Revocation. The serial's INTEGER contents, sign octet and all, as
+           a CRL entry or an OCSP CertID spells it; the SubjectPublicKey BIT
+           STRING past its unused-bits octet, what an OCSP issuerKeyHash and
+           a byKey responder hash; the first whole-reason http: CRL
+           distribution point and the fullName it is one of (null when there
+           is none, tls_parse_crl_points); authorityKeyIdentifier's
+           keyIdentifier, or null; and the TLS Feature status_request. */
+        p8 address_to serial;
+        positive serial_length;
+        p8 address_to key_bits;
+        positive key_bits_length;
+        p8 address_to crl_url;
+        positive crl_url_length;
+        p8 address_to crl_names;
+        positive crl_names_length;
+        p8 address_to authority_key;
+        positive authority_key_length;
+        bool must_staple;
         p8 curve;
         p8 qx[48];
         p8 qy[48];
@@ -7059,8 +7286,10 @@ typedef struct
         bool key_usage;
         bool digital_signature;
         bool key_cert_sign;
+        bool crl_sign;
         bool extended_key_usage;
         bool server_auth;
+        bool ocsp_signing;
         bool san_match;
         bool unsupported_critical;
 } tls_cert;
@@ -7132,6 +7361,54 @@ static COLD bool tls_date_value(p8 tag, p8 address_to text, positive length,
         answer = answer * 100 + second;
         address_to value = answer;
         return true;
+}
+
+/* An OCSP time: GeneralizedTime in every year (RFC 6960 4.2.1), held to the
+   one spelling RFC 5280 4.1.2.5.2 allows it, YYYYMMDDHHMMSSZ. From 2050 on
+   that is tls_date_value's own GeneralizedTime; before, its digits past the
+   century are the UTCTime of the same moment, and the century has to be the
+   one that UTCTime implies (so 1950 through 2049). */
+static COLD bool tls_date_general(p8 address_to text, positive length,
+                                  p64 address_to value)
+{
+        p64 answer = 0;
+
+        if (tls_date_value(0x18, text, length, value))
+                return true;
+        if (length != 15 || text[0] < '1' || text[0] > '2' || text[1] < '0' ||
+            text[1] > '9' ||
+            !tls_date_value(0x17, text + 2, 13, address_of answer) ||
+            answer / 1000000000000ull !=
+                (p64)(text[0] - '0') * 10 + (p64)(text[1] - '0'))
+                return false;
+        address_to value = answer;
+        return true;
+}
+
+/* A date as tls_date_value keeps it, YYYYMMDDHHMMSS, as seconds from the
+   start of year 0 of the proleptic Gregorian calendar (the days are
+   Hinnant's days_from_civil): how far apart two dates are, for the clock
+   skew a revocation answer is allowed. 0 for 0. */
+static COLD p64 tls_date_seconds(p64 date)
+{
+        p64 year = date / 10000000000ull;
+        p64 month = date / 100000000 % 100;
+        p64 day = date / 1000000 % 100;
+        p64 shifted;
+        p64 era;
+        p64 of_era;
+        p64 of_year;
+        p64 days;
+
+        if (!year || !month)
+                return 0;
+        shifted = month <= 2 ? year - 1 : year;
+        era = shifted / 400;
+        of_era = shifted - era * 400;
+        of_year = (153 * (month > 2 ? month - 3 : month + 9) + 2) / 5 + day - 1;
+        days = era * 146097 + of_era * 365 + of_era / 4 - of_era / 100 + of_year;
+        return ((days * 24 + date / 10000 % 100) * 60 + date / 100 % 100) * 60 +
+               date % 100;
 }
 
 static COLD bipolar tls_parse_validity(p8 address_to der, positive size,
@@ -7238,6 +7515,7 @@ static COLD bipolar tls_parse_key_usage(p8 address_to value, positive length,
                 return TLS_FAIL;
         cert->digital_signature = (value[at] & 0x80) != 0;
         cert->key_cert_sign = (value[at] & 0x04) != 0;
+        cert->crl_sign = (value[at] & 0x02) != 0;
         return TLS_OK;
 }
 
@@ -7259,6 +7537,8 @@ static COLD bipolar tls_parse_extended_key_usage(p8 address_to value, positive l
                         return TLS_FAIL;
                 if (tls_oid_is(value + at, oid_stop - at, tls_oid_server_auth, 8))
                         cert->server_auth = true;
+                if (tls_oid_is(value + at, oid_stop - at, tls_oid_ocsp_signing, 8))
+                        cert->ocsp_signing = true;
                 at = oid_stop;
         }
         return TLS_OK;
@@ -7302,6 +7582,143 @@ static COLD fn tls_parse_ca_issuers(p8 address_to value, positive length,
                 }
                 at = access_stop;
         }
+}
+
+/* cRLDistributionPoints (RFC 5280 4.2.1.13), every point checked: each a
+   distributionPoint [0], reasons [1] and cRLIssuer [2] in that order, not
+   reasons alone, the name a fullName [0] of GeneralNames or a
+   nameRelativeToCRLIssuer [1]. The one kept is the first point that covers
+   every reason and is its own CA's (no reasons, no cRLIssuer) with an http:
+   URI in its fullName: that URI is fetched (tls_crl_answer), and the
+   fullName is what a partitioned CRL's issuingDistributionPoint has to
+   share a name with. A value that does not parse refuses the certificate,
+   as OpenSSL refuses it: a distribution point is how the issuer says where
+   revocation is published, and one that cannot be read cannot be honoured. */
+static COLD bipolar tls_parse_crl_points(p8 address_to value, positive length,
+                                         tls_cert address_to cert)
+{
+        byte_reader reader = byte_reader_open(value, length);
+        byte_reader points = tls_der_value(&reader, 0x30);
+
+        if (!byte_reader_end(&reader) || !byte_reader_left(&points))
+                return TLS_FAIL;
+        while (byte_reader_left(&points))
+        {
+                byte_reader point = tls_der_value(&points, 0x30);
+                byte_reader full = byte_reader_dead();
+                bool named = false;
+                bool partial = false;
+                bool delegated = false;
+
+                if (tls_der_peek(point) == 0xa0)
+                {
+                        byte_reader name = tls_der_value(&point, 0xa0);
+                        p8 form = tls_der_peek(name);
+                        byte_reader inside = tls_der_value(&name, form);
+
+                        if ((form != 0xa0 && form != 0xa1) || !byte_reader_end(&name) ||
+                            (form == 0xa0 ? !tls_general_names_valid(inside)
+                                          : !byte_reader_left(&inside)))
+                                return TLS_FAIL;
+                        if (form == 0xa0)
+                                full = inside;
+                        named = true;
+                }
+                if (tls_der_peek(point) == 0x81)
+                {
+                        if (!tls_der_named_bits(tls_der_value(&point, 0x81)))
+                                return TLS_FAIL;
+                        partial = true;
+                }
+                if (tls_der_peek(point) == 0xa2)
+                {
+                        if (!tls_general_names_valid(tls_der_value(&point, 0xa2)))
+                                return TLS_FAIL;
+                        delegated = true;
+                }
+                if (!byte_reader_end(&point) || (!named && !delegated))
+                        return TLS_FAIL;
+                if (cert->crl_url || partial || delegated || !byte_reader_ok(&full))
+                        continue;
+                for (byte_reader names = full; byte_reader_left(&names);)
+                {
+                        p8 tag = tls_der_peek(names);
+                        byte_reader uri = tls_der_value(&names, tag);
+                        const p8 address_to text = byte_reader_here(&uri);
+                        positive size = byte_reader_left(&uri);
+
+                        if (tag == 0x86 && size > 7 && tls_printable(text, size) &&
+                            !memory_compare_ascii_case(text, "http://", 7))
+                        {
+                                cert->crl_url = (p8 address_to)text;
+                                cert->crl_url_length = size;
+                                cert->crl_names = (p8 address_to)byte_reader_here(&full);
+                                cert->crl_names_length = byte_reader_left(&full);
+                                break;
+                        }
+                }
+        }
+        return byte_reader_ok(&points) ? TLS_OK : TLS_FAIL;
+}
+
+/* authorityKeyIdentifier (RFC 5280 4.2.1.1): keyIdentifier [0], then
+   authorityCertIssuer [1] and authorityCertSerialNumber [2], the two only
+   together. The identifier is kept; a CRL that names its own has to name
+   the same one (tls_crl_answer). */
+static COLD bipolar tls_parse_authority_key(p8 address_to value, positive length,
+                                            p8 address_to address_to key,
+                                            positive address_to key_length)
+{
+        byte_reader reader = byte_reader_open(value, length);
+        byte_reader identifier = tls_der_value(&reader, 0x30);
+
+        address_to key = null;
+        address_to key_length = 0;
+        if (!byte_reader_end(&reader))
+                return TLS_FAIL;
+        if (tls_der_peek(identifier) == 0x80)
+        {
+                byte_reader octets = tls_der_value(&identifier, 0x80);
+
+                address_to key = (p8 address_to)byte_reader_here(&octets);
+                address_to key_length = byte_reader_left(&octets);
+        }
+        if (tls_der_peek(identifier) == 0xa1 &&
+            (!tls_general_names_valid(tls_der_value(&identifier, 0xa1)) ||
+             !tls_der_integer(tls_der_value(&identifier, 0x82))))
+                return TLS_FAIL;
+        return byte_reader_end(&identifier) ? TLS_OK : TLS_FAIL;
+}
+
+/* The TLS Feature extension (RFC 7633): a SEQUENCE of INTEGERs, each a TLS
+   extension number. status_request (5) among them is must-staple: the
+   leaf is refused in every tier unless the server staples a good OCSP
+   answer. Numbers are non-negative and at most 65535; an extension that
+   does not parse refuses the certificate, since it may be the one that
+   asked for a staple. */
+static COLD bipolar tls_parse_tls_feature(p8 address_to value, positive length,
+                                          tls_cert address_to cert)
+{
+        byte_reader reader = byte_reader_open(value, length);
+        byte_reader features = tls_der_value(&reader, 0x30);
+
+        if (!byte_reader_end(&reader))
+                return TLS_FAIL;
+        while (byte_reader_left(&features))
+        {
+                byte_reader number = tls_der_value(&features, 0x02);
+                positive feature = 0;
+
+                if (!tls_der_integer(number) || byte_reader_left(&number) > 3 ||
+                    (tls_der_peek(number) & 0x80))
+                        return TLS_FAIL;
+                while (byte_reader_left(&number))
+                        feature = feature << 8 | byte_reader_u8(&number);
+                if (feature > 0xffff)
+                        return TLS_FAIL;
+                cert->must_staple |= feature == 5;
+        }
+        return byte_reader_ok(&features) ? TLS_OK : TLS_FAIL;
 }
 
 static COLD bipolar tls_parse_extensions(p8 address_to der, positive tbs_stop,
@@ -7441,6 +7858,26 @@ static COLD bipolar tls_parse_extensions(p8 address_to der, positive tbs_stop,
                          tls_oid_is(der + oid_at, oid_stop - oid_at,
                                     tls_oid_authority_info, 8))
                         tls_parse_ca_issuers(der + at, value_stop - at, cert);
+                else if (tls_oid_is(der + oid_at, oid_stop - oid_at,
+                                    tls_oid_crl_points, 3))
+                {
+                        if (tls_parse_crl_points(der + at, value_stop - at, cert))
+                                return TLS_FAIL;
+                }
+                else if (tls_oid_is(der + oid_at, oid_stop - oid_at,
+                                    tls_oid_authority_key, 3))
+                {
+                        if (tls_parse_authority_key(der + at, value_stop - at,
+                                                    address_of cert->authority_key,
+                                                    address_of cert->authority_key_length))
+                                return TLS_FAIL;
+                }
+                else if (tls_oid_is(der + oid_at, oid_stop - oid_at,
+                                    tls_oid_tls_feature, 8))
+                {
+                        if (tls_parse_tls_feature(der + at, value_stop - at, cert))
+                                return TLS_FAIL;
+                }
                 else if (critical)
                         cert->unsupported_critical = true;
 
@@ -7499,6 +7936,8 @@ static COLD bipolar tls_parse_cert(p8 address_to der, positive length,
                                           address_of value_at,
                                           address_of value_length))
                         return TLS_FAIL;
+                cert->serial = der + at;
+                cert->serial_length = serial_stop - at;
                 at = serial_stop;
         }
         {
@@ -7540,6 +7979,8 @@ static COLD bipolar tls_parse_cert(p8 address_to der, positive length,
                 return TLS_FAIL;
         if (at >= bit_stop || der[at++] != 0)
                 return TLS_FAIL;
+        cert->key_bits = der + at;
+        cert->key_bits_length = bit_stop - at;
 
         if (tls_oid_is(der + param_at, oid_stop - param_at, tls_oid_ec, 7))
         {
@@ -7620,6 +8061,774 @@ static COLD bipolar tls_parse_cert(p8 address_to der, positive length,
 
         return tls_parse_extensions(der, tbs_stop, spki_stop, version,
                                     cert, host);
+}
+
+/*
+        Revocation answers, read before anything vouches for them.
+
+        An OCSP response (RFC 6960) comes stapled in the handshake and a CRL
+        (RFC 5280 5) over plain HTTP from the address a certificate names, so
+        both are any peer's bytes until a signature over them verifies, and
+        their parsers run first: strict DER, every field in its place, every
+        extension known or not critical and none twice, every list under a
+        ceiling. What they keep are pointers into the bytes they were given.
+
+          TLS_OCSP_MAX         bytes of a stapled response; one has to fit a
+                               handshake message anyway
+          TLS_OCSP_RESPONSES   SingleResponses in one response
+          TLS_OCSP_CERTS       certificates one carries for a delegated
+                               responder
+          TLS_LIST_EXTENSIONS  extensions in a CRL, an entry, a response or a
+                               single response
+          TLS_CRL_ENTRIES      revoked certificates read in one CRL: 1.7
+                               times the 311,758 of the largest public one
+                               seen (DigiCert Global G2 TLS RSA SHA256 2020
+                               CA1, 11.7 MB, 2026-10-09), and fewer than the
+                               smallest entries (20 bytes) can fill below
+                               the three length octets tls_asn1_length reads,
+                               so the count binds before the length does
+*/
+#define TLS_OCSP_MAX 16384
+#define TLS_OCSP_RESPONSES 16
+#define TLS_OCSP_CERTS 4
+#define TLS_LIST_EXTENSIONS 16
+#define TLS_CRL_ENTRIES ((positive)1 << 19)
+#define TLS_OCSP_GOOD 0
+#define TLS_OCSP_REVOKED 1
+#define TLS_OCSP_UNKNOWN 2
+
+typedef struct
+{
+        const p8 address_to oid[TLS_LIST_EXTENSIONS];
+        positive length[TLS_LIST_EXTENSIONS];
+        positive count;
+} tls_seen;
+
+/* Whether a reader holds exactly these bytes: an OID's contents, say. */
+static COLD bool tls_der_is(byte_reader contents, const p8 address_to want,
+                            positive length)
+{
+        return byte_reader_ok(&contents) && byte_reader_left(&contents) == length &&
+               !memory_compare(byte_reader_here(&contents), want, length);
+}
+
+/* A Time (RFC 5280 4.1.2.5): UTCTime or GeneralizedTime by the certificate
+   rule, or -- generalized -- GeneralizedTime in every year, as OCSP and a
+   CRL entry's invalidityDate write it. Fails the reader on any other tag. */
+static COLD bool tls_der_time(byte_reader address_to reader, bool generalized,
+                              p64 address_to value)
+{
+        p8 tag = tls_der_peek(address_to reader);
+        byte_reader text;
+
+        if (tag != 0x18 && (generalized || tag != 0x17))
+        {
+                (void)byte_reader_take(reader, positive_max);
+                return false;
+        }
+        text = tls_der_value(reader, tag);
+        return byte_reader_ok(&text) &&
+               (generalized
+                    ? tls_date_general((p8 address_to)byte_reader_here(&text),
+                                       byte_reader_left(&text), value)
+                    : tls_date_value(tag, (p8 address_to)byte_reader_here(&text),
+                                     byte_reader_left(&text), value));
+}
+
+/* The next Extension of an Extensions list's contents: its OID, its
+   critical flag and its value's contents, the list read past it. False at
+   the end of the list, or with the list failed on anything malformed, on a
+   second of one OID, and past TLS_LIST_EXTENSIONS of them. */
+static COLD bool tls_der_extension(byte_reader address_to list,
+                                   tls_seen address_to seen,
+                                   byte_reader address_to oid,
+                                   bool address_to critical,
+                                   byte_reader address_to value)
+{
+        byte_reader extension;
+
+        if (!byte_reader_left(list))
+                return false;
+        extension = tls_der_value(list, 0x30);
+        address_to oid = tls_der_value(&extension, 0x06);
+        address_to critical = tls_der_flag(&extension, 0x01);
+        address_to value = tls_der_value(&extension, 0x04);
+        if (!byte_reader_end(&extension) ||
+            !tls_oid_content_der(byte_reader_here(oid), byte_reader_left(oid)) ||
+            seen->count == TLS_LIST_EXTENSIONS)
+                goto refused;
+        for (positive k = 0; k < seen->count; k++)
+                if (tls_der_is(address_to oid, seen->oid[k], seen->length[k]))
+                        goto refused;
+        seen->oid[seen->count] = byte_reader_here(oid);
+        seen->length[seen->count++] = byte_reader_left(oid);
+        return true;
+
+refused:
+        (void)byte_reader_take(list, positive_max);
+        return false;
+}
+
+/* A CRLReason (RFC 5280 5.3.1): 0 to 10 but the unused 7, and in a whole
+   CRL not removeFromCRL (8), which only a delta CRL may say. */
+static COLD bool tls_crl_reason(bipolar code, bool whole)
+{
+        return code >= 0 && code <= 10 && code != 7 && (!whole || code != 8);
+}
+
+typedef struct
+{
+        /* The hash the CertID names its issuer by: 1 SHA-1, 2 SHA-256. */
+        p8 hash;
+        p8 status;
+        positive hash_length;
+        const p8 address_to name_hash;
+        const p8 address_to key_hash;
+        const p8 address_to serial;
+        positive serial_length;
+        p64 this_update;
+        /* 0 when it names none. */
+        p64 next_update;
+} tls_ocsp_single;
+
+typedef struct
+{
+        /* ResponseData whole, the signature over it and its algorithm. */
+        p8 address_to tbs;
+        positive tbs_length;
+        p8 address_to sig_oid;
+        positive sig_oid_length;
+        const p8 address_to sig;
+        positive sig_length;
+        /* byName's Name, header and all, or byKey's SHA-1 key hash. */
+        const p8 address_to responder;
+        positive responder_length;
+        bool by_key;
+        p64 produced;
+        /* The SingleResponses' and the certificates' SEQUENCE contents. */
+        const p8 address_to responses;
+        positive responses_length;
+        const p8 address_to certs;
+        positive certs_length;
+} tls_ocsp;
+
+/* One SingleResponse (RFC 6960 4.2.1), whole: the CertID -- SHA-1 or
+   SHA-256 with NULL or absent parameters, both hashes that hash's length,
+   a DER serial -- then good [0], revoked [1] (a time and an optional
+   reason) or unknown [2], thisUpdate, an optional nextUpdate [0] and
+   singleExtensions [1], none critical. */
+static COLD bipolar tls_parse_ocsp_single(const p8 address_to bytes,
+                                          positive length,
+                                          tls_ocsp_single address_to single)
+{
+        byte_reader reader = byte_reader_open(bytes, length);
+        byte_reader response = tls_der_value(&reader, 0x30);
+        byte_reader id = tls_der_value(&response, 0x30);
+        byte_reader algorithm = tls_der_value(&id, 0x30);
+        byte_reader oid = tls_der_value(&algorithm, 0x06);
+        byte_reader name_hash;
+        byte_reader key_hash;
+        byte_reader serial;
+        byte_reader status;
+        p8 tag;
+
+        memory_fill(single, 0, sizeof(address_to single));
+        single->hash = tls_der_is(oid, tls_oid_sha1, 5)     ? 1
+                       : tls_der_is(oid, tls_oid_sha256, 9) ? 2
+                                                            : 0;
+        single->hash_length = single->hash == 1 ? 20 : 32;
+        if (byte_reader_left(&algorithm))
+        {
+                byte_reader nothing = tls_der_value(&algorithm, 0x05);
+
+                if (!byte_reader_end(&nothing))
+                        return TLS_FAIL;
+        }
+        name_hash = tls_der_value(&id, 0x04);
+        key_hash = tls_der_value(&id, 0x04);
+        serial = tls_der_value(&id, 0x02);
+        if (!single->hash || !byte_reader_end(&algorithm) || !byte_reader_end(&id) ||
+            byte_reader_left(&name_hash) != single->hash_length ||
+            byte_reader_left(&key_hash) != single->hash_length ||
+            !tls_der_integer(serial))
+                return TLS_FAIL;
+        single->name_hash = byte_reader_here(&name_hash);
+        single->key_hash = byte_reader_here(&key_hash);
+        single->serial = byte_reader_here(&serial);
+        single->serial_length = byte_reader_left(&serial);
+
+        tag = tls_der_peek(response);
+        status = tls_der_value(&response, tag);
+        if (tag == 0x80 || tag == 0x82)
+        {
+                if (!byte_reader_end(&status))
+                        return TLS_FAIL;
+                single->status = tag == 0x80 ? TLS_OCSP_GOOD : TLS_OCSP_UNKNOWN;
+        }
+        else if (tag == 0xa1)
+        {
+                p64 revoked = 0;
+
+                if (!tls_der_time(&status, true, address_of revoked))
+                        return TLS_FAIL;
+                if (tls_der_peek(status) == 0xa0)
+                {
+                        byte_reader reason = tls_der_value(&status, 0xa0);
+
+                        if (!tls_crl_reason(tls_der_small(&reason, 0x0a), false) ||
+                            !byte_reader_end(&reason))
+                                return TLS_FAIL;
+                }
+                if (!byte_reader_end(&status))
+                        return TLS_FAIL;
+                single->status = TLS_OCSP_REVOKED;
+        }
+        else
+                return TLS_FAIL;
+
+        if (!tls_der_time(&response, true, address_of single->this_update))
+                return TLS_FAIL;
+        if (tls_der_peek(response) == 0xa0)
+        {
+                byte_reader next = tls_der_value(&response, 0xa0);
+
+                if (!tls_der_time(&next, true, address_of single->next_update) ||
+                    !byte_reader_end(&next) ||
+                    single->next_update < single->this_update)
+                        return TLS_FAIL;
+        }
+        if (tls_der_peek(response) == 0xa1)
+        {
+                byte_reader wrapper = tls_der_value(&response, 0xa1);
+                byte_reader list = tls_der_value(&wrapper, 0x30);
+                byte_reader value;
+                bool critical = false;
+                tls_seen seen;
+
+                memory_fill(address_of seen, 0, sizeof seen);
+                if (!byte_reader_end(&wrapper) || !byte_reader_left(&list))
+                        return TLS_FAIL;
+                while (tls_der_extension(&list, address_of seen, address_of oid,
+                                         address_of critical, address_of value))
+                        if (critical)
+                                return TLS_FAIL;
+                if (!byte_reader_end(&list))
+                        return TLS_FAIL;
+        }
+        return byte_reader_end(&response) && byte_reader_end(&reader) ? TLS_OK
+                                                                      : TLS_FAIL;
+}
+
+/* An OCSPResponse (RFC 6960 4.2.1) of at most TLS_OCSP_MAX bytes that
+   answers: status successful (0, the only one with responseBytes),
+   id-pkix-ocsp-basic, and a BasicOCSPResponse of ResponseData (v1, which
+   DER leaves out; a responder byName [1] or byKey [2] of 20 bytes;
+   producedAt; one to TLS_OCSP_RESPONSES SingleResponses, each whole;
+   responseExtensions [1], none critical), a signature algorithm
+   tls_signature_algorithm knows, the signature, and up to TLS_OCSP_CERTS
+   certificates [0]. Any other status is TLS_FAIL: tryLater and the rest say
+   nothing about the certificate. */
+static COLD bipolar tls_parse_ocsp(p8 address_to bytes, positive length,
+                                   tls_ocsp address_to ocsp)
+{
+        byte_reader reader = byte_reader_open(bytes,
+                                              length > TLS_OCSP_MAX ? 0 : length);
+        byte_reader response = tls_der_value(&reader, 0x30);
+        bipolar status = tls_der_small(&response, 0x0a);
+        byte_reader wrapper = tls_der_value(&response, 0xa0);
+        byte_reader kind = tls_der_value(&wrapper, 0x30);
+        byte_reader oid = tls_der_value(&kind, 0x06);
+        byte_reader octets = tls_der_value(&kind, 0x04);
+        byte_reader basic = tls_der_value(&octets, 0x30);
+        byte_reader outer;
+        byte_reader data;
+        byte_reader bits;
+        byte_reader list;
+        p8 tag;
+        positive at = 0;
+        positive count = 0;
+
+        memory_fill(ocsp, 0, sizeof(address_to ocsp));
+        if (status || !byte_reader_end(&reader) || !byte_reader_end(&response) ||
+            !byte_reader_end(&wrapper) || !tls_der_is(oid, tls_oid_ocsp_basic, 9) ||
+            !byte_reader_end(&kind) || !byte_reader_end(&octets))
+                return TLS_FAIL;
+        ocsp->tbs = tls_der_whole(&basic, 0x30, address_of ocsp->tbs_length);
+        if (!ocsp->tbs ||
+            !tls_signature_algorithm((p8 address_to)byte_reader_here(&basic),
+                                     byte_reader_left(&basic), address_of at,
+                                     address_of ocsp->sig_oid,
+                                     address_of ocsp->sig_oid_length) ||
+            !byte_reader_skip(&basic, at))
+                return TLS_FAIL;
+        bits = tls_der_value(&basic, 0x03);
+        if (byte_reader_u8(&bits) || !byte_reader_left(&bits))
+                return TLS_FAIL;
+        ocsp->sig = byte_reader_here(&bits);
+        ocsp->sig_length = byte_reader_left(&bits);
+        if (tls_der_peek(basic) == 0xa0)
+        {
+                byte_reader holder = tls_der_value(&basic, 0xa0);
+
+                list = tls_der_value(&holder, 0x30);
+                if (!byte_reader_end(&holder))
+                        return TLS_FAIL;
+                ocsp->certs = byte_reader_here(&list);
+                ocsp->certs_length = byte_reader_left(&list);
+                for (count = 0; byte_reader_left(&list); count++)
+                {
+                        byte_reader certificate = tls_der_value(&list, 0x30);
+
+                        if (count == TLS_OCSP_CERTS || !byte_reader_ok(&certificate))
+                                return TLS_FAIL;
+                }
+                if (!byte_reader_ok(&list))
+                        return TLS_FAIL;
+        }
+        if (!byte_reader_end(&basic))
+                return TLS_FAIL;
+
+        outer = byte_reader_open(ocsp->tbs, ocsp->tbs_length);
+        data = tls_der_value(&outer, 0x30);
+        tag = tls_der_peek(data);
+        if (tag == 0xa1)
+        {
+                byte_reader name = tls_der_value(&data, 0xa1);
+
+                ocsp->responder = tls_der_whole(&name, 0x30,
+                                                address_of ocsp->responder_length);
+                if (!ocsp->responder || !byte_reader_end(&name))
+                        return TLS_FAIL;
+        }
+        else if (tag == 0xa2)
+        {
+                byte_reader name = tls_der_value(&data, 0xa2);
+                byte_reader hash = tls_der_value(&name, 0x04);
+
+                if (byte_reader_left(&hash) != 20 || !byte_reader_end(&name))
+                        return TLS_FAIL;
+                ocsp->responder = byte_reader_here(&hash);
+                ocsp->responder_length = 20;
+                ocsp->by_key = true;
+        }
+        else
+                return TLS_FAIL;
+        if (!tls_der_time(&data, true, address_of ocsp->produced))
+                return TLS_FAIL;
+        list = tls_der_value(&data, 0x30);
+        ocsp->responses = byte_reader_here(&list);
+        ocsp->responses_length = byte_reader_left(&list);
+        if (!byte_reader_left(&list))
+                return TLS_FAIL;
+        for (count = 0; byte_reader_left(&list); count++)
+        {
+                positive size = 0;
+                const p8 address_to whole = tls_der_whole(&list, 0x30, address_of size);
+                tls_ocsp_single single;
+
+                if (count == TLS_OCSP_RESPONSES || !whole ||
+                    tls_parse_ocsp_single(whole, size, address_of single))
+                        return TLS_FAIL;
+        }
+        if (tls_der_peek(data) == 0xa1)
+        {
+                byte_reader holder = tls_der_value(&data, 0xa1);
+                byte_reader extensions = tls_der_value(&holder, 0x30);
+                byte_reader value;
+                bool critical = false;
+                tls_seen seen;
+
+                memory_fill(address_of seen, 0, sizeof seen);
+                if (!byte_reader_end(&holder) || !byte_reader_left(&extensions))
+                        return TLS_FAIL;
+                while (tls_der_extension(&extensions, address_of seen, address_of oid,
+                                         address_of critical, address_of value))
+                        if (critical)
+                                return TLS_FAIL;
+                if (!byte_reader_end(&extensions))
+                        return TLS_FAIL;
+        }
+        return byte_reader_end(&data) ? TLS_OK : TLS_FAIL;
+}
+
+typedef struct
+{
+        /* The issuingDistributionPoint (RFC 5280 5.2.5): whether there is
+           one, its fullName's GeneralNames contents (null when it names no
+           point or a relative one), and what it says the CRL leaves out. */
+        bool present;
+        bool relative;
+        bool user_only;
+        bool ca_only;
+        bool some_reasons;
+        bool indirect;
+        bool attribute_only;
+        const p8 address_to names;
+        positive names_length;
+} tls_crl_scope;
+
+typedef struct
+{
+        p8 address_to tbs;
+        positive tbs_length;
+        p8 address_to sig_oid;
+        positive sig_oid_length;
+        const p8 address_to sig;
+        positive sig_length;
+        p8 address_to issuer;
+        positive issuer_length;
+        p8 address_to authority_key;
+        positive authority_key_length;
+        tls_crl_scope scope;
+        p64 this_update;
+        /* 0 when it names none. */
+        p64 next_update;
+        positive entries;
+        /* The serial asked about is on it. */
+        bool listed;
+} tls_crl;
+
+/* An issuingDistributionPoint's value: not empty, its fields in order, the
+   booleans only ever TRUE (DER leaves FALSE out), reasons a named bit list,
+   and at most one of user, CA and attribute certificates only. */
+static COLD bipolar tls_parse_crl_scope(const p8 address_to value,
+                                        positive length,
+                                        tls_crl_scope address_to scope)
+{
+        byte_reader reader = byte_reader_open(value, length);
+        byte_reader point = tls_der_value(&reader, 0x30);
+
+        memory_fill(scope, 0, sizeof(address_to scope));
+        if (!byte_reader_end(&reader) || !byte_reader_left(&point))
+                return TLS_FAIL;
+        scope->present = true;
+        if (tls_der_peek(point) == 0xa0)
+        {
+                byte_reader name = tls_der_value(&point, 0xa0);
+                p8 form = tls_der_peek(name);
+                byte_reader inside = tls_der_value(&name, form);
+
+                if ((form != 0xa0 && form != 0xa1) || !byte_reader_end(&name) ||
+                    (form == 0xa0 ? !tls_general_names_valid(inside)
+                                  : !byte_reader_left(&inside)))
+                        return TLS_FAIL;
+                scope->relative = form == 0xa1;
+                if (form == 0xa0)
+                {
+                        scope->names = byte_reader_here(&inside);
+                        scope->names_length = byte_reader_left(&inside);
+                }
+        }
+        scope->user_only = tls_der_flag(&point, 0x81);
+        scope->ca_only = tls_der_flag(&point, 0x82);
+        if (tls_der_peek(point) == 0x83)
+        {
+                if (!tls_der_named_bits(tls_der_value(&point, 0x83)))
+                        return TLS_FAIL;
+                scope->some_reasons = true;
+        }
+        scope->indirect = tls_der_flag(&point, 0x84);
+        scope->attribute_only = tls_der_flag(&point, 0x85);
+        return byte_reader_end(&point) &&
+                       scope->user_only + scope->ca_only + scope->attribute_only <= 1
+                   ? TLS_OK
+                   : TLS_FAIL;
+}
+
+/* A CRL entry's extensions: reasonCode (not removeFromCRL), invalidityDate,
+   and nothing else critical -- certificateIssuer, which only an indirect
+   CRL carries, among them. */
+static COLD bool tls_crl_entry_extensions(byte_reader list)
+{
+        byte_reader oid;
+        byte_reader value;
+        bool critical = false;
+        tls_seen seen;
+
+        memory_fill(address_of seen, 0, sizeof seen);
+        if (!byte_reader_left(&list))
+                return false;
+        while (tls_der_extension(&list, address_of seen, address_of oid,
+                                 address_of critical, address_of value))
+        {
+                p64 when = 0;
+
+                if (tls_der_is(oid, tls_oid_crl_reason, 3))
+                {
+                        if (!tls_crl_reason(tls_der_small(&value, 0x0a), true) ||
+                            !byte_reader_end(&value))
+                                return false;
+                }
+                else if (tls_der_is(oid, tls_oid_invalidity, 3))
+                {
+                        if (!tls_der_time(&value, true, address_of when) ||
+                            !byte_reader_end(&value))
+                                return false;
+                }
+                else if (critical)
+                        return false;
+        }
+        return byte_reader_end(&list);
+}
+
+/* A CertificateList (RFC 5280 5.1), and whether serial is on it: v2, or v1
+   with no extension anywhere; the inner signature algorithm the outer one;
+   thisUpdate and an optional nextUpdate by the certificate time rule;
+   revoked certificates each a DER serial, a time and the extensions
+   tls_crl_entry_extensions allows, at most TLS_CRL_ENTRIES of them; and
+   crlExtensions, not empty, of which authorityKeyIdentifier, cRLNumber (a
+   non-negative INTEGER of at most 20 octets past its sign) and
+   issuingDistributionPoint are read, deltaCRLIndicator is refused (a delta
+   is not a whole CRL), and anything else must not be critical. */
+static COLD bipolar tls_parse_crl(p8 address_to bytes, positive length,
+                                  const p8 address_to serial,
+                                  positive serial_length, tls_crl address_to crl)
+{
+        byte_reader reader = byte_reader_open(bytes, length);
+        byte_reader list = tls_der_value(&reader, 0x30);
+        byte_reader outer;
+        byte_reader tbs;
+        byte_reader bits;
+        p8 address_to tbs_oid = null;
+        positive tbs_oid_length = 0;
+        positive at = 0;
+        bool v2 = false;
+
+        memory_fill(crl, 0, sizeof(address_to crl));
+        if (!byte_reader_end(&reader))
+                return TLS_FAIL;
+        crl->tbs = tls_der_whole(&list, 0x30, address_of crl->tbs_length);
+        if (!crl->tbs ||
+            !tls_signature_algorithm((p8 address_to)byte_reader_here(&list),
+                                     byte_reader_left(&list), address_of at,
+                                     address_of crl->sig_oid,
+                                     address_of crl->sig_oid_length) ||
+            !byte_reader_skip(&list, at))
+                return TLS_FAIL;
+        bits = tls_der_value(&list, 0x03);
+        if (byte_reader_u8(&bits) || !byte_reader_left(&bits) ||
+            !byte_reader_end(&list))
+                return TLS_FAIL;
+        crl->sig = byte_reader_here(&bits);
+        crl->sig_length = byte_reader_left(&bits);
+
+        outer = byte_reader_open(crl->tbs, crl->tbs_length);
+        tbs = tls_der_value(&outer, 0x30);
+        if (tls_der_peek(tbs) == 0x02)
+        {
+                if (tls_der_small(&tbs, 0x02) != 1)
+                        return TLS_FAIL;
+                v2 = true;
+        }
+        at = 0;
+        if (!tls_signature_algorithm((p8 address_to)byte_reader_here(&tbs),
+                                     byte_reader_left(&tbs), address_of at,
+                                     address_of tbs_oid, address_of tbs_oid_length) ||
+            !byte_reader_skip(&tbs, at) || tbs_oid_length != crl->sig_oid_length ||
+            memory_compare(tbs_oid, crl->sig_oid, tbs_oid_length))
+                return TLS_FAIL;
+        crl->issuer = tls_der_whole(&tbs, 0x30, address_of crl->issuer_length);
+        if (!crl->issuer || !tls_der_time(&tbs, false, address_of crl->this_update))
+                return TLS_FAIL;
+        if ((tls_der_peek(tbs) == 0x17 || tls_der_peek(tbs) == 0x18) &&
+            (!tls_der_time(&tbs, false, address_of crl->next_update) ||
+             crl->next_update < crl->this_update))
+                return TLS_FAIL;
+        if (tls_der_peek(tbs) == 0x30)
+        {
+                byte_reader revoked = tls_der_value(&tbs, 0x30);
+
+                while (byte_reader_left(&revoked))
+                {
+                        byte_reader entry = tls_der_value(&revoked, 0x30);
+                        byte_reader number = tls_der_value(&entry, 0x02);
+                        p64 when = 0;
+
+                        if (crl->entries++ == TLS_CRL_ENTRIES ||
+                            !tls_der_integer(number) ||
+                            !tls_der_time(&entry, false, address_of when) ||
+                            (byte_reader_left(&entry) &&
+                             (!v2 || !tls_crl_entry_extensions(
+                                         tls_der_value(&entry, 0x30)))) ||
+                            !byte_reader_end(&entry))
+                                return TLS_FAIL;
+                        crl->listed |= tls_der_is(number, serial, serial_length);
+                }
+                if (!byte_reader_ok(&revoked))
+                        return TLS_FAIL;
+        }
+        if (tls_der_peek(tbs) == 0xa0)
+        {
+                byte_reader holder = tls_der_value(&tbs, 0xa0);
+                byte_reader extensions = tls_der_value(&holder, 0x30);
+                byte_reader oid;
+                byte_reader value;
+                bool critical = false;
+                tls_seen seen;
+
+                memory_fill(address_of seen, 0, sizeof seen);
+                if (!v2 || !byte_reader_end(&holder) || !byte_reader_left(&extensions))
+                        return TLS_FAIL;
+                while (tls_der_extension(&extensions, address_of seen, address_of oid,
+                                         address_of critical, address_of value))
+                {
+                        if (tls_der_is(oid, tls_oid_authority_key, 3))
+                        {
+                                if (tls_parse_authority_key(
+                                        (p8 address_to)byte_reader_here(&value),
+                                        byte_reader_left(&value),
+                                        address_of crl->authority_key,
+                                        address_of crl->authority_key_length))
+                                        return TLS_FAIL;
+                        }
+                        else if (tls_der_is(oid, tls_oid_crl_number, 3))
+                        {
+                                byte_reader number = tls_der_value(&value, 0x02);
+
+                                if (!tls_der_integer(number) ||
+                                    (tls_der_peek(number) & 0x80) ||
+                                    byte_reader_left(&number) > 21 ||
+                                    !byte_reader_end(&value))
+                                        return TLS_FAIL;
+                        }
+                        else if (tls_der_is(oid, tls_oid_crl_scope, 3))
+                        {
+                                if (tls_parse_crl_scope(byte_reader_here(&value),
+                                                        byte_reader_left(&value),
+                                                        address_of crl->scope))
+                                        return TLS_FAIL;
+                        }
+                        else if (critical || tls_der_is(oid, tls_oid_delta_crl, 3))
+                                return TLS_FAIL;
+                }
+                if (!byte_reader_end(&extensions))
+                        return TLS_FAIL;
+        }
+        return byte_reader_end(&tbs) && byte_reader_end(&outer) ? TLS_OK : TLS_FAIL;
+}
+
+/* Whether a CRL of this scope answers for cert, which named the distribution
+   point it was fetched from (RFC 5280 6.3.3 (b)(2)): a CRL without one is
+   whole; one with one covers no reasons partly, is no indirect CRL, holds
+   the kind of certificate cert is (a CA's or an end entity's), and when it
+   names a point shares a name with cert's. A relative name is not read, so
+   it covers nothing. */
+static COLD bool tls_crl_covers(const tls_crl_scope address_to scope,
+                                const tls_cert address_to cert)
+{
+        if (!scope->present)
+                return true;
+        if (scope->relative || scope->some_reasons || scope->indirect ||
+            scope->attribute_only || (scope->user_only && cert->ca) ||
+            (scope->ca_only && !cert->ca))
+                return false;
+        return !scope->names ||
+               (cert->crl_names &&
+                tls_general_names_meet(
+                    byte_reader_open(scope->names, scope->names_length),
+                    byte_reader_open(cert->crl_names, cert->crl_names_length)));
+}
+
+/* Whether a revocation answer issued at this_update and good until
+   next_update holds now, allowing TLS_REVOCATION_SKEW seconds of clock
+   difference either way (OpenSSL's OCSP_check_validity allows the same five
+   minutes): issued no later than now, not yet past its next, and naming a
+   next at all -- one that names none (RFC 6960 4.2.2.1, RFC 5280 5.1.2.5)
+   cannot be told stale, and both CA/Browser Forum profiles require it. */
+#define TLS_REVOCATION_SKEW 300
+
+static COLD bool tls_revocation_fresh(p64 this_update, p64 next_update, p64 now)
+{
+        p64 at = tls_date_seconds(now);
+
+        return next_update && this_update <= next_update &&
+               tls_date_seconds(this_update) <= at + TLS_REVOCATION_SKEW &&
+               at <= tls_date_seconds(next_update) + TLS_REVOCATION_SKEW;
+}
+
+/* A DER header for contents of length bytes at out: its size, which
+   tls_der_header_size says without writing. */
+static COLD positive tls_der_header_size(positive length)
+{
+        return length < 0x80 ? 2 : length < 0x100 ? 3 : length < 0x10000 ? 4 : 5;
+}
+
+static COLD positive tls_der_header(p8 address_to out, p8 tag, positive length)
+{
+        positive size = tls_der_header_size(length);
+
+        out[0] = tag;
+        if (size == 2)
+                out[1] = (p8)length;
+        else
+        {
+                out[1] = (p8)(0x80 | (size - 2));
+                for (positive k = 2; k < size; k++)
+                        out[k] = (p8)(length >> (8 * (size - 1 - k)));
+        }
+        return size;
+}
+
+/* The SubjectPublicKey BIT STRING contents of a key, past the unused-bits
+   octet: what an OCSP issuerKeyHash and a byKey responder hash. A served
+   certificate's own bytes; for an anchor, which carries none, the same
+   bytes rebuilt -- 04 X Y for a curve, the RSAPublicKey SEQUENCE for RSA --
+   which DER makes the one spelling of that key. The length in out, or 0
+   when room is short or the key is none of these. */
+static COLD positive tls_key_bits(const tls_cert address_to cert,
+                                  p8 address_to out, positive room)
+{
+        positive coord = cert->curve == 1 ? 32 : 48;
+        positive skip = 0;
+        positive magnitude;
+        positive modulus;
+        positive power = 0;
+        positive exponent;
+        positive inner;
+        positive at;
+        p8 bytes[8];
+
+        if (cert->key_bits)
+        {
+                if (cert->key_bits_length > room)
+                        return 0;
+                memory_copy(out, cert->key_bits, cert->key_bits_length);
+                return cert->key_bits_length;
+        }
+        if (cert->curve == 1 || cert->curve == 2)
+        {
+                if (room < 1 + 2 * coord)
+                        return 0;
+                out[0] = 4;
+                memory_copy(out + 1, cert->qx + 48 - coord, coord);
+                memory_copy(out + 1 + coord, cert->qy + 48 - coord, coord);
+                return 1 + 2 * coord;
+        }
+        if (cert->curve != 3 || !cert->modulus_length || !cert->exponent ||
+            cert->modulus_length > sizeof cert->modulus)
+                return 0;
+        while (skip + 1 < cert->modulus_length && !cert->modulus[skip])
+                skip++;
+        magnitude = cert->modulus_length - skip;
+        modulus = magnitude + (cert->modulus[skip] >> 7);
+        for (p64 rest = cert->exponent; rest; rest >>= 8)
+                bytes[7 - power++] = (p8)rest;
+        exponent = power + (bytes[8 - power] >> 7);
+        inner = tls_der_header_size(modulus) + modulus +
+                tls_der_header_size(exponent) + exponent;
+        if (tls_der_header_size(inner) + inner > room)
+                return 0;
+        at = tls_der_header(out, 0x30, inner);
+        at += tls_der_header(out + at, 0x02, modulus);
+        if (modulus > magnitude)
+                out[at++] = 0;
+        memory_copy(out + at, cert->modulus + skip, magnitude);
+        at += magnitude;
+        at += tls_der_header(out + at, 0x02, exponent);
+        if (exponent > power)
+                out[at++] = 0;
+        memory_copy(out + at, bytes + 8 - power, power);
+        return at + power;
 }
 
 /* An anchor's key laid out the way tls_parse_cert lays out a served one. */
@@ -7790,40 +8999,43 @@ static COLD bool tls_verify_one(tls_cert address_to child, tls_cert address_to i
 
 /* The last certificate served names its issuer.  Each anchor with that
    subject Name is tried, and one signature that verifies ends the chain; a
-   Name no anchor carries fails without any signature check. */
-static COLD bool tls_anchor_verifies(tls_cert address_to child, p64 leaf_from)
+   Name no anchor carries fails without any signature check. The anchor that
+   signed goes to signer when there is one to fill: its key is what the
+   child's revocation answers are verified under. */
+static COLD bool tls_anchor_verifies(tls_cert address_to child, p64 leaf_from,
+                                     tls_cert address_to signer)
 {
         p8 digest[32];
+        tls_cert root;
 
         if (!child->issuer || !child->issuer_length)
                 return false;
 #ifdef TLS_BENCH_ANCHOR
-        {
-                tls_cert root;
-
-                memory_fill(address_of root, 0, sizeof(root));
-                root.curve = 2;
-                memory_copy(root.qx, tls_bench_anchor_x, 48);
-                memory_copy(root.qy, tls_bench_anchor_y, 48);
-                if (!tls_bench_distrusts(leaf_from) &&
-                    tls_verify_one(child, address_of root))
-                        return true;
-        }
+        memory_fill(address_of root, 0, sizeof(root));
+        root.curve = 2;
+        memory_copy(root.qx, tls_bench_anchor_x, 48);
+        memory_copy(root.qy, tls_bench_anchor_y, 48);
+        if (!tls_bench_distrusts(leaf_from) &&
+            tls_verify_one(child, address_of root))
+                goto signed_by;
 #endif
         crypto_sha256_of(child->issuer, child->issuer_length, digest);
         for (positive i = 0; i < array_count(tls_anchors); i++)
         {
-                tls_cert root;
-
                 if (memory_compare(tls_anchors[i].name, digest, 8) ||
                     tls_anchor_distrusts(tls_anchors + i, leaf_from) ||
                     !tls_anchor_key(tls_anchors + i, address_of root))
                         continue;
                 if (tls_verify_one(child, address_of root))
-                        return true;
+                        goto signed_by;
         }
 
         return false;
+
+signed_by:
+        if (signer)
+                address_to signer = root;
+        return true;
 }
 
 static COLD fn tls_keep_leaf(tls_conn address_to tls, tls_cert address_to leaf)
@@ -7998,12 +9210,54 @@ static COLD bool tls_certificate_body_open(p8 address_to body,
         return byte_reader_end(&reader);
 }
 
+/* A CertificateEntry's extensions (RFC 8446 4.4.2): none, or -- when the
+   hello offered status_request -- that one alone, a CertificateStatus (RFC
+   6066 8) of status_type ocsp and an OCSPResponse of at least a byte, filling
+   the extension. The response is handed back unread (only the leaf's is
+   read, by tls_ocsp_answer); an SCT list or any other kind answers nothing
+   this client asked, and OpenSSL refuses the two it knows too. */
+static COLD bool tls_entry_status(const p8 address_to bytes, positive length,
+                                  bool asked,
+                                  const p8 address_to address_to response,
+                                  positive address_to response_length)
+{
+        byte_reader reader = byte_reader_open(bytes, length);
+        byte_reader status;
+        byte_reader answer;
+
+        address_to response = null;
+        address_to response_length = 0;
+        if (!length)
+                return true;
+        if (!asked || byte_reader_u16(&reader) != 5)
+                return false;
+        status = byte_reader_vector16(&reader);
+        if (!byte_reader_end(&reader) || byte_reader_u8(&status) != 1)
+                return false;
+        answer = byte_reader_vector24(&status);
+        if (!byte_reader_end(&status) || !byte_reader_left(&answer))
+                return false;
+        address_to response = byte_reader_here(&answer);
+        address_to response_length = byte_reader_left(&answer);
+        return true;
+}
+
 /* The issuer certificate a caIssuers URL names, fetched into room over the
    HTTP client (defined there, beside it): its length, or 0. */
 #define TLS_AIA_MAX 16384
 
 static COLD positive tls_aia_fetch(const p8 address_to url, positive length,
                                    p8 address_to into, positive room);
+
+/* Whether the certificates on a verified path are revoked, as their issuers
+   answer, which tls_verify_chain asks last: defined with the HTTP client,
+   beside the CRL fetch. */
+static COLD bool tls_revocation_holds(tls_conn address_to tls,
+                                      tls_cert address_to certs,
+                                      const positive address_to path,
+                                      positive depth, tls_cert address_to top,
+                                      const p8 address_to staple,
+                                      positive staple_length, p64 now);
 
 /* The leaf comes first; the rest is a pool, as RFC 8446 section 4.4.2 asks
    clients to treat it. Of 640 public HTTPS hosts openssl verified on
@@ -8027,11 +9281,16 @@ static COLD positive tls_aia_fetch(const p8 address_to url, positive length,
    certificate names in its caIssuers location is fetched once
    (tls_aia_fetch) and joins the pool as one more candidate, held to every
    test a served one is. A fetched certificate's own missing issuer is not
-   fetched in turn. */
+   fetched in turn.
+
+   A path that ends at an anchor is then asked about revocation
+   (tls_revocation_holds): the leaf by the OCSP response stapled in its
+   entry or by its CRL, each certificate above it by its CRL. */
 static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
                              string_address host, tls_conn address_to tls)
 {
         tls_cert certs[9];
+        tls_cert root;
         positive path[9] = {0};
         p8 fetched[TLS_AIA_MAX];
         positive count = 0;
@@ -8041,21 +9300,34 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
         positive depth = 0;
         p64 now = 0;
         bool asked = false;
+        const p8 address_to staple = null;
+        positive staple_length = 0;
 
         if (!tls_certificate_body_open(body, body_length, address_of list))
                 return false;
 
         //      Each entry is a certificate and its extensions, which can only
         //      answer what a ClientHello asked for (RFC 8446 4.2, 4.4.2): an
-        //      OCSP status or an SCT list, neither of which this client asks
-        //      for, so an entry with any is refused, as OpenSSL refuses both.
+        //      OCSP status when the hello offered status_request, and nothing
+        //      else (tls_entry_status).
         while (byte_reader_left(&list) && count < 8)
         {
                 byte_reader entry = byte_reader_vector24(&list);
                 byte_reader extensions = byte_reader_vector16(&list);
+                const p8 address_to status = null;
+                positive status_length = 0;
 
-                if (!byte_reader_ok(&list) || byte_reader_left(&extensions))
+                if (!byte_reader_ok(&list) ||
+                    !tls_entry_status(byte_reader_here(&extensions),
+                                      byte_reader_left(&extensions),
+                                      tls->status_requested, address_of status,
+                                      address_of status_length))
                         return false;
+                if (!count)
+                {
+                        staple = status;
+                        staple_length = status_length;
+                }
                 if (tls_parse_cert((p8 address_to)byte_reader_here(&entry),
                                    byte_reader_left(&entry), certs + count,
                                    count ? null : host))
@@ -8110,8 +9382,11 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
                         positive length;
 
                         if (tls_anchor_verifies(certs + child,
-                                                certs[0].not_before))
-                                return true;
+                                                certs[0].not_before,
+                                                address_of root))
+                                return tls_revocation_holds(
+                                    tls, certs, path, depth, address_of root,
+                                    staple, staple_length, now);
                         if (asked || !certs[child].ca_issuers)
                                 return false;
                         asked = true;
@@ -8125,7 +9400,9 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
                         continue;
                 }
                 if (anchor)
-                        return true;
+                        return tls_revocation_holds(tls, certs, path, depth,
+                                                    certs + next, staple,
+                                                    staple_length, now);
                 unusable |= (positive)1 << next;
                 child = next;
                 path[++depth] = next;
@@ -8231,6 +9508,11 @@ static COLD bipolar tls_client_hello(tls_conn address_to tls, p8 address_to out,
             0, 0x2b, 0, 5, 4, 0x03, 0x04, 0x03, 0x03,
             0, 0x0d, 0, 12, 0, 10, 0x04, 0x03, 0x05, 0x03, 0x08, 0x04,
             0x04, 0x01, 0x05, 0x01};
+        /* status_request (RFC 6066 8): OCSP, no responder named, no request
+           extensions. Only when the chain is checked: a staple is read for
+           revocation alone, so an unchecked connection asks for none and
+           keeps refusing one. */
+        static const p8 status_request[] = {0, 5, 0, 5, 1, 0, 0, 0, 0};
         p8 share[10 + 97];
         positive share_length;
         positive host_length = string_length(tls->host);
@@ -8307,8 +9589,12 @@ static COLD bipolar tls_client_hello(tls_conn address_to tls, p8 address_to out,
         if (!tls_hello_append(out, room, address_of at, groups, sizeof groups) ||
             !tls_hello_append(out, room, address_of at, share,
                               10 + share_length) ||
-            !tls_hello_append(out, room, address_of at, tail, sizeof tail))
+            !tls_hello_append(out, room, address_of at, tail, sizeof tail) ||
+            (tls->check_cert &&
+             !tls_hello_append(out, room, address_of at, status_request,
+                              sizeof status_request)))
                 goto done;
+        tls->status_requested = tls->check_cert;
 
         {
                 positive ext_length = at - ext_len_at - 2;
@@ -8350,8 +9636,11 @@ static const p8 tls_retry_random[32] = {
    secret (RFC 7627) and an empty renegotiation_info (RFC 5746) required,
    point formats that include uncompressed, a session id the server may
    choose; and never the random's downgrade sentinel, since TLS 1.3 was on
-   offer (RFC 8446 4.1.3). Each version refuses the other's extensions.
-   Both record the server's random. */
+   offer (RFC 8446 4.1.3). An empty status_request when the hello offered
+   one says a CertificateStatus may follow the Certificate (RFC 6066 8),
+   which tls->status_echoed records; TLS 1.3 carries the staple in the
+   Certificate instead, so its ServerHello may not echo it. Each version
+   refuses the other's extensions. Both record the server's random. */
 static COLD bipolar tls_server_hello_keys(p8 address_to hello, positive length,
                                      tls_conn address_to tls,
                                      p8 address_to peer, positive room,
@@ -8402,19 +9691,21 @@ static COLD bipolar tls_server_hello_keys(p8 address_to hello, positive length,
         {
                 positive id = byte_reader_u16(&extensions);
                 byte_reader data = byte_reader_vector16(&extensions);
-                positive bit = 7;
+                positive bit = 8;
 
                 if (!byte_reader_ok(&extensions))
                         return TLS_FAIL;
-                /* One bit a kind this client offered, in kinds' order and
-                   renegotiation_info last; any other kind, or one twice,
-                   fails. */
+                /* One bit a kind this client offered, in kinds' order,
+                   renegotiation_info and then status_request last; any
+                   other kind, or one twice, fails. */
                 for (positive kind = 0; kind < sizeof kinds; kind++)
                         if (id == kinds[kind])
                                 bit = kind;
                 if (id == 0xff01)
                         bit = 6;
-                if (bit == 7 || seen >> bit & 1)
+                if (id == 0x0005 && tls->status_requested)
+                        bit = 7;
+                if (bit == 8 || seen >> bit & 1)
                         return TLS_FAIL;
                 seen |= (positive)1 << bit;
 
@@ -8473,7 +9764,8 @@ static COLD bipolar tls_server_hello_keys(p8 address_to hello, positive length,
                 }
                 else if ((id == 0x0000 &&
                           (byte_reader_left(&data) || !tls->named)) ||
-                         (id == 0x0017 && byte_reader_left(&data)) ||
+                         ((id == 0x0017 || id == 0x0005) &&
+                          byte_reader_left(&data)) ||
                          (id == 0xff01 &&
                           (byte_reader_u8(&data) || !byte_reader_end(&data))))
                         return TLS_FAIL;
@@ -8496,6 +9788,7 @@ static COLD bipolar tls_server_hello_keys(p8 address_to hello, positive length,
                 return TLS_FAIL;
         tls->tls12 = true;
         tls->suite = (p16)suite;
+        tls->status_echoed = (seen >> 7 & 1) != 0;
         return TLS_OK;
 }
 
@@ -8797,13 +10090,16 @@ static COLD bipolar tls_check_cert_verify(tls_conn address_to tls, p8 address_to
 #define TLS_SERVER_FLIGHT_FINISHED 4
 #define TLS_SERVER_FLIGHT_COMPLETE 5
 #define TLS12_FLIGHT_CERTIFICATE 6
-#define TLS12_FLIGHT_FINISHED 10
-#define TLS12_FLIGHT_COMPLETE 11
+#define TLS12_FLIGHT_FINISHED 11
+#define TLS12_FLIGHT_COMPLETE 12
 
 /* This client offers no PSK and resumes nothing, so each version's server
    flight has one legal shape, in which only a CertificateRequest is
-   optional: TLS 1.3's from EncryptedExtensions, TLS 1.2's from Certificate
-   to ServerHelloDone and, after the client's flight, Finished. A zero ends
+   optional, and in TLS 1.2 a CertificateStatus after the Certificate (which
+   tls_flight_message takes only when the ServerHello echoed
+   status_request): TLS 1.3's from EncryptedExtensions, TLS 1.2's from
+   Certificate to ServerHelloDone and, after the client's flight, Finished. A
+   zero ends
    each, so neither version's walk reaches the other's messages. Keeping
    the shapes in one transition function prevents a duplicate message from
    overwriting parsed certificate state or an early Finished from
@@ -8820,6 +10116,7 @@ static COLD bool tls_server_flight_step(p8 address_to state, p8 type)
             TLS_HS_FINISHED,
             0,
             TLS_HS_CERTIFICATE,
+            TLS_HS_CERTIFICATE_STATUS | 0x80,
             TLS_HS_SERVER_KEY_EXCHANGE,
             TLS_HS_CERT_REQUEST | 0x80,
             TLS_HS_SERVER_HELLO_DONE,
@@ -9004,11 +10301,22 @@ static COLD bipolar tls_post_handshake_append_until(
         return TLS_OK;
 }
 
+/* The relaid list in into through the one chain check, and then the leaf's
+   key has to be the kind the suite signs with. */
+static COLD bool tls12_chain(tls_conn address_to tls, p8 address_to into)
+{
+        tls->chain_pending = false;
+        return tls_verify_chain(into, 4 + tls_load_24(into + 1), tls->host, tls) &&
+               (tls->leaf_curve == 3) == (tls->suite == 0xc02f);
+}
+
 /* A TLS 1.2 Certificate is the list alone, each entry without
    extensions. Laid out again as TLS 1.3's -- an empty context, two empty
    extension bytes after each certificate -- in into, which has room for
-   5 + TLS_PLAINTEXT_MAX bytes, it goes through the one chain check; then
-   the leaf's key has to be the kind the suite signs with. */
+   5 + TLS_PLAINTEXT_MAX bytes, it goes through the one chain check
+   (tls12_chain). When the server echoed status_request the check waits for
+   the message after: a CertificateStatus (tls12_certificate_status), or
+   ServerKeyExchange with no staple. */
 static COLD bool tls12_certificate(tls_conn address_to tls, p8 address_to body,
                                    positive length, p8 address_to into)
 {
@@ -9038,8 +10346,54 @@ static COLD bool tls12_certificate(tls_conn address_to tls, p8 address_to body,
         }
         into[1] = (p8)((out.used - 4) >> 16);
         network_store_16(into + 2, (p16)(out.used - 4));
-        return tls_verify_chain(into, out.used, tls->host, tls) &&
-               (tls->leaf_curve == 3) == (tls->suite == 0xc02f);
+        if (tls->status_echoed)
+        {
+                tls->chain_pending = true;
+                return true;
+        }
+        return tls12_chain(tls, into);
+}
+
+/* A TLS 1.2 CertificateStatus (RFC 6066 8), after the Certificate of a
+   server that echoed status_request: status_type ocsp and a response of at
+   least a byte, the whole body. The response goes into the relaid list as
+   the leaf's CertificateEntry status_request extension, the way TLS 1.3
+   sends it, and the chain is checked with it there. */
+static COLD bool tls12_certificate_status(tls_conn address_to tls,
+                                          p8 address_to body, positive length,
+                                          p8 address_to into)
+{
+        byte_reader reader = byte_reader_open(body, length);
+        byte_reader answer;
+        positive used;
+        positive leaf;
+        positive size;
+        positive extension;
+
+        if (!tls->chain_pending || byte_reader_u8(&reader) != 1)
+                return false;
+        answer = byte_reader_vector24(&reader);
+        size = byte_reader_left(&answer);
+        used = 4 + tls_load_24(into + 1);
+        //      The leaf's two extension length bytes, after its certificate;
+        //      a list with no leaf has none to fill.
+        leaf = used >= 9 ? 7 + tls_load_24(into + 4) : used;
+        extension = 4 + 1 + 3 + size;
+        if (!byte_reader_end(&reader) || !size || extension > 0xffff ||
+            leaf + 2 > used || extension > 5 + TLS_PLAINTEXT_MAX - used)
+                return false;
+        memory_copy(into + leaf + 2 + extension, into + leaf + 2, used - leaf - 2);
+        network_store_16(into + leaf, (p16)extension);
+        network_store_16(into + leaf + 2, 5);
+        network_store_16(into + leaf + 4, (p16)(extension - 4));
+        into[leaf + 6] = 1;
+        into[leaf + 7] = (p8)(size >> 16);
+        network_store_16(into + leaf + 8, (p16)size);
+        memory_copy(into + leaf + 10, byte_reader_here(&answer), size);
+        used += extension;
+        into[1] = (p8)((used - 4) >> 16);
+        network_store_16(into + 2, (p16)(used - 4));
+        return tls12_chain(tls, into);
 }
 
 /* ServerKeyExchange (RFC 8422 5.4): a named curve this client offered and a
@@ -9140,8 +10494,27 @@ static COLD bipolar tls_flight_message(tls_conn address_to tls,
                                                       tls->host, tls);
                 tls->untrusted = tls->check_cert && !valid;
         }
+        //      A TLS 1.2 check that waited for a staple runs at the
+        //      CertificateStatus, or with none at ServerKeyExchange; a
+        //      CertificateStatus nothing waited for is refused.
+        else if (msg[0] == TLS_HS_CERTIFICATE_STATUS)
+        {
+                bool waited = tls->chain_pending;
+
+                valid = tls12_certificate_status(tls, body, body_length, scratch);
+                tls->untrusted = tls->check_cert && !valid && waited &&
+                                 !tls->chain_pending;
+        }
         else if (msg[0] == TLS_HS_SERVER_KEY_EXCHANGE)
-                valid = tls12_key_exchange(tls, body, body_length);
+        {
+                valid = true;
+                if (tls->chain_pending)
+                {
+                        valid = tls12_chain(tls, scratch);
+                        tls->untrusted = tls->check_cert && !valid;
+                }
+                valid = valid && tls12_key_exchange(tls, body, body_length);
+        }
         else if (msg[0] == TLS_HS_SERVER_HELLO_DONE)
                 valid = !body_length;
         else if (msg[0] == TLS_HS_CERT_VERIFY)
@@ -9284,6 +10657,7 @@ static COLD bipolar tls_handshake(
         const p8 address_to cookie = null;
         positive cookie_length = 0;
 
+        tls->deadline = deadline;
         crypto_sha256_open(address_of tls->transcript);
 
         for (;;)
@@ -9371,6 +10745,7 @@ done:
         crypto_forget(shared, sizeof shared);
         crypto_forget(hs, sizeof hs);
         crypto_forget(tls->scalar, sizeof tls->scalar);
+        tls->deadline = null;
         return status;
 }
 
@@ -9393,7 +10768,9 @@ static COLD bipolar tls_connect(tls_conn address_to tls, bipolar handle,
                          : tls->fault == TLS_FAULT_EARLY ? TLS_NOT_YET
                          : tls->fault == TLS_FAULT_LATE ? TLS_EXPIRED
                          : tls->fault == TLS_FAULT_NAME ? TLS_MISMATCH
-                                                        : TLS_UNTRUSTED;
+                         : tls->fault == TLS_FAULT_REVOKED ? TLS_REVOKED
+                         : tls->fault == TLS_FAULT_UNCHECKED ? TLS_UNCHECKED
+                                                             : TLS_UNTRUSTED;
                 tls_forget(tls);
         }
         return status;
@@ -9619,6 +10996,10 @@ static bipolar tls_read_until(
 //      STRICT_TIGHT only: a redirect that leaves public address space for
 //      an address that is not public.
 #define HTTP_PRIVATE (-17)
+//      The certificate is revoked, or whether it is could not be told where
+//      the answer is required (TLS_REVOKED, TLS_UNCHECKED).
+#define HTTP_REVOKED (-18)
+#define HTTP_UNCHECKED (-19)
 
 typedef byte_store http_buffer;
 #define http_forget(buffer) byte_store_release(buffer)
@@ -10343,7 +11724,9 @@ static bipolar http_link_open(http_link address_to link, p32 ip, p16 port,
                                : verdict == TLS_EXPIRED ? HTTP_EXPIRED
                                : verdict == TLS_NOT_YET ? HTTP_NOT_YET
                                : verdict == TLS_MISMATCH ? HTTP_MISMATCH
-                                                        : HTTP_TLS;
+                               : verdict == TLS_REVOKED ? HTTP_REVOKED
+                               : verdict == TLS_UNCHECKED ? HTTP_UNCHECKED
+                                                          : HTTP_TLS;
                 }
                 link->tls = true;
         }
@@ -11215,23 +12598,459 @@ static bool http_address_public(p32 ip)
 }
 
 #define TLS_AIA_SECONDS 5
+/* What a CRL's store grows by while its length is not yet known. */
+#define TLS_CRL_STEP ((positive)1 << 16)
 
 /*
-        tls_verify_chain's missing issuer: the certificate a caIssuers
-        location names (RFC 5280 4.2.2.1), which browsers fetch when a server
-        leaves an intermediate out. The URL comes from a certificate nothing
-        has verified yet, so the peer chooses the destination, and the fetch
-        is held to what a certificate needs: http: only (https would be a
-        handshake inside a handshake), port 80 unless a harness serves it,
-        no userinfo, a public address, one HTTP/1.0 GET with no redirect
-        followed, five seconds for the connection and the reply together,
-        a 200, and a body of at most room bytes less the head, which the
-        caller parses and verifies like any served certificate -- DER only,
-        so a PKCS#7 bundle or PEM text is refused there. Returns the body's
-        length at the front of into, or 0.
+        Revocation: stapling and CRLs, in tiers.
+
+        Each certificate on a verified path below its anchor is asked about
+        by the issuer that signed it. The leaf first by the OCSP response its
+        server stapled (RFC 6066 8, RFC 8446 4.4.2.1), when it stapled one;
+        then -- the leaf without a good staple, and every certificate above
+        it -- by the CRL its first whole-reason http: distribution point
+        names (RFC 5280 6.3), fetched under caIssuers' rules and held in
+        memory for the rest of the process (tls_crl_get).
+
+        An answer is good, revoked, none (a source there is that said
+        nothing usable: unreachable, too large, unparseable, signed by
+        nobody it may be, about another certificate, unknown, or stale) or
+        absent (no source: no staple and no distribution point). Revoked
+        refuses in every tier. A leaf that asks for a staple (TLS Feature
+        status_request, RFC 7633) and has no good one is refused in every
+        tier too. None is passed over at the default tier, as browsers that
+        still fetch revocation pass over it, and refuses at the tight one.
+        Absent is passed in both: a certificate that names no CRL and whose
+        server staples nothing has no source to fail, and OCSP is never
+        fetched (only stapled), so a responder URL alone is not a source.
+
+        Ceilings: TLS_REVOCATION_SECONDS for every fetch of one handshake
+        together (inside the handshake's own deadline; each name lookup has
+        its own three seconds), TLS_CRL_MAX bytes a CRL, TLS_CRL_HELD CRLs and
+        TLS_CRL_HELD_BYTES held, a failed fetch not tried again for
+        TLS_CRL_RETRY seconds.
 */
-static COLD positive tls_aia_fetch(const p8 address_to url, positive length,
-                                   p8 address_to into, positive room)
+#define TLS_ANSWER_GOOD 0
+#define TLS_ANSWER_REVOKED 1
+#define TLS_ANSWER_NONE 2
+#define TLS_ANSWER_ABSENT 3
+#define TLS_REVOCATION_SECONDS 10
+#define TLS_CRL_MAX ((positive)16 << 20)
+#define TLS_CRL_HELD 8
+#define TLS_CRL_HELD_BYTES ((positive)32 << 20)
+#define TLS_CRL_RETRY 300
+
+/* The CRL a distribution point names, fetched over the HTTP client (defined
+   there, beside tls_aia_fetch) into a store that grows to TLS_CRL_MAX. */
+static COLD bool tls_crl_fetch(const p8 address_to url, positive length,
+                               byte_store address_to into,
+                               const network_deadline address_to deadline);
+
+/* SHA-1 (kind 1, 20 bytes) or SHA-256 (kind 2, 32), the two an OCSP CertID
+   names its issuer by. */
+static COLD fn tls_revocation_hash(p8 kind, const p8 address_to bytes,
+                                   positive length, p8 address_to out)
+{
+        digest_state digest;
+
+        digest_open(address_of digest, kind == 1 ? DIGEST_SHA1 : DIGEST_SHA256,
+                    kind == 1 ? 20 : 32);
+        digest_write(address_of digest, (address_any)bytes, length);
+        digest_close(address_of digest, out);
+}
+
+/* Whether signer's key signed tbs: tls_verify_one, given the signed part of
+   an OCSP response or a CRL laid out as a certificate's. */
+static COLD bool tls_signed_by(p8 address_to tbs, positive tbs_length,
+                               p8 address_to sig_oid, positive sig_oid_length,
+                               const p8 address_to sig, positive sig_length,
+                               tls_cert address_to signer)
+{
+        tls_cert part;
+
+        memory_fill(address_of part, 0, sizeof part);
+        part.tbs = tbs;
+        part.tbs_length = tbs_length;
+        part.sig_oid = sig_oid;
+        part.sig_oid_length = sig_oid_length;
+        part.sig = (p8 address_to)sig;
+        part.sig_length = sig_length;
+        return tls_verify_one(address_of part, signer);
+}
+
+/* What a stapled OCSP response says of leaf, which issuer signed (RFC 6960
+   3.2, 4.2.2.2). It has to parse (tls_parse_ocsp); exactly one of its
+   SingleResponses has to name leaf -- the hash of leaf's issuer Name and of
+   issuer's key under the CertID's hash, and leaf's serial; and it has to be
+   signed by issuer, or by a delegated responder among its certificates:
+   issued by issuer (the Name leaf names, issuer's signature), with
+   id-kp-OCSPSigning, current, a digitalSignature key if it limits its key
+   at all, and the responder the response names (byName its subject, byKey
+   the SHA-1 of its key). Revoked so signed is revoked whenever it was said;
+   good has to be fresh (tls_revocation_fresh); unknown, stale or anything
+   short of the above is none. */
+static COLD p8 tls_ocsp_answer(tls_cert address_to leaf, tls_cert address_to issuer,
+                               const p8 address_to response, positive length,
+                               p64 now)
+{
+        p8 key[32 + CRYPTO_RSA_BYTES];
+        p8 names[2][32];
+        p8 keys[2][32];
+        positive key_length = tls_key_bits(issuer, key, sizeof key);
+        positive matched = 0;
+        tls_ocsp ocsp;
+        tls_ocsp_single single;
+        tls_ocsp_single found;
+        tls_cert responder;
+        tls_cert address_to signer = null;
+        byte_reader list;
+
+        if (!key_length || !leaf->issuer || !leaf->serial ||
+            tls_parse_ocsp((p8 address_to)response, length, address_of ocsp))
+                return TLS_ANSWER_NONE;
+        for (p8 kind = 1; kind <= 2; kind++)
+        {
+                tls_revocation_hash(kind, leaf->issuer, leaf->issuer_length,
+                                    names[kind - 1]);
+                tls_revocation_hash(kind, key, key_length, keys[kind - 1]);
+        }
+        memory_fill(address_of found, 0, sizeof found);
+        list = byte_reader_open(ocsp.responses, ocsp.responses_length);
+        while (byte_reader_left(&list))
+        {
+                positive size = 0;
+                const p8 address_to whole = tls_der_whole(&list, 0x30, address_of size);
+
+                if (!whole || tls_parse_ocsp_single(whole, size, address_of single))
+                        return TLS_ANSWER_NONE;
+                if (!memory_compare(single.name_hash, names[single.hash - 1],
+                                    single.hash_length) &&
+                    !memory_compare(single.key_hash, keys[single.hash - 1],
+                                    single.hash_length) &&
+                    single.serial_length == leaf->serial_length &&
+                    !memory_compare(single.serial, leaf->serial, leaf->serial_length))
+                {
+                        found = single;
+                        matched++;
+                }
+        }
+        //      None names leaf, or two do, which could disagree.
+        if (matched != 1)
+                return TLS_ANSWER_NONE;
+
+        if (ocsp.by_key ? !memory_compare(ocsp.responder, keys[0], 20)
+                        : ocsp.responder_length == leaf->issuer_length &&
+                              !memory_compare(ocsp.responder, leaf->issuer,
+                                              leaf->issuer_length))
+                signer = issuer;
+        list = byte_reader_open(ocsp.certs, ocsp.certs_length);
+        while (!signer && byte_reader_left(&list))
+        {
+                positive size = 0;
+                p8 address_to whole =
+                    (p8 address_to)tls_der_whole(&list, 0x30, address_of size);
+                p8 named[20];
+
+                if (!whole)
+                        break;
+                if (tls_parse_cert(whole, size, address_of responder, null) ||
+                    responder.issuer_length != leaf->issuer_length ||
+                    memory_compare(responder.issuer, leaf->issuer,
+                                   leaf->issuer_length) ||
+                    !responder.ocsp_signing ||
+                    !tls_cert_current(address_of responder, now) ||
+                    (responder.key_usage && !responder.digital_signature))
+                        continue;
+                if (ocsp.by_key)
+                {
+                        p8 bits[32 + CRYPTO_RSA_BYTES];
+                        positive bits_length = tls_key_bits(address_of responder, bits,
+                                                            sizeof bits);
+
+                        tls_revocation_hash(1, bits, bits_length, named);
+                        if (!bits_length || memory_compare(named, ocsp.responder, 20))
+                                continue;
+                }
+                else if (responder.subject_length != ocsp.responder_length ||
+                         memory_compare(responder.subject, ocsp.responder,
+                                        ocsp.responder_length))
+                        continue;
+                if (tls_verify_one(address_of responder, issuer))
+                        signer = address_of responder;
+        }
+        if (!signer || !tls_signed_by(ocsp.tbs, ocsp.tbs_length, ocsp.sig_oid,
+                                      ocsp.sig_oid_length, ocsp.sig,
+                                      ocsp.sig_length, signer))
+                return TLS_ANSWER_NONE;
+        if (found.status == TLS_OCSP_REVOKED)
+                return TLS_ANSWER_REVOKED;
+        return found.status == TLS_OCSP_GOOD &&
+                       tls_revocation_fresh(found.this_update, found.next_update,
+                                            now)
+                   ? TLS_ANSWER_GOOD
+                   : TLS_ANSWER_NONE;
+}
+
+/*
+        The CRLs this process fetched, by the SHA-256 of their URL: the bytes
+        (or a failed fetch, not tried again for TLS_CRL_RETRY seconds), and
+        once one verifies, the SHA-256 of the key it verified under and its
+        nextUpdate. Memory only: the fetch may run where no file can be
+        opened, and a CRL is a few seconds' download at worst. A CRL past its
+        nextUpdate is fetched again; the least recently used goes when a new
+        one would hold more than TLS_CRL_HELD of them or TLS_CRL_HELD_BYTES.
+*/
+typedef struct
+{
+        byte_store crl;
+        p8 name[32];
+        p8 signer[32];
+        p64 next_update;
+        p64 fetched;
+        positive age;
+        bool used;
+        bool failed;
+} tls_crl_held;
+
+static tls_crl_held tls_crl_cache[TLS_CRL_HELD];
+static positive tls_crl_clock;
+
+static COLD fn tls_crl_drop(tls_crl_held address_to held)
+{
+        byte_store_release(address_of held->crl);
+        memory_fill(held, 0, sizeof(address_to held));
+}
+
+static COLD tls_crl_held address_to tls_crl_get(const p8 address_to url,
+                                               positive length, p64 now,
+                                               const network_deadline address_to deadline)
+{
+        p8 name[32];
+        p64 at = tls_date_seconds(now);
+        byte_store fetched = {null, 0, 0};
+        tls_crl_held address_to slot = null;
+        bool got;
+
+        crypto_sha256_of((p8 address_to)url, length, name);
+        for (positive k = 0; k < TLS_CRL_HELD; k++)
+        {
+                tls_crl_held address_to held = tls_crl_cache + k;
+
+                if (!held->used || memory_compare(held->name, name, 32))
+                        continue;
+                if (held->failed ? held->fetched + TLS_CRL_RETRY > at
+                                 : !held->next_update ||
+                                       tls_date_seconds(held->next_update) +
+                                               TLS_REVOCATION_SKEW >= at)
+                {
+                        held->age = ++tls_crl_clock;
+                        return held;
+                }
+                tls_crl_drop(held);
+        }
+        if (!deadline)
+                return null;
+        got = tls_crl_fetch(url, length, address_of fetched, deadline);
+        if (!got)
+                byte_store_release(address_of fetched);
+        for (;;)
+        {
+                positive count = 0;
+                positive bytes = fetched.used;
+                tls_crl_held address_to oldest = null;
+
+                slot = null;
+                for (positive k = 0; k < TLS_CRL_HELD; k++)
+                {
+                        tls_crl_held address_to held = tls_crl_cache + k;
+
+                        if (!held->used)
+                        {
+                                slot = slot ? slot : held;
+                                continue;
+                        }
+                        count++;
+                        bytes += held->crl.used;
+                        if (!oldest || held->age < oldest->age)
+                                oldest = held;
+                }
+                if (slot && bytes <= TLS_CRL_HELD_BYTES)
+                        break;
+                if (!oldest)
+                {
+                        byte_store_release(address_of fetched);
+                        return null;
+                }
+                tls_crl_drop(oldest);
+        }
+        slot->crl = fetched;
+        memory_copy(slot->name, name, 32);
+        slot->fetched = at;
+        slot->age = ++tls_crl_clock;
+        slot->used = true;
+        slot->failed = !got;
+        return slot;
+}
+
+/* What the CRL at one URL says of cert, which issuer signed (RFC 5280
+   6.3.3): fetched or held; parsed with cert's serial looked up
+   (tls_parse_crl); issued under the Name cert names and, when both carry one,
+   the same authority key identifier; signed by issuer, whose key's SHA-256
+   is signer; of a scope that covers cert (tls_crl_covers). Listed so signed
+   is revoked; otherwise good when fresh; none for any failure. */
+static COLD p8 tls_crl_answer_at(tls_cert address_to cert,
+                                 tls_cert address_to issuer,
+                                 const p8 address_to url, positive length,
+                                 const p8 address_to signer, p64 now,
+                                 const network_deadline address_to deadline)
+{
+        tls_crl_held address_to held = tls_crl_get(url, length, now, deadline);
+        tls_crl crl;
+
+        if (!held || held->failed ||
+            tls_parse_crl(held->crl.bytes, held->crl.used, cert->serial,
+                          cert->serial_length, address_of crl) ||
+            crl.issuer_length != cert->issuer_length ||
+            memory_compare(crl.issuer, cert->issuer, cert->issuer_length) ||
+            (crl.authority_key && cert->authority_key &&
+             (crl.authority_key_length != cert->authority_key_length ||
+              memory_compare(crl.authority_key, cert->authority_key,
+                             crl.authority_key_length))) ||
+            !tls_crl_covers(address_of crl.scope, cert))
+                return TLS_ANSWER_NONE;
+        if (memory_compare(held->signer, signer, 32))
+        {
+                if (!tls_signed_by(crl.tbs, crl.tbs_length, crl.sig_oid,
+                                   crl.sig_oid_length, crl.sig, crl.sig_length,
+                                   issuer))
+                        return TLS_ANSWER_NONE;
+                memory_copy(held->signer, signer, 32);
+                held->next_update = crl.next_update;
+        }
+        if (crl.listed)
+                return TLS_ANSWER_REVOKED;
+        return tls_revocation_fresh(crl.this_update, crl.next_update, now)
+                   ? TLS_ANSWER_GOOD
+                   : TLS_ANSWER_NONE;
+}
+
+/* What cert's CRL says of it: each http: URI of the distribution point it
+   names, in order, until one answers (tls_crl_answer_at), at most
+   TLS_CRL_POINTS of them. A CA lists mirrors there, and one may refuse a
+   plain GET that another serves: Microsoft's www.microsoft.com answers 403
+   where crl2.microsoft.com serves the same CRL. The issuer has to be one
+   whose key may sign CRLs (cRLSign, when it limits its key at all). Absent
+   when cert names no CRL, none when no URI answers. */
+#define TLS_CRL_POINTS 4
+
+static COLD p8 tls_crl_answer(tls_cert address_to cert, tls_cert address_to issuer,
+                              p64 now, const network_deadline address_to deadline)
+{
+        p8 key[32 + CRYPTO_RSA_BYTES];
+        p8 signer[32];
+        positive key_length;
+        positive tried = 0;
+        byte_reader names;
+
+        if (!cert->crl_url)
+                return TLS_ANSWER_ABSENT;
+        key_length = tls_key_bits(issuer, key, sizeof key);
+        if (!key_length || !cert->issuer || !cert->serial ||
+            (issuer->key_usage && !issuer->crl_sign))
+                return TLS_ANSWER_NONE;
+        crypto_sha256_of(key, key_length, signer);
+        names = byte_reader_open(cert->crl_names, cert->crl_names_length);
+        while (byte_reader_left(&names) && tried < TLS_CRL_POINTS)
+        {
+                p8 tag = tls_der_peek(names);
+                byte_reader uri = tls_der_value(&names, tag);
+                const p8 address_to text = byte_reader_here(&uri);
+                positive size = byte_reader_left(&uri);
+                p8 answer;
+
+                if (tag != 0x86 || size <= 7 || !tls_printable(text, size) ||
+                    memory_compare_ascii_case(text, "http://", 7))
+                        continue;
+                tried++;
+                answer = tls_crl_answer_at(cert, issuer, text, size, signer, now,
+                                           deadline);
+                if (answer != TLS_ANSWER_NONE)
+                        return answer;
+        }
+        return TLS_ANSWER_NONE;
+}
+
+/* The tiers over a verified path: path[0] the leaf, path[depth] the last
+   certificate below the anchor, top the certificate or anchor that signed
+   that one. False with tls->fault saying why when the path may not be
+   used: revoked, or unchecked where the answer was required. */
+static COLD bool tls_revocation_holds(tls_conn address_to tls,
+                                      tls_cert address_to certs,
+                                      const positive address_to path,
+                                      positive depth, tls_cert address_to top,
+                                      const p8 address_to staple,
+                                      positive staple_length, p64 now)
+{
+        network_deadline deadline;
+        bool timed = network_deadline_begin_within(address_of deadline,
+                                                   TLS_REVOCATION_SECONDS, 0,
+                                                   tls->deadline);
+        bool tight = MOONWATER_STRICT_NET >= STRICT_TIGHT;
+
+        for (positive k = 0; k <= depth; k++)
+        {
+                tls_cert address_to cert = certs + path[k];
+                tls_cert address_to issuer = k < depth ? certs + path[k + 1] : top;
+                p8 answer = TLS_ANSWER_ABSENT;
+
+                if (!k && staple)
+                        answer = tls_ocsp_answer(cert, issuer, staple, staple_length,
+                                                 now);
+                if (answer == TLS_ANSWER_GOOD)
+                        continue;
+                if (answer == TLS_ANSWER_REVOKED)
+                        goto revoked;
+                if ((!k && cert->must_staple) || (answer == TLS_ANSWER_NONE && tight))
+                        goto unchecked;
+                answer = tls_crl_answer(cert, issuer, now,
+                                        timed ? address_of deadline : null);
+                if (answer == TLS_ANSWER_REVOKED)
+                        goto revoked;
+                if (answer == TLS_ANSWER_NONE && tight)
+                        goto unchecked;
+        }
+        return true;
+
+revoked:
+        tls->fault = TLS_FAULT_REVOKED;
+        return false;
+unchecked:
+        tls->fault = TLS_FAULT_UNCHECKED;
+        return false;
+}
+
+/*
+        tls_verify_chain's two fetches over plain HTTP: the certificate a
+        caIssuers location names (RFC 5280 4.2.2.1), which browsers fetch
+        when a server leaves an intermediate out, and the CRL a distribution
+        point names (RFC 5280 4.2.1.13). The URL comes from a certificate,
+        and for caIssuers one nothing has verified yet, so the peer may
+        choose the destination, and the fetch is held to what a certificate
+        or a CRL needs: http: only (https would be a handshake inside a
+        handshake), port 80 unless a harness serves it, no userinfo, a public
+        address, one HTTP/1.0 GET with no redirect followed, seconds for the
+        connection and the reply together -- inside outer, when there is one
+        -- a 200, and a body of at most most bytes, which the caller parses
+        and verifies -- DER only, so a PKCS#7 bundle or PEM text is refused
+        there. The store holds what it was given (caIssuers' room on the
+        stack) or, when grow says so, grows on the heap to hold the head and
+        most bytes of body (a CRL's). Returns the body's length at the front
+        of the store, or 0.
+*/
+static COLD positive tls_plain_get(const p8 address_to url, positive length,
+                                   byte_store address_to into, positive most,
+                                   bool grow, positive seconds,
+                                   const network_deadline address_to outer)
 {
         p8 text[HTTP_URL_MAX];
         p8 host[256];
@@ -11241,13 +13060,15 @@ static COLD positive tls_aia_fetch(const p8 address_to url, positive length,
         bool tls;
         p32 ip;
         positive sent = 0;
-        positive used = 0;
         positive header = 0;
+        positive left = 0;
+        positive part = 0;
         http_response response;
         network_deadline deadline;
         bipolar handle;
         bool closed = false;
 
+        into->used = 0;
         if (length >= sizeof text)
                 return 0;
         memory_copy(text, url, length);
@@ -11262,9 +13083,12 @@ static COLD positive tls_aia_fetch(const p8 address_to url, positive length,
                              path, false, '0', (string_address)"Wget",
                              address_of sent) ||
             !(ip = http_lookup((string_address)host)) || !http_address_public(ip) ||
-            !network_deadline_begin(address_of deadline, TLS_AIA_SECONDS, 0))
+            !network_deadline_begin_within(address_of deadline, seconds, 0, outer) ||
+            !network_deadline_left(address_of deadline, address_of left,
+                                   address_of part) ||
+            (grow && !byte_store_reserve(into, TLS_CRL_STEP, TLS_CRL_STEP)))
                 return 0;
-        handle = http_stream_open(ip, port, TLS_AIA_SECONDS);
+        handle = http_stream_open(ip, port, left + (part != 0));
         if (handle < 0)
                 return 0;
         if (network_stream_send_all_until(handle, request, sent,
@@ -11272,33 +13096,67 @@ static COLD positive tls_aia_fetch(const p8 address_to url, positive length,
                 for (;;)
                 {
                         bipolar got;
+                        bool framed = !http_response_framing(into->bytes, into->used,
+                                                             address_of header,
+                                                             address_of response);
+                        positive wanted;
 
-                        if (!http_response_framing(into, used, address_of header,
-                                                   address_of response) &&
-                            response.body_kind == HTTP_BODY_LENGTH &&
-                            used - header >= response.body_length)
+                        if (framed && response.body_kind == HTTP_BODY_LENGTH &&
+                            (response.body_length > most ||
+                             into->used - header >= response.body_length))
                                 break;
-                        if (used == room)
+                        if (framed && into->used - header > most)
                                 break;
+                        if (into->used == into->room)
+                        {
+                                wanted = framed && response.body_kind == HTTP_BODY_LENGTH
+                                             ? header + response.body_length
+                                             : into->room + TLS_CRL_STEP;
+                                if (!grow || wanted > most + HTTP_HEAD_MAX ||
+                                    !byte_store_reserve(into, wanted, TLS_CRL_STEP))
+                                        break;
+                        }
                         got = network_stream_read_some_until(
-                            handle, into + used, room - used, address_of deadline);
+                            handle, into->bytes + into->used, into->room - into->used,
+                            address_of deadline);
                         if (got <= 0)
                         {
                                 closed = !got;
                                 break;
                         }
-                        used += (positive)got;
+                        into->used += (positive)got;
                 }
         socket_close((b32)handle);
-        if (http_response_framing(into, used, address_of header,
+        if (http_response_framing(into->bytes, into->used, address_of header,
                                   address_of response) ||
-            response.code != 200 ||
+            response.code != 200 || into->used - header > most ||
             (response.body_kind == HTTP_BODY_LENGTH
-                 ? used - header != response.body_length
+                 ? into->used - header != response.body_length
                  : response.body_kind != HTTP_BODY_CLOSE || !closed))
+        {
+                into->used = 0;
                 return 0;
-        memory_copy(into, into + header, used - header);
-        return used - header;
+        }
+        memory_copy(into->bytes, into->bytes + header, into->used - header);
+        into->used -= header;
+        return into->used;
+}
+
+static COLD positive tls_aia_fetch(const p8 address_to url, positive length,
+                                   p8 address_to into, positive room)
+{
+        byte_store store = {into, room, 0};
+
+        return tls_plain_get(url, length, address_of store, room, false,
+                             TLS_AIA_SECONDS, null);
+}
+
+static COLD bool tls_crl_fetch(const p8 address_to url, positive length,
+                               byte_store address_to into,
+                               const network_deadline address_to deadline)
+{
+        return tls_plain_get(url, length, into, TLS_CRL_MAX, true,
+                             TLS_REVOCATION_SECONDS, deadline) != 0;
 }
 
 static fn http_url_leaf(string_address path, p8 address_to into, positive room)

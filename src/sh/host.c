@@ -15770,7 +15770,10 @@ static string_address locale_auto_reason(bipolar status)
         case HTTP_EXPIRED:
         case HTTP_NOT_YET:
         case HTTP_MISMATCH:
+        case HTTP_UNCHECKED:
                 return (string_address) "TLS failed -- is the clock right?";
+        case HTTP_REVOKED:
+                return (string_address) "its certificate is revoked";
         case HTTP_STATUS:
                 return (string_address) "it answered with an error";
         case HTTP_MALFORMED:
