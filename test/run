@@ -4075,6 +4075,15 @@ lane_net()
         2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
         *) net_outcome=1 ;;
         esac
+        #       NTS against chrony's server and against servers that are
+        #       wrong, in a namespace; NOT RUN without a chronyd built with NTS
+        #       (MOONWATER_CHRONYD), which does not downgrade net.
+        python3 test/differential.py --harness nts
+        case $? in
+        0) ;;
+        2) note "nts: skipped (soft) -- needs chronyd with NTS (MOONWATER_CHRONYD)" ;;
+        *) net_outcome=1 ;;
+        esac
         python3 test/differential.py --harness tls_hostnames
         case $? in
         0) ;;
@@ -4176,6 +4185,12 @@ lane_net()
         2) note "wifi_sae_fuzz: skipped (soft) -- does not downgrade net" ;;
         *) net_outcome=1 ;;
         esac
+        python3 test/differential.py --harness nts_fuzz
+        case $? in
+        0) ;;
+        2) note "nts_fuzz: skipped (soft) -- does not downgrade net" ;;
+        *) net_outcome=1 ;;
+        esac
         python3 test/differential.py --harness bowl_sig_fuzz
         case $? in
         0) ;;
@@ -4219,6 +4234,14 @@ lane_net()
         *) net_outcome=1 ;;
         esac
         python3 test/differential.py --harness hostile_strings --shell "$shell_binary"
+        case $? in
+        0) ;;
+        2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
+        *) net_outcome=1 ;;
+        esac
+        #       DNS over TLS: a shell trusting a generated root, a resolver on
+        #       1.1.1.1 and the network's own on 10.0.0.1, in a namespace.
+        python3 test/differential.py --harness dns_tls
         case $? in
         0) ;;
         2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;

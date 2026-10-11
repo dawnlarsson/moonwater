@@ -523,8 +523,8 @@ static COLD b32 net_host(void)
         }
         else
         {
-                status = dns_resolve_any((string_address) "/etc/resolv.conf",
-                                         net_word(1), address_of found, 3);
+                status = dns_resolve_wanted((string_address) "/etc/resolv.conf",
+                                            net_word(1), address_of found, 3);
         }
 
         switch (status)
@@ -796,6 +796,19 @@ static COLD b32 net_wget_failed(bipolar status, b32 code, p8 address_to where,
                                      "revoked could not be checked.\n"
                                      "To connect to %w insecurely, use "
                                      "`--no-check-certificate'.\n",
+                                     writer_terminal_quoted_name, host,
+                                     writer_terminal_quoted_name, host);
+        //      Not a wrong clock but an unset one: it reads earlier than the
+        //      system's own build, or than the last time the machine was sure,
+        //      so no certificate date can be judged.
+        case HTTP_CLOCK:
+                return string_report(log_error, WGET_SSL,
+                                     "ERROR: The system clock has not been set "
+                                     "(it reads before this system was built), "
+                                     "so the certificate of '%w' cannot be "
+                                     "checked.\nRun `moonwater time sync`, or "
+                                     "set it with `date -s`. To connect to %w "
+                                     "insecurely, use `--no-check-certificate'.\n",
                                      writer_terminal_quoted_name, host,
                                      writer_terminal_quoted_name, host);
         case HTTP_PRIVATE:

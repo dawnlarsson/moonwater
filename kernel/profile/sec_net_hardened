@@ -8,7 +8,10 @@
 # a packet is not read, a Wi-Fi join requires protected management frames
 # and WPA3 unless the network was saved with wpa2 (`moonwater wifi add SSID -
 # wpa2`), and wget and fetch do not run: Floodlight's network fetch switch is
-# off.
+# off. Time is taken from NTS servers only and names are asked over DNS over
+# TLS only, unless root's /root/ntp.nts or /root/dns.tls says otherwise: no
+# plain time and no name in the clear, at the cost of no clock and no names
+# until an NTS server answers.
 #
 CONFIG_MOONWATER_STRICT_NET=2
 CONFIG_MOONWATER_FLOODLIGHT_NETWORK_FETCH=n
