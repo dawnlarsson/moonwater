@@ -26565,7 +26565,9 @@ def harness_core_state(argv):
         (work / "canvas-pane.inc").write_text(geometry)
         # The userspace compositor's CPU backend, which has to draw G-S1 to
         # the same hash as the kernel's compose path above.
-        (work / "compositor-backend.inc").write_text(section(
+        # canvas_abi.h's SURFACE_* numbers are what the roles are keyed by.
+        (work / "compositor-backend.inc").write_text(
+            (root / "src/canvas/canvas_abi.h").read_text() + section(
             (root / "src/canvas/compositor.c").read_text(),
             "/* ---- backend: the classic look on the CPU ---- */",
             "/* ---- end of the backend ---- */"))
