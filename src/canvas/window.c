@@ -51,6 +51,9 @@
 #ifndef WINDOW_INCLUDED
 #define WINDOW_INCLUDED
 
+// Version 2's numbers, which the compositor's ABI header holds.
+#include "canvas_abi.h"
+
 #define WINDOW_DEVICE "/dev/spark"
 
 // O_RDWR | O_CLOEXEC, which are the same numbers on all three architectures.
@@ -453,6 +456,119 @@ static inline int window_key(struct window *window, struct window_key *key)
 
 #define window_pixels(window) window_at((window), unsigned int, WINDOW_PIXELS)
 
+/*
+        A surface: protocol version 2's page.
+
+        The version 1 struct first, every field where it was, then the rest of
+        the header (canvas spec 01 section 4), and the buffers from
+        WINDOW_PIXELS on. Of the version 1 half a surface uses the position,
+        style, title, sequence, state and want; its contents are buffers, not
+        the cells or the key ring.
+
+        Who writes what: the program writes the requests, buffer_index, the
+        damage list, acked_serial, the style requests and event_tail; the
+        compositor writes everything it decides or applies and event_head.
+        The compositor reads every field the program writes as hostile and
+        keeps its own copy of the geometry it checked at create.
+
+        A buffer is XR24: 0x00rrggbb a pixel, buffer_stride bytes a row. Two
+        slots let a program draw the next frame while the last is still on
+        the screen; release_serial is the last commit the compositor has
+        finished reading.
+*/
+struct surface_damage
+{
+        int x, y, width, height;
+};
+
+struct surface_style
+{
+        unsigned int id;
+        int value;
+};
+
+struct surface_event
+{
+        unsigned short type;
+        unsigned short flags;
+        unsigned int serial;
+        int a, b;
+};
+
+#define SURFACE_DAMAGE_MAX 8
+#define SURFACE_STYLES 16
+#define SURFACE_EVENTS 64
+
+struct surface
+{
+        struct window window;
+
+        unsigned int magic;
+        unsigned short protocol;
+        unsigned short header_size;
+        unsigned int role_requested;
+        unsigned int role_state;
+        int role_result;
+        unsigned int layer;
+        unsigned int anchor_requested;
+        unsigned int anchor_applied;
+        int exclusive_requested;
+        unsigned int exclusive_applied;
+        unsigned int lock_applied;
+        unsigned int parent;
+        unsigned int surface_id;
+        int rel_x, rel_y;
+        unsigned int configure_serial;
+        unsigned int acked_serial;
+        unsigned int applied_width;
+        unsigned int applied_height;
+        unsigned int buffer_slots;
+        unsigned int buffer_index;
+        unsigned int buffer_kind;
+        unsigned int buffer_format;
+        unsigned int buffer_stride;
+        unsigned int buffer_size;
+        unsigned int buffer_offset[2];
+        unsigned int release_serial;
+        unsigned int damage_count; // 0, or above SURFACE_DAMAGE_MAX, is all of it
+        struct surface_damage damage[SURFACE_DAMAGE_MAX];
+        unsigned int style_count;
+        unsigned int style_serial;
+        struct surface_style style_request[SURFACE_STYLES];
+        struct surface_style style_applied[SURFACE_STYLES]; // {value, status}
+        unsigned int event_head;
+        unsigned int event_tail;
+        unsigned int event_dropped;
+        unsigned int reserved;
+        struct surface_event event[SURFACE_EVENTS];
+        unsigned int theme_generation;
+        unsigned int theme_foreground;
+        unsigned int theme_background;
+        unsigned int theme_cursor;
+        unsigned int theme_palette[16];
+};
+
+_Static_assert(sizeof(struct window) == 1288, "window page ABI");
+_Static_assert(sizeof(struct surface_event) == 16, "surface event ABI");
+_Static_assert(__builtin_offsetof(struct surface, magic) == 1288, "surface ABI");
+_Static_assert(__builtin_offsetof(struct surface, role_requested) == 1296, "surface ABI");
+_Static_assert(__builtin_offsetof(struct surface, surface_id) == 1336, "surface ABI");
+_Static_assert(__builtin_offsetof(struct surface, configure_serial) == 1348, "surface ABI");
+_Static_assert(__builtin_offsetof(struct surface, buffer_slots) == 1364, "surface ABI");
+_Static_assert(__builtin_offsetof(struct surface, buffer_offset) == 1388, "surface ABI");
+_Static_assert(__builtin_offsetof(struct surface, damage_count) == 1400, "surface ABI");
+_Static_assert(__builtin_offsetof(struct surface, style_count) == 1532, "surface ABI");
+_Static_assert(__builtin_offsetof(struct surface, style_applied) == 1668, "surface ABI");
+_Static_assert(__builtin_offsetof(struct surface, event_head) == 1796, "surface ABI");
+_Static_assert(__builtin_offsetof(struct surface, event) == 1812, "surface ABI");
+_Static_assert(__builtin_offsetof(struct surface, theme_generation) == 2836, "surface ABI");
+_Static_assert(sizeof(struct surface) == SURFACE_HEADER, "surface ABI");
+
+// Where a slot's pixels start, and how much a page of two slots holds.
+#define SURFACE_PAGE_ROUND(bytes) (((bytes) + 4095u) & ~4095u)
+#define surface_buffer(surface, slot)                                          \
+        window_at((surface), unsigned int, (surface)->buffer_offset[(slot) & 1])
+
 #ifndef KERNEL_MODE
 
 #if defined(__x86_64__)
@@ -462,6 +578,13 @@ static inline int window_key(struct window *window, struct window_key *key)
 #define WINDOW_SYS_IOCTL 16
 #define WINDOW_SYS_CLOSE 3
 #define WINDOW_SYS_PPOLL 271
+#define WINDOW_SYS_SOCKET 41
+#define WINDOW_SYS_CONNECT 42
+#define WINDOW_SYS_SENDMSG 46
+#define WINDOW_SYS_RECVMSG 47
+#define WINDOW_SYS_FCNTL 72
+#define WINDOW_SYS_FTRUNCATE 77
+#define WINDOW_SYS_MEMFD_CREATE 319
 #else
 // arm64 and riscv share the asm-generic numbering.
 #define WINDOW_SYS_OPENAT 56
@@ -470,6 +593,13 @@ static inline int window_key(struct window *window, struct window_key *key)
 #define WINDOW_SYS_IOCTL 29
 #define WINDOW_SYS_CLOSE 57
 #define WINDOW_SYS_PPOLL 73
+#define WINDOW_SYS_SOCKET 198
+#define WINDOW_SYS_CONNECT 203
+#define WINDOW_SYS_SENDMSG 211
+#define WINDOW_SYS_RECVMSG 212
+#define WINDOW_SYS_FCNTL 25
+#define WINDOW_SYS_FTRUNCATE 46
+#define WINDOW_SYS_MEMFD_CREATE 279
 #endif
 
 /*
@@ -685,6 +815,205 @@ static void window_close(struct window *window)
 
         window_call(WINDOW_SYS_MUNMAP, (long)window, window->mapping, 0, 0, 0, 0);
         window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
+}
+
+/*
+        Version 2: a surface on the compositor that runs in userspace.
+
+        The program makes the page -- a memfd sealed so it can never shrink
+        under the compositor's mapping -- and sends it with the create
+        message; the answer says whether the compositor took it. handle is
+        the connection, and closing it is the surface going away.
+*/
+struct surface_iovec
+{
+        void *base;
+        unsigned long length;
+};
+
+struct surface_msghdr
+{
+        void *name;
+        unsigned int name_length;
+        struct surface_iovec *iov;
+        unsigned long iov_count;
+        void *control;
+        unsigned long control_length;
+        int flags;
+};
+
+// One descriptor's worth of SCM_RIGHTS: cmsg_len, cmsg_level, cmsg_type.
+struct surface_rights
+{
+        unsigned long length;
+        int level, type;
+        int handle, pad;
+};
+
+#define SURFACE_AF_UNIX 1
+#define SURFACE_SOCK_SEQPACKET 5
+#define SURFACE_SOCK_CLOEXEC 0x80000
+#define SURFACE_MSG_DONTWAIT 0x40
+#define SURFACE_MSG_NOSIGNAL 0x4000
+#define SURFACE_MFD_CLOEXEC 1u
+#define SURFACE_MFD_ALLOW_SEALING 2u
+#define SURFACE_F_ADD_SEALS 1033
+// F_SEAL_SEAL, F_SEAL_SHRINK and F_SEAL_GROW: the size is fixed for good.
+#define SURFACE_SEAL_FIXED (1u | 2u | 4u)
+
+// What the last surface_open was refused with, as a negative errno.
+static long surface_refused;
+
+static long surface_send(long handle, struct surface_message *message, int file)
+{
+        struct surface_iovec part = {message, sizeof(*message)};
+        struct surface_rights rights = {16 + sizeof(int), 1, 1, file, 0};
+        struct surface_msghdr header = {0, 0, &part, 1, 0, 0, 0};
+
+        if (file >= 0)
+        {
+                header.control = &rights;
+                header.control_length = sizeof(rights);
+        }
+
+        return window_call(WINDOW_SYS_SENDMSG, handle, (long)&header,
+                           SURFACE_MSG_NOSIGNAL, 0, 0, 0);
+}
+
+static long surface_receive(long handle, struct surface_message *message, int flags)
+{
+        struct surface_iovec part = {message, sizeof(*message)};
+        struct surface_msghdr header = {0, 0, &part, 1, 0, 0, 0};
+
+        return window_call(WINDOW_SYS_RECVMSG, handle, (long)&header, flags, 0, 0, 0);
+}
+
+static struct surface *surface_open(unsigned int width, unsigned int height,
+                                    unsigned int role)
+{
+        struct {
+                unsigned short family;
+                char path[sizeof(SURFACE_SOCKET)];
+        } where = {SURFACE_AF_UNIX, SURFACE_SOCKET};
+        struct surface_message message = {SURFACE_CREATE, 0, {0}};
+        unsigned long slot, bytes;
+        long handle, file, mapped;
+
+        surface_refused = -22; // EINVAL
+        if (!width || !height || width > 16384 || height > 16384)
+                return 0;
+
+        slot = SURFACE_PAGE_ROUND((unsigned long)width * height * 4);
+        bytes = WINDOW_PIXELS + slot * 2;
+
+        handle = window_call(WINDOW_SYS_SOCKET, SURFACE_AF_UNIX,
+                             SURFACE_SOCK_SEQPACKET | SURFACE_SOCK_CLOEXEC, 0, 0, 0, 0);
+        if (handle < 0)
+                return surface_refused = handle, (struct surface *)0;
+
+        surface_refused = window_call(WINDOW_SYS_CONNECT, handle, (long)&where,
+                                      sizeof(where), 0, 0, 0);
+        file = surface_refused < 0 ? surface_refused
+                                   : window_call(WINDOW_SYS_MEMFD_CREATE, (long)"surface",
+                                                 SURFACE_MFD_CLOEXEC | SURFACE_MFD_ALLOW_SEALING,
+                                                 0, 0, 0, 0);
+        mapped = file < 0 ? file : window_call(WINDOW_SYS_FTRUNCATE, file, (long)bytes, 0, 0, 0, 0);
+        if (mapped >= 0)
+                mapped = window_call(WINDOW_SYS_FCNTL, file, SURFACE_F_ADD_SEALS,
+                                     SURFACE_SEAL_FIXED, 0, 0, 0);
+        if (mapped >= 0)
+                // PROT_READ | PROT_WRITE, MAP_SHARED
+                mapped = window_call(WINDOW_SYS_MMAP, 0, (long)bytes, 3, 1, file, 0);
+
+        if (mapped < 0 && mapped > -4096)
+        {
+                surface_refused = file < 0 ? file : mapped;
+                if (file >= 0)
+                        window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
+                window_call(WINDOW_SYS_CLOSE, handle, 0, 0, 0, 0, 0);
+                return 0;
+        }
+
+        message.request.size = sizeof(message.request);
+        message.request.protocol = SURFACE_PROTOCOL;
+        message.request.role = role;
+        message.request.width = width;
+        message.request.height = height;
+        message.request.buffer_slots = 2;
+
+        surface_refused = surface_send(handle, &message, (int)file);
+        window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
+
+        if (surface_refused >= 0)
+                surface_refused = surface_receive(handle, &message, 0);
+
+        if (surface_refused >= 0)
+                surface_refused = message.kind != SURFACE_CREATED ? -71 // EPROTO
+                                  : message.status;
+
+        if (surface_refused < 0)
+        {
+                window_call(WINDOW_SYS_MUNMAP, mapped, (long)bytes, 0, 0, 0, 0);
+                window_call(WINDOW_SYS_CLOSE, handle, 0, 0, 0, 0, 0);
+                return 0;
+        }
+
+        ((struct surface *)mapped)->window.handle = (unsigned int)handle;
+        return (struct surface *)mapped;
+}
+
+/*
+        The buffer named by buffer_index, the damage list and the requests are
+        ready. Damage is the program's: leave damage_count at zero for the
+        whole buffer.
+*/
+static void surface_commit(struct surface *surface)
+{
+        struct surface_message message = {SURFACE_COMMIT, 0, {0}};
+
+        __atomic_store_n(&surface->window.sequence, surface->window.sequence + 1,
+                         __ATOMIC_RELEASE);
+        surface_send(surface->window.handle, &message, -1);
+}
+
+// The next event, or false when there is none waiting.
+static int surface_event(struct surface *surface, struct surface_event *event)
+{
+        unsigned int head = __atomic_load_n(&surface->event_head, __ATOMIC_ACQUIRE);
+
+        if (surface->event_tail == head)
+                return 0;
+
+        *event = surface->event[surface->event_tail % SURFACE_EVENTS];
+        __atomic_store_n(&surface->event_tail, surface->event_tail + 1, __ATOMIC_RELEASE);
+        return 1;
+}
+
+/*
+        Sleeps until the compositor has written an event, the other descriptor
+        has bytes, or the time is up, and empties the wakes that said so.
+        Answers what ppoll does, or -1 when the compositor has gone.
+*/
+static long surface_wait(struct surface *surface, long other, long nanoseconds)
+{
+        struct surface_message message;
+        long ready = window_wait(&surface->window, other, nanoseconds);
+        long got;
+
+        while ((got = surface_receive(surface->window.handle, &message,
+                                      SURFACE_MSG_DONTWAIT)) > 0)
+                ;
+
+        // Zero bytes is the far end closed; EAGAIN (-11) is nothing waiting.
+        return got == 0 || (got < 0 && got != -11) ? -1 : ready;
+}
+
+static void surface_close(struct surface *surface)
+{
+        long handle = surface->window.handle;
+
+        window_call(WINDOW_SYS_MUNMAP, (long)surface, surface->window.mapping, 0, 0, 0, 0);
+        window_call(WINDOW_SYS_CLOSE, handle, 0, 0, 0, 0, 0);
 }
 
 #endif // KERNEL_MODE

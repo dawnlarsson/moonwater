@@ -231,4 +231,128 @@ _Static_assert(sizeof(struct canvas_control) == 232, "spark canvas control ABI")
 // In the boot settings' flags, whose other bits are spark.c's.
 #define SPARK_SETTINGS_CANVAS_OFF 0x1u // Canvas does not start at boot
 
+/*
+        Surfaces, protocol version 2: what a program asks of the compositor
+        that runs in userspace (src/canvas/compositor.c), which holds the card
+        while it runs and hands it back to Canvas when it stops. The page a
+        surface is drawn into is laid out in window.c, beside version 1.
+
+        The way there is a socket and not /dev/spark. A program makes its page
+        itself, as a sealed memfd it cannot shrink under the reader, and hands
+        it over with SCM_RIGHTS in its create message; the compositor checks
+        the size and the seals before it maps a byte, writes its half of the
+        header and answers. A commit is a message, so the compositor sleeps
+        in poll until there is one, and an event it writes into the page's
+        ring is followed by a message that wakes the program the same way.
+        Closing the socket is closing the surface: one connection, one
+        surface, as one file is one window in version 1.
+
+        Every message both ways is one struct surface_message on a
+        SOCK_SEQPACKET connection. Only CREATE carries a descriptor.
+*/
+#define SURFACE_SOCKET "/run/moonwater/surface"
+#define SURFACE_PROTOCOL 2u
+#define SURFACE_MAGIC 0x3253574du // 'MWS2'
+#define SURFACE_HEADER 2916u
+#define SURFACE_FORMAT_XR24 0x34325258u
+
+// struct surface_message kind. CREATE is answered by CREATED, COMMIT by
+// nothing; WAKE says the page's event ring has something.
+#define SURFACE_CREATE 1u
+#define SURFACE_COMMIT 2u
+#define SURFACE_CREATED 3u
+#define SURFACE_WAKE 4u
+
+// Roles (canvas spec 02). Values are never renumbered.
+#define SURFACE_ROLE_APP 0u
+#define SURFACE_ROLE_BACKGROUND 1u
+#define SURFACE_ROLE_PANEL 2u
+#define SURFACE_ROLE_LAUNCHER 3u
+#define SURFACE_ROLE_WINDOW_LIST 4u
+#define SURFACE_ROLE_TRAY 5u
+#define SURFACE_ROLE_ICONS 6u
+#define SURFACE_ROLE_CONTROL 7u
+#define SURFACE_ROLE_LOG 8u
+#define SURFACE_ROLE_LEGACY 9u
+
+// role_state
+#define SURFACE_ROLE_NONE 0u
+#define SURFACE_ROLE_PENDING 1u
+#define SURFACE_ROLE_ACTIVE 2u
+#define SURFACE_ROLE_REFUSED 3u
+#define SURFACE_ROLE_REVOKED 4u
+
+// layer
+#define SURFACE_LAYER_BACKGROUND 0u
+#define SURFACE_LAYER_BOTTOM 1u
+#define SURFACE_LAYER_NORMAL 2u
+#define SURFACE_LAYER_TOP 3u
+#define SURFACE_LAYER_OVERLAY 4u
+
+// lock_applied
+#define SURFACE_LOCK_MOVABLE 1u
+#define SURFACE_LOCK_RESIZABLE 2u
+#define SURFACE_LOCK_NO_FOCUS_CLICK 4u
+#define SURFACE_LOCK_NO_KEYBOARD 8u
+#define SURFACE_LOCK_PASS_POINTER 16u
+#define SURFACE_LOCK_DECORATED 32u
+
+// struct surface_request flags
+#define SURFACE_REQUEST_FOCUS 1u
+#define SURFACE_REQUEST_TRANSIENT 2u
+#define SURFACE_REQUEST_CHILD 4u
+
+// struct surface_event type
+#define SURFACE_EVENT_POINTER_ENTER 1u
+#define SURFACE_EVENT_POINTER_LEAVE 2u
+#define SURFACE_EVENT_POINTER_MOTION 3u
+#define SURFACE_EVENT_POINTER_BUTTON 4u
+#define SURFACE_EVENT_POINTER_WHEEL 5u
+#define SURFACE_EVENT_KEY 6u
+#define SURFACE_EVENT_FOCUS 7u
+#define SURFACE_EVENT_CONFIGURE 8u
+#define SURFACE_EVENT_CLOSE 9u
+#define SURFACE_EVENT_ROLE 10u
+#define SURFACE_EVENT_RELEASE 11u
+#define SURFACE_EVENT_STYLE 12u
+
+// SURFACE_EVENT_KEY flags; POINTER_BUTTON uses SURFACE_KEY_DOWN alone.
+#define SURFACE_KEY_DOWN 1u
+#define SURFACE_KEY_REPEAT 2u
+#define SURFACE_KEY_SHIFT 4u
+#define SURFACE_KEY_CONTROL 8u
+#define SURFACE_KEY_ALT 16u
+#define SURFACE_KEY_ALTGR 32u
+#define SURFACE_KEY_SUPER 64u
+
+// SURFACE_EVENT_CLOSE reason
+#define SURFACE_CLOSE_REQUESTED 0u
+#define SURFACE_CLOSE_REPLACED 1u
+#define SURFACE_CLOSE_REFUSED 2u
+#define SURFACE_CLOSE_PARENT 3u
+
+struct surface_request {
+        unsigned int size;         // sizeof(struct surface_request)
+        unsigned int protocol;     // in: 2 or 0; out: the agreed protocol
+        unsigned int role;         // SURFACE_ROLE_*
+        unsigned int width, height;
+        unsigned int buffer_slots; // 1 or 2
+        unsigned int flags;        // SURFACE_REQUEST_*
+        unsigned int parent;       // surface_id, with SURFACE_REQUEST_CHILD
+        int rel_x, rel_y;
+        unsigned int anchor;
+        int exclusive;
+        unsigned int surface_id;   // out
+        unsigned int bytes;        // out: what the page has to hold
+};
+
+struct surface_message {
+        unsigned int kind;  // SURFACE_CREATE ...
+        int status;         // CREATED: 0, or a negative errno
+        struct surface_request request;
+};
+
+_Static_assert(sizeof(struct surface_request) == 56, "surface request ABI");
+_Static_assert(sizeof(struct surface_message) == 64, "surface message ABI");
+
 #endif // CANVAS_ABI_INCLUDED
