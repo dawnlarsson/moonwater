@@ -11664,6 +11664,28 @@ else
         lost 'record moves with a region' "[$record_one] [$record_two]"
 fi
 
+#       The NET level each tier's profile resolves to, which is the level the
+#       HTTP client's address policy and its ceiling on an undeclared body
+#       read (wget_hostile and CHECK_net hold the client at each level): the
+#       reference 0, the default and the workstation 1, the hardened tier 2
+#       and the locked 3, and a NET profile named after another tier its own.
+group net-tiers
+for net_case in 'sec_reference:0' 'sec_default:1' 'sec_workstation:1' \
+        'sec_hardened:2' 'sec_locked:3' 'sec_default sec_net_hardened:2' \
+        'sec_default sec_net_locked:3' 'sec_hardened sec_net_locked:3'; do
+        net_profiles=${net_case%:*}
+        { echo CONFIG_MOONWATER_CORE=y
+          for net_profile in $net_profiles; do cat "kernel/profile/$net_profile"; done
+        } > "$work/switch-net.config"
+        if build_tool config-header "$work/switch-net.config" "$work/switch-net.h" \
+                > "$work/switch-net.log" 2>&1; then
+                same "$net_profiles: NET" "${net_case##*:}" \
+                        "$(sed -n 's/^#define MOONWATER_STRICT_NET //p' "$work/switch-net.h")"
+        else
+                lost "$net_profiles header" "$(head -3 "$work/switch-net.log")"
+        fi
+done
+
 #       One region at a level the rest of the build is not at. The FILES
 #       region tight in a build whose whole level is the default refuses
 #       to make an entry in a world-writable directory without the sticky bit

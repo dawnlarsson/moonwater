@@ -57199,6 +57199,100 @@ static fn fetching(void)
         check("the port is read", port == 8080);
         check("the path after a port", string_equals(path, (string_address) "/x"));
 
+        /* inet_aton's spellings: the address GNU wget and curl connect to,
+           written as the dotted quad by default, refused at the tight tier;
+           the edge of each part's share, and what is no such spelling. */
+        {
+                static const struct
+                {
+                        const char *host;
+                        bool spelling;
+                        p32 address;
+                } spellings[] = {
+                    {"127.1", true, 0x7f000001}, {"0x7f.1", true, 0x7f000001},
+                    {"0177.0.0.1", true, 0x7f000001}, {"2130706433", true, 0x7f000001},
+                    {"0X7F.0X0.0.01", true, 0x7f000001}, {"0", true, 0},
+                    {"4294967295", true, 0xffffffff}, {"0xffffffff", true, 0xffffffff},
+                    {"1.16777215", true, 0x01ffffff}, {"1.2.65535", true, 0x0102ffff},
+                    {"255.255.255.255", true, 0xffffffff}, {"010.0.0.1", true, 0x08000001},
+                    {"4294967296", false, 0}, {"1.16777216", false, 0},
+                    {"1.2.65536", false, 0}, {"256.1", false, 0}, {"1.2.3.256", false, 0},
+                    {"1.2.3.4.5", false, 0}, {"0x", false, 0}, {"0x.1", false, 0},
+                    {"08", false, 0}, {"1.2.3.", false, 0}, {"1..2", false, 0},
+                    {".1", false, 0}, {"", false, 0}, {"1a", false, 0},
+                    {"99999999999999999999", false, 0},
+                };
+
+                for (positive at = 0; at < array_count(spellings); at++)
+                {
+                        p32 address = 0xdeadbeef;
+                        bool spelled = http_ipv4_spelling(
+                            (const p8 address_to)spellings[at].host,
+                            string_length((string_address)spellings[at].host),
+                            address_of address);
+
+                        check("an inet_aton spelling is read as inet_aton reads it",
+                              spelled == spellings[at].spelling &&
+                                  (!spelled || address == spellings[at].address));
+                }
+                check("a spelled address is the dotted quad by default and refused tight",
+                      MOONWATER_STRICT_NET >= STRICT_TIGHT
+                          ? http_split_into((string_address) "http://0x7f.1:8080/x", name,
+                                            sizeof name, address_of port, address_of path,
+                                            address_of tls) == HTTP_BAD_URL
+                          : http_split_into((string_address) "http://0x7f.1:8080/x", name,
+                                            sizeof name, address_of port, address_of path,
+                                            address_of tls) == HTTP_OK &&
+                                string_equals(name, (string_address) "127.0.0.1") &&
+                                port == 8080 &&
+                                string_equals(path, (string_address) "/x"));
+                check("the dotted quad itself and a name ending in the root's dot are "
+                      "left alone in every tier",
+                      http_split_into((string_address) "http://10.0.0.1/", name,
+                                      sizeof name, address_of port, address_of path,
+                                      address_of tls) == HTTP_OK &&
+                          string_equals(name, (string_address) "10.0.0.1") &&
+                          http_split_into((string_address) "http://127.1./", name,
+                                          sizeof name, address_of port, address_of path,
+                                          address_of tls) == HTTP_OK &&
+                          string_equals(name, (string_address) "127.1."));
+                /* A name the resolver rebinds onto this machine, "this
+                   network" or the link-local block, which the tight tier
+                   refuses on every hop; an address in the URL, localhost and
+                   an intranet answer are not that. */
+                check("a name answered with loopback, 0/8 or link-local is rebound",
+                      http_name_rebound((string_address) "evil.example", 0x7f000001) &&
+                          http_name_rebound((string_address) "evil.example", 0x7fffffff) &&
+                          http_name_rebound((string_address) "evil.example", 0x00000001) &&
+                          http_name_rebound((string_address) "evil.example", 0xa9fea9fe) &&
+                          http_name_rebound((string_address) "a", 0xa9fe0000) &&
+                          http_name_rebound((string_address) "127.0.0.1.", 0x7f000001));
+                check("an address, localhost, or a name answered inside the network "
+                      "or outside it is not rebound",
+                      !http_name_rebound((string_address) "127.0.0.1", 0x7f000001) &&
+                          !http_name_rebound((string_address) "169.254.169.254",
+                                             0xa9fea9fe) &&
+                          !http_name_rebound((string_address) "localhost", 0x7f000001) &&
+                          !http_name_rebound((string_address) "a.LocalHost.", 0x7f000001) &&
+                          !http_name_rebound((string_address) "evil.example", 0x0a000001) &&
+                          !http_name_rebound((string_address) "evil.example", 0xc0a80001) &&
+                          !http_name_rebound((string_address) "evil.example", 0x64400001) &&
+                          !http_name_rebound((string_address) "evil.example", 0xa9fd0001) &&
+                          !http_name_rebound((string_address) "evil.example", 0xa9ff0001) &&
+                          !http_name_rebound((string_address) "evil.example", 0x08080808) &&
+                          !http_name_rebound((string_address) "evil.example", 0x80000001) &&
+                          !http_name_rebound((string_address) "evil.example", 0x01000000));
+                check("a spelled address needs room for its dotted quad",
+                      http_split_into((string_address) "http://1/", name, 8,
+                                      address_of port, address_of path,
+                                      address_of tls) == HTTP_BAD_URL &&
+                          (MOONWATER_STRICT_NET >= STRICT_TIGHT ||
+                           (http_split_into((string_address) "http://1/", name, 9,
+                                            address_of port, address_of path,
+                                            address_of tls) == HTTP_OK &&
+                            string_equals(name, (string_address) "0.0.0.1"))));
+        }
+
         check("a bare host gets a slash",
               http_split_into((string_address) "http://dawning.dev", name, sizeof name,
                          address_of port, address_of path, address_of tls) == HTTP_OK);
@@ -57542,6 +57636,46 @@ static fn fetching(void)
                                                     address_of response) ==
                                   HTTP_MALFORMED);
                 }
+                /* A Content-Length list at the default tier: the largest
+                   number there is, twice, is one number; one more than it is
+                   not a number; the first element's digits are the span the
+                   framing reads, blanks and a second field around it. */
+                {
+                        static const char largest[] =
+                            "HTTP/1.1 200 OK\r\nContent-Length: 18446744073709551615 ,"
+                            "\t18446744073709551615\r\n\r\n";
+                        static const char past[] =
+                            "HTTP/1.1 200 OK\r\nContent-Length: 18446744073709551616,"
+                            "18446744073709551616\r\n\r\n";
+                        static const char spread[] =
+                            "HTTP/1.1 200 OK\r\nContent-Length:  007 , 7\t\r\n"
+                            "X: y\r\ncontent-length: 7\r\n\r\n";
+                        http_framing_fields fields;
+                        http_response plain = {.code = 200};
+
+                        check("the largest Content-Length listed twice is one number "
+                              "by default, and a list at the tight tier",
+                              (http_response_framing((p8 address_to)largest,
+                                                     sizeof largest - 1, address_of header,
+                                                     address_of response) == HTTP_OK &&
+                               response.body_kind == HTTP_BODY_LENGTH &&
+                               response.body_length == positive_max) ==
+                                  (MOONWATER_STRICT_NET < STRICT_TIGHT));
+                        check("a Content-Length past 2^64-1 is malformed in every list",
+                              http_response_framing((p8 address_to)past, sizeof past - 1,
+                                                    address_of header,
+                                                    address_of response) ==
+                                  HTTP_MALFORMED);
+                        check("the framing reads the first listed number's digits",
+                              http_response_fields((p8 address_to)spread,
+                                                   sizeof spread - 1, address_of plain,
+                                                   address_of fields) ==
+                                  (MOONWATER_STRICT_NET < STRICT_TIGHT) &&
+                                  (MOONWATER_STRICT_NET >= STRICT_TIGHT ||
+                                   (fields.length_size == 3 &&
+                                    !memory_compare(fields.length, "007", 3) &&
+                                    fields.length_value == 7)));
+                }
         }
 
         /* Exercise every byte class, not only one example from each.  This
@@ -57555,6 +57689,11 @@ static fn fetching(void)
                 p8 value[] = "HTTP/1.1 200 OK\r\nX: x\r\n\r\n";
                 p8 status[] = "HTTP/1.1 200 x\r\nX: value\r\n\r\n";
                 bool text = (byte >= 0x20 || byte == '\t') && byte != 0x7f;
+                /* The default takes any byte in the reason phrase but NUL,
+                   CR and LF, as wget and curl do (only the code is read);
+                   the tight tier holds it to text. */
+                bool reason = text || (MOONWATER_STRICT_NET < STRICT_TIGHT &&
+                                       byte && byte != '\r' && byte != '\n');
 
                 name[19] = (p8)byte;
                 value[20] = (p8)byte;
@@ -57565,8 +57704,8 @@ static fn fetching(void)
                                   http_token_byte((p8)byte));
                 check("every HTTP field-value byte has its text classification",
                       http_header_block_valid(value, sizeof value - 1) == text);
-                check("every HTTP reason byte has its text classification",
-                      http_header_block_valid(status, sizeof status - 1) == text);
+                check("every HTTP reason byte has its tier's classification",
+                      http_header_block_valid(status, sizeof status - 1) == reason);
         }
 
         for (b32 status = 299; status <= 309; status++)
@@ -57670,6 +57809,55 @@ static fn fetching(void)
                                 "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n"
                                 "Content-Length: 2\r\n\r\nx",
                                 "");
+                /* What wget and curl both accept: the default reads these,
+                   the tight tier refuses them.  What curl refuses, or the
+                   two read apart, stays refused in both. */
+                framing_harness("content-length-equal-twice",
+                                MOONWATER_STRICT_NET < STRICT_TIGHT, FRAME,
+                                "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n"
+                                "Content-Length: 3\r\n\r\nabc", "abc");
+                framing_harness("cl-list-same",
+                                MOONWATER_STRICT_NET < STRICT_TIGHT, FRAME,
+                                "HTTP/1.1 200 OK\r\nContent-Length: 5, 5\r\n\r\nhello",
+                                "hello");
+                framing_harness("cl-field-and-list-same",
+                                MOONWATER_STRICT_NET < STRICT_TIGHT, FRAME,
+                                "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n"
+                                "Content-Length: 5 ,05\r\n\r\nhello", "hello");
+                framing_harness("cl-list-then-different-field", false, FRAME,
+                                "HTTP/1.1 200 OK\r\nContent-Length: 5, 5\r\n"
+                                "Content-Length: 6\r\n\r\nhello!", "");
+                framing_harness("cl-list-trailing-comma", false, FRAME,
+                                "HTTP/1.1 200 OK\r\nContent-Length: 5,\r\n\r\nhello",
+                                "");
+                framing_harness("cl-list-different", false, FRAME,
+                                "HTTP/1.1 200 OK\r\nContent-Length: 5, 6\r\n\r\nhello!",
+                                "");
+                framing_harness("cl-list-overflow", false, FRAME,
+                                "HTTP/1.1 200 OK\r\nContent-Length: 5, "
+                                "18446744073709551621\r\n\r\nhello", "");
+                framing_harness("obs-fold-date",
+                                MOONWATER_STRICT_NET < STRICT_TIGHT, FRAME,
+                                "HTTP/1.1 200 OK\r\nDate: Mon,\r\n 01 Jan\r\n"
+                                "Content-Length: 0\r\n\r\n", "");
+                framing_harness("obs-fold-location-on-200",
+                                MOONWATER_STRICT_NET < STRICT_TIGHT, FRAME,
+                                "HTTP/1.1 200 OK\r\nLocation: /a\r\n /b\r\n"
+                                "Content-Length: 0\r\n\r\n", "");
+                framing_harness("obs-fold-after-cl-chain", false, FRAME,
+                                "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n a\r\n b\r\n\r\n",
+                                "");
+                framing_harness("obs-fold-te", false, FRAME,
+                                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"
+                                " , gzip\r\n\r\n0\r\n\r\n", "");
+                framing_harness("obs-fold-control", false, FRAME,
+                                "HTTP/1.1 200 OK\r\nX: a\r\n b\x01c\r\n"
+                                "Content-Length: 0\r\n\r\n", "");
+                framing_harness("reason-phrase-control",
+                                MOONWATER_STRICT_NET < STRICT_TIGHT, FRAME,
+                                "HTTP/1.1 200 O\x01K\r\nContent-Length: 0\r\n\r\n", "");
+                framing_harness("reason-phrase-nul", false, FRAME,
+                                "HTTP/1.1 200 O\x00K\r\nContent-Length: 0\r\n\r\n", "");
                 framing_harness("bare-cr-in-location", false, FRAME,
                                 "HTTP/1.1 302 Found\r\n"
                                 "Location: /safe\rhidden\r\n\r\n",
@@ -57745,6 +57933,36 @@ static fn fetching(void)
                                        address_of used) == HTTP_OK &&
                           used == sizeof expected - 1 &&
                           !memory_compare(request, expected, used));
+
+                static const p8 head_expected[] =
+                    "HEAD /x HTTP/1.1\r\n"
+                    "Host: example.com:8080\r\n"
+                    "User-Agent: Test\r\n"
+                    "Accept: */*\r\n"
+                    "Connection: close\r\n\r\n";
+
+                check("wget --spider's request is the same request with HEAD",
+                      http_request(request, sizeof request, true,
+                                   (string_address)"example.com", 8080,
+                                   (string_address)"/x", false, '1',
+                                   (string_address)"Test", address_of used) == HTTP_OK &&
+                          used == sizeof head_expected - 1 &&
+                          !memory_compare(request, head_expected, used) &&
+                          http_request(request, sizeof head_expected - 1, true,
+                                       (string_address)"example.com", 8080,
+                                       (string_address)"/x", false, '1',
+                                       (string_address)"Test", address_of used) ==
+                              HTTP_OK &&
+                          http_request(request, sizeof head_expected - 2, true,
+                                       (string_address)"example.com", 8080,
+                                       (string_address)"/x", false, '1',
+                                       (string_address)"Test", address_of used) ==
+                              HTTP_BAD_URL);
+                check("only the spider's manners ask HEAD, and they follow as wget does",
+                      http_manners_spider.head && http_manners_spider.follow &&
+                          !http_manners_spider.undeclared_most &&
+                          !http_manners_wget.head && !http_manners_fetch.head &&
+                          !http_manners_zone.head);
 
                 static const p8 fragmentless[] =
                     "GET /x?q=one HTTP/1.1\r\n"
@@ -58856,7 +59074,7 @@ static fn http_header_deadlines(void)
                                           address_of link, head, sizeof head,
                                           address_of used, address_of header,
                                           address_of response, 0, 100000000,
-                                          false) == HTTP_NO_REPLY);
+                                          false, null) == HTTP_NO_REPLY);
                         }
                         socket_close(pair[0]);
                         if (child > 0)
@@ -59154,6 +59372,72 @@ static fn http_tls_resource_exhaustion(void)
                           !net_memory_reserve_fail && !store.used &&
                           !store.bytes);
                 http_forget(address_of store);
+        }
+
+        /* The ceiling on a body that declared no length, with a small one:
+           exactly that many bytes and then the end is a body, one more is
+           HTTP_UNDECLARED and is never written, and a chunk that would pass
+           it is refused before a byte of it is; no ceiling takes it all.
+           The shipped ceiling is the tight tier's wget's alone. */
+        {
+                static p8 seventeen[] = "abcdefghijklmnopq";
+                static p8 chunked_exact[] = "8\r\nabcdefgh\r\n8\r\nijklmnop\r\n0\r\n\r\n";
+                static p8 chunked_over[] =
+                    "8\r\nabcdefgh\r\n8\r\nijklmnop\r\n1\r\nq\r\n0\r\n\r\n";
+                static p8 chunked_whole[] = "11\r\nabcdefghijklmnopq\r\n0\r\n\r\n";
+                http_response close_body = {.code = 200, .body_kind = HTTP_BODY_CLOSE};
+                http_response chunked = {.code = 200, .body_kind = HTTP_BODY_CHUNKED};
+                p8 out[64];
+                //      Never written: no read reaches a socket here.
+                p8 scratch[64];
+                struct
+                {
+                        p8 address_to wire;
+                        positive length;
+                        const http_response address_to response;
+                        positive most;
+                        bipolar want;
+                        positive written;
+                } rows[] = {
+                    {seventeen, 16, address_of close_body, 16, HTTP_OK, 16},
+                    {seventeen, 17, address_of close_body, 16, HTTP_UNDECLARED, 16},
+                    {seventeen, 17, address_of close_body, 0, HTTP_OK, 17},
+                    {seventeen, 0, address_of close_body, 16, HTTP_OK, 0},
+                    {chunked_exact, sizeof chunked_exact - 1, address_of chunked, 16,
+                     HTTP_OK, 16},
+                    {chunked_over, sizeof chunked_over - 1, address_of chunked, 16,
+                     HTTP_UNDECLARED, 16},
+                    {chunked_whole, sizeof chunked_whole - 1, address_of chunked, 16,
+                     HTTP_UNDECLARED, 0},
+                    {chunked_over, sizeof chunked_over - 1, address_of chunked, 0,
+                     HTTP_OK, 17},
+                };
+
+                for (positive at = 0; at < array_count(rows); at++)
+                {
+                        http_body body = {
+                            .stash = rows[at].wire,
+                            .stash_used = rows[at].length,
+                            .scratch = scratch,
+                            .output = out,
+                            .undeclared_most = rows[at].most,
+                        };
+                        bipolar status = http_copy_body(address_of body, -1,
+                                                        rows[at].response);
+
+                        check("a body that declared no length is held to its ceiling",
+                              status == rows[at].want &&
+                                  (positive)(body.output - out) == rows[at].written &&
+                                  !memory_compare(out, "abcdefghijklmnopq",
+                                                  rows[at].written));
+                }
+                check("only the tight tier's wget has a ceiling on an undeclared body",
+                      HTTP_UNDECLARED_MOST == (positive)1 << 30 &&
+                          http_manners_wget.undeclared_most ==
+                              (MOONWATER_STRICT_NET >= STRICT_TIGHT
+                                   ? HTTP_UNDECLARED_MOST : 0) &&
+                          !http_manners_fetch.undeclared_most &&
+                          !http_manners_zone.undeclared_most);
         }
 
         if (net_as_emulated())
@@ -69134,6 +69418,33 @@ static fn redirect_urls(void)
                                address_of body, address_of code) == HTTP_BAD_URL &&
                           http_fetch_to((string_address)"http://127.0.0.1:1/%0d",
                                         -1, false, address_of code, null) == HTTP_BAD_URL);
+                /* What wget and a redirect send instead: the bytes after the
+                   authority escaped, the authority as written, in exactly the
+                   room the answer and its terminator take. */
+                {
+                        static const char typed[] = "h:8/a b\\c\xc3\xa9?d e#f g";
+                        static const char typed_want[] =
+                            "h:8/a%20b%5Cc%C3%A9?d%20e#f%20g";
+                        static const char spaced[] = "//h b/c d%20%zz";
+                        static const char spaced_want[] = "//h b/c%20d%20%zz";
+                        p8 escaped[64];
+
+                        check("a typed URL is escaped after its authority, as wget and curl send it",
+                              http_url_escape((string_address)typed, sizeof typed - 1,
+                                              true, escaped, sizeof typed_want) ==
+                                      HTTP_OK &&
+                                  !memory_compare(escaped, typed_want,
+                                                  sizeof typed_want));
+                        check("an escaped URL needs room for its terminator as well",
+                              http_url_escape((string_address)typed, sizeof typed - 1,
+                                              true, escaped, sizeof typed_want - 1) ==
+                                  HTTP_BAD_URL);
+                        check("a reference keeps its network-path authority and every escape",
+                              http_url_escape((string_address)spaced, sizeof spaced - 1,
+                                              false, escaped, sizeof escaped) == HTTP_OK &&
+                                  !memory_compare(escaped, spaced_want,
+                                                  sizeof spaced_want));
+                }
 
                 /* Absolute Location that already fills the next-URL buffer. */
                 {
@@ -69252,7 +69563,7 @@ static fn fetching_for_real(void)
                                     "short";
                 p8 answer_repeated[] = "HTTP/1.0 200 OK\r\n"
                                        "Content-Length: 5\r\n"
-                                       "content-LENGTH: 5\r\n"
+                                       "content-LENGTH: 6\r\n"
                                        "\r\n"
                                        "hello";
                 p8 answer_conflicting[] = "HTTP/1.0 200 OK\r\n"
@@ -69487,7 +69798,7 @@ static fn fetching_for_real(void)
                       status == HTTP_MALFORMED);
 
                 status = http_get(url, address_of body, address_of code);
-                check("case-insensitive repeated lengths are refused",
+                check("case-insensitive repeated lengths that disagree are refused",
                       status == HTTP_MALFORMED);
 
                 status = http_get(url, address_of body, address_of code);
@@ -69979,6 +70290,90 @@ static fn fetching_for_real(void)
                 system_wait4_retry((b32)child, null, 0, null);
                 socket_close((b32)listening);
         }
+}
+
+/*
+        A redirect chain held to one budget: a server that answers every hop
+        a redirect after 300 ms, and a client whose manners give the whole
+        fetch a second. The chain stops on the clock, well before its twenty
+        redirects (six seconds) run out; with no budget it would take them
+        all, which is the default's GNU behaviour and is not waited for here.
+*/
+static fn http_chain_deadline(void)
+{
+        socket_address_internet where;
+        p32 size = sizeof where;
+        b32 one = 1;
+        bipolar listening = socket_new(AF_INET, SOCK_STREAM, 0);
+        bipolar child;
+        p8 url[64];
+        positive began;
+        positive took;
+        bipolar status;
+        b32 code = 0;
+        http_manners chained = http_manners_wget;
+
+        check("the chain deadline's listener opens", listening >= 0);
+        if (listening < 0)
+                return;
+        socket_option_set((b32)listening, SOL_SOCKET, SO_REUSEADDR, address_of one,
+                          sizeof one);
+        memory_fill(address_of where, 0, sizeof where);
+        where.family = AF_INET;
+        where.host = network_order_32(HOST_LOOPBACK);
+        if (socket_bind((b32)listening, address_of where, sizeof where) ||
+            socket_listen((b32)listening, 8) ||
+            socket_name((b32)listening, address_of where, address_of size))
+        {
+                check("the chain deadline's listener binds", false);
+                socket_close((b32)listening);
+                return;
+        }
+        child = system_fork();
+        if (child == 0)
+        {
+                static const p8 again[] = "HTTP/1.1 302 Found\r\nLocation: /again\r\n"
+                                          "Content-Length: 0\r\n\r\n";
+                p8 said[512];
+
+                for (positive hop = 0; hop < HTTP_HOPS; hop++)
+                {
+                        timespec pause = {0, 300000000};
+                        bipolar taken = socket_accept((b32)listening, 0, 0, 0);
+
+                        if (taken < 0)
+                                break;
+                        socket_receive((b32)taken, said, sizeof said, 0, 0, 0);
+                        system_call_2(syscall(nanosleep), (positive)address_of pause, 0);
+                        system_write_all((positive)taken, again, sizeof again - 1);
+                        socket_shutdown((b32)taken, SHUT_BOTH);
+                        socket_close((b32)taken);
+                }
+                system_call_1(syscall(exit_group), 0);
+        }
+        check("the chain deadline's server starts", child > 0);
+        if (child > 0)
+        {
+                memory_copy(url, "http://127.0.0.1:", 17);
+                url[17 + positive_into(url + 17, network_order_16(where.port))] = end;
+                chained.chain_seconds = 1;
+                began = clock_monotonic_nanoseconds();
+                status = http_run((string_address)url, address_of chained, false, -1,
+                                  null, address_of code, null, null);
+                took = clock_monotonic_nanoseconds() - began;
+                check("a redirect chain stops on its whole budget, not its hop count",
+                      status == HTTP_NO_REPLY && took < 3000000000u);
+                system_call_2(syscall(kill), (positive)child, SIGKILL);
+                system_wait4_retry((b32)child, null, 0, null);
+        }
+        socket_close((b32)listening);
+        check("only the tight tiers give a fetch one budget",
+              http_manners_wget.chain_seconds ==
+                      (MOONWATER_STRICT_NET >= STRICT_TIGHT
+                           ? (positive)(HTTP_HEAD_SECONDS + HTTP_BODY_SECONDS) : 0) &&
+                  http_manners_spider.chain_seconds == http_manners_wget.chain_seconds &&
+                  http_manners_zone.chain_seconds ==
+                      (MOONWATER_STRICT_NET >= STRICT_TIGHT ? 20 : 0));
 }
 
 /*
@@ -73315,6 +73710,7 @@ b32 main(void)
         net_group(tls_revocation_ceilings);
         net_group(redirect_urls);
         net_group(fetching_for_real);
+        net_group(http_chain_deadline);
         net_group(leasing);
         net_group(dhcp_confinement);
         net_group(dhcp_frames_judged);

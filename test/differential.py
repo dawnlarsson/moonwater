@@ -51473,8 +51473,8 @@ def harness_http_response_framing(argv):
 
     net = (HARNESS_ROOT / "src/net/net.c").read_text()
     defines = net[net.index("#define HTTP_PORT 80"):
-                  net.index("#define HTTP_WRITE (-11)") +
-                  len("#define HTTP_WRITE (-11)\n")]
+                  net.index("#define HTTP_UNDECLARED (-22)") +
+                  len("#define HTTP_UNDECLARED (-22)\n")]
     headers = net[net.index("//      Where the header ends"):
                   net.index(
                       "return http_response_framing_from(bytes, size, "
@@ -51660,7 +51660,7 @@ static bipolar system_call_3(positive a, positive b, positive c, positive d)
         abort();
         return -1;
 }
-"""
+""" + byte_reader_source() + positive_append_digit_source()
 
     driver = r"""
 static void emit_hex(const p8 *bytes, positive length)
@@ -51937,6 +51937,51 @@ int main(void)
          b"HTTP/1.1 200 OK\r\nContent-Length: 5, 5\r\n\r\nhello", None),
         ("cl-list-different", "frame",
          b"HTTP/1.1 200 OK\r\nContent-Length: 5, 6\r\n\r\nhello!", None),
+        ("cl-list-triple-same", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 5, 5, 5\r\n\r\nhello", b"hello"),
+        ("cl-list-spread-same", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 5 ,5\r\n\r\nhello", b"hello"),
+        ("cl-field-and-list-same", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Length: 5, 5\r\n\r\nhello",
+         b"hello"),
+        ("cl-list-leading-zero-same", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 05, 5\r\n\r\nhello", b"hello"),
+        ("cl-list-trailing-comma", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 5,\r\n\r\nhello", None),
+        ("cl-list-leading-comma", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: ,5\r\n\r\nhello", None),
+        ("cl-list-empty-middle", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 5,,5\r\n\r\nhello", None),
+        ("cl-list-then-different-field", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 5, 5\r\nContent-Length: 6\r\n\r\nhello!",
+         None),
+        ("cl-three-fields-last-differs", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Length: 5\r\n"
+         b"Content-Length: 4\r\n\r\nhello", None),
+        ("reason-phrase-del", "frame",
+         b"HTTP/1.1 200 O\x7fK\r\nContent-Length: 0\r\n\r\n", None),
+        ("reason-phrase-esc", "frame",
+         b"HTTP/1.1 200 O\x1b[2JK\r\nContent-Length: 0\r\n\r\n", None),
+        ("reason-phrase-nul", "frame",
+         b"HTTP/1.1 200 O\x00K\r\nContent-Length: 0\r\n\r\n", None),
+        ("obs-fold-first-field", "frame",
+         b"HTTP/1.1 200 OK\r\n X: y\r\nContent-Length: 0\r\n\r\n", None),
+        ("obs-fold-chain", "frame",
+         b"HTTP/1.1 200 OK\r\nX: a\r\n b\r\n\tc\r\nContent-Length: 0\r\n\r\n", None),
+        ("obs-fold-after-cl-chain", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n a\r\n b\r\n\r\n", None),
+        ("obs-fold-te", "frame",
+         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n , gzip\r\n\r\n0\r\n\r\n",
+         None),
+        ("obs-fold-control", "frame",
+         b"HTTP/1.1 200 OK\r\nX: a\r\n b\x01c\r\nContent-Length: 0\r\n\r\n", None),
+        ("obs-fold-location-on-200", "frame",
+         b"HTTP/1.1 200 OK\r\nLocation: /a\r\n /b\r\nContent-Length: 0\r\n\r\n", None),
+        ("cl-list-overflow", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 5, 18446744073709551621\r\n\r\nhello",
+         None),
+        ("cl-list-sign", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 5, +5\r\n\r\nhello", None),
         ("cl-hex", "frame",
          b"HTTP/1.1 200 OK\r\nContent-Length: 0x5\r\n\r\nhello", None),
         ("cl-padded", "full",
@@ -51995,6 +52040,13 @@ int main(void)
         "chunk-size-leading-zeros", "chunk-lf-only-delim",
         "cl-padded", "status-no-reason", "field-obs-text-value",
         "chunk-size-trailing-blank", "chunk-uppercase-hex",
+        #   What GNU wget 1.25.0 and curl 8.22.0 both take in a head, so the
+        #   default does (TIGHT_REFUSES has every one of them).
+        "reason-phrase-control", "reason-phrase-del", "reason-phrase-esc",
+        "content-length-equal-twice", "cl-list-same", "cl-list-triple-same",
+        "cl-list-spread-same", "cl-field-and-list-same", "cl-list-leading-zero-same",
+        "obs-fold-date", "obs-fold-first-field", "obs-fold-chain",
+        "obs-fold-location-on-200",
     }
     #       Moonwater policy where http.client disagrees on the same bytes.
     DELIBERATE = {
@@ -52002,16 +52054,35 @@ int main(void)
             "RFC 9112 forbids TE with Content-Length; Moonwater refuses both",
         "duplicate-content-length":
             "duplicate framing fields are refused before a length is chosen",
-        "reason-phrase-control":
-            "a control byte in the status line is refused: it would reach logs and terminals",
-        "content-length-equal-twice":
-            "duplicate framing fields are refused before a length is chosen",
+        "cl-list-trailing-comma":
+            "an empty element in a Content-Length list is malformed (curl refuses it too)",
+        "cl-list-leading-comma":
+            "an empty element in a Content-Length list is malformed (curl refuses it too)",
+        "cl-list-empty-middle":
+            "an empty element in a Content-Length list is malformed (curl refuses it too)",
+        "cl-list-then-different-field":
+            "Content-Length values that disagree are refused, as curl does (wget reads the first)",
+        "cl-three-fields-last-differs":
+            "Content-Length values that disagree are refused, as curl does (wget reads the first)",
+        "cl-list-overflow":
+            "a number past 2^64 is not the 5 before it; GNU wget and curl both read the first",
+        "cl-list-sign":
+            "a Content-Length element is plain DIGIT (curl refuses +5 too)",
+        "reason-phrase-nul":
+            "a NUL in the status line is refused (curl refuses it too)",
+        "obs-fold-after-cl-chain":
+            "a fold after Content-Length is refused: curl refuses it, wget reads the length",
+        "obs-fold-te":
+            "a fold after Transfer-Encoding is refused: curl refuses it, wget prints the chunks raw",
+        "obs-fold-control":
+            "response field values reject embedded controls (NUL/CR/LF), a folded line too",
         "content-length-conflict-twice":
             "duplicate framing fields are refused before a length is chosen",
         "bare-cr-in-location":
             "response field values reject embedded controls (NUL/CR/LF)",
         "obs-fold-location":
-            "obsolete line folding is refused so a proxy cannot split views",
+            "a redirect's folded Location is refused: GNU wget follows it to "
+            "/a%20%20%20/b and curl to /a%20/b",
         "space-before-colon":
             "field names are exact tokens; whitespace before ':' is not a name",
         "te-not-chunked":
@@ -52034,8 +52105,6 @@ int main(void)
             "response field values reject embedded controls (NUL/CR/LF)",
         "bare-cr-status-line":
             "a bare CR mid-status-line is not a field separator",
-        "obs-fold-date":
-            "obsolete line folding is refused so a proxy cannot split views",
         "obs-fold-cl":
             "obsolete line folding is refused so a proxy cannot split views",
         "tab-before-colon":
@@ -52074,8 +52143,6 @@ int main(void)
             "chunk framing allows LF-only delimiters like response headers",
         "cl-negative":
             "Content-Length is plain DIGIT; a sign is malformed",
-        "cl-list-same":
-            "a list in Content-Length is a duplicate framing field by another spelling",
         "cl-list-different":
             "a list in Content-Length is a duplicate framing field by another spelling",
         "cl-hex":
@@ -52099,8 +52166,37 @@ int main(void)
     #       all of them: a real server sends 204 with Content-Length: 0, both
     #       tools ignore a 204's declared body and print a 205's, and this
     #       client closes the connection after one response, so a declared
-    #       body left unread can never be taken for the next response.
+    #       body left unread can never be taken for the next response; both
+    #       read a Content-Length that repeats one number, a fold after an
+    #       ordinary field and any reason-phrase byte but NUL and CR (measured
+    #       on the box against GNU wget 1.25.0 and curl 8.22.0, 2026-10-09).
     TIGHT_REFUSES = {
+        "reason-phrase-control":
+            "a control byte in the status line would reach logs and terminals",
+        "reason-phrase-del":
+            "a control byte in the status line would reach logs and terminals",
+        "reason-phrase-esc":
+            "a control byte in the status line would reach logs and terminals",
+        "content-length-equal-twice":
+            "duplicate framing fields are refused before a length is chosen",
+        "cl-list-same":
+            "a list in Content-Length is a duplicate framing field by another spelling",
+        "cl-list-triple-same":
+            "a list in Content-Length is a duplicate framing field by another spelling",
+        "cl-list-spread-same":
+            "a list in Content-Length is a duplicate framing field by another spelling",
+        "cl-field-and-list-same":
+            "duplicate framing fields are refused before a length is chosen",
+        "cl-list-leading-zero-same":
+            "a list in Content-Length is a duplicate framing field by another spelling",
+        "obs-fold-date":
+            "obsolete line folding is refused so a proxy cannot split views",
+        "obs-fold-first-field":
+            "obsolete line folding is refused so a proxy cannot split views",
+        "obs-fold-chain":
+            "obsolete line folding is refused so a proxy cannot split views",
+        "obs-fold-location-on-200":
+            "obsolete line folding is refused so a proxy cannot split views",
         "204-with-content-length":
             "RFC 9110 15.3.5 forbids Content-Length on 204",
         "204-with-transfer-encoding":
@@ -52194,7 +52290,7 @@ int main(void)
             "%s %s %s\n" % (name, mode, wire.hex() or "00")
             for name, mode, wire, _ in CASES)
 
-        def probe(strict):
+        def probe(strict, text=stdin):
             """The matrix through the lifted framing at a MOONWATER_STRICT
             tier: (verdict lines, None), or (None, why it failed)."""
             binary = work / ("http_response_framing_%d" % strict)
@@ -52206,7 +52302,7 @@ int main(void)
             if built.returncode:
                 return None, ("the response framing probe did not build:\n" +
                               built.stderr[-3000:])
-            ran = subprocess.run([str(binary)], input=stdin,
+            ran = subprocess.run([str(binary)], input=text,
                                  capture_output=True, text=True, timeout=60)
             if ran.returncode or ran.stderr.strip():
                 return None, ("the probe aborted:\n" +
@@ -52282,6 +52378,145 @@ int main(void)
                 checks(py_body == want_body,
                        "%s: http.client body %r != %r" % (
                            name, py_body, want_body))
+
+        #       Generated heads against a model written from the structure
+        #       that made them, at both tiers. The model knows nothing of
+        #       net.c: it says what wget and curl both take (the default
+        #       reads an identical duplicate Content-Length, a list of one
+        #       number, a fold after an ordinary field or a non-redirect's
+        #       Location, and any reason-phrase byte but NUL and a bare CR),
+        #       what curl refuses or the two read apart (a pair that
+        #       disagrees, an empty list element, a fold after a framing field
+        #       or a redirect's Location) and what only the tight tier refuses
+        #       (every one of those, and a 204 or 205 whose declaration cannot
+        #       describe no content).
+        def head_spec(rng):
+            spec = {"code": rng.choice([200, 200, 204, 205, 302, 304, 404]),
+                    "reason": rng.choice(["plain"] * 12 + ["none", "ctl", "del",
+                                                           "esc", "nul", "cr"]),
+                    "fields": [], "folds": {}}
+            for _ in range(rng.choice([0, 1, 1, 1, 2, 3])):
+                base = rng.choice([0, 3, 3, 7])
+                elements = []
+                for _ in range(rng.choice([1, 1, 1, 2, 3])):
+                    roll = rng.random()
+                    if roll < 0.10:
+                        elements.append(str(base + 1))
+                    elif roll < 0.15:
+                        elements.append("")
+                    elif roll < 0.18:
+                        elements.append("x")
+                    elif roll < 0.30:
+                        elements.append("0" + str(base))
+                    else:
+                        elements.append(str(base))
+                spec["fields"].append(("content-length", elements))
+            for _ in range(rng.choice([0, 0, 0, 0, 0, 1, 1, 2])):
+                spec["fields"].append(("transfer-encoding", [rng.choice(
+                    ["chunked", "chunked", "gzip"])]))
+            if spec["code"] in (300, 301, 302, 303, 307, 308) or rng.random() < 0.15:
+                for _ in range(rng.choice([1, 1, 1, 2])):
+                    spec["fields"].append(("location", ["/next"]))
+            for _ in range(rng.choice([0, 1, 2])):
+                spec["fields"].append(("x-pad", ["v"]))
+            rng.shuffle(spec["fields"])
+            spec["folds"] = {at: rng.choice([1, 1, 2]) for at in
+                             range(-1, len(spec["fields"]))
+                             if rng.random() < 0.12}
+            return spec
+
+        def head_wire(spec):
+            reason = {"plain": b" OK", "none": b"", "ctl": b" O\x01K",
+                      "del": b" O\x7fK", "esc": b" O\x1b[2JK",
+                      "nul": b" O\x00K", "cr": b" O\rK"}[spec["reason"]]
+            out = b"HTTP/1.1 %d%s\r\n" % (spec["code"], reason)
+
+            def folds(at):
+                return b"".join([b" folded\r\n", b"\tmore\r\n"][:spec["folds"].get(at, 0)])
+
+            out += folds(-1)
+            for at, (name, elements) in enumerate(spec["fields"]):
+                value = ", ".join(elements) if name != "transfer-encoding" else elements[0]
+                if name == "content-length" and at % 2:
+                    value = " ,".join(elements)
+                out += b"%s: %s\r\n" % (name.title().encode(), value.encode()) + folds(at)
+            return out + b"\r\n"
+
+        def head_model(spec, tier):
+            """None for a refusal, else the body length declared (or -1)."""
+            redirect = spec["code"] in (300, 301, 302, 303, 307, 308)
+            framing = ("content-length", "transfer-encoding") + (
+                ("location",) if redirect else ())
+            if spec["reason"] in ("nul", "cr"):
+                return None
+            if spec["reason"] in ("ctl", "del", "esc") and tier == 2:
+                return None
+            names = [name for name, _ in spec["fields"]]
+            for at in spec["folds"]:
+                if tier == 2:
+                    return None
+                if at >= 0 and names[at] in framing:
+                    return None
+            if names.count("transfer-encoding") > 1:
+                return None
+            if "transfer-encoding" in names:
+                if "content-length" in names or \
+                        [e for n, e in spec["fields"]
+                         if n == "transfer-encoding"][0][0] != "chunked":
+                    return None
+            if redirect and names.count("location") > 1:
+                return None
+            length = -1
+            lists = [e for n, e in spec["fields"] if n == "content-length"]
+            if lists:
+                flat = [x for e in lists for x in e]
+                if any(not x.isdigit() for x in flat):
+                    return None
+                if tier == 2 and (len(lists) > 1 or len(lists[0]) > 1):
+                    return None
+                if len({int(x) for x in flat}) > 1:
+                    return None
+                length = int(flat[0])
+            if tier == 2 and ((spec["code"] == 204 and
+                               ("transfer-encoding" in names or lists)) or
+                              (spec["code"] == 205 and length > 0)):
+                return None
+            return length
+
+        generator = random.Random(0x7157)
+        specs = [head_spec(generator) for _ in range(4000)]
+        wires = []
+        for spec in specs:
+            model = head_model(spec, 1)
+            wires.append(head_wire(spec) +
+                         b"x" * (max(model, 0) if model is not None else 3))
+        text = "".join("g%d frame %s\n" % (n, wire.hex())
+                       for n, wire in enumerate(wires))
+        for tier in (1, 2):
+            said, failure = probe(tier, text)
+            if failure:
+                checks(False, "generated heads, tier %d: %s" % (tier, failure))
+                continue
+            said = {line.split("\t")[0]: line.split("\t") for line in said.splitlines()}
+            wrong = 0
+            accepted = 0
+            for n, spec in enumerate(specs):
+                expect = head_model(spec, tier)
+                row = said["g%d" % n]
+                ours = row[1] == "ACCEPT"
+                accepted += ours
+                body = binascii.unhexlify(row[2]) if row[2] != "-" else None
+                good = ours == (expect is not None) and (
+                    not ours or expect < 0 or body == b"x" * expect)
+                if not good:
+                    wrong += 1
+                    if wrong <= 5:
+                        checks(False, "generated head %d at tier %d: model %s, tier says "
+                               "%s %r for %r" % (
+                                   n, tier, "refuse" if expect is None else
+                                   "accept %d" % expect, row[1], body, wires[n][:200]))
+            checks(wrong == 0, "generated heads at tier %d: %d of %d differ from the model "
+                   "(%d accepted)" % (tier, wrong, len(specs), accepted))
 
     if not curl_seen:
         print("http response framing: curl NOT RUN -- curl is not installed")
@@ -52366,6 +52601,7 @@ typedef const p8 *const_string;
 #define min(a, b) ((a) < (b) ? (a) : (b))
 #define memory_copy memmove
 #define memory_copy_apart memcpy
+#define memory_compare memcmp
 #define memory_fill(at, v, n) memset((at), (int)(v), (n))
 #define string_get(s) (*(const unsigned char *)(s))
 #define string_is(source, value) (*(source) == (value))
@@ -52472,6 +52708,11 @@ static positive positive_into(p8 *into, positive value)
 {
         return (positive)sprintf((char *)into, "%lu", value);
 }
+static positive host_into(p8 *into, p32 host)
+{
+        return (positive)sprintf((char *)into, "%u.%u.%u.%u", host >> 24,
+                                 host >> 16 & 255, host >> 8 & 255, host & 255);
+}
 static positive string_digits_max(string_address source, positive bound,
                                   positive *used)
 {
@@ -52496,7 +52737,7 @@ static bool memory_from_hex_exact(address_any into, const p8 *text, positive byt
         return true;
 }
 typedef struct { p8 *bytes; positive room; positive used; } byte_store;
-""" + digits + appends + r"""
+""" + digits + appends + positive_append_digit_source() + r"""
 static bool fuzz_reserve(byte_store *store, positive wanted, positive step)
 {
         (void)step;
@@ -52528,6 +52769,8 @@ static positive fuzz_segment_size;
 static positive fuzz_segment_at;
 static positive fuzz_opened;
 static p32 fuzz_connected[32];
+static bool fuzz_connected_name[32];
+static bool fuzz_identity_name;
 static positive fuzz_connected_count;
 static positive fuzz_requests;
 static char fuzz_identity_host[256];
@@ -52620,9 +52863,11 @@ static int socket_connect(b32 h, const void *where, positive size)
         fuzz_identity_port = to->port;
         fuzz_identity_tls = false;
         fuzz_identity_pending = true;
-        if (fuzz_connected_count < 32)
+        if (fuzz_connected_count < 32) {
+                fuzz_connected_name[fuzz_connected_count] = fuzz_identity_name;
                 fuzz_connected[fuzz_connected_count++] =
                     to->host;
+        }
         return 0;
 }
 static int socket_close(b32 h) { (void)h; return 0; }
@@ -52639,15 +52884,26 @@ static bool network_deadline_left(const network_deadline *d, positive *s,
         *n = d->budget % 1000000000UL;
         return d->began && d->budget;
 }
+static bool network_deadline_begin_within(network_deadline *d, positive s,
+                                          positive n, const network_deadline *outer)
+{
+        if (!network_deadline_begin(d, s, n))
+                return false;
+        if (outer && outer->budget < d->budget)
+                d->budget = outer->budget;
+        return !outer || outer->began;
+}
 
 /* Every request this client writes: one request line and four fields, each
    ended by CRLF, a blank line, and no other CR, LF or control. */
+static bool fuzz_request_head;
 static void fuzz_request(const p8 *data, positive length)
 {
         positive lines = 0;
+        positive method = fuzz_request_head ? 5 : 4;
         fuzz_requests++;
-        if (length < 4 || memcmp(data + length - 4, "\r\n\r\n", 4) ||
-            memcmp(data, "GET /", 5))
+        if (length < 5 || memcmp(data + length - 4, "\r\n\r\n", 4) ||
+            memcmp(data, fuzz_request_head ? "HEAD /" : "GET /", method + 1))
                 fuzz_die("request framing");
         for (positive at = 0; at < length; at++) {
                 p8 byte = data[at];
@@ -52664,7 +52920,7 @@ static void fuzz_request(const p8 *data, positive length)
                 fuzz_die("request line count");
         /* "GET " target " HTTP/1.x" CR: the target holds no space. */
         positive line = (positive)((const p8 *)memchr(data, '\r', length) - data);
-        if (line < 14 || memchr(data + 4, ' ', line - 13))
+        if (line < method + 10 || memchr(data + method, ' ', line - method - 9))
                 fuzz_die("space inside the request target");
         if (fuzz_identity_pending) {
                 const p8 *field = memmem(data, length, "\r\nHost: ", 8);
@@ -52893,35 +53149,75 @@ static bipolar system_call_3(positive number, positive fd, positive spans,
         return (bipolar)wrote;
 }
 
-/* A name that does not resolve, one in public space (8.8.8.8), one inside
-   (10.0.0.1), and every other name and literal on this machine. */
-static p32 http_lookup(string_address host);
-static p32 http_lookup_wanted(string_address host)
+/* lib.c's string_to_host: four octets of one to three digits, no leading
+   zero, single dots, nothing after; the address in host order, or -1. */
+static bipolar string_to_host(string_address input)
 {
-        return http_lookup(host);
+        p32 address = 0;
+        for (int part = 0; part < 4; part++) {
+                p32 octet = 0;
+                int digits = 0;
+                if (part && *input++ != '.')
+                        return -1;
+                while (*input >= '0' && *input <= '9') {
+                        if (digits == 3 || (digits && !octet))
+                                return -1;
+                        octet = octet * 10 + (p32)(*input++ - '0');
+                        digits++;
+                }
+                if (!digits || octet > 255)
+                        return -1;
+                address = address << 8 | octet;
+        }
+        return *input ? -1 : (bipolar)address;
 }
+static bool http_host_loopback(string_address host);
+
+/* A name that does not resolve, one in public space (8.8.8.8), one inside
+   (10.0.0.1), one the resolver rebinds onto this machine (127.0.0.1) and one
+   onto the clouds' metadata address (169.254.169.254); an address is itself,
+   localhost is loopback, and every other name is on the intranet
+   (10.0.0.2). Each connection records whether a name chose it. */
 static p32 http_lookup(string_address host)
 {
         p32 answer;
+        bipolar literal = string_to_host(host);
 
         if (!strcmp(host, "unknown.invalid"))
                 return 0;
-        if (!strcmp(host, "public.example"))
+        if (literal >= 0)
+                answer = (p32)literal;
+        else if (http_host_loopback(host) || !strcmp(host, "rebind.example"))
+                answer = 0x7f000001;
+        else if (!strcmp(host, "public.example"))
                 answer = 0x08080808;
         else if (!strcmp(host, "inside.example"))
                 answer = 0x0a000001;
+        else if (!strcmp(host, "metadata.example"))
+                answer = 0xa9fea9fe;
         else
-                answer = 0x7f000001;
+                answer = 0x0a000002;
         if (strlen(host) >= sizeof fuzz_identity_host)
                 fuzz_die("resolved host exceeds the identity transcript");
         strcpy(fuzz_identity_host, host);
         fuzz_identity_ip = answer;
+        fuzz_identity_name = literal < 0 && !http_host_loopback(host);
         return answer;
+}
+static p32 http_lookup_wanted(string_address host)
+{
+        return http_lookup(host);
 }
 """
     if tight:
         shim = shim.replace("#define MOONWATER_STRICT STRICT_SAFE",
                             "#define MOONWATER_STRICT STRICT_TIGHT")
+        #   The tight tier's ceiling on a body that declared no length, cut
+        #   from 1 GiB to 64 bytes so an input can reach it and pass it.
+        ceiling = "#define HTTP_UNDECLARED_MOST ((positive)1 << 30)"
+        if ceiling not in http:
+            raise ValueError("http_fuzz_source: the ceiling on undeclared bodies moved")
+        http = http.replace(ceiling, "#define HTTP_UNDECLARED_MOST ((positive)64)")
     return shim + http + driver
 
 
@@ -52991,8 +53287,13 @@ static int fuzz_whole(const p8 *segment, positive size, bool tls, bool follow,
         if (http_response_has_no_body(response.code))
                 return 1;
         /* The tight tier reads a 205 as the RFC does: its framing is taken
-           and any content is a refusal. */
+           and any content is a refusal. Its wget, which writes a body as it
+           arrives, refuses one that declared no length past
+           HTTP_UNDECLARED_MOST (cut to 64 bytes in this lift); a chunk that
+           would pass it is refused whole, so a chunked body is refused when
+           its decoded total passes it. */
         bool reset = MOONWATER_STRICT >= STRICT_TIGHT && response.code == 205;
+        bool capped = MOONWATER_STRICT >= STRICT_TIGHT && follow;
         switch (response.body_kind) {
         case HTTP_BODY_LENGTH:
                 if (size - header < response.body_length)
@@ -53006,19 +53307,25 @@ static int fuzz_whole(const p8 *segment, positive size, bool tls, bool follow,
                 if (verdict < 0)
                         return -1;
                 *body_size = (positive)verdict;
+                if (capped && *body_size > HTTP_UNDECLARED_MOST)
+                        return 0;
                 return reset && *body_size ? 0 : 1;
         default:
                 /* Close-delimited: plaintext EOF, or close_notify. */
                 memmove(copy, copy + header, size - header);
                 *body_size = size - header;
+                if (capped && *body_size > HTTP_UNDECLARED_MOST)
+                        return 0;
                 return reset && *body_size ? 0 : 1;
         }
 }
 
+static bool fuzz_head;
 static void fuzz_run(const p8 *data, positive size, int lane)
 {
         bool tls = lane == 1;
         bool fetch = lane == 2;
+        bool head = fuzz_head && !fetch;
         const char *start = tls ? "https://127.0.0.1:8443/dir/file.bin?q=1"
                                 : "http://127.0.0.1:8080/dir/file.bin?q=1";
         http_buffer store = {0};
@@ -53033,23 +53340,49 @@ static void fuzz_run(const p8 *data, positive size, int lane)
         fuzz_identity_host[0] = 0;
         fuzz_identity_pending = false;
         fuzz_sink_used = 0;
+        fuzz_request_head = head;
         status = fetch ? http_get((string_address)start, &store, &code)
-                       : http_fetch_to((string_address)start, 7, true, &code, null);
+                 : head ? http_spider((string_address)start, true, &code, null)
+                        : http_fetch_to((string_address)start, 7, true, &code, null);
+        if (head && fuzz_sink_used)
+                fuzz_die("a HEAD wrote a body");
         if (fuzz_requests != fuzz_opened)
                 fuzz_die("a connection was opened with no request written on it");
         if (fuzz_identity_pending)
                 fuzz_die("a connected authority was not consumed by one request");
         /* At the tight tier a chain that has reached public space never
-           connects inside again. */
+           connects inside again, and no name reaches this machine, "this
+           network" or the link-local block, on any hop. */
         if (MOONWATER_STRICT >= STRICT_TIGHT)
-                for (positive i = 0; i < fuzz_connected_count; i++)
+                for (positive i = 0; i < fuzz_connected_count; i++) {
+                        p8 a = (p8)(fuzz_connected[i] >> 24);
+                        if (fuzz_connected_name[i] &&
+                            (!a || a == 127 ||
+                             (fuzz_connected[i] >> 16) == 0xa9fe))
+                                fuzz_die("a name rebound onto this machine was connected to");
                         for (positive j = i + 1; j < fuzz_connected_count; j++)
                                 if (http_address_public(fuzz_connected[i]) &&
                                     !http_address_public(fuzz_connected[j]))
                                         fuzz_die("a connection went inside after one to "
                                                  "public space");
+                }
 
-        if (fuzz_opened && !fuzz_write_faults && fuzz_segment_open(fuzz_opened - 1)) {
+        /* A HEAD's final answer is its head: a whole 2xx head is success
+           whatever follows it, a refused head is a refusal. */
+        if (head && fuzz_opened && fuzz_segment_open(fuzz_opened - 1)) {
+                http_response response;
+                positive header = 0;
+                p8 *copy = malloc(fuzz_segment_size + 1);
+                memcpy(copy, fuzz_segment, fuzz_segment_size);
+                bipolar framed = http_response_framing(copy, fuzz_segment_size, &header,
+                                                       &response);
+                free(copy);
+                if (!framed && http_response_is_success(response.code) && status)
+                        fuzz_die("HEAD refused a whole 2xx head");
+                if (framed && framed != HTTP_NO_REPLY &&
+                    fuzz_segment_size < HTTP_HEAD_MAX && !status)
+                        fuzz_die("HEAD took a head the framing refuses");
+        } else if (fuzz_opened && !fuzz_write_faults && fuzz_segment_open(fuzz_opened - 1)) {
                 p8 *want = NULL;
                 positive want_size = 0;
                 int whole = fuzz_whole(fuzz_segment, fuzz_segment_size, tls, !fetch,
@@ -53099,6 +53432,20 @@ static void fuzz_url(const p8 *data, positive size)
         p8 leaf[256];
         p8 next[HTTP_URL_MAX];
 
+        fuzz_request_head = false;
+        /* Escaping is idempotent and leaves nothing it escapes behind the
+           authority: a second pass over its answer changes nothing. */
+        for (int bare = 0; bare < 2; bare++) {
+                char *text = bare ? url : location;
+                p8 once[HTTP_URL_MAX], twice[HTTP_URL_MAX];
+                if (!http_url_escape((string_address)text, strlen(text), bare, once,
+                                     sizeof once) &&
+                    (http_url_escape(once, strlen((char *)once), bare, twice,
+                                     sizeof twice) ||
+                     strcmp((char *)once, (char *)twice)))
+                        fuzz_die("escaping an escaped URL changed it");
+        }
+
         memset(host, 0xa5, sizeof host);
         if (http_split_into(url, host, sizeof host, &port, &path, &tls)) {
                 if (host[0] != 0xa5)
@@ -53111,6 +53458,17 @@ static void fuzz_url(const p8 *data, positive size)
         for (p8 *at = host; *at; at++)
                 if (!known_is_alnum(*at) && *at != '-' && *at != '.' && *at != '_')
                         fuzz_die("split let a byte into the host");
+        {
+                /* An address split answers is written one way: the dotted
+                   quad, which only the default reaches from a spelling. */
+                p32 numeric;
+                p8 quad[16];
+                if (http_ipv4_spelling(host, strlen((char *)host), &numeric)) {
+                        quad[host_into(quad, numeric)] = 0;
+                        if (strcmp((char *)quad, (char *)host))
+                                fuzz_die("split answered an address in a spelling of its own");
+                }
+        }
         if (!http_get_request(request, sizeof request, (string_address)host, port,
                               path, tls, '1', (string_address)"Wget", &used))
                 fuzz_request(request, used);
@@ -53192,7 +53550,10 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
         data += 2;
         size -= 2;
         if (lane < 3)
+        {
+                fuzz_head = lane < 2 && (data[-1] & 0x80);
                 fuzz_run(data, size, lane);
+        }
         else if (lane == 3)
                 fuzz_url(data, size);
         else
@@ -53229,7 +53590,8 @@ def http_fuzz_seeds():
                            ("downgrade", b"http://127.0.0.1/p"),
                            ("unknown_host", b"http://unknown.invalid/"),
                            ("trailing_blank", b"/p \t"), ("dot_segments", b"../../x"),
-                           ("unbuildable", b"/caf\xe9"), ("percent_cr", b"/%0d")):
+                           ("unbuildable", b"/caf\xe9"), ("percent_cr", b"/%0d"),
+                           ("spaced", b"dir/a b?q=x y"), ("backslash", b"/a\\b%zz")):
         redirect = (b"HTTP/1.1 302 Found\r\nLocation: " + location +
                     b"\r\nContent-Length: 0\r\n\r\n")
         for lane in (0, 1):
@@ -53240,7 +53602,11 @@ def http_fuzz_seeds():
             ("inside_then_public", (b"inside.example/p", b"public.example/q")),
             ("public_twice", (b"public.example/p", b"public.example/q")),
             ("public_inside_public", (b"public.example/p", b"inside.example/q",
-                                      b"public.example/r"))):
+                                      b"public.example/r")),
+            ("public_then_spelled", (b"public.example/p", b"0x7f.1/q")),
+            ("to_rebound", (b"rebind.example/p",)),
+            ("to_metadata_name", (b"metadata.example/p", b"other.example/q")),
+            ("to_intranet_name", (b"other.example/p", b"169.254.169.254/q"))):
         for lane in (0, 1):
             scheme = b"https://" if lane else b"http://"
             wire = hop.join(b"HTTP/1.1 302 Found\r\nLocation: " + scheme + where +
@@ -53255,6 +53621,15 @@ def http_fuzz_seeds():
     seeds["run0_faults_length.bin"] = b"\x80\x03" + (
         b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\n" + b"z" * 4096)
     seeds["run1_close_notify.bin"] = b"\x01\x02HTTP/1.1 200 OK\r\n\r\n" + b"q" * 3000
+    #   HEAD (wget --spider): a lane's second byte with its top bit set.
+    for name, wire in (("cl_unsent", b"HTTP/1.1 200 OK\r\nContent-Length: 99\r\n\r\n"),
+                       ("chunked", b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"),
+                       ("close_with_bytes", b"HTTP/1.1 200 OK\r\n\r\nnot a body"),
+                       ("missing", b"HTTP/1.1 404 Not Found\r\nContent-Length: 3\r\n\r\nno\n"),
+                       ("redirected", b"HTTP/1.1 302 Found\r\nLocation: /y\r\n\r\n" + hop +
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\n")):
+        for lane in (0, 1):
+            seeds["head%d_%s.bin" % (lane, name)] = bytes([lane, 0x87]) + wire
     seeds["run0_1xx_trickle.bin"] = b"\x00\x01" + (
         b"HTTP/1.1 100 Continue\r\n\r\n" * 20 + ok)
     for name, url, location in (
@@ -53271,7 +53646,10 @@ def http_fuzz_seeds():
             ("scheme_only", b"gopher://h/", b"mailto:x"),
             ("bare_web_scheme", b"https:443", b"http:80"),
             ("bare_other_scheme", b"ftp:21", b"smtp:25"),
-            ("long", b"http://h/" + b"a" * 2100, b"b" * 2100)):
+            ("long", b"http://h/" + b"a" * 2100, b"b" * 2100),
+            ("escapes", b"h:8/a b\\c\xc3\xa9?d e", b"//h b/c d\xff"),
+            ("spelled", b"http://0x7f.1:8/a", b"//2130706433:9/b"),
+            ("spelled_edge", b"0377.0xffffff", b"http://1.2.65536/")):
         seeds["url_%s.bin" % name] = b"\x03\x00" + url + b"\x00" + location
     return seeds
 
@@ -53855,15 +54233,28 @@ def harness_wget_mutation(argv):
             #   wget/curl or by this client, never read two ways.
             ("a duplicated equal Content-Length", [length.replace(
                 b"Content-Length: 15\r\n", b"Content-Length: 15\r\nContent-Length: 15\r\n")],
+             False, (0, payload)),
+            ("a Content-Length list of one number", [length.replace(
+                b"Content-Length: 15\r\n", b"Content-Length: 15, 15\r\n")],
+             False, (0, payload)),
+            ("a Content-Length list that disagrees", [length.replace(
+                b"Content-Length: 15\r\n", b"Content-Length: 15, 3\r\n")],
              False, None),
             ("conflicting Content-Length values", [length.replace(
                 b"Content-Length: 15\r\n", b"Content-Length: 15\r\nContent-Length: 3\r\n")],
              False, None),
             ("an obs-fold continuation line in the head", [length.replace(
                 b"Connection: close\r\n", b"X-Fold: a\r\n b\r\nConnection: close\r\n")],
+             False, (0, payload)),
+            ("an obs-fold line after Content-Length", [length.replace(
+                b"Content-Length: 15\r\n", b"Content-Length: 15\r\n 4\r\n")],
              False, None),
             ("a control byte in the reason phrase",
-             [length.replace(b"200 OK", b"200 O\x01K")], False, None),
+             [length.replace(b"200 OK", b"200 O\x01K")], False, (0, payload)),
+            ("DEL and ESC in the reason phrase",
+             [length.replace(b"200 OK", b"200 O\x7f\x1b[2JK")], False, (0, payload)),
+            ("a NUL in the reason phrase",
+             [length.replace(b"200 OK", b"200 O\x00K")], False, None),
             ("a bare CR in the reason phrase",
              [length.replace(b"200 OK", b"200 O\rK")], False, None),
             ("a bare LF ends the status line, a second Content-Length follows",
@@ -53887,26 +54278,28 @@ def harness_wget_mutation(argv):
             procedures.append(("FIN cuts a response at byte %d" % at,
                                [length[:at]], False, None))
 
-        #       Where the built shell's wget refuses what GNU wget accepts.
-        #       These refusals predate the harness and stay listed, not
-        #       settled: wget and curl both accept an identical duplicate
-        #       Content-Length and a control byte in the reason phrase, so
-        #       whether the default should is the user's decision. Anything
-        #       else must answer as GNU wget does, and never accept what curl
-        #       refuses.
+        #       Where the built shell's wget refuses what GNU wget accepts:
+        #       only what curl refuses as well (a Content-Length pair or list
+        #       that disagrees, a NUL or bare CR in the status line, a fold
+        #       after a framing field). What both tools accept -- an
+        #       identical duplicate Content-Length, a list of one number, a
+        #       fold after an ordinary field, a control byte in the reason
+        #       phrase -- the default accepts and only MOONWATER_STRICT 2
+        #       refuses. Anything else must answer as GNU wget does, and never
+        #       accept what curl refuses.
         #       A FIN inside the status line or a header is not a response:
         #       GNU wget 1.25.0 exits 0 with nothing written for some of
         #       those cut points, which lets whoever can cut a connection turn
         #       a download into an empty success. This client fails them all.
         STRICTER_THAN_WGET = {
+            "a Content-Length list that disagrees":
+                "values that disagree are refused, as curl does (wget reads the first)",
+            "an obs-fold line after Content-Length":
+                "a fold after a framing field is refused; curl refuses it too",
+            "a NUL in the reason phrase":
+                "a NUL in the status line is refused; curl refuses it too",
             "conflicting Content-Length values":
                 "duplicate framing fields are refused before a length is chosen",
-            "a duplicated equal Content-Length":
-                "duplicate framing fields are refused before a length is chosen",
-            "an obs-fold continuation line in the head":
-                "obsolete line folding is refused so a proxy cannot split views",
-            "a control byte in the reason phrase":
-                "a control byte in the status line would reach logs and terminals",
             "a bare CR in the reason phrase":
                 "a bare CR mid-status-line is not a field separator",
             "a bare LF ends the status line, a second Content-Length follows":
@@ -53989,13 +54382,15 @@ def harness_wget_hostile(argv):
     import socket
     import tempfile
     import threading
+    import time
     parser = argparse.ArgumentParser(prog="differential.py --harness wget_hostile")
     parser.add_argument("--cc", default=os.environ.get("CC", "gcc"))
     parser.add_argument("--shell", help="a built shell to use instead of building one")
     parser.add_argument("--tight-shell", help="a shell built with MOONWATER_STRICT=2")
     parser.add_argument("--netns", help=argparse.SUPPRESS)
-    parser.add_argument("--tight", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--level", type=int, default=1, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    args.tight = args.level >= 2
     if platform.system() != "Linux":
         print("wget hostile: NOT RUN -- needs Linux")
         return 2
@@ -54010,7 +54405,7 @@ def harness_wget_hostile(argv):
     def hop(location):
         """/x redirects to location; anything else is the answer."""
         return lambda line, port: (redirect(location.replace(b"PORT", b"%d" % port))
-                                   if line.startswith(b"GET /x ") else ok())
+                                   if line.split(b" ")[1:2] == [b"/x"] else ok())
 
     def answer(response):
         return lambda line, port: response.replace(b"PORT", b"%d" % port)
@@ -54052,8 +54447,14 @@ def harness_wget_hostile(argv):
                     if field.lower().startswith(b"host:"):
                         self.hosts.append(field[5:].strip())
                 reply = self.script(line, self.port)
+                hold = reply.endswith(b"<HOLD>")
+                reply = reply[:-6] if hold else reply
                 for at in range(0, len(reply), 4096):
                     peer.sendall(reply[at:at + 4096])
+                if hold:
+                    #   Keeps the connection open, as a server that means to
+                    #   send the body a head declares would.
+                    time.sleep(8)
             except OSError:
                 pass
             finally:
@@ -54074,12 +54475,69 @@ def harness_wget_hostile(argv):
     #   name, script, url (PORT and HOST filled in), expected request lines,
     #   expected exit for mw, references that must show the same lines, note
     def case(name, script, url, lines, code=0, refs=("wget", "curl"), host=None,
-             saved=b"hi", message=None):
+             saved=b"hi", message=None, spider=False, quick=False):
         return dict(name=name, script=script, url=url, lines=lines, code=code,
-                    refs=refs, host=host, saved=saved, message=message)
+                    refs=refs, host=host, saved=saved, message=message,
+                    spider=spider, quick=quick)
 
     GET = lambda target: b"GET " + target
+    HEAD = lambda target: b"HEAD " + target
     CASES = [
+        #   A space, a backslash and bytes past ASCII after the authority are
+        #   sent escaped, %XX in upper case, as GNU wget and curl send them
+        #   (curl sends a backslash on as it is, so that row is GNU wget's).
+        case("a Location with UTF-8 is fetched, escaped", hop(b"/caf\xc3\xa9"),
+             "http://127.0.0.1:PORT/x", [GET(b"/x"), GET(b"/caf%C3%A9")]),
+        case("a Location with a space is fetched, escaped", hop(b"/a b"),
+             "http://127.0.0.1:PORT/x", [GET(b"/x"), GET(b"/a%20b")]),
+        case("a Location with a backslash in the path is escaped", hop(b"/a\\b"),
+             "http://127.0.0.1:PORT/x", [GET(b"/x"), GET(b"/a%5Cb")], refs=("wget",)),
+        case("a relative Location is escaped whole", hop(b"dir/a b?q=x y"),
+             "http://127.0.0.1:PORT/x", [GET(b"/x"), GET(b"/dir/a%20b?q=x%20y")],
+             refs=("wget",)),
+        case("an absolute Location with UTF-8", hop(b"http://127.0.0.1:PORT/\xc3\xa9"),
+             "http://127.0.0.1:PORT/x", [GET(b"/x"), GET(b"/%C3%A9")]),
+        case("a network-path Location with a space", hop(b"//127.0.0.1:PORT/a b"),
+             "http://127.0.0.1:PORT/x", [GET(b"/x"), GET(b"/a%20b")]),
+        case("an escape already there is not doubled", hop(b"/a%20b%zz"),
+             "http://127.0.0.1:PORT/x", [GET(b"/x"), GET(b"/a%20b%zz")],
+             refs=("curl",)),
+        case("a URL typed with UTF-8", answer(ok()), "http://127.0.0.1:PORT/é",
+             [GET(b"/%C3%A9")]),
+        case("a URL typed with a space", answer(ok()), "http://127.0.0.1:PORT/a b?c d",
+             [GET(b"/a%20b?c%20d")], refs=("wget",)),
+        case("a schemeless URL typed with a space", answer(ok()), "127.0.0.1:PORT/a b",
+             [GET(b"/a%20b")], refs=("wget",)),
+        #   A redirect with nothing to follow is the server's answer: GNU wget
+        #   exits 8 ("Redirection (302) without location"; with an empty
+        #   Location it asks again for the same URL until its twenty run out,
+        #   which no row asks anyone to match), curl -L hands the body over.
+        case("a redirect with no Location is the server's answer",
+             answer(b"HTTP/1.1 302 Found\r\nContent-Length: 0\r\n\r\n"),
+             "http://127.0.0.1:PORT/x", [GET(b"/x")], code=8, refs=("wget", "curl"),
+             saved=None, message=b"Redirection (302) without location"),
+        case("a redirect with an empty Location is the server's answer",
+             answer(b"HTTP/1.1 302 Found\r\nLocation: \r\nContent-Length: 0\r\n\r\n"),
+             "http://127.0.0.1:PORT/x", [GET(b"/x")], code=8, refs=(), saved=None),
+        case("a Location too long to follow is named as it was, not as its sender",
+             hop(b"/" + b"a" * 3000), "http://127.0.0.1:PORT/x", [GET(b"/x")], code=1,
+             refs=(), saved=None, message=b"/aaaaaaaa"),
+        #   wget --spider asks HEAD at every hop and reads no body, however
+        #   the head frames one (curl -I beside it); with -O GNU wget leaves
+        #   an empty file, which this does on success.
+        case("--spider asks HEAD", answer(ok()), "http://127.0.0.1:PORT/x",
+             [HEAD(b"/x")], saved=b"", spider=True),
+        case("--spider follows a redirect with HEAD", hop(b"/z"), "http://127.0.0.1:PORT/x",
+             [HEAD(b"/x"), HEAD(b"/z")], saved=b"", spider=True),
+        case("--spider on a missing file is the server's answer",
+             answer(b"HTTP/1.1 404 Not Found\r\nContent-Length: 3\r\n\r\nno\n"),
+             "http://127.0.0.1:PORT/x", [HEAD(b"/x")], code=8, saved=None, spider=True),
+        case("--spider does not wait for a body the head declares",
+             answer(b"HTTP/1.1 200 OK\r\nContent-Length: 99\r\n\r\n<HOLD>"),
+             "http://127.0.0.1:PORT/x", [HEAD(b"/x")], saved=b"", spider=True, quick=True),
+        case("--spider does not wait for chunks the head declares",
+             answer(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n<HOLD>"),
+             "http://127.0.0.1:PORT/x", [HEAD(b"/x")], saved=b"", spider=True, quick=True),
         case("a redirect loop stops", answer(redirect(b"/x")),
              "http://127.0.0.1:PORT/x", [GET(b"/x")] * 21, code=8, refs=(), saved=None,
              message=b"redirections exceeded"),
@@ -54092,20 +54550,37 @@ def harness_wget_hostile(argv):
         case("DELIBERATE: a %00 in a Location is refused", hop(b"/a%00b"),
              "http://127.0.0.1:PORT/x", [GET(b"/x")], code=1, refs=(), saved=None),
     ]
+    #   inet_aton's spellings of 127.0.0.1 reach it with the dotted quad in
+    #   Host, as curl sends it (GNU wget sends the spelling; both connect).
+    for spelling in ("127.1", "0x7f.1", "0177.0.0.1", "2130706433", "0x7f000001",
+                     "127.0.1", "0177.1", "0X7F.0X0.0.01"):
+        CASES.append(case("the address %s is 127.0.0.1" % spelling, answer(ok()),
+                          "http://%s:PORT/" % spelling, [GET(b"/")], host=b"127.0.0.1"))
+    CASES.append(case("a Location naming 127.1", hop(b"http://127.1:PORT/z"),
+                      "http://127.0.0.1:PORT/x", [GET(b"/x"), GET(b"/z")], host=b"127.0.0.1"))
 
-    #   The address policy of the tight tier, in a network namespace of its
-    #   own where 8.8.8.8 and 8.8.4.4 are loopback addresses: a chain that has
-    #   reached public space may not be sent back inside, and a chain that
-    #   never left the inside may go anywhere.  The default follows all of it,
-    #   as GNU wget and curl do.
+    #   The address policy of each tier, in a network namespace of its own
+    #   where 8.8.8.8, 8.8.4.4, 10.9.9.9 and 169.254.169.254 are loopback
+    #   addresses, run by a shell built at each MOONWATER_STRICT level: the
+    #   tight and locked tiers (2 and 3, what sec_hardened and sec_locked
+    #   resolve STRICT_NET to) keep a chain that has reached public space out
+    #   of loopback, private, shared and link-local space and refuse a name
+    #   the resolver rebinds onto this machine or its link on any hop, the
+    #   first one too; a chain that never left the inside may go anywhere, an
+    #   address typed in the URL is taken, and an intranet name is ordinary.
+    #   The default and reference tiers (1 and 0) follow all of it, as GNU
+    #   wget and curl do.
     if args.netns:
         import struct
         farm = Path(tempfile.mkdtemp(prefix="wget-netns-"))
         (farm / "wget").symlink_to(args.netns)
         #   The network's resolver, played by a stub on this namespace's own
         #   127.0.0.1:53 (resolv.conf is bound over in a mount namespace of
-        #   its own): every A question is answered 8.8.4.4, a public address
-        #   that is a loopback one here, and every name asked is kept.
+        #   its own): an A question is answered 8.8.4.4, a public address that
+        #   is a loopback one here, but for three names a hostile or
+        #   misconfigured resolver might give -- intranet.example 10.9.9.9,
+        #   rebind.example 127.0.0.1, metadata.example 169.254.169.254 -- and
+        #   every name asked is kept.
         (farm / "resolv.conf").write_text("nameserver 127.0.0.1\n")
         subprocess.run(["mount", "--bind", str(farm / "resolv.conf"), "/etc/resolv.conf"],
                        check=True)
@@ -54122,9 +54597,14 @@ def harness_wget_hostile(argv):
                         labels.append(data[at + 1:at + 1 + data[at]])
                         at += 1 + data[at]
                     kind = struct.unpack("!H", data[at + 1:at + 3])[0]
-                    asked.append(b".".join(labels).decode("latin1").lower())
+                    name = b".".join(labels).decode("latin1").lower()
+                    asked.append(name)
+                    address = {"intranet.example": [10, 9, 9, 9],
+                               "rebind.example": [127, 0, 0, 1],
+                               "metadata.example": [169, 254, 169, 254]}.get(
+                                   name, [8, 8, 4, 4])
                     answer = (b"\xc0\x0c" + struct.pack("!HHIH", 1, 1, 60, 4) +
-                              bytes([8, 8, 4, 4])) if kind == 1 else b""
+                              bytes(address)) if kind == 1 else b""
                     resolver.sendto(struct.pack("!HHHHHH", struct.unpack("!H", data[:2])[0],
                                                 0x8180, 1, int(kind == 1), 0, 0) +
                                     data[12:at + 5] + answer, peer)
@@ -54140,23 +54620,149 @@ def harness_wget_hostile(argv):
             #   tight tier refuses it after public space as it refuses
             #   127.0.0.1; a resolver that said 8.8.4.4 once made it public.
             ("public to localhost", "8.8.8.8", b"http://LocalHost.:PORT/z", False),
+            #   inet_aton's spelling of loopback is loopback: the default
+            #   follows it as GNU wget and curl do, and the tight tier, which
+            #   refuses every such spelling but the dotted quad, never asks.
+            ("public to a legacy spelling of loopback", "8.8.8.8",
+             b"http://2130706433:PORT/z", False),
+            ("public to a private address", "8.8.8.8", b"http://10.9.9.9:PORT/z", False),
+            ("public to the cloud metadata address", "8.8.8.8",
+             b"http://169.254.169.254:PORT/z", False),
+            ("public to a name the resolver puts on the intranet", "8.8.8.8",
+             b"http://intranet.example:PORT/z", False),
+            ("public to a name the resolver rebinds onto loopback", "8.8.8.8",
+             b"http://rebind.example:PORT/z", False),
+            ("private to the cloud metadata address", "10.9.9.9",
+             b"http://169.254.169.254:PORT/z", True),
+            ("private to an intranet name", "10.9.9.9", b"http://intranet.example:PORT/z",
+             True),
+            #   The rebinding rule holds on every hop, inside space too.
+            ("private to a name rebound onto the metadata address", "10.9.9.9",
+             b"http://metadata.example:PORT/z", "rebound"),
         ]
+        level = ("reference", "default", "tight", "locked")[args.level]
+        said = {b"2130706433": b"not a url this understands",
+                b"rebind.example": b"the name resolved to this machine",
+                b"metadata.example": b"the name resolved to this machine"}
         failures = 0
         for name, first, location, follows in rows:
+            refused = args.tight and follows is not True
             server = Server(hop(location), "0.0.0.0")
             done = subprocess.run([str(farm / "wget"), "-O", "saved",
                                    "http://%s:%d/x" % (first, server.port)],
                                   capture_output=True, timeout=60, cwd=str(farm))
             server.close()
-            want = [GET(b"/x"), GET(b"/z")] if follows or not args.tight else [GET(b"/x")]
-            code = 0 if follows or not args.tight else 1
-            good = server.lines == want and done.returncode == code and (
-                follows or not args.tight or b"not public" in done.stderr)
+            want = [GET(b"/x")] if refused else [GET(b"/x"), GET(b"/z")]
+            message = [words for spelled, words in said.items() if spelled in location]
+            message = message[0] if message else b"not public"
+            good = server.lines == want and done.returncode == (1 if refused else 0) and (
+                not refused or message in done.stderr)
             if not good:
                 failures += 1
                 print("FAIL %s %s: lines %r exit %d (%s)" % (
-                    "tight" if args.tight else "default", name, server.lines,
-                    done.returncode, done.stderr[-120:]))
+                    level, name, server.lines, done.returncode, done.stderr[-120:]))
+        #   The first URL is the caller's: an address typed in it is taken at
+        #   every tier, and so is a name the resolver puts on the intranet;
+        #   a name it rebinds onto loopback or the metadata address is
+        #   refused at the tight tiers before anything is sent.
+        first_hops = [
+            ("a typed loopback address", "127.0.0.1", True),
+            ("a typed metadata address", "169.254.169.254", True),
+            ("a typed private address", "10.9.9.9", True),
+            ("an intranet name", "intranet.example", True),
+            ("a name rebound onto loopback", "rebind.example", False),
+            ("a name rebound onto the metadata address", "metadata.example", False),
+        ]
+        for name, host, taken in first_hops:
+            refused = args.tight and not taken
+            server = Server(answer(ok()), "0.0.0.0")
+            done = subprocess.run([str(farm / "wget"), "-O", "saved",
+                                   "http://%s:%d/y" % (host, server.port)],
+                                  capture_output=True, timeout=60, cwd=str(farm))
+            server.close()
+            good = (server.lines == ([] if refused else [GET(b"/y")]) and
+                    done.returncode == (1 if refused else 0) and
+                    (not refused or b"the name resolved to this machine" in done.stderr))
+            if not good:
+                failures += 1
+                print("FAIL %s first hop, %s: lines %r exit %d (%s)" % (
+                    level, name, server.lines, done.returncode, done.stderr[-120:]))
+        rows = rows + first_hops
+        #   The tight tiers' ceiling on a body that declared no length
+        #   (HTTP_UNDECLARED_MOST, 1 GiB) through the real program, to its
+        #   standard output: exactly that much and then the close is a download,
+        #   one byte more is refused in so many words, and a chunk that would
+        #   pass it is refused at its size line. The default takes all of it,
+        #   as GNU wget does; CHECK_net holds that with a small ceiling, so
+        #   no row here asks it to read a gigabyte.
+        if args.tight:
+            ceiling = 1 << 30
+            block = b"z" * (1 << 20)
+
+            sent_total = [0]
+
+            def bulk(head, count):
+                sent_total[0] = 0
+                listener = socket.socket()
+                listener.bind(("127.0.0.1", 0))
+                listener.listen(1)
+                listener.settimeout(60)
+
+                def serve():
+                    try:
+                        peer, _ = listener.accept()
+                    except OSError:
+                        return
+                    try:
+                        peer.settimeout(60)
+                        request = b""
+                        while b"\r\n\r\n" not in request:
+                            more = peer.recv(4096)
+                            if not more:
+                                return
+                            request += more
+                        peer.sendall(head)
+                        left = count
+                        while left:
+                            sent = block if left >= len(block) else block[:left]
+                            peer.sendall(sent)
+                            left -= len(sent)
+                            sent_total[0] += len(sent)
+                    except OSError:
+                        pass
+                    finally:
+                        peer.close()
+                threading.Thread(target=serve, daemon=True).start()
+                return listener
+            plain = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n"
+            ceilings = [
+                ("a close-delimited body of exactly the ceiling", plain, ceiling, 0),
+                ("a close-delimited body one byte past the ceiling", plain, ceiling + 1, 1),
+                ("a chunk past the ceiling", b"HTTP/1.1 200 OK\r\nTransfer-Encoding: "
+                 b"chunked\r\n\r\n%x\r\n" % (ceiling + 1), 4096, 1),
+            ]
+            for name, head, count, code in ceilings:
+                listener = bulk(head, count)
+                began = time.monotonic()
+                #   Standard output thrown away: /dev/null belongs to nobody
+                #   in this user namespace, which -O refuses to write through.
+                done = subprocess.run([str(farm / "wget"), "-q", "-O", "-",
+                                       "http://127.0.0.1:%d/big" % listener.getsockname()[1]],
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                      timeout=280, cwd=str(farm))
+                took = time.monotonic() - began
+                listener.close()
+                #   The exact row is a download only if every byte went out.
+                good = done.returncode == code and (
+                    not code or b"with no length declared" in done.stderr) and (
+                    code or sent_total[0] == count)
+                print("NOTE %s %s: exit %d, %d bytes sent, in %.1f s" % (
+                    level, name, done.returncode, sent_total[0], took))
+                if not good:
+                    failures += 1
+                    print("FAIL %s %s: exit %d (%s)" % (level, name, done.returncode,
+                                                        done.stderr[-160:]))
+            rows = rows + ceilings
         #   RFC 6761 6.3: localhost and every name under it, in any case and
         #   with or without the root's dot, reaches 127.0.0.1 and is never
         #   asked of the resolver; a name that only looks like one is asked
@@ -54173,7 +54779,7 @@ def harness_wget_hostile(argv):
         elsewhere = [cased(name) for name in (
             "localhostx", "xlocalhost", "localhost.example", "localhost-a.example",
             "a-localhost", "localhos", "localhost.localhost.example", "ocalhost")]
-        curl = shutil.which("curl") if not args.tight else None
+        curl = shutil.which("curl") if args.level == 1 else None
         for host, inside in [(h, True) for h in loopback] + [(h, False) for h in elsewhere]:
             row_failed = False
             for who in ("mw", "curl") if curl else ("mw",):
@@ -54191,61 +54797,67 @@ def harness_wget_hostile(argv):
                 if not good:
                     row_failed = True
                     print("FAIL %s %s %r: exit %d, reached %r, resolver asked %r" % (
-                        "tight" if args.tight else "default", who, host, done.returncode,
+                        level, who, host, done.returncode,
                         server.locals, asked))
             failures += row_failed
-        #   Host spellings against the references, at the default tier: how
-        #   each client reads 127.0.0.1 spelled the ways inet_aton reads it
-        #   (fewer parts, hex, octal, one number, the root's dot), and the
-        #   authority forms this client refuses. A row says what this client
-        #   does -- "literal" (127.0.0.1 reached, nobody asked), "name" (the
-        #   resolver asked, 8.8.4.4 reached) or "refused" (nothing asked or
-        #   reached) -- and why, where GNU wget or curl is known to differ.
-        #   This client is held to its column; the references' answers are
-        #   printed, and one that has come to agree is said.
+        #   Host spellings against the references: how each client reads
+        #   127.0.0.1 spelled the ways inet_aton reads it (fewer parts, hex,
+        #   octal, one number, the root's dot), and the authority forms this
+        #   client refuses. A row says what this client does -- "literal"
+        #   (127.0.0.1 reached, nobody asked), "name" (the resolver asked,
+        #   8.8.4.4 reached) or "refused" (nothing asked or reached) -- and
+        #   why, where GNU wget or curl is known to differ. This client is
+        #   held to its column at each tier; the references' answers are
+        #   printed beside the default's, and one that has come to agree is
+        #   said.
         spelled = []
-        if not args.tight:
-            quad = [127, 0, 0, 1]
+        quad = [127, 0, 0, 1]
 
-            def octet(value, form):
-                return {"dec": "%d" % value, "zero": "0%d" % value, "hex": "0x%x" % value,
-                        "HEX": "0X%X" % value, "oct": "0%o" % value}[form]
-            numeric = set()
-            while len(numeric) < 10:
-                parts = spell.choice([quad, [127, 0, 1], [127, 1], [0x7f000001]])
-                forms = [spell.choice(["dec", "dec", "zero", "hex", "HEX", "oct"])
-                         for _ in parts]
-                text = ".".join(octet(v, f) for v, f in zip(parts, forms))
-                try:
-                    same = socket.inet_aton(text) == bytes(quad)
-                except OSError:
-                    same = False
-                if text != "127.0.0.1" and same:
-                    numeric.add(text + spell.choice(["", "", "."]))
-            shorthand = ("a host that is not four plain decimal octets is a name to this "
-                         "client, as the resolver is asked; inet_aton, under GNU wget and "
-                         "curl, reads it as 127.0.0.1 (needs a decision: parity would "
-                         "canonicalize it once in http_split_into)")
-            spelled = [("http://127.0.0.1:PORT/", "literal", None)] + [
-                ("http://%s:PORT/" % text, "name", shorthand) for text in sorted(numeric)] + [
-                ("http://u@127.0.0.1:PORT/", "refused",
-                 "userinfo is refused; both send it as Authorization or drop it"),
-                ("http://127.0.0.1:PORT\\@x/", "refused",
-                 "a backslash is refused; both read x as the host"),
-                ("http://ex%61mple.com:PORT/", "refused",
-                 "a percent-encoded host is refused; both decode it"),
-                ("http://b\u00fccher.example:PORT/", "refused",
-                 "a host outside the DNS alphabet is refused; both apply IDNA"),
-                ("http:PORT", "refused",
-                 "http: without // is refused (SECURITY.md); both reach a host named http"),
-                ("http:/127.0.0.1:PORT/", "refused", "curl reads one slash as two"),
-                ("http://127.0.0.1.:PORT/", "name",
-                 "the root's dot makes a name, as GNU wget reads it; curl reads the address"),
-                ("HTTP://127.0.0.1:PORT/", "literal", None),
-                ("http://Example.COM.:PORT/", "name", None),
-            ]
+        def octet(value, form):
+            return {"dec": "%d" % value, "zero": "0%d" % value, "hex": "0x%x" % value,
+                    "HEX": "0X%X" % value, "oct": "0%o" % value}[form]
+        numeric = set()
+        while len(numeric) < 10:
+            parts = spell.choice([quad, [127, 0, 1], [127, 1], [0x7f000001]])
+            forms = [spell.choice(["dec", "dec", "zero", "hex", "HEX", "oct"])
+                     for _ in parts]
+            text = ".".join(octet(v, f) for v, f in zip(parts, forms))
+            try:
+                same = socket.inet_aton(text) == bytes(quad)
+            except OSError:
+                same = False
+            if text != "127.0.0.1" and same:
+                numeric.add(text + spell.choice(["", "", "."]))
+        #   Without the root's dot the spelling is the address, written as
+        #   the dotted quad once (curl's Host; GNU wget sends the spelling);
+        #   the tight tier refuses it. With the dot it is a name, as GNU wget
+        #   reads it (curl still takes the address).
+        shorthand = ("inet_aton's spelling of an address is that address, as GNU wget "
+                     "and curl read it")
+        rooted = "the root's dot makes a name, as GNU wget reads it; curl reads the address"
+        spelled = [("http://127.0.0.1:PORT/", "literal", None)] + [
+            ("http://%s:PORT/" % text, "name" if text.endswith(".") else
+             "refused" if args.tight else "literal",
+             rooted if text.endswith(".") else shorthand)
+            for text in sorted(numeric)] + [
+            ("http://u@127.0.0.1:PORT/", "refused",
+             "userinfo is refused; both send it as Authorization or drop it"),
+            ("http://127.0.0.1:PORT\\@x/", "refused",
+             "a backslash is refused; both read x as the host"),
+            ("http://ex%61mple.com:PORT/", "refused",
+             "a percent-encoded host is refused; both decode it"),
+            ("http://b\u00fccher.example:PORT/", "refused",
+             "a host outside the DNS alphabet is refused; both apply IDNA"),
+            ("http:PORT", "refused",
+             "http: without // is refused (SECURITY.md); both reach a host named http"),
+            ("http:/127.0.0.1:PORT/", "refused", "curl reads one slash as two"),
+            ("http://127.0.0.1.:PORT/", "name", rooted),
+            ("HTTP://127.0.0.1:PORT/", "literal", None),
+            ("http://Example.COM.:PORT/", "name", None),
+        ]
         references = [(who, path) for who, path in (("wget", shutil.which("wget")),
-                                                    ("curl", shutil.which("curl"))) if path]
+                                                    ("curl", shutil.which("curl"))) if path
+                      and args.level == 1]
         for url, want, why in spelled:
             answers = {}
             for who, path in [("mw", str(farm / "wget"))] + references:
@@ -54269,9 +54881,11 @@ def harness_wget_hostile(argv):
                                                                          asked))
             if answers["mw"] != want:
                 failures += 1
-                print("FAIL default spelling %r: this client %s, wanted %s" % (
-                    url, answers["mw"], want))
+                print("FAIL %s spelling %r: this client %s, wanted %s" % (
+                    level, url, answers["mw"], want))
             others = {who: seen for who, seen in answers.items() if who != "mw"}
+            if not others:
+                continue
             if any(seen != want for seen in others.values()):
                 print("NOTE spelling %r: this client %s; %s%s" % (
                     url, want, ", ".join("%s %s" % kv for kv in sorted(others.items())),
@@ -54301,12 +54915,16 @@ def harness_wget_hostile(argv):
                 server = Server(one["script"])
                 folder = Path(tempfile.mkdtemp(dir=work))
                 url = one["url"].replace("PORT", str(server.port))
+                extra = ([] if not one["spider"] else
+                         ["-I"] if who == "curl" else ["--spider"])
+                began = time.monotonic()
                 try:
-                    done = subprocess.run(command + [url], capture_output=True,
+                    done = subprocess.run(command + extra + [url], capture_output=True,
                                           timeout=60, cwd=str(folder),
                                           env={"PATH": "/usr/bin:/bin"})
                 except subprocess.TimeoutExpired:
                     done = None
+                took = time.monotonic() - began
                 server.close()
                 label = "%s: %s" % (who, one["name"])
                 if done is None:
@@ -54318,6 +54936,9 @@ def harness_wget_hostile(argv):
                 if who == "mw":
                     checks(done.returncode == one["code"], "%s: exit %d, wanted %d (%s)" % (
                         label, done.returncode, one["code"], done.stderr[-160:]))
+                    if one["quick"]:
+                        checks(took < 5, "%s: took %.1f s, the server held the "
+                               "connection open" % (label, took))
                     if one["host"]:
                         want = one["host"] + b":%d" % server.port
                         checks(server.hosts == [want] * len(server.hosts) and server.hosts,
@@ -54329,7 +54950,9 @@ def harness_wget_hostile(argv):
                     have = saved.read_bytes() if saved.exists() else None
                     checks(have == one["saved"], "%s: saved %r, wanted %r" % (
                         label, have, one["saved"]))
-        #   The address policy, by the default shell and by a tight-tier build.
+        #   The address policy at every level: the default shell, and builds
+        #   at MOONWATER_STRICT 0 (sec_reference), 2 (sec_hardened's
+        #   STRICT_NET) and 3 (sec_locked's).
         probe = subprocess.run(["unshare", "-Urnm", "sh", "-c",
                                 "ip link set lo up && ip addr add 8.8.8.8/32 dev lo"],
                                capture_output=True) if shutil.which("unshare") and shutil.which("ip") \
@@ -54337,23 +54960,28 @@ def harness_wget_hostile(argv):
         if probe is None or probe.returncode:
             print("wget hostile: address policy rows skipped (no unshare -Urnm with ip)")
         else:
-            tight = Path(args.tight_shell) if args.tight_shell else work / "tight"
-            if not args.tight_shell:
+            levels = {1: shell}
+            for number in (0, 2, 3):
+                if number == 2 and args.tight_shell:
+                    levels[number] = Path(args.tight_shell)
+                    continue
+                levels[number] = work / ("level%d" % number)
                 built = subprocess.run(spark_shell_command(
-                    args.cc, tight, defines=("MOONWATER_STRICT=2",)), cwd=HARNESS_ROOT,
-                    capture_output=True, text=True)
-                checks(built.returncode == 0, "the tight-tier shell did not build: "
-                       + built.stderr[-300:])
-            for level, path in (("default", shell), ("tight", tight)):
+                    args.cc, levels[number], defines=("MOONWATER_STRICT=%d" % number,)),
+                    cwd=HARNESS_ROOT, capture_output=True, text=True)
+                checks(built.returncode == 0, "the MOONWATER_STRICT=%d shell did not build: "
+                       % number + built.stderr[-300:])
+            for number, path in sorted(levels.items()):
+                level = ("reference", "default", "tight", "locked")[number]
                 if not path.exists():
                     continue
                 inside = subprocess.run(
                     ["unshare", "-Urnm", "sh", "-c",
                      'ip link set lo up && ip addr add 8.8.8.8/32 dev lo && '
-                     'ip addr add 8.8.4.4/32 dev lo && exec "$0" "$@"',
+                     'ip addr add 8.8.4.4/32 dev lo && ip addr add 10.9.9.9/32 dev lo && '
+                     'ip addr add 169.254.169.254/32 dev lo && exec "$0" "$@"',
                      sys.executable, str(Path(__file__).resolve()), "--harness",
-                     "wget_hostile", "--netns", str(path)] + (
-                         ["--tight"] if level == "tight" else []),
+                     "wget_hostile", "--netns", str(path), "--level", str(number)],
                     capture_output=True, text=True, timeout=300)
                 for line in inside.stdout.splitlines():
                     if line.startswith("FAIL"):
@@ -54458,6 +55086,17 @@ int main(void)
                 p8 *url = unhex(strcmp(first, "-") ? first : "");
                 if (mode[0] == 'S') {
                         answer(url);
+                } else if (mode[0] == 'E' || mode[0] == 'F') {
+                        p8 into[8192];
+                        unsigned room;
+                        if (scanf("%u", &room) == 1 && room <= sizeof into &&
+                            !http_url_escape((string_address)url, strlen((char *)url),
+                                             mode[0] == 'E', into, room)) {
+                                printf("OK\t");
+                                emit(into);
+                                printf("\n");
+                        } else
+                                printf("BAD\n");
                 } else if (scanf("%8191s", second) == 1) {
                         p8 *ref = unhex(strcmp(second, "-") ? second : "");
                         p8 host[256];
@@ -54489,7 +55128,12 @@ int main(void)
     #       refusal still turns up hundreds of times.
     users = [""] * 12 + ["user@", "u:p@", "@"]
     hosts = ["example.com", "Example.COM", "a-b.c_d", "127.0.0.1", "h", "x" * 254] * 3 + [
-        "", "bad!host", "h%41", "[::1]", "x" * 255, "\u00e9.test"]
+        "", "bad!host", "h%41", "[::1]", "x" * 255, "\u00e9.test",
+        #   inet_aton's spellings and their neighbours (http_ipv4_spelling).
+        "127.1", "0x7f.1", "0X7F.0.0.1", "0177.0.0.1", "2130706433", "0x7f000001",
+        "010.0.0.1", "127.000.000.001", "1.2.3", "4294967295", "4294967296", "0",
+        "1.2.3.4.5", "0x", "0x.1", "08.1", "127.0.0.1.", "127.1.", "256.1", "1.256",
+        "1.65535", "1.65536", "1.2.65536", "0xffffffff", "0x100000000", "1..2", ".1"]
     ports = ["", "", "", ":80", ":443", ":8080", ":65535", ":08", ":1"] * 2 + [
         ":0", ":65536", ":", ":+1", ":1x", ":99999999999999999999"]
     paths = ["", "/", "/a/b", "/a%20b", "/a;b,c", "/\u00e9", "/a:b@c", "/%0d%0a"] * 2 + [
@@ -54527,11 +55171,39 @@ int main(void)
         shape = random_urls.randrange(7)
         tail = pick(segments) + pick(queries) + pick(fragments)
         references.add([tail, "/" + tail, "//other.example" + pick(ports) + "/" + tail,
-                        pick(["HTTP://", "https://", "Https://"]) + "h2" + pick(ports) + "/" + tail,
+                        pick(["HTTP://", "https://", "Https://"]) +
+                        pick(["h2"] * 4 + ["127.1", "0x7f.0.0.1", "2130706433"]) +
+                        pick(ports) + "/" + tail,
                         pick(["ftp://h/", "mailto:x", "a:b", "javascript:x"]) + tail,
                         pick(["http:", "https:"]) + tail,
                         pick(["?", "#"]) + tail][shape])
     references = sorted(references)
+
+    def inet_aton_quad(host):
+        """The dotted quad inet_aton (glibc's, through Python) reads host as,
+        or None. A bare "0x" part, which glibc reads as zero and nothing
+        writes, stays a name to this client."""
+        import socket
+        if not host or re.search(r"(^|\.)0[xX](\.|$)", host) or \
+                any(c not in string.ascii_letters + string.digits + "." for c in host):
+            return None
+        try:
+            return socket.inet_ntoa(socket.inet_aton(host))
+        except OSError:
+            return None
+
+    def url_host(url):
+        """The host http_split_into reads: after a web scheme's //, or from
+        the start of a URL typed without one, up to / : ? or #."""
+        found = re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", url)
+        return re.split(r"[/:?#]", url[found.end():] if found else url, maxsplit=1)[0]
+
+    def respelled(url):
+        """Whether url's host is inet_aton's spelling of an address other
+        than that address's own dotted quad: canonicalized by default,
+        refused at the tight tier."""
+        quad = inet_aton_quad(url_host(url))
+        return quad is not None and quad != url_host(url)
 
     def encode(text):
         return text.encode("utf-8").hex() or "-"
@@ -54577,7 +55249,8 @@ int main(void)
             return "refuse"
         tls = scheme.group(1).lower() == "https"
         target = (parts.path or "/") + ("?" + parts.query if "?" in url.split("#", 1)[0] else "")
-        return (tls, host, int(port) if colon else 443 if tls else 80, dot_free(target))
+        return (tls, inet_aton_quad(host) or host, int(port) if colon else 443 if tls else 80,
+                dot_free(target))
 
     def same(got, want):
         return got is not None and got == want
@@ -54670,7 +55343,8 @@ int main(void)
         for key, why in DELIBERATE.items():
             checks(seen[key] > 0, "DELIBERATE %s never generated (%s)" % (key, why))
         #   The tight tier: the default's answer, but no scheme token
-        #   without "//" in front of the authority.
+        #   without "//" in front of the authority, and no host that is
+        #   inet_aton's spelling of an address other than its dotted quad.
         tiers = collections.Counter()
         for url, default, tight in zip(urls, answers, tight_answers):
             scheme = scheme_shape.match(url)
@@ -54682,14 +55356,79 @@ int main(void)
                        "%r: http(s): without // was taken: %s" % (url, default))
                 tiers["default took, tight refused" if default != "BAD" else
                       "both refused"] += 1
+            elif respelled(url) and default != "BAD":
+                checks(tight == "BAD", "%r: the tight tier took a respelled address: %s"
+                       % (url, tight))
+                checks(default.split("\t")[1] ==
+                       inet_aton_quad(url_host(url)).encode().hex(),
+                       "%r: the default did not write the dotted quad: %s" % (url, default))
+                tiers["address respelled by default, refused tight"] += 1
             else:
                 checks(tight == default, "%r: the tiers differ: default %s, tight %s" % (
                     url, default, tight))
         for (base, reference), default, tight in zip(pairs, answers[len(urls):],
                                                      tight_answers[len(urls):]):
-            checks(tight == default, "%r + %r: the tiers resolve differently" % (base, reference))
+            if respelled(reference_join(base, reference)) and default != "BAD":
+                checks(tight == "BAD", "%r + %r: the tight tier followed a respelled "
+                       "address: %s" % (base, reference, tight))
+                tiers["a Location's address respelled, refused tight"] += 1
+            else:
+                checks(tight == default, "%r + %r: the tiers resolve differently"
+                       % (base, reference))
         checks(tiers["default took, tight refused"] > 0 and tiers["both refused"] > 0,
                "both halves of the scheme-token rule seen: %r" % dict(tiers))
+        checks(tiers["address respelled by default, refused tight"] > 0 and
+               tiers["a Location's address respelled, refused tight"] > 0,
+               "both halves of the address-spelling rule seen: %r" % dict(tiers))
+
+        #   http_url_escape: after the authority a space, a backslash and every
+        #   byte past 0x7f is %XX in upper case, and nothing else moves. The
+        #   oracle is a regular expression, not the C's loop; that GNU wget and
+        #   curl send these bytes so is wget_hostile's, against the real ones.
+        def escaped(text, bare):
+            """A whole URL's authority follows scheme:// or, typed bare,
+            starts it; a reference's follows a leading //."""
+            raw = text.encode("utf-8")
+            found = (re.match(rb"^[A-Za-z][A-Za-z0-9+.-]*://[^/?#]*", raw) or
+                     (re.match(rb"^//[^/?#]*", raw) if not bare else
+                      re.match(rb"^[^/?#]*", raw)))
+            stop = found.end() if found else 0
+            tail = re.sub(rb"[ \\\x80-\xff]", lambda hit: b"%%%02X" % hit.group()[0],
+                          raw[stop:])
+            return raw[:stop] + tail
+
+        texts = sorted(set(urls[:1500]) | set(references) | {
+            "", "/", " ", "\\", "\u00e9", "//", "//h", "//h/a b", "h/a b", "a b:c",
+            "http://h/a b#f g", "http://h b/", "http:", "http://", "x:// y",
+            "\u00e9://h/a b", "a b://h/c d", "HTTP://h/\u00e9?\u00e9#\u00e9",
+            "//h b/c d", "//h\\@e/x y", "//\u00e9:1?q r", "http://\u00e9 \\/a b"})
+        wire = [(mode, text) for text in texts for mode in ("E", "F")]
+        questions = []
+        for mode, text in wire:
+            want = escaped(text, mode == "E")
+            questions.append("%s %s %d" % (mode, encode(text), 8192))
+            #   Exactly enough room, and one byte less.
+            questions.append("%s %s %d" % (mode, encode(text), len(want) + 1))
+            questions.append("%s %s %d" % (mode, encode(text), len(want)))
+        ran = subprocess.run([str(work / "http_urls")], input="\n".join(questions) + "\n",
+                             capture_output=True, text=True, timeout=120,
+                             env=dict(os.environ, ASAN_OPTIONS="detect_leaks=0"))
+        answers = ran.stdout.splitlines()
+        if ran.returncode or len(answers) != len(questions):
+            print("  FAIL the escape lift stopped:\n" + ran.stderr[-3000:])
+            write_tally("http-urls", 0, 1)
+            return 1
+        for at, (mode, text) in enumerate(wire):
+            want = escaped(text, mode == "E")
+            for offset, room_ok in ((0, True), (1, True), (2, False)):
+                got = answers[3 * at + offset]
+                if room_ok:
+                    checks(got.startswith("OK\t") and
+                           binascii.unhexlify(got.split("\t")[1]) == want,
+                           "%s %r: escaped %r, wanted %r" % (mode, text, got, want))
+                else:
+                    checks(got == "BAD", "%s %r: one byte too little room answered %r"
+                           % (mode, text, got))
 
     return checks.verdict("http urls", "http-urls")
 
@@ -55293,6 +56032,16 @@ def byte_reader_source():
         text, "typedef struct\n{\n        const p8 address_to bytes;\n"
               "        positive left;",
         "/* Stable storage owns its mapping outside these mechanisms.")
+
+
+def positive_append_digit_source():
+    """lib.util.c's positive_append_digit, the checked one-more-digit step the
+    decimal readers run, for a hosted lift of a parser that reads a number
+    through byte_reader. Needs the shim's p8/positive types and bool."""
+    text = (HARNESS_ROOT / "src/lib.util.c").read_text()
+    return src_slice(
+        text, "/* One more decimal digit on a number",
+        "/* The decimal digits at the front of bytes[0, length)")
 
 
 def byte_store_source():
@@ -63653,7 +64402,8 @@ def harness_msan_net(argv):
         i = text.index(first)
         return text[i:text.index(following, i)]
 
-    # Shared hosted typedefs/macros for freestanding net.c lifts.
+    # Shared hosted typedefs/macros for freestanding net.c lifts. The tier is
+    # the default's, as a build with no header has it; the HTTP head reads it.
     base_shim = r"""
 #include <stdio.h>
 #include <stdlib.h>
@@ -63662,6 +64412,15 @@ def harness_msan_net(argv):
 #include <stddef.h>
 #include <stdbool.h>
 #include <ctype.h>
+#define STRICT_REFERENCE 0
+#define STRICT_SAFE 1
+#define STRICT_TIGHT 2
+#ifndef MOONWATER_STRICT
+#define MOONWATER_STRICT STRICT_SAFE
+#endif
+#ifndef MOONWATER_STRICT_NET
+#define MOONWATER_STRICT_NET MOONWATER_STRICT
+#endif
 typedef uint8_t p8;
 """ + HOSTED_WIDE_TYPES + r"""
 #define memory_compare memcmp
@@ -63687,7 +64446,7 @@ static positive memory_span_without_byte(const void *block, p8 byte,
 """ + HOSTED_SPAN_BYTE + r"""
 """ + HOSTED_STRING_HELPERS + r"""
 """ + HOSTED_NETWORK_LOADS + r"""
-""" + byte_store_source() + byte_reader_source()
+""" + byte_store_source() + byte_reader_source() + positive_append_digit_source()
 
     # --- 1a. Generic wire-header pad prove (original). ---
     pad_source = r"""
@@ -63988,10 +64747,27 @@ int main(void)
                 failures++;
         }
 
+        /* A fold after an ordinary field is read at the default tier (as
+           wget and curl do) and refused at the tight one; after a framing
+           field it is refused at both. */
         hend = http_header_end((p8 *)fold, (positive)strlen(fold));
-        if (hend < 0 || http_header_block_valid((p8 *)fold, (positive)hend)) {
-                fprintf(stderr, "msan http: FAIL obs-fold must refuse\n");
+        if (hend < 0 ||
+            http_header_block_valid((p8 *)fold, (positive)hend) !=
+                (MOONWATER_STRICT_NET < STRICT_TIGHT)) {
+                fprintf(stderr, "msan http: FAIL obs-fold after an ordinary field\n");
                 failures++;
+        }
+        {
+                const char *framed =
+                        "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n 4\r\n\r\n";
+
+                hend = http_header_end((p8 *)framed, (positive)strlen(framed));
+                if (hend < 0 ||
+                    http_header_block_valid((p8 *)framed, (positive)hend)) {
+                        fprintf(stderr, "msan http: FAIL obs-fold after "
+                                "Content-Length must refuse\n");
+                        failures++;
+                }
         }
 
         /* NUL in field name: walk still bounded; validity refuses. */
@@ -66544,9 +67320,14 @@ int main(void)
         return 0;
 }
 ''', ["http_header_end", "http_token_byte", "http_field_name", "http_line_valid",
-      "http_response_is_redirect", "http_response_fields"],
+      "http_response_is_redirect", "http_length_values", "http_response_fields"],
  "typedef struct { b32 code; p8 body_kind; positive body_length; string_address location; positive location_length; } http_response;\n"
- "typedef struct { string_address transfer; string_address length; positive transfer_size; positive length_size; } http_framing_fields;\n"),
+ "typedef struct { string_address transfer; string_address length; positive transfer_size; positive length_size; positive length_value; } http_framing_fields;\n"
+ "#define positive_max (~(positive)0)\n"
+ "static bool positive_append_digit(positive *value, positive digit, positive limit)\n"
+ "{ positive made; if (__builtin_mul_overflow(*value, 10, &made) ||\n"
+ "  __builtin_add_overflow(made, digit, &made) || made > limit) return false;\n"
+ "  *value = made; return true; }\n"),
 ("http_chunk", 17, r'''
 /* PRODUCTION */
 #define N 10
@@ -66590,9 +67371,19 @@ int main(void)
         }
         return 0;
 }
-''', ["http_host_byte", "http_scheme_length", "http_web_scheme", "http_split_into"],
+''', ["http_host_byte", "http_scheme_length", "http_web_scheme", "http_ipv4_spelling",
+      "http_split_into"],
  "#define HTTP_OK 0\n#define HTTP_BAD_URL (-1)\n#define HTTP_SCHEME (-12)\n#define HTTP_PORT 80\n"
- "#define HTTP_HTTPS_PORT 443\n#define HTTP_URL_MAX 2048\n"),
+ "#define HTTP_HTTPS_PORT 443\n#define HTTP_URL_MAX 2048\n"
+ "/* lib.c's host_into: the dotted quad, no terminator, its length. */\n"
+ "static positive host_into(p8 *into, p32 host)\n"
+ "{ positive n = 0;\n"
+ "  for (int k = 3; k >= 0; k--) { p8 octet = (p8)(host >> (8 * k));\n"
+ "    if (octet >= 100) into[n++] = (p8)('0' + octet / 100);\n"
+ "    if (octet >= 10) into[n++] = (p8)('0' + octet / 10 % 10);\n"
+ "    into[n++] = (p8)('0' + octet % 10);\n"
+ "    if (k) into[n++] = '.'; }\n"
+ "  return n; }\n"),
 ("http_path", 12, r'''
 /* PRODUCTION */
 #define N 8
@@ -67933,6 +68724,9 @@ def harness_security_hygiene(argv):
         ("nts_ke_reply", ("data",)),
         ("nts_cookies_take", ("plain",)),
         ("nts_reply", ("reply",)),
+        ("http_length_values", ("value",)),
+        ("http_url_escape", ("url",)),
+        ("http_ipv4_spelling", ("host",)),
     )
     #   The kernel log is anybody's to read on this image (DMESG_RESTRICT is
     #   off) and the ring-0 terminal draws it, so every part of a host_kmsg

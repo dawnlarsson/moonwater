@@ -11427,6 +11427,16 @@ static bipolar tls_read_until(
 #define HTTP_IDLE_SECONDS 30
 #define HTTP_HEAD_SECONDS 30
 #define HTTP_BODY_SECONDS 300
+//      STRICT_TIGHT's most for a body that declared no length -- one ended by
+//      the close, or chunked -- written as it arrives: 1 GiB. GNU wget takes
+//      such a body until the peer stops, which the default does too.
+#define HTTP_UNDECLARED_MOST ((positive)1 << 30)
+//      STRICT_TIGHT's budget for a whole fetch -- every hop of a redirect
+//      chain and the body -- where the default, as GNU wget, times each hop
+//      alone: one head wait and one body wait. Zero for none.
+#define HTTP_CHAIN_SECONDS                                                   \
+        (MOONWATER_STRICT_NET >= STRICT_TIGHT                                \
+             ? (positive)(HTTP_HEAD_SECONDS + HTTP_BODY_SECONDS) : 0)
 
 #define HTTP_OK 0
 #define HTTP_BAD_URL (-1)
@@ -11456,6 +11466,13 @@ static bipolar tls_read_until(
 #define HTTP_UNCHECKED (-19)
 //      The clock is below its floor: it was never set.
 #define HTTP_CLOCK (-20)
+//      STRICT_TIGHT only: a name (not an address, not localhost) the
+//      resolver answered with this machine, "this network" or the link-local
+//      block the clouds' metadata service lives in.
+#define HTTP_REBOUND (-21)
+//      STRICT_TIGHT only: a body that declared no length ran past
+//      HTTP_UNDECLARED_MOST.
+#define HTTP_UNDECLARED (-22)
 
 typedef byte_store http_buffer;
 #define http_forget(buffer) byte_store_release(buffer)
@@ -11493,6 +11510,136 @@ static bool http_web_scheme(string_address url, positive scheme)
                !memory_compare_ascii_case(url, "https", scheme - 1);
 }
 
+/* A URL made fit for a request line the way GNU wget and curl make one: after
+   the authority, a space, a backslash and every byte past 0x7f become %XX in
+   upper case, and every other byte -- '%' included, so an escape already
+   there is never doubled and one that is not an escape (%zz) goes on as curl
+   sends it -- goes through as it came.  A server's Location with a space or
+   UTF-8 in it, or a URL typed with one, is a real answer that both fetch;
+   http_split_into's and the request builder's refusal of those bytes stays
+   the backstop for a caller that skips this.  The authority is left exactly
+   as written for the parser to judge: url is a whole URL, whose authority
+   follows "scheme://" or, when bare_host, starts it; otherwise it is a
+   reference, whose only authority follows a leading "//".  url is length
+   bytes and a terminator; into holds the answer whole with its own, or this
+   is HTTP_BAD_URL. */
+static bipolar http_url_escape(string_address url, positive length, bool bare_host,
+                               p8 address_to into, positive room)
+{
+        static const p8 hex[] = "0123456789ABCDEF";
+        byte_reader reader = byte_reader_open((const p8 address_to)url, length);
+        byte_reader slashes = reader;
+        byte_store out = {into, room ? room - 1 : 0, 0};
+        positive scheme = http_scheme_length(url);
+        positive verbatim = 0;
+
+        if (scheme > length)
+                scheme = 0;
+        byte_reader_skip(address_of slashes, scheme);
+        if ((scheme || !bare_host) && byte_reader_u8(address_of slashes) == '/' &&
+            byte_reader_u8(address_of slashes) == '/' && byte_reader_ok(address_of slashes))
+                verbatim = scheme + 2;
+        if (verbatim || bare_host)
+        {
+                byte_reader rest = reader;
+
+                byte_reader_skip(address_of rest, verbatim);
+                for (;;)
+                {
+                        byte_reader look = rest;
+                        p8 byte = byte_reader_u8(address_of look);
+
+                        if (!byte_reader_ok(address_of look) || byte == '/' ||
+                            byte == '?' || byte == '#')
+                                break;
+                        rest = look;
+                        verbatim++;
+                }
+        }
+        if (!room || !byte_store_append_exact(address_of out,
+                                               byte_reader_take(address_of reader,
+                                                                verbatim),
+                                               verbatim))
+                return HTTP_BAD_URL;
+        while (byte_reader_left(address_of reader))
+        {
+                p8 byte = byte_reader_u8(address_of reader);
+                p8 escape[3] = {'%', hex[byte >> 4], hex[byte & 15]};
+                bool plain = byte != ' ' && byte != '\\' && byte <= 0x7f;
+
+                if (!byte_store_append_exact(address_of out, plain ? address_of byte
+                                                                   : escape,
+                                             plain ? 1 : 3))
+                        return HTTP_BAD_URL;
+        }
+        into[out.used] = end;
+        return HTTP_OK;
+}
+
+/* inet_aton's spellings of an IPv4 address, which GNU wget (through the C
+   library) and curl (its own URL parser) both connect to: one to four parts
+   joined by '.', each decimal, 0x hex or 0 octal, every part but the last one
+   byte and the last filling the bytes left ("127.1", "0x7f.1", "0177.0.0.1",
+   "2130706433").  A trailing '.', an empty part, an 8 or 9 in an octal part,
+   a bare "0x" (which glibc reads as 0) or a part past its share is no such
+   spelling, and the host stays a name for the resolver.  The address is in
+   host order, as http_address_public reads one. */
+static bool http_ipv4_spelling(const p8 address_to host, positive length,
+                               p32 address_to ip)
+{
+        byte_reader reader = byte_reader_open(host, length);
+        p64 address = 0;
+        positive parts = 0;
+
+        for (;;)
+        {
+                byte_reader look = reader;
+                p8 first = byte_reader_u8(address_of look);
+                p8 second = byte_reader_u8(address_of look);
+                positive base = 10;
+                positive digits = 0;
+                p64 value = 0;
+
+                if (first == '0' && (second | 0x20) == 'x')
+                {
+                        base = 16;
+                        byte_reader_skip(address_of reader, 2);
+                }
+                else if (first == '0' && byte_is_digit(second))
+                {
+                        base = 8;
+                        byte_reader_skip(address_of reader, 1);
+                }
+                for (;; digits++)
+                {
+                        look = reader;
+                        positive digit = digit_known(byte_reader_u8(address_of look),
+                                                     base);
+
+                        if (!byte_reader_ok(address_of look) || digit >= base)
+                                break;
+                        value = value * base + digit;
+                        if (value > 0xffffffffu)
+                                return false;
+                        reader = look;
+                }
+                if (!digits)
+                        return false;
+                parts++;
+                if (!byte_reader_left(address_of reader))
+                {
+                        if (value >> (8 * (5 - parts)))
+                                return false;
+                        address_to ip = (p32)(address << (8 * (5 - parts)) | value);
+                        return true;
+                }
+                if (parts == 4 || value > 255 ||
+                    byte_reader_u8(address_of reader) != '.')
+                        return false;
+                address = address << 8 | value;
+        }
+}
+
 /*
         http://host[:port][/path] taken apart.
 
@@ -11502,6 +11649,14 @@ static bool http_web_scheme(string_address url, positive scheme)
         port the kernel picked. A URL the client could not carry through
         http_run -- HTTP_URL_MAX bytes or more -- is refused here too, so no
         caller derives an output name or a message from one.
+
+        A host that inet_aton reads as an address is that address, written
+        once here as the dotted quad, so the Host field, TLS's choice of an IP
+        identity over a DNS one, the lookup and the address policy all see the
+        same four octets: curl does the same (GNU wget connects to the address
+        and sends the spelling as written in Host). STRICT_TIGHT refuses every
+        such spelling but the dotted quad itself, as the ambiguity it is: a
+        filter that reads "0x7f.1" as a name is not the parser that connects.
 */
 static bipolar http_split_into(string_address url, p8 address_to host, positive room,
                                p16 address_to port, string_address address_to path,
@@ -11565,6 +11720,24 @@ static bipolar http_split_into(string_address url, p8 address_to host, positive 
                 return HTTP_BAD_URL;
 
         string_address host_at = at;
+        positive host_length = length;
+        p8 quad[16];
+        p32 numeric;
+
+        if (http_ipv4_spelling(host_at, length, address_of numeric))
+        {
+                positive quad_length = host_into(quad, numeric);
+
+                if (quad_length != length ||
+                    memory_compare(quad, host_at, length))
+                {
+                        if (MOONWATER_STRICT_NET >= STRICT_TIGHT ||
+                            quad_length + 1 >= room)
+                                return HTTP_BAD_URL;
+                        host_at = quad;
+                        host_length = quad_length;
+                }
+        }
         at += length;
 
         if (string_is(at, ':'))
@@ -11591,8 +11764,8 @@ static bipolar http_split_into(string_address url, p8 address_to host, positive 
            transaction, not a half-written host paired with a default port;
            callers which log or retry after an error cannot accidentally use
            pieces of a rejected authority. */
-        memory_copy(host, host_at, length);
-        host[length] = end;
+        memory_copy(host, host_at, host_length);
+        host[host_length] = end;
         address_to port = selected_port;
         address_to tls = selected_tls;
         address_to path = string_get(at) && !string_is(at, '#')
@@ -11665,17 +11838,27 @@ static PURE bipolar http_header_end(p8 address_to bytes, positive size)
    anywhere else would itself be the differential.  Response splitting is still relevant to a client: a poisoned
    keep-alive cache or an intercepting proxy can otherwise make the bytes
    authenticated by TLS describe a different response from the one consumed
-   here. */
+   here.
+
+   The default reads a head as GNU wget 1.25.0 and curl 8.22.0 both do, and
+   refuses what either of them refuses where a second reading would frame or
+   redirect differently: it takes a Content-Length that repeats one number
+   ("3" twice, "3, 3"), a folded line after an ordinary field, and any byte
+   but NUL and a bare CR in the reason phrase (only the code is read); it
+   refuses Content-Length values that disagree, an empty element of a list, a
+   fold after Content-Length, Transfer-Encoding or a redirect's Location, and
+   a control in any field.  STRICT_TIGHT refuses every repeat, list, fold and
+   status-line control. */
 static bool http_token_byte(p8 byte)
 {
         return byte_is_alnum(byte) ||
                memory_first_of("!#$%&'*+-.^_`|~", byte, 15);
 }
 
-/* One line of a head or of a trailer, its line end gone.  A status line is
-   text with no control but tab; a field is a token, a colon, and a value
-   held to the same.  The token also refuses obs-fold, whitespace before the
-   colon, and an empty field name. */
+/* One line of a head or of a trailer, its line end gone.  A field is a
+   token, a colon, and a value that is text with no control but tab.  The
+   token also refuses obs-fold, whitespace before the colon, and an empty
+   field name. */
 static bipolar http_field_name(p8 address_to line, positive stop)
 {
         positive name = string_span_max((string_address)line, stop,
@@ -11688,10 +11871,29 @@ static bipolar http_field_name(p8 address_to line, positive stop)
         return (bipolar)name;
 }
 
+/* A status line is never read past its code (http_status_code), so the
+   default takes what wget and curl take in its reason phrase -- DEL, ESC and
+   bytes past 0x7f included -- and refuses only a NUL and a CR, the two curl
+   refuses; nothing of it is printed or stored.  STRICT_TIGHT holds it to
+   text with no control but tab.  (Plain C, not #if: a hosted lift that
+   forgets to define the tier fails to build instead of running as the tight
+   one.) */
 static bool http_line_valid(p8 address_to line, positive stop, bool field)
 {
-        return field ? http_field_name(line, stop) >= 0
-                     : memory_text_span(line, stop) == stop;
+        positive at = 0;
+
+        if (field)
+                return http_field_name(line, stop) >= 0;
+        for (;;)
+        {
+                at += memory_text_span(line + at, stop - at);
+                if (at == stop)
+                        return true;
+                if (MOONWATER_STRICT_NET >= STRICT_TIGHT || !line[at] ||
+                    line[at] == '\r')
+                        return false;
+                at++;
+        }
 }
 
 //      One header's value, by name, without regard to its case.
@@ -11876,6 +12078,8 @@ typedef struct
         string_address length;
         positive transfer_size;
         positive length_size;
+        //      The number every Content-Length named, at the default tier.
+        positive length_value;
 } http_framing_fields;
 
 static bool http_response_is_redirect(b32 code)
@@ -11889,9 +12093,72 @@ static bool http_response_is_success(b32 code)
         return code >= 200 && code < 300;
 }
 
+/* One Content-Length value at the default tier, as wget and curl read it: a
+   comma list of decimal numbers with blanks around each, every number the
+   same as each other and as every Content-Length before it.  An empty
+   element, a sign, any other byte, or a number that disagrees is refused
+   (curl refuses each; GNU wget reads the first number and ignores the rest).
+   The first number's digits are the span the framing reads, so a list of one
+   number frames exactly as the number alone. */
+static bool http_length_values(const p8 address_to value, positive size,
+                               http_framing_fields address_to fields)
+{
+        byte_reader reader = byte_reader_open(value, size);
+
+        for (;;)
+        {
+                byte_reader look;
+                const p8 address_to digits;
+                positive count = 0;
+                positive number = 0;
+
+                for (look = reader; byte_is_blank(byte_reader_u8(address_of look));
+                     look = reader)
+                        byte_reader_skip(address_of reader, 1);
+                digits = byte_reader_here(address_of reader);
+                for (look = reader;; look = reader, count++)
+                {
+                        p8 byte = byte_reader_u8(address_of look);
+
+                        if (!byte_reader_ok(address_of look) || !byte_is_digit(byte))
+                                break;
+                        if (!positive_append_digit(address_of number,
+                                                   (positive)(byte - '0'),
+                                                   positive_max))
+                                return false;
+                        byte_reader_skip(address_of reader, 1);
+                }
+                if (!count)
+                        return false;
+                if (!fields->length)
+                {
+                        fields->length = (string_address)digits;
+                        fields->length_size = count;
+                        fields->length_value = number;
+                }
+                else if (number != fields->length_value)
+                        return false;
+                for (look = reader; byte_is_blank(byte_reader_u8(address_of look));
+                     look = reader)
+                        byte_reader_skip(address_of reader, 1);
+                if (!byte_reader_left(address_of reader))
+                        return byte_reader_ok(address_of reader);
+                if (byte_reader_u8(address_of reader) != ',')
+                        return false;
+        }
+}
+
 /* Validate each line and collect the framing fields in the same walk.
    Unknown fields still undergo the full grammar and control-byte checks;
-   their names need no repeated comparison with fields of other lengths. */
+   their names need no repeated comparison with fields of other lengths.
+   A folded line (one that begins with a blank) continues the field before
+   it, whose value here is its first line either way: the default reads one
+   after an ordinary field, or straight after the status line, as wget and
+   curl do, and refuses one after Content-Length or Transfer-Encoding (curl
+   refuses both; GNU wget reads the length and prints a chunked body raw)
+   and after the Location of a redirect, which the two follow to different
+   places (wget to "/a%20%20%20/b", curl to "/a%20/b" for "/a" folded onto
+   "/b"). */
 static bool http_response_fields(p8 address_to bytes, positive size,
                                  http_response address_to response,
                                  http_framing_fields address_to fields)
@@ -11899,6 +12166,7 @@ static bool http_response_fields(p8 address_to bytes, positive size,
         positive at = 0;
         bool status = true;
         bool redirect = http_response_is_redirect(response->code);
+        bool framing_before = false;
 
         memory_zero(fields, sizeof *fields);
         while (at < size)
@@ -11921,6 +12189,14 @@ static bool http_response_fields(p8 address_to bytes, positive size,
                         status = false;
                         continue;
                 }
+                if (byte_is_blank(bytes[line]))
+                {
+                        if (MOONWATER_STRICT_NET >= STRICT_TIGHT || framing_before ||
+                            memory_text_span(bytes + line, stop - line) !=
+                                stop - line)
+                                return false;
+                        continue;
+                }
 
                 bipolar name = http_field_name(bytes + line, stop - line);
                 string_address address_to value = null;
@@ -11928,21 +12204,32 @@ static bool http_response_fields(p8 address_to bytes, positive size,
 
                 if (name < 0)
                         return false;
+                framing_before = false;
                 if (name == 17 && !memory_compare_ascii_case(
                         bytes + line, "transfer-encoding", 17))
                 {
+                        framing_before = true;
                         value = address_of fields->transfer;
                         length = address_of fields->transfer_size;
                 }
                 else if (name == 14 && !memory_compare_ascii_case(
                         bytes + line, "content-length", 14))
                 {
+                        framing_before = true;
+                        if (MOONWATER_STRICT_NET < STRICT_TIGHT)
+                        {
+                                if (!http_length_values(bytes + line + 15,
+                                                        stop - line - 15, fields))
+                                        return false;
+                                continue;
+                        }
                         value = address_of fields->length;
                         length = address_of fields->length_size;
                 }
                 else if (redirect && name == 8 && !memory_compare_ascii_case(
                         bytes + line, "location", 8))
                 {
+                        framing_before = true;
                         value = address_of response->location;
                         length = address_of response->location_length;
                 }
@@ -12229,7 +12516,7 @@ static bipolar http_response_head(
     http_link address_to link, p8 address_to head, positive room,
     positive address_to used, positive address_to header,
     http_response address_to response, positive seconds, positive nanoseconds,
-    bool incomplete_is_malformed)
+    bool incomplete_is_malformed, const network_deadline address_to outer)
 {
         network_deadline deadline;
         /* Carried across the reads: the head is walked once in total rather
@@ -12239,7 +12526,9 @@ static bipolar http_response_head(
         positive searched = 0;
 
         address_to used = 0;
-        if (!network_deadline_begin(address_of deadline, seconds, nanoseconds))
+        //      A redirect chain's own deadline, when it has one, holds this.
+        if (!network_deadline_begin_within(address_of deadline, seconds,
+                                           nanoseconds, outer))
                 return HTTP_NO_REPLY;
 
         for (;;)
@@ -12288,6 +12577,10 @@ typedef struct
         positive read_nanoseconds;
         // Whole-body budget; zero began is reserved for bounded unit readers.
         network_deadline deadline;
+        // The most payload a body that declared no length may deliver, and
+        // what a chunked one has delivered so far; zero for no ceiling.
+        positive undeclared_most;
+        positive undeclared_seen;
 } http_body;
 
 static bipolar http_body_read(http_body address_to body, p8 address_to into,
@@ -12295,19 +12588,37 @@ static bipolar http_body_read(http_body address_to body, p8 address_to into,
 static bipolar http_copy(http_body address_to body, bipolar dest, positive want,
                          bool exact);
 static bipolar http_copy_chunked(http_body address_to body, bipolar dest);
+static bipolar http_body_borrow(http_body address_to body, positive room,
+                                p8 address_to address_to data,
+                                positive address_to got);
 
 /* A final response's body, by the framing its head declared.  A memory store
    refuses a close-delimited body beyond its limit as it arrives, so an EOF
-   that lands exactly on the limit is still a complete body. */
+   that lands exactly on the limit is still a complete body.  So does a body's
+   ceiling on what declared no length (undeclared_most): exactly that many
+   bytes and then the close is a body, and one byte more is
+   HTTP_UNDECLARED, asked for only once the ceiling is reached and never
+   written. */
 static bipolar http_copy_body(http_body address_to body, bipolar dest,
                               const http_response address_to response)
 {
-        bool exact = response->body_kind == HTTP_BODY_LENGTH;
+        bipolar copied;
+        p8 address_to more = null;
+        positive got = 0;
 
         if (response->body_kind == HTTP_BODY_CHUNKED)
                 return http_copy_chunked(body, dest);
-        return http_copy(body, dest,
-                         exact ? response->body_length : positive_max, exact);
+        if (response->body_kind == HTTP_BODY_LENGTH)
+                return http_copy(body, dest, response->body_length, true);
+        copied = http_copy(body, dest,
+                           body->undeclared_most ? body->undeclared_most
+                                                 : positive_max,
+                           false);
+        if (copied || !body->undeclared_most)
+                return copied;
+        if (http_body_borrow(body, 1, address_of more, address_of got))
+                return HTTP_NO_REPLY;
+        return got ? HTTP_UNDECLARED : HTTP_OK;
 }
 
 //      One progress wait, shortened by a whole-body budget when one is active;
@@ -12341,10 +12652,6 @@ static inline INLINE bool http_body_wait(
         }
         return address_to seconds || address_to nanoseconds;
 }
-
-static bipolar http_body_borrow(http_body address_to body, positive room,
-                                p8 address_to address_to data,
-                                positive address_to got);
 
 /* Payload copied into the caller's bytes: the stash's and TLS's through
    http_body_borrow, a plaintext socket's by a read that asks the clock and
@@ -12667,6 +12974,14 @@ static bipolar http_copy_chunked(http_body address_to body, bipolar dest)
                         return HTTP_MALFORMED;
                 if (!size)
                         return http_copy_trailers(body);
+                /* A chunk past the ceiling on an undeclared body is refused
+                   before a byte of it is written. */
+                if (body->undeclared_most)
+                {
+                        if (size > body->undeclared_most - body->undeclared_seen)
+                                return HTTP_UNDECLARED;
+                        body->undeclared_seen += size;
+                }
                 {
                         bipolar copied = http_copy(body, dest, size, true);
 
@@ -12787,11 +13102,13 @@ static positive http_port_suffix(p8 address_to into, bool tls, p16 port)
                    ? 0 : 1 + positive_into(into + 1, port);
 }
 
-static bipolar http_get_request(p8 address_to request, positive room,
-                                string_address host, p16 port,
-                                string_address path, bool tls,
-                                p8 version_minor, string_address agent,
-                                positive address_to used)
+/* The request, GET or -- for a caller that asks only whether the resource is
+   there, as wget --spider does -- HEAD, whose answer has no content whatever
+   its head declares (RFC 9110 9.3.2). */
+static bipolar http_request(p8 address_to request, positive room, bool head,
+                            string_address host, p16 port, string_address path,
+                            bool tls, p8 version_minor, string_address agent,
+                            positive address_to used)
 {
         p8 target[HTTP_URL_MAX];
         p8 port_text[7];
@@ -12805,7 +13122,8 @@ static bipolar http_get_request(p8 address_to request, positive room,
             version_minor < '0' || version_minor > '9')
                 return HTTP_BAD_URL;
 
-        ok = byte_store_append_exact(address_of out, "GET ", 4);
+        ok = head ? byte_store_append_exact(address_of out, "HEAD ", 5)
+                  : byte_store_append_exact(address_of out, "GET ", 4);
         ok &= byte_store_append_exact(address_of out, target, string_length(target));
         ok &= byte_store_append_exact(address_of out, " HTTP/1.", 8);
         ok &= byte_store_append_exact(address_of out, address_of version_minor, 1);
@@ -12821,6 +13139,16 @@ static bipolar http_get_request(p8 address_to request, positive room,
                 return HTTP_BAD_URL;
         address_to used = out.used;
         return HTTP_OK;
+}
+
+static bipolar http_get_request(p8 address_to request, positive room,
+                                string_address host, p16 port,
+                                string_address path, bool tls,
+                                p8 version_minor, string_address agent,
+                                positive address_to used)
+{
+        return http_request(request, room, false, host, port, path, tls,
+                            version_minor, agent, used);
 }
 
 static bipolar http_put_url(p8 address_to into, positive room, bool tls,
@@ -12845,6 +13173,9 @@ static bipolar http_put_url(p8 address_to into, positive room, bool tls,
         return HTTP_OK;
 }
 
+/* A Location resolved against the URL that answered with it, into room
+   bytes at into, which may be location itself: the reference is copied
+   before a byte is written. */
 static bipolar http_absolutize(bool tls, string_address host, p16 port,
                                string_address path, string_address location,
                                p8 address_to into, positive room)
@@ -13058,6 +13389,26 @@ static bool http_address_public(p32 ip)
                (a != 100 || (b & 0xc0) != 64) && (a != 169 || b != 254) &&
                (a != 172 || (b & 0xf0) != 16) && (a != 192 || b != 168) &&
                (a != 192 || b || (p8)(ip >> 8)) && (a != 198 || (b & 0xfe) != 18);
+}
+
+/* Whether host is a name that the resolver answered with an address no
+   name of a real service has: this network (0/8), loopback (127/8) or
+   link-local (169.254/16, where the clouds keep the metadata service that
+   hands out the machine's credentials). That answer is what DNS rebinding
+   looks like -- a name its owner, or an on-path forger of plain DNS, points
+   at the machine itself so a fetch of an untrusted URL reads what only the
+   machine may -- and STRICT_TIGHT refuses it on every hop, the first one
+   too. An address written in the URL is the writer's own choice and is
+   taken, as is localhost, which never asks a resolver. A name inside the
+   network (10/8, 172.16/12, 192.168/16, 100.64/10) is ordinary on an
+   intranet, and only the redirect rule keeps a chain that has reached public
+   space from going back to one. */
+static bool http_name_rebound(string_address host, p32 ip)
+{
+        p8 a = (p8)(ip >> 24);
+
+        return string_to_host(host) < 0 && !http_host_loopback(host) &&
+               (!a || a == 127 || (a == 169 && (p8)(ip >> 16) == 254));
 }
 
 #define TLS_AIA_SECONDS 5
@@ -14444,16 +14795,37 @@ typedef struct
         positive head_seconds;
         positive body_seconds;
         positive body_most;
+        //      The most a streamed body that declared no length may write,
+        //      or zero for no ceiling: GNU wget's default has none, and
+        //      neither has this client's; the tight tier's is
+        //      HTTP_UNDECLARED_MOST. A body held in memory is held to
+        //      body_most in every tier already.
+        positive undeclared_most;
+        //      HEAD, not GET: whether the resource is there, and no body.
+        bool head;
+        //      The whole fetch, every hop's head and the body, in one budget,
+        //      or zero for none: the tight tier's is one head wait and one
+        //      body wait (HTTP_CHAIN_SECONDS), where the default, as GNU wget,
+        //      times each hop alone.
+        positive chain_seconds;
 } http_manners;
 
 static const http_manners http_manners_fetch = {
     (string_address)"dawning", '0', false, false, true,
-    HTTP_HEAD_SECONDS, HTTP_BODY_SECONDS, HTTP_FETCH_MAX};
+    HTTP_HEAD_SECONDS, HTTP_BODY_SECONDS, HTTP_FETCH_MAX, 0, false, HTTP_CHAIN_SECONDS};
 static const http_manners http_manners_wget = {
     (string_address)"Wget", '1', true, true, false,
-    HTTP_HEAD_SECONDS, HTTP_BODY_SECONDS, HTTP_FETCH_MAX};
+    HTTP_HEAD_SECONDS, HTTP_BODY_SECONDS, HTTP_FETCH_MAX,
+    MOONWATER_STRICT_NET >= STRICT_TIGHT ? HTTP_UNDECLARED_MOST : 0, false,
+    HTTP_CHAIN_SECONDS};
+//      wget --spider: wget's manners, asking HEAD at every hop as GNU wget
+//      does, and reading no body however the head frames one.
+static const http_manners http_manners_spider = {
+    (string_address)"Wget", '1', true, true, false,
+    HTTP_HEAD_SECONDS, HTTP_BODY_SECONDS, HTTP_FETCH_MAX, 0, true, HTTP_CHAIN_SECONDS};
 static const http_manners http_manners_zone = {
-    (string_address)"Moonwater", '1', false, true, false, 10, 10, 4096};
+    (string_address)"Moonwater", '1', false, true, false, 10, 10, 4096, 0, false,
+    MOONWATER_STRICT_NET >= STRICT_TIGHT ? 20 : 0};
 
 /* The head of the response a fetch ended on, for the caller that reads a
    header of it. */
@@ -14483,6 +14855,8 @@ static bipolar http_run(string_address start, const http_manners address_to how,
         http_buffer whole = {0};
         positive hop;
         bool secure = false;
+        //      The tight tier's budget for the whole fetch; began zero for none.
+        network_deadline chain = {0};
 #if MOONWATER_STRICT_NET >= STRICT_TIGHT
         bool reached_public = false;
 #endif
@@ -14491,6 +14865,9 @@ static bipolar http_run(string_address start, const http_manners address_to how,
         if (string_length(start) >= sizeof url)
                 return HTTP_BAD_URL;
         string_copy(url, start);
+        if (how->chain_seconds &&
+            !network_deadline_begin(address_of chain, how->chain_seconds, 0))
+                return HTTP_NO_REPLY;
 
         for (hop = 0; hop < HTTP_HOPS; hop++)
         {
@@ -14506,6 +14883,15 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                 positive header = 0;
                 positive used = 0;
 
+                positive left[2];
+
+                if (chain.began &&
+                    !network_deadline_left(address_of chain, left, left + 1))
+                {
+                        status = HTTP_NO_REPLY;
+                        goto done;
+                }
+
                 /* The request is built before any name is looked up or any
                    connection opened: a Location this client cannot put on
                    the wire costs its target no connection and no handshake.
@@ -14519,11 +14905,17 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                 if (!status && !http_transport_allowed(address_of secure, tls))
                         status = HTTP_DOWNGRADE;
                 if (!status)
-                        status = http_get_request(
-                            head, sizeof head, host, port, path, tls,
+                        status = http_request(
+                            head, sizeof head, how->head, host, port, path, tls,
                             how->version_minor, how->agent, address_of used);
                 if (!status && !(ip = http_lookup_wanted(host)))
                         status = HTTP_NO_HOST;
+                /* GNU wget and curl connect wherever a name resolves, so the
+                   default does; the tight tier refuses a name rebound onto
+                   this machine or its link, on the first hop as on any. */
+                if (!status && MOONWATER_STRICT_NET >= STRICT_TIGHT &&
+                    http_name_rebound(host, ip))
+                        status = HTTP_REBOUND;
 #if MOONWATER_STRICT_NET >= STRICT_TIGHT
                 /* Once a chain has reached public space no later hop may
                    go back inside: a name that resolves, or a Location that
@@ -14556,7 +14948,8 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                         status = http_response_head(
                             address_of link, head, sizeof head, address_of used,
                             address_of header, address_of response,
-                            how->head_seconds, 0, how->head_cut_is_malformed);
+                            how->head_seconds, 0, how->head_cut_is_malformed,
+                            chain.began ? address_of chain : null);
                 if (!status && code)
                         address_to code = response.code;
                 if (!status && head_out)
@@ -14567,16 +14960,37 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                 {
                         p8 placed[HTTP_URL_MAX];
 
-                        status = !response.location_length ? HTTP_MALFORMED
+                        /* A redirect with nothing to follow, no Location or
+                           an empty one, is the server's answer, a status like
+                           any other: GNU wget says "Redirection (302) without
+                           location" and exits 8, and curl -L hands the body
+                           over. */
+                        status = !response.location_length ? HTTP_STATUS
                                  : response.location_length >= sizeof placed
                                      ? HTTP_BAD_URL : HTTP_OK;
+                        if (status == HTTP_BAD_URL)
+                        {
+                                /* The URL a failure names is the Location
+                                   that was too long, as far as it goes, and
+                                   not the page that sent it. */
+                                memory_copy(url, response.location, sizeof url - 1);
+                                url[sizeof url - 1] = end;
+                        }
                         if (!status)
                         {
                                 memory_copy(placed, response.location,
                                             response.location_length);
                                 placed[response.location_length] = end;
-                                status = http_absolutize(tls, host, port, path, placed,
-                                                         next, sizeof next);
+                                /* Escaped into next, and resolved from there
+                                   in place: http_absolutize copies the
+                                   reference before it writes a byte. */
+                                status = http_url_escape(placed,
+                                                         response.location_length,
+                                                         false, next, sizeof next);
+                                if (!status)
+                                        status = http_absolutize(tls, host, port, path,
+                                                                 next, next,
+                                                                 sizeof next);
                                 //      The next hop, or the Location a failure
                                 //      names; both terminate inside a buffer
                                 //      exactly as large as url.
@@ -14590,7 +15004,8 @@ static bipolar http_run(string_address start, const http_manners address_to how,
 
                 if (!status && !http_response_is_success(response.code))
                         status = HTTP_STATUS;
-                else if (!status && !http_response_has_no_body(response.code))
+                else if (!status && !how->head &&
+                         !http_response_has_no_body(response.code))
                 {
                         /* The default reads a 205's content as any other
                            response's, as wget and curl do.  The tight tier
@@ -14606,6 +15021,7 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                             .scratch = head,
                             .store = reset || into ? address_of whole : null,
                             .store_limit = reset ? 0 : how->body_most,
+                            .undeclared_most = into ? 0 : how->undeclared_most,
                         };
 
                         /* The idle timer catches a stopped peer; this absolute
@@ -14617,8 +15033,9 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                            on one, and a large file over a slow link is not an
                            attack. */
                         if ((into || MOONWATER_STRICT_NET >= STRICT_TIGHT) &&
-                            !network_deadline_begin(address_of body.deadline,
-                                                    how->body_seconds, 0))
+                            !network_deadline_begin_within(
+                                address_of body.deadline, how->body_seconds, 0,
+                                chain.began ? address_of chain : null))
                                 status = HTTP_NO_REPLY;
                         else
                                 status =
@@ -14660,6 +15077,14 @@ static bipolar http_get(string_address url, http_buffer address_to body,
 {
         return http_run(url, address_of http_manners_fetch, false, -1, body,
                         code, null, null);
+}
+
+//      wget --spider: wget's request with HEAD, and nothing but the answer.
+static bipolar http_spider(string_address start, bool check_cert,
+                           b32 address_to code, p8 address_to where)
+{
+        return http_run(start, address_of http_manners_spider, check_cert, -1,
+                        null, code, where, null);
 }
 
 //      wget: TLS, redirects, and the body written as it arrives; where, if
