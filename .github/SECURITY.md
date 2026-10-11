@@ -254,10 +254,11 @@ never a pass.
   image has no `bpf(2)` (the classic socket filters the DHCP client uses are
   separate).
 - **The clients' network half runs apart (`net_apart`, `src/net/net.c`).**
-  wget (`--spider` too), fetch, `host`, the NTS key establishment the
-  machine's NTP child makes as root (`nts_ke_apart`) and the zone question
-  the machine asks at boot as root (`locale_auto_ask`) parse TLS, X.509, HTTP
-  and DNS from whoever answers, so that half runs in a forked child; bowl's
+  wget (`--spider` too), fetch, `host`, the NTS key establishment and every
+  SNTP or NTS time query the machine's NTP child makes as root
+  (`nts_ke_apart`, `sntp_query_apart`) and the zone question the machine
+  asks at boot as root (`locale_auto_ask`) parse TLS, X.509, HTTP, NTP and
+  DNS from whoever answers, so that half runs in a forked child; bowl's
   downloads exec wget and get it too, and a DNS over TLS lookup or a
   revocation list a fetch needs is made inside the same child.
   The child keeps the answer's pipe, the output it was handed (wget's file or
@@ -272,7 +273,8 @@ never a pass.
   connect, bind, sendto and recvfrom, `SO_RCVTIMEO`, `SO_SNDTIMEO` and
   `TCP_NODELAY` to set and `SO_ERROR` to read, ppoll, the clock, getrandom,
   write, writev, close, memory that is never executable, exit, and
-  `riscv_hwprobe` on RISC-V. A redirect, a caIssuers fetch or a revocation
+  `riscv_hwprobe` on RISC-V; a time query's child may also `recvmsg` and set
+  `SO_TIMESTAMPNS` and `SO_TIMESTAMPING`. A redirect, a caIssuers fetch or a revocation
   list is another socket in the same child. The client opens and publishes
   the output and makes every decision that touches a file, and believes the
   child's answer only as far as it can check it: a status `http_run` can
@@ -290,7 +292,13 @@ never a pass.
   cannot be confined is no time from that server. The NTS state comes back
   only as `nts_ke_reply` could have made it (one to eight cookies of 1 to 256
   bytes, a name or nothing for the time server, a port not zero), and the
-  keys are wiped from every copy but the caller's. DHCP has its own filter
+  keys are wiped from every copy but the caller's. A time query's answer is
+  believed as `sntp_query_at` could have made it: a status it returns, a
+  sample `sntp_reply_sample` could have taken (delay within 2 s, an offset
+  inside the NTP window and inside the asked bound once synchronised), and
+  for NTS only the cookies, each 1 to 256 bytes; `moonwater time sync` says
+  when the query could not be confined (`SNTP_CONFINE`) or died
+  (`SNTP_APART`). DHCP has its own filter
   (`dhcp_confine`, DHCP-D2), which also fails closed. A new client is a task
   handed to `net_apart`, and `security_hygiene` fails any call into the
   HTTP/TLS engine, the NTS key establishment or the resolver over TLS that is
@@ -654,13 +662,11 @@ architecture gate above. CI is parked (`workflow_dispatch` only).
   unauthenticated, so the join orders by what the saved network asks for and has
   taught it, and the handshake's message 3 authenticates the elements the
   choice was made from.
-- **Parsing still in the asking process:** the HTTP/TLS clients, `host` and
-  the NTS key establishment run apart (Decisions), but a DNS answer read for
-  `hostid`, logger, a Waterlink service name or the time server's name
-  (`sntp_query`, in the machine's NTP child, as root), and an SNTP or NTS
-  reply (48 bytes and its extension fields, read through `byte_reader`), are
-  parsed where they were asked. Each can become a task for `net_apart`; the
-  resolver already reads its servers before the filter there.
+- **Parsing still in the asking process:** the HTTP/TLS clients, `host`, the
+  NTS key establishment and every time query run apart (Decisions), but a DNS
+  answer read for `hostid`, logger or a Waterlink service name is parsed
+  where it was asked (`dns_resolve_any`: `byte_reader`, `dns_fuzz`, the
+  exhaustive and bounded proofs). Each can become a task for `net_apart`.
 - **Evidence:** a corpus beyond generated seeds; ASan/UBSan and native
   namespace runs as required jobs; MSan beyond hosted lifts; a second oracle for
   DNS; an independent review once those are reproducible.

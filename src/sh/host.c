@@ -13482,6 +13482,10 @@ static b32 tune_hibernate_verb(string_address address_to arguments, positive cou
 //      A plain answer put the clock further from the time NTS gave this boot
 //      than the crystal can have drifted since.
 #define SNTP_CONTRADICTS (SNTP_ANSWER - 10)
+//      The query could not be confined (net_apart), so nothing was asked; or
+//      its confined child ended without an answer that could be believed.
+#define SNTP_CONFINE (SNTP_ANSWER - 11)
+#define SNTP_APART (SNTP_ANSWER - 12)
 #define SNTP_KISS_RATE 0x52415445u /* "RATE" */
 #define SNTP_KISS_DENY 0x44454e59u /* "DENY" */
 #define SNTP_KISS_RSTR 0x52535452u /* "RSTR" */
@@ -14857,15 +14861,134 @@ static COLD bipolar sntp_query_at(p32 server, p16 port, bool filter,
         return SNTP_OK;
 }
 
+/*
+        A time server asked apart. The machine's NTP child asks as root, and
+        what a server sends is read by sntp_reply_sample and, with NTS, by
+        nts_reply, so the name's lookup, the exchanges and both readers run
+        in a confined child (net_apart, with a time query's filter: recvmsg
+        and the two timestamp options besides a fetch's calls). It answers
+        with its status, the sample it picked and, with NTS, the cookies the
+        replies left. The status is believed as one sntp_query_at returns;
+        the sample as one sntp_reply_sample could have made (taken, a delay
+        within SNTP_DELAY_MOST_NS, a distance not below half of it, an
+        offset inside the NTP window, and inside most when the clock is
+        synchronised, from an address); the cookies as nts_ke_believed holds
+        them. The keys never come back: the caller still has its own.
+*/
+_Static_assert(SNTP_TIMESTAMPNS == NET_APART_SO_TIMESTAMPNS &&
+                   SNTP_TIMESTAMPING == NET_APART_SO_TIMESTAMPING,
+               "the time query's filter allows the options it sets");
+
+typedef struct
+{
+        b64 status;
+        sntp_sample sample;
+        p64 count;
+        p16 length[NTS_COOKIES];
+        p8 cookie[NTS_COOKIES][NTS_COOKIE_MAX];
+} sntp_apart_said;
+
+typedef struct
+{
+        string_address name;
+        p16 port;
+        bool filter;
+        bipolar most;
+        nts_exchange address_to nts;
+} sntp_apart_ask;
+
+static COLD bool sntp_apart_task(address_any context, bipolar answer)
+{
+        sntp_apart_ask address_to ask = context;
+        sntp_apart_said said;
+        //      The name or the address as the HTTP client takes it, which is
+        //      the one place a host is looked up.
+        p32 host = ask->name && ask->name[0] ? http_lookup(ask->name) : 0;
+        bool wrote;
+
+        memory_zero(address_of said, sizeof said);
+        said.status = host ? sntp_query_at(host, ask->port, ask->filter, ask->most,
+                                           ask->nts, address_of said.sample)
+                           : SNTP_NO_SERVER;
+        if (ask->nts)
+        {
+                said.count = ask->nts->state->count;
+                memory_copy(said.length, ask->nts->state->length,
+                            sizeof said.length);
+                memory_copy(said.cookie, ask->nts->state->cookie,
+                            sizeof said.cookie);
+        }
+        wrote = system_write_all((positive)answer, address_of said, sizeof said) ==
+                sizeof said;
+        crypto_forget(address_of said, sizeof said);
+        return wrote;
+}
+
+static COLD bool sntp_apart_believed(const sntp_apart_said address_to said,
+                                     bipolar most, bool nts)
+{
+        const sntp_sample address_to sample = address_of said->sample;
+
+        if (said->status != SNTP_OK &&
+            (said->status > SNTP_ANSWER - 1 || said->status < SNTP_CONTRADICTS))
+                return false;
+        if (said->status == SNTP_OK &&
+            (!sample->ok || !sample->address || sample->delay_ns < 0 ||
+             sample->delay_ns > SNTP_DELAY_MOST_NS ||
+             sample->distance_ns < sample->delay_ns / 2 ||
+             !sntp_within(sample->offset_ns, SNTP_WALL_MOST_NS) ||
+             (most <= SNTP_OFFSET_SYNCED_NS &&
+              !sntp_within(sample->offset_ns, most))))
+                return false;
+        if (!nts)
+                return !said->count;
+        if (said->count > NTS_COOKIES)
+                return false;
+        for (positive at = 0; at < said->count; at++)
+                if (!said->length[at] || said->length[at] > NTS_COOKIE_MAX)
+                        return false;
+        return true;
+}
+
+static COLD bipolar sntp_query_apart(string_address name, p16 port, bool filter,
+                                     bipolar most, nts_exchange address_to nts,
+                                     sntp_sample address_to answer)
+{
+        sntp_apart_ask ask = {name, port, filter, most, nts};
+        byte_store got = {0};
+        sntp_apart_said said;
+        bipolar ran = net_apart(sntp_apart_task, address_of ask, -1, address_of got,
+                                sizeof said, true);
+        bool whole = ran == NET_APART_OK && got.used == sizeof said;
+        bipolar status = ran == NET_APART_UNCONFINED ? SNTP_CONFINE : SNTP_APART;
+
+        if (whole)
+                memory_copy(address_of said, got.bytes, sizeof said);
+        if (got.bytes)
+                crypto_forget(got.bytes, got.used);
+        byte_store_release(address_of got);
+        if (whole && sntp_apart_believed(address_of said, most, nts != null))
+        {
+                status = (bipolar)said.status;
+                if (status == SNTP_OK)
+                        address_to answer = said.sample;
+                if (nts)
+                {
+                        nts->state->count = (positive)said.count;
+                        memory_copy(nts->state->length, said.length,
+                                    sizeof said.length);
+                        memory_copy(nts->state->cookie, said.cookie,
+                                    sizeof said.cookie);
+                }
+        }
+        crypto_forget(address_of said, sizeof said);
+        return status;
+}
+
 static COLD bipolar sntp_query(string_address name, bool filter, bipolar most,
                                sntp_sample address_to answer)
 {
-        //      The name or the address as the HTTP client takes it, which is
-        //      the one place a host is looked up.
-        p32 host = name && name[0] ? http_lookup(name) : 0;
-
-        return host ? sntp_query_at(host, SNTP_PORT, filter, most, null, answer)
-                    : SNTP_NO_SERVER;
+        return sntp_query_apart(name, SNTP_PORT, filter, most, null, answer);
 }
 
 //      A time server an NTS key establishment named, asked with its keys:
@@ -14874,11 +14997,8 @@ static COLD bipolar sntp_query_nts(string_address name, p16 port, bool filter,
                                    nts_exchange address_to nts,
                                    sntp_sample address_to answer)
 {
-        p32 host = name && name[0] ? http_lookup(name) : 0;
-
-        return host ? sntp_query_at(host, port, filter, SNTP_OFFSET_ANY_NS, nts,
-                                    answer)
-                    : SNTP_NO_SERVER;
+        return sntp_query_apart(name, port, filter, SNTP_OFFSET_ANY_NS, nts,
+                                answer);
 }
 
 #endif
@@ -15924,7 +16044,7 @@ static bipolar locale_auto_ask_apart(locale_auto_answer address_to answer)
         byte_store got = {0};
         locale_auto_said said;
         bipolar ran = net_apart(locale_auto_ask_task, null, -1, address_of got,
-                                sizeof said);
+                                sizeof said, false);
         bool whole = ran == NET_APART_OK && got.used == sizeof said;
 
         memory_zero(answer, sizeof(address_to answer));
@@ -16188,6 +16308,11 @@ static b32 locale_time_sync(void)
                                   ? " -- asked too often, try in a minute"
                               : failed == SNTP_DENIED
                                   ? " -- a server told this machine to stay away"
+                              : failed == SNTP_CONFINE
+                                  ? " -- the query cannot be confined here, so "
+                                    "nothing was asked"
+                              : failed == SNTP_APART
+                                  ? " -- the confined query died"
                                   : "");
                 if (locale_nts_why[0])
                         string_format(log, "  NTS %s\n", locale_nts_why);

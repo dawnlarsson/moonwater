@@ -68818,11 +68818,14 @@ def harness_security_hygiene(argv):
         "dns_query_tls": {"dns_resolve_wanted"},
         "dns_resolve_wanted": {"http_lookup_wanted", "dns_apart_task"},
         "http_lookup_wanted": {"http_run"},
+        "sntp_query_at": {"sntp_apart_task"},
+        "sntp_exchange": {"sntp_query_at"},
     }
     apart_tasks = {"http_apart_task": "src/net/net.c",
                    "nts_ke_task": "src/net/net.c",
                    "dns_apart_task": "src/net/net.c",
-                   "locale_auto_ask_task": "src/sh/host.c"}
+                   "locale_auto_ask_task": "src/sh/host.c",
+                   "sntp_apart_task": "src/sh/host.c"}
     found_callers = {}
     for path in sorted(list((HARNESS_ROOT / "src").rglob("*.c")) +
                        list((HARNESS_ROOT / "src").rglob("*.inc"))):

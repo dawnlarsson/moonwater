@@ -15262,6 +15262,10 @@ static bipolar http_fetch_to(string_address start, bipolar dest, bool check_cert
 #define NET_FILTER_STEPS 96
 //      PROT_EXEC, the one protection a mapping in the child may not have.
 #define NET_APART_EXECUTABLE 4
+//      SO_TIMESTAMPNS and SO_TIMESTAMPING, the two options a time query
+//      sets (SNTP_TIMESTAMPNS and SNTP_TIMESTAMPING in src/sh/host.c).
+#define NET_APART_SO_TIMESTAMPNS 35
+#define NET_APART_SO_TIMESTAMPING 37
 
 //      struct sock_filter.
 typedef struct
@@ -15341,8 +15345,10 @@ static COLD fn net_filter_load(net_filter address_to filter, positive argument)
 /* The program: the architecture, then the calls that need no more than
    their number, then the four whose arguments decide, then death. The
    numbers come first in the order a download makes them most. x32's
-   bit-30 numbers on x86_64 match nothing listed and are killed. */
-static COLD fn net_filter_build(net_filter address_to filter)
+   bit-30 numbers on x86_64 match nothing listed and are killed. A time
+   query (clock) also reads its replies and their stamps with recvmsg and
+   sets the two timestamp options; nothing else is told them. */
+static COLD fn net_filter_build(net_filter address_to filter, bool clock)
 {
         static const p32 plain[] = {
             (p32)syscall(recvfrom), (p32)syscall(writev),
@@ -15362,6 +15368,9 @@ static COLD fn net_filter_build(net_filter address_to filter)
         static const p32 kinds[] = {SOCK_STREAM, SOCK_DGRAM};
         static const p32 protocols[] = {0};
         static const p32 socket_level[] = {SO_RCVTIMEO, SO_SNDTIMEO};
+        static const p32 clock_level[] = {SO_RCVTIMEO, SO_SNDTIMEO,
+                                          NET_APART_SO_TIMESTAMPNS,
+                                          NET_APART_SO_TIMESTAMPING};
         static const p32 tcp_level[] = {TCP_NODELAY};
         static const p32 sol_socket[] = {SOL_SOCKET};
         static const p32 so_error[] = {SO_ERROR};
@@ -15394,8 +15403,12 @@ static COLD fn net_filter_build(net_filter address_to filter)
         call = net_filter_when(filter, (p32)syscall(setsockopt));
         net_filter_load(filter, 1);
         level = net_filter_when(filter, SOL_SOCKET);
-        net_filter_require(filter, 2, ~(p32)0, socket_level,
-                           array_count(socket_level));
+        if (clock)
+                net_filter_require(filter, 2, ~(p32)0, clock_level,
+                                   array_count(clock_level));
+        else
+                net_filter_require(filter, 2, ~(p32)0, socket_level,
+                                   array_count(socket_level));
         net_filter_answer(filter, SECCOMP_RET_ALLOW);
         net_filter_past(filter, level);
         level = net_filter_when(filter, IPPROTO_TCP);
@@ -15411,6 +15424,14 @@ static COLD fn net_filter_build(net_filter address_to filter)
         net_filter_require(filter, 2, ~(p32)0, so_error, array_count(so_error));
         net_filter_answer(filter, SECCOMP_RET_ALLOW);
         net_filter_past(filter, call);
+
+        //      recvmsg, for a time query only.
+        if (clock)
+        {
+                call = net_filter_when(filter, (p32)syscall(recvmsg));
+                net_filter_answer(filter, SECCOMP_RET_ALLOW);
+                net_filter_past(filter, call);
+        }
 
         //      mmap: anything but executable.
         call = net_filter_when(filter, (p32)syscall(mmap));
@@ -15506,7 +15527,8 @@ static COLD bool net_apart_tie(bipolar parent)
 typedef bool (*net_apart_task)(address_any context, bipolar answer);
 
 static DEAD_END COLD fn net_apart_child(net_apart_task task, address_any context,
-                                        bipolar keep, b32 answer, bipolar parent)
+                                        bipolar keep, b32 answer, bipolar parent,
+                                        bool clock)
 {
         p32 kept[3] = {(p32)answer, 2, keep >= 0 ? (p32)keep : descriptors_none};
         net_filter filter;
@@ -15514,7 +15536,7 @@ static DEAD_END COLD fn net_apart_child(net_apart_task task, address_any context
         dns_servers_hold((string_address) "/etc/resolv.conf");
         dns_tls_held = dns_tls_mode() + 1;
         clock_floor_held = clock_trust_floor();
-        net_filter_build(address_of filter);
+        net_filter_build(address_of filter, clock);
         if (!net_apart_descriptors_keep(kept, array_count(kept)) ||
             !net_apart_nobody() || !net_apart_tie(parent) ||
             !net_filter_install(address_of filter))
@@ -15534,6 +15556,7 @@ static b32 net_apart_signal;
         at most `most` bytes and exited, NET_APART_UNCONFINED when it could not
         confine itself and did nothing, NET_APART_DIED when it died, said too
         much or ended otherwise, NET_APART_NO_CHILD when there was no child.
+        clock is a time query's filter (net_filter_build).
 
         The parent reads to the end of the pipe before it waits, so an answer
         larger than a pipe holds cannot stall the child. A child that dies of
@@ -15546,7 +15569,7 @@ static b32 net_apart_signal;
 */
 static COLD bipolar net_apart(net_apart_task task, address_any context,
                               bipolar keep, byte_store address_to answer,
-                              positive most)
+                              positive most, bool clock)
 {
         b32 ends[2];
         bipolar parent = system_call(syscall(getpid));
@@ -15572,7 +15595,7 @@ static COLD bipolar net_apart(net_apart_task task, address_any context,
                 return NET_APART_NO_CHILD;
         }
         if (!child)
-                net_apart_child(task, context, keep, ends[1], parent);
+                net_apart_child(task, context, keep, ends[1], parent, clock);
 
         for (;;)
         {
@@ -15728,7 +15751,7 @@ static COLD bipolar http_run_apart(string_address start,
         bipolar ran = net_apart(http_apart_task, address_of ask, dest,
                                 address_of answer,
                                 sizeof said + HTTP_URL_MAX + HTTP_HEAD_MAX +
-                                    how->body_most);
+                                    how->body_most, false);
 
         if (ran != NET_APART_OK || answer.used < sizeof said)
         {
@@ -15866,7 +15889,7 @@ static COLD bipolar nts_ke_apart(string_address host, p16 port, bool bootstrap,
         byte_store got = {0};
         nts_ke_said said;
         bipolar ran = net_apart(nts_ke_task, address_of ask, -1, address_of got,
-                                sizeof said);
+                                sizeof said, false);
         bool whole = ran == NET_APART_OK && got.used == sizeof said;
         bipolar status = ran == NET_APART_UNCONFINED ? HTTP_CONFINE : HTTP_APART;
 
@@ -15934,7 +15957,7 @@ static COLD bipolar dns_resolve_apart(bipolar server, string_address name,
         byte_store got = {0};
         dns_apart_said said;
         bipolar ran = net_apart(dns_apart_task, address_of ask, -1, address_of got,
-                                sizeof said);
+                                sizeof said, false);
         bool whole = ran == NET_APART_OK && got.used == sizeof said;
 
         address_to found = 0;

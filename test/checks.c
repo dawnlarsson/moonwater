@@ -71021,7 +71021,7 @@ static fn net_apart_filter_decisions(void)
         static const p64 none[6] = {0};
         bool landed = true;
 
-        net_filter_build(address_of filter);
+        net_filter_build(address_of filter, false);
         check("the client filter fits its program",
               filter.used > 8 && filter.used <= NET_FILTER_STEPS);
         if (filter.used > NET_FILTER_STEPS)
@@ -71056,6 +71056,55 @@ static fn net_apart_filter_decisions(void)
         check("the client filter kills a call from another architecture",
               net_filter_run(address_of filter, NET_APART_ARCH ^ 1,
                              syscall(recvfrom), none) == SECCOMP_RET_KILL_PROCESS);
+
+        //      A time query's filter: the fetch's, and recvmsg and the two
+        //      timestamp options, which the fetch's still refuses.
+        {
+                static const struct
+                {
+                        string_address name;
+                        p32 number;
+                        p64 arguments[6];
+                } added[] = {
+                    {"recvmsg", syscall(recvmsg), {0}},
+                    {"SO_TIMESTAMPNS", syscall(setsockopt),
+                     {3, SOL_SOCKET, NET_APART_SO_TIMESTAMPNS}},
+                    {"SO_TIMESTAMPING", syscall(setsockopt),
+                     {3, SOL_SOCKET, NET_APART_SO_TIMESTAMPING}},
+                };
+                net_filter timed;
+
+                net_filter_build(address_of timed, true);
+                check("the time filter fits its program",
+                      timed.used > filter.used && timed.used <= NET_FILTER_STEPS);
+                if (timed.used > NET_FILTER_STEPS)
+                        return;
+                for (positive at = 0; at < array_count(added); at++)
+                {
+                        net_apart_check(added[at].name,
+                                        net_filter_run(address_of timed, NET_APART_ARCH,
+                                                       added[at].number,
+                                                       added[at].arguments) ==
+                                                SECCOMP_RET_ALLOW &&
+                                            net_filter_run(address_of filter,
+                                                           NET_APART_ARCH,
+                                                           added[at].number,
+                                                           added[at].arguments) ==
+                                                SECCOMP_RET_KILL_PROCESS);
+                }
+                for (positive at = 0; at < array_count(rows); at++)
+                        net_apart_check(rows[at].name,
+                                        net_filter_run(address_of timed, NET_APART_ARCH,
+                                                       rows[at].number,
+                                                       rows[at].arguments) ==
+                                            rows[at].answer);
+                check("the time filter kills a timestamp option at the TCP level",
+                      net_filter_run(address_of timed, NET_APART_ARCH,
+                                     syscall(setsockopt),
+                                     (p64[6]){3, IPPROTO_TCP,
+                                              NET_APART_SO_TIMESTAMPNS}) ==
+                          SECCOMP_RET_KILL_PROCESS);
+        }
 }
 
 typedef struct
@@ -71172,7 +71221,7 @@ static fn net_apart_confinement(void)
                 net_apart_probe probe = {spare, ends[1], at};
                 byte_store answer = {0};
                 bipolar ran = net_apart(net_apart_probe_task, address_of probe,
-                                        ends[1], address_of answer, 64);
+                                        ends[1], address_of answer, 64, false);
                 bool all = answer.used == NET_APART_PROBE_ANSWER;
                 p8 name[96];
 
@@ -71480,7 +71529,7 @@ static fn net_apart_fetching(void)
                 byte_store answer = {0};
                 b64 said[2] = {0, 0};
                 bipolar ran = net_apart(net_apart_planted_task, address_of planted, -1,
-                                        address_of answer, 64);
+                                        address_of answer, 64, false);
 
                 if (answer.used == sizeof said)
                         memory_copy(said, answer.bytes, sizeof said);
@@ -71548,7 +71597,7 @@ static fn net_apart_fetching(void)
                 planted.count = dns_servers((string_address) "/etc/resolv.conf",
                                             planted.servers, DNS_SERVERS_MAX);
                 ran = net_apart(net_apart_resolver_task, address_of planted, -1,
-                                address_of answer, 64);
+                                address_of answer, 64, false);
                 if (answer.used == sizeof said)
                         memory_copy(said, answer.bytes, sizeof said);
                 if (emulated)
