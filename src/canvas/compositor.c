@@ -1263,12 +1263,14 @@ static void compositor_client_read(struct compositor_client *client)
                                 files[at] = handles[at];
                 }
 
-                if (got == (long)sizeof(message) && message.kind == SURFACE_CREATE && file_count == 1)
+                if (got == (long)sizeof(message) && message.kind == SURFACE_CREATE)
                 {
-                        int status = compositor_create(client, &message.request, files[0]);
+                        int status = file_count == 1 ? compositor_create(client, &message.request, files[0])
+                                                     : -COMPOSITOR_EINVAL;
 
                         compositor_reply(client, status, &message.request);
-                        if (status < 0)
+                        // A second create is answered EBUSY and the surface it came on stays.
+                        if (status < 0 && status != -COMPOSITOR_EBUSY)
                                 got = 0;
                 }
                 else if (got == (long)sizeof(message) && message.kind == SURFACE_COMMIT &&
@@ -1819,7 +1821,7 @@ static b32 surface_main()
 {
         bipolar x = -1, y = -1, width = 320, height = 200, colour = 0x3366aa, role = SURFACE_ROLE_APP;
         bipolar seconds = -1;
-        b32 pointer = 0;
+        b32 pointer = 0, twice = 0;
         bipolar offset = -1, flood = 0, writers = 1;
         b32 child = 0;
         string_address font = null, text = (string_address) "Moonwater";
@@ -1835,9 +1837,10 @@ static b32 surface_main()
 
                 if (option[0] != '-' || !option[1] || option[2])
                         continue;
-                if (option[1] == 'p')
+                if (option[1] == 'p' || option[1] == '2')
                 {
-                        pointer = 1;
+                        pointer |= option[1] == 'p';
+                        twice |= option[1] == '2';
                         continue;
                 }
                 if (!value)
@@ -1907,6 +1910,30 @@ static b32 surface_main()
         {
                 surface->buffer_offset[0] = (unsigned int)offset;
                 surface_commit(surface);
+        }
+
+        // A second create on the connection it already made a surface on.
+        if (twice)
+        {
+                struct surface_message message = {SURFACE_CREATE, 0, {0}};
+                long file = window_call(WINDOW_SYS_MEMFD_CREATE, (long)"surface",
+                                        SURFACE_MFD_CLOEXEC | SURFACE_MFD_ALLOW_SEALING, 0, 0, 0, 0);
+
+                window_call(WINDOW_SYS_FTRUNCATE, file, surface->window.mapping, 0, 0, 0, 0);
+                window_call(WINDOW_SYS_FCNTL, file, SURFACE_F_ADD_SEALS, SURFACE_SEAL_FIXED, 0, 0, 0);
+                message.request.size = sizeof(message.request);
+                message.request.protocol = SURFACE_PROTOCOL;
+                message.request.role = SURFACE_ROLE_APP;
+                message.request.width = (unsigned int)width;
+                message.request.height = (unsigned int)height;
+                message.request.buffer_slots = 2;
+                surface_send(surface->window.handle, &message, (int)file);
+                window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
+                while (surface_receive(surface->window.handle, &message, 0) > 0 &&
+                       message.kind != SURFACE_CREATED)
+                        ;
+                string_format(log, "surface: second create answered %b\n", (bipolar)message.status);
+                log_flush();
         }
 
         string_format(log, "surface: %p at %b,%b\n", (positive)surface->surface_id,
