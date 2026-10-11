@@ -50059,10 +50059,11 @@ static fn test_exec(void)
         are closed except the two kept, whatever their order, and the ones
         below `from` are not touched. The child answers with the number of
         descriptors that are not what that says, and 100 when the call
-        itself said false.
+        itself said false. A third kept one goes through
+        descriptors_close_outside, which the two-kept form is.
 */
-static fn test_close_except_case(string_address name, p32 from, p32 first,
-                                 p32 second)
+static fn test_close_three_case(string_address name, p32 from, p32 first,
+                                p32 second, p32 third)
 {
         b32 status = 0;
         b32 child;
@@ -50074,19 +50075,23 @@ static fn test_close_except_case(string_address name, p32 from, p32 first,
         {
                 positive wrong = 0;
                 bipolar null_device = system_open_at(AT_FDCWD, "/dev/null", FILE_READ);
+                p32 keep[3] = {first, second, third};
 
                 for (positive at = 0; at < 16; at++)
                         system_call_3(syscall(dup3), (positive)null_device, at, 0);
                 if (null_device >= 16)
                         system_close(null_device);
 
-                if (!descriptors_close_except(from, first, second))
+                if (third == descriptors_none
+                        ? !descriptors_close_except(from, first, second)
+                        : !descriptors_close_outside(from, keep, 3))
                         _exit(100);
 
                 for (positive at = 0; at < 16; at++)
                 {
                         bool open = system_call_3(syscall(fcntl), at, 1, 0) >= 0;
-                        bool wanted = at < from || at == first || at == second;
+                        bool wanted = at < from || at == first || at == second ||
+                                      at == third;
 
                         wrong += open != wanted;
                 }
@@ -50097,8 +50102,21 @@ static fn test_close_except_case(string_address name, p32 from, p32 first,
         same(name, WEXITSTATUS(status), 0);
 }
 
+static fn test_close_except_case(string_address name, p32 from, p32 first,
+                                 p32 second)
+{
+        test_close_three_case(name, from, first, second, descriptors_none);
+}
+
 static fn test_close_except(void)
 {
+        test_close_three_case("close_outside: three kept, out of order", 3, 11, 5, 8);
+        test_close_three_case("close_outside: three adjacent", 3, 6, 4, 5);
+        test_close_three_case("close_outside: one below from, two above", 3, 9, 1, 4);
+        test_close_three_case("close_outside: one twice and one missing", 3, 7,
+                              descriptors_none, 7);
+        test_close_three_case("close_outside: the last of the sixteen and two below it",
+                              0, 15, 0, 14);
         test_close_except_case("close_except: all from 3 up", 3, descriptors_none,
                                descriptors_none);
         test_close_except_case("close_except: one kept", 3, 5, descriptors_none);
@@ -69636,54 +69654,500 @@ static fn fetching_for_real(void)
 
 /*
         The exchange's confinement, as net_dhcp_apart's child meets it: the
-        socket and the answer's pipe stay open and nothing else does, the
-        answer's write is allowed, and a call beyond the exchange's own kills
-        the child with SIGSYS. qemu-user cannot filter itself, so there the
-        last step is NOT RUN rather than a pass.
+        client socket, the packet socket and the answer's pipe stay open and
+        nothing else does; the answer's write and a send on the client socket
+        are allowed; a write or a send on the packet socket (which could put
+        any frame on the wire), or any call beyond the exchange's own, kills
+        the child with SIGSYS. And no filter is no exchange: where seccomp
+        answers ENOSYS -- a filter installed first that answers so, or
+        qemu-user, which cannot filter itself -- the confinement refuses. The
+        child says what it got to by its exit code: 3 refused, 4 a descriptor
+        left open or closed, 5 a call that should have killed it did not, 6
+        the refusal asked for, 7 no refusal.
 */
-static fn dhcp_confinement(void)
+#define DHCP_TEST_ALLOWED 0
+#define DHCP_TEST_WRITE_FRAMES 1
+#define DHCP_TEST_SEND_FRAMES 2
+#define DHCP_TEST_NO_SECCOMP 3
+
+static b32 dhcp_confined_child(positive scenario, bipolar spare, p8 address_to said)
 {
         b32 ends[2];
         b32 status = 0;
-        p8 byte = 0;
-        bipolar spare = system_open_at(AT_FDCWD, "/", FILE_READ | O_CLOEXEC);
+        bipolar child;
 
-        check("DHCP confinement fixture opens",
-              spare >= 0 &&
-                  system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC) == 0);
-        if (spare < 0)
-                return;
-        bipolar child = system_fork();
+        address_to said = 0;
+        if (system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC) != 0)
+                return -1;
+        child = system_fork();
         if (child == 0)
         {
                 bipolar handle = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+                bipolar frames = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+                socket_address_internet discard = {
+                    .family = AF_INET, .port = network_order_16(9),
+                    .host = network_order_32(HOST_LOOPBACK)};
+                p8 byte = 1;
 
+                if (scenario == DHCP_TEST_NO_SECCOMP)
+                {
+                        //      seccomp answers ENOSYS from here on, as on a
+                        //      kernel built without it.
+                        dhcp_filter_step steps[] = {
+                            {0x20, 0, 0, 0},
+                            {0x15, 0, 1, (p32)syscall(seccomp)},
+                            {0x06, 0, 0, 0x00050000u | ENOSYS},
+                            {0x06, 0, 0, DHCP_FILTER_ALLOW}};
+                        struct
+                        {
+                                p16 count;
+                                dhcp_filter_step address_to steps;
+                        } filter = {4, steps};
+
+                        system_call_5(syscall(prctl), 38, 1, 0, 0, 0);
+                        system_call_3(syscall(seccomp), 1, 0,
+                                      (positive)address_of filter);
+                }
                 dhcp_apart = ends[1];
-                if (handle < 0 || !dhcp_confine((b32)handle))
-                        system_call_1(syscall(exit_group), 3);
+                dhcp_frames = frames;
+                if (handle < 0 || frames < 0 || !dhcp_confine((b32)handle))
+                        system_call_1(syscall(exit_group),
+                                      scenario == DHCP_TEST_NO_SECCOMP ? 6 : 3);
+                if (scenario == DHCP_TEST_NO_SECCOMP)
+                        system_call_1(syscall(exit_group), 7);
                 if (system_call_1(syscall(close), (positive)spare) != -EBADF ||
                     system_call_1(syscall(close), (positive)ends[0]) != -EBADF)
                         system_call_1(syscall(exit_group), 4);
-                byte = 1;
                 system_call_3(syscall(write), (positive)ends[1],
                               (positive)address_of byte, 1);
-                system_open_at(AT_FDCWD, "/", FILE_READ | O_CLOEXEC);
+                if (scenario == DHCP_TEST_WRITE_FRAMES)
+                        system_call_3(syscall(write), (positive)frames,
+                                      (positive)address_of byte, 1);
+                else if (scenario == DHCP_TEST_SEND_FRAMES)
+                        socket_send((b32)frames, address_of byte, 1, 0,
+                                    address_of discard, sizeof discard);
+                else
+                {
+                        byte = 2;
+                        socket_send((b32)handle, address_of byte, 1, 0,
+                                    address_of discard, sizeof discard);
+                        system_call_3(syscall(write), (positive)ends[1],
+                                      (positive)address_of byte, 1);
+                        //      The packet socket was kept: it closes.
+                        if (system_call_1(syscall(close), (positive)frames) != 0)
+                                system_call_1(syscall(exit_group), 4);
+                        system_open_at(AT_FDCWD, "/", FILE_READ | O_CLOEXEC);
+                }
                 system_call_1(syscall(exit_group), 5);
         }
         system_close(ends[1]);
-        system_read_retry((positive)ends[0], address_of byte, 1);
+        while (child > 0)
+        {
+                p8 byte = 0;
+
+                if (system_read_retry((positive)ends[0], address_of byte, 1) != 1)
+                        break;
+                address_to said = byte;
+        }
         if (child > 0)
                 system_call_4(syscall(wait4), (positive)child,
                               (positive)address_of status, 0, 0);
         system_close(ends[0]);
-        system_close(spare);
-        check("the confined exchange keeps only its socket and pipe, and may answer",
-              child > 0 && byte == 1);
-        if (net_as_emulated() && status == 5 << 8)
+        return child > 0 ? status : -1;
+}
+
+static fn dhcp_confinement(void)
+{
+        p8 said = 0;
+        bipolar spare = system_open_at(AT_FDCWD, "/", FILE_READ | O_CLOEXEC);
+        b32 status;
+
+        check("DHCP confinement fixture opens", spare >= 0);
+        if (spare < 0)
+                return;
+        status = dhcp_confined_child(DHCP_TEST_NO_SECCOMP, spare, address_of said);
+        check("an exchange where seccomp answers ENOSYS refuses to run unfiltered",
+              status == 6 << 8);
+        status = dhcp_confined_child(DHCP_TEST_ALLOWED, spare, address_of said);
+        if (net_as_emulated())
+        {
+                check("under qemu-user, which cannot filter itself, the exchange refuses",
+                      status == 3 << 8);
                 log_direct(str("net: DHCP seccomp filter NOT RUN -- qemu-user\n"));
-        else
-                check("the confined exchange dies on a call outside its own",
-                      (status & 0x7f) == 31);
+                system_close(spare);
+                return;
+        }
+        check("the confined exchange keeps only its sockets and pipe, may answer and send",
+              said == 2);
+        check("the confined exchange dies on a call outside its own",
+              (status & 0x7f) == 31);
+        status = dhcp_confined_child(DHCP_TEST_WRITE_FRAMES, spare, address_of said);
+        check("a write on the packet socket kills the confined exchange",
+              said == 1 && (status & 0x7f) == 31);
+        status = dhcp_confined_child(DHCP_TEST_SEND_FRAMES, spare, address_of said);
+        check("a send on the packet socket kills the confined exchange",
+              said == 1 && (status & 0x7f) == 31);
+        system_close(spare);
+}
+
+/*
+        The frame judge (dhcp_unframe), against frames written here: a reply
+        whose headers and checksums are right is taken with its addresses,
+        port and message; each thing IP or UDP would refuse, one at a time,
+        is refused; padding after the datagram, IP options, the reserved flag,
+        a UDP length short of the payload and an absent UDP checksum are not;
+        a wrong UDP checksum is, unless the kernel vouches for it
+        (dhcp_frame_vouched, over control messages written here too).
+*/
+static p32 dhcp_test_fold(const p8 address_to bytes, positive count, p32 sum)
+{
+        for (positive at = 0; at < count; at++)
+                sum += at & 1 ? bytes[at] : (p32)bytes[at] << 8;
+        while (sum >> 16)
+                sum = (sum & 0xffff) + (sum >> 16);
+        return sum;
+}
+
+//      Both checksums written for the header and UDP lengths the frame says.
+static fn dhcp_test_sums(p8 address_to frame, positive header)
+{
+        positive udp = (positive)frame[header + 4] << 8 | frame[header + 5];
+        p8 pseudo[12];
+        p32 sum;
+
+        frame[10] = frame[11] = 0;
+        network_store_16(frame + 10, (p16)~dhcp_test_fold(frame, header, 0));
+        memory_copy(pseudo, frame + 12, 8);
+        pseudo[8] = 0;
+        pseudo[9] = 17;
+        network_store_16(pseudo + 10, (p16)udp);
+        frame[header + 6] = frame[header + 7] = 0;
+        sum = (p16)~dhcp_test_fold(frame + header, udp, dhcp_test_fold(pseudo, 12, 0));
+        network_store_16(frame + header + 6, (p16)(sum ? sum : 0xffff));
+}
+
+//      A frame of `message` from 10.0.2.2:67 to 255.255.255.255:68 with
+//      `options` bytes of IP options; its length.
+static positive dhcp_test_frame(p8 address_to frame, const p8 address_to message,
+                                positive length, positive options)
+{
+        positive header = 20 + options;
+
+        memory_zero(frame, header + 8);
+        frame[0] = (p8)(0x40 | header / 4);
+        network_store_16(frame + 2, (p16)(header + 8 + length));
+        network_store_16(frame + 6, 0x4000);
+        frame[8] = 64;
+        frame[9] = 17;
+        network_store_32(frame + 12, 0x0a000202);
+        network_store_32(frame + 16, 0xffffffff);
+        for (positive at = 20; at < header; at++)
+                frame[at] = 1;
+        network_store_16(frame + header, 67);
+        network_store_16(frame + header + 2, 68);
+        network_store_16(frame + header + 4, (p16)(8 + length));
+        memory_copy(frame + header + 8, message, length);
+        dhcp_test_sums(frame, header);
+        return header + 8 + length;
+}
+
+static fn dhcp_frames_judged(void)
+{
+        p8 message[61];
+        p8 frame[200];
+        p8 copy[200];
+        dhcp_frame got;
+        positive size;
+
+        for (positive at = 0; at < sizeof message; at++)
+                message[at] = (p8)(at * 7 + 3);
+        size = dhcp_test_frame(frame, message, sizeof message, 0);
+        check("a reply frame with its headers right is taken",
+              dhcp_unframe(frame, size, false, address_of got) &&
+                  got.source == 0x0a000202 && got.destination == 0xffffffff &&
+                  got.source_port == 67 && got.message == frame + 28 &&
+                  got.length == sizeof message &&
+                  !memory_compare(got.message, message, sizeof message));
+        {
+                bool refused = true;
+
+                for (positive cut = 0; cut < size; cut++)
+                        refused &= !dhcp_unframe(frame, cut, false, address_of got);
+                check("a reply frame cut at any byte is refused", refused);
+        }
+        memory_copy(copy, frame, size);
+        memory_fill(copy + size, 0xa5, 20);
+        check("link padding after the datagram is not read",
+              dhcp_unframe(copy, size + 20, false, address_of got) &&
+                  got.length == sizeof message);
+        {
+                positive with = dhcp_test_frame(copy, message, sizeof message, 8);
+
+                check("IP options are stepped over",
+                      dhcp_unframe(copy, with, false, address_of got) &&
+                          got.message == copy + 36 && got.length == sizeof message);
+        }
+
+        //      One field at a time, the checksums written again after it
+        //      unless the checksum is the field.
+        static const struct
+        {
+                p8 at;
+                p8 value;
+                bool sums;
+                bool taken;
+        } faults[] = {
+            {0, 0x65, true, false},     // version 6
+            {0, 0x44, true, false},     // a header of four words
+            {6, 0x60, true, false},     // more fragments
+            {7, 0x01, true, false},     // a fragment offset
+            {6, 0x41, true, false},     // an offset's high bits
+            {6, 0xc0, true, true},      // the reserved flag
+            {6, 0x00, true, true},      // may fragment, but did not
+            {9, 6, true, false},        // TCP
+            {11, 0, false, false},      // the header checksum off
+            {21, 68, true, false},      // from port 68
+            {23, 67, true, false},      // to port 67
+            {27, 0, false, false},      // the UDP checksum off
+            {3, 0, true, false},        // a total length past what was read
+        };
+        for (positive at = 0; at < array_count(faults); at++)
+        {
+                memory_copy(copy, frame, size);
+                copy[faults[at].at] ^= faults[at].at == 11 || faults[at].at == 27
+                                           ? 1
+                                           : copy[faults[at].at] ^ faults[at].value;
+                if (faults[at].at == 3)
+                        network_store_16(copy + 2, (p16)(size + 1));
+                if (faults[at].sums)
+                        dhcp_test_sums(copy, 20);
+                if (faults[at].taken)
+                        check("a header field IP does not refuse is not refused",
+                              dhcp_unframe(copy, size, false, address_of got));
+                else
+                        check("a header field IP or UDP refuses is refused",
+                              !dhcp_unframe(copy, size, false, address_of got));
+        }
+        memory_copy(copy, frame, size);
+        copy[27] ^= 1;
+        check("a wrong UDP checksum the kernel vouches for is not asked about",
+              dhcp_unframe(copy, size, true, address_of got));
+        copy[26] = copy[27] = 0;
+        check("a UDP datagram with no checksum is taken",
+              dhcp_unframe(copy, size, false, address_of got));
+        memory_copy(copy, frame, size);
+        network_store_16(copy + 24, 7);
+        dhcp_test_sums(copy, 20);
+        check("a UDP length shorter than its header is refused",
+              !dhcp_unframe(copy, size, false, address_of got));
+        network_store_16(copy + 24, (p16)(sizeof message + 9));
+        dhcp_test_sums(copy, 20);
+        check("a UDP length past the IP payload is refused",
+              !dhcp_unframe(copy, size, false, address_of got));
+        network_store_16(copy + 24, (p16)(sizeof message + 5));
+        dhcp_test_sums(copy, 20);
+        check("a UDP length short of the IP payload cuts the message, as the kernel cuts it",
+              dhcp_unframe(copy, size, false, address_of got) &&
+                  got.length == sizeof message - 3);
+        network_store_16(copy + 2, 27);
+        dhcp_test_sums(copy, 20);
+        check("an IP total length with no room for UDP's header is refused",
+              !dhcp_unframe(copy, size, false, address_of got));
+
+        //      The kernel's word on the checksum: PACKET_AUXDATA, alone or
+        //      after another control message.
+        {
+                p8 control[64];
+
+                memory_zero(control, sizeof control);
+                control[0] = 36;
+                network_store_16(control + 8, 0x0701);  // 263, little-endian
+                control[12] = 8;
+                control[16] = 8;
+                check("TP_STATUS_CSUMNOTREADY vouches for the checksum",
+                      dhcp_frame_vouched(control, 40));
+                control[16] = 0x80;
+                check("TP_STATUS_CSUM_VALID vouches for the checksum",
+                      dhcp_frame_vouched(control, 40));
+                control[16] = 0x77;
+                check("no other status does",
+                      !dhcp_frame_vouched(control, 40));
+                control[16] = 8;
+                check("a message cut short vouches for nothing",
+                      !dhcp_frame_vouched(control, 19) &&
+                          !dhcp_frame_vouched(control, 15));
+                control[0] = 18;
+                check("PACKET_AUXDATA too short for its status vouches for nothing",
+                      !dhcp_frame_vouched(control, 40));
+                control[0] = 0;
+                check("a message length under its own header ends the walk",
+                      !dhcp_frame_vouched(control, 40));
+                memory_zero(control, sizeof control);
+                control[0] = 20;
+                control[12] = 29;
+                control[24] = 36;
+                network_store_16(control + 32, 0x0701);
+                control[36] = 8;
+                control[40] = 8;
+                check("PACKET_AUXDATA after another message is found",
+                      dhcp_frame_vouched(control, 64));
+                control[7] = 0x40;
+                check("a length past the buffer ends the walk",
+                      !dhcp_frame_vouched(control, 64));
+        }
+}
+
+/*
+        The packet socket in a kernel, in user and network namespaces of the
+        check's own, on their loopback: dhcp_frames_open refuses a link that
+        is not there and a name that cannot be one, and its filter cannot be
+        taken off. A reply sent to another station's address is read and
+        refused, once, against the allowance, and one to port 69 never
+        reaches the socket (nor does the copy this machine sends: a socket
+        bound to one protocol is not handed outgoing frames); then a reply to
+        the offered address is taken with its peer and nothing charged.
+        Loopback leaves UDP checksums for a card to finish, so the reply is
+        taken only if the kernel's word on that (dhcp_frame_vouched) is read.
+        The child answers by bits over 0x80: 1 a name that should not open
+        did, 2 lo did not, 4 the filter came off, 8 the other station's reply
+        was taken or miscounted, 16 ours was not taken right.
+*/
+static positive dhcp_test_reply(p8 address_to packet, p32 transaction,
+                                const p8 address_to hardware, p32 offered,
+                                p32 server)
+{
+        positive at = DHCP_HEAD + 4;
+
+        memory_zero(packet, 300);
+        packet[0] = 2;
+        packet[1] = 1;
+        packet[2] = 6;
+        network_store_32(packet + 4, transaction);
+        network_store_32(packet + 16, offered);
+        memory_copy(packet + 28, hardware, 6);
+        network_store_32(packet + DHCP_HEAD, DHCP_COOKIE);
+        packet[at++] = DHCP_OPTION_TYPE;
+        packet[at++] = 1;
+        packet[at++] = DHCP_OFFER;
+        packet[at++] = DHCP_OPTION_SERVER;
+        packet[at++] = 4;
+        network_store_32(packet + at, server);
+        at += 4;
+        packet[at] = DHCP_OPTION_END;
+        return 300;
+}
+
+static fn dhcp_test_frames_child(positive uid, positive gid)
+{
+        p8 hardware[6] = {2, 0, 0, 0, 0, 9};
+        p8 packet[1024];
+        p8 reply[300];
+        p32 transaction = 0x5eed0001;
+        b32 bits = 0x80;
+        b32 one = 1;
+        dhcp_lease lease;
+        p8 kind = 0;
+        socket_address_internet any = {
+            .family = AF_INET, .port = network_order_16(DHCP_SERVER_PORT)};
+        socket_address_internet peer;
+        socket_address_internet me = {
+            .family = AF_INET, .port = network_order_16(DHCP_SERVER_PORT),
+            .host = network_order_32(HOST_LOOPBACK)};
+        socket_address_internet to = {.family = AF_INET};
+        network_deadline deadline;
+        positive remaining;
+        bipolar lo;
+        bipolar frames;
+        bipolar server;
+        b32 nl;
+
+        if (!net_test_enter_namespaces(uid, gid))
+                system_call_1(syscall(exit_group), 0x7f);
+        lo = net_test_index((string_address)"lo");
+        nl = (b32)netlink_open_groups(0);
+        if (lo <= 0 || (bipolar)nl < 0 || netlink_link_up(nl, (p32)lo) < 0)
+                system_call_1(syscall(exit_group), 0x7f);
+        if (dhcp_frames_open((string_address)"moonwater-none") >= 0 ||
+            dhcp_frames_open((string_address)"") >= 0 ||
+            dhcp_frames_open((string_address)"sixteen-bytes-xx") >= 0)
+                bits |= 1;
+        frames = dhcp_frames_open((string_address)"lo");
+        server = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+        if (frames < 0 || server < 0 ||
+            socket_bind((b32)server, address_of me, sizeof me) < 0)
+                system_call_1(syscall(exit_group), bits | 2 | 8 | 16);
+        //      SO_DETACH_FILTER, refused once the filter is locked.
+        if (socket_option_set((b32)frames, SOL_SOCKET, 27, address_of one,
+                              sizeof one) != -EPERM)
+                bits |= 4;
+        dhcp_frames = frames;
+
+        dhcp_test_reply(reply, transaction, hardware, HOST_LOOPBACK, 0x0a090902);
+        to.port = network_order_16(69);
+        to.host = network_order_32(HOST_LOOPBACK);
+        socket_send((b32)server, reply, sizeof reply, 0, address_of to, sizeof to);
+        to.port = network_order_16(DHCP_CLIENT_PORT);
+        to.host = network_order_32(0x7f000002);
+        socket_send((b32)server, reply, sizeof reply, 0, address_of to, sizeof to);
+        remaining = NETWORK_DISCARD_MAX;
+        if (!network_deadline_begin(address_of deadline, 0, 300000000) ||
+            dhcp_receive(-1, packet, sizeof packet, transaction, hardware,
+                         address_of lease, address_of kind, address_of any, true,
+                         address_of peer, address_of remaining,
+                         address_of deadline) ||
+            remaining != NETWORK_DISCARD_MAX - 1)
+                bits |= 8;
+
+        dhcp_test_reply(reply, transaction, hardware, HOST_LOOPBACK, 0x0a090903);
+        to.host = network_order_32(HOST_LOOPBACK);
+        socket_send((b32)server, reply, sizeof reply, 0, address_of to, sizeof to);
+        remaining = NETWORK_DISCARD_MAX;
+        if (!network_deadline_begin(address_of deadline, 2, 0) ||
+            !dhcp_receive(-1, packet, sizeof packet, transaction, hardware,
+                          address_of lease, address_of kind, address_of any, true,
+                          address_of peer, address_of remaining,
+                          address_of deadline) ||
+            kind != DHCP_OFFER || lease.address != HOST_LOOPBACK ||
+            lease.server != 0x0a090903 ||
+            peer.host != network_order_32(HOST_LOOPBACK) ||
+            peer.port != network_order_16(DHCP_SERVER_PORT) ||
+            remaining != NETWORK_DISCARD_MAX)
+                bits |= 16;
+        dhcp_frames_close();
+        socket_close((b32)server);
+        system_call_1(syscall(exit_group), bits);
+}
+
+static fn dhcp_frames_on_loopback(void)
+{
+        b32 status = 0;
+        bipolar child;
+
+        if (net_as_emulated())
+        {
+                log_direct(str("net: DHCP packet socket NOT RUN -- under emulation\n"));
+                return;
+        }
+        child = system_fork();
+        if (child == 0)
+                dhcp_test_frames_child((positive)system_call(syscall(getuid)),
+                                       (positive)system_call(syscall(getgid)));
+        if (child < 0 ||
+            system_call_4(syscall(wait4), (positive)child,
+                          (positive)address_of status, 0, 0) < 0 ||
+            status >> 8 == 0x7f)
+        {
+                log_direct(str("net: DHCP packet socket NOT RUN -- user or network namespaces unavailable\n"));
+                return;
+        }
+        check("the packet socket refuses a link that is not there and a name that cannot be one",
+              (status >> 8 & 0x81) == 0x80);
+        check("the packet socket opens on a link, its filter attached and locked",
+              (status >> 8 & 0x86) == 0x80);
+        check("a reply to another station's address is refused and counted, and port 69 never read",
+              (status >> 8 & 0x88) == 0x80);
+        check("a reply to the offered address is taken off the packet socket with its peer",
+              (status >> 8 & 0x90) == 0x80);
 }
 
 /*
@@ -71295,6 +71759,8 @@ b32 main(void)
         net_group(fetching_for_real);
         net_group(leasing);
         net_group(dhcp_confinement);
+        net_group(dhcp_frames_judged);
+        net_group(dhcp_frames_on_loopback);
         net_group(dhcp_reacquisition_state_matrix);
         net_group(dhcp_ack_lease_integrity);
         net_group(dhcp_ack_invalid_then_valid);
