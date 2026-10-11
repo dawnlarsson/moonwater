@@ -98989,6 +98989,24 @@ static b32 render_step(positive address_to compared, positive address_to wrong, 
                 return true;
         }
 
+        if (what < 71)
+        {
+                // The terminal has been left alone: the buffer that is not on the screen is
+                // given back, and reads as nothing but junk until it is drawn again.
+                int spare = terminal.shown < 0 ? -1 : 1 - terminal.shown;
+
+                if (spare >= 0)
+                {
+                        terminal.surface->release_serial = terminal.committed[spare];
+                        terminal_discard();
+                        if (!terminal.valid[spare])
+                                memory_fill_u32(surface_slot(terminal.surface, (unsigned int)spare, terminal.width,
+                                                             terminal.height),
+                                                (positive)terminal.width * terminal.height, 0xbad000);
+                }
+                return true;
+        }
+
         {
                 // A frame: the buffer not on the screen is released, or it is not.
                 int slot = terminal.shown < 0 ? 0 : 1 - terminal.shown;

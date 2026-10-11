@@ -57,6 +57,8 @@
 #define TERMINAL_KEY_BACKSPACE 14
 // A held synchronized frame is let go of after this long.
 #define TERMINAL_SYNC_NANOSECONDS 200000000ll
+// A buffer that is not on the screen is given back after the terminal has been left alone this long.
+#define TERMINAL_IDLE_NANOSECONDS 1000000000ll
 
 typedef unsigned long long __attribute__((may_alias)) terminal_word;
 
@@ -573,6 +575,24 @@ static b32 terminal_frames(void)
 }
 
 /*
+        The buffer that is not on the screen, given back to the system: it
+        costs a screenful of pixels and is only wanted for the next frame,
+        which draws it whole again. The page is punched out of the shared
+        file, so the compositor, which maps the same file and is not reading
+        this slot, loses nothing.
+*/
+static void terminal_discard(void)
+{
+        int slot = terminal.shown < 0 ? -1 : 1 - terminal.shown;
+
+        if (slot < 0 || !terminal.valid[slot] || !terminal_free((unsigned int)slot))
+                return;
+
+        surface_discard(terminal.surface, (unsigned int)slot);
+        terminal.valid[slot] = 0;
+}
+
+/*
         One frame: the cells that differ drawn into the free buffer, the rows
         the compositor has to read again named, and the buffer committed.
         False when there is no buffer to draw into yet, and nothing was done.
@@ -634,12 +654,9 @@ static b32 terminal_frame(void)
                         terminal_row(pixels, row, line, drawn ? drawn + (unsigned long)row * COLUMNS : null, a0, a1);
                 any |= a1 > a0 || b1 > b0;
 
-                // What the compositor reads again: the cells that changed on the screen,
-                // and the ones that were drawn over a buffer older than it.
-                if (b1 > b0 && a1 > a0)
-                        b0 = b0 < a0 ? b0 : a0, b1 = b1 > a1 ? b1 : a1;
-                else if (a1 > a0)
-                        b0 = a0, b1 = a1;
+                // What the compositor reads again is what differs from what it shows: a cell
+                // that is the same as on the screen is the same pixels in this buffer too,
+                // however old the buffer was.
                 row_x0[row & 1023] = b1 > b0 ? b0 : 0;
                 row_x1[row & 1023] = b1 > b0 ? b1 : 0;
         }
@@ -658,7 +675,7 @@ static b32 terminal_frame(void)
 
         // The rows, in bands that share their columns; more than the list holds is the whole buffer.
         surface->damage_count = 0;
-        if (terminal.valid[slot] && ROWS <= 1024)
+        if (screen && ROWS <= 1024)
         {
                 for (unsigned int row = 0; row < ROWS && !overflow;)
                 {
@@ -1179,10 +1196,37 @@ static b32 terminal_main()
                 if (gone)
                         break;
 
-                // Asleep until a key, a resize or the shell's output; and, with a frame
-                // waiting for a buffer, until the compositor has let one go.
-                if (surface_wait(terminal.surface, master, timeout) < 0)
-                        break;
+                /*
+                        Asleep until a key, a resize or the shell's output; and, with a frame
+                        waiting for a buffer, until the compositor has let one go. With
+                        nothing to do and a spare buffer held, once, for the time it takes
+                        to be sure nothing is coming, after which the spare is given back and
+                        the sleep is for ever: an idle terminal wakes no more.
+
+                        The compositor having gone is the screen having gone: the shell is
+                        hung up on, as it is when the window is closed, and what is left is
+                        to see it out.
+                */
+                {
+                        b32 spare = !dirty && !synchronized_output && terminal.shown >= 0 &&
+                                    terminal.valid[1 - terminal.shown];
+                        long ready = surface_wait(terminal.surface, master,
+                                                  spare && timeout < 0 ? TERMINAL_IDLE_NANOSECONDS : timeout);
+
+                        if (ready < 0)
+                        {
+                                if (!gone && !hung)
+                                {
+                                        system_call_2(syscall(kill), (positive)(-child), SIGHUP);
+                                        hung = 1;
+                                }
+                                closing = true;
+                                break;
+                        }
+
+                        if (!ready && spare && timeout < 0)
+                                terminal_discard();
+                }
         }
 
         if (term_finish(child, master, hung, oom_kills))
