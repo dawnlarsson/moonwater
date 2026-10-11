@@ -15940,6 +15940,9 @@ MOONWATER_CANVAS_COVERAGE=${coverage_serial#-serial file:}
 export MOONWATER_CANVAS_COVERAGE
 qmp_guest_module "$work"
 
+#       CANVAS_ONLY=m1 runs the userspace compositor's boot alone, for a
+#       parent and a fix compared in one sitting; the lane runs all of it.
+if [ "${CANVAS_ONLY:-}" != m1 ]; then
 PYTHONPATH=$work python3 - "$image" > "$work/answers" 2>"$work/why" <<'PY'
 import os, re, subprocess, sys, time
 from qmp_guest import *
@@ -18122,6 +18125,172 @@ else
         while IFS='|' read -r name got want; do
                 same "$name" "$want" "$got"
         done < "$work/plane-answers"
+fi
+fi
+
+#       The compositor in userspace (canvas milestone M1).
+#
+#       A script on a stick, typed into the boot terminal, starts
+#       /compositor, which takes the card from Canvas, and two /surface
+#       windows on it; then the screen is read. Nothing typed reaches a shell
+#       while the compositor holds the card -- Canvas drops every key then --
+#       so the script itself ends the compositor after a fixed time, and the
+#       clicks go in through the tablet in between. The boot terminal is the
+#       one that has the keyboard, so it has it again once the card is back.
+#
+#       The first window is at (40, 40) and 320 by 200: its border starts at
+#       38, its titlebar is rows 40 to 59 and its body rows 60 to 259. The
+#       second, at (240, 140), covers the first's body from (238, 138).
+PYTHONPATH=$work python3 - "$image" > "$work/m1-answers" 2>"$work/m1-why" <<'PY'
+import os, re, sys, time
+from qmp_guest import *
+
+image = sys.argv[1]
+work = os.environ["MOONWATER_CANVAS_WORK"] + "/m1"
+stick = work + "/stick"
+os.makedirs(stick, exist_ok=True)
+out = []
+
+open(stick + "/m1", "w").write(r"""exec > /dev/ttyS0 2>&1
+/compositor &
+c=$!
+sleep 2
+/surface -x 40 -y 40 -w 320 -h 200 -c 336699 -p &
+sleep 1
+/surface -x 240 -y 140 -w 320 -h 200 -c 996633 &
+sleep 1
+echo m1-ready
+sleep 10
+kill $c
+wait $c
+echo m1-done
+""")
+
+guest = Guest(desktop(image) + [
+    "-drive", "if=none,id=stick,format=raw,file=fat:ro:" + stick + ",readonly=on",
+    "-device", "usb-storage,drive=stick,removable=on",
+    "-no-reboot", "-display", "none", "-serial", "file:" + work + "/serial",
+    "-append", "console=ttyS0 drm_client_lib.active= moonwater.cursor_plane=0 " + os.environ.get("CANVAS_APPEND", "")],
+    work + "/qmp", work + "/mon", work)
+time.sleep(25)
+
+def serial():
+    return open(work + "/serial", "rb").read()
+
+def wait_for(marker, seconds):
+    stop = time.time() + seconds
+    while time.time() < stop:
+        if marker in serial():
+            return True
+        time.sleep(0.2)
+    return False
+
+def picture(name):
+    shot(name, 1)
+    width, height, data = load(name)
+    def at(x, y):
+        o = (y * width + x) * 3
+        return "%02x%02x%02x" % (data[o], data[o + 1], data[o + 2])
+    return width, height, at
+
+def windows(width, height, at):
+    # Runs of anything but the desktop across the middle row: the kernel's
+    # log and terminal windows, which nothing of this scenario reaches.
+    runs, start, ground = 0, None, at(4, 4)
+    for x in range(width):
+        lit = at(x, height // 2) != ground
+        if lit and start is None:
+            start = x
+        elif not lit and start is not None:
+            runs += x - start > 40
+            start = None
+    return runs + (start is not None and width - start > 40)
+
+def click(x, y):
+    # The tablet reports 32767 steps across the screen and Canvas, like the
+    # compositor, takes offset * size / span rounded down. A report rounded
+    # up lands the pointer on the pixel asked for; rounded down it lands one
+    # short (100 gives 99), which is the device's quantisation, not the place.
+    send([{"type": "abs", "data": {"axis": "x", "value": -(-x * 32767 // W)}},
+          {"type": "abs", "data": {"axis": "y", "value": -(-y * 32767 // H)}}])
+    time.sleep(0.1)
+    send([{"type": "btn", "data": {"down": True, "button": "left"}}])
+    time.sleep(0.05)
+    send([{"type": "btn", "data": {"down": False, "button": "left"}}])
+    time.sleep(0.5)
+
+width, height, before = picture("m1-before")
+kernel_windows = windows(width, height, before)
+
+type_text("mkdir -p /mnt\n")
+time.sleep(1)
+type_text("mount -r -t vfat /dev/sda1 /mnt\n")
+time.sleep(2)
+type_text("sh /mnt/m1\n")
+ready = wait_for(b"m1-ready", 30)
+time.sleep(0.5)
+
+width, height, two = picture("m1-two")
+out.append(("M1.1 the compositor's desktop is the classic ink and a surface's body its fill",
+            "yes" if two(4, 4) == "1b2733" and two(100, 100) == "336699" and two(1200, 700) == "1b2733"
+            else "(4,4) %s, body %s, (1200,700) %s" % (two(4, 4), two(100, 100), two(1200, 700)), "yes"))
+out.append(("M1.2 the frame is drawn: border 2f3f52, an unfocused titlebar 2b3a4c",
+            "%s %s" % (two(39, 100), two(100, 50)), "2f3f52 2b3a4c"))
+out.append(("the window opened second stacks above the first where they overlap",
+            two(300, 200), "996633"))
+
+click(100, 150)
+width, height, clicked = picture("m1-click")
+out.append(("a click on the first window raises it above the second",
+            clicked(300, 200), "336699"))
+out.append(("M1.2 and focuses it: its titlebar lit 4c6785, the other's 2b3a4c",
+            "%s %s" % (clicked(100, 50), clicked(500, 150)), "4c6785 2b3a4c"))
+said = re.findall(rb"surface: event 3 0 (-?\d+) (-?\d+)\r?\nsurface: event 4 1 272 0", serial())
+out.append(("M1.6 the press reaches the surface as POINTER_BUTTON at buffer pixel (60, 90)",
+            "%s,%s" % (said[-1][0].decode(), said[-1][1].decode()) if said else "no event", "60,90"))
+
+done = wait_for(b"m1-done", 30)
+time.sleep(1)
+width, height, back = picture("m1-back")
+out.append(("M1.12 the compositor's exit leaves the kernel desktop on screen",
+            "yes" if ready and done and two(100, 100) == "336699" and kernel_windows and
+            windows(width, height, back) == kernel_windows and back(100, 100) != "336699"
+            else "kernel windows %d before, %d after; body %s then %s" % (
+                kernel_windows, windows(width, height, back), two(100, 100), back(100, 100)), "yes"))
+handed = re.findall(rb"drawn again, microseconds after the card was let go: (\d+)", serial())
+#   M1.12 records the latency and does not pass on it (canvas spec 05 3.2);
+#   the frame target of 1.4 is what the number is compared against.
+print("m1 hand-back %s us" % (handed[-1].decode() if handed else "unknown"), file=sys.stderr)
+
+type_text("echo m1-typed-")
+chord("shift", "4")
+chord("shift", "4")
+type_text(" ")
+chord("shift", "dot")
+type_text(" /dev/tty")
+chord("shift", "s")
+type_text("0\n")
+out.append(("and the keyboard reaches the terminal again",
+            "yes" if wait_for(b"m1-typed-", 10) else "no", "yes"))
+
+qcmd({"execute": "quit"})
+try:
+    guest.wait(10)
+except Exception:
+    guest.kill()
+
+for name, got, want in out:
+    print("%s|%s|%s" % (name, got, want))
+PY
+
+if [ ! -s "$work/m1-answers" ]; then
+        same "the compositor boot answered" "yes" "no"
+        sed 's/^/    /' "$work/m1-why" | tail -5
+else
+        while IFS='|' read -r name got want; do
+                same "$name" "$want" "$got"
+        done < "$work/m1-answers"
+        sed -n 's/^m1 hand-back/  canvas       hand-back/p' "$work/m1-why"
 fi
 
 counted
