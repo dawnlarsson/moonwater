@@ -517,15 +517,11 @@ static COLD b32 net_host(void)
                         net_flush();
                         return 1;
                 }
-
-                status = dns_resolve_at((p32)server, DNS_PORT, net_word(1),
-                                        address_of found, 5);
         }
         else
-        {
-                status = dns_resolve_wanted((string_address) "/etc/resolv.conf",
-                                            net_word(1), address_of found, 3);
-        }
+                server = -1;
+        //      The answer is read in a confined child (net_apart), as wget's is.
+        status = dns_resolve_apart(server, net_word(1), address_of found);
 
         switch (status)
         {
@@ -557,6 +553,14 @@ static COLD b32 net_host(void)
                 break;
         case DNS_NO_RANDOM:
                 string_format(net_out, "host: secure randomness is not ready\n");
+                break;
+        case DNS_CONFINE:
+                string_format(net_out, "host: cannot confine the lookup of %w "
+                                       "here; nothing was asked\n",
+                              writer_terminal_quoted_name, net_word(1));
+                break;
+        case DNS_APART:
+                string_format(net_out, "host: the confined lookup died\n");
                 break;
         default:
                 string_format(net_out, "host: the reply made no sense\n");
@@ -615,10 +619,20 @@ static b32 net_fetch(void)
         //      The url is handed over whole rather than the pieces above: the
         //      client resolves it, and a literal address needs no resolver,
         //      which is what makes the test able to fetch from a socket on
-        //      loopback with no nameserver anywhere in sight.
-        status = http_get(net_word(1), address_of body, address_of code);
+        //      loopback with no nameserver anywhere in sight. The exchange
+        //      runs in a confined child (net_apart), and the body comes back
+        //      to be written here.
+        status = http_get_apart(net_word(1), address_of body, address_of code);
 
-        if (status == HTTP_NO_HOST)
+        if (status == HTTP_CONFINE)
+                string_format(net_out, "fetch: cannot confine the download "
+                                   "from %w here; nothing was fetched\n",
+                              writer_terminal_quoted_name, name);
+        else if (status == HTTP_APART)
+                string_format(net_out, "fetch: the confined download from %w "
+                                   "died\n",
+                              writer_terminal_quoted_name, name);
+        else if (status == HTTP_NO_HOST)
                 string_format(net_out, "fetch: cannot resolve %w\n",
                               writer_terminal_quoted_name, name);
         else if (status == HTTP_NO_ROUTE)
@@ -841,6 +855,25 @@ static COLD b32 net_wget_failed(bipolar status, b32 code, p8 address_to where,
                 return string_report(log_error, WGET_SERVER,
                                      "%p redirections exceeded.\n",
                                      (positive)(HTTP_HOPS - 1));
+        //      The network half runs in a confined child (net_apart): a
+        //      kernel that cannot filter it fetches nothing, and a child
+        //      killed by its filter or anything else is said apart.
+        case HTTP_CONFINE:
+                return string_report(log_error, WGET_GENERIC,
+                                     "wget: cannot confine the download from "
+                                     "%w here; nothing was fetched\n",
+                                     writer_terminal_quoted_name, host);
+        case HTTP_APART:
+                if (!net_apart_signal)
+                        return string_report(log_error, WGET_NETWORK,
+                                             "wget: the confined download "
+                                             "from %w gave no answer\n",
+                                             writer_terminal_quoted_name, host);
+                return string_report(log_error, WGET_NETWORK,
+                                     "wget: the confined download from %w "
+                                     "died (signal %p)\n",
+                                     writer_terminal_quoted_name, host,
+                                     (positive)net_apart_signal);
         //      GNU wget's own line, and its file I/O status.
         case HTTP_WRITE:
                 return string_report(log_error, WGET_FILE,
@@ -954,7 +987,8 @@ static b32 net_wget(void)
                                                  "remote file exists.\n%w\n",
                                       writer_terminal_quoted_name, url);
                 string_copy(where, url);
-                status = http_spider(url, check_cert, address_of code, where);
+                status = http_spider_apart(url, check_cert, address_of code,
+                                           where);
                 if (status)
                         return net_wget_failed(status, code, where, null);
                 if (!quiet)
@@ -1024,8 +1058,9 @@ static b32 net_wget(void)
 
         string_copy(where, url);
         status = taking.flags & FILE_FLAG('s')
-                     ? http_spider(url, check_cert, address_of code, where)
-                     : http_fetch_to(url, dest, check_cert, address_of code, where);
+                     ? http_spider_apart(url, check_cert, address_of code, where)
+                     : http_fetch_to_apart(url, dest, check_cert,
+                                           address_of code, where);
         if (own_stream)
                 system_close((positive)dest);
 

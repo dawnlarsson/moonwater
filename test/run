@@ -3902,8 +3902,13 @@ freestanding_checks_one()
         #       Soft RLIMIT_AS is ignored under qemu-user; native host arch
         #       proves it. Pass --emulated so CHECK_reserve / CHECK_lock /
         #       CHECK_net log honest NOT RUN for AS rather than a false pass.
+        #       qemu-user cannot install a seccomp filter either, so wget's
+        #       confined network half refuses there: CHECK_net and
+        #       CHECK_storage_io check the refusal and say NOT RUN for the
+        #       fetch.
         if { [ "$suite" = reserve ] || [ "$suite" = lock ] ||
-             [ "$suite" = net ]; } && [ -n "$runner" ]; then
+             [ "$suite" = net ] || [ "$suite" = storage_io ]; } &&
+                [ -n "$runner" ]; then
                 $runner "$work/$suite.$name" --emulated > "$work/$suite.$name.out" 2>&1
                 status=$?
         elif [ -n "${check_input-}" ]; then

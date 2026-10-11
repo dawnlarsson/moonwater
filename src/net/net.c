@@ -2362,6 +2362,30 @@ static COLD bipolar dns_resolve_at(p32 server, p16 port, string_address name,
 #define DNS_FALLBACK 0x01010101u
 #define DNS_SERVERS_MAX 3
 
+/*
+        The servers, read once and held: what a confined child does
+        (net_apart), since a child that may not open a file cannot read
+        resolv.conf at the moment a redirect or a caIssuers location names a
+        host. It reads the file before its filter goes on, and every lookup
+        it makes after that asks the servers it read, whatever path it names.
+        Only that child ever holds; every other process reads the file each
+        time, as before.
+*/
+typedef struct
+{
+        bool held;
+        positive count;
+        p32 servers[DNS_SERVERS_MAX];
+} dns_held_servers;
+
+static dns_held_servers dns_held;
+
+static COLD fn dns_servers_hold(string_address path)
+{
+        dns_held.count = dns_servers(path, dns_held.servers, DNS_SERVERS_MAX);
+        dns_held.held = true;
+}
+
 static CONST COLD bool dns_answer_is_final(bipolar status)
 {
         return status == DNS_OK || status == DNS_NO_SUCH_NAME ||
@@ -2372,8 +2396,11 @@ static COLD bipolar dns_resolve_any(string_address path, string_address name,
                                p32 address_to found, positive seconds)
 {
         bipolar status = DNS_NO_SERVER;
-        p32 servers[DNS_SERVERS_MAX];
-        positive count = dns_servers(path, servers, array_count(servers));
+        p32 read[DNS_SERVERS_MAX];
+        p32 address_to servers = dns_held.held ? dns_held.servers : read;
+        positive count = dns_held.held
+                             ? dns_held.count
+                             : dns_servers(path, read, array_count(read));
 
         for (positive index = 0; index < count; index++)
         {
@@ -9338,17 +9365,23 @@ static COLD fn tls_keep_leaf(tls_conn address_to tls, tls_cert address_to leaf)
 //      SNTP_WALL_MOST, the last second an NTP stamp can carry (2104-02-26).
 #define CLOCK_GOOD_MOST 4233462143ll
 
+//      The floor a confined child read before its filter went on (net_apart),
+//      since it may not open the file after; 0 everywhere else.
+static p64 clock_floor_held;
+
 //      The floor, in seconds since the epoch: the build's, or the
 //      persisted last-known-good time when that is later.
 static COLD p64 clock_trust_floor(void)
 {
         p8 text[24];
-        bipolar got = file_slurp_regular_at(AT_FDCWD,
-                                            (string_address)CLOCK_GOOD_PATH,
-                                            text, sizeof(text), O_NOFOLLOW);
+        bipolar got;
         p64 value = 0;
         positive at = 0;
 
+        if (clock_floor_held)
+                return clock_floor_held;
+        got = file_slurp_regular_at(AT_FDCWD, (string_address)CLOCK_GOOD_PATH,
+                                    text, sizeof(text), O_NOFOLLOW);
         if (got < 1 || got > 12)
                 return MOONWATER_CLOCK_FLOOR;
         while (at < (positive)got && text[at] >= '0' && text[at] <= '9')
@@ -11473,6 +11506,12 @@ static bipolar tls_read_until(
 //      STRICT_TIGHT only: a body that declared no length ran past
 //      HTTP_UNDECLARED_MOST.
 #define HTTP_UNDECLARED (-22)
+//      The fetch's network half (http_run_apart) could not be confined, so
+//      nothing was asked; or it ended without a whole answer -- killed by
+//      its filter or a signal, or with an answer the caller could not
+//      believe.
+#define HTTP_CONFINE (-23)
+#define HTTP_APART (-24)
 
 typedef byte_store http_buffer;
 #define http_forget(buffer) byte_store_release(buffer)
@@ -14545,6 +14584,10 @@ static COLD bipolar nts_ke(string_address host, p16 port, bool bootstrap,
 #define DNS_TLS_PORT 853
 #define DNS_TLS_SECONDS 2
 #define DNS_TLS_FAILED (-12)
+//      dns_resolve_apart's own: the child could not be confined, so nothing
+//      was asked; or it ended without an answer that could be believed.
+#define DNS_CONFINE (-13)
+#define DNS_APART (-14)
 #define DNS_TLS_OFF 0
 #define DNS_TLS_ON 1
 #define DNS_TLS_ONLY 2
@@ -14578,13 +14621,20 @@ static COLD positive dns_tls_mode_of(string_address word)
                                              : DNS_TLS_DEFAULT;
 }
 
+//      The setting a confined child read before its filter went on, as
+//      dns_held holds its servers; 0 everywhere else.
+static positive dns_tls_held;
+
 //      The published setting, read as a plain file only.
 static COLD positive dns_tls_mode(void)
 {
         p8 text[16];
-        bipolar got = file_slurp_regular_at(AT_FDCWD, (string_address)DNS_TLS_PATH,
-                                            text, sizeof(text), O_NOFOLLOW);
+        bipolar got;
 
+        if (dns_tls_held)
+                return dns_tls_held;
+        got = file_slurp_regular_at(AT_FDCWD, (string_address)DNS_TLS_PATH,
+                                    text, sizeof(text), O_NOFOLLOW);
         if (got < 0)
                 got = 0;
         while (got > 0 && (text[got - 1] == '\n' || text[got - 1] == ' '))
@@ -14705,7 +14755,13 @@ static COLD bipolar dns_resolve_wanted(string_address path, string_address name,
 
         if (mode == DNS_TLS_OFF)
                 return dns_resolve_any(path, name, found, seconds);
-        have = dns_servers(path, named, array_count(named));
+        if (dns_held.held)
+        {
+                have = dns_held.count;
+                memory_copy(named, dns_held.servers, have * sizeof *named);
+        }
+        else
+                have = dns_servers(path, named, array_count(named));
         for (positive at = 0; at < have; at++)
                 if (dns_offers_tls(named[at]))
                         asked[count++] = named[at];
@@ -15071,6 +15127,12 @@ done:
         return status;
 }
 
+/* The two clients' engines, run in the calling process. The clients
+   themselves never call these: they call http_get_apart and
+   http_fetch_to_apart below, which run the same engine in a confined child.
+   These are what the checks and the HTTP fuzz target drive directly, the
+   way the checks call dhcp_ask. */
+
 //      fetch: no TLS, no redirect followed, and the body only once it is whole.
 static bipolar http_get(string_address url, http_buffer address_to body,
                         b32 address_to code)
@@ -15097,6 +15159,798 @@ static bipolar http_fetch_to(string_address start, bipolar dest, bool check_cert
 }
 
 #endif // STANDARD_MODERN_C_NET_HTTP
+/* ---- apart: the network half of a client, in a child of its own ---- */
+
+#ifndef STANDARD_MODERN_C_NET_APART
+#define STANDARD_MODERN_C_NET_APART
+
+/*
+        The network half of a client, apart from the client.
+
+        Everything a TLS server, an HTTP server or a resolver sends is read by
+        a parser here: the record layer, X.509 and its DER, the HTTP head and
+        its framing, a DNS answer. A memory-safety bug in any of them, run in
+        the process of the person who typed wget, is code running with
+        everything that person may do, and the zone's question at boot
+        (locale_auto_ask in src/sh/host.c) runs as root. So a client puts that
+        half in a child (net_apart) and keeps the rest itself:
+
+          the client opens or creates whatever is written, makes every
+          decision that touches a file, and reads back one answer, of a size
+          it bounds, which it believes only as far as it can check;
+
+          the child holds the answer's pipe, the one descriptor it was handed
+          to write into (wget's output, or none) and standard error, and
+          nothing else; reads resolv.conf, the DNS over TLS setting and the
+          clock's floor while it still may (the trust anchors are compiled
+          in, the clock is a vDSO read, and a revocation list is fetched
+          into memory, never a file); becomes
+          nobody when it is root; can no longer be dumped, gain a privilege
+          through exec or outlive the client; and then installs a filter that
+          kills it at any system call fetching does not need.
+
+        What fetching needs is short: a socket, IPv4 TCP or UDP and nothing
+        else -- no unix, netlink, packet, raw or IPv6 socket -- with connect,
+        bind (a DNS query's random port), sendto and recvfrom; two socket
+        timeouts and TCP_NODELAY to set and SO_ERROR to read back; ppoll; the
+        clock and getrandom; write and writev; close; memory that is never
+        made executable; riscv_hwprobe on RISC-V, which the hash routines ask
+        the first time they run; and the ways out. A redirect, a caIssuers
+        fetch or a revocation list is another socket and connect inside the
+        same child, which is why those stay. openat, execve, ptrace, kill,
+        ioctl, mprotect and everything else is a SIGSYS.
+
+        It fails closed. A kernel that will not take the filter -- one built
+        without seccomp, a container whose own filter refuses the call, or
+        qemu-user, which cannot filter itself and answers ENOSYS -- fetches
+        nothing: NET_APART_UNCONFINED, and the client says so. Moonwater's own
+        kernels always have CONFIG_SECCOMP_FILTER (build_essentials in
+        src/build/build.c). The DHCP exchange has its own filter
+        (dhcp_confine), which also fails closed.
+
+        Every client is a task: a function that runs in the child with the
+        caller's memory as it was at the fork, does the exchange, and writes
+        its answer to the descriptor it is given; and a caller that hands it
+        to net_apart and then reads that answer as it would a packet, held to
+        sizes and values it can check. http_run_apart, nts_ke_apart and
+        dns_resolve_apart below are the three.
+*/
+#define NET_APART_OK 0
+#define NET_APART_NO_CHILD (-1)
+#define NET_APART_UNCONFINED (-2)
+#define NET_APART_DIED (-3)
+
+//      The child's exit when it could not confine itself and so did nothing.
+#define NET_APART_EXIT_UNCONFINED 3
+
+#define NET_APART_NOBODY 65534
+
+#define PR_SET_PDEATHSIG 1
+#define PR_SET_DUMPABLE 4
+#define PR_SET_NO_NEW_PRIVS 38
+#define SECCOMP_SET_MODE_FILTER 1
+#define SECCOMP_RET_KILL_PROCESS 0x80000000u
+#define SECCOMP_RET_ALLOW 0x7fff0000u
+#define AUDIT_ARCH_X86_64 0xc000003eu
+#define AUDIT_ARCH_AARCH64 0xc00000b7u
+#define AUDIT_ARCH_RISCV64 0xc00000f3u
+
+#if defined(__x86_64__)
+#define NET_APART_ARCH AUDIT_ARCH_X86_64
+#elif defined(__aarch64__)
+#define NET_APART_ARCH AUDIT_ARCH_AARCH64
+#else
+#define NET_APART_ARCH AUDIT_ARCH_RISCV64
+#define NET_APART_RISCV_HWPROBE 258
+#endif
+
+/*
+        Classic BPF, as seccomp runs it over struct seccomp_data: the call's
+        number at 0, its architecture at 4, then six 64-bit arguments from 16.
+        An argument is read by its low word, which on these little-endian
+        machines is the word at its offset and is all of an int to the kernel.
+*/
+#define NET_FILTER_LOAD 0x20    /* BPF_LD | BPF_W | BPF_ABS */
+#define NET_FILTER_AND 0x54     /* BPF_ALU | BPF_AND | BPF_K */
+#define NET_FILTER_ALWAYS 0x05  /* BPF_JMP | BPF_JA */
+#define NET_FILTER_EQUAL 0x15   /* BPF_JMP | BPF_JEQ | BPF_K */
+#define NET_FILTER_ANY_BIT 0x45 /* BPF_JMP | BPF_JSET | BPF_K */
+#define NET_FILTER_RETURN 0x06  /* BPF_RET | BPF_K */
+#define NET_FILTER_NUMBER 0
+#define NET_FILTER_ARCH 4
+#define NET_FILTER_ARGUMENT(n) (16 + 8 * (n))
+#define NET_FILTER_STEPS 96
+//      PROT_EXEC, the one protection a mapping in the child may not have.
+#define NET_APART_EXECUTABLE 4
+
+//      struct sock_filter.
+typedef struct
+{
+        p16 code;
+        p8 jump_true;
+        p8 jump_false;
+        p32 value;
+} net_filter_step;
+
+typedef struct
+{
+        net_filter_step steps[NET_FILTER_STEPS];
+        positive used;
+} net_filter;
+
+//      One step. A program that would not fit counts past the end, and
+//      net_filter_install refuses it.
+static COLD fn net_filter_put(net_filter address_to filter, p16 code,
+                              p8 jump_true, p8 jump_false, p32 value)
+{
+        if (filter->used < NET_FILTER_STEPS)
+                filter->steps[filter->used] =
+                    (net_filter_step){code, jump_true, jump_false, value};
+        filter->used++;
+}
+
+//      The answer for every call that reached this step.
+static COLD fn net_filter_answer(net_filter address_to filter, p32 answer)
+{
+        net_filter_put(filter, NET_FILTER_RETURN, 0, 0, answer);
+}
+
+//      Argument n's low word, masked, is one of the values, or the call is
+//      killed; when it is, the program goes on to the step after.
+static COLD fn net_filter_require(net_filter address_to filter, positive argument,
+                                  p32 mask, const p32 address_to values,
+                                  positive count)
+{
+        positive after = filter->used + 1 + (mask != ~(p32)0) + count + 1;
+
+        net_filter_put(filter, NET_FILTER_LOAD, 0, 0,
+                       (p32)NET_FILTER_ARGUMENT(argument));
+        if (mask != ~(p32)0)
+                net_filter_put(filter, NET_FILTER_AND, 0, 0, mask);
+        for (positive at = 0; at < count; at++)
+                net_filter_put(filter, NET_FILTER_EQUAL,
+                               (p8)(after - filter->used - 1), 0, values[at]);
+        net_filter_answer(filter, SECCOMP_RET_KILL_PROCESS);
+}
+
+/* A test on the accumulator whose false branch goes past what follows, to
+   wherever net_filter_past is called: a call's own block of argument checks,
+   which ends in an answer on every path, or one value's half of one. The
+   accumulator still holds what was compared, so the next test reads it. */
+static COLD positive net_filter_when(net_filter address_to filter, p32 value)
+{
+        positive at = filter->used;
+
+        net_filter_put(filter, NET_FILTER_EQUAL, 0, 0, value);
+        return at;
+}
+
+static COLD fn net_filter_past(net_filter address_to filter, positive when)
+{
+        if (when < NET_FILTER_STEPS)
+                filter->steps[when].jump_false = (p8)(filter->used - when - 1);
+}
+
+//      Argument n's low word into the accumulator.
+static COLD fn net_filter_load(net_filter address_to filter, positive argument)
+{
+        net_filter_put(filter, NET_FILTER_LOAD, 0, 0,
+                       (p32)NET_FILTER_ARGUMENT(argument));
+}
+
+/* The program: the architecture, then the calls that need no more than
+   their number, then the four whose arguments decide, then death. The
+   numbers come first in the order a download makes them most. x32's
+   bit-30 numbers on x86_64 match nothing listed and are killed. */
+static COLD fn net_filter_build(net_filter address_to filter)
+{
+        static const p32 plain[] = {
+            (p32)syscall(recvfrom), (p32)syscall(writev),
+            (p32)syscall(sendto), (p32)syscall(ppoll),
+            (p32)syscall(clock_gettime), (p32)syscall(write),
+            (p32)syscall(getrandom), (p32)syscall(close),
+            (p32)syscall(connect), (p32)syscall(bind),
+            (p32)syscall(munmap), (p32)syscall(mremap),
+            (p32)syscall(madvise), (p32)syscall(exit_group),
+            (p32)syscall(exit), (p32)syscall(rt_sigreturn),
+            (p32)syscall(restart_syscall),
+#ifdef NET_APART_RISCV_HWPROBE
+            NET_APART_RISCV_HWPROBE,
+#endif
+        };
+        static const p32 families[] = {AF_INET};
+        static const p32 kinds[] = {SOCK_STREAM, SOCK_DGRAM};
+        static const p32 protocols[] = {0};
+        static const p32 socket_level[] = {SO_RCVTIMEO, SO_SNDTIMEO};
+        static const p32 tcp_level[] = {TCP_NODELAY};
+        static const p32 sol_socket[] = {SOL_SOCKET};
+        static const p32 so_error[] = {SO_ERROR};
+        positive count = array_count(plain);
+        positive call;
+        positive level;
+
+        filter->used = 0;
+        net_filter_put(filter, NET_FILTER_LOAD, 0, 0, NET_FILTER_ARCH);
+        net_filter_put(filter, NET_FILTER_EQUAL, 1, 0, NET_APART_ARCH);
+        net_filter_answer(filter, SECCOMP_RET_KILL_PROCESS);
+        net_filter_put(filter, NET_FILTER_LOAD, 0, 0, NET_FILTER_NUMBER);
+        for (positive at = 0; at < count; at++)
+                net_filter_put(filter, NET_FILTER_EQUAL, (p8)(count - at), 0,
+                               plain[at]);
+        net_filter_put(filter, NET_FILTER_ALWAYS, 0, 0, 1);
+        net_filter_answer(filter, SECCOMP_RET_ALLOW);
+
+        //      socket: AF_INET, stream or datagram (with SOCK_NONBLOCK or
+        //      SOCK_CLOEXEC or both), protocol 0.
+        call = net_filter_when(filter, (p32)syscall(socket));
+        net_filter_require(filter, 0, ~(p32)0, families, array_count(families));
+        net_filter_require(filter, 1, ~(p32)(SOCK_NONBLOCK | SOCK_CLOEXEC),
+                           kinds, array_count(kinds));
+        net_filter_require(filter, 2, ~(p32)0, protocols, array_count(protocols));
+        net_filter_answer(filter, SECCOMP_RET_ALLOW);
+        net_filter_past(filter, call);
+
+        //      setsockopt: SO_RCVTIMEO and SO_SNDTIMEO, or TCP_NODELAY.
+        call = net_filter_when(filter, (p32)syscall(setsockopt));
+        net_filter_load(filter, 1);
+        level = net_filter_when(filter, SOL_SOCKET);
+        net_filter_require(filter, 2, ~(p32)0, socket_level,
+                           array_count(socket_level));
+        net_filter_answer(filter, SECCOMP_RET_ALLOW);
+        net_filter_past(filter, level);
+        level = net_filter_when(filter, IPPROTO_TCP);
+        net_filter_require(filter, 2, ~(p32)0, tcp_level, array_count(tcp_level));
+        net_filter_answer(filter, SECCOMP_RET_ALLOW);
+        net_filter_past(filter, level);
+        net_filter_answer(filter, SECCOMP_RET_KILL_PROCESS);
+        net_filter_past(filter, call);
+
+        //      getsockopt: SO_ERROR, after a connect that did not finish.
+        call = net_filter_when(filter, (p32)syscall(getsockopt));
+        net_filter_require(filter, 1, ~(p32)0, sol_socket, array_count(sol_socket));
+        net_filter_require(filter, 2, ~(p32)0, so_error, array_count(so_error));
+        net_filter_answer(filter, SECCOMP_RET_ALLOW);
+        net_filter_past(filter, call);
+
+        //      mmap: anything but executable.
+        call = net_filter_when(filter, (p32)syscall(mmap));
+        net_filter_load(filter, 2);
+        net_filter_put(filter, NET_FILTER_ANY_BIT, 1, 0, NET_APART_EXECUTABLE);
+        net_filter_answer(filter, SECCOMP_RET_ALLOW);
+        net_filter_answer(filter, SECCOMP_RET_KILL_PROCESS);
+        net_filter_past(filter, call);
+
+        net_filter_answer(filter, SECCOMP_RET_KILL_PROCESS);
+}
+
+//      True only when the kernel took it. ENOSYS is a refusal like any other.
+static COLD bool net_filter_install(net_filter address_to filter)
+{
+        struct
+        {
+                p16 count;
+                net_filter_step address_to steps;
+        } program = {(p16)filter->used, filter->steps};
+
+        return filter->used <= NET_FILTER_STEPS &&
+               system_call_3(syscall(seccomp), SECCOMP_SET_MODE_FILTER, 0,
+                             (positive)address_of program) == 0;
+}
+
+/* Every descriptor closed but the ones named, which may come in any order
+   or twice; descriptors_none fills a slot that names none. */
+static COLD bool net_apart_descriptors_keep(p32 address_to keep, positive count)
+{
+        p32 from = 0;
+
+        for (positive at = 1; at < count; at++)
+                for (positive back = at; back && keep[back - 1] > keep[back]; back--)
+                {
+                        p32 held = keep[back];
+
+                        keep[back] = keep[back - 1];
+                        keep[back - 1] = held;
+                }
+        for (positive at = 0; at < count && keep[at] != descriptors_none; at++)
+        {
+                if (keep[at] < from)
+                        continue;
+                if (keep[at] > from &&
+                    system_call_3(syscall(close_range), from, keep[at] - 1, 0) < 0)
+                        return false;
+                from = keep[at] + 1;
+        }
+        return system_call_3(syscall(close_range), from, ~(p32)0, 0) >= 0;
+}
+
+/*
+        Root becomes nobody, as the DHCP exchange does. A user namespace that
+        maps root and not nobody (unshare -r, which the address-policy rows of
+        wget_hostile run under) answers EINVAL for an id it has no mapping
+        for, and EPERM for setgroups, which unshare turns off there: that
+        root owns nothing outside the namespace, and the filter is the
+        boundary. Any other refusal is a refusal.
+*/
+static COLD bool net_apart_nobody(void)
+{
+        bipolar status;
+
+        if (system_call_1(syscall(getuid), 0) && system_call_1(syscall(geteuid), 0))
+                return true;
+        status = system_call_2(syscall(setgroups), 0, 0);
+        if (status < 0 && status != -EPERM)
+                return false;
+        status = system_call_3(syscall(setresgid), NET_APART_NOBODY,
+                               NET_APART_NOBODY, NET_APART_NOBODY);
+        if (status < 0 && status != -EINVAL)
+                return false;
+        status = system_call_3(syscall(setresuid), NET_APART_NOBODY,
+                               NET_APART_NOBODY, NET_APART_NOBODY);
+        return status >= 0 || status == -EINVAL;
+}
+
+/* After the ids change, which clears both: no core and no ptrace by its
+   owner, killed with the client that forked it (and gone already if the
+   client went first), and no exec that grants anything. */
+static COLD bool net_apart_tie(bipolar parent)
+{
+        return system_call_5(syscall(prctl), PR_SET_DUMPABLE, 0, 0, 0, 0) == 0 &&
+               system_call_5(syscall(prctl), PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0) == 0 &&
+               system_call(syscall(getppid)) == parent &&
+               system_call_5(syscall(prctl), PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0;
+}
+
+/* What a confined child does: its work, with its answer written to answer,
+   a pipe whose other end the caller reads to its end. True when the whole
+   answer went in. */
+typedef bool (*net_apart_task)(address_any context, bipolar answer);
+
+static DEAD_END COLD fn net_apart_child(net_apart_task task, address_any context,
+                                        bipolar keep, b32 answer, bipolar parent)
+{
+        p32 kept[3] = {(p32)answer, 2, keep >= 0 ? (p32)keep : descriptors_none};
+        net_filter filter;
+
+        dns_servers_hold((string_address) "/etc/resolv.conf");
+        dns_tls_held = dns_tls_mode();
+        clock_floor_held = clock_trust_floor();
+        net_filter_build(address_of filter);
+        if (!net_apart_descriptors_keep(kept, array_count(kept)) ||
+            !net_apart_nobody() || !net_apart_tie(parent) ||
+            !net_filter_install(address_of filter))
+                system_call_1(syscall(exit_group), NET_APART_EXIT_UNCONFINED);
+        system_call_1(syscall(exit_group), task(context, answer) ? 0 : 1);
+        __builtin_unreachable();
+}
+
+//      The signal the last confined child died of, for the line that says
+//      so; 0 when it ended some other way.
+static b32 net_apart_signal;
+
+/*
+        task in a confined child, with keep (or -1 for none) the one
+        descriptor it may write besides its answer, and the answer read into
+        answer, which the caller releases: NET_APART_OK when the child wrote
+        at most `most` bytes and exited, NET_APART_UNCONFINED when it could not
+        confine itself and did nothing, NET_APART_DIED when it died, said too
+        much or ended otherwise, NET_APART_NO_CHILD when there was no child.
+
+        The parent reads to the end of the pipe before it waits, so an answer
+        larger than a pipe holds cannot stall the child. A child that dies of
+        SIGPIPE or SIGXFSZ died writing into keep, which in the caller's own
+        process would have killed the caller: the caller dies of it too, so
+        wget -O - | head still ends the way it did. A caller started with
+        SIGCHLD ignored would have its child reaped by the kernel before it
+        could ask how the child ended, so the disposition is the default for
+        as long as the child runs, and put back after.
+*/
+static COLD bipolar net_apart(net_apart_task task, address_any context,
+                              bipolar keep, byte_store address_to answer,
+                              positive most)
+{
+        b32 ends[2];
+        bipolar parent = system_call(syscall(getpid));
+        bipolar child;
+        positive raw = 0;
+        positive was[4] = {0};
+        bool whole = true;
+        bool restore;
+        bipolar waited;
+        positive signal;
+
+        net_apart_signal = 0;
+        restore = system_signal_action(SIGCHLD, null, was, 8) >= 0 &&
+                  (was[0] == (positive)SIG_IGN ||
+                   (was[1] & SA_NOCLDWAIT)) &&
+                  system_signal_install(SIGCHLD, (positive)SIG_DFL, 0, 0, null);
+        log_flush();
+        child = system_child_fork(ends, O_CLOEXEC);
+        if (child < 0)
+        {
+                if (restore)
+                        system_signal_action(SIGCHLD, was, null, 8);
+                return NET_APART_NO_CHILD;
+        }
+        if (!child)
+                net_apart_child(task, context, keep, ends[1], parent);
+
+        for (;;)
+        {
+                positive want = answer->used + 65536;
+                bipolar got;
+
+                if (want > most + 1)
+                        want = most + 1;
+                if (!byte_store_reserve(answer, want, 4096))
+                {
+                        whole = false;
+                        break;
+                }
+                got = system_read_retry((positive)ends[0],
+                                        answer->bytes + answer->used,
+                                        want - answer->used);
+                if (got <= 0)
+                {
+                        whole = !got;
+                        break;
+                }
+                answer->used += (positive)got;
+                if (answer->used > most)
+                {
+                        whole = false;
+                        break;
+                }
+        }
+        if (!whole)
+                system_call_2(syscall(kill), (positive)child, SIGKILL);
+        system_close(ends[0]);
+        waited = system_wait4_retry(child, address_of raw, 0, null);
+        if (restore)
+                system_signal_action(SIGCHLD, was, null, 8);
+        if (waited != child)
+                return NET_APART_DIED;
+
+        signal = raw & 0x7f;
+        if (signal)
+        {
+                net_apart_signal = (b32)signal;
+                if (whole && (signal == SIGPIPE || signal == SIGXFSZ))
+                        system_call_2(syscall(kill), (positive)parent, signal);
+                return NET_APART_DIED;
+        }
+        if (((raw >> 8) & 0xff) == NET_APART_EXIT_UNCONFINED && !answer->used)
+                return NET_APART_UNCONFINED;
+        return whole && !((raw >> 8) & 0xff) ? NET_APART_OK : NET_APART_DIED;
+}
+
+/*
+        http_run, apart.
+
+        The child runs http_run as the caller would have, with the caller's
+        arguments as the fork left them -- the output descriptor is the one
+        it keeps -- and answers with what http_run left behind: its status,
+        the response code, why the last write failed, where it ended, the
+        head when one was kept, and the body when it was stored. The caller
+        believes that only as far as it can check it: a status http_run can
+        return, an errno that is an errno, a URL shorter than a URL may be,
+        a head no longer than a head may be, a body within what the manners
+        allow, and lengths that add up to exactly what came. Anything else
+        is HTTP_APART, as a child that died is.
+*/
+typedef struct
+{
+        b64 status;
+        b64 code;
+        b64 write_failure;
+        p64 where_length;
+        p64 head_length;
+        p64 body_length;
+} http_apart_said;
+
+//      head_length when no head was kept.
+#define HTTP_APART_NO_HEAD (~(p64)0)
+
+typedef struct
+{
+        string_address start;
+        const http_manners address_to how;
+        bool check_cert;
+        bipolar dest;
+        bool body;
+        bool head;
+        b32 address_to code;
+        p8 address_to where;
+} http_apart_ask;
+
+static COLD bool http_apart_write(bipolar answer, const address_any bytes,
+                                  positive length)
+{
+        return !length || system_write_all((positive)answer, bytes, length) == length;
+}
+
+static COLD bool http_apart_task(address_any context, bipolar answer)
+{
+        http_apart_ask address_to ask = context;
+        http_buffer body = {0};
+        http_buffer head = {0};
+        http_apart_said said = {0};
+
+        said.status = http_run(ask->start, ask->how, ask->check_cert, ask->dest,
+                               ask->body ? address_of body : null, ask->code,
+                               ask->where, ask->head ? address_of head : null);
+        said.code = ask->code ? address_to ask->code : 0;
+        said.write_failure = http_write_failure;
+        said.where_length = ask->where ? string_length(ask->where) : 0;
+        said.head_length = head.bytes ? head.used : HTTP_APART_NO_HEAD;
+        said.body_length = body.used;
+        return http_apart_write(answer, address_of said, sizeof said) &&
+               http_apart_write(answer, ask->where, said.where_length) &&
+               (!head.bytes || http_apart_write(answer, head.bytes, head.used)) &&
+               http_apart_write(answer, body.bytes, body.used);
+}
+
+static CONST COLD bool http_apart_status(b64 status)
+{
+        return status <= HTTP_OK && status >= HTTP_UNDECLARED && status != -6;
+}
+
+static COLD bool http_apart_believed(const http_apart_said address_to said,
+                                     const http_apart_ask address_to ask,
+                                     positive whole)
+{
+        bool head = said->head_length != HTTP_APART_NO_HEAD;
+
+        return http_apart_status(said->status) &&
+               said->code == (b32)said->code &&
+               said->write_failure <= 0 && said->write_failure >= -4095 &&
+               said->where_length < HTTP_URL_MAX &&
+               (ask->where || !said->where_length) &&
+               (!head || (ask->head && said->head_length <= HTTP_HEAD_MAX)) &&
+               said->body_length <= ask->how->body_most &&
+               (!said->body_length || (ask->body && said->status == HTTP_OK)) &&
+               whole == sizeof *said + said->where_length +
+                            (head ? said->head_length : 0) + said->body_length;
+}
+
+static COLD bipolar http_run_apart(string_address start,
+                                   const http_manners address_to how,
+                                   bool check_cert, bipolar dest,
+                                   http_buffer address_to into,
+                                   b32 address_to code, p8 address_to where,
+                                   http_buffer address_to head_out)
+{
+        http_apart_ask ask = {start, how, check_cert, dest, into != null,
+                              head_out != null, code, where};
+        byte_store answer = {0};
+        http_apart_said said;
+        positive at = sizeof said;
+        bipolar status;
+        bipolar ran = net_apart(http_apart_task, address_of ask, dest,
+                                address_of answer,
+                                sizeof said + HTTP_URL_MAX + HTTP_HEAD_MAX +
+                                    how->body_most);
+
+        if (ran != NET_APART_OK || answer.used < sizeof said)
+        {
+                byte_store_release(address_of answer);
+                return ran == NET_APART_UNCONFINED ? HTTP_CONFINE : HTTP_APART;
+        }
+        memory_copy(address_of said, answer.bytes, sizeof said);
+        if (!http_apart_believed(address_of said, address_of ask, answer.used))
+        {
+                byte_store_release(address_of answer);
+                return HTTP_APART;
+        }
+
+        status = (bipolar)said.status;
+        if (code)
+                address_to code = (b32)said.code;
+        if (where)
+        {
+                memory_copy(where, answer.bytes + at, said.where_length);
+                where[said.where_length] = end;
+        }
+        at += said.where_length;
+        if (head_out && said.head_length != HTTP_APART_NO_HEAD)
+        {
+                bipolar kept = http_head_keep(head_out, answer.bytes + at,
+                                              said.head_length);
+
+                if (!status)
+                        status = kept;
+                at += said.head_length;
+        }
+        http_write_failure = (bipolar)said.write_failure;
+        //      A body only on success, and then it replaces what the caller
+        //      held, terminated as http_copy's store terminates it.
+        if (into && !status)
+        {
+                byte_store_release(into);
+                if (said.body_length)
+                {
+                        memory_copy(answer.bytes, answer.bytes + at,
+                                    said.body_length);
+                        answer.used = said.body_length;
+                        answer.bytes[answer.used] = end;
+                        address_to into = answer;
+                        memory_fill(address_of answer, 0, sizeof answer);
+                }
+        }
+        byte_store_release(address_of answer);
+        return status;
+}
+
+//      fetch, wget and wget --spider, as the clients call them: http_get,
+//      http_fetch_to and http_spider in a confined child.
+static bipolar http_get_apart(string_address url, http_buffer address_to body,
+                              b32 address_to code)
+{
+        return http_run_apart(url, address_of http_manners_fetch, false, -1,
+                              body, code, null, null);
+}
+
+static bipolar http_spider_apart(string_address start, bool check_cert,
+                                 b32 address_to code, p8 address_to where)
+{
+        return http_run_apart(start, address_of http_manners_spider, check_cert,
+                              -1, null, code, where, null);
+}
+
+static bipolar http_fetch_to_apart(string_address start, bipolar dest,
+                                   bool check_cert, b32 address_to code,
+                                   p8 address_to where)
+{
+        return http_run_apart(start, address_of http_manners_wget, check_cert,
+                              dest, null, code, where, null);
+}
+
+/*
+        nts_ke, apart. The machine's NTP child asks it as root, and the key
+        establishment is a TLS 1.3 handshake with an X.509 chain and a record
+        of the server's own making, so all of it runs in a confined child,
+        which answers with its status and the state it made. The state is
+        believed only as nts_ke_reply could have written it: at least one
+        cookie and no more than there is room for, each of a length a cookie
+        may have, a time server that is a name or empty, a port not zero.
+        The keys cross the pipe, and every copy but the caller's is wiped.
+*/
+typedef struct
+{
+        b64 status;
+        nts_state state;
+} nts_ke_said;
+
+typedef struct
+{
+        string_address host;
+        p16 port;
+        bool bootstrap;
+} nts_ke_ask;
+
+static COLD bool nts_ke_task(address_any context, bipolar answer)
+{
+        nts_ke_ask address_to ask = context;
+        nts_ke_said said;
+        bool wrote;
+
+        memory_fill(address_of said, 0, sizeof said);
+        said.status = nts_ke(ask->host, ask->port, ask->bootstrap,
+                             address_of said.state);
+        wrote = system_write_all((positive)answer, address_of said, sizeof said) ==
+                sizeof said;
+        crypto_forget(address_of said, sizeof said);
+        return wrote;
+}
+
+static COLD bool nts_ke_believed(nts_ke_said address_to said)
+{
+        nts_state address_to state = address_of said->state;
+
+        if (said->status)
+                return http_apart_status(said->status);
+        state->server[sizeof state->server - 1] = end;
+        if (!state->count || state->count > NTS_COOKIES || !state->port ||
+            (state->server[0] &&
+             !nts_name_ok(state->server, string_length((string_address)state->server))))
+                return false;
+        for (positive at = 0; at < state->count; at++)
+                if (!state->length[at] || state->length[at] > NTS_COOKIE_MAX)
+                        return false;
+        return true;
+}
+
+static COLD bipolar nts_ke_apart(string_address host, p16 port, bool bootstrap,
+                                 nts_state address_to state)
+{
+        nts_ke_ask ask = {host, port, bootstrap};
+        byte_store got = {0};
+        nts_ke_said said;
+        bipolar ran = net_apart(nts_ke_task, address_of ask, -1, address_of got,
+                                sizeof said);
+        bool whole = ran == NET_APART_OK && got.used == sizeof said;
+        bipolar status = ran == NET_APART_UNCONFINED ? HTTP_CONFINE : HTTP_APART;
+
+        memory_fill(state, 0, sizeof(*state));
+        if (whole)
+                memory_copy(address_of said, got.bytes, sizeof said);
+        if (got.bytes)
+                crypto_forget(got.bytes, got.used);
+        byte_store_release(address_of got);
+        if (!whole)
+                return status;
+        if (!nts_ke_believed(address_of said))
+                status = HTTP_APART;
+        else if (!(status = (bipolar)said.status))
+        {
+                memory_copy(state, address_of said.state, sizeof(*state));
+                state->origin[0] = end;
+                state->origin_port = 0;
+        }
+        crypto_forget(address_of said, sizeof said);
+        return status;
+}
+
+/*
+        A name asked as `host` asks it, apart: the DNS answer, and the TLS
+        and X.509 of a resolver over TLS, are read in a confined child, which
+        answers with a status and an address. The status is believed only as
+        one the resolver returns.
+*/
+typedef struct
+{
+        b64 status;
+        p32 found;
+} dns_apart_said;
+
+typedef struct
+{
+        bipolar server;
+        string_address name;
+} dns_apart_ask;
+
+static COLD bool dns_apart_task(address_any context, bipolar answer)
+{
+        dns_apart_ask address_to ask = context;
+        dns_apart_said said = {0};
+        p32 found = 0;
+
+        said.status =
+            ask->server >= 0
+                ? dns_resolve_at((p32)ask->server, DNS_PORT, ask->name,
+                                 address_of found, 5)
+                : dns_resolve_wanted((string_address) "/etc/resolv.conf",
+                                     ask->name, address_of found, 3);
+        said.found = said.status == DNS_OK ? found : 0;
+        return system_write_all((positive)answer, address_of said, sizeof said) ==
+               sizeof said;
+}
+
+//      server, or -1 for the setting's resolvers; a status the resolver
+//      returns, DNS_CONFINE or DNS_APART.
+static COLD bipolar dns_resolve_apart(bipolar server, string_address name,
+                                      p32 address_to found)
+{
+        dns_apart_ask ask = {server, name};
+        byte_store got = {0};
+        dns_apart_said said;
+        bipolar ran = net_apart(dns_apart_task, address_of ask, -1, address_of got,
+                                sizeof said);
+        bool whole = ran == NET_APART_OK && got.used == sizeof said;
+
+        address_to found = 0;
+        if (whole)
+                memory_copy(address_of said, got.bytes, sizeof said);
+        byte_store_release(address_of got);
+        if (!whole)
+                return ran == NET_APART_UNCONFINED ? DNS_CONFINE : DNS_APART;
+        if (said.status > DNS_OK || said.status < DNS_TLS_FAILED)
+                return DNS_APART;
+        if (said.status == DNS_OK)
+                address_to found = said.found;
+        return (bipolar)said.status;
+}
+
+#endif // STANDARD_MODERN_C_NET_APART
 /* ---- dhcp: dhcp: an address obtained rather than typed ---- */
 
 #ifndef STANDARD_MODERN_C_NET_DHCP

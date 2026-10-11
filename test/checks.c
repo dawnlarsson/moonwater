@@ -70875,6 +70875,694 @@ static fn dhcp_frames_on_loopback(void)
 }
 
 /*
+        The clients' network half, apart (net_apart in src/net/net.c).
+
+        The filter first, as a program: run here by a small classic-BPF
+        interpreter over the calls a fetch makes and the calls it must never
+        make, so its decisions are proved on all three machines, qemu-user
+        included, where the kernel cannot run it. Then, natively, the child
+        itself: it keeps its answer pipe, the one descriptor it was handed and
+        standard error, and nothing else; every call fetching needs works in
+        it; and each call it has no business making kills it with SIGSYS
+        after it has answered. qemu-user cannot filter itself, and there the
+        primitive must refuse to run the task at all -- which is the pass --
+        and the deaths are NOT RUN.
+*/
+static p32 net_filter_run(const net_filter address_to filter, p32 arch,
+                          p32 number, const p64 address_to arguments)
+{
+        p8 data[64];
+        p32 accumulator = 0;
+
+        memory_fill(data, 0, sizeof data);
+        memory_copy(data, address_of number, 4);
+        memory_copy(data + 4, address_of arch, 4);
+        memory_copy(data + 16, arguments, 6 * sizeof(p64));
+        for (positive at = 0; at < filter->used && at < NET_FILTER_STEPS; at++)
+        {
+                net_filter_step step = filter->steps[at];
+
+                switch (step.code)
+                {
+                case NET_FILTER_LOAD:
+                        if (step.value > sizeof data - 4)
+                                return 0;
+                        memory_copy(address_of accumulator, data + step.value, 4);
+                        break;
+                case NET_FILTER_AND:
+                        accumulator &= step.value;
+                        break;
+                case NET_FILTER_ALWAYS:
+                        at += step.value;
+                        break;
+                case NET_FILTER_EQUAL:
+                        at += accumulator == step.value ? step.jump_true
+                                                        : step.jump_false;
+                        break;
+                case NET_FILTER_ANY_BIT:
+                        at += accumulator & step.value ? step.jump_true
+                                                       : step.jump_false;
+                        break;
+                case NET_FILTER_RETURN:
+                        return step.value;
+                default:
+                        return 0;
+                }
+        }
+        //      Off the end: the kernel refuses such a program at install.
+        return 0;
+}
+
+//      check() with a name made at run time.
+static fn net_apart_check(string_address name, bool passed)
+{
+        checks++;
+        if (!passed)
+        {
+                failures++;
+                string_format(log, "  FAIL %s\n", name);
+        }
+}
+
+static fn net_apart_filter_decisions(void)
+{
+        static const struct
+        {
+                string_address name;
+                p32 number;
+                p64 arguments[6];
+                p32 answer;
+        } rows[] = {
+            {"recvfrom", syscall(recvfrom), {0}, SECCOMP_RET_ALLOW},
+            {"writev", syscall(writev), {0}, SECCOMP_RET_ALLOW},
+            {"ppoll", syscall(ppoll), {0}, SECCOMP_RET_ALLOW},
+            {"getrandom", syscall(getrandom), {0}, SECCOMP_RET_ALLOW},
+            {"connect", syscall(connect), {0}, SECCOMP_RET_ALLOW},
+            {"bind", syscall(bind), {0}, SECCOMP_RET_ALLOW},
+            {"exit_group", syscall(exit_group), {0}, SECCOMP_RET_ALLOW},
+            {"an IPv4 TCP socket", syscall(socket),
+             {AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0}, SECCOMP_RET_ALLOW},
+            {"a nonblocking IPv4 TCP socket", syscall(socket),
+             {AF_INET, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0},
+             SECCOMP_RET_ALLOW},
+            {"an IPv4 UDP socket", syscall(socket),
+             {AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0}, SECCOMP_RET_ALLOW},
+            {"a unix socket", syscall(socket), {AF_UNIX, SOCK_STREAM, 0},
+             SECCOMP_RET_KILL_PROCESS},
+            {"a netlink socket", syscall(socket),
+             {AF_NETLINK, SOCK_DGRAM, NETLINK_ROUTE}, SECCOMP_RET_KILL_PROCESS},
+            {"a packet socket", syscall(socket), {AF_PACKET, SOCK_DGRAM, 0},
+             SECCOMP_RET_KILL_PROCESS},
+            {"an IPv6 socket", syscall(socket), {AF_INET6, SOCK_STREAM, 0},
+             SECCOMP_RET_KILL_PROCESS},
+            {"a raw IPv4 socket", syscall(socket),
+             {AF_INET, SOCK_RAW, IPPROTO_ICMP}, SECCOMP_RET_KILL_PROCESS},
+            {"an IPv4 socket that names its protocol", syscall(socket),
+             {AF_INET, SOCK_STREAM, IPPROTO_TCP}, SECCOMP_RET_KILL_PROCESS},
+            {"an IPv4 socket with a flag fetching never sets", syscall(socket),
+             {AF_INET, SOCK_STREAM | 0x100, 0}, SECCOMP_RET_KILL_PROCESS},
+            {"SO_RCVTIMEO", syscall(setsockopt), {3, SOL_SOCKET, SO_RCVTIMEO},
+             SECCOMP_RET_ALLOW},
+            {"SO_SNDTIMEO", syscall(setsockopt), {3, SOL_SOCKET, SO_SNDTIMEO},
+             SECCOMP_RET_ALLOW},
+            {"TCP_NODELAY", syscall(setsockopt), {3, IPPROTO_TCP, TCP_NODELAY},
+             SECCOMP_RET_ALLOW},
+            {"SO_BINDTODEVICE", syscall(setsockopt),
+             {3, SOL_SOCKET, SO_BINDTODEVICE}, SECCOMP_RET_KILL_PROCESS},
+            {"SO_REUSEADDR", syscall(setsockopt), {3, SOL_SOCKET, SO_REUSEADDR},
+             SECCOMP_RET_KILL_PROCESS},
+            {"a socket-level number at the TCP level", syscall(setsockopt),
+             {3, IPPROTO_TCP, SO_RCVTIMEO}, SECCOMP_RET_KILL_PROCESS},
+            {"TCP_NODELAY's number at the socket level", syscall(setsockopt),
+             {3, SOL_SOCKET, TCP_NODELAY}, SECCOMP_RET_KILL_PROCESS},
+            {"an IP-level option", syscall(setsockopt), {3, IPPROTO_IP, 1},
+             SECCOMP_RET_KILL_PROCESS},
+            {"SO_ERROR read back", syscall(getsockopt), {3, SOL_SOCKET, SO_ERROR},
+             SECCOMP_RET_ALLOW},
+            {"SO_RCVBUF read back", syscall(getsockopt), {3, SOL_SOCKET, SO_RCVBUF},
+             SECCOMP_RET_KILL_PROCESS},
+            {"memory to read and write", syscall(mmap), {0, 4096, 3, 0x22},
+             SECCOMP_RET_ALLOW},
+            {"executable memory", syscall(mmap), {0, 4096, 5, 0x22},
+             SECCOMP_RET_KILL_PROCESS},
+            {"openat", syscall(openat), {0}, SECCOMP_RET_KILL_PROCESS},
+            {"execve", syscall(execve), {0}, SECCOMP_RET_KILL_PROCESS},
+            {"ptrace", syscall(ptrace), {0}, SECCOMP_RET_KILL_PROCESS},
+            {"mprotect", syscall(mprotect), {0}, SECCOMP_RET_KILL_PROCESS},
+            {"ioctl", syscall(ioctl), {0}, SECCOMP_RET_KILL_PROCESS},
+            {"kill", syscall(kill), {0}, SECCOMP_RET_KILL_PROCESS},
+            {"prctl", syscall(prctl), {0}, SECCOMP_RET_KILL_PROCESS},
+            {"seccomp", syscall(seccomp), {0}, SECCOMP_RET_KILL_PROCESS},
+            {"read", syscall(read), {0}, SECCOMP_RET_KILL_PROCESS},
+            {"x32's recvfrom", syscall(recvfrom) | 0x40000000u, {0},
+             SECCOMP_RET_KILL_PROCESS},
+        };
+        net_filter filter;
+        static const p64 none[6] = {0};
+        bool landed = true;
+
+        net_filter_build(address_of filter);
+        check("the client filter fits its program",
+              filter.used > 8 && filter.used <= NET_FILTER_STEPS);
+        if (filter.used > NET_FILTER_STEPS)
+                return;
+        for (positive at = 0; at < filter.used; at++)
+        {
+                net_filter_step step = filter.steps[at];
+
+                if (step.code == NET_FILTER_EQUAL || step.code == NET_FILTER_ANY_BIT)
+                        landed = landed && at + 1 + step.jump_true < filter.used &&
+                                 at + 1 + step.jump_false < filter.used;
+                else if (step.code == NET_FILTER_ALWAYS)
+                        landed = landed && at + 1 + step.value < filter.used;
+        }
+        check("every jump of the client filter lands inside it", landed);
+        check("the client filter ends in an answer",
+              filter.steps[filter.used - 1].code == NET_FILTER_RETURN);
+        for (positive at = 0; at < array_count(rows); at++)
+        {
+                p8 name[128];
+                p8 address_to put = string_copy_end(name, (string_address) "the client filter ");
+
+                put = string_copy_end(put, rows[at].answer == SECCOMP_RET_ALLOW
+                                               ? (string_address) "allows "
+                                               : (string_address) "kills ");
+                string_copy_max_end(put, rows[at].name, name + sizeof name - put - 1);
+                net_apart_check(name, net_filter_run(address_of filter, NET_APART_ARCH,
+                                                     rows[at].number,
+                                                     rows[at].arguments) ==
+                                          rows[at].answer);
+        }
+        check("the client filter kills a call from another architecture",
+              net_filter_run(address_of filter, NET_APART_ARCH ^ 1,
+                             syscall(recvfrom), none) == SECCOMP_RET_KILL_PROCESS);
+}
+
+typedef struct
+{
+        bipolar spare;
+        bipolar kept;
+        positive bad;
+} net_apart_probe;
+
+#define NET_APART_PROBE_ANSWER 8
+
+/* What the child finds, eight bytes of 1 when all is as it should be, then
+   the call it was asked to make when it has no business making it. */
+static bool net_apart_probe_task(address_any context, bipolar answer)
+{
+        net_apart_probe address_to probe = context;
+        p8 said[NET_APART_PROBE_ANSWER] = {0};
+        b32 one = 1;
+        b32 error = 0;
+        p32 error_size = sizeof error;
+        timeval limit = {1, 0};
+        timespec now = {0, 0};
+        p8 random[16];
+        socket_address_internet here = {.family = AF_INET,
+                                        .host = network_order_32(HOST_LOOPBACK)};
+        bipolar stream = socket_new(AF_INET, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+        bipolar datagram = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+        bipolar page = system_call_6(syscall(mmap), 0, 4096, 3, 0x22, (positive)-1, 0);
+        static string_address const nothing[] = {null};
+
+        said[0] = system_close(probe->spare) == -EBADF;
+        said[1] = system_write_once(probe->kept, "", 0) == 0 &&
+                  system_write_once(2, "", 0) == 0;
+        said[2] = stream >= 0 && datagram >= 0;
+        said[3] = socket_option_set((b32)stream, SOL_SOCKET, SO_RCVTIMEO,
+                                    address_of limit, sizeof limit) == 0 &&
+                  socket_option_set((b32)stream, SOL_SOCKET, SO_SNDTIMEO,
+                                    address_of limit, sizeof limit) == 0 &&
+                  socket_option_set((b32)stream, IPPROTO_TCP, TCP_NODELAY,
+                                    address_of one, sizeof one) == 0 &&
+                  socket_option_get((b32)stream, SOL_SOCKET, SO_ERROR,
+                                    address_of error, address_of error_size) == 0;
+        said[4] = system_call_2(syscall(clock_gettime), CLOCK_MONOTONIC,
+                                (positive)address_of now) == 0 &&
+                  system_random_fill(random, sizeof random, 0) == 0;
+        said[5] = page > 0 && system_call_2(syscall(munmap), (positive)page, 4096) == 0;
+        said[6] = socket_bind((b32)datagram, address_of here, sizeof here) == 0;
+        said[7] = 1;
+        if (stream >= 0)
+                socket_close((b32)stream);
+        if (datagram >= 0)
+                socket_close((b32)datagram);
+        if (system_write_all((positive)answer, said, sizeof said) != sizeof said)
+                return false;
+
+        switch (probe->bad)
+        {
+        case 1:
+                system_open_at(AT_FDCWD, "/", FILE_READ | O_CLOEXEC);
+                break;
+        case 2:
+                system_call_3(syscall(execve), (positive) "/bin/true",
+                              (positive)nothing, (positive)nothing);
+                break;
+        case 3:
+                system_call_4(syscall(ptrace), 0, 0, 0, 0);
+                break;
+        case 4:
+                socket_new(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+                break;
+        case 5:
+                socket_new(AF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC, NETLINK_ROUTE);
+                break;
+        case 6:
+                socket_new(AF_PACKET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+                break;
+        case 7:
+                socket_new(AF_INET6, SOCK_STREAM | SOCK_CLOEXEC, 0);
+                break;
+        case 8:
+                socket_new(AF_INET, SOCK_RAW | SOCK_CLOEXEC, IPPROTO_ICMP);
+                break;
+        case 9:
+                system_call_6(syscall(mmap), 0, 4096, 5, 0x22, (positive)-1, 0);
+                break;
+        case 10:
+                system_call_3(syscall(mprotect), 0, 4096, 1);
+                break;
+        case 11:
+                system_call_3(syscall(ioctl), 2, 0x5401 /* TCGETS */, 0);
+                break;
+        }
+        return true;
+}
+
+static fn net_apart_confinement(void)
+{
+        static const string_address bad[] = {
+            null, "openat", "execve", "ptrace", "a unix socket", "a netlink socket",
+            "a packet socket", "an IPv6 socket", "a raw socket",
+            "executable memory", "mprotect", "ioctl"};
+        b32 ends[2];
+        bipolar spare = system_open_at(AT_FDCWD, "/", FILE_READ | O_CLOEXEC);
+        bool emulated = net_as_emulated();
+
+        check("the client confinement fixture opens",
+              spare >= 0 &&
+                  system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC) == 0);
+        if (spare < 0)
+                return;
+
+        for (positive at = 0; at < array_count(bad); at++)
+        {
+                net_apart_probe probe = {spare, ends[1], at};
+                byte_store answer = {0};
+                bipolar ran = net_apart(net_apart_probe_task, address_of probe,
+                                        ends[1], address_of answer, 64);
+                bool all = answer.used == NET_APART_PROBE_ANSWER;
+                p8 name[96];
+
+                for (positive byte = 0; all && byte < answer.used; byte++)
+                        all = answer.bytes[byte] == 1;
+                if (emulated)
+                {
+                        check("under qemu-user the client child refuses rather than run unfiltered",
+                              ran == NET_APART_UNCONFINED && !answer.used);
+                        byte_store_release(address_of answer);
+                        continue;
+                }
+                if (!at)
+                {
+                        check("the confined client keeps its pipe, its output and standard error, and nothing else; every call fetching needs works",
+                              ran == NET_APART_OK && all);
+                        byte_store_release(address_of answer);
+                        continue;
+                }
+                string_copy_max_end(string_copy_end(name, (string_address) "the confined client dies of "),
+                                    bad[at], 48);
+                net_apart_check(name, ran == NET_APART_DIED &&
+                                          net_apart_signal == SIGSYS && all);
+                byte_store_release(address_of answer);
+        }
+        if (emulated)
+                log_direct(str("net: client seccomp filter NOT RUN -- qemu-user (the refusal is checked)\n"));
+
+        system_close(ends[0]);
+        system_close(ends[1]);
+        system_close(spare);
+}
+
+/*
+        A fetch through the confinement, end to end, from a server on
+        loopback that also looks at the client while it waits for the
+        answer: the server's parent is this process, and so is the confined
+        child's, so the child is the other pid in this process's children,
+        and its status must say a filter (Seccomp 2) and no new privileges.
+        A server that cannot read those says 2, and the check says NOT RUN.
+*/
+static p8 net_apart_seen_confined(void)
+{
+        p8 path[96];
+        p8 text[1024];
+        p8 address_to put;
+        bipolar parent = system_call(syscall(getppid));
+        bipolar self = system_call(syscall(getpid));
+        bipolar got;
+        positive at = 0;
+
+        put = string_copy_end(path, (string_address) "/proc/");
+        put += positive_into(put, (positive)parent);
+        put = string_copy_end(put, (string_address) "/task/");
+        put += positive_into(put, (positive)parent);
+        string_copy_end(put, (string_address) "/children");
+        got = file_slurp(path, text, sizeof text - 1);
+        if (got <= 0)
+                return 2;
+        text[got] = end;
+        while (at < (positive)got)
+        {
+                positive pid = 0;
+                p8 status[2048];
+                bipolar read;
+
+                while (at < (positive)got && (text[at] < '0' || text[at] > '9'))
+                        at++;
+                while (at < (positive)got && text[at] >= '0' && text[at] <= '9')
+                        pid = pid * 10 + (positive)(text[at++] - '0');
+                if (!pid || pid == (positive)self)
+                        continue;
+                put = string_copy_end(path, (string_address) "/proc/");
+                put += positive_into(put, pid);
+                string_copy_end(put, (string_address) "/status");
+                read = file_slurp(path, status, sizeof status - 1);
+                if (read <= 0)
+                        continue;
+                status[read] = end;
+                return memory_search(status, (positive)read, "\nSeccomp:\t2\n", 12) &&
+                       memory_search(status, (positive)read, "\nNoNewPrivs:\t1\n", 15);
+        }
+        return 2;
+}
+
+static p8 net_apart_body_byte(positive at)
+{
+        return (p8)('a' + at % 26);
+}
+
+/* Each length a connection: the request read, the client looked at (the
+   answer on proof), then a 200 with that many bytes of the alphabet. */
+static DEAD_END fn net_apart_server(bipolar listening, const positive address_to bodies,
+                                    positive count, b32 proof)
+{
+        for (positive round = 0; round < count; round++)
+        {
+                p8 request[2048];
+                p8 head[128];
+                p8 chunk[8192];
+                p8 address_to put;
+                p8 seen;
+                positive sent = 0;
+                bipolar taken = socket_accept((b32)listening, 0, 0, 0);
+
+                if (taken < 0)
+                        break;
+                socket_receive((b32)taken, request, sizeof request, 0, 0, 0);
+                seen = net_apart_seen_confined();
+                system_write_all((positive)proof, address_of seen, 1);
+                put = string_copy_end(head, (string_address) "HTTP/1.1 200 OK\r\nContent-Length: ");
+                put += positive_into(put, bodies[round]);
+                put = string_copy_end(put, (string_address) "\r\nConnection: close\r\n\r\n");
+                system_write_all((positive)taken, head, (positive)(put - head));
+                while (sent < bodies[round])
+                {
+                        positive part = min(sizeof chunk, bodies[round] - sent);
+
+                        for (positive at = 0; at < part; at++)
+                                chunk[at] = net_apart_body_byte(sent + at);
+                        if (system_write_all((positive)taken, chunk, part) != part)
+                                break;
+                        sent += part;
+                }
+                socket_shutdown((b32)taken, SHUT_BOTH);
+                socket_close((b32)taken);
+        }
+        system_call_1(syscall(exit_group), 0);
+        __builtin_unreachable();
+}
+
+static bool net_apart_body_right(const p8 address_to bytes, positive length,
+                                 positive want)
+{
+        if (length != want || (want && !bytes))
+                return false;
+        for (positive at = 0; at < length; at++)
+                if (bytes[at] != net_apart_body_byte(at))
+                        return false;
+        return true;
+}
+
+typedef struct
+{
+        string_address url;
+        bool held;
+        positive count;
+        p32 servers[DNS_SERVERS_MAX];
+} net_apart_planted;
+
+/* The engine itself, run in the child the way http_run_apart runs it, then
+   a call no fetch makes: the answer says the fetch worked, and the death
+   says the filter was there all along. */
+static bool net_apart_planted_task(address_any context, bipolar answer)
+{
+        net_apart_planted address_to planted = context;
+        http_buffer body = {0};
+        b32 code = 0;
+        b64 said[2];
+
+        said[0] = http_get(planted->url, address_of body, address_of code);
+        said[1] = said[0] == HTTP_OK &&
+                  net_apart_body_right(body.bytes, body.used, 1000) && code == 200;
+        if (system_write_all((positive)answer, said, sizeof said) != sizeof said)
+                return false;
+        system_open_at(AT_FDCWD, "/", FILE_READ | O_CLOEXEC);
+        return true;
+}
+
+/* The resolver in the child: it read resolv.conf before its filter went
+   on (the servers it holds are the ones this process reads now), and a
+   lookup after it opens nothing -- a UDP query to loopback, answered or
+   refused, and the child still alive to say so. */
+static bool net_apart_resolver_task(address_any context, bipolar answer)
+{
+        net_apart_planted address_to planted = context;
+        p32 found = 0;
+        b64 said[2];
+
+        said[0] = dns_held.held && dns_held.count == planted->count &&
+                  !memory_compare(dns_held.servers, planted->servers,
+                                  planted->count * sizeof(p32));
+        dns_held.count = 1;
+        dns_held.servers[0] = HOST_LOOPBACK;
+        said[1] = dns_resolve_any((string_address) "/moonwater/not/read",
+                                  (string_address) "moonwater-apart.invalid",
+                                  address_of found, 1);
+        return system_write_all((positive)answer, said, sizeof said) == sizeof said;
+}
+
+static fn net_apart_fetching(void)
+{
+        static const positive bodies[] = {1000, 70000, 1000, 12 * 1024 * 1024};
+        socket_address_internet where = {0};
+        p32 size = sizeof where;
+        b32 one = 1;
+        b32 proof[2] = {-1, -1};
+        bool emulated = net_as_emulated();
+        bipolar listening = socket_new(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        bipolar server;
+        p8 url[64];
+        p8 seen[4] = {0};
+        positive url_used;
+
+        check("the confined fetch server opens",
+              listening >= 0 &&
+                  system_call_2(syscall(pipe2), (positive)proof, O_CLOEXEC) == 0);
+        if (listening < 0)
+                return;
+        where.family = AF_INET;
+        where.host = network_order_32(HOST_LOOPBACK);
+        socket_option_set((b32)listening, SOL_SOCKET, SO_REUSEADDR, address_of one,
+                          sizeof one);
+        check("the confined fetch server listens",
+              socket_bind((b32)listening, address_of where, sizeof where) == 0 &&
+                  socket_listen((b32)listening, 4) == 0 &&
+                  socket_name((b32)listening, address_of where, address_of size) == 0);
+        url_used = string_copy_end(url, (string_address) "http://127.0.0.1:") - url;
+        url_used += positive_into(url + url_used, network_order_16(where.port));
+        string_copy_end(url + url_used, (string_address) "/apart/file.bin");
+
+        server = system_fork();
+        if (server == 0)
+        {
+                system_close(proof[0]);
+                net_apart_server(listening, bodies, array_count(bodies), proof[1]);
+        }
+        system_close(proof[1]);
+        check("the confined fetch server starts", server > 0);
+        if (server <= 0)
+        {
+                system_close(proof[0]);
+                socket_close((b32)listening);
+                return;
+        }
+
+        //      fetch's manners: the body comes back over the pipe.
+        {
+                http_buffer body = {0};
+                b32 code = 0;
+                bipolar status = http_get_apart(url, address_of body, address_of code);
+
+                if (emulated)
+                        check("under qemu-user a confined fetch is refused, not run unfiltered",
+                              status == HTTP_CONFINE && !body.used);
+                else
+                        check("a fetch through the confinement brings its body back whole",
+                              status == HTTP_OK && code == 200 &&
+                                  net_apart_body_right(body.bytes, body.used, bodies[0]));
+                http_forget(address_of body);
+        }
+
+        //      wget's manners: the child writes the body into the file it
+        //      was handed, and says where it ended.
+        {
+                p8 path[96];
+                p8 ended[HTTP_URL_MAX];
+                b32 code = 0;
+                bipolar file;
+                bipolar status;
+                p8 address_to back = null;
+                positive back_room = 0;
+                positive back_used = 0;
+
+                string_copy_end(string_copy_end(path, (string_address) "/tmp/moonwater-net-apart-"),
+                                (string_address) "file");
+                positive_into_string(path + string_length(path), system_nonce());
+                file = system_open_at_mode(AT_FDCWD, path,
+                                           FILE_READ_WRITE | FILE_CREATE | FILE_EXCLUSIVE |
+                                               O_CLOEXEC, 0600);
+                check("the confined download's file opens", file >= 0);
+                if (file >= 0)
+                {
+                        system_remove_at(AT_FDCWD, path, 0);
+                        string_copy(ended, (string_address) "unset");
+                        status = http_fetch_to_apart(url, file, false, address_of code,
+                                                     ended);
+                        if (!emulated && array_store_reserve(back, back_room, 0,
+                                                             bodies[1] + 1, 4096))
+                        {
+                                bipolar got;
+
+                                system_seek(file, 0, 0);
+                                while ((got = system_read_retry((positive)file,
+                                                                back + back_used,
+                                                                back_room - back_used)) > 0)
+                                        back_used += (positive)got;
+                        }
+                        if (emulated)
+                                check("under qemu-user a confined download is refused, not run unfiltered",
+                                      status == HTTP_CONFINE);
+                        else
+                                check("a download through the confinement lands in the file it was handed and says where it ended",
+                                      status == HTTP_OK && code == 200 &&
+                                          string_equals(ended, url) &&
+                                          net_apart_body_right(back, back_used, bodies[1]));
+                        array_store_release(back, back_room, back_used);
+                        system_close(file);
+                }
+        }
+
+        //      A planted call no fetch makes, after a fetch that worked.
+        {
+                net_apart_planted planted = {url};
+                byte_store answer = {0};
+                b64 said[2] = {0, 0};
+                bipolar ran = net_apart(net_apart_planted_task, address_of planted, -1,
+                                        address_of answer, 64);
+
+                if (answer.used == sizeof said)
+                        memory_copy(said, answer.bytes, sizeof said);
+                if (emulated)
+                        check("under qemu-user the planted child is refused before it runs",
+                              ran == NET_APART_UNCONFINED);
+                else
+                        check("a planted openat after a confined fetch kills the child with SIGSYS, the fetch having worked",
+                              ran == NET_APART_DIED && net_apart_signal == SIGSYS &&
+                                  said[0] == HTTP_OK && said[1] == 1);
+                byte_store_release(address_of answer);
+        }
+
+        //      A body past 8 MiB, which the store grows by mremap and
+        //      madvise, inside the filter.
+        {
+                http_buffer body = {0};
+                b32 code = 0;
+                bipolar status = http_get_apart(url, address_of body, address_of code);
+
+                if (!emulated)
+                        check("a 12 MiB body grows its store inside the confinement",
+                              status == HTTP_OK && code == 200 &&
+                                  net_apart_body_right(body.bytes, body.used, bodies[3]));
+                http_forget(address_of body);
+        }
+
+        //      What the server saw of the client each time it was asked. It
+        //      has served every connection it was going to by now; one that
+        //      never came (a fetch refused) would leave it in accept.
+        system_call_2(syscall(kill), (positive)server, SIGKILL);
+        system_wait4_retry((b32)server, null, 0, null);
+        for (positive at = 0; at < sizeof seen; at++)
+                if (system_read_retry((positive)proof[0], seen + at, 1) != 1)
+                        break;
+        system_close(proof[0]);
+        socket_close((b32)listening);
+        if (emulated)
+                log_direct(str("net: client confinement end to end NOT RUN -- qemu-user (the refusal is checked)\n"));
+        else if (seen[0] == 2 || seen[1] == 2)
+                log_direct(str("net: client confinement seen from outside NOT RUN -- no /proc children\n"));
+        else
+                check("the server saw the fetching child under a filter with no new privileges, both times",
+                      seen[0] == 1 && seen[1] == 1);
+
+        //      A port nothing listens on is the same answer in the child.
+        {
+                http_buffer body = {0};
+                b32 code = 0;
+                bipolar status = http_get_apart((string_address) "http://127.0.0.1:1/",
+                                                address_of body, address_of code);
+
+                check("a refused connection is the same answer through the confinement",
+                      status == (emulated ? HTTP_CONFINE : HTTP_NO_ROUTE));
+                http_forget(address_of body);
+        }
+
+        //      The resolver, held.
+        {
+                net_apart_planted planted = {url};
+                byte_store answer = {0};
+                b64 said[2] = {0, 0};
+                bipolar ran;
+
+                planted.count = dns_servers((string_address) "/etc/resolv.conf",
+                                            planted.servers, DNS_SERVERS_MAX);
+                ran = net_apart(net_apart_resolver_task, address_of planted, -1,
+                                address_of answer, 64);
+                if (answer.used == sizeof said)
+                        memory_copy(said, answer.bytes, sizeof said);
+                if (emulated)
+                        check("under qemu-user the resolver child is refused before it runs",
+                              ran == NET_APART_UNCONFINED);
+                else
+                        check("the confined child holds the servers resolv.conf named and looks a name up without opening it",
+                              ran == NET_APART_OK && answer.used == sizeof said &&
+                                  said[0] == 1 && said[1] != DNS_OK);
+                byte_store_release(address_of answer);
+        }
+}
+
+/*
         The lease, built and read, without a server.
 
         The socket dance -- broadcast from an address we do not have yet, out
@@ -73715,6 +74403,9 @@ b32 main(void)
         net_group(dhcp_confinement);
         net_group(dhcp_frames_judged);
         net_group(dhcp_frames_on_loopback);
+        net_group(net_apart_filter_decisions);
+        net_group(net_apart_confinement);
+        net_group(net_apart_fetching);
         net_group(dhcp_reacquisition_state_matrix);
         net_group(dhcp_ack_lease_integrity);
         net_group(dhcp_ack_invalid_then_valid);
@@ -97331,6 +98022,14 @@ static fn storage_test_wget_304(string_address target)
                 string_address address_to saved_words = program_words;
                 b32 saved_count = program_words_count;
                 positive raw = 0;
+                //      qemu-user arches get --emulated from test/run. wget's
+                //      network half runs in a confined child (net_apart),
+                //      which qemu-user cannot filter, so there wget refuses
+                //      to fetch at all and the server is never asked.
+                bool emulated = program_argument_count() > 1 &&
+                                !string_compare(program_argument(1),
+                                                (string_address) "--emulated");
+                b32 said;
 
                 memory_copy(url, "http://127.0.0.1:", used);
                 used += positive_into(url + used,
@@ -97340,16 +98039,27 @@ static fn storage_test_wget_304(string_address target)
                 string_address words[] = {
                     "wget", "-q", "-O", target, url, null};
                 program_arguments_use(words, 5);
-                check("wget refuses a terminal 304",
-                      net_wget() == 8);
+                said = net_wget();
                 if (saved_words)
                         program_arguments_use(saved_words, saved_count);
                 else
                         program_arguments_own();
-                check("304 preservation server completes",
-                      system_wait4_retry((b32)child, address_of raw, 0,
-                                         null) == child &&
-                          wait_status_code(raw) == 0);
+                if (emulated)
+                {
+                        check("under qemu-user wget refuses to fetch unconfined",
+                              said == 1);
+                        system_call_2(syscall(kill), (positive)child, SIGKILL);
+                        system_wait4_retry((b32)child, null, 0, null);
+                        log_direct(str("storage: wget 304 refusal NOT RUN -- qemu-user cannot confine wget\n"));
+                }
+                else
+                {
+                        check("wget refuses a terminal 304", said == 8);
+                        check("304 preservation server completes",
+                              system_wait4_retry((b32)child, address_of raw, 0,
+                                                 null) == child &&
+                                  wait_status_code(raw) == 0);
+                }
         }
 }
 
@@ -100092,6 +100802,79 @@ static fn machine_auto(void)
                           string_equals(answer.zone, "Asia/Tokyo") &&
                           !locale_auto_from_trace((p8 address_to)none,
                                                   sizeof(none) - 1, address_of answer));
+        }
+        //      The question runs in a confined child (locale_auto_ask_apart),
+        //      and what it says back is a status and two words that root
+        //      believes only as the zone table spells them.
+        {
+                static const struct
+                {
+                        b64 status;
+                        char zone[64];
+                        char mode[32];
+                        b64 believed;
+                        char want_zone[40];
+                        char want_mode[24];
+                } said[] = {
+                        {0, "Europe/Stockholm", "auto cloudflare", 0,
+                         "Europe/Stockholm", "auto cloudflare"},
+                        {0, "Pacific/Auckland", "auto country NZ", 0,
+                         "Pacific/Auckland", "auto country NZ"},
+                        //      the code is what decides, not the zone beside it
+                        {0, "Europe/Stockholm", "auto country JP", 0,
+                         "Asia/Tokyo", "auto country JP"},
+                        //      only the table's own spelling of a zone
+                        {0, "Asia/Calcutta", "auto cloudflare", HTTP_MALFORMED, "", ""},
+                        {0, "europe/stockholm", "auto cloudflare", HTTP_MALFORMED, "", ""},
+                        {0, "Mars/Olympus", "auto cloudflare", HTTP_MALFORMED, "", ""},
+                        {0, "Europe/Stockholm\x1b]0;x\x07", "auto cloudflare",
+                         HTTP_MALFORMED, "", ""},
+                        {0, "Europe/Stockholm", "auto country XX", HTTP_MALFORMED, "", ""},
+                        {0, "Europe/Stockholm", "auto country SEX", HTTP_MALFORMED, "", ""},
+                        {0, "Europe/Stockholm", "auto manual", HTTP_MALFORMED, "", ""},
+                        {0, "Europe/Stockholm", "", HTTP_MALFORMED, "", ""},
+                        //      a status http_run can return is passed on; any
+                        //      other is a child that cannot be believed
+                        {HTTP_NO_HOST, "", "", HTTP_NO_HOST, "", ""},
+                        {HTTP_MISMATCH, "Europe/Stockholm", "auto cloudflare",
+                         HTTP_MISMATCH, "", ""},
+                        {-6, "", "", HTTP_APART, "", ""},
+                        {1, "Europe/Stockholm", "auto cloudflare", HTTP_APART, "", ""},
+                        {-1000, "", "", HTTP_APART, "", ""},
+                };
+                bool all = true;
+
+                for (positive at = 0; at < array_count(said); at++)
+                {
+                        locale_auto_said one;
+                        bipolar believed;
+
+                        memory_zero(address_of one, sizeof one);
+                        one.status = said[at].status;
+                        memory_copy(one.answer.zone, said[at].zone,
+                                    sizeof(one.answer.zone));
+                        memory_copy(one.answer.mode, said[at].mode,
+                                    sizeof(one.answer.mode));
+                        believed = locale_auto_believe(address_of one,
+                                                       address_of answer);
+                        if (believed != said[at].believed ||
+                            !string_equals(answer.zone, said[at].want_zone) ||
+                            !string_equals(answer.mode, said[at].want_mode))
+                                all = false;
+                }
+                check("a confined zone question is believed only as the table spells it",
+                      all);
+        }
+        {
+                locale_auto_said one;
+
+                //      Every byte set and no terminator anywhere.
+                memory_fill(address_of one, 'A', sizeof one);
+                one.status = 0;
+                check("and an answer with no terminator is refused, not read past",
+                      locale_auto_believe(address_of one, address_of answer) ==
+                              HTTP_MALFORMED &&
+                          !answer.zone[0] && !answer.mode[0]);
         }
 }
 
