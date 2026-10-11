@@ -53945,6 +53945,32 @@ static fn surfaces(void)
                 sigaction(SIGALRM, &previous, 0);
         }
 
+        //      And a signal does not end the create's wait for its answer: the
+        //      receive is retried, so it comes back with the message.
+        {
+                signal_action wanted = {.handler = surface_interrupt}, previous;
+                p64 timer[4] = {0, 20000, 0, 20000}, nap[2] = {0, 150000000};
+                bipolar child;
+
+                sigaction(SIGALRM, &wanted, &previous);
+                child = system_fork();
+                if (child == 0)
+                {
+                        system_call_2(syscall(nanosleep), (positive)nap, 0);
+                        surface_send(pair[1], &wake, -1);
+                        system_call_1(syscall(exit_group), 0);
+                }
+                system_call_3(syscall(setitimer), 0, (positive)timer, 0);
+                memory_fill(&taken, 0, sizeof(taken));
+                got = surface_receive(pair[0], &taken, 0);
+                check("a signal in a blocking receive does not end it",
+                      got == (long)sizeof(taken) && taken.kind == SURFACE_WAKE);
+                memory_fill(timer, 0, sizeof(timer));
+                system_call_3(syscall(setitimer), 0, (positive)timer, 0);
+                sigaction(SIGALRM, &previous, 0);
+                system_call_4(syscall(wait4), (positive)child, 0, 0, 0);
+        }
+
         //      The far end closing is the one thing that is -1, whichever way the sleep goes.
         socket_close(pair[1]);
         check("a closed connection ends the sleep with -1", surface_wait(&page, -1, -1) == -1);

@@ -923,6 +923,7 @@ static long surface_send(long handle, struct surface_message *message, int file)
         struct surface_iovec part = {message, sizeof(*message)};
         struct surface_rights rights = {16 + sizeof(int), 1, 1, file, 0};
         struct surface_msghdr header = {0, 0, &part, 1, 0, 0, 0};
+        long sent;
 
         if (file >= 0)
         {
@@ -930,8 +931,13 @@ static long surface_send(long handle, struct surface_message *message, int file)
                 header.control_length = sizeof(rights);
         }
 
-        return window_call(WINDOW_SYS_SENDMSG, handle, (long)&header,
-                           SURFACE_MSG_NOSIGNAL, 0, 0, 0);
+        // A signal in a call that had to wait is not the call failing.
+        do
+                sent = window_call(WINDOW_SYS_SENDMSG, handle, (long)&header,
+                                   SURFACE_MSG_NOSIGNAL, 0, 0, 0);
+        while (sent == -4);
+
+        return sent;
 }
 
 static long surface_receive(long handle, struct surface_message *message, int flags)
@@ -939,7 +945,13 @@ static long surface_receive(long handle, struct surface_message *message, int fl
         struct surface_iovec part = {message, sizeof(*message)};
         struct surface_msghdr header = {0, 0, &part, 1, 0, 0, 0};
 
-        return window_call(WINDOW_SYS_RECVMSG, handle, (long)&header, flags, 0, 0, 0);
+        long got;
+
+        do
+                got = window_call(WINDOW_SYS_RECVMSG, handle, (long)&header, flags, 0, 0, 0);
+        while (got == -4);
+
+        return got;
 }
 
 static struct surface *surface_open(unsigned int width, unsigned int height,
