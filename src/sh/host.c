@@ -6502,6 +6502,9 @@ typedef struct
         p8 rsn[48];
         p8 rsn_length;
         wifi_seen seen;
+        //      The access point's Transition Disable bits from an
+        //      authenticated message 3 (WIFI_TRANSITION_*).
+        p8 transition_disable;
 } wifi_link;
 
 static COLD fn wifi_link_close(wifi_link address_to link)
@@ -6588,14 +6591,20 @@ static COLD bipolar wifi_eapol_reply(wifi_link address_to link, p8 address_to kc
 }
 
 /* What key data holds that a station takes: the first GTK and its id, the
-   first IGTK (key id 4 or 5, its packet number then the key), and the
-   access point's own RSN element and RSN extension element, whole. */
+   first IGTK (key id 4 or 5, its packet number then the key), the access
+   point's own RSN element and RSN extension element, whole, and the
+   Transition Disable bitmap (IEEE 802.11-2020 12.7.2: KDE 00-0F-AC:32;
+   WPA3 specification 13.5), whose first bit says this network is never to
+   be joined with WPA2 again. */
+#define WIFI_TRANSITION_WPA3_PERSONAL 1
+
 typedef struct
 {
         p8 gtk[16];
         p8 gtk_id;
         p8 igtk[6 + 16];
         p8 igtk_id;
+        p8 transition_disable;
         p8 rsn[WIFI_ELEMENT_ROOM];
         p8 rsnx[WIFI_ELEMENT_ROOM];
         p16 rsn_length;
@@ -6623,6 +6632,7 @@ static COLD bipolar wifi_gtk_take(p8 address_to kek, p8 address_to data, positiv
                 p8 kind = byte_reader_u8(&reader);
                 byte_reader element = byte_reader_vector8(&reader);
                 positive span = byte_reader_left(&element);
+                p32 type;
 
                 if (!byte_reader_ok(&reader))
                         break;
@@ -6642,9 +6652,12 @@ static COLD bipolar wifi_gtk_take(p8 address_to kek, p8 address_to data, positiv
                 }
                 if (kind != 0xdd || span < 4)
                         continue;
+                //      The OUI and data type, read once: each test below is of
+                //      the same four bytes.
+                type = byte_reader_u32(&element);
                 //      The GTK KDE: 00-0F-AC:1, the key id, a reserved
                 //      byte, then a CCMP key of sixteen bytes.
-                if (span == 4 + 2 + 16 && byte_reader_u32(&element) == 0x000fac01 && !found)
+                if (span == 4 + 2 + 16 && type == 0x000fac01 && !found)
                 {
                         p8 key_id = byte_reader_u8(&element);
 
@@ -6653,11 +6666,13 @@ static COLD bipolar wifi_gtk_take(p8 address_to kek, p8 address_to data, positiv
                         memory_copy(what->gtk, byte_reader_take(&element, 16), 16);
                         found = 1;
                 }
+                //      Transition Disable: 00-0F-AC:32 and its bitmap.
+                else if (span >= 4 + 1 && type == 0x000fac20)
+                        what->transition_disable |= byte_reader_u8(&element);
                 //      The IGTK KDE: 00-0F-AC:9, the key id (4 or 5, two
                 //      bytes little endian), the six byte packet number the
                 //      key starts at, and a BIP-CMAC-128 key of sixteen bytes.
-                else if (span == 4 + 2 + 6 + 16 && byte_reader_u32(&element) == 0x000fac09 &&
-                         !what->igtk_id)
+                else if (span == 4 + 2 + 6 + 16 && type == 0x000fac09 && !what->igtk_id)
                 {
                         p16 key_id = byte_reader_u16le(&element);
 
@@ -6783,6 +6798,9 @@ static COLD bipolar wifi_eapol_step(wifi_link address_to link, p8 address_to fra
                 crypto_forget(address_of what, sizeof(what));
                 return WIFI_REFUSE_ELEMENTS;
         }
+        //      Only from a message 3 whose MIC checked: what the access point
+        //      said under the key, not what anyone in range may say.
+        link->transition_disable |= what.transition_disable;
         /* A failed group-key install is retried under the same replay
            counter. Do not acknowledge or consume it until the driver has
            the key. The joining handshake fails as a whole on an error, so
@@ -8891,9 +8909,13 @@ static COLD bipolar nl80211_join_once(p8 address_to ssid, positive ssid_length,
         {
                 //      What this join has taught the network: an access point
                 //      by its name protects its management frames, and WPA3
-                //      is what it is joined with.
+                //      is what it is joined with -- or what the access point
+                //      said, under the key, to keep to (Transition Disable).
                 p8 learned = (link->pmf && caps.pmf ? WIFI_RULE_PMF : 0) |
-                             (link->akm == 8 ? WIFI_RULE_SAE : 0);
+                             (link->akm == 8 ||
+                                      (link->transition_disable & WIFI_TRANSITION_WPA3_PERSONAL)
+                                  ? WIFI_RULE_SAE
+                                  : 0);
 
                 if (learned & ~rules)
                         radio_rules_put(ssid, ssid_length, learned, learned);

@@ -428,6 +428,39 @@ never a pass.
   SAE-PK, the extended-key suites (AKM 24 and 25), FT. A network that offers
   hash-to-element is never hunted for: the extension element of message 3 is
   held to what was seen, so stripping it from the beacon is caught.
+- **WIFI-D7, the station runs apart (`radio_join_apart`, src/sh/host.c):**
+  the scan, the choice, WPA3's exchange, the association, the four-way
+  handshake and, for as long as the link stands, the keeper's rekeys run in a
+  station process that is nobody with CAP_NET_ADMIN and CAP_NET_RAW and no
+  other capability (the rest dropped from its bounding set, nothing ambient),
+  not dumpable, killed with its broker, with no new privileges and under a
+  seccomp filter (`radio_filter_build`): netlink sockets of the route and
+  generic families, the EAPOL packet socket (datagrams of type 0x888e) and
+  nothing else, a netlink group joined or left and extended acks as its only
+  options, never executable memory, no file, no exec. The scan elements, SAE
+  commits and EAPOL-Key frames any station in range sends are read there.
+  What it needs of the machine's state (what a saved network taught, the
+  access points to try last, a scan's age, the WPA3 budget) it asks of its
+  broker as fixed-size questions by number; the broker is root, detached,
+  holds the keeper's lock, does the one thing each question names to the one
+  file it names, logs only its own literal for a numbered line, and believes
+  only a status a join can return. Every password the joining process holds
+  is wiped from the broker's copy at once and from the station's once its
+  join is done. **It fails closed:** a kernel that will not take the filter
+  joins nothing (`WIFI_REFUSE_CONFINE`, said by `moonwater wifi`); a station
+  that ends without a status is `WIFI_REFUSE_APART`.
+- **The Waterlink listener's mDNS reader runs apart (`link_mdns_read_apart`,
+  src/waterlink/nearby.c):** every host on the link may send the listener
+  mDNS, and reading it walks names, compression pointers and records of the
+  sender's lengths. The listener is root and keeps the link's key, so the
+  reading (`waterlink_mdns_read`) is done by a child that is nobody, not
+  dumpable, dies with the listener, holds only its end of a socket of whole
+  messages and stdio, and is killed at any call but reading a packet from
+  that socket and sending the reading back. The listener believes the
+  fixed-size reading only with every count and length inside its array; a
+  reader that dies or answers what cannot be believed is ended and started
+  again. **It fails closed:** a reader that cannot be confined reads nothing,
+  and the listener hears no machine nearby (the link without discovery).
 
 ## Evidence
 
@@ -646,39 +679,6 @@ architecture gate above. CI is parked (`workflow_dispatch` only).
 
 ## Open
 
-- **WIFI-D7, the station runs apart (`radio_join_apart`, src/sh/host.c):**
-  the scan, the choice, WPA3's exchange, the association, the four-way
-  handshake and, for as long as the link stands, the keeper's rekeys run in a
-  station process that is nobody with CAP_NET_ADMIN and CAP_NET_RAW and no
-  other capability (the rest dropped from its bounding set, nothing ambient),
-  not dumpable, killed with its broker, with no new privileges and under a
-  seccomp filter (`radio_filter_build`): netlink sockets of the route and
-  generic families, the EAPOL packet socket (datagrams of type 0x888e) and
-  nothing else, a netlink group joined or left and extended acks as its only
-  options, never executable memory, no file, no exec. The scan elements, SAE
-  commits and EAPOL-Key frames any station in range sends are read there.
-  What it needs of the machine's state (what a saved network taught, the
-  access points to try last, a scan's age, the WPA3 budget) it asks of its
-  broker as fixed-size questions by number; the broker is root, detached,
-  holds the keeper's lock, does the one thing each question names to the one
-  file it names, logs only its own literal for a numbered line, and believes
-  only a status a join can return. Every password the joining process holds
-  is wiped from the broker's copy at once and from the station's once its
-  join is done. **It fails closed:** a kernel that will not take the filter
-  joins nothing (`WIFI_REFUSE_CONFINE`, said by `moonwater wifi`); a station
-  that ends without a status is `WIFI_REFUSE_APART`.
-- **The Waterlink listener's mDNS reader runs apart (`link_mdns_read_apart`,
-  src/waterlink/nearby.c):** every host on the link may send the listener
-  mDNS, and reading it walks names, compression pointers and records of the
-  sender's lengths. The listener is root and keeps the link's key, so the
-  reading (`waterlink_mdns_read`) is done by a child that is nobody, not
-  dumpable, dies with the listener, holds only its end of a socket of whole
-  messages and stdio, and is killed at any call but reading a packet from
-  that socket and sending the reading back. The listener believes the
-  fixed-size reading only with every count and length inside its array; a
-  reader that dies or answers what cannot be believed is ended and started
-  again. **It fails closed:** a reader that cannot be confined reads nothing,
-  and the listener hears no machine nearby (the link without discovery).
 - **Closed, unmerged work:** wget and curl parity of defaults (#22). Its
   branch is gone; the pull request keeps its head (`git fetch origin
   pull/22/head`). The clock floor (#17), NTS (#18) and DNS over TLS (#20) are
@@ -693,8 +693,9 @@ architecture gate above. CI is parked (`workflow_dispatch` only).
   not built. The first join of a network is trust on first use (WIFI-D4), and
   a WPA2/WPA3 network never joined with WPA3 can be pushed to WPA2 at the
   default tier by an attacker who stops the exchange (a refusal or
-  deauthentication forged before the confirm); the access point's Transition
-  Disable indication is not read. EAPOL message 1 is unauthenticated by
+  deauthentication forged before the confirm), unless its access point says
+  Transition Disable for WPA3-Personal in an authenticated message 3, which
+  is then kept as WPA3 joined with (`/root/wifi.rules`). EAPOL message 1 is unauthenticated by
   design; a roam the driver made on its own has no elements to hold the next
   message 3 to. SAE's commits are unauthenticated before the confirm, so a
   forger in range can make an exchange fail (the budget bounds what that
@@ -709,7 +710,7 @@ architecture gate above. CI is parked (`workflow_dispatch` only).
   is; the NTS-KE certificate of the first exchange of a boot is judged as of the
   floor, so a stolen key whose certificate expired after the floor can answer
   it; NTS's and SNTP's own names, and a caIssuers location, are asked in plain.
-- **No change planned:** HEAD is not exercised; a response cut inside its status
+- **No change planned:** a response cut inside its status
   line or a header fails in both tiers (GNU wget and curl disagree with each
   other there); an endless close-delimited body at the default tier can fill the
   disk; the radio lock is held across a whole join; the elements a scan reads are

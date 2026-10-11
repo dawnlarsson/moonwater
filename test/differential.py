@@ -74562,6 +74562,9 @@ static positive fz_igtk_kde(p8 *plain, p8 idx, const p8 *key)
    element, then the GTK KDE for message 3; the GTK KDE alone for group
    message 1; an IGTK KDE after it where the network protects its management
    frames; padded and wrapped under the KEK. */
+//      Transition Disable bits for the access point to send, or 0.
+static p8 fz_ap_transition;
+
 static positive fz_key_data(p8 *out, const p8 *kek, bool rsn)
 {
         p8 plain[160];
@@ -74581,6 +74584,12 @@ static positive fz_key_data(p8 *out, const p8 *kek, bool rsn)
         n += 16;
         if (fz_mode)
                 n += fz_igtk_kde(plain + n, fz_ap_igtk_id, fz_ap_igtk);
+        if (fz_ap_transition)
+        {
+                plain[n++] = 0xdd, plain[n++] = 5;
+                plain[n++] = 0, plain[n++] = 0x0f, plain[n++] = 0xac, plain[n++] = 0x20;
+                plain[n++] = fz_ap_transition;
+        }
         if (n % 8)
         {
                 plain[n++] = 0xdd;
@@ -75455,6 +75464,33 @@ int main(void)
                 state_check(state_gtk(true) == 1 && fz_authorized,
                             "and the access point's own, at the same counter, is", mode, 0, 1);
                 memset(&fz_link.seen, 0, sizeof fz_link.seen);
+        }
+
+        /* Transition Disable is taken from an authenticated message 3 and
+           group message, and from nothing a key does not check. */
+        for (int pairwise = 0; pairwise < 2; pairwise++) {
+                (void)LLVMFuzzerTestOneInput(NULL, 0);
+                memset(fz_ptk, 0x42, sizeof fz_ptk);
+                memset(fz_anonce, 0x24, sizeof fz_anonce);
+                memcpy(fz_link.anonce, fz_anonce, 32);
+                memcpy(fz_link.pending, fz_ptk, 64);
+                memcpy(fz_link.ptk, fz_ptk, 64);
+                fz_link.pending_set = pairwise;
+                fz_link.installed = !pairwise;
+                fz_made_add(4, fz_ptk + 32);
+                fz_made_add(fz_ap_gtk_idx, fz_ap_gtk);
+                fz_link.transition_disable = 0;
+                fz_ap_transition = WIFI_TRANSITION_WPA3_PERSONAL;
+                memset(fz_ptk, 0x43, sizeof fz_ptk);
+                state_check(state_gtk(pairwise) <= 0 && !fz_link.transition_disable,
+                            "Transition Disable under a key the station does not hold is not taken",
+                            0, 0, pairwise);
+                memset(fz_ptk, 0x42, sizeof fz_ptk);
+                state_check(state_gtk(pairwise) == (pairwise ? 1 : 2) &&
+                            fz_link.transition_disable == WIFI_TRANSITION_WPA3_PERSONAL,
+                            "Transition Disable for WPA3-Personal in an authenticated message is taken",
+                            0, 0, pairwise);
+                fz_ap_transition = 0;
         }
 
         /* And to the extension element: hash-to-element's, left out of
