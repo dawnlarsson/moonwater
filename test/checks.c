@@ -99117,6 +99117,64 @@ static fn check_keys(void)
         to_shell_length = 0;
 }
 
+/*
+        The pointer, when a program has asked for it: where it is in cells
+        from where it is in pixels, the button it pressed and let go of, and
+        the wheel as the buttons after the last. Pixels are the surface's, so
+        the cell is whole cells of this font's size.
+*/
+static fn check_pointer(void)
+{
+        unsigned int column = 3, row = 4;
+        int x = (int)((column - 1) * terminal.cell_w + terminal.cell_w / 2);
+        int y = (int)((row - 1) * terminal.cell_h + terminal.cell_h / 2);
+        struct surface_event motion = {SURFACE_EVENT_POINTER_MOTION, 0, 0, x, y};
+        struct surface_event press = {SURFACE_EVENT_POINTER_BUTTON, SURFACE_KEY_DOWN, 0, 0x110, 0};
+        struct surface_event release = {SURFACE_EVENT_POINTER_BUTTON, 0, 0, 0x110, 0};
+        struct surface_event right = {SURFACE_EVENT_POINTER_BUTTON, SURFACE_KEY_DOWN, 0, 0x111, 0};
+        struct surface_event wheel = {SURFACE_EVENT_POINTER_WHEEL, 0, 0, 120, 0};
+        b32 dirty = false, closing = false;
+        unsigned int resize[3] = {0, 0, 0};
+        char expect[16];
+
+        mouse_mode = 1000;
+        mouse_sgr = false;
+        terminal.modifiers = 0;
+        to_shell_length = 0;
+        terminal_receive(-1, &motion, &dirty, &closing, resize);
+        check("pointer: a motion is nothing to a program that asked for clicks", !to_shell_length);
+
+        terminal_receive(-1, &press, &dirty, &closing, resize);
+        expect[0] = 27, expect[1] = '[', expect[2] = 'M', expect[3] = 32, expect[4] = (char)(32 + column),
+        expect[5] = (char)(32 + row);
+        check("pointer: a press is the button and the cell", to_shell_length == 6 && !memory_compare(to_shell, expect, 6));
+
+        to_shell_length = 0;
+        terminal_receive(-1, &release, &dirty, &closing, resize);
+        expect[3] = 32 + 3;
+        check("pointer: a release is button 3", to_shell_length == 6 && !memory_compare(to_shell, expect, 6));
+
+        to_shell_length = 0;
+        terminal_receive(-1, &wheel, &dirty, &closing, resize);
+        expect[3] = 32 + 64;
+        check("pointer: the wheel is button 64", to_shell_length == 6 && !memory_compare(to_shell, expect, 6));
+
+        mouse_sgr = true;
+        to_shell_length = 0;
+        terminal_receive(-1, &press, &dirty, &closing, resize);
+        check("pointer: SGR press", to_shell_length == 9 && !memory_compare(to_shell, "\x1b[<0;3;4M", 9));
+        to_shell_length = 0;
+        terminal_receive(-1, &right, &dirty, &closing, resize);
+        check("pointer: the right button is 2", to_shell_length == 9 && !memory_compare(to_shell, "\x1b[<2;3;4M", 9));
+        to_shell_length = 0;
+        terminal_receive(-1, &release, &dirty, &closing, resize);
+        check("pointer: SGR release", to_shell_length == 9 && !memory_compare(to_shell, "\x1b[<0;3;4m", 9));
+
+        mouse_mode = 0;
+        mouse_sgr = false;
+        to_shell_length = 0;
+}
+
 b32 main()
 {
         string_address paths[1];
@@ -99151,6 +99209,7 @@ b32 main()
                         refused++;
 
         check_keys();
+        check_pointer();
         check("frames: a buffer is refused only while the compositor may still be reading it", !refused);
         check("frames: some were drawn", compared > 1000);
         check("frames: the screen and the buffer are always the full draw", !wrong);

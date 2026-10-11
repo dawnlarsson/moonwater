@@ -18669,22 +18669,36 @@ for candidate in /usr/share/fonts/TTF/Hack-Regular.ttf /usr/share/fonts/TTF/Deja
                 break
         fi
 done
+#       btop, if the host has it, goes on the stick with the loader and the
+#       libraries it needs, and is started through the loader: nothing of
+#       what it is linked to is in the image.
+m5_btop=
+if [ -x /usr/bin/btop ] && [ -f /usr/lib/libstdc++.so.6 ] && [ -f /usr/lib/libgcc_s.so.1 ] &&
+   [ -f /usr/lib/libm.so.6 ] && [ -f /usr/lib/libc.so.6 ] && [ -f /usr/lib64/ld-linux-x86-64.so.2 ]; then
+        m5_btop=1
+fi
 if [ -n "${CANVAS_ONLY:-}" ] && [ "$CANVAS_ONLY" != m5 ]; then
         :
 elif [ -z "$m5_font" ]; then
         note "the terminal on the compositor: NOT RUN, no monospace font in the usual places"
 else
 [ -f "$m5_bold" ] || m5_bold=$m5_font
-PYTHONPATH=$work python3 - "$image" "$m5_font" "$m5_bold" > "$work/m5-answers" 2>"$work/m5-why" <<'PY'
+PYTHONPATH=$work python3 - "$image" "$m5_font" "$m5_bold" "$m5_btop" > "$work/m5-answers" 2>"$work/m5-why" <<'PY'
 import os, re, shutil, sys, time
 from qmp_guest import *
 
-image, font, bold = sys.argv[1:4]
+image, font, bold, btop = sys.argv[1:5]
 work = os.environ["MOONWATER_CANVAS_WORK"] + "/m5"
 stick = work + "/stick"
 os.makedirs(stick, exist_ok=True)
 shutil.copy(font, stick + "/font.ttf")
 shutil.copy(bold, stick + "/bold.ttf")
+if btop:
+    os.makedirs(stick + "/lib", exist_ok=True)
+    shutil.copy("/usr/bin/btop", stick + "/btop")
+    for name in ("libstdc++.so.6", "libgcc_s.so.1", "libm.so.6", "libc.so.6"):
+        shutil.copy("/usr/lib/" + name, stick + "/lib/" + name)
+    shutil.copy("/usr/lib64/ld-linux-x86-64.so.2", stick + "/lib/ld.so")
 out = []
 
 #   The compositor, one terminal, and a count of the terminal's wakeups over
@@ -18705,7 +18719,7 @@ b=$(sed -n 's/^voluntary_ctxt_switches:[^0-9]*//p' /proc/$t/status)
 echo "m5 idle wakeups: $((b - a))"
 echo "m5 memory: $(grep -E '^(VmSize|VmRSS|RssAnon|RssFile|RssShmem)' /proc/$t/status | tr -s ' \t\n' ' ')"
 echo m5-idle-done
-sleep 110
+sleep 150
 kill $c
 wait $c
 echo m5-done
@@ -18825,9 +18839,13 @@ out.append(("and its paper is black below it",
 click((left + right) // 2, (top + bottom) // 2)
 before = lit(at, left, top, left + 400, top + 16)
 type_text("echo m5-typed")
-time.sleep(0.3)
-w, h, at = picture("m5-typed")
-after = lit(at, left, top, left + 400, top + 16)
+# A slow guest is given a few looks: what is asked is that it gets there, and it is the
+# frames of the compositor that say how soon.
+for _ in range(4):
+    w, h, at = picture("m5-typed")
+    after = lit(at, left, top, left + 400, top + 16)
+    if after > before + 40:
+        break
 out.append(("M5.3 a typed key's echo is on the screen",
             "yes" if after > before + 40 else "%d then %d lit pixels" % (before, after), "yes"))
 type_shell("\n")
@@ -18908,7 +18926,43 @@ bar = sum(1 for y in range(top, bottom) if again(right - 3, y) == (0x4c, 0x67, 0
 out.append(("and the bar's thumb is in the gutter",
             "yes" if bar > 8 else "%d thumb pixels" % bar, "yes"))
 
-done = wait_for(b"m5-done", 130)
+# And the bar is something to take hold of: the thumb dragged to the top is the oldest of it.
+thumb = [y for y in range(top, bottom) if again(right - 8, y) == (0x4c, 0x67, 0x85)]
+if thumb:
+    # Eight in: the six pixels at the edge of a frame are the edge's, to resize by.
+    drag(right - 8, (thumb[0] + thumb[-1]) // 2, right - 8, top + 2)
+    time.sleep(0.5)
+w, h, dragged = picture("m5-bar")
+moved_to = [y for y in range(top, bottom) if dragged(right - 8, y) == (0x4c, 0x67, 0x85)]
+out.append(("M5 a drag on the bar's thumb moves the view to where the thumb is",
+            "yes" if thumb and moved_to and moved_to[0] <= top + 12 and
+            sum(1 for y in range(top, bottom, 3) for x in range(left, left + 60, 2) if again(x, y) != dragged(x, y)) > 150
+            else "thumb %s then %s" % (thumb[:1], moved_to[:1]), "yes"))
+
+# btop, the redraw that fills a window as large as it is made: at 60 columns it says the
+# terminal is too small, and at once on being made wider it is every panel of it.
+if btop:
+    w, h, at = picture("m5-btop-small")
+    box = window(w, h, at) or (left, top, right, bottom)
+    left, top, right, bottom = box
+    small = lit(at, left, top, right, bottom)
+    type_shell("/mnt/lib/ld.so --library-path /mnt/lib /mnt/btop --force-utf\n")
+    time.sleep(5)
+    w, h, at = picture("m5-btop-narrow")
+    narrow = lit(at, left, top, right, bottom)
+    drag(right - 2, (top + bottom) // 2, right + 398, (top + bottom) // 2)
+    time.sleep(3)
+    w, h, at = picture("m5-btop-wide")
+    wide = window(w, h, at)
+    full = lit(at, wide[0], wide[1], wide[2], wide[3]) if wide else 0
+    strip = lit(at, wide[2] - 120, wide[1], wide[2] - 14, wide[3]) if wide else 0
+    out.append(("M5.6 btop redraws at the new size at once: wider by the drag, every panel of it drawn",
+                "yes" if wide and wide[2] > right + 250 and full > 6 * narrow and strip > 150
+                else "%s lit pixels at %s, %d after, %d in the new strip" % (narrow, (left, right), full, strip), "yes"))
+    type_text("q")
+    time.sleep(1)
+
+done = wait_for(b"m5-done", 170)
 out.append(("M5 the compositor ends and the kernel desktop is back", "yes" if done else "no", "yes"))
 
 try:
