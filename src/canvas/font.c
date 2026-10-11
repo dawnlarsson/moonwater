@@ -91,7 +91,7 @@
         nearest 1024th, so a long edge's rounding does not lean one way.
         Measured against an exact rendering of every glyph of Inter, Inter
         Bold, IBM Plex Mono and Hack at 8, 16, 48 and 200 px, no byte is
-        more than 1.25 levels from 255 times the true area (rounding to the
+        more than 0.97 levels from 255 times the true area (rounding to the
         byte itself is half a level of that), and none is more than 1 from
         the exact area's own nearest byte.
 
@@ -134,7 +134,7 @@
                 A glyph's advance, and the adjustment between two glyphs.
 
         fn font_start(font_engine *engine, p8 *atlas, p32 width, p32 height)
-                Readies an engine (749 KB; one per thread) with the
+                Readies an engine (766 KB; one per thread) with the
                 caller's width by height bytes for its atlas, which bounds
                 the largest glyph it will draw by area. The engine's memory
                 must be zero (a static, or a new mapping), or an engine that
@@ -1745,6 +1745,10 @@ static bool font_tracking(font_engine address_to e)
         b32 box[64][4];
         p32 first = 0, alike[2] = {0, 0};
 
+        //      One contour has none to overlap, and its winding is looked
+        //      at only for the rows two of them are drawn again.
+        if (e->contour_count < 2)
+                return false;
         for (p32 c = 0; c < e->contour_count; first = e->contour[c++].last + 1u)
         {
                 b64 area = 0;
