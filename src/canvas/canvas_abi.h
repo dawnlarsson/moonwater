@@ -275,6 +275,14 @@ _Static_assert(sizeof(struct canvas_control) == 232, "spark canvas control ABI")
 #define SURFACE_ACTIVATE 5u
 #define SURFACE_GRANT 6u
 #define SURFACE_GRANTED 7u
+// RESIZE is a CREATE for the surface the connection already has: a new page
+// at the size the request says, the descriptor with it. The compositor puts
+// it where the old one was and answers RESIZED; the old page is the program's
+// to unmap once it has. A surface is asked for a size by the CONFIGURE event
+// (a: width, b: height, serial: the ask) when the hand drags an edge of it,
+// and answers by writing the serial in acked_serial and committing.
+#define SURFACE_RESIZE 8u
+#define SURFACE_RESIZED 9u
 
 // struct surface_message GRANT's flags
 #define SURFACE_GRANT_REPLACE 1u // the holder of the role may be replaced by it

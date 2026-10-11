@@ -799,6 +799,19 @@ struct compositor_client
         unsigned int active; // it holds what its role gives: composed, and heard
         unsigned int pid, uid; // who is on the other end, as the kernel says
         char title[SURFACE_LISTING_TITLE]; // what the window list was last told
+
+        // A resize: the page it had until the new one has committed, so what is on
+        // the screen is still the picture it was, and the CONFIGURE it was last sent.
+        struct
+        {
+                struct surface *page;
+                unsigned long bytes;
+                unsigned int width, height, slot;
+        } old;
+        unsigned int serial, asked_w, asked_h, outstanding;
+        unsigned int want_w, want_h; // the size the hand is asking for
+        unsigned int edges;          // the edges it holds, until the answer to the last ask
+        int right, bottom;           // where the edges it does not hold are
 };
 
 // A role a program may claim, and the process it was given to. The pidfd is
@@ -843,8 +856,10 @@ static struct
         struct compositor_client clients[COMPOSITOR_CLIENTS];
         struct compositor_client *stack[COMPOSITOR_CLIENTS]; // bottom first, by layer
         unsigned int stacked;
-        struct compositor_client *focus, *hover, *grab, *drag;
+        struct compositor_client *focus, *hover, *grab, *drag, *resize;
         int drag_x, drag_y;
+        // The surface being resized, how large it was and where the hand took hold.
+        int resize_w, resize_h, press_x, press_y;
         int pointer_x, pointer_y;
         unsigned int modifiers;
         unsigned int next_id, placed, connections;
@@ -949,14 +964,19 @@ static int compositor_title_height(const struct compositor_client *client)
 static void compositor_frame_of(const struct compositor_client *client,
                                 struct compositor_frame *frame)
 {
-        *frame = (struct compositor_frame){client->x, client->y, (int)client->width,
-                                           (int)client->height, compositor.scale,
-                                           compositor_framed(client), client == compositor.focus, 1,
+        // Until a new page has committed, the picture is the one it replaced.
+        struct surface *page = client->old.page ? client->old.page : client->page;
+        unsigned int width = client->old.page ? client->old.width : client->width;
+        unsigned int height = client->old.page ? client->old.height : client->height;
+        unsigned int slot = client->old.page ? client->old.slot : client->slot;
+
+        *frame = (struct compositor_frame){client->x, client->y, (int)width, (int)height,
+                                           compositor.scale, compositor_framed(client),
+                                           client == compositor.focus, 1,
                                            // Not surface_buffer: the page is the program's, and
                                            // its buffer_offset is whatever it last wrote.
-                                           surface_slot(client->page, client->slot, client->width,
-                                                        client->height),
-                                           client->width, 0, null, 0};
+                                           surface_slot(page, slot, width, height),
+                                           width, 0, null, 0};
 }
 
 // The windows a panel lists, in the order they were made, and what shows of each.
@@ -1761,6 +1781,10 @@ static void compositor_destroy(struct compositor_client *client)
                         compositor_list_changed();
 
                 compositor_call(syscall(munmap), (positive)client->page, client->bytes, 0, 0, 0, 0);
+                if (client->old.page)
+                        compositor_call(syscall(munmap), (positive)client->old.page, client->old.bytes, 0, 0, 0, 0);
+                if (compositor.resize == client)
+                        compositor.resize = null;
         }
 
         system_close(client->handle);
@@ -1768,10 +1792,10 @@ static void compositor_destroy(struct compositor_client *client)
         client->handle = -1;
 }
 
-static void compositor_reply(struct compositor_client *client, int status,
+static void compositor_reply(struct compositor_client *client, unsigned int kind, int status,
                              const struct surface_request *request)
 {
-        struct surface_message message = {SURFACE_CREATED, status, *request};
+        struct surface_message message = {kind, status, *request};
 
         surface_send(client->handle, &message, -1);
 }
@@ -1891,6 +1915,146 @@ static void compositor_required(unsigned int role, int *width, int *height)
 }
 
 /*
+        The page a create or a resize hands over, mapped: it is the program's
+        and so is the descriptor, so the size and the seals are looked at
+        before a byte of it is mapped.
+*/
+static int compositor_map(const struct surface_request *request, int file, struct surface **page,
+                          unsigned long *bytes)
+{
+        long size, seals, mapped;
+
+        *bytes = WINDOW_PIXELS + SURFACE_PAGE_ROUND((unsigned long)request->width * request->height * 4) *
+                                     request->buffer_slots;
+
+        size = compositor_call(syscall(lseek), (positive)file, 0, 2, 0, 0, 0);
+        seals = compositor_call(syscall(fcntl), (positive)file, COMPOSITOR_F_GET_SEALS, 0, 0, 0, 0);
+        if (size < (long)*bytes || seals < 0 || !(seals & COMPOSITOR_SEAL_SHRINK))
+                return -COMPOSITOR_EINVAL;
+
+        mapped = compositor_call(syscall(mmap), 0, *bytes, 3, 1, (positive)file, 0);
+        if (mapped < 0 && mapped > -4096)
+                return -COMPOSITOR_ENOSPC;
+
+        *page = (struct surface *)mapped;
+        return 0;
+}
+
+/*
+        Resizing: the hand takes hold of an edge, and the surface is asked for
+        the size it points at. Asked, because the page it draws in is the
+        surface's own and sealed at the size it was made at, so a new size is
+        a new page the surface makes and hands over (SURFACE_RESIZE), and
+        what size to make it is its to say: a terminal answers in whole
+        cells. One ask is out at a time; the surface answers it by writing the
+        serial into its page's acked_serial and committing, and the next ask
+        is the size the hand points at by then, so a fast drag is a few asks
+        and not one a motion. The edges the hand does not hold stay where they
+        were, whatever size comes back.
+*/
+#define COMPOSITOR_EDGE_LEFT 1u
+#define COMPOSITOR_EDGE_RIGHT 2u
+#define COMPOSITOR_EDGE_TOP 4u
+#define COMPOSITOR_EDGE_BOTTOM 8u
+#define COMPOSITOR_GRIP 6
+
+static void compositor_configure(struct compositor_client *client)
+{
+        struct surface *page = client->page;
+
+        if (client->outstanding || !client->want_w ||
+            (client->want_w == client->asked_w && client->want_h == client->asked_h))
+        {
+                // Let go and answered: the edges are the surface's own again.
+                if (compositor.resize != client && !client->outstanding)
+                        client->edges = 0;
+                return;
+        }
+
+        client->asked_w = client->want_w;
+        client->asked_h = client->want_h;
+        client->serial++;
+        client->outstanding = 1;
+        page->configure_serial = client->serial;
+        page->applied_width = client->asked_w;
+        page->applied_height = client->asked_h;
+        compositor_post(client, SURFACE_EVENT_CONFIGURE, 0, client->serial, (int)client->asked_w,
+                        (int)client->asked_h);
+}
+
+// Which edges of a framed surface that may be resized the point is within the grip of.
+static unsigned int compositor_edges(const struct compositor_client *client, int x, int y)
+{
+        struct compositor_frame frame;
+        unsigned int edges = 0;
+        int fx, fy, fw, fh, grip = COMPOSITOR_GRIP * compositor.scale;
+
+        if (!compositor_framed(client) || !(client->lock & SURFACE_LOCK_RESIZABLE) ||
+            client->old.page || client->outstanding)
+                return 0;
+
+        compositor_frame_of(client, &frame);
+        compositor_outline(&frame, &fx, &fy, &fw, &fh);
+
+        if (x < fx + grip)
+                edges |= COMPOSITOR_EDGE_LEFT;
+        else if (x >= fx + fw - grip)
+                edges |= COMPOSITOR_EDGE_RIGHT;
+
+        if (y < fy + grip)
+                edges |= COMPOSITOR_EDGE_TOP;
+        else if (y >= fy + fh - grip)
+                edges |= COMPOSITOR_EDGE_BOTTOM;
+
+        return edges;
+}
+
+static void compositor_resize_begin(struct compositor_client *client, unsigned int edges)
+{
+        compositor.resize = client;
+        compositor.resize_w = (int)client->width;
+        compositor.resize_h = (int)client->height;
+        compositor.press_x = compositor.pointer_x;
+        compositor.press_y = compositor.pointer_y;
+        client->edges = edges;
+        client->right = client->x + (int)client->width;
+        client->bottom = client->y + compositor_title_height(client) + (int)client->height;
+        client->want_w = client->asked_w = client->width;
+        client->want_h = client->asked_h = client->height;
+}
+
+static void compositor_resize_move(void)
+{
+        struct compositor_client *client = compositor.resize;
+        struct compositor_area work;
+        int dx = compositor.pointer_x - compositor.press_x;
+        int dy = compositor.pointer_y - compositor.press_y;
+        int w = compositor.resize_w, h = compositor.resize_h;
+        int border = COMPOSITOR_BORDER * compositor.scale;
+        int max_w, max_h;
+
+        compositor_work(compositor.width, compositor.height, compositor.scale, compositor.bottom, &work);
+        max_w = work.x2 - work.x1 - border * 2;
+        max_h = work.y2 - work.y1 - compositor_title_height(client) - border * 3;
+
+        if (client->edges & COMPOSITOR_EDGE_LEFT)
+                w -= dx;
+        else if (client->edges & COMPOSITOR_EDGE_RIGHT)
+                w += dx;
+
+        if (client->edges & COMPOSITOR_EDGE_TOP)
+                h -= dy;
+        else if (client->edges & COMPOSITOR_EDGE_BOTTOM)
+                h += dy;
+
+        w = w < WINDOW_MIN_WIDTH ? WINDOW_MIN_WIDTH : w > max_w ? max_w : w;
+        h = h < WINDOW_MIN_HEIGHT ? WINDOW_MIN_HEIGHT : h > max_h ? max_h : h;
+        client->want_w = (unsigned int)w;
+        client->want_h = (unsigned int)h;
+        compositor_configure(client);
+}
+
+/*
         A create: the request checked, then the page, then what the role
         says. An application window is anybody's. Every other role needs a
         grant for the process (canvas spec 02 section 4), and then it is
@@ -1902,11 +2066,10 @@ static int compositor_create(struct compositor_client *client, struct surface_re
                              int file)
 {
         unsigned long slot, bytes;
-        long size, seals, mapped;
         struct surface *page;
         const struct compositor_role *role;
         struct compositor_client *holder;
-        int granted = 0, width = 0, height = 0, shown_nothing = 0;
+        int granted = 0, width = 0, height = 0, shown_nothing = 0, status;
 
         if (client->page)
                 return -COMPOSITOR_EBUSY;
@@ -1965,18 +2128,10 @@ static int compositor_create(struct compositor_client *client, struct surface_re
                 return -COMPOSITOR_EINVAL;
 
         slot = SURFACE_PAGE_ROUND((unsigned long)request->width * request->height * 4);
-        bytes = WINDOW_PIXELS + slot * request->buffer_slots;
+        status = compositor_map(request, file, &page, &bytes);
+        if (status)
+                return status;
 
-        size = compositor_call(syscall(lseek), (positive)file, 0, 2, 0, 0, 0);
-        seals = compositor_call(syscall(fcntl), (positive)file, COMPOSITOR_F_GET_SEALS, 0, 0, 0, 0);
-        if (size < (long)bytes || seals < 0 || !(seals & COMPOSITOR_SEAL_SHRINK))
-                return -COMPOSITOR_EINVAL;
-
-        mapped = compositor_call(syscall(mmap), 0, bytes, 3, 1, (positive)file, 0);
-        if (mapped < 0 && mapped > -4096)
-                return -COMPOSITOR_ENOSPC;
-
-        page = (struct surface *)mapped;
         client->page = page;
         client->bytes = bytes;
         client->id = ++compositor.next_id;
@@ -2061,6 +2216,93 @@ static int compositor_create(struct compositor_client *client, struct surface_re
         return 0;
 }
 
+/*
+        A resize: the surface has made a page at another size and handed it
+        over on its connection. The new page starts as the old one's header --
+        everything the compositor decided about the surface stays decided --
+        with the sizes of the new buffers written over it and what the program
+        had not yet read of its events carried across. It is the page events
+        are written to from here on; the old one is what the surface is drawn
+        from until the new one has committed a picture, so the window is
+        never shown empty between the two. Only a window that may be resized
+        may be.
+*/
+static int compositor_resize(struct compositor_client *client, struct surface_request *request,
+                             int file)
+{
+        struct surface *old = client->page, *page;
+        unsigned long slot, bytes;
+        unsigned int head, tail, unread;
+        int status;
+
+        if (!old || client->old.page)
+                return -COMPOSITOR_EBUSY;
+
+        if (!(client->lock & SURFACE_LOCK_RESIZABLE) || request->role != client->role)
+                return -COMPOSITOR_EPERM;
+
+        if (request->size != sizeof(*request) ||
+            (request->protocol != 0 && request->protocol != SURFACE_PROTOCOL) || request->flags ||
+            request->buffer_slots != 2 || request->parent || request->rel_x || request->rel_y ||
+            request->anchor || request->exclusive || request->surface_id || request->bytes ||
+            !request->width || !request->height || request->width > (unsigned int)compositor.width ||
+            request->height > (unsigned int)compositor.height || file < 0)
+                return -COMPOSITOR_EINVAL;
+
+        status = compositor_map(request, file, &page, &bytes);
+        if (status)
+                return status;
+
+        slot = SURFACE_PAGE_ROUND((unsigned long)request->width * request->height * 4);
+
+        // The header as it was, once, and then the parts that are about the new buffers.
+        for (unsigned int at = 0; at < SURFACE_HEADER / 4; at++)
+                ((unsigned int *)page)[at] = ((volatile unsigned int *)old)[at];
+        page->window.width = page->window.pitch = page->window.max_width = request->width;
+        page->window.height = page->window.max_height = request->height;
+        page->window.mapping = (unsigned int)bytes;
+        page->window.sequence = 0;
+        page->applied_width = request->width;
+        page->applied_height = request->height;
+        page->configure_serial = client->serial;
+        page->acked_serial = 0;
+        page->buffer_index = 0;
+        page->buffer_stride = request->width * 4;
+        page->buffer_size = request->width * request->height * 4;
+        page->buffer_offset[0] = WINDOW_PIXELS;
+        page->buffer_offset[1] = (unsigned int)(WINDOW_PIXELS + slot);
+        page->release_serial = 0;
+        page->damage_count = 0;
+        page->style_count = 0;
+
+        // Read once, as the program is waiting for this answer and its tail is not moving.
+        head = __atomic_load_n(&old->event_head, __ATOMIC_ACQUIRE);
+        tail = __atomic_load_n(&old->event_tail, __ATOMIC_ACQUIRE);
+        unread = head - tail > SURFACE_EVENTS ? SURFACE_EVENTS : head - tail;
+        for (unsigned int at = 0; at < unread; at++)
+                page->event[at] = old->event[(tail + at) % SURFACE_EVENTS];
+        page->event_tail = 0;
+        __atomic_store_n(&page->event_head, unread, __ATOMIC_RELEASE);
+
+        client->old.page = old;
+        client->old.bytes = client->bytes;
+        client->old.width = client->width;
+        client->old.height = client->height;
+        client->old.slot = client->slot;
+
+        client->page = page;
+        client->bytes = bytes;
+        client->width = request->width;
+        client->height = request->height;
+        client->slot = 0;
+        client->sequence = 0;
+
+        request->protocol = SURFACE_PROTOCOL;
+        request->surface_id = client->id;
+        request->bytes = (unsigned int)bytes;
+        return 0;
+}
+
 // A holder's time is up when it was asked to go and has not: it loses the
 // role, and what waited for it has it.
 static void compositor_expire(positive now)
@@ -2098,6 +2340,25 @@ static void compositor_commit(struct compositor_client *client)
 
         client->sequence = sequence;
         slot = slot < client->slots ? slot : 0;
+
+        // The first picture of a page that replaced one: what was on the screen goes, and the
+        // edges the hand does not hold stay where they were.
+        if (client->old.page)
+        {
+                compositor_damage_client(client);
+                compositor_call(syscall(munmap), (positive)client->old.page, client->old.bytes, 0, 0, 0, 0);
+                client->old.page = null;
+
+                if (client->edges & COMPOSITOR_EDGE_LEFT)
+                        x = client->right - (int)client->width;
+                if (client->edges & COMPOSITOR_EDGE_TOP)
+                        y = client->bottom - (int)client->height - compositor_title_height(client);
+                whole = 1;
+        }
+
+        // The answer to the last CONFIGURE.
+        if (__atomic_load_n(&page->acked_serial, __ATOMIC_RELAXED) == client->serial)
+                client->outstanding = 0;
 
         if (!(client->lock & SURFACE_LOCK_MOVABLE))
         {
@@ -2166,6 +2427,9 @@ static void compositor_commit(struct compositor_client *client)
                 if (compositor_roles[client->role].framed)
                         compositor_list_changed();
         }
+
+        // The next ask, if the hand has moved since the last.
+        compositor_configure(client);
 
         if (!client->active)
                 return;
@@ -2261,10 +2525,18 @@ static void compositor_client_read(struct compositor_client *client)
                         int status = file_count == 1 ? compositor_create(client, &message.request, files[0])
                                                      : -COMPOSITOR_EINVAL;
 
-                        compositor_reply(client, status, &message.request);
+                        compositor_reply(client, SURFACE_CREATED, status, &message.request);
                         // A second create is answered EBUSY and the surface it came on stays.
                         if (status < 0 && status != -COMPOSITOR_EBUSY)
                                 got = 0;
+                }
+                else if (got == (long)sizeof(message) && message.kind == SURFACE_RESIZE && client->page)
+                {
+                        // Refused, the surface stays as it was: the program is told and goes on.
+                        int status = file_count == 1 ? compositor_resize(client, &message.request, files[0])
+                                                     : -COMPOSITOR_EINVAL;
+
+                        compositor_reply(client, SURFACE_RESIZED, status, &message.request);
                 }
                 else if (got == (long)sizeof(message) && message.kind == SURFACE_COMMIT &&
                          client->page && !file_count)
@@ -2433,6 +2705,12 @@ static void compositor_motion(void)
         under = compositor_under(compositor.pointer_x, compositor.pointer_y, &panel);
         compositor_cursor_move();
 
+        if (compositor.resize)
+        {
+                compositor_resize_move();
+                return;
+        }
+
         if (compositor.drag)
         {
                 struct compositor_client *client = compositor.drag;
@@ -2480,6 +2758,13 @@ static void compositor_button(unsigned int code, int down)
 
                 compositor.drag = null;
                 compositor.grab = null;
+                if (compositor.resize)
+                {
+                        struct compositor_client *client = compositor.resize;
+
+                        compositor.resize = null;
+                        compositor_configure(client);
+                }
                 if (compositor_wants_pointer(grab))
                         compositor_post(grab, SURFACE_EVENT_POINTER_BUTTON, 0, 0, (int)code, 0);
                 return;
@@ -2505,6 +2790,7 @@ static void compositor_button(unsigned int code, int down)
         if (code == COMPOSITOR_BTN_LEFT && !compositor.grab)
         {
                 struct compositor_frame frame;
+                unsigned int edges;
                 int cx, cy, side;
 
                 // A raise stays in the surface's layer; a surface that takes
@@ -2520,6 +2806,13 @@ static void compositor_button(unsigned int code, int down)
                 {
                         under->page->window.state |= WINDOW_CLOSING;
                         compositor_post(under, SURFACE_EVENT_CLOSE, 0, 0, SURFACE_CLOSE_REQUESTED, 0);
+                        return;
+                }
+
+                edges = compositor_edges(under, compositor.pointer_x, compositor.pointer_y);
+                if (edges)
+                {
+                        compositor_resize_begin(under, edges);
                         return;
                 }
 

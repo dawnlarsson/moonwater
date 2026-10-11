@@ -1066,6 +1066,39 @@ static long surface_receive(long handle, struct surface_message *message, int fl
         return got;
 }
 
+/*
+        A page for slots buffers of width by height, made and mapped: a memfd
+        sealed so it can never shrink under the compositor's mapping. The
+        descriptor is left open for the message that hands it over. Answers
+        the mapping, or a negative errno with nothing left open.
+*/
+static long surface_page(unsigned int width, unsigned int height, unsigned int slots,
+                         long address_to file, unsigned long address_to bytes)
+{
+        unsigned long slot = SURFACE_PAGE_ROUND((unsigned long)width * height * 4);
+        long mapped;
+
+        address_to bytes = WINDOW_PIXELS + slot * slots;
+        address_to file = window_call(WINDOW_SYS_MEMFD_CREATE, (long)"surface",
+                                      SURFACE_MFD_CLOEXEC | SURFACE_MFD_ALLOW_SEALING,
+                                      0, 0, 0, 0);
+        mapped = address_to file < 0 ? address_to file
+                                     : window_call(WINDOW_SYS_FTRUNCATE, address_to file,
+                                                   (long)address_to bytes, 0, 0, 0, 0);
+        if (mapped >= 0)
+                mapped = window_call(WINDOW_SYS_FCNTL, address_to file, SURFACE_F_ADD_SEALS,
+                                     SURFACE_SEAL_FIXED, 0, 0, 0);
+        if (mapped >= 0)
+                // PROT_READ | PROT_WRITE, MAP_SHARED
+                mapped = window_call(WINDOW_SYS_MMAP, 0, (long)address_to bytes, 3, 1,
+                                     address_to file, 0);
+
+        if (mapped < 0 && mapped > -4096 && address_to file >= 0)
+                window_call(WINDOW_SYS_CLOSE, address_to file, 0, 0, 0, 0, 0);
+
+        return mapped;
+}
+
 static struct surface *surface_open_slots(unsigned int width, unsigned int height,
                                           unsigned int role, unsigned int slots)
 {
@@ -1074,16 +1107,13 @@ static struct surface *surface_open_slots(unsigned int width, unsigned int heigh
                 char path[sizeof(SURFACE_SOCKET)];
         } where = {SURFACE_AF_UNIX, SURFACE_SOCKET};
         struct surface_message message = {SURFACE_CREATE, 0, {0}};
-        unsigned long slot, bytes;
-        long handle, file, mapped;
+        unsigned long bytes = 0;
+        long handle, file = -1, mapped;
 
         surface_refused = -22; // EINVAL
         surface_wanted_width = surface_wanted_height = 0;
         if (!width || !height || width > 16384 || height > 16384)
                 return 0;
-
-        slot = SURFACE_PAGE_ROUND((unsigned long)width * height * 4);
-        bytes = WINDOW_PIXELS + slot * slots;
 
         handle = window_call(WINDOW_SYS_SOCKET, SURFACE_AF_UNIX,
                              SURFACE_SOCK_SEQPACKET | SURFACE_SOCK_CLOEXEC, 0, 0, 0, 0);
@@ -1092,23 +1122,12 @@ static struct surface *surface_open_slots(unsigned int width, unsigned int heigh
 
         surface_refused = window_call(WINDOW_SYS_CONNECT, handle, (long)&where,
                                       sizeof(where), 0, 0, 0);
-        file = surface_refused < 0 ? surface_refused
-                                   : window_call(WINDOW_SYS_MEMFD_CREATE, (long)"surface",
-                                                 SURFACE_MFD_CLOEXEC | SURFACE_MFD_ALLOW_SEALING,
-                                                 0, 0, 0, 0);
-        mapped = file < 0 ? file : window_call(WINDOW_SYS_FTRUNCATE, file, (long)bytes, 0, 0, 0, 0);
-        if (mapped >= 0)
-                mapped = window_call(WINDOW_SYS_FCNTL, file, SURFACE_F_ADD_SEALS,
-                                     SURFACE_SEAL_FIXED, 0, 0, 0);
-        if (mapped >= 0)
-                // PROT_READ | PROT_WRITE, MAP_SHARED
-                mapped = window_call(WINDOW_SYS_MMAP, 0, (long)bytes, 3, 1, file, 0);
+        mapped = surface_refused < 0 ? surface_refused
+                                     : surface_page(width, height, slots, &file, &bytes);
 
         if (mapped < 0 && mapped > -4096)
         {
-                surface_refused = file < 0 ? file : mapped;
-                if (file >= 0)
-                        window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
+                surface_refused = mapped;
                 window_call(WINDOW_SYS_CLOSE, handle, 0, 0, 0, 0, 0);
                 return 0;
         }
@@ -1151,6 +1170,63 @@ static struct surface *surface_open_slots(unsigned int width, unsigned int heigh
 static struct surface *surface_open(unsigned int width, unsigned int height, unsigned int role)
 {
         return surface_open_slots(width, height, role, 2);
+}
+
+/*
+        The same surface at another size.
+
+        A page is sealed at the size it was made, so a surface that is told
+        to be larger or smaller makes a new one and hands it over on its own
+        connection; the compositor keeps its place, its stacking and its
+        focus, carries over the events not yet read, and answers. What the
+        old page held for the program -- title, style, the pointer bit -- is
+        carried across by the compositor, so the new page is the old one at
+        its new size. Answers the new page, with the old one unmapped, or
+        the old one (and surface_refused set) when the compositor would not.
+*/
+static struct surface *surface_resize(struct surface *surface, unsigned int width,
+                                      unsigned int height)
+{
+        struct surface_message message = {SURFACE_RESIZE, 0, {0}};
+        unsigned long bytes = 0;
+        long handle = surface->window.handle, file = -1, mapped;
+
+        surface_refused = -22; // EINVAL
+        if (!width || !height || width > 16384 || height > 16384)
+                return surface;
+
+        mapped = surface_page(width, height, 2, &file, &bytes);
+        if (mapped < 0 && mapped > -4096)
+                return surface_refused = mapped, surface;
+
+        message.request.size = sizeof(message.request);
+        message.request.protocol = SURFACE_PROTOCOL;
+        message.request.role = surface->role_requested;
+        message.request.width = width;
+        message.request.height = height;
+        message.request.buffer_slots = 2;
+
+        surface_refused = surface_send(handle, &message, (int)file);
+        window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
+
+        // Wakes may be ahead of the answer; they say nothing the ring will not.
+        while (surface_refused >= 0 &&
+               (surface_refused = surface_receive(handle, &message, 0)) > 0 &&
+               message.kind != SURFACE_RESIZED)
+                ;
+
+        if (surface_refused >= 0)
+                surface_refused = message.kind != SURFACE_RESIZED ? -71 : message.status;
+
+        if (surface_refused < 0)
+        {
+                window_call(WINDOW_SYS_MUNMAP, mapped, (long)bytes, 0, 0, 0, 0);
+                return surface;
+        }
+
+        ((struct surface *)mapped)->window.handle = (unsigned int)handle;
+        window_call(WINDOW_SYS_MUNMAP, (long)surface, surface->window.mapping, 0, 0, 0, 0);
+        return (struct surface *)mapped;
 }
 
 /*
