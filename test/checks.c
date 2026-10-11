@@ -70417,15 +70417,15 @@ static b32 dhcp_confined_child(positive scenario, bipolar spare, p8 address_to s
                 {
                         //      seccomp answers ENOSYS from here on, as on a
                         //      kernel built without it.
-                        dhcp_filter_step steps[] = {
+                        net_filter_step steps[] = {
                             {0x20, 0, 0, 0},
                             {0x15, 0, 1, (p32)syscall(seccomp)},
                             {0x06, 0, 0, 0x00050000u | ENOSYS},
-                            {0x06, 0, 0, DHCP_FILTER_ALLOW}};
+                            {0x06, 0, 0, SECCOMP_RET_ALLOW}};
                         struct
                         {
                                 p16 count;
-                                dhcp_filter_step address_to steps;
+                                net_filter_step address_to steps;
                         } filter = {4, steps};
 
                         system_call_5(syscall(prctl), 38, 1, 0, 0, 0);

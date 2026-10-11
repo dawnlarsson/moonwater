@@ -16690,27 +16690,6 @@ static b32 dhcp_apart = -1;
    only while dhcp_ask runs. */
 static bipolar dhcp_frames = -1;
 
-#define DHCP_NOBODY 65534
-
-#if defined(__x86_64__)
-#define DHCP_AUDIT_ARCH 0xc000003eu
-#elif defined(__aarch64__)
-#define DHCP_AUDIT_ARCH 0xc00000b7u
-#else
-#define DHCP_AUDIT_ARCH 0xc00000f3u
-#endif
-
-typedef struct
-{
-        p16 code;
-        p8 jump_true;
-        p8 jump_false;
-        p32 value;
-} dhcp_filter_step;
-
-#define DHCP_FILTER_KILL 0x80000000u
-#define DHCP_FILTER_ALLOW 0x7fff0000u
-
 static COLD bool dhcp_confine(b32 handle)
 {
         static const p32 allowed[] = {
@@ -16720,16 +16699,10 @@ static COLD bool dhcp_confine(b32 handle)
             (p32)syscall(rt_sigreturn), (p32)syscall(restart_syscall)};
         const p32 pinned[2][2] = {{(p32)syscall(sendto), (p32)handle},
                                   {(p32)syscall(write), (p32)dhcp_apart}};
-        dhcp_filter_step steps[6 + 5 * 2 + array_count(allowed)];
-        struct
-        {
-                p16 count;
-                dhcp_filter_step address_to steps;
-        } filter = {0, steps};
+        positive count = array_count(allowed);
         p32 keep[3] = {(p32)handle, (p32)dhcp_apart,
                        dhcp_frames >= 0 ? (p32)dhcp_frames : descriptors_none};
-        positive at = 0;
-        bipolar status;
+        net_filter filter;
 
         if (dhcp_apart < 0)
                 return true;
@@ -16738,41 +16711,38 @@ static COLD bool dhcp_confine(b32 handle)
 
         if ((!system_call_1(syscall(getuid), 0) &&
              (system_call_2(syscall(setgroups), 0, 0) < 0 ||
-              system_call_3(syscall(setresgid), DHCP_NOBODY, DHCP_NOBODY,
-                            DHCP_NOBODY) < 0 ||
-              system_call_3(syscall(setresuid), DHCP_NOBODY, DHCP_NOBODY,
-                            DHCP_NOBODY) < 0)) ||
-            system_call_5(syscall(prctl), 38 /* PR_SET_NO_NEW_PRIVS */, 1, 0,
-                          0, 0) < 0)
+              system_call_3(syscall(setresgid), NET_APART_NOBODY,
+                            NET_APART_NOBODY, NET_APART_NOBODY) < 0 ||
+              system_call_3(syscall(setresuid), NET_APART_NOBODY,
+                            NET_APART_NOBODY, NET_APART_NOBODY) < 0)) ||
+            system_call_5(syscall(prctl), PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0)
                 return false;
 
-        //      The architecture, then the call. x32's bit-30 numbers match
-        //      nothing listed and are killed with the rest.
-        steps[at++] = (dhcp_filter_step){0x20, 0, 0, 4};
-        steps[at++] = (dhcp_filter_step){0x15, 1, 0, DHCP_AUDIT_ARCH};
-        steps[at++] = (dhcp_filter_step){0x06, 0, 0, DHCP_FILTER_KILL};
-        steps[at++] = (dhcp_filter_step){0x20, 0, 0, 0};
+        //      net_apart's kind of filter (net_filter): the architecture, then
+        //      the call. x32's bit-30 numbers match nothing listed and are
+        //      killed with the rest.
+        filter.used = 0;
+        net_filter_put(address_of filter, NET_FILTER_LOAD, 0, 0, NET_FILTER_ARCH);
+        net_filter_put(address_of filter, NET_FILTER_EQUAL, 1, 0, NET_APART_ARCH);
+        net_filter_answer(address_of filter, SECCOMP_RET_KILL_PROCESS);
+        net_filter_put(address_of filter, NET_FILTER_LOAD, 0, 0, NET_FILTER_NUMBER);
         //      A pinned call, then its descriptor: the low half of its first
         //      argument, which is all of the int the kernel reads. Another
         //      call goes on to the next block.
         for (positive i = 0; i < 2; i++)
         {
-                steps[at++] = (dhcp_filter_step){0x15, 0, 4, pinned[i][0]};
-                steps[at++] = (dhcp_filter_step){0x20, 0, 0, 16};
-                steps[at++] = (dhcp_filter_step){0x15, 0, 1, pinned[i][1]};
-                steps[at++] = (dhcp_filter_step){0x06, 0, 0, DHCP_FILTER_ALLOW};
-                steps[at++] = (dhcp_filter_step){0x06, 0, 0, DHCP_FILTER_KILL};
-        }
-        for (positive i = 0; i < array_count(allowed); i++)
-                steps[at++] = (dhcp_filter_step){
-                    0x15, (p8)(array_count(allowed) - i), 0, allowed[i]};
-        steps[at++] = (dhcp_filter_step){0x06, 0, 0, DHCP_FILTER_KILL};
-        steps[at++] = (dhcp_filter_step){0x06, 0, 0, DHCP_FILTER_ALLOW};
-        filter.count = (p16)at;
+                positive call = net_filter_when(address_of filter, pinned[i][0]);
 
-        status = system_call_3(syscall(seccomp), 1 /* SET_MODE_FILTER */, 0,
-                               (positive)address_of filter);
-        return status >= 0;
+                net_filter_require(address_of filter, 0, ~(p32)0, pinned[i] + 1, 1);
+                net_filter_answer(address_of filter, SECCOMP_RET_ALLOW);
+                net_filter_past(address_of filter, call);
+        }
+        for (positive i = 0; i < count; i++)
+                net_filter_put(address_of filter, NET_FILTER_EQUAL, (p8)(count - i),
+                               0, allowed[i]);
+        net_filter_answer(address_of filter, SECCOMP_RET_KILL_PROCESS);
+        net_filter_answer(address_of filter, SECCOMP_RET_ALLOW);
+        return net_filter_install(address_of filter);
 }
 
 /* Says how far the exchange has got to whoever waits for it apart
@@ -16844,7 +16814,7 @@ static COLD bipolar dhcp_open(string_address device, p32 host, bool broadcast)
 #define DHCP_MSG_CTRUNC 8
 #define DHCP_FRAME_ROOM 1536
 
-static const dhcp_filter_step dhcp_frame_filter[] = {
+static const net_filter_step dhcp_frame_filter[] = {
     {0x30, 0, 0, 9},                    // ldb [9]: the protocol
     {0x15, 0, 6, 17},                   //   UDP, or drop
     {0x28, 0, 0, 6},                    // ldh [6]: flags and fragment offset
@@ -16860,7 +16830,7 @@ static COLD bipolar dhcp_frames_open(string_address device)
         struct
         {
                 p16 count;
-                const dhcp_filter_step address_to steps;
+                const net_filter_step address_to steps;
         } filter = {(p16)array_count(dhcp_frame_filter), dhcp_frame_filter};
         struct
         {

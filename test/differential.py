@@ -44138,13 +44138,13 @@ def harness_dhcp_frame_fuzz(argv):
     del argv
     shim, head, walk = dhcp_lift()
     net = (HARNESS_ROOT / "src/net/net.c").read_text()
-    program = re.search(r"^static const dhcp_filter_step dhcp_frame_filter\[\] = \{.*?\}\};",
+    program = re.search(r"^static const net_filter_step dhcp_frame_filter\[\] = \{.*?\}\};",
                         net, re.M | re.S)
     if not program:
         print("  FAIL dhcp frame fuzz: dhcp_frame_filter is not in src/net/net.c")
         write_tally("dhcp-frame-fuzz", 0, 1)
         return 1
-    source = shim + head + walk + ul_c_typedefs(net, "dhcp_filter_step") + "\n" + \
+    source = shim + head + walk + ul_c_typedefs(net, "net_filter_step") + "\n" + \
         program.group(0) + r"""
 #define FUZZ_REQUIRE(condition, what)                                         \
         do { if (!(condition)) { fprintf(stderr, "dhcp frame fuzz: %s\n", what); \
@@ -44226,7 +44226,7 @@ static unsigned reference_bpf(const p8 *packet, unsigned long size)
         unsigned a = 0, x = 0;
         unsigned count = sizeof dhcp_frame_filter / sizeof *dhcp_frame_filter;
         for (unsigned pc = 0; pc < count; pc++) {
-                const dhcp_filter_step *step = dhcp_frame_filter + pc;
+                const net_filter_step *step = dhcp_frame_filter + pc;
                 unsigned long at = step->value;
                 switch (step->code) {
                 case 0x30: if (at >= size) return 0; a = packet[at]; break;
@@ -67771,8 +67771,8 @@ def dhcp_frame_proof_lift(net):
         re.findall(r"^#define (?:DHCP_CLIENT_PORT|DHCP_SERVER_PORT|DHCP_SOL_PACKET|"
                    r"DHCP_PACKET_AUXDATA|DHCP_CHECKSUM_NOT_READY|DHCP_CHECKSUM_VALID) .*$",
                    net, re.M) +
-        [ul_c_typedefs(net, "dhcp_frame", "dhcp_filter_step"),
-         re.search(r"^static const dhcp_filter_step dhcp_frame_filter\[\] = \{.*?\}\};",
+        [ul_c_typedefs(net, "dhcp_frame", "net_filter_step"),
+         re.search(r"^static const net_filter_step dhcp_frame_filter\[\] = \{.*?\}\};",
                    net, re.M | re.S).group(0),
          DHCP_FRAME_SPEC_FILTER]) + "\n"
 
@@ -67783,7 +67783,7 @@ static p32 spec_filter(const p8 *packet, positive size)
 {
         p32 a = 0, x = 0;
         for (positive pc = 0; pc < sizeof dhcp_frame_filter / sizeof *dhcp_frame_filter; pc++) {
-                const dhcp_filter_step *step = dhcp_frame_filter + pc;
+                const net_filter_step *step = dhcp_frame_filter + pc;
                 positive at = step->value;
                 if (step->code == 0x30) { if (at >= size) return 0; a = packet[at]; }
                 else if (step->code == 0x28) { if (at + 2 > size) return 0; a = (p32)packet[at] << 8 | packet[at + 1]; }
@@ -68309,7 +68309,7 @@ network_receive_next network_store_16 network_store_32 network_store_64 network_
 network_stream_read_some_for network_stream_read_some_until
 network_stream_send_all_for network_stream_send_all_until network_stream_timeout
 network_transaction_secure network_wait_readable_until network_wait_writable_until
-positive_into socket_bind socket_close socket_connect socket_name socket_new
+positive_append_digit positive_into socket_bind socket_close socket_connect socket_name socket_new
 socket_option_get socket_option_set socket_receive socket_send string_compare_max
 string_copy string_copy_max_end string_digits_checked string_digits_max
 string_equals string_first_of string_first_of_or_end string_get string_has_prefix
@@ -68336,7 +68336,6 @@ WIRE_ALIASES = {
     "DHCP_SO_ATTACH_FILTER": "SO_ATTACH_FILTER", "DHCP_SO_LOCK_FILTER": "SO_LOCK_FILTER",
     "DHCP_SIOCGIFINDEX": "SIOCGIFINDEX", "DHCP_PACKET_HOST": "PACKET_HOST",
     "DHCP_PACKET_BROADCAST": "PACKET_BROADCAST", "DHCP_MSG_CTRUNC": "MSG_CTRUNC",
-    "DHCP_FILTER_KILL": "SECCOMP_RET_KILL_PROCESS", "DHCP_FILTER_ALLOW": "SECCOMP_RET_ALLOW",
 }
 
 #       Families of names the uapi headers own. A define here whose name is
