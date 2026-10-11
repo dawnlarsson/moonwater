@@ -101603,6 +101603,40 @@ static void check_golden_gs1(const u32 *ink) {
     desktop.scale=1;
 }
 
+/* M1.3: src/canvas/compositor.c's CPU backend draws G-S1 to the kernel's
+   hashes, at every scale. */
+static void memory_fill_u32_rect(u32 *into,unsigned long stride,unsigned long width,
+                                 unsigned long height,u32 value) {
+    for(unsigned long y=0;y<height;y++)for(unsigned long x=0;x<width;x++)into[y*stride+x]=value;
+}
+#include "compositor-backend.inc"
+static void check_compositor_gs1(void) {
+    static u32 body[128*64];
+    for(unsigned i=0;i<128*64;i++)body[i]=0x3a5a7a;
+    for(int scale=1;scale<=4;scale++) {
+        struct compositor_target t={golden_screen,1024,1024,768,0,0,1024,768};
+        struct compositor_frame f={80,80,128,64,scale,1,1,1,body,128};
+        compositor_fill(&t,0,0,1024,768,COMPOSITOR_INK_DESKTOP);
+        compositor_draw(&t,&f);
+        char got[65];golden_sha256(golden_screen,1024*768,got);
+        if(strcmp(got,golden_gs1[scale-1]))
+            fprintf(stderr,"the compositor's G-S1 at scale %d is %s, not the golden %s\n",scale,got,golden_gs1[scale-1]);
+        check(!strcmp(got,golden_gs1[scale-1]));
+        /* Damage is a clip, not a different picture: the same scene drawn
+           in four quarters is the same buffer. */
+        for(int q=0;q<4;q++) {
+            struct compositor_target part={golden_screen,1024,1024,768,
+                q%2?512:0,q/2?384:0,q%2?1024:512,q/2?768:384};
+            compositor_fill(&part,0,0,1024,768,COMPOSITOR_INK_DESKTOP);
+            compositor_draw(&part,&f);
+        }
+        golden_sha256(golden_screen,1024*768,got);
+        if(strcmp(got,golden_gs1[scale-1]))
+            fprintf(stderr,"the compositor's G-S1 at scale %d drawn in quarters is %s\n",scale,got);
+        check(!strcmp(got,golden_gs1[scale-1]));
+    }
+}
+
 static void check_pane_layout(void) {
     static u32 screen[256*256];
     const u32 ink[]={0x102030,0x203040,0x304050,0x405060,0x506070,0x607080,0,0};
@@ -101926,6 +101960,7 @@ int main(void) {
     struct font_desc face={8,16,font_bits};canvas_font=&face;
     check_pane_layout();
     check_golden_gs1(palette);
+    check_compositor_gs1();
     for(unsigned i=0;i<sizeof(font_bits);i++)font_bits[i]=(i*29+i/16*73)&255;
     struct window_cell cells[96];unsigned seed=123;
     for(unsigned trial=0;trial<2400;trial++) {

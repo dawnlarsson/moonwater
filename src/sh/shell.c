@@ -913,6 +913,10 @@ static bool floodlight_parent_supervised;
 #include "../canvas/term.c"
 #include "host.c"
 #include "../canvas/screen.c"
+#ifndef SHELL_UTILITY_PROGRAM
+#include "../canvas/font.c"
+#include "../canvas/compositor.c"
+#endif
 #include "edit.c"
 #include "system.c"
 #define PROMPT TERM_RESET TERM_BOLD " $ " TERM_RESET
