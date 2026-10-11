@@ -604,6 +604,37 @@ SURFACE_AT(theme_palette, 2852);
 _Static_assert(sizeof(struct surface) == SURFACE_HEADER, "surface ABI");
 _Static_assert(SURFACE_HEADER <= WINDOW_PIXELS, "the header ends before the first buffer");
 
+/*
+        The window list: what the compositor writes into the page of the
+        surface that holds the panel role, in the span the header leaves
+        free below WINDOW_PIXELS, so the panel can draw one button for each
+        ordinary window without a request of its own. An entry is the
+        window's surface id, SURFACE_LIST_* bits and its title cut to what a
+        button holds and ended with a NUL; the order is the order the windows
+        were made in. generation is odd while the compositor writes and one
+        more, even, when it has, and the event SURFACE_EVENT_LIST says it
+        changed; a reader copies and reads generation again, and takes the
+        copy only if it was even and is the same. The titles are programs'
+        own words, so they are data and never a format.
+*/
+struct surface_entry
+{
+        unsigned int id;
+        unsigned int state;
+        char title[SURFACE_LISTING_TITLE];
+};
+
+struct surface_listing
+{
+        unsigned int generation;
+        unsigned int count;
+        struct surface_entry entry[SURFACE_LISTING_MAX];
+};
+
+_Static_assert(sizeof(struct surface_entry) == 36, "surface listing ABI");
+_Static_assert(SURFACE_HEADER + sizeof(struct surface_listing) <= WINDOW_PIXELS,
+               "the window list ends before the first buffer");
+
 /* Where a slot's pixels start, and how much a page of two slots holds.
 
    surface_buffer is the program's: it reads buffer_offset, which the
@@ -994,8 +1025,10 @@ struct surface_rights
 // F_SEAL_SEAL, F_SEAL_SHRINK and F_SEAL_GROW: the size is fixed for good.
 #define SURFACE_SEAL_FIXED (1u | 2u | 4u)
 
-// What the last surface_open was refused with, as a negative errno.
+// What the last surface_open was refused with, as a negative errno, and
+// the size the compositor wanted when that was SURFACE_ESIZE.
 static long surface_refused;
+static unsigned int surface_wanted_width, surface_wanted_height;
 
 static long surface_send(long handle, struct surface_message *message, int file)
 {
@@ -1033,8 +1066,8 @@ static long surface_receive(long handle, struct surface_message *message, int fl
         return got;
 }
 
-static struct surface *surface_open(unsigned int width, unsigned int height,
-                                    unsigned int role)
+static struct surface *surface_open_slots(unsigned int width, unsigned int height,
+                                          unsigned int role, unsigned int slots)
 {
         struct {
                 unsigned short family;
@@ -1045,11 +1078,12 @@ static struct surface *surface_open(unsigned int width, unsigned int height,
         long handle, file, mapped;
 
         surface_refused = -22; // EINVAL
+        surface_wanted_width = surface_wanted_height = 0;
         if (!width || !height || width > 16384 || height > 16384)
                 return 0;
 
         slot = SURFACE_PAGE_ROUND((unsigned long)width * height * 4);
-        bytes = WINDOW_PIXELS + slot * 2;
+        bytes = WINDOW_PIXELS + slot * slots;
 
         handle = window_call(WINDOW_SYS_SOCKET, SURFACE_AF_UNIX,
                              SURFACE_SOCK_SEQPACKET | SURFACE_SOCK_CLOEXEC, 0, 0, 0, 0);
@@ -1084,7 +1118,7 @@ static struct surface *surface_open(unsigned int width, unsigned int height,
         message.request.role = role;
         message.request.width = width;
         message.request.height = height;
-        message.request.buffer_slots = 2;
+        message.request.buffer_slots = slots;
 
         surface_refused = surface_send(handle, &message, (int)file);
         window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
@@ -1096,6 +1130,12 @@ static struct surface *surface_open(unsigned int width, unsigned int height,
                 surface_refused = message.kind != SURFACE_CREATED ? -71 // EPROTO
                                   : message.status;
 
+        if (surface_refused == SURFACE_ESIZE)
+        {
+                surface_wanted_width = message.request.width;
+                surface_wanted_height = message.request.height;
+        }
+
         if (surface_refused < 0)
         {
                 window_call(WINDOW_SYS_MUNMAP, mapped, (long)bytes, 0, 0, 0, 0);
@@ -1105,6 +1145,12 @@ static struct surface *surface_open(unsigned int width, unsigned int height,
 
         ((struct surface *)mapped)->window.handle = (unsigned int)handle;
         return (struct surface *)mapped;
+}
+
+// Two slots: the program draws one while the compositor reads the other.
+static struct surface *surface_open(unsigned int width, unsigned int height, unsigned int role)
+{
+        return surface_open_slots(width, height, role, 2);
 }
 
 /*
@@ -1119,6 +1165,46 @@ static void surface_commit(struct surface *surface)
         __atomic_store_n(&surface->window.sequence, surface->window.sequence + 1,
                          __ATOMIC_RELEASE);
         surface_send(surface->window.handle, &message, -1);
+}
+
+/*
+        Asks the compositor to restore, raise and focus another surface. Only
+        the surface that holds the panel role is heard, which is what makes
+        a window list a client of it and not a way for any program to take
+        the keys.
+*/
+static void surface_activate(struct surface *surface, unsigned int id)
+{
+        struct surface_message message = {SURFACE_ACTIVATE, 0, {0}};
+
+        message.request.surface_id = id;
+        surface_send(surface->window.handle, &message, -1);
+}
+
+/*
+        The window list the compositor wrote into the page, whole or not at
+        all: the copy is taken again while the compositor is writing or if it
+        wrote while the copy was being made. Answers the generation, which is how a program knows it
+        has changed.
+*/
+static unsigned int surface_listing_read(struct surface *surface, struct surface_listing *into)
+{
+        struct surface_listing *listing = window_at(surface, struct surface_listing, SURFACE_HEADER);
+        unsigned int generation;
+
+        do
+        {
+                generation = __atomic_load_n(&listing->generation, __ATOMIC_ACQUIRE);
+                for (unsigned int at = 0; at < sizeof(*into) / 4; at++)
+                        ((unsigned int *)into)[at] = ((volatile unsigned int *)listing)[at];
+                __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        } while ((generation & 1) || generation != __atomic_load_n(&listing->generation, __ATOMIC_RELAXED));
+
+        into->count = into->count > SURFACE_LISTING_MAX ? SURFACE_LISTING_MAX : into->count;
+        for (unsigned int at = 0; at < into->count; at++)
+                into->entry[at].title[SURFACE_LISTING_TITLE - 1] = 0;
+
+        return generation;
 }
 
 // The next event, or false when there is none waiting.

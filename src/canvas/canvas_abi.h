@@ -258,10 +258,27 @@ _Static_assert(sizeof(struct canvas_control) == 232, "spark canvas control ABI")
 
 // struct surface_message kind. CREATE is answered by CREATED, COMMIT by
 // nothing; WAKE says the page's event ring has something.
+//
+// ACTIVATE asks the compositor to restore, raise and focus the surface
+// whose id is request.surface_id: only the surface that holds the panel role
+// may ask, and it is answered by nothing. GRANT is the one message a root
+// program sends without a surface: it says that the process request.parent
+// (a pid) may claim the role request.role, with the flags in request.flags
+// (SURFACE_GRANT_*), and is answered by GRANTED with a status. A grant
+// lasts as long as the process does and no longer: a pid that was reused
+// finds none. Only a peer whose uid is 0 is heard, and the program never
+// grants itself anything it was not given.
 #define SURFACE_CREATE 1u
 #define SURFACE_COMMIT 2u
 #define SURFACE_CREATED 3u
 #define SURFACE_WAKE 4u
+#define SURFACE_ACTIVATE 5u
+#define SURFACE_GRANT 6u
+#define SURFACE_GRANTED 7u
+
+// struct surface_message GRANT's flags
+#define SURFACE_GRANT_REPLACE 1u // the holder of the role may be replaced by it
+#define SURFACE_GRANT_REVOKE 2u  // takes the grant back, and the role with it
 
 // Roles (canvas spec 02). Values are never renumbered.
 #define SURFACE_ROLE_APP 0u
@@ -297,6 +314,12 @@ _Static_assert(sizeof(struct canvas_control) == 232, "spark canvas control ABI")
 #define SURFACE_LOCK_PASS_POINTER 16u
 #define SURFACE_LOCK_DECORATED 32u
 
+// anchor_applied: the edges a surface is held to
+#define SURFACE_ANCHOR_TOP 1u
+#define SURFACE_ANCHOR_BOTTOM 2u
+#define SURFACE_ANCHOR_LEFT 4u
+#define SURFACE_ANCHOR_RIGHT 8u
+
 // struct surface_request flags
 #define SURFACE_REQUEST_FOCUS 1u
 #define SURFACE_REQUEST_TRANSIENT 2u
@@ -315,6 +338,26 @@ _Static_assert(sizeof(struct canvas_control) == 232, "spark canvas control ABI")
 #define SURFACE_EVENT_ROLE 10u
 #define SURFACE_EVENT_RELEASE 11u
 #define SURFACE_EVENT_STYLE 12u
+#define SURFACE_EVENT_LIST 13u    // serial: the window list in the page changed
+#define SURFACE_EVENT_REFUSED 14u // a: SURFACE_REFUSED_*, b: the negative errno
+
+// SURFACE_EVENT_REFUSED a: what a program asked of a surface that is locked.
+// The page holds the position and size it has; this says it was not given
+// the one it asked for.
+#define SURFACE_REFUSED_MOVE 1u
+#define SURFACE_REFUSED_RESIZE 2u
+
+// The window list a panel is sent, in its page past the header (window.c).
+#define SURFACE_LISTING_MAX 32u
+#define SURFACE_LISTING_TITLE 28u
+#define SURFACE_LIST_FOCUSED 1u
+#define SURFACE_LIST_MINIMIZED 2u
+
+// A create the compositor refuses for its size, because the role fixes it
+// (a panel is as wide as the output and as high as its zone), is answered
+// SURFACE_ESIZE with the size it wants in the reply's request.width and
+// height; the program makes its page that size and asks again.
+#define SURFACE_ESIZE (-90)
 
 // SURFACE_EVENT_KEY flags; POINTER_BUTTON uses SURFACE_KEY_DOWN alone.
 #define SURFACE_KEY_DOWN 1u

@@ -53878,6 +53878,43 @@ static fn surfaces(void)
                       (char *)surface_slot(&page, 1, width, height) == (char *)&page + WINDOW_PIXELS + first);
         }
 
+        /*
+                The window list a panel is sent: past the header and before
+                the first buffer, read whole and with every title ended,
+                whatever the page holds. The message kinds and the events
+                are numbers programs were built with.
+        */
+        {
+                static union { struct surface page; char bytes[WINDOW_PIXELS]; } shown;
+                struct surface_listing *listing = window_at(&shown.page, struct surface_listing, SURFACE_HEADER);
+                struct surface_listing copy;
+
+                listing->count = 3;
+                for (unsigned int at = 0; at < 3; at++)
+                {
+                        listing->entry[at].id = 10 + at;
+                        listing->entry[at].state = at;
+                        for (unsigned int letter = 0; letter < SURFACE_LISTING_TITLE; letter++)
+                                listing->entry[at].title[letter] = 'a' + (char)at;
+                }
+                listing->generation = 6;
+                check("the window list is read with its generation",
+                      surface_listing_read(&shown.page, &copy) == 6 && copy.count == 3 &&
+                      copy.entry[2].id == 12 && copy.entry[1].state == 1);
+                check("a title the page did not end is ended",
+                      copy.entry[0].title[SURFACE_LISTING_TITLE - 1] == 0 && copy.entry[0].title[0] == 'a');
+                listing->count = 0xffffffffu;
+                surface_listing_read(&shown.page, &copy);
+                check("a count past the list is the list", copy.count == SURFACE_LISTING_MAX);
+                check("the window list ends below the first buffer",
+                      (char *)(listing + 1) <= shown.bytes + WINDOW_PIXELS &&
+                      (char *)listing == shown.bytes + SURFACE_HEADER);
+                check("the message kinds and the events keep their numbers",
+                      SURFACE_CREATE == 1 && SURFACE_COMMIT == 2 && SURFACE_CREATED == 3 && SURFACE_WAKE == 4 &&
+                      SURFACE_ACTIVATE == 5 && SURFACE_GRANT == 6 && SURFACE_GRANTED == 7 &&
+                      SURFACE_EVENT_STYLE == 12 && SURFACE_EVENT_LIST == 13 && SURFACE_EVENT_REFUSED == 14);
+        }
+
         check("the header sits below the first buffer", SURFACE_HEADER <= WINDOW_PIXELS);
 
         //      A slot given back reads as zeros, the other slot and the header are
