@@ -67519,7 +67519,11 @@ int main(void)
  "#define TLS_OK 0\n#define TLS_FAIL (-1)\n#define CRYPTO_RSA_BYTES 1024\n"),
 ("dhcp_frame", 22, r'''
 /* PRODUCTION */
-#define N 40
+/* 32 bytes: an IPv4 header with one option word, or without one and four
+   bytes of message, after UDP's. CBMC takes 9 s at 28, 131 s at 32, and ran
+   past an hour at 40 (the checksum's sum, written two ways, over every
+   byte); dhcp_frame_fuzz is what covers longer frames. */
+#define N 32
 #define M 48
 /* RFC 1071 over 16-bit words, written the other way round from dhcp_sum:
    whole words first, a last odd byte as the high half of one more. */
@@ -67555,6 +67559,35 @@ static bool spec_unframe(const p8 *f, positive n, bool vouched, positive *offset
         *length = udp - 8;
         return true;
 }
+/* Every frame of up to N bytes: the judge reads only inside it, agrees with
+   RFC 791 and 768 on the verdict and on the addresses, the port and the
+   message's place, and every frame it accepts the kernel's prefilter keeps.
+   The control buffer's reader is dhcp_frame_control's: one problem for both
+   ran past an hour. */
+int main(void)
+{
+        p8 frame[N];
+        positive size = nondet_positive();
+        bool vouched = nondet_bool();
+        positive offset = 0, length = 0;
+        dhcp_frame got;
+        __CPROVER_assume(size <= N);
+        bool accepted = dhcp_unframe(frame, size, vouched, &got);
+        assert(accepted == spec_unframe(frame, size, vouched, &offset, &length));
+        if (accepted) {
+                REACHED();
+                assert(got.message == frame + offset && got.length == length);
+                assert(got.message + got.length <= frame + size);
+                assert(got.source == spec_load32(frame + 12) && got.destination == spec_load32(frame + 16));
+                assert(got.source_port == 67);
+                assert(spec_filter(frame, size) != 0);
+        }
+        return 0;
+}
+''', ["dhcp_sum", "dhcp_unframe"], lambda net: dhcp_frame_proof_lift(net)),
+("dhcp_frame_control", 10, r'''
+/* PRODUCTION */
+#define M 48
 /* cmsg(3): length (its 16-byte header in it), level, type, data, padding
    to eight; PACKET_AUXDATA's tp_status bits 3 and 7 vouch for the checksum. */
 static bool spec_vouched(const p8 *c, positive n)
@@ -67570,33 +67603,20 @@ static bool spec_vouched(const p8 *c, positive n)
         }
         return false;
 }
-/* Every frame of up to N bytes and every control buffer of up to M: the
-   judge reads only inside them, agrees with RFC 791 and 768 on the verdict
-   and on the addresses, the port and the message's place, and every frame it
-   accepts the kernel's prefilter keeps. */
+/* Every control buffer of up to M bytes: the reader reads only inside it and
+   says the checksum is vouched for exactly when cmsg(3) and PACKET_AUXDATA do. */
 int main(void)
 {
-        p8 frame[N], control[M];
-        positive size = nondet_positive(), held = nondet_positive();
-        bool vouched = nondet_bool();
-        positive offset = 0, length = 0;
-        dhcp_frame got;
-        __CPROVER_assume(size <= N && held <= M);
-        bool accepted = dhcp_unframe(frame, size, vouched, &got);
-        assert(accepted == spec_unframe(frame, size, vouched, &offset, &length));
-        if (accepted) {
-                REACHED();
-                assert(got.message == frame + offset && got.length == length);
-                assert(got.message + got.length <= frame + size);
-                assert(got.source == spec_load32(frame + 12) && got.destination == spec_load32(frame + 16));
-                assert(got.source_port == 67);
-                assert(spec_filter(frame, size) != 0);
-        }
+        p8 control[M];
+        positive held = nondet_positive();
+        __CPROVER_assume(held <= M);
         bool said = dhcp_frame_vouched(control, held);
         assert(said == spec_vouched(control, held));
+        if (said)
+                REACHED();
         return 0;
 }
-''', ["dhcp_sum", "dhcp_unframe", "dhcp_frame_vouched"], lambda net: dhcp_frame_proof_lift(net)),
+''', ["dhcp_frame_vouched"], lambda net: dhcp_frame_proof_lift(net)),
 ("dhcp_frame_filter", 34, r'''
 /* PRODUCTION */
 #define N 68
@@ -67856,12 +67876,17 @@ def harness_net_bounded_proof(argv):
             unit = Path(temporary) / (name + ".c")
             unit.write_text(source)
             started = time.monotonic()
-            ran = subprocess.run(
-                [cbmc, str(unit), "--bounds-check", "--pointer-check",
-                 "--pointer-overflow-check", "--signed-overflow-check",
-                 "--unwind", str(unwind), "--unwinding-assertions",
-                 "--object-bits", "12"],
-                capture_output=True, text=True, timeout=3600)
+            try:
+                ran = subprocess.run(
+                    [cbmc, str(unit), "--bounds-check", "--pointer-check",
+                     "--pointer-overflow-check", "--signed-overflow-check",
+                     "--unwind", str(unwind), "--unwinding-assertions",
+                     "--object-bits", "12"],
+                    capture_output=True, text=True, timeout=3600)
+            except subprocess.TimeoutExpired:
+                print("  %-14s NOT proved: cbmc ran past an hour" % name)
+                checks(False, "%s: cbmc finished within an hour" % name)
+                continue
             proved = "VERIFICATION SUCCESSFUL" in ran.stdout
             failed = [line for line in ran.stdout.splitlines() if ": FAILURE" in line]
             reach = subprocess.run(
@@ -68821,6 +68846,15 @@ def harness_security_hygiene(argv):
         "dns_resolve_wanted": {"http_lookup_wanted", "dns_apart_task"},
         "http_lookup_wanted": {"http_run"},
         "sntp_query_at": {"sntp_apart_task"},
+        #   The Wi-Fi station: the join and the keeper's loop only in the
+        #   confined station, which only its broker forks, which only a join
+        #   apart starts.
+        "nl80211_join": {"radio_station_run"},
+        "wifi_keep": {"radio_station_run"},
+        "radio_station_run": {"radio_broker"},
+        "radio_broker": {"radio_join_apart"},
+        #   The listener reads mDNS only in its confined reader.
+        "waterlink_mdns_read": {"link_mdns_child"},
         "net_resolve_v4": {"http_lookup", "dns_apart_task"},
         "dns_resolve_any": {"dns_resolve_wanted", "net_resolve_v4"},
         "dns_resolve_at": {"dns_resolve_any", "dns_apart_task"},
@@ -68898,7 +68932,9 @@ HOSTILE_SOURCES = {
         "locale_auto_from_headers": "words pass locale_auto_word and must name a zone in the table",
     },
     "waterlink_mdns_read": {
-        "link_nearby_heard": "names pass link_name_for (link_name_good)",
+        "link_mdns_child": "the listener's confined reader: the reading goes back as "
+                           "waterlink_found, and its names pass link_name_for "
+                           "(link_name_good) in link_nearby_heard",
     },
     "file_machine_read": {
         "build_arch_here": "build tool, the machine field only",
@@ -81205,6 +81241,13 @@ static bipolar link_groups_save(link_groups address_to groups)
             "/*\n        Every interface with an IPv4 address"),
         sec(near, "static bool link_nearby_send(", "// Goodbye, with TTL zero"),
         sec(near, "// The same place is greeted once in a while",
+            "/*\n        The mDNS reader, apart."),
+        #   The listener reads mDNS in a confined child; the fuzz reads it in
+        #   place, since the reading is what it fuzzes.
+        "static bool link_mdns_read_apart(const p8 *packet, positive length,\n"
+        "                                 struct waterlink_found *found)\n"
+        "{\n        return waterlink_mdns_read(packet, length, found);\n}\n",
+        sec(near, "/*\n        One mDNS packet from the local link",
             "/*\n        The listener's turn:"),
         sec(near, "// Read what is waiting on the mDNS socket",
             "#endif // WATERLINK_NEARBY_INCLUDED"),

@@ -3905,9 +3905,10 @@ freestanding_checks_one()
         #       qemu-user cannot install a seccomp filter either, so wget's
         #       confined network half refuses there: CHECK_net and
         #       CHECK_storage_io check the refusal and say NOT RUN for the
-        #       fetch.
+        #       fetch, and CHECK_bowl does for the Wi-Fi station.
         if { [ "$suite" = reserve ] || [ "$suite" = lock ] ||
-             [ "$suite" = net ] || [ "$suite" = storage_io ]; } &&
+             [ "$suite" = net ] || [ "$suite" = storage_io ] ||
+             [ "$suite" = bowl ]; } &&
                 [ -n "$runner" ]; then
                 $runner "$work/$suite.$name" --emulated > "$work/$suite.$name.out" 2>&1
                 status=$?

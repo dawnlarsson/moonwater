@@ -9370,6 +9370,54 @@ static fn hash_reference_blake2b(p64 address_to st, const p8 address_to d, posit
         }
 }
 
+#elif defined(SHARED_filter_run)
+/* Classic BPF as seccomp runs it, over one call: the client filter's checks
+   (CHECK_net) and the Wi-Fi station's (CHECK_bowl). */
+static p32 net_filter_run(const net_filter address_to filter, p32 arch,
+                          p32 number, const p64 address_to arguments)
+{
+        p8 data[64];
+        p32 accumulator = 0;
+
+        memory_fill(data, 0, sizeof data);
+        memory_copy(data, address_of number, 4);
+        memory_copy(data + 4, address_of arch, 4);
+        memory_copy(data + 16, arguments, 6 * sizeof(p64));
+        for (positive at = 0; at < filter->used && at < NET_FILTER_STEPS; at++)
+        {
+                net_filter_step step = filter->steps[at];
+
+                switch (step.code)
+                {
+                case NET_FILTER_LOAD:
+                        if (step.value > sizeof data - 4)
+                                return 0;
+                        memory_copy(address_of accumulator, data + step.value, 4);
+                        break;
+                case NET_FILTER_AND:
+                        accumulator &= step.value;
+                        break;
+                case NET_FILTER_ALWAYS:
+                        at += step.value;
+                        break;
+                case NET_FILTER_EQUAL:
+                        at += accumulator == step.value ? step.jump_true
+                                                        : step.jump_false;
+                        break;
+                case NET_FILTER_ANY_BIT:
+                        at += accumulator & step.value ? step.jump_true
+                                                       : step.jump_false;
+                        break;
+                case NET_FILTER_RETURN:
+                        return step.value;
+                default:
+                        return 0;
+                }
+        }
+        //      Off the end: the kernel refuses such a program at install.
+        return 0;
+}
+
 #else /* the sections */
 
 #ifdef CHECK_standard
@@ -70888,50 +70936,9 @@ static fn dhcp_frames_on_loopback(void)
         primitive must refuse to run the task at all -- which is the pass --
         and the deaths are NOT RUN.
 */
-static p32 net_filter_run(const net_filter address_to filter, p32 arch,
-                          p32 number, const p64 address_to arguments)
-{
-        p8 data[64];
-        p32 accumulator = 0;
-
-        memory_fill(data, 0, sizeof data);
-        memory_copy(data, address_of number, 4);
-        memory_copy(data + 4, address_of arch, 4);
-        memory_copy(data + 16, arguments, 6 * sizeof(p64));
-        for (positive at = 0; at < filter->used && at < NET_FILTER_STEPS; at++)
-        {
-                net_filter_step step = filter->steps[at];
-
-                switch (step.code)
-                {
-                case NET_FILTER_LOAD:
-                        if (step.value > sizeof data - 4)
-                                return 0;
-                        memory_copy(address_of accumulator, data + step.value, 4);
-                        break;
-                case NET_FILTER_AND:
-                        accumulator &= step.value;
-                        break;
-                case NET_FILTER_ALWAYS:
-                        at += step.value;
-                        break;
-                case NET_FILTER_EQUAL:
-                        at += accumulator == step.value ? step.jump_true
-                                                        : step.jump_false;
-                        break;
-                case NET_FILTER_ANY_BIT:
-                        at += accumulator & step.value ? step.jump_true
-                                                       : step.jump_false;
-                        break;
-                case NET_FILTER_RETURN:
-                        return step.value;
-                default:
-                        return 0;
-                }
-        }
-        //      Off the end: the kernel refuses such a program at install.
-        return 0;
-}
+#define SHARED_filter_run
+#include "checks.c"
+#undef SHARED_filter_run
 
 //      check() with a name made at run time.
 static fn net_apart_check(string_address name, bool passed)
@@ -87023,6 +87030,86 @@ static fn epochs_generated(void)
                   malformed > 0 && taken > 1000);
 }
 
+/*
+        The listener's mDNS reader, apart (link_mdns_read_apart in
+        src/waterlink/nearby.c): its filter in the classic-BPF interpreter, what
+        the listener believes of an answer, and a real announcement and noise
+        read through the confined reader, in this check's user namespace,
+        against the reading the parser makes in place.
+*/
+#define SHARED_filter_run
+#include "checks.c"
+#undef SHARED_filter_run
+
+static fn mdns_apart(void)
+{
+        static const struct
+        {
+                string_address name;
+                p32 number;
+                bool allowed;
+        } rows[] = {
+            {"recvfrom", syscall(recvfrom), true}, {"sendto", syscall(sendto), true},
+            {"ppoll", syscall(ppoll), true},       {"exit_group", syscall(exit_group), true},
+            {"openat", syscall(openat), false},    {"socket", syscall(socket), false},
+            {"execve", syscall(execve), false},    {"ptrace", syscall(ptrace), false},
+            {"mmap", syscall(mmap), false},        {"write", syscall(write), false},
+            {"read", syscall(read), false},        {"kill", syscall(kill), false},
+        };
+        static const p64 none[6] = {0};
+        net_filter filter;
+        bool all = true;
+        p8 instance[10] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+        p8 host[6] = {0x01, 0x23, 0x45, 0x67, 0x89, 0xab};
+        p8 packet[WATERLINK_MDNS_MAX];
+        positive length;
+        struct waterlink_found here;
+        struct waterlink_found apart;
+        bool read_here;
+        bool read_apart;
+
+        link_mdns_filter_build(address_of filter);
+        for (positive at = 0; at < array_count(rows); at++)
+                all = all && net_filter_run(address_of filter, NET_APART_ARCH, rows[at].number,
+                                            none) ==
+                                 (rows[at].allowed ? SECCOMP_RET_ALLOW
+                                                   : SECCOMP_RET_KILL_PROCESS);
+        check("the mDNS reader's filter allows its pipe's calls and kills the rest", all);
+        check("the mDNS reader's filter kills a call from another architecture",
+              net_filter_run(address_of filter, NET_APART_ARCH ^ 1, syscall(recvfrom), none) ==
+                  SECCOMP_RET_KILL_PROCESS);
+
+        memory_zero(address_of here, sizeof here);
+        here.count = WATERLINK_FOUND_MAX;
+        check("the listener believes a reading with every count in its array",
+              link_mdns_believed(address_of here));
+        here.count = WATERLINK_FOUND_MAX + 1;
+        check("and not one more", !link_mdns_believed(address_of here));
+        here.count = 1;
+        here.instance[0].label_length = sizeof(here.instance[0].label) + 1;
+        check("nor a label longer than its room", !link_mdns_believed(address_of here));
+        here.instance[0].label_length = 0;
+        here.question_length = sizeof(here.question) + 1;
+        check("nor a question longer than its room", !link_mdns_believed(address_of here));
+
+        length = waterlink_mdns_announce(packet, sizeof packet, instance, host, 22348,
+                                         0x7f000001u, 120, 0, null, 0);
+        memory_zero(address_of here, sizeof here);
+        read_here = waterlink_mdns_read(packet, length, address_of here);
+        read_apart = link_mdns_read_apart(packet, length, address_of apart);
+        check("an announcement read apart is the reading made in place",
+              length && read_here && read_apart && apart.count == here.count &&
+                  !memory_compare(address_of apart, address_of here, sizeof here));
+        check("the reader is a process of its own, still there for the next packet",
+              link_mdns.pid > 0 && link_mdns.channel >= 0 && !link_mdns.refused);
+        memory_fill(packet, 0xc0, 64);
+        check("noise read apart is no reading",
+              !link_mdns_read_apart(packet, 64, address_of apart) && !apart.count);
+        read_apart = link_mdns_read_apart(packet, length, address_of apart);
+        link_mdns_end();
+        check("and the reader is let go", link_mdns.pid < 0 && link_mdns.channel < 0);
+}
+
 b32 main(void)
 {
         bipolar listener;
@@ -87051,6 +87138,7 @@ b32 main(void)
         }
 
         authorization_files();
+        mdns_apart();
         identity_creation_races();
         staging();
         publication();
@@ -89281,6 +89369,341 @@ static fn wifi_plans(void)
         }
 }
 
+/*
+        The Wi-Fi station apart (radio_station_run in src/sh/host.c). Its filter
+        in the classic-BPF interpreter over the calls a join and its keeper make
+        and the ones they must not; the statuses its broker believes of a join;
+        and natively, the station confined in a user namespace of its own, where
+        its netlink and EAPOL sockets are its to ask for and anything else kills
+        it. Under qemu-user, which cannot filter itself, the confinement is
+        refused, which is what the station then does: it joins nothing.
+*/
+#define SHARED_filter_run
+#include "checks.c"
+#undef SHARED_filter_run
+
+//      check() with a name made at run time.
+static fn station_check(string_address name, bool passed)
+{
+        checks++;
+        if (!passed)
+        {
+                failures++;
+                string_format(log, "  FAIL %s\n", name);
+        }
+}
+
+static bool station_emulated(void)
+{
+        return program_argument_count() > 1 &&
+               !string_compare(program_argument(1), (string_address)"--emulated");
+}
+
+static fn station_filter(void)
+{
+        const p32 eapol = (p32)network_order_16(ETH_P_PAE);
+        const struct
+        {
+                string_address name;
+                p32 number;
+                p64 arguments[6];
+                bool allowed;
+        } rows[] = {
+            {"recvfrom", syscall(recvfrom), {0}, true},
+            {"sendto", syscall(sendto), {0}, true},
+            {"ppoll", syscall(ppoll), {0}, true},
+            {"clock_gettime", syscall(clock_gettime), {0}, true},
+            {"getrandom", syscall(getrandom), {0}, true},
+            {"close", syscall(close), {0}, true},
+            {"bind", syscall(bind), {0}, true},
+            {"getsockname", syscall(getsockname), {0}, true},
+            {"nanosleep", syscall(nanosleep), {0}, true},
+            {"exit_group", syscall(exit_group), {0}, true},
+            {"a generic netlink socket", syscall(socket),
+             {AF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC, NETLINK_GENERIC}, true},
+            {"a route netlink socket", syscall(socket),
+             {AF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC, NETLINK_ROUTE}, true},
+            {"the EAPOL packet socket", syscall(socket),
+             {AF_PACKET, SOCK_DGRAM | SOCK_CLOEXEC, eapol}, true},
+            {"an audit netlink socket", syscall(socket),
+             {AF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC, 9}, false},
+            {"a raw netlink socket", syscall(socket),
+             {AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_GENERIC}, false},
+            {"a raw packet socket", syscall(socket), {AF_PACKET, SOCK_RAW, eapol}, false},
+            {"a packet socket of every ethertype", syscall(socket),
+             {AF_PACKET, SOCK_DGRAM, network_order_16(3)}, false},
+            {"an IPv4 socket", syscall(socket), {AF_INET, SOCK_DGRAM, 0}, false},
+            {"a unix socket", syscall(socket), {AF_UNIX, SOCK_STREAM, 0}, false},
+            {"an IPv6 socket", syscall(socket), {AF_INET6, SOCK_DGRAM, 0}, false},
+            {"a netlink group joined", syscall(setsockopt),
+             {3, SOL_NETLINK, NETLINK_ADD_MEMBERSHIP}, true},
+            {"a netlink group left", syscall(setsockopt),
+             {3, SOL_NETLINK, RADIO_NETLINK_DROP_MEMBERSHIP}, true},
+            {"netlink extended acks", syscall(setsockopt), {3, SOL_NETLINK, NETLINK_EXT_ACK},
+             true},
+            {"another netlink option", syscall(setsockopt), {3, SOL_NETLINK, 3}, false},
+            {"SO_BINDTODEVICE", syscall(setsockopt), {3, SOL_SOCKET, SO_BINDTODEVICE}, false},
+            {"a packet socket option", syscall(setsockopt), {3, 263, 1}, false},
+            {"memory to read and write", syscall(mmap), {0, 4096, 3, 0x22}, true},
+            {"executable memory", syscall(mmap), {0, 4096, 5, 0x22}, false},
+            {"openat", syscall(openat), {0}, false},
+            {"execve", syscall(execve), {0}, false},
+            {"ptrace", syscall(ptrace), {0}, false},
+            {"kill", syscall(kill), {0}, false},
+            {"ioctl", syscall(ioctl), {0}, false},
+            {"prctl", syscall(prctl), {0}, false},
+            {"mprotect", syscall(mprotect), {0}, false},
+            {"seccomp", syscall(seccomp), {0}, false},
+            {"capset", syscall(capset), {0}, false},
+            {"setresuid", syscall(setresuid), {0}, false},
+            {"unshare", syscall(unshare), {0}, false},
+            {"read", syscall(read), {0}, false},
+            {"write", syscall(write), {0}, false},
+            {"connect", syscall(connect), {0}, false},
+            {"sendmsg", syscall(sendmsg), {0}, false},
+            {"recvmsg", syscall(recvmsg), {0}, false},
+            {"socketpair", syscall(socketpair), {0}, false},
+            {"x32's recvfrom", syscall(recvfrom) | 0x40000000u, {0}, false},
+        };
+        static const p64 none[6] = {0};
+        net_filter filter;
+        bool landed = true;
+
+        radio_filter_build(address_of filter);
+        check("the station's filter fits its program",
+              filter.used > 8 && filter.used <= NET_FILTER_STEPS);
+        if (filter.used > NET_FILTER_STEPS)
+                return;
+        for (positive at = 0; at < filter.used; at++)
+        {
+                net_filter_step step = filter.steps[at];
+
+                if (step.code == NET_FILTER_EQUAL || step.code == NET_FILTER_ANY_BIT)
+                        landed = landed && at + 1 + step.jump_true < filter.used &&
+                                 at + 1 + step.jump_false < filter.used;
+                else if (step.code == NET_FILTER_ALWAYS)
+                        landed = landed && at + 1 + step.value < filter.used;
+        }
+        check("every jump of the station's filter lands inside it", landed);
+        check("the station's filter ends in an answer",
+              filter.steps[filter.used - 1].code == NET_FILTER_RETURN);
+        for (positive at = 0; at < array_count(rows); at++)
+        {
+                p8 name[128];
+                p32 answer = net_filter_run(address_of filter, NET_APART_ARCH,
+                                            rows[at].number, rows[at].arguments);
+
+                string_copy_max_end(
+                    string_copy_end(name, rows[at].allowed
+                                              ? (string_address) "the station's filter allows "
+                                              : (string_address) "the station's filter kills "),
+                    rows[at].name, 80);
+                station_check((string_address)name,
+                              answer == (rows[at].allowed ? SECCOMP_RET_ALLOW
+                                                          : SECCOMP_RET_KILL_PROCESS));
+        }
+        check("the station's filter kills a call from another architecture",
+              net_filter_run(address_of filter, NET_APART_ARCH ^ 1, syscall(recvfrom), none) ==
+                  SECCOMP_RET_KILL_PROCESS);
+}
+
+static fn station_statuses(void)
+{
+        static const struct
+        {
+                b64 status;
+                bool believed;
+        } rows[] = {
+            {0, true},
+            {-13, true},
+            {-113, true},
+            {-4095, true},
+            {-1001, true},
+            {-1000 - 65535, true},
+            {WIFI_REFUSE_TKIP, true},
+            {WIFI_REFUSE_ELEMENTS, true},
+            {WIFI_REFUSE_CONFINE, true},
+            {1, false},
+            {-1000 - 65536, false},
+            {WIFI_REFUSE_TKIP + 1, false},
+            {WIFI_REFUSE_ELEMENTS - 1, false},
+            {WIFI_REFUSE_APART, false},
+            {-(b64)1 << 40, false},
+        };
+        bool all = true;
+
+        for (positive at = 0; at < array_count(rows); at++)
+                all = all && radio_join_status(rows[at].status) == rows[at].believed;
+        check("the broker believes a join's status only as one the join returns", all);
+}
+
+#define STATION_PROBES 9
+
+/* One probe, in a child: a user namespace of its own (its maps written by
+   the parent, as unshare -r does: this kernel lets no process write its
+   own), the station's confinement, then the one thing the probe is. Exit 0
+   when the call came back (whatever it answered), 3 when the confinement
+   was refused, 4 when there was no namespace to be had. */
+static DEAD_END fn station_probe(positive which, b32 said, b32 go)
+{
+        p8 byte = 0;
+
+        byte = system_call_1(syscall(unshare), 0x10000000 /* CLONE_NEWUSER */) == 0;
+        if (system_write_all((positive)said, address_of byte, 1) != 1 || !byte ||
+            system_read_retry((positive)go, address_of byte, 1) != 1 || !byte)
+                system_call_1(syscall(exit_group), 4);
+        system_close(said);
+        system_close(go);
+        if (!radio_station_confine())
+                system_call_1(syscall(exit_group), 3);
+        switch (which)
+        {
+        case 0:
+                (void)socket_new(AF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC, NETLINK_GENERIC);
+                break;
+        case 1:
+                (void)socket_new(AF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC, NETLINK_ROUTE);
+                break;
+        case 2:
+                (void)socket_new(AF_PACKET, SOCK_DGRAM | SOCK_CLOEXEC,
+                                 (b32)network_order_16(ETH_P_PAE));
+                break;
+        case 3:
+                (void)system_open_at(AT_FDCWD, "/", FILE_READ | O_CLOEXEC);
+                break;
+        case 4:
+                (void)socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+                break;
+        case 5:
+                (void)system_call_3(syscall(execve), (positive) "/bin/true", 0, 0);
+                break;
+        case 6:
+                (void)system_call_4(syscall(ptrace), 0, 0, 0, 0);
+                break;
+        case 7:
+                (void)socket_new(AF_PACKET, SOCK_RAW | SOCK_CLOEXEC,
+                                 (b32)network_order_16(ETH_P_PAE));
+                break;
+        case 8:
+                (void)system_call_5(syscall(prctl), 8 /* PR_SET_KEEPCAPS */, 1, 0, 0, 0);
+                break;
+        }
+        system_call_1(syscall(exit_group), 0);
+        __builtin_unreachable();
+}
+
+//      One of a child's maps, written from here: "0 ID 1", or the word.
+static bool station_map(bipolar child, string_address file, string_address text)
+{
+        p8 path[64];
+        p8 address_to put = string_copy_end(path, (string_address) "/proc/");
+        bipolar handle;
+        positive length = string_length(text);
+        bool wrote;
+
+        put += positive_into(put, (positive)child);
+        string_copy_end(string_copy_end(put, (string_address) "/"), file);
+        handle = system_open_at(AT_FDCWD, (string_address)path, FILE_WRITE | O_CLOEXEC);
+        if (handle < 0)
+                return false;
+        wrote = system_write_all((positive)handle, text, length) == (bipolar)length;
+        system_close(handle);
+        return wrote;
+}
+
+static fn station_confinement(void)
+{
+        static const string_address names[STATION_PROBES] = {
+            "opens a generic netlink socket", "opens a route netlink socket",
+            "asks for the EAPOL packet socket", "dies of openat", "dies of an IPv4 socket",
+            "dies of execve", "dies of ptrace", "dies of a raw packet socket", "dies of prctl"};
+        bool emulated = station_emulated();
+        bool unprivileged = false;
+
+        //      qemu-user cannot filter itself: the confinement is refused
+        //      there, before any namespace, which is what the station does.
+        if (emulated)
+        {
+                bipolar child = system_fork();
+                positive raw = 0;
+
+                if (!child)
+                        system_call_1(syscall(exit_group), radio_station_confine() ? 0 : 3);
+                check("under qemu-user the station refuses rather than run unfiltered",
+                      child > 0 && system_wait4_retry(child, address_of raw, 0, null) == child &&
+                          (raw & 0x7f) == 0 && ((raw >> 8) & 0xff) == 3);
+                log_direct(str("bowl: the station's confinement NOT RUN -- qemu-user (the refusal is checked)\n"));
+                return;
+        }
+        for (positive at = 0; at < STATION_PROBES; at++)
+        {
+                b32 up[2];
+                b32 down[2];
+                bipolar child;
+                positive raw = 0;
+                p8 name[96];
+                p8 byte = 0;
+                p8 uid_line[32];
+                p8 gid_line[32];
+                p8 address_to put;
+
+                put = string_copy_end(uid_line, (string_address) "0 ");
+                put += positive_into_string(put, (positive)system_call(syscall(getuid)));
+                string_copy_end(put, (string_address) " 1");
+                put = string_copy_end(gid_line, (string_address) "0 ");
+                put += positive_into_string(put, (positive)system_call(syscall(getgid)));
+                string_copy_end(put, (string_address) " 1");
+                if (system_call_2(syscall(pipe2), (positive)up, O_CLOEXEC) < 0 ||
+                    system_call_2(syscall(pipe2), (positive)down, O_CLOEXEC) < 0)
+                {
+                        check("the station probe's pipes open", false);
+                        return;
+                }
+                child = system_fork();
+                if (!child)
+                {
+                        system_close(up[0]);
+                        system_close(down[1]);
+                        station_probe(at, up[1], down[0]);
+                }
+                system_close(up[1]);
+                system_close(down[0]);
+                //      The child waits for this byte only once it has said it
+                //      has a namespace; otherwise it is gone, and a write to its
+                //      pipe would be a SIGPIPE here.
+                if (child > 0 && system_read_retry((positive)up[0], address_of byte, 1) == 1 &&
+                    byte)
+                {
+                        byte = station_map(child, (string_address) "uid_map",
+                                           (string_address)uid_line) &&
+                               station_map(child, (string_address) "setgroups",
+                                           (string_address) "deny") &&
+                               station_map(child, (string_address) "gid_map",
+                                           (string_address)gid_line);
+                        (void)system_write_all((positive)down[1], address_of byte, 1);
+                }
+                system_close(up[0]);
+                system_close(down[1]);
+                if (child < 0 || system_wait4_retry(child, address_of raw, 0, null) != child)
+                {
+                        check("the station probe forks", false);
+                        return;
+                }
+                if ((raw & 0x7f) == 0 && ((raw >> 8) & 0xff) == 4)
+                {
+                        unprivileged = true;
+                        break;
+                }
+                string_copy_max_end(string_copy_end(name, (string_address) "the confined station "),
+                                    names[at], 64);
+                station_check((string_address)name,
+                              at < 3 ? (raw & 0x7f) == 0 && ((raw >> 8) & 0xff) == 0
+                                     : (raw & 0x7f) == SIGSYS);
+        }
+        if (unprivileged)
+                log_direct(str("bowl: the station's confinement NOT RUN -- no unprivileged user namespaces\n"));
+}
+
 b32 main(void)
 {
         names();
@@ -89303,6 +89726,9 @@ b32 main(void)
 #endif
         boot_links();
         wifi_plans();
+        station_filter();
+        station_statuses();
+        station_confinement();
         json();
         oci();
         nix();

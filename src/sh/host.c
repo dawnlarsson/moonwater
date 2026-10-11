@@ -6119,6 +6119,10 @@ static COLD fn wifi_caps_merge(wifi_rsn_caps address_to into, const wifi_rsn_cap
 #define WIFI_REFUSE_ELEMENTS (-70010)
 #define WIFI_REFUSE_FIRST WIFI_REFUSE_ELEMENTS
 #define WIFI_REFUSE_LAST WIFI_REFUSE_TKIP
+//      The machine's doing, not the network's: no station could be confined
+//      here, so nothing was joined; or the station ended without a status.
+#define WIFI_REFUSE_CONFINE (-70101)
+#define WIFI_REFUSE_APART (-70102)
 
 /* What a join asks of an access point: the key management suite (2, 6 or
    8), the protection it asks for, and the PSK suite it may try when WPA3
@@ -7008,24 +7012,168 @@ static COLD bipolar wifi_handshake(wifi_link address_to link)
 }
 
 /*
-        The keeper: the link the machine joined, held past the join for as long
-        as it stands, in a process of its own with nothing else open. With
-        keys of its own to keep it answers the access point's rekeys; with a
-        driver that does its own handshake, or an open network, it only
-        watches. It ends when the link goes, and the machine's next pass joins
-        again. One at a time: it holds a write lock on wifi.keeper, which
-        names it to whatever joins or leaves next (host_lock_owner), which ends
-        it and waits until it is gone; and what a pass finds of it is what
-        says the link is there, without asking the kernel. It is started with
-        the radio lock still held, and not returned from until the lock is
-        taken, so that no join can start between the two and find nobody to
-        end. wifi.kept says a keeper was started and has not ended of its
-        own: a link with no keeper and that file is one whose keeper died.
+        The station, apart, and its keeper.
+
+        Everything the join and the keeper read comes from the air: scan
+        elements of any access point in range, SAE commits and confirms,
+        EAPOL-Key frames. So all of it -- the scan, the choice, WPA3's
+        exchange, the association, the four-way handshake and, for as long
+        as the link stands, its rekeys -- runs in the station, a process that
+        is nobody with CAP_NET_ADMIN and CAP_NET_RAW and nothing else (no
+        capability can come back through exec, which it may not make), not
+        dumpable, killed with its broker, and under a filter that kills any
+        call but its netlink and EAPOL sockets' (radio_filter_build). It opens
+        no file. The little it needs of the machine's state -- what a saved
+        network has taught the join, the access points to try last, when the
+        air was last scanned for a name, the WPA3 budget -- and the little it
+        has to leave there it asks of its broker over a channel of fixed-size
+        questions (radio_ask): the broker is root, does the one thing each
+        question names to the one file it names, and reads nothing else from
+        the station but the join's status.
+
+        The broker is the keeper the rest of the machine knows: it holds a
+        write lock on wifi.keeper for as long as its station lives, which
+        names it to whatever joins or leaves next (host_lock_owner), which
+        ends it and waits until it is gone (and the station with it); what a
+        pass finds of it is what says the link is there, without asking the
+        kernel. wifi.kept says a station joined and has not ended of its own:
+        a link with no keeper and that file is one whose keeper died. The
+        joining process waits for the join's status and nothing else, holding
+        the radio lock, so no join can start between the two.
+
+        It fails closed: a kernel that will not take the filter joins nothing
+        (WIFI_REFUSE_CONFINE), and a station that ends without a status is
+        WIFI_REFUSE_APART.
 */
 #define RADIO_KEEPER_PATH NET_STATE_DIR "/wifi.keeper"
 #define RADIO_KEPT_PATH NET_STATE_DIR "/wifi.kept"
-#define RADIO_KEEPER_START_NANOSECONDS 1000000000
-#define RADIO_KEEPER_ASK_NANOSECONDS 2000000
+
+//      A socket of whole messages for the broker's channel: a question is
+//      read whole or not at all.
+#define RADIO_SOCK_SEQPACKET 5
+
+#define RADIO_ASK_RULES_GET 1
+#define RADIO_ASK_RULES_PUT 2
+#define RADIO_ASK_AVOID_LOAD 3
+#define RADIO_ASK_AVOID_ADD 4
+#define RADIO_ASK_SCAN_AGE 5
+#define RADIO_ASK_SCAN_NOTE 6
+#define RADIO_ASK_SAE_BUDGET 7
+#define RADIO_ASK_SAID 8
+#define RADIO_ASK_JOINED 9
+//      What the station may have logged, by number: the broker logs its
+//      own literal for it, so nothing the station holds reaches the log.
+#define RADIO_SAID_NO_CLOCK 1
+#define RADIO_SAID_SOCKETS 2
+//      How long the station waits for its broker to answer, which it does
+//      at once: one that does not is gone.
+#define RADIO_ASK_SECONDS 10
+//      RADIO_AVOID_MOST of radio_avoid, sixteen bytes each.
+#define RADIO_ASK_AVOID_ROOM 1024
+
+//      One question, every field of it a fixed size the broker checks.
+typedef struct
+{
+        p32 what;
+        p8 ssid_length;
+        p8 mask;
+        p8 rules;
+        p8 named;
+        p8 ssid[32];
+        p8 bssid[6];
+        p8 unused[2];
+        b64 status;
+} radio_ask;
+
+typedef struct
+{
+        b64 answer;
+        p64 count;
+        p8 avoid[RADIO_ASK_AVOID_ROOM];
+} radio_answer;
+
+//      The station's end of its broker's channel; -1 everywhere else.
+static b32 radio_station = -1;
+
+/* A question to the broker and its answer, which every question has, so a
+   write is made before the station goes on. A broker that does not answer
+   is gone, and its station with it. */
+static COLD fn radio_station_ask(radio_ask address_to ask, radio_answer address_to answer)
+{
+        network_deadline deadline;
+
+        memory_fill(answer, 0, sizeof(*answer));
+        if (socket_send(radio_station, ask, sizeof(*ask), MSG_NOSIGNAL, null, 0) !=
+                (bipolar)sizeof(*ask) ||
+            !network_deadline_begin(address_of deadline, RADIO_ASK_SECONDS, 0) ||
+            network_wait_readable_until(radio_station, address_of deadline) <= 0 ||
+            socket_receive(radio_station, answer, sizeof(*answer), MSG_DONTWAIT, null, null) !=
+                (bipolar)sizeof(*answer))
+                system_call_1(syscall(exit_group), 1);
+}
+
+//      A question about a name or an access point, its answer's number.
+static COLD b64 radio_station_number(p32 what, const p8 address_to ssid, positive ssid_length,
+                                     const p8 address_to bssid, p8 mask, p8 rules)
+{
+        radio_ask ask;
+        radio_answer answer;
+
+        memory_fill(address_of ask, 0, sizeof(ask));
+        ask.what = what;
+        if (ssid && ssid_length <= sizeof(ask.ssid))
+        {
+                memory_copy(ask.ssid, ssid, ssid_length);
+                ask.ssid_length = (p8)ssid_length;
+                ask.named = 1;
+        }
+        if (bssid)
+                memory_copy(ask.bssid, bssid, 6);
+        ask.mask = mask;
+        ask.rules = rules;
+        radio_station_ask(address_of ask, address_of answer);
+        return answer.answer;
+}
+
+/*
+        Where passwords are in this process when a join forks: the saved
+        networks a pass loaded, a password a person typed. The broker, which
+        never needs one, and the station, once its join is over, wipe every
+        region held here, as the keeper used to be started only after the
+        joining process had forgotten them.
+*/
+#define RADIO_SECRETS 4
+
+static struct
+{
+        address_any at;
+        positive length;
+} radio_secrets[RADIO_SECRETS];
+
+static fn radio_secret_hold(address_any at, positive length)
+{
+        for (positive slot = 0; slot < RADIO_SECRETS; slot++)
+                if (!radio_secrets[slot].at)
+                {
+                        radio_secrets[slot].at = at;
+                        radio_secrets[slot].length = length;
+                        return;
+                }
+}
+
+static fn radio_secret_let_go(address_any at)
+{
+        for (positive slot = 0; slot < RADIO_SECRETS; slot++)
+                if (radio_secrets[slot].at == at)
+                        radio_secrets[slot].at = null;
+}
+
+static fn radio_secrets_forget(void)
+{
+        for (positive slot = 0; slot < RADIO_SECRETS; slot++)
+                if (radio_secrets[slot].at)
+                        crypto_forget(radio_secrets[slot].at, radio_secrets[slot].length);
+}
 
 /* What the keeper or whoever starts it has to say, in the kernel log: its
    output is /dev/null. The reason is a literal at every call. */
@@ -7034,6 +7182,18 @@ static COLD fn radio_keeper_said(string_address reason)
         string_address line[] = {"wifi keeper: ", reason, null};
 
         host_kmsg(line);
+}
+
+//      The station's line for the log, said by its broker (RADIO_SAID_*).
+static COLD fn radio_station_said(positive which)
+{
+        radio_ask ask;
+        radio_answer answer;
+
+        memory_fill(address_of ask, 0, sizeof(ask));
+        ask.what = RADIO_ASK_SAID;
+        ask.status = (b64)which;
+        radio_station_ask(address_of ask, address_of answer);
 }
 
 static COLD fn radio_keeper_stop(void)
@@ -7076,7 +7236,7 @@ static COLD fn wifi_keep(wifi_link address_to link)
 
         if (!network_deadline_begin(address_of check, WIFI_KEEP_CHECK_SECONDS, 0))
         {
-                radio_keeper_said("no clock to check the link by");
+                radio_station_said(RADIO_SAID_NO_CLOCK);
                 return;
         }
         for (;;)
@@ -7088,7 +7248,7 @@ static COLD fn wifi_keep(wifi_link address_to link)
 
                 if (ready < 0)
                 {
-                        radio_keeper_said("its sockets failed");
+                        radio_station_said(RADIO_SAID_SOCKETS);
                         return;
                 }
                 if (ready & 2)
@@ -7113,7 +7273,7 @@ static COLD fn wifi_keep(wifi_link address_to link)
                         continue;
                 if (!network_deadline_begin(address_of check, WIFI_KEEP_CHECK_SECONDS, 0))
                 {
-                        radio_keeper_said("no clock to check the link by");
+                        radio_station_said(RADIO_SAID_NO_CLOCK);
                         return;
                 }
                 there = nl80211_station(address_of link->session, link->index, now);
@@ -7125,68 +7285,6 @@ static COLD fn wifi_keep(wifi_link address_to link)
         //      Sent away, or the access point stopped answering: the next
         //      join tries another with the same name first.
         radio_avoid_add(link->bssid);
-}
-
-/* The joined link, from the join until its keeper takes it or it is let go. */
-static wifi_link radio_joined = {.session = {.handle = -1}, .eapol = -1};
-
-/* The keeper for the link just joined, started once the joining process has
-   said what it has to and forgotten the passwords it read. */
-static COLD fn radio_keeper_start(void)
-{
-        wifi_link address_to link = address_of radio_joined;
-        p64 began = system_clock_ns(HOST_CLOCK_BOOTTIME);
-
-        if (link->session.handle < 0)
-                return;
-        //      The sockets are kept in its descriptors and stdio is replaced:
-        //      a socket that is itself one of the first three would be lost
-        //      to that.
-        if (link->session.handle < 3 || (link->eapol >= 0 && link->eapol < 3))
-        {
-                radio_keeper_said("not started: its sockets are standard descriptors");
-                wifi_link_close(link);
-                return;
-        }
-        host_write_file(RADIO_KEPT_PATH, (p8 address_to) "1\n", 2, 0644, false);
-
-        if (host_detach(link->eapol >= 0 ? (p32)link->eapol : descriptors_none,
-                        (p32)link->session.handle))
-        {
-                //      Its lock first: what it holds is what the next join
-                //      looks for, and the joining process waits for it.
-                if (host_lock_file(RADIO_KEEPER_PATH, HOST_FILE_SETLK, null) < 0)
-                {
-                        radio_keeper_said("not started: it could not take its lock");
-                        system_call_1(syscall(exit_group), 1);
-                }
-                //      The join's scan news is nothing to the keeper, which
-                //      would wake for every scan anyone asked for.
-                if (link->session.scan)
-                        socket_option_set(link->session.handle, SOL_NETLINK,
-                                          WIFI_NETLINK_DROP_MEMBERSHIP,
-                                          address_of link->session.scan,
-                                          sizeof(link->session.scan));
-                wifi_keep(link);
-                system_remove_at(AT_FDCWD, RADIO_KEPT_PATH, 0);
-                wifi_link_close(link);
-                system_call_1(syscall(exit_group), 0);
-        }
-        wifi_link_close(link);
-
-        //      Not returned from until the lock is taken, so that no join can
-        //      begin between the two and find nobody to end: asked a few
-        //      times a millisecond for as long as a second.
-        while (!host_lock_owner(RADIO_KEEPER_PATH))
-        {
-                if (system_clock_ns(HOST_CLOCK_BOOTTIME) - began >= RADIO_KEEPER_START_NANOSECONDS)
-                {
-                        system_remove_at(AT_FDCWD, RADIO_KEPT_PATH, 0);
-                        radio_keeper_said("not started: it took no lock");
-                        return;
-                }
-                host_pause(RADIO_KEEPER_ASK_NANOSECONDS);
-        }
 }
 
 static COLD bool wifi_link_mac(string_address name, p8 address_to mac)
@@ -8270,12 +8368,17 @@ typedef struct
 static COLD bool wifi_sae_budget(const p8 address_to bssid)
 {
         wifi_sae_spent list[WIFI_SAE_ALL_MOST + 1];
-        bipolar got = file_read_once_at(AT_FDCWD, RADIO_SAE_PATH, list + 1,
-                                        WIFI_SAE_ALL_MOST * sizeof(list[0]));
-        positive count = got > 0 ? (positive)got / sizeof(list[0]) : 0;
+        bipolar got;
+        positive count;
         p64 now = system_clock_ns(HOST_CLOCK_BOOTTIME) / 1000000;
         positive kept = 1;
         positive peer = 0;
+
+        if (radio_station >= 0)
+                return radio_station_number(RADIO_ASK_SAE_BUDGET, null, 0, bssid, 0, 0) != 0;
+        got = file_read_once_at(AT_FDCWD, RADIO_SAE_PATH, list + 1,
+                                WIFI_SAE_ALL_MOST * sizeof(list[0]));
+        count = got > 0 ? (positive)got / sizeof(list[0]) : 0;
 
         for (positive at = 1; at <= count; at++)
                 if (list[at].at <= now && now - list[at].at < WIFI_SAE_WINDOW_MS)
@@ -8616,8 +8719,16 @@ static COLD bipolar wifi_sae_join(wifi_link address_to link, p8 address_to ssid,
         the machine's own pass leaves that to what a scan for the name found
         lately (radio_bss_choose).
 */
-static COLD bipolar nl80211_join(p8 address_to ssid, positive ssid_length, p8 address_to pass,
-                                 positive pass_length, bool force, wifi_link address_to link)
+/* Whether the access point the last choice made was one a join had given
+   up on (radio_avoid): the best there was, behind every other. */
+static bool radio_pick_given_up;
+
+/* nl80211_join's answer when a second look found no other access point. */
+#define RADIO_JOIN_NO_OTHER 1
+
+static COLD bipolar nl80211_join_once(p8 address_to ssid, positive ssid_length,
+                                      p8 address_to pass, positive pass_length, bool force,
+                                      bool again, wifi_link address_to link)
 {
         nl80211_iface iface;
         p8 chosen[6];
@@ -8640,9 +8751,9 @@ static COLD bipolar nl80211_join(p8 address_to ssid, positive ssid_length, p8 ad
         memory_fill(chosen, 0, 6);
         memory_fill(address_of caps, 0, sizeof(caps));
         memory_fill(address_of plan, 0, sizeof(plan));
-        //      Whatever keeps the last link's keys goes first: its EAPOL
-        //      socket would hear this join's message 1 as a rekey.
-        radio_keeper_stop();
+        //      Whatever kept the last link's keys is gone before the station
+        //      that runs this is forked (radio_join_apart): its EAPOL socket
+        //      would hear this join's message 1 as a rekey.
         failed = nl80211_open(address_of link->session);
         if (!failed)
                 failed = nl80211_interface(address_of link->session, address_of iface);
@@ -8667,6 +8778,8 @@ static COLD bipolar nl80211_join(p8 address_to ssid, positive ssid_length, p8 ad
         picked = radio_bss_choose(address_of link->session, iface.index, ssid, ssid_length,
                                   secured, chosen, address_of frequency, force, rules, key_only,
                                   address_of caps, address_of link->seen);
+        if (again && (picked <= 0 || radio_pick_given_up))
+                return RADIO_JOIN_NO_OTHER;
         if (!picked)
                 return -113;
 
@@ -8787,6 +8900,30 @@ static COLD bipolar nl80211_join(p8 address_to ssid, positive ssid_length, p8 ad
         }
         kept = !failed;
         return failed;
+}
+
+/*
+        A join. A failure at an access point puts it behind every other by the
+        name (radio_avoid_add), and in the machine's own pass the air is looked
+        at once more at once: another by the name is asked now, not after the
+        wait the failure earns. A louder twin that refuses every join -- WPA3
+        under a password its owner never chose, say -- otherwise held the real
+        one off for as long as that wait grew, a minute at the last. A join a
+        person asked for answers at once and pays for no second look; a wrong
+        password at the one access point there is finds nothing else and
+        waits as it did.
+*/
+static COLD bipolar nl80211_join(p8 address_to ssid, positive ssid_length, p8 address_to pass,
+                                 positive pass_length, bool force, wifi_link address_to link)
+{
+        bipolar failed = nl80211_join_once(ssid, ssid_length, pass, pass_length, force, false,
+                                           link);
+        bipolar again;
+
+        if (!failed || force || failed == -19 || failed == -113 || failed == WIFI_REFUSE_SAE_BUDGET)
+                return failed;
+        again = nl80211_join_once(ssid, ssid_length, pass, pass_length, force, true, link);
+        return again == RADIO_JOIN_NO_OTHER ? failed : again;
 }
 
 static bipolar nl80211_disconnect(nl80211 address_to session, p32 index)
@@ -9120,11 +9257,15 @@ static p8 radio_rule_of(const p8 address_to line, positive length, const p8 addr
 static COLD p8 radio_rules_get(p8 address_to ssid, positive ssid_length)
 {
         p8 text[RADIO_RULES_ROOM];
-        bipolar got = host_read_state(RADIO_RULES_PATH, text, sizeof(text));
+        bipolar got;
         positive at = 0;
         positive start;
         positive length;
         p8 rules = 0;
+
+        if (radio_station >= 0)
+                return (p8)radio_station_number(RADIO_ASK_RULES_GET, ssid, ssid_length, null, 0, 0);
+        got = host_read_state(RADIO_RULES_PATH, text, sizeof(text));
 
         while (got > 0 && host_line_next(text, (positive)got, address_of at, address_of start,
                                          address_of length))
@@ -9140,13 +9281,22 @@ static COLD fn radio_rules_put(p8 address_to ssid, positive ssid_length, p8 mask
         p8 text[RADIO_RULES_ROOM];
         p8 kept[RADIO_RULES_ROOM];
         radio_network networks[RADIO_WIFI_MOST];
-        positive count = radio_wifi_load(networks, RADIO_WIFI_MOST, null);
-        bipolar got = host_read_state(RADIO_RULES_PATH, text, sizeof(text));
+        positive count;
+        bipolar got;
         p8 rules = 0;
         positive at = 0;
         positive used = 0;
         positive start;
         positive length;
+
+        if (radio_station >= 0)
+        {
+                (void)radio_station_number(RADIO_ASK_RULES_PUT, ssid, ssid_length, null, mask,
+                                           what);
+                return;
+        }
+        count = radio_wifi_load(networks, RADIO_WIFI_MOST, null);
+        got = host_read_state(RADIO_RULES_PATH, text, sizeof(text));
 
         while (got > 0 && host_line_next(text, (positive)got, address_of at, address_of start,
                                          address_of length))
@@ -10212,6 +10362,9 @@ static p64 radio_scan_age(p8 address_to ssid, positive ssid_length)
         radio_scan_line line;
         string_address cursor = (string_address)text;
 
+        if (radio_station >= 0)
+                return (p64)radio_station_number(RADIO_ASK_SCAN_AGE, ssid, ssid_length, null, 0,
+                                                 0);
         if (host_read_word(RADIO_SCAN_PATH, text, sizeof(text)) <= 0)
                 return best;
         while (radio_scan_line_next(address_of cursor, address_of line))
@@ -10234,6 +10387,12 @@ static fn radio_scan_note(p8 address_to ssid, positive ssid_length)
         string_address cursor = (string_address)old;
         positive lines = 1;
         positive used;
+
+        if (radio_station >= 0)
+        {
+                (void)radio_station_number(RADIO_ASK_SCAN_NOTE, ssid, ssid_length, null, 0, 0);
+                return;
+        }
 
         bipolar_into_string(number, (bipolar)now);
         string_copy_bounded(text, number, sizeof(text));
@@ -10518,13 +10677,32 @@ typedef struct
         p64 until;
 } radio_avoid;
 
+_Static_assert(RADIO_AVOID_MOST * sizeof(radio_avoid) == RADIO_ASK_AVOID_ROOM,
+               "the broker's answer holds the whole avoid list");
+
 static positive radio_avoid_load(radio_avoid address_to into)
 {
-        bipolar got = file_read_once_at(AT_FDCWD, RADIO_AVOID_PATH, into,
-                                        RADIO_AVOID_MOST * sizeof(radio_avoid));
-        positive count = got > 0 ? (positive)got / sizeof(radio_avoid) : 0;
+        bipolar got;
+        positive count;
         positive kept = 0;
         p64 now = system_clock_ns(HOST_CLOCK_BOOTTIME) / 1000000;
+
+        if (radio_station >= 0)
+        {
+                radio_ask ask;
+                radio_answer answer;
+
+                memory_fill(address_of ask, 0, sizeof(ask));
+                ask.what = RADIO_ASK_AVOID_LOAD;
+                radio_station_ask(address_of ask, address_of answer);
+                if (answer.count > RADIO_AVOID_MOST)
+                        return 0;
+                memory_copy(into, answer.avoid, (positive)answer.count * sizeof(radio_avoid));
+                return (positive)answer.count;
+        }
+        got = file_read_once_at(AT_FDCWD, RADIO_AVOID_PATH, into,
+                                RADIO_AVOID_MOST * sizeof(radio_avoid));
+        count = got > 0 ? (positive)got / sizeof(radio_avoid) : 0;
 
         for (positive at = 0; at < count; at++)
                 if (into[at].until > now && into[at].until - now <= RADIO_AVOID_MS)
@@ -10540,6 +10718,11 @@ static COLD fn radio_avoid_add(p8 address_to bssid)
 
         if (!bssid || !wifi_mac_set(bssid))
                 return;
+        if (radio_station >= 0)
+        {
+                (void)radio_station_number(RADIO_ASK_AVOID_ADD, null, 0, bssid, 0, 0);
+                return;
+        }
         count = radio_avoid_load(list + 1);
         memory_fill(list, 0, sizeof(list[0]));
         memory_copy(list[0].bssid, bssid, 6);
@@ -10550,6 +10733,357 @@ static COLD fn radio_avoid_add(p8 address_to bssid)
         host_state_ready();
         host_write_file(RADIO_AVOID_PATH, (p8 address_to)list, kept * sizeof(radio_avoid),
                         0600, false);
+}
+
+/*
+        The station's filter: its architecture, then the calls that need no
+        more than their number, then the four whose arguments decide, then
+        death. A socket is netlink (route or generic) or the EAPOL packet
+        socket and nothing else; an option is a netlink group joined or left,
+        or extended acks; memory is never executable. Its broker's channel is
+        a socket it already holds, spoken to with sendto and recvfrom.
+*/
+#define RADIO_NETLINK_DROP_MEMBERSHIP 2
+
+static COLD fn radio_filter_build(net_filter address_to filter)
+{
+        static const p32 plain[] = {
+            (p32)syscall(recvfrom), (p32)syscall(sendto), (p32)syscall(ppoll),
+            (p32)syscall(clock_gettime), (p32)syscall(getrandom),
+            (p32)syscall(close), (p32)syscall(bind), (p32)syscall(getsockname),
+            (p32)syscall(nanosleep), (p32)syscall(clock_nanosleep),
+            (p32)syscall(munmap), (p32)syscall(mremap), (p32)syscall(madvise),
+            (p32)syscall(exit_group), (p32)syscall(exit),
+            (p32)syscall(rt_sigreturn), (p32)syscall(restart_syscall),
+#ifdef NET_APART_RISCV_HWPROBE
+            NET_APART_RISCV_HWPROBE,
+#endif
+        };
+        static const p32 datagram[] = {SOCK_DGRAM};
+        static const p32 netlink_protocols[] = {NETLINK_ROUTE, NETLINK_GENERIC};
+        static const p32 netlink_options[] = {NETLINK_ADD_MEMBERSHIP,
+                                              RADIO_NETLINK_DROP_MEMBERSHIP,
+                                              NETLINK_EXT_ACK};
+        const p32 eapol[] = {(p32)network_order_16(ETH_P_PAE)};
+        positive count = array_count(plain);
+        positive call;
+        positive family;
+
+        filter->used = 0;
+        net_filter_put(filter, NET_FILTER_LOAD, 0, 0, NET_FILTER_ARCH);
+        net_filter_put(filter, NET_FILTER_EQUAL, 1, 0, NET_APART_ARCH);
+        net_filter_answer(filter, SECCOMP_RET_KILL_PROCESS);
+        net_filter_put(filter, NET_FILTER_LOAD, 0, 0, NET_FILTER_NUMBER);
+        for (positive at = 0; at < count; at++)
+                net_filter_put(filter, NET_FILTER_EQUAL, (p8)(count - at), 0, plain[at]);
+        net_filter_put(filter, NET_FILTER_ALWAYS, 0, 0, 1);
+        net_filter_answer(filter, SECCOMP_RET_ALLOW);
+
+        //      socket: netlink route or generic, or a packet socket of EAPOL's
+        //      ethertype; datagrams, with SOCK_NONBLOCK or SOCK_CLOEXEC.
+        call = net_filter_when(filter, (p32)syscall(socket));
+        net_filter_load(filter, 0);
+        family = net_filter_when(filter, AF_NETLINK);
+        net_filter_require(filter, 1, ~(p32)(SOCK_NONBLOCK | SOCK_CLOEXEC), datagram,
+                           array_count(datagram));
+        net_filter_require(filter, 2, ~(p32)0, netlink_protocols,
+                           array_count(netlink_protocols));
+        net_filter_answer(filter, SECCOMP_RET_ALLOW);
+        net_filter_past(filter, family);
+        family = net_filter_when(filter, AF_PACKET);
+        net_filter_require(filter, 1, ~(p32)(SOCK_NONBLOCK | SOCK_CLOEXEC), datagram,
+                           array_count(datagram));
+        net_filter_require(filter, 2, ~(p32)0, eapol, array_count(eapol));
+        net_filter_answer(filter, SECCOMP_RET_ALLOW);
+        net_filter_past(filter, family);
+        net_filter_answer(filter, SECCOMP_RET_KILL_PROCESS);
+        net_filter_past(filter, call);
+
+        //      setsockopt: a netlink group joined or left, extended acks.
+        call = net_filter_when(filter, (p32)syscall(setsockopt));
+        net_filter_load(filter, 1);
+        family = net_filter_when(filter, SOL_NETLINK);
+        net_filter_require(filter, 2, ~(p32)0, netlink_options,
+                           array_count(netlink_options));
+        net_filter_answer(filter, SECCOMP_RET_ALLOW);
+        net_filter_past(filter, family);
+        net_filter_answer(filter, SECCOMP_RET_KILL_PROCESS);
+        net_filter_past(filter, call);
+
+        //      mmap: anything but executable.
+        call = net_filter_when(filter, (p32)syscall(mmap));
+        net_filter_load(filter, 2);
+        net_filter_put(filter, NET_FILTER_ANY_BIT, 1, 0, NET_APART_EXECUTABLE);
+        net_filter_answer(filter, SECCOMP_RET_ALLOW);
+        net_filter_answer(filter, SECCOMP_RET_KILL_PROCESS);
+        net_filter_past(filter, call);
+
+        net_filter_answer(filter, SECCOMP_RET_KILL_PROCESS);
+}
+
+#define RADIO_CAP_NET_ADMIN 12
+#define RADIO_CAP_NET_RAW 13
+#define RADIO_CAPABILITY_VERSION 0x20080522u
+#define RADIO_PR_SET_KEEPCAPS 8
+#define RADIO_PR_CAPBSET_DROP 24
+#define RADIO_PR_CAP_AMBIENT 47
+#define RADIO_PR_CAP_AMBIENT_CLEAR_ALL 4
+
+/*
+        The station made what it may be: every capability but CAP_NET_ADMIN
+        (nl80211, the link up) and CAP_NET_RAW (the EAPOL socket) out of its
+        bounding set, nobody when it is root, those two raised again and no
+        other, nothing ambient, not dumpable, no new privileges, then its
+        filter. A user namespace that maps root and not nobody keeps root,
+        which owns nothing outside it (net_apart_nobody). False at the first
+        refusal, and nothing is joined.
+*/
+static COLD bool radio_station_confine(void)
+{
+        struct
+        {
+                p32 version;
+                b32 pid;
+        } head = {RADIO_CAPABILITY_VERSION, 0};
+        struct
+        {
+                p32 effective;
+                p32 permitted;
+                p32 inheritable;
+        } data[2] = {{0}};
+        p32 keep = 1u << RADIO_CAP_NET_ADMIN | 1u << RADIO_CAP_NET_RAW;
+        net_filter filter;
+
+        for (positive cap = 0; cap < 64; cap++)
+        {
+                bipolar dropped;
+
+                if (cap == RADIO_CAP_NET_ADMIN || cap == RADIO_CAP_NET_RAW)
+                        continue;
+                dropped = system_call_5(syscall(prctl), RADIO_PR_CAPBSET_DROP, cap, 0, 0, 0);
+                if (dropped == -EINVAL)
+                        break;
+                if (dropped < 0)
+                        return false;
+        }
+        if (system_call_5(syscall(prctl), RADIO_PR_SET_KEEPCAPS, 1, 0, 0, 0) < 0 ||
+            !net_apart_nobody())
+                return false;
+        data[0].effective = data[0].permitted = keep;
+        radio_filter_build(address_of filter);
+        return system_call_2(syscall(capset), (positive)address_of head,
+                             (positive)data) == 0 &&
+               system_call_5(syscall(prctl), RADIO_PR_CAP_AMBIENT,
+                             RADIO_PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0) >= 0 &&
+               system_call_5(syscall(prctl), PR_SET_DUMPABLE, 0, 0, 0, 0) == 0 &&
+               system_call_5(syscall(prctl), PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0 &&
+               net_filter_install(address_of filter);
+}
+
+/* The station: confined, then the join, its status to the broker, and for
+   as long as the link stands, its keeper. */
+static DEAD_END COLD fn radio_station_run(b32 channel, bipolar broker, p8 address_to ssid,
+                                          positive ssid_length, p8 address_to pass,
+                                          positive pass_length, bool force)
+{
+        wifi_link link = {.session = {.handle = -1}, .eapol = -1};
+        p32 kept[1] = {(p32)channel};
+        radio_ask ask;
+        radio_answer answer;
+        bipolar failed = WIFI_REFUSE_CONFINE;
+        bool confined;
+
+        radio_station = channel;
+        confined = system_call_5(syscall(prctl), PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0) == 0 &&
+                   system_call(syscall(getppid)) == broker &&
+                   descriptors_close_outside(3, kept, 1) && radio_station_confine();
+        if (confined)
+                failed = nl80211_join(ssid, ssid_length, pass, pass_length, force,
+                                      address_of link);
+        crypto_forget(pass, pass_length);
+        radio_secrets_forget();
+        memory_fill(address_of ask, 0, sizeof(ask));
+        ask.what = RADIO_ASK_JOINED;
+        ask.status = failed;
+        radio_station_ask(address_of ask, address_of answer);
+        if (!failed)
+        {
+                //      The join's scan news is nothing to the keeper, which
+                //      would wake for every scan anyone asked for.
+                if (link.session.scan)
+                        socket_option_set(link.session.handle, SOL_NETLINK,
+                                          RADIO_NETLINK_DROP_MEMBERSHIP,
+                                          address_of link.session.scan,
+                                          sizeof(link.session.scan));
+                wifi_keep(address_of link);
+        }
+        wifi_link_close(address_of link);
+        system_call_1(syscall(exit_group), 0);
+        __builtin_unreachable();
+}
+
+/* A status the join can return: joined, an errno, an access point's reason
+   for ending the handshake, or one of the join's own refusals. */
+static CONST COLD bool radio_join_status(b64 status)
+{
+        return (status <= 0 && status >= -4095) ||
+               (status <= -1000 && status > -1000 - 65536) ||
+               (status >= WIFI_REFUSE_FIRST && status <= WIFI_REFUSE_LAST) ||
+               status == WIFI_REFUSE_CONFINE;
+}
+
+/* What the broker does for one question, with checks on every field: a name
+   no longer than a name, a line to log only as a number it has a line for. */
+static COLD fn radio_broker_answer(radio_ask address_to ask, radio_answer address_to answer)
+{
+        p8 address_to ssid = ask->named ? ask->ssid : null;
+        positive ssid_length = ask->named ? ask->ssid_length : 0;
+
+        memory_fill(answer, 0, sizeof(*answer));
+        if (ssid_length > sizeof(ask->ssid))
+                return;
+        switch (ask->what)
+        {
+        case RADIO_ASK_RULES_GET:
+                answer->answer = ssid ? radio_rules_get(ssid, ssid_length) : 0;
+                break;
+        case RADIO_ASK_RULES_PUT:
+                if (ssid)
+                        radio_rules_put(ssid, ssid_length, ask->mask, ask->rules);
+                break;
+        case RADIO_ASK_AVOID_LOAD:
+                answer->count = radio_avoid_load((radio_avoid address_to)answer->avoid);
+                break;
+        case RADIO_ASK_AVOID_ADD:
+                radio_avoid_add(ask->bssid);
+                break;
+        case RADIO_ASK_SCAN_AGE:
+                answer->answer = (b64)radio_scan_age(ssid, ssid_length);
+                break;
+        case RADIO_ASK_SCAN_NOTE:
+                if (ssid)
+                        radio_scan_note(ssid, ssid_length);
+                break;
+        case RADIO_ASK_SAE_BUDGET:
+                answer->answer = wifi_sae_budget(ask->bssid);
+                break;
+        case RADIO_ASK_SAID:
+                if (ask->status == RADIO_SAID_NO_CLOCK)
+                        radio_keeper_said("no clock to check the link by");
+                else if (ask->status == RADIO_SAID_SOCKETS)
+                        radio_keeper_said("its sockets failed");
+                break;
+        }
+}
+
+/*
+        The broker: root, detached, holding the keeper's lock. It forks the
+        station, forgets every password it carries, then answers questions
+        until the station ends; the join's status goes to whoever asked for
+        the join, once, through told. A status that is no status the join
+        returns is the station's failure.
+*/
+static DEAD_END COLD fn radio_broker(b32 told, p8 address_to ssid, positive ssid_length,
+                                     p8 address_to pass, positive pass_length, bool force)
+{
+        b32 ends[2];
+        bipolar broker = system_call(syscall(getpid));
+        bipolar station;
+        positive raw = 0;
+        bool joined = false;
+
+        if (host_lock_file(RADIO_KEEPER_PATH, HOST_FILE_SETLK, null) < 0 ||
+            system_call_4(syscall(socketpair), AF_UNIX,
+                          RADIO_SOCK_SEQPACKET | SOCK_CLOEXEC, 0, (positive)ends) < 0)
+                system_call_1(syscall(exit_group), 1);
+        station = system_fork();
+        if (station < 0)
+                system_call_1(syscall(exit_group), 1);
+        if (!station)
+                radio_station_run(ends[1], broker, ssid, ssid_length, pass, pass_length, force);
+        system_close(ends[1]);
+        crypto_forget(pass, pass_length);
+        radio_secrets_forget();
+
+        for (;;)
+        {
+                radio_ask ask;
+                radio_answer answer;
+                network_deadline deadline;
+                bipolar ready;
+
+                //      The station asks when it has to and may keep the link
+                //      for days: an hour's wait at a time, for ever.
+                if (!network_deadline_begin(address_of deadline, 3600, 0))
+                        break;
+                ready = network_wait_readable_until(ends[0], address_of deadline);
+                if (!ready)
+                        continue;
+                if (ready < 0 ||
+                    socket_receive(ends[0], address_of ask, sizeof(ask), MSG_DONTWAIT, null,
+                                   null) != (bipolar)sizeof(ask))
+                        break;
+                if (ask.what == RADIO_ASK_JOINED && told >= 0)
+                {
+                        b64 status = ask.status;
+
+                        if (!radio_join_status(status))
+                                status = WIFI_REFUSE_APART;
+                        joined = status == 0;
+                        if (joined)
+                        {
+                                host_state_ready();
+                                host_write_file(RADIO_KEPT_PATH, (p8 address_to) "1\n", 2, 0644,
+                                                false);
+                        }
+                        (void)system_write_all((positive)told, address_of status, sizeof(status));
+                        system_close(told);
+                        told = -1;
+                        memory_fill(address_of answer, 0, sizeof(answer));
+                }
+                else if (ask.what == RADIO_ASK_JOINED)
+                        break;
+                else
+                        radio_broker_answer(address_of ask, address_of answer);
+                if (socket_send(ends[0], address_of answer, sizeof(answer), MSG_NOSIGNAL, null,
+                                0) != (bipolar)sizeof(answer))
+                        break;
+        }
+        system_close(ends[0]);
+        system_call_2(syscall(kill), (positive)station, SIGKILL);
+        (void)system_wait4_retry(station, address_of raw, 0, null);
+        if (joined)
+                system_remove_at(AT_FDCWD, RADIO_KEPT_PATH, 0);
+        system_call_1(syscall(exit_group), 0);
+        __builtin_unreachable();
+}
+
+/* A join, apart: whatever kept the last link is ended, a broker is forked
+   that outlives this process, and its word of the join is waited for. */
+static COLD bipolar radio_join_apart(p8 address_to ssid, positive ssid_length,
+                                     p8 address_to pass, positive pass_length, bool force)
+{
+        b32 told[2];
+        b64 status = WIFI_REFUSE_APART;
+        bipolar got;
+
+        radio_keeper_stop();
+        if (system_call_2(syscall(pipe2), (positive)told, O_CLOEXEC) < 0)
+                return WIFI_REFUSE_APART;
+        //      The broker's stdio is replaced; an end that is one of the
+        //      first three would be lost to that.
+        if (told[1] < 3 || told[0] < 3)
+        {
+                system_close(told[0]);
+                system_close(told[1]);
+                return WIFI_REFUSE_APART;
+        }
+        if (host_detach((p32)told[1], descriptors_none))
+                radio_broker(told[1], ssid, ssid_length, pass, pass_length, force);
+        system_close(told[1]);
+        got = system_read_retry((positive)told[0], address_of status, sizeof(status));
+        system_close(told[0]);
+        return got == (bipolar)sizeof(status) ? (bipolar)status : WIFI_REFUSE_APART;
 }
 
 typedef struct
@@ -10687,6 +11221,7 @@ static COLD bipolar radio_bss_choose(nl80211 address_to session, p32 index,
         //      Nothing by the name and no scan asked for: not in range as of
         //      the scan a moment ago, which is no new failure to wait longer for.
         radio_scan_declined = !pick.found && !scanned;
+        radio_pick_given_up = pick.found && pick.until != 0;
         if (!pick.found)
                 return heard > 0 ? 0 : -1;
         memory_copy(bssid, pick.best.bssid, 6);
@@ -10801,6 +11336,31 @@ static fn radio_air_row(radio_heard address_to heard, positive width, bool saved
 /* ---- wifi: what the last join said, and the password asked for ---- */
 
 /* The reason a join gave, as the words that follow the network's name. */
+/* What the join's plan says of the access point heard by a saved network's
+   name, the refusal or 0: a twin that offers less than the network taught
+   is said for what it is, whether or not the machine's pass has asked it. */
+static COLD bipolar radio_heard_refused(const radio_heard address_to heard,
+                                        const radio_network address_to networks,
+                                        positive count)
+{
+        for (positive at = 0; at < count; at++)
+        {
+                wifi_plan plan;
+                wifi_rsn_caps caps = heard->caps;
+
+                if (networks[at].ssid_length != heard->ssid_length ||
+                    memory_compare(networks[at].ssid, heard->ssid, heard->ssid_length))
+                        continue;
+                if (!networks[at].pass_length)
+                        return 0;
+                return wifi_join_plan(MOONWATER_STRICT_NET, address_of caps,
+                                      radio_rules_get((p8 address_to)networks[at].ssid,
+                                                      networks[at].ssid_length),
+                                      networks[at].pass_length == 64, address_of plan);
+        }
+        return 0;
+}
+
 static string_address radio_join_words(bipolar failed)
 {
         static p8 words[48];
@@ -10852,6 +11412,12 @@ static string_address radio_join_words(bipolar failed)
                : failed == WIFI_REFUSE_ELEMENTS
                    ? (string_address) "showed other security in its handshake than in its "
                                       "beacon (an impostor, or a downgrade on the way)"
+               : failed == WIFI_REFUSE_CONFINE
+                   ? (string_address) "was not joined: the Wi-Fi station cannot be confined "
+                                      "on this kernel (no seccomp filter)"
+               : failed == WIFI_REFUSE_APART
+                   ? (string_address) "was not joined: the confined Wi-Fi station ended "
+                                      "without a word"
                    : (string_address) "could not be joined";
 }
 
@@ -11112,8 +11678,8 @@ static bipolar radio_wifi_join(string_address ssid, string_address pass, bool fo
         started = system_clock_ns(HOST_CLOCK_BOOTTIME);
         for (;;)
         {
-                failed = nl80211_join((p8 address_to)ssid, ssid_length, (p8 address_to)pass,
-                                      pass_length, force, address_of radio_joined);
+                failed = radio_join_apart((p8 address_to)ssid, ssid_length,
+                                          (p8 address_to)pass, pass_length, force);
                 if (failed != -19)
                         break;
                 //      No wireless interface yet: waited for only where the
@@ -11156,6 +11722,9 @@ static b32 radio_wifi_bring(bool say)
         bipolar failed = 0;
         bool joined = false;
         b32 switched = radio_switch(NET_WIFI_POWER, RADIO_RFKILL_WLAN, true, say);
+
+        radio_secret_hold(networks, sizeof(networks));
+        scope_exit(radio_secret_let_go(networks));
 
         if (!say && nl80211_associated())
         {
@@ -11212,7 +11781,8 @@ static b32 radio_wifi_bring(bool say)
                            : host_refuse("no wireless interface\n");
         }
         if (say)
-                return radio_join_said(failed)
+                return radio_join_said(failed) || failed == WIFI_REFUSE_CONFINE ||
+                               failed == WIFI_REFUSE_APART
                            ? host_refuse("the network %s\n", radio_join_words(failed))
                            : host_fail("wifi", failed ? failed : -1);
         return 1;
@@ -11226,7 +11796,6 @@ static b32 radio_wifi_on(bool say)
         if (lock < 0)
                 return say ? host_fail("wifi", lock) : 1;
         result = radio_wifi_bring(say);
-        radio_keeper_start();
         radio_unlock(lock);
         return result;
 }
@@ -11391,6 +11960,8 @@ static b32 radio_wifi_enter(string_address ssid, string_address pass, bool wpa2)
                 return host_refuse("saved, but the network %s\n",
                                    radio_join_words(failed));
         }
+        if (failed == WIFI_REFUSE_CONFINE || failed == WIFI_REFUSE_APART)
+                return host_refuse("saved, but the network %s\n", radio_join_words(failed));
         return_if(failed < 0, host_fail("wifi", failed));
         if (pass && pass[0])
                 crypto_forget((address_any)pass, string_length(pass));
@@ -11422,14 +11993,17 @@ static b32 radio_wifi_add(string_address ssid, string_address pass, bool wpa2)
                 join to make its own. */
         lock = radio_lock(true);
         return_if(lock < 0, host_fail("wifi", lock));
-        result = radio_wifi_enter(ssid, pass, wpa2);
-        //      The password is forgotten before the keeper is forked, which
-        //      would carry it in its memory for as long as it lives, and the
-        //      keeper is started before the lock is let go, so that nothing
-        //      joins between the join and the process that keeps it.
+        //      The broker and the station a join forks wipe their copies of
+        //      the password (radio_secrets); this process forgets its own
+        //      before the lock is let go.
         if (pass_length)
+                radio_secret_hold((address_any)pass, pass_length);
+        result = radio_wifi_enter(ssid, pass, wpa2);
+        if (pass_length)
+        {
+                radio_secret_let_go((address_any)pass);
                 crypto_forget((address_any)pass, pass_length);
-        radio_keeper_start();
+        }
         radio_unlock(lock);
         return result;
 }
@@ -11678,14 +12252,35 @@ static b32 radio_wifi_status(void)
                 }
                 else if (heard)
                         string_format(log, host_label "not joined: %s %s\n",
-                                      (string_address)name, radio_join_words(last.failed));
+                                      (string_address)name,
+                                      radio_join_words(radio_heard_refused(heard, networks, count)
+                                                           ?: last.failed));
                 else
                 {
                         bool near = false;
+                        bool said = false;
 
-                        for (at = 0; at < count; at++)
-                                near |= radio_air_find(address_of air,
-                                                       networks[at].ssid) != null;
+                        //      No join has failed of late, or not of one in the
+                        //      air: a saved network heard only from an access
+                        //      point its plan refuses is said for what it is.
+                        for (at = 0; at < count && !said; at++)
+                        {
+                                radio_heard address_to one =
+                                    radio_air_find(address_of air, networks[at].ssid);
+                                bipolar refused =
+                                    one ? radio_heard_refused(one, networks, count) : 0;
+
+                                near |= one != null;
+                                if (refused)
+                                {
+                                        radio_display(name, sizeof(name), networks[at].ssid,
+                                                      networks[at].ssid_length);
+                                        string_format(log, host_label "not joined: %s %s\n",
+                                                      (string_address)name,
+                                                      radio_join_words(refused));
+                                        said = true;
+                                }
+                        }
                         if (!near)
                                 string_format(log, host_label "not joined: no saved "
                                                               "network is in range\n");
@@ -11951,7 +12546,6 @@ static fn radio_wifi_keep(void)
         if (lost)
                 radio_wifi_leave();
         radio_wifi_bring(false);
-        radio_keeper_start();
         radio_unlock(lock);
         system_call_1(syscall(exit), 0);
 }
