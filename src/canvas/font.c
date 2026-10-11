@@ -1234,12 +1234,16 @@ static fn font_embolden(font_engine address_to e, f32 strength)
         that stays inside it adds to them and nothing else; the cell is
         written only when the path leaves it.
 
-        Most of a big glyph's row is no edge at all: the inside of a stem,
-        the air beside it. Each row keeps a bit for every block of columns an
-        edge touched, at least 8 wide and few enough to fit 64 bits, and the
-        sweep fills an untouched block with the one value the running sum
-        already holds. The sweep also leaves every cell it read at zero, so
-        the next band and the next glyph start clean without a clearing pass.
+        Most of a really big glyph's row is no edge at all: the inside of a
+        stem, the air beside it. Each row of a bitmap over 510 columns wide
+        keeps a bit for every block of columns an edge touched, at least 8
+        wide and few enough to fit 64 bits, and the sweep fills an untouched
+        block with the one value the running sum already holds. Under that a
+        row is summed whole, one library call: at 16 cells for 14 vector
+        instructions it is 110 instructions for a row of 120, where a call a
+        run of blocks was 60 each and a row has a half dozen of them. The
+        sweep also leaves every cell it read at zero, so the next band and the
+        next glyph start clean without a clearing pass.
 */
 static inline fn font_cell_add(font_engine address_to e, b32 row, b32 column, b32 cover, b32 area)
 {
@@ -2255,7 +2259,7 @@ static fn font_raster(font_engine address_to e, b32 width, b32 height,
         for (e->cross = 0; (width + 1) >> e->cross >= 64;)
                 e->cross++;
         e->track = font_tracking(e);
-        e->mark = width + 2 > 64;
+        e->mark = width + 2 > 512;
 
         b32 most = FONT_BAND / e->stride < FONT_ROWS ? FONT_BAND / e->stride : FONT_ROWS;
         for (e->band = 0; e->band < height; e->band += e->rows)
