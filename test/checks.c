@@ -53880,6 +53880,70 @@ static fn surfaces(void)
 
         check("the header sits below the first buffer", SURFACE_HEADER <= WINDOW_PIXELS);
 
+        //      A slot given back reads as zeros, the other slot and the header are
+        //      as they were, and a page whose numbers are out of the mapping is left alone.
+        {
+                static const unsigned long slot = 8192, bytes = 4096 + 2 * 8192;
+                long file = window_call(WINDOW_SYS_MEMFD_CREATE, (long) "surface",
+                                        SURFACE_MFD_CLOEXEC | SURFACE_MFD_ALLOW_SEALING, 0, 0, 0, 0);
+                long mapped = file < 0 ? file : window_call(WINDOW_SYS_FTRUNCATE, file, (long)bytes, 0, 0, 0, 0);
+                unsigned char *map;
+
+                if (mapped >= 0)
+                        mapped = window_call(WINDOW_SYS_FCNTL, file, SURFACE_F_ADD_SEALS, SURFACE_SEAL_FIXED, 0, 0, 0);
+                if (mapped >= 0)
+                        mapped = window_call(WINDOW_SYS_MMAP, 0, (long)bytes, 3, 1, file, 0);
+                check("a sealed memfd for a page", mapped > 0);
+                if (mapped > 0)
+                {
+                        struct surface *shared = (struct surface *)mapped;
+                        int whole = 1, kept = 1, header = 1;
+
+                        map = (unsigned char *)mapped;
+                        memory_fill(map, 0x5a, bytes);
+                        shared->window.mapping = (unsigned int)bytes;
+                        shared->buffer_size = 64 * 32 * 4;
+                        shared->buffer_offset[0] = WINDOW_PIXELS;
+                        shared->buffer_offset[1] = (unsigned int)(WINDOW_PIXELS + slot);
+                        surface_discard(shared, 1);
+                        for (unsigned long at = 0; at < bytes; at++)
+                        {
+                                if (at >= WINDOW_PIXELS + slot && map[at])
+                                        whole = 0;
+                                if (at >= WINDOW_PIXELS && at < WINDOW_PIXELS + slot && map[at] != 0x5a)
+                                        kept = 0;
+                        }
+                        header = map[0] == 0x5a && map[WINDOW_PIXELS - 1] == 0x5a;
+                        //      qemu-user answers madvise success and drops the advice.
+                        if (program_argument_count() > 1 &&
+                            !string_compare(program_argument(1), (string_address) "--emulated"))
+                                log_direct(str("surface_discard: the pages-returned rows NOT RUN under emulation\n"));
+                        else
+                        {
+                                check("surface_discard gives the slot's pages back, zeroed", whole);
+                                check("and leaves the other slot and the header as they were", kept && header);
+                        }
+
+                        memory_fill(map, 0x5a, bytes);
+                        shared->window.mapping = (unsigned int)bytes;
+                        shared->buffer_size = 64 * 32 * 4;
+                        shared->buffer_offset[1] = (unsigned int)(bytes - 4096); // runs past the mapping
+                        surface_discard(shared, 1);
+                        shared->buffer_offset[1] = 100; // in the header, not on a page
+                        surface_discard(shared, 1);
+                        shared->buffer_offset[1] = 0xfffff000u; // far outside
+                        surface_discard(shared, 1);
+                        whole = 1;
+                        for (unsigned long at = 0; at < bytes; at++)
+                                if (at >= 4096 && map[at] != 0x5a)
+                                        whole = 0;
+                        check("a slot outside the mapping or off a page is not touched", whole);
+                        window_call(WINDOW_SYS_MUNMAP, mapped, (long)bytes, 0, 0, 0, 0);
+                }
+                if (file >= 0)
+                        window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
+        }
+
         check("socketpair", system_call_4(syscall(socketpair), SURFACE_AF_UNIX,
                                           SURFACE_SOCK_SEQPACKET | SURFACE_SOCK_CLOEXEC, 0,
                                           (positive)pair) == 0);

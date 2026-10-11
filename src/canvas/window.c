@@ -638,6 +638,7 @@ _Static_assert(SURFACE_HEADER <= WINDOW_PIXELS, "the header ends before the firs
 #define WINDOW_SYS_FTRUNCATE 77
 #define WINDOW_SYS_MEMFD_CREATE 319
 #define WINDOW_SYS_RECVMMSG 299
+#define WINDOW_SYS_MADVISE 28
 #else
 // arm64 and riscv share the asm-generic numbering.
 #define WINDOW_SYS_OPENAT 56
@@ -654,6 +655,7 @@ _Static_assert(SURFACE_HEADER <= WINDOW_PIXELS, "the header ends before the firs
 #define WINDOW_SYS_FTRUNCATE 46
 #define WINDOW_SYS_MEMFD_CREATE 279
 #define WINDOW_SYS_RECVMMSG 243
+#define WINDOW_SYS_MADVISE 233
 #endif
 
 /*
@@ -1134,6 +1136,31 @@ static long surface_wait(struct surface *surface, long other, long nanoseconds)
                 return -1;
 
         return ready;
+}
+
+/*
+        Gives a slot's pages back to the system. A surface holds its header
+        page and the pages of the slots it has drawn into, and a slot that is
+        not the one on the screen -- the one a program that has stopped
+        animating no longer draws into, or both of a window it keeps
+        minimized -- is memory held for nothing: a 64 by 32 surface that drew
+        into both slots has 20 KiB resident and 12 KiB after this. The pages
+        are punched out of the shared file, so the slot reads as zeros until
+        it is drawn into again and the compositor, which maps the same file,
+        sees the same; discard the slot that is not showing. A page is only
+        ever given back whole, from the slot's own start.
+*/
+static void surface_discard(struct surface *surface, unsigned int slot)
+{
+        unsigned long start = surface->buffer_offset[slot & 1];
+        unsigned long length = SURFACE_PAGE_ROUND((unsigned long)surface->buffer_size);
+
+        if (start < WINDOW_PIXELS || start & 4095 || length > surface->window.mapping ||
+            start > surface->window.mapping - length)
+                return;
+
+        // MADV_REMOVE
+        window_call(WINDOW_SYS_MADVISE, (long)surface + (long)start, (long)length, 9, 0, 0, 0);
 }
 
 static void surface_close(struct surface *surface)
