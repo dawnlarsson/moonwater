@@ -61,26 +61,39 @@
         advances, kerning and the pen are the same rational in 16.16, so a
         line of a thousand glyphs drifts by under 1/100 of a pixel.
 
-        A quadratic is cut into n equal steps of its parameter, the fewest
-        that leave each piece with a second difference of at most FONT_FLAT
-        1024ths on either axis. A piece bows from its chord by a quarter of
-        that, 1/1024 px, and the points between pieces are the curve's own,
-        rounded to the nearest 1024th by a forward difference carried to
-        2^-32 of a unit (2^-8 of a unit off after the longest walk), so the
-        drawn outline is never 3/2048 px from the true curve on either axis:
-        under 1/256 px, and under one 8-bit level of any pixel's area.
-        Integrating the quadratic analytically per cell would still end on
-        the same 1/1024 grid, and would cost a square root at every cell
-        crossing; this costs integer adds, and comes out the same bytes on
-        all three machines.
+        A quadratic whose second difference is over FONT_STRAIGHT 1024ths is
+        cut into n equal steps of its parameter, the fewest that leave each
+        piece a second difference of at most FONT_FLAT 1024ths on either axis
+        and a second difference times its length of at most 1/FONT_REACH of
+        a pixel squared (the second difference in pixels times the chord in
+        pixels over n cubed). Each piece bows from its chord by a quarter of
+        its second difference, so a chord alone would leave the pixels it
+        runs through that much short, all of them the same way. The points
+        between pieces are therefore moved, all by one step toward the curve's
+        side, a sixth of a piece's second difference (a sixth is the mean of
+        the bow, t(1-t)): each piece then covers as much as the curve under
+        it, the extra half step at the first and last point makes the two
+        end pieces come out even, and what is left is the part of a piece's
+        sliver that lies across a pixel's edge, under a tenth of the bow's
+        area in a pixel. The moved points are rounded to the nearest 1024th
+        from a forward difference carried to 2^-32 of a unit (2^-8 of a unit
+        off after the longest walk). Integrating the quadratic analytically
+        per cell would still end on the same 1/1024 grid, and would cost a
+        square root at every cell crossing; this costs integer adds, and
+        comes out the same bytes on all three machines.
 
         Coverage is exact for that polygon: each cell gets the cover (the
         height an edge spans in it, signed by direction) and the area (cover
         times the sum of the x where the edge enters and leaves), exact in
         integers at 1/1024 px, and the byte is the area of the pixel covered
-        times 255 rounded to the nearest, halves up. Measured against an
-        exact rendering of every glyph of three faces at 8 to 400 px, no
-        byte is more than 2 levels from 255 times the true area.
+        times 255 rounded to the nearest, halves up. Where an edge crosses
+        from one row or column to the next, its crossing is placed on the
+        nearest 1024th, so a long edge's rounding does not lean one way.
+        Measured against an exact rendering of every glyph of Inter, Inter
+        Bold, IBM Plex Mono and Hack at 8, 16, 48 and 200 px, no byte is
+        more than 1.25 levels from 255 times the true area (rounding to the
+        byte itself is half a level of that), and none is more than 1 from
+        the exact area's own nearest byte.
 
         sRGB is the piecewise curve itself (the linear foot below 0.04045, the
         2.4 power above it, evaluated in double precision). Each byte's light
@@ -190,7 +203,10 @@
 #define FONT_EXACT 14
 #define FONT_ONE 1024
 #define FONT_SHIFT 10
-#define FONT_FLAT 4
+#define FONT_STRAIGHT 4
+#define FONT_FLAT 16
+#define FONT_REACH 6000
+#define FONT_PIECES (1 << 15)
 
 /*      The ceilings that make a hostile file cost a bounded amount. Real
         fonts sit far under each: Noto's CJK glyphs have under a thousand
@@ -1205,13 +1221,13 @@ static fn font_span(font_engine address_to e, b32 row, b32 xa, b32 xb, b32 cover
 
         //      The cover each column takes is its share of the x travelled,
         //      by a remainder walk: one division for the first column and
-        //      one for the step, each part exact to the floor.
+        //      one for the step, each part exact to the nearest.
         bool right = xb > xa;
         b32 step = right ? 1 : -1, leave = right ? FONT_ONE : 0, enter = FONT_ONE - leave;
         b64 travel = right ? (b64)xb - xa : (b64)xa - xb;
         b64 size = cover < 0 ? -(b64)cover : cover;
         b64 first = right ? FONT_ONE - (xa & mask) : xa & mask;
-        b64 done = size * first / travel, carry = size * first % travel;
+        b64 half = travel >> 1, done = (size * first + half) / travel, carry = (size * first + half) % travel;
         b64 lift = size * FONT_ONE / travel, spare = size * FONT_ONE % travel;
         b32 sign = cover < 0 ? -1 : 1, from = xa & mask;
 
@@ -1335,16 +1351,16 @@ static fn font_edge(font_engine address_to e, b32 x0, b32 y0, b32 x1, b32 y1)
                 x0 = x1, x1 = t, t = y0, y0 = y1, y1 = t, sign = -1;
         }
 
-        //      x where the edge crosses each row's boundary, to the floor,
+        //      x where the edge crosses each row's boundary, to the nearest,
         //      by a remainder walk: a whole row moves it by lift and spare
         //      over dy, a part row divides afresh, and the edge's own end
         //      needs no division at all -- so an edge inside one row, which
         //      is most of them at text sizes, divides never.
-        b64 dx = (b64)x1 - x0, dy = (b64)y1 - y0, at = 0, carry = 0, lift = 0, spare = -1;
+        b64 dx = (b64)x1 - x0, dy = (b64)y1 - y0, half = dy >> 1, at = 0, carry = half, lift = 0, spare = -1;
         b32 ya = y0 < low ? low : y0, top = y1 > high ? high : y1;
 
         if (ya != y0)
-                font_floor_divide(dx * (ya - y0), dy, &at, &carry);
+                font_floor_divide(dx * (ya - y0) + half, dy, &at, &carry);
 
         b32 xa = x0 + (b32)at;
         while (ya < top)
@@ -1357,7 +1373,7 @@ static fn font_edge(font_engine address_to e, b32 x0, b32 y0, b32 x1, b32 y1)
                         if (yb == y1)
                                 at = dx;
                         else
-                                font_floor_divide(dx * (yb - y0), dy, &at, &carry);
+                                font_floor_divide(dx * (yb - y0) + half, dy, &at, &carry);
                 }
                 else
                 {
@@ -1404,21 +1420,15 @@ static inline fn font_piece(font_engine address_to e, b32 x0, b32 y0, b32 x1, b3
 //      A quadratic in n even steps, the fewest that leave each piece's
 //      second difference at most FONT_FLAT. The point at step i is the start
 //      plus (2 b i n + a i^2) / n^2, walked as a forward difference in 32.32:
-//      each step adds the first difference, which adds the second.
-static b64 font_ratio(b64 numerator, b64 denominator)
+//      each step adds the first difference, which adds the second. The two
+//      differences and the shift are over the same n^2, so they are products
+//      with one reciprocal of it, 2^64 / n^2 to the floor, each product an
+//      unrounded 32.32 quotient short of its floor by under num / 2^32 of
+//      the last place (a walk of n steps is then under n^2 num / 2^64 units
+//      off: 2^-12 of a unit at the longest n a glyph the engine draws needs).
+static inline b64 font_scaled(b64 numerator, p64 reciprocal)
 {
-        b64 whole, rest;
-
-        font_floor_divide(numerator, denominator, &whole, &rest);
-        return whole * ((b64)1 << 32) + (rest << 32) / denominator;
-}
-
-static fn font_walker_start(b64 address_to at, b64 address_to step, b64 address_to bend,
-                            b64 a, b64 b, b64 n, b64 square)
-{
-        *at = (b64)1 << 31;
-        *step = font_ratio(2 * b * n + a, square);
-        *bend = font_ratio(2 * a, square);
+        return (b64)(((__int128)numerator * (__int128)reciprocal) >> 32);
 }
 
 //      The columns a piece of a contour may cover in the rows it crosses:
@@ -1453,7 +1463,7 @@ static fn font_conic(font_engine address_to e, b32 cx, b32 cy, b32 x, b32 y)
         b64 bow = ax < 0 ? -ax : ax, rise = ay < 0 ? -ay : ay;
 
         bow = bow > rise ? bow : rise;
-        if (bow <= FONT_FLAT)
+        if (bow <= FONT_STRAIGHT)
         {
                 font_piece(e, x0, y0, x, y);
                 return;
@@ -1462,17 +1472,31 @@ static fn font_conic(font_engine address_to e, b32 cx, b32 cy, b32 x, b32 y)
         b64 n = (b64)__builtin_sqrt((f64)bow / FONT_FLAT);
         while (n * n * FONT_FLAT < bow)
                 n++;
+        n = n < 2 ? 2 : n;
 
-        b64 square = n * n, ux, sx, bx, uy, sy, by;
-        font_walker_start(&ux, &sx, &bx, ax, (b64)cx - x0, n, square);
-        font_walker_start(&uy, &sy, &by, ay, (b64)cy - y0, n, square);
+        b64 chord = x - x0 < 0 ? x0 - x : x - x0, lift = y - y0 < 0 ? y0 - y : y - y0;
+        f64 reach = (f64)bow * (f64)(chord > lift ? chord : lift) / FONT_REACH;
+        while ((f64)(n * n * n) < reach && n < FONT_PIECES)
+                n += (n >> 3) + 1;
+        n = n > FONT_PIECES ? FONT_PIECES : n;
 
+        //      The walk starts half a unit up, so the floor of the 32.32
+        //      position is its nearest 1024th, and a sixth of a second
+        //      difference toward the curve's side (see the arithmetic above).
+        p64 reciprocal = ~(p64)0 / (p64)(n * n);
+        b64 shx = font_scaled(-ax, reciprocal) / 6, shy = font_scaled(-ay, reciprocal) / 6;
+        b64 ux = ((b64)1 << 31) + shx, sx = font_scaled(2 * ((b64)cx - x0) * n + ax, reciprocal), bx = font_scaled(2 * ax, reciprocal);
+        b64 uy = ((b64)1 << 31) + shy, sy = font_scaled(2 * ((b64)cy - y0) * n + ay, reciprocal), by = font_scaled(2 * ay, reciprocal);
+
+        //      The first point and the last take half a step more than the
+        //      rest, both of them on a conic of two pieces.
         b32 px = x0, py = y0;
         for (b64 i = 1; i < n; i++)
         {
                 ux += sx, sx += bx, uy += sy, sy += by;
 
-                b32 qx = x0 + (b32)(ux >> 32), qy = y0 + (b32)(uy >> 32);
+                b64 extra = (i == 1) + (i == n - 1);
+                b32 qx = x0 + (b32)((ux + extra * (shx >> 1)) >> 32), qy = y0 + (b32)((uy + extra * (shy >> 1)) >> 32);
                 font_piece(e, px, py, qx, qy);
                 px = qx;
                 py = qy;
