@@ -54584,6 +54584,13 @@ def harness_wget_hostile(argv):
         (farm / "resolv.conf").write_text("nameserver 127.0.0.1\n")
         subprocess.run(["mount", "--bind", str(farm / "resolv.conf"), "/etc/resolv.conf"],
                        check=True)
+        #   The tight and locked tiers ask names over TLS alone unless the
+        #   published DNS over TLS word says otherwise, and this stub is the
+        #   network's own resolver: the word is off, in a /run of this mount
+        #   namespace's own, so every tier asks the stub.
+        subprocess.run(["mount", "-t", "tmpfs", "tmpfs", "/run"], check=True)
+        os.makedirs("/run/moonwater")
+        Path("/run/moonwater/dns.tls").write_text("off\n")
         asked = []
         resolver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         resolver.bind(("127.0.0.1", 53))

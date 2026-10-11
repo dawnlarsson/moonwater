@@ -14621,8 +14621,8 @@ static COLD positive dns_tls_mode_of(string_address word)
                                              : DNS_TLS_DEFAULT;
 }
 
-//      The setting a confined child read before its filter went on, as
-//      dns_held holds its servers; 0 everywhere else.
+//      The setting a confined child read before its filter went on, plus
+//      one, as dns_held holds its servers; 0 everywhere else.
 static positive dns_tls_held;
 
 //      The published setting, read as a plain file only.
@@ -14632,7 +14632,7 @@ static COLD positive dns_tls_mode(void)
         bipolar got;
 
         if (dns_tls_held)
-                return dns_tls_held;
+                return dns_tls_held - 1;
         got = file_slurp_regular_at(AT_FDCWD, (string_address)DNS_TLS_PATH,
                                     text, sizeof(text), O_NOFOLLOW);
         if (got < 0)
@@ -15512,7 +15512,7 @@ static DEAD_END COLD fn net_apart_child(net_apart_task task, address_any context
         net_filter filter;
 
         dns_servers_hold((string_address) "/etc/resolv.conf");
-        dns_tls_held = dns_tls_mode();
+        dns_tls_held = dns_tls_mode() + 1;
         clock_floor_held = clock_trust_floor();
         net_filter_build(address_of filter);
         if (!net_apart_descriptors_keep(kept, array_count(kept)) ||
