@@ -46593,12 +46593,14 @@ while True:
         # AcceptEnv carry one in); a caller who cannot read /root is told so
         # rather than shown the answer of a machine nobody has set up; a
         # keyboard layout Canvas could not take is not reported as taken; and
-        # the server asked first is a verb, whole or refused.
+        # the server asked first is a verb, whole or refused. The caller's zone
+        # is named QQQ, which no zone the sessions before this one leave behind
+        # (their race ends on Paris or on Tokyo, which is JST) can spell.
         locale_say = say
         script = ("rm -f /root/timezone /root/timezone.mode /root/ntp /root/ntp.sampling "
                   "/root/ntp.server /root/keyboard /root/wired.power /root/canvas.scale /root/canvas.modes\n"
-                  "echo '@@ tz'; TZ=JST-9 timeout 20 /tmp/moonwater timezone +1 2>&1; echo \"@@status $?\"\n"
-                  "echo '@@ tz time'; TZ=JST-9 timeout 20 /tmp/moonwater time 2>&1; echo \"@@status $?\"\n"
+                  "echo '@@ tz'; TZ=QQQ-9 timeout 20 /tmp/moonwater timezone +1 2>&1; echo \"@@status $?\"\n"
+                  "echo '@@ tz time'; TZ=QQQ-9 timeout 20 /tmp/moonwater time 2>&1; echo \"@@status $?\"\n"
                   "printf 'off\\r\\n' > /root/wired.power\n" + locale_say("wired") +
                   "rm -f /root/wired.power /root/timezone /root/timezone.mode\n")
         #       What a machine nobody has told anything says, then what it says to a
@@ -46672,9 +46674,9 @@ while True:
         seen = answers(lines)
         text = lambda name: "\n".join(seen.get(name, {}).get("out", []))
         check(finished, "the clock verbs' session finished", "")
-        check("+01" in text("tz").split("after", 1)[-1] and "JST" not in text("tz"),
+        check("+01" in text("tz").split("after", 1)[-1] and "QQQ" not in text("tz"),
               "a TZ in the caller's environment is not the zone a change is shown in", text("tz"))
-        check("JST" not in text("tz time"), "nor the zone the clock is read in", text("tz time"))
+        check("QQQ" not in text("tz time"), "nor the zone the clock is read in", text("tz time"))
         check("wired off" in text("wired"), "a state word edited with a CRLF is the word it says",
               text("wired"))
         wants = {"ntp": ("ntp off", "sampling off"), "ntp sampling": ("sampling off",),
