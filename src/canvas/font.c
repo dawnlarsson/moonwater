@@ -293,12 +293,12 @@ typedef struct
 } font_point;
 
 //      What a row of the bitmap being drawn needs, together: the blocks an
-//      edge touched, how far left and right the contour in hand reached,
-//      and how far each winding has reached so far.
+//      edge touched; the columns the contour in hand has an edge in; and
+//      for each winding the columns some contour of it reaches (from its
+//      first edge's column to its last), and the columns two or more reach.
 typedef struct
 {
-        p64 touched;
-        b32 near, far, seen[2][2];
+        p64 touched, crossed, there[2], twice[2];
 } font_row;
 
 typedef struct
@@ -341,7 +341,7 @@ typedef struct
         bool started, scratched, clip, gather, overflow, track, mark, direct, ramp_ready;
         p32 point_count, contour_count, components;
         b32 left_side;
-        b32 band, rows, stride, width, grain, wound, x, y;
+        b32 band, rows, stride, width, grain, cross, wound, x, y;
         b32 cell_x, cell_y;
         p32 cover, area, gathered, used[5];
         b32 floor_y, height_y, wide_x;
@@ -1249,6 +1249,8 @@ static inline fn font_cell_add(font_engine address_to e, b32 row, b32 column, b3
         cells[column + 1] += (p32)area;
         if (e->mark)
                 e->row[row].touched |= (p64)1 << (column >> e->grain) | (p64)1 << ((column + 1) >> e->grain);
+        if (e->track)
+                e->row[row].crossed |= (p64)1 << (column >> e->cross);
 }
 
 //      The blocks from the one holding column first to the one holding last.
@@ -1256,6 +1258,14 @@ static inline fn font_mark(font_engine address_to e, b32 row, b32 first, b32 las
 {
         if (e->mark)
                 e->row[row].touched |= ((p64)2 << (last >> e->grain)) - ((p64)1 << (first >> e->grain));
+}
+
+//      The columns from first to last that an edge has a cell in, when the
+//      overlap of contours is looked for.
+static inline fn font_cross(font_engine address_to e, b32 row, b32 first, b32 last)
+{
+        if (e->track)
+                e->row[row].crossed |= ((p64)2 << (last >> e->cross)) - ((p64)1 << (first >> e->cross));
 }
 
 //      A span inside one column: the cover is the height, the area the
@@ -1268,6 +1278,7 @@ static inline fn font_span_one(font_engine address_to e, p32 address_to cells, b
         cells[column] += (p32)(2 * FONT_ONE * cover - area);
         cells[column + 1] += (p32)area;
         font_mark(e, row, column, column + 1);
+        font_cross(e, row, column, column);
 }
 
 static fn font_span_many(font_engine address_to e, p32 address_to cells, b32 row, b32 xa, b32 xb, b32 cover)
@@ -1287,6 +1298,7 @@ static fn font_span_many(font_engine address_to e, p32 address_to cells, b32 row
         b32 sign = cover < 0 ? -1 : 1, from = xa & mask;
 
         font_mark(e, row, right ? column : last, right ? last + 1 : column + 1);
+        font_cross(e, row, right ? column : last, right ? last : column);
 
         b32 part = (b32)done * sign;
         b32 area = part * (from + leave);
@@ -1491,6 +1503,18 @@ static fn font_trace(font_engine address_to e, b32 x0, b32 y0, b32 x1, b32 y1)
         b64 dx = (b64)x1 - x0, dy = (b64)y1 - y0, half = dy >> 1, at = 0, carry = half, lift = 0, spare = -1;
         b32 ya = y0, xa = x0;
 
+        //      Across one row's edge, most of the rest: one division, two spans.
+        if (((y1 - 1) >> FONT_SHIFT) - (y0 >> FONT_SHIFT) == 1)
+        {
+                b32 yb = (y1 - 1) & ~(FONT_ONE - 1), xb;
+
+                font_floor_divide(dx * (yb - y0) + half, dy, &at, &carry);
+                xb = x0 + (b32)at;
+                font_span(e, (y0 >> FONT_SHIFT) - e->band, x0, xb, (yb - y0) * sign);
+                font_span(e, (yb >> FONT_SHIFT) - e->band, xb, x1, (y1 - yb) * sign);
+                return;
+        }
+
         while (ya < y1)
         {
                 b32 yb = (ya & ~(FONT_ONE - 1)) + FONT_ONE;
@@ -1595,23 +1619,6 @@ static inline b64 font_scaled(b64 numerator, p64 reciprocal)
         return (b64)(((__int128)numerator * (__int128)reciprocal) >> 32);
 }
 
-//      The columns a piece of a contour may cover in the rows it crosses:
-//      its box, a curve's by its three points, which hold it.
-static fn font_extent(font_engine address_to e, b32 xa, b32 xb, b32 xc, b32 ya, b32 yb, b32 yc)
-{
-        b32 left = xa < xb ? xa : xb, right = xa < xb ? xb : xa, bottom = ya < yb ? ya : yb, top = ya < yb ? yb : ya;
-
-        left = left < xc ? left : xc, right = right > xc ? right : xc;
-        bottom = ((bottom < yc ? bottom : yc) >> FONT_SHIFT) - e->band;
-        top = (((top > yc ? top : yc) - 1) >> FONT_SHIFT) - e->band;
-        bottom = bottom < 0 ? 0 : bottom, top = top >= e->rows ? e->rows - 1 : top;
-        for (b32 r = bottom; r <= top && e->track && !e->gather; r++)
-        {
-                e->row[r].near = left < e->row[r].near ? left : e->row[r].near;
-                e->row[r].far = right > e->row[r].far ? right : e->row[r].far;
-        }
-}
-
 //      The pieces of a conic: its points from the forward differences, each
 //      joined to the one before, the last to the conic's end.
 static inline fn font_pieces(font_engine address_to e, font_hand address_to h, bool inside,
@@ -1654,9 +1661,6 @@ static fn font_conic(font_engine address_to e, b32 cx, b32 cy, b32 x, b32 y)
         e->y = y;
         if ((y0 >= high && cy >= high && y >= high) || (y0 < low && cy < low && y < low))
                 return;
-        if (e->track && !e->gather)
-                font_extent(e, x0, cx, x, y0, cy, y);
-
         b64 ax = (b64)x0 - 2 * (b64)cx + x, ay = (b64)y0 - 2 * (b64)cy + y;
         b64 bow = ax < 0 ? -ax : ax, rise = ay < 0 ? -ay : ay;
 
@@ -1710,8 +1714,6 @@ static fn font_line(font_engine address_to e, b32 x, b32 y)
 {
         font_hand h;
 
-        if (e->y != y && e->track && !e->gather)
-                font_extent(e, e->x, x, x, e->y, y, y);
         font_pick_up(e, &h);
         font_piece(e, &h, false, e->x, e->y, x, y);
         font_put_down(e, &h);
@@ -1722,12 +1724,12 @@ static fn font_line(font_engine address_to e, b32 x, b32 y)
 /*
         Where the clamped sum is wrong. It counts a point twice only where
         two contours wound alike both cover it, and inside a row a contour
-        covers nothing outside the columns its edges cross there: so each
-        contour notes, row by row, how far left and right its pieces' boxes
-        reach, and a row where that span overlaps the span of the contours
-        wound the same way before it is drawn again as the union. Every other
-        row keeps the sum, which is exact there. One contour's own loops are
-        not looked for.
+        covers nothing outside the columns from its first edge to its last:
+        so each contour notes, row by row, the columns its edges are in, and
+        a row where the span from the first to the last meets that of the
+        contours wound the same way before it is drawn again as the union.
+        Every other row keeps the sum, which is exact there. One contour's
+        own loops are not looked for.
 */
 //      Whether any two contours wound alike have boxes that meet, which
 //      the spans are needed for; each contour's winding kept for the walk.
@@ -1786,17 +1788,32 @@ static fn font_marks(font_engine address_to e)
 {
         if (e->gather || !e->track)
                 return;
+        font_flush(e);
         for (b32 r = 0; r < e->rows; r++)
-                if (e->row[r].near < e->row[r].far)
-                {
-                        b32 address_to low = &e->row[r].seen[e->wound][0], address_to high = &e->row[r].seen[e->wound][1];
+        {
+                font_row address_to row = &e->row[r];
+                p64 crossed = row->crossed;
 
-                        if (e->row[r].near < *high && *low < e->row[r].far)
-                                e->shared[(e->band + r) >> 6] |= (p64)1 << ((e->band + r) & 63);
-                        *low = e->row[r].near < *low ? e->row[r].near : *low;
-                        *high = e->row[r].far > *high ? e->row[r].far : *high;
-                        e->row[r].near = 0x7fffffff, e->row[r].far = -0x7fffffff;
-                }
+                if (!crossed)
+                        continue;
+
+                p64 reach = ((p64)2 << (63 - bits_leading_zeros(crossed))) - ((p64)1 << bits_trailing_zeros(crossed));
+
+                row->twice[e->wound] |= reach & row->there[e->wound];
+                row->there[e->wound] |= reach;
+                row->crossed = 0;
+        }
+}
+
+//      The rows where two contours wound alike reach one column, which the
+//      union is drawn again for.
+static fn font_overlaps(font_engine address_to e)
+{
+        if (e->gather || !e->track)
+                return;
+        for (b32 r = 0; r < e->rows; r++)
+                if (e->row[r].twice[0] | e->row[r].twice[1])
+                        e->shared[(e->band + r) >> 6] |= (p64)1 << ((e->band + r) & 63);
 }
 
 //      The contours as TrueType writes them: an off-curve point between two
@@ -1860,6 +1877,7 @@ static fn font_walk(font_engine address_to e)
                         font_line(e, sx, sy);
         }
         font_marks(e);
+        font_overlaps(e);
 }
 
 //      The byte for a running sum: twice the covered area in 2^20ths of
@@ -2234,6 +2252,8 @@ static fn font_raster(font_engine address_to e, b32 width, b32 height,
         for (e->grain = 3; (width + 1) >> e->grain >= 64;)
                 e->grain++;
         memory_zero(e->shared, ((positive)height + 63) / 64 * 8);
+        for (e->cross = 0; (width + 1) >> e->cross >= 64;)
+                e->cross++;
         e->track = font_tracking(e);
         e->mark = width + 2 > 64;
 
@@ -2243,9 +2263,8 @@ static fn font_raster(font_engine address_to e, b32 width, b32 height,
                 e->rows = height - e->band < most ? height - e->band : most;
                 e->cover = e->area = 0;
                 e->cell_y = -1;
-                for (b32 r = 0; r < e->rows; r++)
-                        e->row[r].near = e->row[r].seen[0][0] = e->row[r].seen[1][0] = 0x7fffffff,
-                        e->row[r].far = e->row[r].seen[0][1] = e->row[r].seen[1][1] = -0x7fffffff;
+                for (b32 r = 0; r < e->rows && e->track; r++)
+                        e->row[r].crossed = e->row[r].there[0] = e->row[r].there[1] = e->row[r].twice[0] = e->row[r].twice[1] = 0;
                 e->floor_y = e->band * FONT_ONE, e->height_y = e->rows * FONT_ONE, e->wide_x = width * FONT_ONE;
                 e->direct = !e->clip;
                 font_walk(e);
@@ -2256,13 +2275,16 @@ static fn font_raster(font_engine address_to e, b32 width, b32 height,
                 {
                         p32 address_to cells = e->cells + (positive)r * (positive)e->stride, sum = 0;
                         p8 address_to row = out + (positive)(height - 1 - e->band - r) * stride;
-                        p64 touched = e->mark ? e->row[r].touched : ~(p64)0;
+                        p64 touched = e->row[r].touched;
 
-                        //      A run of blocks no edge touched is one level; a
-                        //      run of touched ones is summed, made bytes and
-                        //      cleared by the library.
+                        //      A narrow row has no blocks and is summed whole.
+                        //      Otherwise a run of blocks no edge touched is one
+                        //      level; a run of touched ones is summed, made
+                        //      bytes and cleared by the library.
                         e->row[r].touched = 0;
-                        for (b32 x = 0; x < width;)
+                        if (!e->mark)
+                                memory_sweep_coverage(row, cells, (positive)width, 0);
+                        for (b32 x = 0; e->mark && x < width;)
                         {
                                 b32 block = x >> e->grain;
                                 p64 rest = touched >> block;
