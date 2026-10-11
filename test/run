@@ -18236,6 +18236,82 @@ wait $c
 echo m2-done
 """)
 
+#   The panel, the roles and the grants (canvas milestone M2). Three windows
+#   with the panel the compositor draws itself (the third put away), a claim
+#   for the panel role with no grant, then programs that hold it by grant: a
+#   second claim, the holder killed, a locked surface asked to move, a swap
+#   and a holder that hangs. The lane clicks and types between the markers,
+#   and what the programs were told is counted at the end.
+open(stick + "/m3", "w").write(r"""exec > /dev/ttyS0 2>&1
+/compositor &
+c=$!
+sleep 2
+/surface -x 300 -y 200 -w 300 -h 150 -c 336699 -T alpha -p -s 120 > /tmp/wa.out &
+sleep 1
+/surface -x 700 -y 200 -w 300 -h 150 -c 996633 -T beta -p -s 120 > /tmp/wb.out &
+sleep 1
+/surface -x 1200 -y 300 -w 200 -h 120 -c 55aa55 -T gamma -m -s 120 > /tmp/wc.out &
+sleep 1
+/surface -r 2 -s 1 > /tmp/p0.out
+echo "m3 no grant: $(grep -c 'refused -1' /tmp/p0.out)"
+echo m3-windows
+sleep 26
+echo "m3 keys: alpha $(grep -c 'surface: event 6' /tmp/wa.out) beta $(grep -c 'surface: event 6' /tmp/wb.out)"
+/compositor grant panel /surface -r 2 -c 445566 -p -s 120 > /tmp/p1.out &
+p1=$!
+sleep 2
+echo m3-held
+/compositor grant panel /surface -r 2 -c 778899 -s 5 > /tmp/p2.out &
+sleep 2
+echo "m3 fields: $(grep 'surface: role' /tmp/p1.out)"
+echo "m3 second claim: busy $(grep -c 'event 10 0 3 -16' /tmp/p2.out) closed $(grep -c 'event 9 0 2 0' /tmp/p2.out)"
+kill -9 $p1
+echo m3-killed
+sleep 3
+/compositor grant panel /surface -r 2 -c 445566 -x 50 -y 50 -z 10 -s 4 > /tmp/p3.out
+echo "m3 locked: move $(grep -c 'event 14 0 1 -1' /tmp/p3.out) resize $(grep -c 'event 14 0 2 -1' /tmp/p3.out)"
+/compositor grant panel /surface -r 2 -c aa0000 -s 120 > /tmp/s1.out &
+s1=$!
+sleep 2
+/compositor grant panel:replace /surface -r 2 -c 00aa00 -s 120 > /tmp/s2.out &
+s2=$!
+sleep 2
+echo m3-swapped
+sleep 2
+echo "m3 swap: holder asked $(grep -c 'event 9 0 1 0' /tmp/s1.out) new active $(grep -c 'event 10 0 2 0' /tmp/s2.out)"
+kill -STOP $s2
+/compositor grant panel:replace /surface -r 2 -c 0000aa -s 120 > /tmp/s3.out &
+s3=$!
+sleep 3
+echo m3-hung
+kill -CONT $s2
+sleep 1
+echo "m3 hung: told $(grep -c 'event 10 0 4 -110' /tmp/s2.out)"
+kill -9 $s1 $s2 $s3
+sleep 1
+/compositor grant background /surface -r 1 -c 112233 -s 120 > /tmp/b1.out &
+b1=$!
+sleep 2
+echo m3-background
+sleep 3
+echo m3-background-late
+sleep 2
+kill -9 $b1
+sleep 2
+echo m3-bgkilled
+sleep 1
+for n in 1 2 3 4 5 6; do /surface -N 6 -w 10 -h 10 -s 20 > /tmp/n$n.out & done
+sleep 3
+for n in 7 8 9; do /surface -N 2 -w 10 -h 10 -s 20 > /tmp/n$n.out & done
+sleep 3
+/surface -x 1500 -y 500 -w 150 -h 100 -c aabbcc -T late -s 4 > /tmp/late.out &
+sleep 2
+echo "m3 slots: each made 4: $(cat /tmp/n1.out /tmp/n2.out /tmp/n3.out /tmp/n4.out /tmp/n5.out /tmp/n6.out | grep -c 'made 4$') late window $(grep -c 'surface: [0-9]* at' /tmp/late.out)"
+kill $c
+wait $c
+echo m3-done
+""")
+
 open(stick + "/m1", "w").write(r"""exec > /dev/ttyS0 2>&1
 /compositor &
 c=$!
@@ -18260,7 +18336,9 @@ guest = Guest(desktop(image) + [
 time.sleep(25)
 
 def serial():
-    return open(work + "/serial", "rb").read()
+    # The kernel prints into the console between any two characters of a line;
+    # a warning in the middle of one of the script's lines is taken out of it.
+    return re.sub(rb"\[ *\d+\.\d+\] __vm_enough_memory:[^\n]*\n", b"", open(work + "/serial", "rb").read())
 
 def wait_for(marker, seconds):
     stop = time.time() + seconds
@@ -18363,9 +18441,11 @@ ready2 = wait_for(b"m2-ready", 40)
 time.sleep(0.5)
 width, height, off = picture("m2-off")
 #   200 by 100 with its frame, asked for at (99999, 99999), is put with its
-#   body at (W-202, H-124): its titlebar is the rows from there down 20.
-out.append(("M2.1 a window asked for far off the output is put on it, its titlebar at the corner",
-            off(W - 100, H - 114), "2b3a4c"))
+#   body at (W-202, H-148): the panel's 24 rows are not the window's, so its
+#   border ends where the panel's band begins, and its titlebar is the 20
+#   rows from there down.
+out.append(("M2.1 a window asked for far off the output is put on the work area, its titlebar above the panel",
+            off(W - 100, H - 138), "2b3a4c"))
 #   Not where the first compositor's click went: a tablet that is told the
 #   place it already has reports nothing, and a pointer that starts in the
 #   middle of the output would press there.
@@ -18390,6 +18470,124 @@ out.append(("M2.5 a buffer offset written over the page's header does not stop t
             "%s %s" % (said(r"m2 offset: alive (\w+)"), said(r"m2 offset: alive \w+ next client (\d+)")), "yes 1"))
 out.append(("M2.6 a second create is answered EBUSY and the surface it came on stays",
             "%s %s" % (said(r"m2 twice: (\d+)"), said(r"m2 twice: \d+ gone (\d+)")), "1 0"))
+
+#   The panel and its roles. The panel the compositor draws is 24 rows at the
+#   bottom (the guest's scale is 1, which the compositor says in its first
+#   line), the launcher button at its left end and a button for each window
+#   beside it: unit 24, margin 2, so the first button starts at x 54 and each
+#   is 192 wide and 2 apart.
+type_text("sh /mnt/m3\n")
+ready3 = wait_for(b"m3-windows", 60)
+time.sleep(0.5)
+scale3 = [int(v) for v in re.findall(rb"\(scale (\d+)\)", serial())]
+band = 24
+button = lambda i: 54 + i * 194 + 96
+width, height, panel_up = picture("m3-windows")
+out.append(("M2.7 the compositor's own panel: its ink in the band along the bottom, the desktop's above it",
+            "%s %s" % (panel_up(W // 2, H - band // 2), panel_up(W // 2, H - band - 1)), "2f3f52 1b2733"))
+out.append(("M2.8 the launcher button is lit and the windows have a button each, the put-away one outlined",
+            "%s %s %s %s" % (panel_up(8, H - band // 2), panel_up(button(0), H - band // 2),
+                            panel_up(button(1), H - band // 2), panel_up(button(2), H - band + 2)),
+            "4c6785 2b3a4c 2b3a4c 2b3a4c"))
+out.append(("M2.9 a window put away is not on the screen",
+            panel_up(1250, 380), "1b2733"))
+text = serial().decode("latin1")
+out.append(("M2.10 a panel claimed with no grant is refused",
+            said(r"m3 no grant: (\d+)"), "1"))
+
+#   A device plugged in after the compositor started is heard: a mouse added
+#   to the running guest moves the pointer from one window's titlebar to
+#   another's (the tablet put it on the first, and only the new mouse has
+#   relative axes, so only it takes the moves), and a press on the tablet
+#   from there lights the window the pointer is over. A mouse nobody opened
+#   leaves the press on the first window. QEMU takes input-send-event's
+#   device argument for a hot-plugged mouse by dying, so it is not used.
+qcmd({"execute": "device_add", "arguments": {"driver": "usb-mouse", "id": "hot1"}})
+time.sleep(3)
+moveto(450, 210)
+for step in range(8):
+    send([{"type": "rel", "data": {"axis": "x", "value": 50}}])
+    time.sleep(0.1)
+for down in (True, False):
+    send([{"type": "btn", "data": {"down": down, "button": "left"}}])
+    time.sleep(0.1)
+time.sleep(0.4)
+width, height, plugged = picture("m3-plugged")
+out.append(("M2.11 a mouse plugged in after the compositor started presses: the window it pressed on is lit",
+            "%s %s" % (plugged(800, 210), plugged(400, 210)), "4c6785 2b3a4c"))
+click(400, 210)           # alpha's titlebar: it has the keys and is lit
+width, height, lit = picture("m3-focus")
+out.append(("M2.12 the window that was clicked has its button lit, as its titlebar is",
+            "%s %s" % (lit(button(0), H - band // 2), lit(button(1), H - band // 2)), "4c6785 2b3a4c"))
+click(W // 2, H - band // 2)         # the panel, away from every button
+type_text("a")
+width, height, after_panel = picture("m3-panel-click")
+out.append(("M2.13 a click on the panel does not move the keys: the window is still lit",
+            after_panel(400, 210), "4c6785"))
+click(button(1), H - band // 2)      # beta's button
+width, height, raised = picture("m3-button")
+out.append(("M2.14 a window's button brings its window up and gives it the keys",
+            "%s %s" % (raised(800, 210), raised(400, 210)), "4c6785 2b3a4c"))
+click(button(2), H - band // 2)      # gamma's button: put away, and back
+width, height, restored = picture("m3-restore")
+out.append(("M2.15 the button of a window that was put away brings it back",
+            restored(1250, 380), "55aa55"))
+type_text("a")
+
+done3 = wait_for(b"m3-held", 90)
+time.sleep(0.3)
+width, height, held = picture("m3-held")
+out.append(("M2.16 a program given the panel role holds it: its colour in the band, the window buttons gone",
+            "%s %s" % (held(W // 2, H - band // 2), held(button(0), H - band // 2)), "445566 445566"))
+wait_for(b"m3-killed", 40)
+time.sleep(1)
+width, height, fallback = picture("m3-killed")
+out.append(("M2.17 the holder killed, the compositor's panel is back in the band",
+            "%s %s" % (fallback(W // 2, H - band // 2), fallback(button(0), H - band // 2)), "2f3f52 2b3a4c"))
+wait_for(b"m3-swapped", 60)
+time.sleep(0.3)
+width, height, swapped = picture("m3-swapped")
+out.append(("M2.18 a program with the right to replace takes the role when the holder closes",
+            swapped(W // 2, H - band // 2), "00aa00"))
+wait_for(b"m3-hung", 40)
+time.sleep(0.3)
+width, height, hung = picture("m3-hung")
+out.append(("M2.19 a holder that does not close in time loses the role to the replacement",
+            hung(W // 2, H - band // 2), "0000aa"))
+wait_for(b"m3-background", 40)
+time.sleep(0.3)
+width, height, behind = picture("m3-background")
+out.append(("M2.25 a program given the background role fills the output under the windows and the panel",
+            "%s %s %s" % (behind(1500, 600), behind(400, 260), behind(W // 2, H - band // 2)), "112233 336699 2f3f52"))
+wait_for(b"m3-background-late", 40)
+time.sleep(0.3)
+width, height, later = picture("m3-background-late")
+out.append(("M2.25 and still there some seconds on",
+            later(1500, 600), "112233"))
+wait_for(b"m3-bgkilled", 40)
+time.sleep(0.3)
+width, height, bare = picture("m3-bgkilled")
+out.append(("M2.26 the background holder killed, the desktop's own ink is back",
+            "%s %s" % (bare(1500, 600), bare(400, 260)), "1b2733 336699"))
+done4 = wait_for(b"m3-done", 60)
+text = serial().decode("latin1")
+keys3 = re.findall(r"m3 keys: alpha (\d+) beta (\d+)", text)
+out.append(("M2.20 the keys went to the lit window and not to the one the panel's click was beside",
+            "%s %s" % (keys3[-1][0], keys3[-1][1]) if keys3 else "no end", "2 0"))
+out.append(("M2.21 a second claim for a held role is told EBUSY and to close",
+            "%s %s" % (said(r"m3 second claim: busy (\d+)"), said(r"m3 second claim: busy \d+ closed (\d+)")), "1 1"))
+out.append(("M2.22 a panel is told a move or a resize it asked for was refused",
+            "%s %s" % (said(r"m3 locked: move (\d+)"), said(r"m3 locked: move \d+ resize (\d+)")), "1 1"))
+out.append(("M2.23 the holder asked to go is told it was replaced, and the hung one that it lost the role",
+            "%s %s %s" % (said(r"m3 swap: holder asked (\d+)"), said(r"m3 swap: holder asked \d+ new active (\d+)"),
+                          said(r"m3 hung: told (\d+)")), "1 1 1"))
+out.append(("M2.27 a program that shows nothing on its surfaces is given four of them, and a window can still be made after 32 such",
+            "%s %s" % (said(r"m3 slots: each made 4: (\d+)"), said(r"m3 slots: each made 4: \d+ late window (\d+)")), "6 1"))
+out.append(("M2.28 the panel is told what its role gives it: the top layer, held to the bottom and both sides, a zone of its height, locked",
+            said(r"m3 fields: surface: (role \d+ state \d+ layer \d+ anchor \d+ zone \d+ lock \d+)"),
+            "role 2 state 2 layer 3 anchor 14 zone 24 lock 12"))
+out.append(("M2.29 the compositor says what scale it draws at",
+            "%s" % (scale3[-1] if scale3 else "none"), "1"))
 
 qcmd({"execute": "quit"})
 try:
