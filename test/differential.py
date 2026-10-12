@@ -69070,6 +69070,8 @@ def harness_net_mutation(argv):
         subprocess.run(["cp", "-al", str(HARNESS_ROOT), str(target)], check=True)
         shutil.rmtree(target / ".git", ignore_errors=True)
 
+    #   Each mutant runs in a session of its own: a flipped guard can turn a
+    #   kill of a child into kill(0, SIGKILL), which took the whole run with it.
     def judge(index_mutant):
         index, mutant = index_mutant
         tree = workspace / ("m%d" % index)
@@ -69090,7 +69092,7 @@ def harness_net_mutation(argv):
             if built.returncode:
                 return index, "invalid", ""
             ran = subprocess.run([str(tree / "chk")], cwd=tree, capture_output=True,
-                                 text=True, timeout=300)
+                                 text=True, timeout=300, start_new_session=True)
             if ran.returncode or not re.search(r" 0 failures\s*$", ran.stdout):
                 caught = re.search(r"FAIL ([^\n]*)", ran.stdout)
                 return index, "killed", "CHECK_net" + (": " + caught.group(1)[:80] if caught else "")
@@ -69106,7 +69108,7 @@ def harness_net_mutation(argv):
                     if built.returncode:
                         return index, "invalid", ""
                     ran = subprocess.run([str(tree / "chk")], cwd=tree, capture_output=True,
-                                         text=True, timeout=300)
+                                         text=True, timeout=300, start_new_session=True)
                     if ran.returncode or not re.search(r" 0 failures\s*$", ran.stdout):
                         return index, "killed", "CHECK_net at tier " + tier
             if options["--oracle"] == "full":
@@ -69119,7 +69121,8 @@ def harness_net_mutation(argv):
                                            MOONWATER_FUZZ_SECONDS="3")
                         ran = subprocess.run([sys.executable, str(tree / "test/differential.py"),
                                               "--harness"] + words, cwd=tree, env=environment,
-                                             capture_output=True, text=True, timeout=1800)
+                                             capture_output=True, text=True, timeout=1800,
+                                             start_new_session=True)
                         if ran.returncode not in (0, 2):
                             return index, "killed", harness
                     break
