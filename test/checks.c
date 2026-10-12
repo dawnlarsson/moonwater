@@ -98754,9 +98754,20 @@ static fn check_drawing(const font_face address_to one, const font_face address_
         empty), the source's last row ending against a page that faults and
         the destination's too, the words between and before the rows held to
         a canary. On x86_64 once with the planes body and once with the narrow
-        one; test/run runs riscv64 with V at two lengths and without it.
+        one; test/run runs riscv64 with V at two lengths and without it. Three
+        tables, which the planes body tells apart and draws three ways: words
+        of four random bytes, three random bytes and a zero fourth (the text
+        engine's), and a grey, its three low bytes alike.
 */
+static fn check_translate_table(p32 kind);
+
 static fn check_translate()
+{
+        for (p32 kind = 0; kind < 3; kind++)
+                check_translate_table(kind);
+}
+
+static fn check_translate_table(p32 kind)
 {
         static p32 table[512];
         p8 address_to source = memory(4 * 4096);
@@ -98772,7 +98783,7 @@ static fn check_translate()
         for (p32 i = 0; i < 256; i++)
         {
                 XORSHIFT64(state);
-                table[i] = (p32)state;
+                table[i] = kind == 0 ? (p32)state : kind == 1 ? (p32)state & 0xffffff : ((p32)state & 0xff) * 0x010101;
                 for (p32 k = 0; k < 4; k++)
                         ((p8 address_to)(table + 256))[k * 256 + i] = (p8)(table[i] >> (8 * k));
         }

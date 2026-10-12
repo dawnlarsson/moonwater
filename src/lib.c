@@ -12592,6 +12592,94 @@ __asm__(
     "vshufi32x4 $0xee, %zmm3, %zmm2, %zmm2\n   vshufi32x4 $0xee, %zmm5, %zmm4, %zmm4\n"                 \
     "vshufi32x4 $0x88, %zmm7, %zmm6, %zmm8\n   vshufi32x4 $0xdd, %zmm7, %zmm6, %zmm9\n"                 \
     "vshufi32x4 $0x88, %zmm4, %zmm2, %zmm10\n   vshufi32x4 $0xdd, %zmm4, %zmm2, %zmm11\n"
+    //
+    //       The planes are looked up as above, and made words by permutes of
+    //       the index each quarter of the 64 bytes is (zmm12 to zmm15, the
+    //       quarter's byte at 4p, 4p + 1, 4p + 2, 4p + 3 for pixel p, the
+    //       odd ones 64 on, in the second table of vpermi2b): blue and green
+    //       in one vpermi2b, red and the fourth byte in another, merged
+    //       under 0xcccc. The fourth plane is all zero for every table the
+    //       text engine makes (its pixels have no alpha), and then red is a
+    //       vpermb merged under 0x4444 into a vpermi2b that zeroes the
+    //       fourth byte; and a grey pair, blue, green and red the same
+    //       plane, is one plane looked up and three bytes of each word made
+    //       by one vpermb a quarter. Which of the three a table is, is
+    //       found once a call. The unpacks and lane moves this replaced
+    //       were 16 shuffles a turn; this is 8 (zero fourth plane), 4 (grey)
+    //       or 8 with 4 blends. A row's full turns are stored unmasked.
+    //
+    //       On a 9950X core, 3840 by 15 from a strip into a frame in L2, the
+    //       cycles a call of the body before this one: grey 56-61%, colour
+    //       75-81%, a fourth byte 92-93%. Every table gives the words the
+    //       body before it gave.
+    //
+#define TR32_X64_GREY                                                                                   \
+    "vpmovb2m %zmm0, %k4\n"                                                                             \
+    "vmovdqa64 %zmm16, %zmm1\n   vpermt2b %zmm17, %zmm0, %zmm1\n   vmovdqa64 %zmm18, %zmm2\n"          \
+    "vpermt2b %zmm19, %zmm0, %zmm2\n   vmovdqu8 %zmm2, %zmm1{%k4}\n"                                  \
+    "vpermb %zmm1, %zmm12, %zmm8{%k5}{z}\n   vpermb %zmm1, %zmm13, %zmm9{%k5}{z}\n"                   \
+    "vpermb %zmm1, %zmm14, %zmm10{%k5}{z}\n   vpermb %zmm1, %zmm15, %zmm11{%k5}{z}\n"
+#define TR32_X64_THREE_PLANES                                                                           \
+    "vpmovb2m %zmm0, %k4\n"                                                                             \
+    "vmovdqa64 %zmm16, %zmm1\n   vpermt2b %zmm17, %zmm0, %zmm1\n   vmovdqa64 %zmm18, %zmm2\n"          \
+    "vpermt2b %zmm19, %zmm0, %zmm2\n   vmovdqu8 %zmm2, %zmm1{%k4}\n"                                  \
+    "vmovdqa64 %zmm20, %zmm2\n   vpermt2b %zmm21, %zmm0, %zmm2\n   vmovdqa64 %zmm22, %zmm3\n"          \
+    "vpermt2b %zmm23, %zmm0, %zmm3\n   vmovdqu8 %zmm3, %zmm2{%k4}\n"                                  \
+    "vmovdqa64 %zmm24, %zmm3\n   vpermt2b %zmm25, %zmm0, %zmm3\n   vmovdqa64 %zmm26, %zmm4\n"          \
+    "vpermt2b %zmm27, %zmm0, %zmm4\n   vmovdqu8 %zmm4, %zmm3{%k4}\n"                                  \
+    "vmovdqa64 %zmm12, %zmm8\n   vpermi2b %zmm2, %zmm1, %zmm8{%k5}{z}\n   vpermb %zmm3, %zmm12, %zmm8{%k6}\n"  \
+    "vmovdqa64 %zmm13, %zmm9\n   vpermi2b %zmm2, %zmm1, %zmm9{%k5}{z}\n   vpermb %zmm3, %zmm13, %zmm9{%k6}\n"  \
+    "vmovdqa64 %zmm14, %zmm10\n   vpermi2b %zmm2, %zmm1, %zmm10{%k5}{z}\n   vpermb %zmm3, %zmm14, %zmm10{%k6}\n" \
+    "vmovdqa64 %zmm15, %zmm11\n   vpermi2b %zmm2, %zmm1, %zmm11{%k5}{z}\n   vpermb %zmm3, %zmm15, %zmm11{%k6}\n"
+#define TR32_X64_FOUR_PLANES                                                                            \
+    "vpmovb2m %zmm0, %k4\n"                                                                             \
+    "vmovdqa64 %zmm16, %zmm1\n   vpermt2b %zmm17, %zmm0, %zmm1\n   vmovdqa64 %zmm18, %zmm2\n"          \
+    "vpermt2b %zmm19, %zmm0, %zmm2\n   vmovdqu8 %zmm2, %zmm1{%k4}\n"                                  \
+    "vmovdqa64 %zmm20, %zmm2\n   vpermt2b %zmm21, %zmm0, %zmm2\n   vmovdqa64 %zmm22, %zmm3\n"          \
+    "vpermt2b %zmm23, %zmm0, %zmm3\n   vmovdqu8 %zmm3, %zmm2{%k4}\n"                                  \
+    "vmovdqa64 %zmm24, %zmm3\n   vpermt2b %zmm25, %zmm0, %zmm3\n   vmovdqa64 %zmm26, %zmm4\n"          \
+    "vpermt2b %zmm27, %zmm0, %zmm4\n   vmovdqu8 %zmm4, %zmm3{%k4}\n"                                  \
+    "vmovdqa64 %zmm28, %zmm4\n   vpermt2b %zmm29, %zmm0, %zmm4\n   vmovdqa64 %zmm30, %zmm5\n"          \
+    "vpermt2b %zmm31, %zmm0, %zmm5\n   vmovdqu8 %zmm5, %zmm4{%k4}\n"                                  \
+    "vmovdqa64 %zmm12, %zmm8\n   vpermi2b %zmm2, %zmm1, %zmm8\n   vmovdqa64 %zmm12, %zmm5\n"           \
+    "vpermi2b %zmm4, %zmm3, %zmm5\n   vmovdqu8 %zmm5, %zmm8{%k6}\n"                                   \
+    "vmovdqa64 %zmm13, %zmm9\n   vpermi2b %zmm2, %zmm1, %zmm9\n   vmovdqa64 %zmm13, %zmm5\n"           \
+    "vpermi2b %zmm4, %zmm3, %zmm5\n   vmovdqu8 %zmm5, %zmm9{%k6}\n"                                   \
+    "vmovdqa64 %zmm14, %zmm10\n   vpermi2b %zmm2, %zmm1, %zmm10\n   vmovdqa64 %zmm14, %zmm5\n"         \
+    "vpermi2b %zmm4, %zmm3, %zmm5\n   vmovdqu8 %zmm5, %zmm10{%k6}\n"                                  \
+    "vmovdqa64 %zmm15, %zmm11\n   vpermi2b %zmm2, %zmm1, %zmm11\n   vmovdqa64 %zmm15, %zmm5\n"         \
+    "vpermi2b %zmm4, %zmm3, %zmm5\n   vmovdqu8 %zmm5, %zmm11{%k6}\n"
+//  One body a kind of table: four rows of 16 or fewer a turn, a 128-bit lane
+//  each, or a row at a time 64 bytes a turn, the last turn masked.
+#define TR32_X64_BODY(kind, LOOKUP)                                                                     \
+    ".Ltr32_x64_" kind ":\n   cmp $16, %r8\n   ja .Ltr32_x64_" kind "_rows\n"                         \
+    "mov $0xffff, %r10d\n   bzhi %r8d, %r10d, %r10d\n   kmovw %r10d, %k2\n"                            \
+    ".Ltr32_x64_" kind "_four:\n   cmp $4, %r9\n   jb .Ltr32_x64_" kind "_last\n"                     \
+    "vmovdqu8 (%rdx), %xmm0{%k2}{z}\n   lea (%rdx,%rcx), %r10\n   vmovdqu8 (%r10), %xmm5{%k2}{z}\n   add %rcx, %r10\n" \
+    "vmovdqu8 (%r10), %xmm6{%k2}{z}\n   vmovdqu8 (%r10,%rcx), %xmm7{%k2}{z}\n"                        \
+    "vinserti32x4 $1, %xmm5, %zmm0, %zmm0\n   vinserti32x4 $2, %xmm6, %zmm0, %zmm0\n   vinserti32x4 $3, %xmm7, %zmm0, %zmm0\n" \
+    LOOKUP                                                                                              \
+    "vmovdqu32 %zmm8, (%rdi){%k2}\n   lea (%rdi,%rsi), %r10\n   vmovdqu32 %zmm9, (%r10){%k2}\n   add %rsi, %r10\n" \
+    "vmovdqu32 %zmm10, (%r10){%k2}\n   vmovdqu32 %zmm11, (%r10,%rsi){%k2}\n   lea (%r10,%rsi,2), %rdi\n   lea (%rdx,%rcx,4), %rdx\n" \
+    "sub $4, %r9\n   jmp .Ltr32_x64_" kind "_four\n"                                                  \
+    ".Ltr32_x64_" kind "_last:\n   test %r9, %r9\n   jz .Ltr32_x64_wide_done\n"                        \
+    "vmovdqu8 (%rdx), %xmm0{%k2}{z}\n"                                                                  \
+    LOOKUP                                                                                              \
+    "vmovdqu32 %zmm8, (%rdi){%k2}\n   add %rsi, %rdi\n   add %rcx, %rdx\n   dec %r9\n   jmp .Ltr32_x64_" kind "_last\n" \
+    ".Ltr32_x64_" kind "_rows:\n   xor %r10d, %r10d\n"                                                 \
+    ".Ltr32_x64_" kind "_piece:\n   mov %r8, %r11\n   sub %r10, %r11\n   mov $64, %eax\n   cmp %rax, %r11\n   cmova %rax, %r11\n" \
+    /*  bzhi reads the low byte of its index alone, so a row with 256 or more left is cut to 64 first. */ \
+    "mov $-1, %rax\n   bzhi %r11, %rax, %rax\n   kmovq %rax, %k1\n"                                    \
+    "vmovdqu8 (%rdx,%r10), %zmm0{%k1}{z}\n"                                                             \
+    LOOKUP                                                                                              \
+    "cmp $64, %r11\n   jb .Ltr32_x64_" kind "_part\n"                                                  \
+    "vmovdqu64 %zmm8, (%rdi,%r10,4)\n   vmovdqu64 %zmm9, 64(%rdi,%r10,4)\n"                           \
+    "vmovdqu64 %zmm10, 128(%rdi,%r10,4)\n   vmovdqu64 %zmm11, 192(%rdi,%r10,4)\n   jmp .Ltr32_x64_" kind "_stored\n" \
+    ".Ltr32_x64_" kind "_part:\n   kshiftrq $16, %k1, %k3\n   kshiftrq $32, %k1, %k4\n   kshiftrq $48, %k1, %k7\n" \
+    "vmovdqu32 %zmm8, (%rdi,%r10,4){%k1}\n   vmovdqu32 %zmm9, 64(%rdi,%r10,4){%k3}\n"                 \
+    "vmovdqu32 %zmm10, 128(%rdi,%r10,4){%k4}\n   vmovdqu32 %zmm11, 192(%rdi,%r10,4){%k7}\n"            \
+    ".Ltr32_x64_" kind "_stored:\n   add $64, %r10\n   cmp %r8, %r10\n   jb .Ltr32_x64_" kind "_piece\n" \
+    "add %rsi, %rdi\n   add %rcx, %rdx\n   dec %r9\n   jnz .Ltr32_x64_" kind "_rows\n   jmp .Ltr32_x64_wide_done\n"
     ASM_FUNC(memory_translate_u32_rect)
     "test %r8, %r8\n   jz .Ltr32_x64_done\n   test %r9, %r9\n   jz .Ltr32_x64_done\n   mov 8(%rsp), %rax\n   shl $2, %rsi\n"
     ASM_NARROW("cpu_has_avx512_vbmi", ".Ltr32_x64_narrow")
@@ -12599,33 +12687,22 @@ __asm__(
     "vmovdqu64 1280(%rax), %zmm20\n   vmovdqu64 1344(%rax), %zmm21\n   vmovdqu64 1408(%rax), %zmm22\n   vmovdqu64 1472(%rax), %zmm23\n"
     "vmovdqu64 1536(%rax), %zmm24\n   vmovdqu64 1600(%rax), %zmm25\n   vmovdqu64 1664(%rax), %zmm26\n   vmovdqu64 1728(%rax), %zmm27\n"
     "vmovdqu64 1792(%rax), %zmm28\n   vmovdqu64 1856(%rax), %zmm29\n   vmovdqu64 1920(%rax), %zmm30\n   vmovdqu64 1984(%rax), %zmm31\n"
-    "cmp $16, %r8\n   ja .Ltr32_x64_rows\n"
-    //  Four rows of 16 or fewer a turn, a 128-bit lane each.
-    "mov $0xffff, %r10d\n   bzhi %r8d, %r10d, %r10d\n   kmovw %r10d, %k2\n"
-    ".Ltr32_x64_four:\n   cmp $4, %r9\n   jb .Ltr32_x64_last\n"
-    "vmovdqu8 (%rdx), %xmm0{%k2}{z}\n   lea (%rdx,%rcx), %r10\n   vmovdqu8 (%r10), %xmm12{%k2}{z}\n   add %rcx, %r10\n"
-    "vmovdqu8 (%r10), %xmm13{%k2}{z}\n   vmovdqu8 (%r10,%rcx), %xmm14{%k2}{z}\n"
-    "vinserti32x4 $1, %xmm12, %zmm0, %zmm0\n   vinserti32x4 $2, %xmm13, %zmm0, %zmm0\n   vinserti32x4 $3, %xmm14, %zmm0, %zmm0\n"
-    TR32_X64_LOOKUP
-    "vmovdqu32 %zmm8, (%rdi){%k2}\n   lea (%rdi,%rsi), %r10\n   vmovdqu32 %zmm9, (%r10){%k2}\n   add %rsi, %r10\n"
-    "vmovdqu32 %zmm10, (%r10){%k2}\n   vmovdqu32 %zmm11, (%r10,%rsi){%k2}\n   lea (%r10,%rsi,2), %rdi\n   lea (%rdx,%rcx,4), %rdx\n"
-    "sub $4, %r9\n   jmp .Ltr32_x64_four\n"
-    ".Ltr32_x64_last:\n   test %r9, %r9\n   jz .Ltr32_x64_wide_done\n"
-    "vmovdqu8 (%rdx), %xmm0{%k2}{z}\n"
-    TR32_X64_LOOKUP
-    "vmovdqu32 %zmm8, (%rdi){%k2}\n   add %rsi, %rdi\n   add %rcx, %rdx\n   dec %r9\n   jmp .Ltr32_x64_last\n"
-    //  Wider: a row at a time, 64 bytes a turn, the last turn masked.
-    ".Ltr32_x64_rows:\n   xor %r10d, %r10d\n"
-    ".Ltr32_x64_piece:\n   mov %r8, %r11\n   sub %r10, %r11\n   mov $64, %eax\n   cmp %rax, %r11\n   cmova %rax, %r11\n"
-    //  bzhi reads the low byte of its index alone, so a row with 256 or more left is cut to 64 first.
-    "mov $-1, %rax\n   bzhi %r11, %rax, %rax\n   kmovq %rax, %k1\n"
-    "vmovdqu8 (%rdx,%r10), %zmm0{%k1}{z}\n"
-    TR32_X64_LOOKUP
-    "kshiftrq $16, %k1, %k3\n   kshiftrq $32, %k1, %k5\n   kshiftrq $48, %k1, %k6\n"
-    "vmovdqu32 %zmm8, (%rdi,%r10,4){%k1}\n   vmovdqu32 %zmm9, 64(%rdi,%r10,4){%k3}\n"
-    "vmovdqu32 %zmm10, 128(%rdi,%r10,4){%k5}\n   vmovdqu32 %zmm11, 192(%rdi,%r10,4){%k6}\n"
-    "add $64, %r10\n   cmp %r8, %r10\n   jb .Ltr32_x64_piece\n"
-    "add %rsi, %rdi\n   add %rcx, %rdx\n   dec %r9\n   jnz .Ltr32_x64_rows\n"
+    "vmovdqu64 .Ltr32_x64_spread(%rip), %zmm12\n   vmovdqu64 .Ltr32_x64_spread+64(%rip), %zmm13\n"
+    "vmovdqu64 .Ltr32_x64_spread+128(%rip), %zmm14\n   vmovdqu64 .Ltr32_x64_spread+192(%rip), %zmm15\n"
+    //  Which table: a fourth plane not all zero, else three planes that differ, else grey.
+    "mov $0x7777777777777777, %r10\n   kmovq %r10, %k5\n"
+    "vporq %zmm28, %zmm29, %zmm1\n   vporq %zmm30, %zmm31, %zmm2\n   vporq %zmm1, %zmm2, %zmm1\n"
+    "vptestmq %zmm1, %zmm1, %k1\n   kortestb %k1, %k1\n   jnz .Ltr32_x64_all_set\n"
+    "vpcmpneqb %zmm16, %zmm20, %k1\n   vpcmpneqb %zmm17, %zmm21, %k2\n   korq %k1, %k2, %k1\n"
+    "vpcmpneqb %zmm18, %zmm22, %k2\n   korq %k1, %k2, %k1\n   vpcmpneqb %zmm19, %zmm23, %k2\n   korq %k1, %k2, %k1\n"
+    "vpcmpneqb %zmm16, %zmm24, %k2\n   korq %k1, %k2, %k1\n   vpcmpneqb %zmm17, %zmm25, %k2\n   korq %k1, %k2, %k1\n"
+    "vpcmpneqb %zmm18, %zmm26, %k2\n   korq %k1, %k2, %k1\n   vpcmpneqb %zmm19, %zmm27, %k2\n   korq %k1, %k2, %k1\n"
+    "kortestq %k1, %k1\n   jz .Ltr32_x64_grey\n"
+    "mov $0x4444444444444444, %r10\n   kmovq %r10, %k6\n   jmp .Ltr32_x64_three\n"
+    ".Ltr32_x64_all_set:\n   mov $0xcccccccccccccccc, %r10\n   kmovq %r10, %k6\n   jmp .Ltr32_x64_all\n"
+    TR32_X64_BODY("grey", TR32_X64_GREY)
+    TR32_X64_BODY("three", TR32_X64_THREE_PLANES)
+    TR32_X64_BODY("all", TR32_X64_FOUR_PLANES)
     ".Ltr32_x64_wide_done:\n   vzeroupper\n" ASM_RET
     //  Eight words a turn from the words of the table.
     ".Ltr32_x64_narrow:\n   push %rbx\n   push %r12\n   push %r13\n   push %r14\n   mov %r8, %r13\n   and $-8, %r13\n"
@@ -12643,6 +12720,10 @@ __asm__(
     ".Ltr32_x64_next:\n   add %rsi, %rdi\n   add %rcx, %rdx\n   dec %r9\n   jnz .Ltr32_x64_row\n"
     "pop %r14\n   pop %r13\n   pop %r12\n   pop %rbx\n"
     ".Ltr32_x64_done:\n" ASM_RET
+    ".pushsection .rodata\n   .balign 64\n"
+    ".Ltr32_x64_spread:\n   .irp q,0,1,2,3\n   .irp p,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15\n"
+    "   .byte 16*\\q+\\p, 64+16*\\q+\\p, 16*\\q+\\p, 64+16*\\q+\\p\n   .endr\n   .endr\n"
+    ".popsection\n"
     ASM_END(memory_translate_u32_rect)
 
     //
