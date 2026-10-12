@@ -77491,6 +77491,7 @@ typedef struct
 WIFI_PICK_FUZZ_PRELUDE = r"""
 #define NET_STATE_DIR "/run/moonwater"
 #define HOST_CLOCK_BOOTTIME 7
+static bool radio_pick_given_up;
 #ifndef AT_FDCWD
 #define AT_FDCWD (-100)
 #endif
@@ -77713,7 +77714,7 @@ static void check_one(netlink_header *header)
         radio_heard one;
         radio_air air;
 
-        if (radio_bss_read(header, &one) &&
+        if (radio_bss_read(header, &one, NULL) &&
             (one.ssid_length > RADIO_SSID_MOST || one.security > RADIO_FT ||
              one.beacon_security > RADIO_FT || one.caps.h2e > 1 || one.caps.pmf > 3 ||
              one.caps.akms > 15 || one.caps.group > 7 || one.caps.pairwise > 7))
@@ -78328,20 +78329,19 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                         p8 *stop = put_attribute(body, NL80211_ATTR_BSS | 0x8000, nest, nest_size);
                         netlink_header *header;
                         radio_heard one;
+                        wifi_seen seen;
 
                         message = wrap_message(body, (positive)(stop - body), &whole, 34);
                         header = (netlink_header *)message;
                         check_one(header);
-                        if (mode == 1 && radio_bss_read(header, &one))
+                        if (mode == 1 && radio_bss_read(header, &one, &seen))
                         {
                                 wifi_rsn_caps caps;
-                                wifi_seen seen;
                                 const p8 *rsn_at, *rsnx_at;
                                 positive rsn_length, rsnx_length;
 
                                 elements_model(ies, ies_size, capability, sstr, &sl, &sec, &caps,
                                                &rsn_at, &rsn_length, &rsnx_at, &rsnx_length);
-                                radio_bss_seen(header, &seen);
                                 if (key & 4)
                                 {
                                         /* The latest frame says what it says, and

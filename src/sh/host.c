@@ -10072,8 +10072,11 @@ static positive radio_ies_element(p8 address_to elements, positive size, p8 id,
         return 0;
 }
 
-/* One access point of a scan dump: false for a message that is not one. */
-static bool radio_bss_read(netlink_header address_to header, radio_heard address_to one)
+/* One access point of a scan dump: false for a message that is not one. seen,
+   when asked for, is the access point's RSN element and RSN extension element
+   as each of its two frames showed them (wifi_seen), from the same message. */
+static bool radio_bss_read(netlink_header address_to header, radio_heard address_to one,
+                           wifi_seen address_to seen)
 {
         positive length = 0;
         positive size = 0;
@@ -10168,44 +10171,20 @@ static bool radio_bss_read(netlink_header address_to header, radio_heard address
         }
         one->joinable = radio_security_joinable(one->security) ||
                         radio_security_joinable(one->beacon_security);
+        if (seen)
+        {
+                memory_fill(seen, 0, sizeof(*seen));
+                seen->rsn_length[0] = (p16)radio_ies_element(elements, size, 48, seen->rsn[0]);
+                seen->rsnx_length[0] = (p16)radio_ies_element(elements, size, 244, seen->rsnx[0]);
+                if (beacon && beacon != elements)
+                {
+                        seen->rsn_length[1] = (p16)radio_ies_element(beacon, beacon_size, 48,
+                                                                     seen->rsn[1]);
+                        seen->rsnx_length[1] = (p16)radio_ies_element(beacon, beacon_size, 244,
+                                                                      seen->rsnx[1]);
+                }
+        }
         return true;
-}
-
-/* The access point's RSN element and RSN extension element as each of its
-   two frames showed them (wifi_seen), from the same message radio_bss_read
-   read it from. */
-static fn radio_bss_seen(netlink_header address_to header, wifi_seen address_to seen)
-{
-        positive length = 0;
-        positive size = 0;
-        positive beacon_size = 0;
-        p8 address_to bss = (p8 address_to)netlink_find(header, GENL_HEADER, NL80211_ATTR_BSS,
-                                                        address_of length);
-        p8 address_to elements;
-        p8 address_to beacon;
-
-        memory_fill(seen, 0, sizeof(*seen));
-        if (!bss)
-                return;
-        elements = (p8 address_to)netlink_find_span(bss, length,
-                                                    NL80211_BSS_INFORMATION_ELEMENTS,
-                                                    address_of size);
-        beacon = (p8 address_to)netlink_find_span(bss, length, NL80211_BSS_BEACON_IES,
-                                                  address_of beacon_size);
-        if (!elements)
-        {
-                elements = beacon;
-                size = beacon_size;
-        }
-        seen->rsn_length[0] = (p16)radio_ies_element(elements, size, 48, seen->rsn[0]);
-        seen->rsnx_length[0] = (p16)radio_ies_element(elements, size, 244, seen->rsnx[0]);
-        if (beacon && beacon != elements)
-        {
-                seen->rsn_length[1] = (p16)radio_ies_element(beacon, beacon_size, 48,
-                                                             seen->rsn[1]);
-                seen->rsnx_length[1] = (p16)radio_ies_element(beacon, beacon_size, 244,
-                                                              seen->rsnx[1]);
-        }
 }
 
 /* Keep one row per name and, when the bounded display is full, the strongest
@@ -10263,7 +10242,7 @@ static bool radio_air_seen(netlink_header address_to header, address_any context
         radio_air address_to air = (radio_air address_to)context;
         radio_heard one;
 
-        if (!radio_bss_read(header, address_of one))
+        if (!radio_bss_read(header, address_of one, null))
                 return true;
         /* How old the scan is, from what is not joined: the network the
            machine is on stays in the kernel's list, renewed by every
@@ -10776,10 +10755,12 @@ static bool radio_pick_seen(netlink_header address_to header, address_any contex
 {
         radio_pick address_to pick = (radio_pick address_to)context;
         radio_heard one;
+        wifi_seen seen;
         p64 until = 0;
         bool fits;
 
-        if (!radio_bss_read(header, address_of one) || one.seen > RADIO_AIR_STALE_MS ||
+        if (!radio_bss_read(header, address_of one, address_of seen) ||
+            one.seen > RADIO_AIR_STALE_MS ||
             !wifi_mac_set(one.bssid) || one.ssid_length != pick->ssid_length ||
             memory_compare(one.ssid, pick->ssid, pick->ssid_length))
                 return true;
@@ -10817,7 +10798,7 @@ static bool radio_pick_seen(netlink_header address_to header, address_any contex
         pick->found = true;
         pick->until = until;
         pick->fits = fits;
-        radio_bss_seen(header, address_of pick->seen);
+        pick->seen = seen;
         return true;
 }
 
