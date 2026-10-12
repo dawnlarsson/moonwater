@@ -16328,6 +16328,14 @@ static COLD bool dns_apart_task(address_any context, bipolar answer)
                sizeof said;
 }
 
+//      A status the confined resolver may say: one of the resolver's own,
+//      from DNS_OK down to DNS_TLS_FAILED. Anything else is a child that was
+//      not the resolver any more.
+static CONST COLD bool dns_apart_status(b64 status)
+{
+        return status <= DNS_OK && status >= DNS_TLS_FAILED;
+}
+
 static COLD bipolar dns_apart_ask_apart(dns_apart_ask address_to ask,
                                         p32 address_to found)
 {
@@ -16343,7 +16351,7 @@ static COLD bipolar dns_apart_ask_apart(dns_apart_ask address_to ask,
         byte_store_release(address_of got);
         if (!whole)
                 return ran == NET_APART_UNCONFINED ? DNS_CONFINE : DNS_APART;
-        if (said.status > DNS_OK || said.status < DNS_TLS_FAILED)
+        if (!dns_apart_status(said.status))
                 return DNS_APART;
         if (said.status == DNS_OK)
                 address_to found = said.found;

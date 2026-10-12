@@ -53678,8 +53678,15 @@ def answer(query, kind):
     while query[i]:
         i += 1 + query[i]
     question = query[12:i + 5]
-    return (query[:2] + struct.pack(">HHHHH", 0x8180, 1, 1, 0, 0) + question +
-            b"\xc0\x0c" + struct.pack(">HHIH", 1, 1, 0, 4) + ADDRESS[kind])
+    reply = (query[:2] + struct.pack(">HHHHH", 0x8180, 1, 1, 0, 0) + question +
+             b"\xc0\x0c" + struct.pack(">HHIH", 1, 1, 0, 4) + ADDRESS[kind])
+    if kind == "tls" and query[12:16] == b"\x03big":
+        # A NULL record of padding makes the reply exactly 4096 bytes, the
+        # most a reply over TLS is read into.
+        pad = 4096 - len(reply) - 11
+        reply = (reply[:10] + struct.pack(">H", 1) + reply[12:] + b"\x00" +
+                 struct.pack(">HHIH", 10, 1, 0, pad) + b"\x00" * pad)
+    return reply
 
 def udp(where, kind, said):
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -53832,7 +53839,8 @@ def harness_dns_tls(argv):
                 return 1
             (work / variant / "host").symlink_to(work / variant / "shell")
 
-        def case(setting, certificate, resolver="1.1.1.1", tls_port="853", shell="bin"):
+        def case(setting, certificate, resolver="1.1.1.1", tls_port="853", shell="bin",
+                 name="example.test"):
             """(answer text, server log lines) for one `host` run."""
             log = work / "server.log"
             log.write_text("")
@@ -53845,10 +53853,10 @@ def harness_dns_tls(argv):
                 "mount -t tmpfs none /run && mkdir -p /run/moonwater && %s"
                 "mount --bind %s /etc/resolv.conf && "
                 "python3 %s %s %s 53 %s %s > /dev/null 2>&1 & S=$!; "
-                "sleep 1; %s example.test; echo rc=$?; kill $S" % (
+                "sleep 1; %s %s; echo rc=$?; kill $S" % (
                     word, work / "resolv.conf", work / "server.py",
                     work / certificate, work / "leaf.key", tls_port, log,
-                    work / shell / "host"))
+                    work / shell / "host", name))
             ran = subprocess.run(["unshare", "-Urmn", "sh", "-c", script],
                                  capture_output=True, text=True, timeout=60)
             return ran.stdout + ran.stderr, log.read_text().splitlines()
@@ -53906,6 +53914,9 @@ def harness_dns_tls(argv):
             checks(address(text) == want and all(line in log for line in must) and
                    not any(line in log for line in never),
                    "%s: %r %r" % (what, text[-200:], log))
+        text, log = case("on", "good.pem", name="big.test")
+        checks(address(text) == "192.0.2.53" and "tls query" in log and "udp query" not in log,
+               "a reply over TLS of exactly 4096 bytes is read: %r %r" % (text[-200:], log))
     return checks.verdict("dns tls:", "dns-tls")
 
 
@@ -68990,6 +69001,23 @@ NET_MUTATION_EQUIVALENT = {
         "A wait that answers 0 is a deadline gone by; going round again, the loop's own deadline check answers false, as this does.",
     ("network_stream_timeout", "if ((!seconds && !microseconds) || microseconds >= 1000000)", ">=", 1):
         "A timeval of a million microseconds is refused by setsockopt with EDOM, and false is answered either way.",
+    ("http_line", "if (!body->link || used >= limit)", ">=", 1):
+        "At used == limit the loop below does not run, and its end answers HTTP_MALFORMED as this does.",
+    ("dns_tls_mode", "if (got < 0)", "<", 1):
+        "At got == 0 the assignment sets 0.",
+    ("net_filter_put", "if (filter->used < NET_FILTER_STEPS)", "<", 1):
+        "At used == NET_FILTER_STEPS the mutant stores one step past steps, which is undefined, and the compiler, free to take the index as in range, drops the store: a filter one step too long is counted and refused the same.",
+    ("http_run_apart", "if (ran != NET_APART_OK || answer.used < sizeof said)", "||", 1):
+        "A child that did not end well and still wrote a whole said wrote lengths that do not add up to what arrived, which http_apart_believed refuses as HTTP_APART; one that ended well wrote all it said.",
+    ("dns_resolve_apart", "dns_apart_ask ask = {server, name, server >= 0 ? 5 : 3, false};", ">=", 1):
+        "A server of 0.0.0.0 is this machine, where nothing answers DNS: the query is refused at once and neither budget is waited out.",
+    ("net_resolve_v4_apart", "if (numeric < 0 && http_host_loopback(name))", "<", 1):
+        "string_to_host answers 0 only for 0.0.0.0, which is no loopback name.",
+    ("http_lookup_apart", "if (string_to_host(host) < 0 && http_host_loopback(host))", "<", 1):
+        "string_to_host answers 0 only for 0.0.0.0, which is no loopback name.",
+    ("dns_resolve_wanted", "for (positive at = 0; at < have; at++)", "<", 1): "Past the walk's end the mutant reads one slot past what was filled -- uninitialized, or past the array -- and asks whatever server those bytes name; no input sets them, so no check can tell it apart but by luck. Which servers the walk does ask is held by dns_tls.",
+    ("dns_resolve_wanted", "for (; count < array_count(dns_tls_public); count++)", "<", 1): "Past the walk's end the mutant reads one slot past what was filled -- uninitialized, or past the array -- and asks whatever server those bytes name; no input sets them, so no check can tell it apart but by luck. Which servers the walk does ask is held by dns_tls.",
+    ("dns_resolve_wanted", "for (positive at = 0; at < count; at++)", "<", 1): "Past the walk's end the mutant reads one slot past what was filled -- uninitialized, or past the array -- and asks whatever server those bytes name; no input sets them, so no check can tell it apart but by luck. Which servers the walk does ask is held by dns_tls.",
     ("tls_parse_key_usage", "if (unused > 7 || at >= stop)", ">=", 1): 'With no bit octet the unused-count octet is read as the final one; for unused 0 it is zero (refused), and for 1 to 7 its trailing-zero count is below its value, so the canonical test refuses it as the original does.',
 }
 
@@ -68997,6 +69025,22 @@ NET_MUTATION_FAMILIES = r"^(dns_|netlink_|http_|dhcp_|tls_|network_|net_)"
 NET_MUTATION_EXCLUDED = r"^(crypto_|tls_bench|tls_anchor|tls_share|tls_derive|tls_traffic|tls_finished_mac|tls_transcript)"
 NET_MUTATION_OPERATORS = ((" >= ", " > "), (" > ", " >= "), (" <= ", " < "), (" < ", " <= "),
                           (" == ", " != "), (" != ", " == "), (" && ", " || "), (" || ", " && "))
+
+
+def net_tier_lines(text):
+    """The line numbers (1-based) inside a #if or #ifdef that names
+    MOONWATER_STRICT: code only a tier's build compiles."""
+    inside = set()
+    stack = []
+    for number, line in enumerate(text.split("\n"), 1):
+        word = line.strip()
+        if word.startswith("#if"):
+            stack.append("MOONWATER_STRICT" in word)
+        elif word.startswith("#endif") and stack:
+            stack.pop()
+        elif any(stack):
+            inside.add(number)
+    return inside
 
 
 def net_mutants(root, pattern=None):
@@ -69135,6 +69179,8 @@ def harness_net_mutation(argv):
              "-Wl,-e,_start", "-Wl,--build-id=none", "-Wl,--no-warn-rwx-segments",
              "-DCHECK_net", "-fwhole-program", "-o"]
     workspace = Path(tempfile.mkdtemp(prefix="net-mutation-", dir=str(HARNESS_ROOT.parent)))
+    tier_lines = {name: net_tier_lines((HARNESS_ROOT / name).read_text())
+                  for name in {mutant["file"] for mutant in mutants}}
 
     def tree_copy(target):
         #   Hard links for everything but the file mutated, so a copy is cheap
@@ -69171,7 +69217,8 @@ def harness_net_mutation(argv):
             #   A decision a tier compiles in is only there in that tier's
             #   build: the hardened and the locked CHECK_net, as the net lane
             #   runs them, judge a mutant on a line that names one.
-            if "MOONWATER_STRICT" in mutant["text"]:
+            if "MOONWATER_STRICT" in mutant["text"] or mutant["line"] in tier_lines.get(
+                    mutant["file"], set()):
                 for tier in ("2", "3"):
                     built = subprocess.run(build[:-1] + ["-DMOONWATER_STRICT=" + tier, "-o",
                                                          str(tree / "chk"), "test/checks.c"],

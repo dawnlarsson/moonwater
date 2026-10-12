@@ -54325,9 +54325,20 @@ static bipolar net_connect_report_status;
 static positive net_bind_calls;
 static positive net_random_refuse;
 
+static positive net_connect_refuse;
+
 static bipolar net_test_socket_connect(b32 handle, address_any address, positive size)
 {
-        bipolar status = socket_connect(handle, address, size);
+        bipolar status;
+
+        //      Refused without asking the kernel: no packet leaves for an
+        //      address the check names only to be refused.
+        if (net_connect_refuse)
+        {
+                net_connect_refuse--;
+                return -ECONNREFUSED;
+        }
+        status = socket_connect(handle, address, size);
 
         if (!net_connect_report)
                 return status;
@@ -61192,6 +61203,7 @@ static fn net_io_faults_clear(void)
         net_random_refuse = 0;
         net_time_set = false;
         net_send_zero = false;
+        net_connect_refuse = 0;
 }
 
 /* Procedural interruption counts and deadline budgets exercise both recovery
@@ -71566,6 +71578,338 @@ static fn http_chain_deadline(void)
 }
 
 /*
+        A loopback server that plays canned responses, one a connection, in
+        order: each response's first `at_once` bytes at once and the rest a
+        byte every `pause` milliseconds. The first line of each request is
+        written to lines, which the caller reads.
+*/
+typedef struct
+{
+        const p8 address_to bytes;
+        positive length;
+        positive at_once;
+        positive pause;
+} http_canned;
+
+static bipolar http_canned_serve(const http_canned address_to list, positive count,
+                                 p16 address_to port, b32 address_to lines)
+{
+        socket_address_internet where = {.family = AF_INET,
+                                         .host = network_order_32(HOST_LOOPBACK)};
+        p32 size = sizeof where;
+        b32 one = 1;
+        b32 pipe_ends[2];
+        bipolar listening = socket_new(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        bipolar child;
+
+        if (listening < 0 ||
+            system_call_2(syscall(pipe2), (positive)pipe_ends, O_CLOEXEC) != 0)
+        {
+                if (listening >= 0)
+                        socket_close((b32)listening);
+                return -1;
+        }
+        socket_option_set((b32)listening, SOL_SOCKET, SO_REUSEADDR, address_of one, sizeof one);
+        if (socket_bind((b32)listening, address_of where, sizeof where) ||
+            socket_listen((b32)listening, 8) ||
+            socket_name((b32)listening, address_of where, address_of size))
+        {
+                socket_close((b32)listening);
+                system_close(pipe_ends[0]);
+                system_close(pipe_ends[1]);
+                return -1;
+        }
+        child = system_fork();
+        if (!child)
+        {
+                //      A client that gave up closes its end mid-trickle; the
+                //      next response is still owed to the next connection.
+                system_signal_install(SIGPIPE, (positive)SIG_IGN, 0, 0, null);
+                for (positive at = 0; at < count; at++)
+                {
+                        p8 request[4096];
+                        bipolar got;
+                        positive line = 0;
+                        bipolar taken = socket_accept((b32)listening, 0, 0, SOCK_CLOEXEC);
+
+                        if (taken < 0)
+                                break;
+                        got = socket_receive((b32)taken, request, sizeof request, 0, 0, 0);
+                        while (got > 0 && line < (positive)got && request[line] != '\r' &&
+                               request[line] != '\n')
+                                line++;
+                        request[line] = '\n';
+                        system_write_all((positive)pipe_ends[1], request, line + 1);
+                        system_write_all((positive)taken, list[at].bytes, list[at].at_once);
+                        for (positive byte = list[at].at_once; byte < list[at].length; byte++)
+                        {
+                                timespec pause = {0, (b64)list[at].pause * 1000000};
+
+                                system_call_2(syscall(nanosleep), (positive)address_of pause, 0);
+                                system_write_all((positive)taken, list[at].bytes + byte, 1);
+                        }
+                        socket_shutdown((b32)taken, SHUT_BOTH);
+                        socket_close((b32)taken);
+                }
+                system_call_1(syscall(exit_group), 0);
+        }
+        socket_close((b32)listening);
+        system_close(pipe_ends[1]);
+        address_to port = network_order_16(where.port);
+        address_to lines = pipe_ends[0];
+        return child;
+}
+
+static fn http_canned_end(bipolar child, b32 lines)
+{
+        if (child > 0)
+        {
+                system_call_2(syscall(kill), (positive)child, SIGKILL);
+                system_wait4_retry((b32)child, null, 0, null);
+        }
+        if (lines >= 0)
+                system_close(lines);
+}
+
+//      "http://127.0.0.1:<port><path>" into url.
+static fn http_canned_url(p8 address_to url, p16 port, string_address path)
+{
+        positive at = 17;
+
+        memory_copy(url, "http://127.0.0.1:", 17);
+        at += positive_into(url + at, port);
+        string_copy(url + at, path);
+}
+
+/*
+        The edges of a whole fetch (http_run) and of one run apart
+        (http_run_apart): a path with a dot segment, the code and the head
+        kept only for an answer and both left alone for a refusal, TLS
+        refused where it is not allowed, a URL as long as the buffer, a body
+        that outlasts its budget held in memory and written out, a child
+        that could not confine itself, the statuses a child may say, and a
+        trailer block of exactly the most a head may be.
+*/
+static fn http_run_edges(void)
+{
+        static p8 trailed[16384 + 64];
+        static const p8 ok[] = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi";
+        static const p8 slow[] = "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n0123456789";
+        http_canned list[6];
+        positive trailed_length = 0;
+        p8 url[HTTP_URL_MAX + 8];
+        p8 line[512];
+        p16 port = 0;
+        b32 lines = -1;
+        bipolar child;
+
+        {
+                //      Chunked "hello", then trailers whose lines and blank
+                //      end come to 16384 bytes, the most a head may be.
+                static const p8 start[] = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                                          "5\r\nhello\r\n0\r\n";
+                memory_copy(trailed, start, sizeof start - 1);
+                trailed_length = sizeof start - 1;
+                for (positive half = 0; half < 2; half++)
+                {
+                        memory_copy(trailed + trailed_length, "X-Pad: ", 7);
+                        memory_fill(trailed + trailed_length + 7, 'a', 8182);
+                        memory_copy(trailed + trailed_length + 7 + 8182, "\r\n", 2);
+                        trailed_length += 8191;
+                }
+                memory_copy(trailed + trailed_length, "\r\n", 2);
+                trailed_length += 2;
+        }
+        list[0] = (http_canned){ok, sizeof ok - 1, sizeof ok - 1, 0};
+        list[1] = (http_canned){ok, sizeof ok - 1, sizeof ok - 1, 0};
+        list[2] = (http_canned){slow, sizeof slow - 1, sizeof slow - 11, 300};
+        list[3] = (http_canned){slow, sizeof slow - 1, sizeof slow - 11, 300};
+        list[4] = (http_canned){trailed, trailed_length, trailed_length, 0};
+        child = http_canned_serve(list, 5, address_of port, address_of lines);
+        check("the canned HTTP server starts", child > 0);
+        if (child <= 0)
+                return;
+        {
+                http_buffer body = {0};
+                http_buffer head = {0};
+                b32 code = 0;
+                bipolar status;
+
+                http_canned_url(url, port, "/a/../b");
+                status = http_run((string_address)url, address_of http_manners_fetch, false, -1,
+                                  address_of body, address_of code, null, address_of head);
+                check("a fetch answers with its body, its code and the head it ended on",
+                      status == HTTP_OK && code == 200 && body.used == 2 &&
+                          !memory_compare(body.bytes, "hi", 2) && head.used > 12 &&
+                          !memory_compare(head.bytes, "HTTP/1.1 200", 12));
+                check("the request names the path without its dot segment",
+                      system_read_retry((positive)lines, line, 7) == 7 &&
+                          !memory_compare(line, "GET /b ", 7));
+                while (system_read_once((positive)lines, line, 1) == 1 && line[0] != '\n')
+                        ;
+                byte_store_release(address_of body);
+                byte_store_release(address_of head);
+                if (!net_as_emulated())
+                {
+                        http_canned_url(url, port, "/");
+                        status = http_run_apart((string_address)url, address_of http_manners_fetch,
+                                                false, -1, address_of body, address_of code,
+                                                null, address_of head);
+                        check("a fetch apart answers the same, its head kept",
+                              status == HTTP_OK && code == 200 && body.used == 2 &&
+                                  head.used > 12 && !memory_compare(head.bytes, "HTTP/1.1 200", 12));
+                        byte_store_release(address_of body);
+                        byte_store_release(address_of head);
+                }
+                else
+                {
+                        //      The canned response the fetch apart would have
+                        //      taken, taken so the next one is the slow one.
+                        http_canned_url(url, port, "/");
+                        (void)http_get((string_address)url, address_of body, address_of code);
+                        byte_store_release(address_of body);
+                }
+        }
+        {
+                http_manners budget = http_manners_fetch;
+                http_buffer body = {0};
+                b32 code = 0;
+                positive began = clock_monotonic_nanoseconds();
+
+                budget.body_seconds = 1;
+                http_canned_url(url, port, "/");
+                check("a body held in memory that outlasts its budget is cut off",
+                      http_run((string_address)url, address_of budget, false, -1, address_of body,
+                               address_of code, null, null) == HTTP_NO_REPLY &&
+                          clock_monotonic_nanoseconds() - began < 2500000000u);
+                byte_store_release(address_of body);
+                {
+                        bipolar sink = system_open_at(AT_FDCWD, "/dev/null", 1 | O_CLOEXEC);
+                        bipolar status = http_run((string_address)url, address_of budget, false, sink,
+                                                  null, address_of code, null, null);
+
+                        check("a body written out has the budget at the tight tiers only",
+                              MOONWATER_STRICT_NET >= STRICT_TIGHT ? status == HTTP_NO_REPLY
+                                                                   : status == HTTP_OK);
+                        if (sink >= 0)
+                                system_close((b32)sink);
+                }
+        }
+        {
+                http_buffer body = {0};
+                b32 code = 0;
+
+                bipolar got = http_run((string_address)url, address_of http_manners_fetch, false, -1,
+                               address_of body, address_of code, null, null);
+                check("a chunked body whose trailers come to exactly the most a head may be is read",
+                      got == HTTP_OK && body.used == 5);
+                byte_store_release(address_of body);
+        }
+        http_canned_end(child, lines);
+        {
+                http_buffer head = {0};
+                b32 code = 777;
+                socket_address_internet dead = {.family = AF_INET,
+                                                .port = dns_port_refusing(),
+                                                .host = network_order_32(HOST_LOOPBACK)};
+
+                http_canned_url(url, network_order_16(dead.port), "/");
+                check("a refused fetch leaves the code and the head alone",
+                      http_run((string_address)url, address_of http_manners_fetch, false, -1, null,
+                               address_of code, null, address_of head) != HTTP_OK &&
+                          code == 777 && !head.used);
+                if (!net_as_emulated())
+                {
+                        check("a refused fetch apart leaves the head alone",
+                              http_run_apart((string_address)url, address_of http_manners_fetch,
+                                             false, -1, null, address_of code, null,
+                                             address_of head) != HTTP_OK &&
+                                  !head.used);
+                        net_fake_set(syscall(seccomp), -EACCES);
+                        check("a fetch apart whose child cannot confine itself is refused for that",
+                              http_run_apart((string_address)url, address_of http_manners_fetch,
+                                             false, -1, null, null, null, null) == HTTP_CONFINE);
+                        {
+                                p32 found = 9;
+
+                                check("a lookup apart whose child cannot confine itself is refused for that",
+                                      dns_resolve_apart(0x7f000001, (string_address)"example.test",
+                                                        address_of found) == DNS_CONFINE);
+                        }
+                        net_fakes_clear();
+                }
+                byte_store_release(address_of head);
+        }
+        {
+                http_manners plain = http_manners_fetch;
+
+                plain.allow_tls = false;
+                check("https is refused where TLS is not allowed",
+                      http_run("https://127.0.0.1:1/", address_of plain, false, -1, null, null,
+                               null, null) == HTTP_TLS);
+        }
+        {
+                memory_copy(url, "http://h/", 9);
+                memory_fill(url + 9, 'a', HTTP_URL_MAX - 9);
+                url[HTTP_URL_MAX] = end;
+                check("a URL as long as the buffer it would be copied into is refused",
+                      http_run((string_address)url, address_of http_manners_fetch, false, -1, null,
+                               null, null, null) == HTTP_BAD_URL);
+        }
+        {
+                static const b64 statuses[][2] = {
+                    {HTTP_OK, 1}, {HTTP_UNLOGGED, 1}, {-5, 1}, {-6, 0},
+                    {HTTP_UNLOGGED - 1, 0}, {1, 0}};
+                static const b64 dns[][2] = {
+                    {DNS_OK, 1}, {DNS_TLS_FAILED, 1}, {DNS_TLS_FAILED - 1, 0}, {1, 0}};
+                positive wrong = 0;
+
+                for (positive at = 0; at < array_count(statuses); at++)
+                        wrong += http_apart_status(statuses[at][0]) != (bool)statuses[at][1];
+                for (positive at = 0; at < array_count(dns); at++)
+                        wrong += dns_apart_status(dns[at][0]) != (bool)dns[at][1];
+                check("a child apart is believed only in the statuses its work can say", wrong == 0);
+        }
+        if (!net_as_emulated())
+        {
+                p32 found = 9;
+
+                check("0.0.0.0 is its own address apart, asked of nobody",
+                      net_resolve_v4_apart("0.0.0.0", address_of found, 1) == DNS_OK && found == 0);
+                check("an address is its own address apart",
+                      http_lookup_apart("10.1.2.3") == 0x0a010203);
+                net_slurp_text = (string_address)"nameserver 127.0.0.1\n";
+                net_random_refuse = 1000;
+                found = 9;
+                check("a name that is not the machine's is not loopback apart",
+                      net_resolve_v4_apart("example.invalid", address_of found, 1) != DNS_OK &&
+                          found != HOST_LOOPBACK &&
+                          http_lookup_apart("example.invalid") == 0);
+                net_io_faults_clear();
+        }
+        {
+                network_deadline deadline;
+                p32 found = 0;
+
+                net_random_refuse = 2;
+                net_connect_refuse = 1;
+                check("a query over TLS with no randomness for its id is not asked",
+                      network_deadline_begin(address_of deadline, 1, 0) &&
+                          dns_query_tls(0x01010101, "example.test", address_of found,
+                                        address_of deadline) == DNS_NO_RANDOM);
+                net_io_faults_clear();
+                net_slurp_text = (string_address)"nameserver 127.0.0.1\n";
+                net_connect_refuse = 8;
+                dns_tls_held = DNS_TLS_ONLY + 1;
+                check("only over TLS, when no resolver can be reached, is no reply rather than a TLS failure",
+                      dns_resolve_wanted("/etc/resolv.conf", "example.test", address_of found, 1) ==
+                          DNS_NO_REPLY);
+                dns_tls_held = 0;
+                net_io_faults_clear();
+        }
+}
+
+/*
         The exchange's confinement, as net_dhcp_apart's child meets it: the
         client socket, the packet socket and the answer's pipe stay open and
         nothing else does; the answer's write and a send on the client socket
@@ -72948,6 +73292,7 @@ typedef struct
         positive bytes;
         bool spill;
         bool probe_keep;
+        bool fail;
         bipolar keep;
 } net_apart_edge;
 
@@ -72968,7 +73313,7 @@ static bool net_apart_edge_task(address_any context, bipolar answer)
                 return false;
         if (edge->spill)
                 (void)system_write_all((positive)edge->keep, bytes, 1);
-        return true;
+        return !edge->fail;
 }
 
 /*
@@ -73110,6 +73455,15 @@ static fn net_apart_edges(void)
                 }
                 check("an answer that could not be held is no answer, however the child ended",
                       died == 8);
+        }
+        {
+                net_apart_edge edge = {.fail = true, .keep = -1};
+                byte_store answer = {0};
+
+                check("a child whose work failed is no answer, though it said nothing amiss",
+                      net_apart(net_apart_edge_task, address_of edge, -1, address_of answer, 8,
+                                false) == NET_APART_DIED);
+                byte_store_release(address_of answer);
         }
         {
                 bipolar child = system_fork();
@@ -76379,6 +76733,7 @@ b32 main(void)
         net_group(redirect_urls);
         net_group(fetching_for_real);
         net_group(http_chain_deadline);
+        net_group(http_run_edges);
         net_group(leasing);
         net_group(dhcp_confinement);
         net_group(dhcp_sockets_in_namespace);
