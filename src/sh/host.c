@@ -19568,7 +19568,9 @@ static fn dns_say(bool label)
                 string_format(log, " " LOCALE_NEEDS_ROOT);
         else
                 string_format(log, "%s", net_dns_kept(kept) ? " (kept)" : " (the network's)");
-        host_say(log, "\n%s tls %s\n", label ? host_label "dns" : "  dns",
+        //      The label's escapes are format text: as an argument %s would
+        //      print them as the characters they are spelt with.
+        host_say(log, label ? "\n" host_label "dns tls %s\n" : "\n  dns tls %s\n",
                  dns_tls_word(dns_tls_mode()));
 }
 
@@ -19576,19 +19578,16 @@ static b32 dns_tls_verb(string_address address_to arguments, positive count)
 {
         string_address word = count > 3 ? arguments[3] : null;
 
-        if (count == 3)
+        if (count == 4)
         {
-                host_say(log, host_label "dns tls %s\n", dns_tls_word(dns_tls_mode()));
-                return 0;
+                return_if(!string_equals(word, "on") && !string_equals(word, "off") &&
+                          !string_equals(word, "only"), host_usage());
+                host_need_root();
+                return_if(host_save("dns tls", DNS_TLS_KEPT, word), 1);
+                dns_tls_publish();
         }
-        return_if(count != 4 || (!string_equals(word, "on") &&
-                                 !string_equals(word, "off") &&
-                                 !string_equals(word, "only")),
-                  host_usage());
-        host_need_root();
-        if (host_save("dns tls", DNS_TLS_KEPT, word))
-                return 1;
-        dns_tls_publish();
+        else
+                return_if(count != 3, host_usage());
         host_say(log, host_label "dns tls %s\n", dns_tls_word(dns_tls_mode()));
         return 0;
 }

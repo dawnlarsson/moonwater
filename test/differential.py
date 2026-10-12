@@ -46511,7 +46511,9 @@ while True:
                    "echo \"@@servers $([ -e /root/ntp.nts.servers ] && echo present || echo absent)\"\n" +
                    say("ntp nts servers time.example") + say("ntp nts off"))
         #       dns tls: the three words written and published, an unknown one
-        #       refused and both files left as they were.
+        #       refused and both files left as they were. A bare dns says its
+        #       state, with the label's bold in it as escapes and not as text.
+        script += say("dns")
         script += "".join(say(f"dns tls {word}") +
                           "echo \"@@dnstls $(cat /root/dns.tls) $(cat /run/moonwater/dns.tls)\"\n"
                           for word in ("on", "only", "off", "banana"))
@@ -46524,6 +46526,7 @@ while True:
                    "$(cat /bowls/one/kept)\"\n")
         lines, finished = session(script)
         current = None
+        dns_lines = 0
         for line in lines:
             if line.startswith("@@ "):
                 current = line[3:]
@@ -46538,6 +46541,10 @@ while True:
                 check(line.split()[1] == current.split()[1], f"{current} is written", line)
             elif line.startswith("@@nts "):
                 check(line.split()[1] == current.split()[2], f"{current} is written", line)
+            elif current == "dns" and not line.startswith("@@"):
+                dns_lines += 1
+                check("\\x1b" not in line,
+                      "a bare dns prints its label's escapes, not their spelling", line)
             elif line.startswith("@@dnstls "):
                 want = "off" if current == "dns tls banana" else current.split()[2]
                 check(line.split()[1:] == [want, want],
@@ -46560,6 +46567,7 @@ while True:
                              "wipe empties /home and /root and keeps the settings (wired and the "
                              "power and charge ones too), the link's key and switch, and the bowls",
                              line)
+        check(dns_lines > 0, "a bare dns says its state, one or more lines", dns_lines)
 
         # A group's secret is read from standard input with "-", and never
         # taken for the word "-" itself; a password or a secret on the line
