@@ -516,6 +516,12 @@ static const struct compositor_role compositor_roles[SURFACE_ROLE_LEGACY + 1] = 
 };
 
 #define COMPOSITOR_CLIENTS 32
+
+// What a window fills: nothing, the work area, or half of it.
+#define COMPOSITOR_FLOATING 0
+#define COMPOSITOR_MAXIMIZED 1
+#define COMPOSITOR_LEFT 2
+#define COMPOSITOR_RIGHT 3
 #define COMPOSITOR_FRAMES (COMPOSITOR_CLIENTS + 1) // and the compositor's own panel
 
 /*
@@ -1381,6 +1387,10 @@ struct compositor_poll
 #define COMPOSITOR_INPUTS 16
 #define COMPOSITOR_DEVICES 64 // evdev numbers the hotplug watch can name
 #define COMPOSITOR_GRANTS 16
+// Two presses on a titlebar are a pair when the second comes this soon after the first,
+// and a drag that ends this near the edge of the output fills the work area or half of it.
+#define COMPOSITOR_AGAIN_NS 400000000ull
+#define COMPOSITOR_SNAP 8
 // How long a pointer that was shaken stays large.
 #define COMPOSITOR_MAGNIFIED_NS 1200000000ull
 #define COMPOSITOR_DAMAGE 8
@@ -1441,6 +1451,9 @@ struct compositor_client
         unsigned int want_w, want_h; // the size the hand is asking for
         unsigned int edges;          // the edges it holds, until the answer to the last ask
         int right, bottom;           // where the edges it does not hold are
+        unsigned int arranged;       // COMPOSITOR_FLOATING, or what it fills: all, the left half, the right
+        int saved_x, saved_y;        // where it was floating, and how large (its contents)
+        unsigned int saved_w, saved_h;
 };
 
 // A role a program may claim, and the process it was given to. The pidfd is
@@ -1485,7 +1498,8 @@ static struct
         struct compositor_client clients[COMPOSITOR_CLIENTS];
         struct compositor_client *stack[COMPOSITOR_CLIENTS]; // bottom first, by layer
         unsigned int stacked;
-        struct compositor_client *focus, *hover, *grab, *drag, *resize;
+        struct compositor_client *focus, *hover, *grab, *drag, *resize, *press;
+        positive press_ns; // when the last press on a titlebar was, and on whose
         int drag_x, drag_y;
         // The surface being resized, how large it was and where the hand took hold.
         int resize_w, resize_h, press_x, press_y;
@@ -1961,7 +1975,7 @@ static int compositor_cursor_plane_wanted(void)
 // A shape painted into the buffer of the plane that is not showing, and the plane given it.
 static int compositor_cursor_paint(unsigned int shape, int fitted, int left, int top)
 {
-        struct compositor_map_dumb map = {compositor.cursor.handle[compositor.cursor.back], 0};
+        struct compositor_map_dumb map = {.handle = compositor.cursor.handle[compositor.cursor.back]};
         struct compositor_cursor cursor = {3, compositor.crtc, left, top, CP_PLANE, CP_PLANE, map.handle};
         long mapped;
 
@@ -2411,6 +2425,15 @@ static struct compositor_client *compositor_under(int x, int y, int *panel)
         }
 }
 
+// A surface where it is told to be, and the program told where it is.
+static void compositor_put(struct compositor_client *client, int x, int y)
+{
+        client->x = x;
+        client->y = y;
+        client->page->window.x = client->asked_x = x;
+        client->page->window.y = client->asked_y = y;
+}
+
 /*
         Where a surface goes. A role that fixes its size fixes its place
         too: the whole output, the panel's band, the work area, beside the
@@ -2462,10 +2485,7 @@ static void compositor_place(struct compositor_client *client, int x, int y)
         }
         }
 
-        client->x = x;
-        client->y = y;
-        client->page->window.x = client->asked_x = client->x;
-        client->page->window.y = client->asked_y = client->y;
+        compositor_put(client, x, y);
 }
 
 // The topmost surface there is to give the keys to; never one that has shown
@@ -2544,6 +2564,8 @@ static void compositor_detach(struct compositor_client *client, unsigned int sta
                 compositor.grab = null;
         if (compositor.drag == client)
                 compositor.drag = null;
+        if (compositor.press == client)
+                compositor.press = null;
 
         client->page->role_state = state;
         client->page->role_result = result;
@@ -2592,6 +2614,8 @@ static void compositor_destroy(struct compositor_client *client)
                         compositor.grab = null;
                 if (compositor.drag == client)
                         compositor.drag = null;
+                if (compositor.press == client)
+                        compositor.press = null;
                 if (compositor.focus == client)
                         compositor_refocus();
 
@@ -2879,6 +2903,94 @@ static void compositor_resize_move(void)
         compositor_configure(client);
 }
 
+// The contents' size a surface is asked for, which is what it is when nothing is out.
+static void compositor_want(struct compositor_client *client, int width, int height)
+{
+        if (!client->outstanding)
+        {
+                client->asked_w = client->width;
+                client->asked_h = client->height;
+        }
+        client->want_w = (unsigned int)(width < WINDOW_MIN_WIDTH ? WINDOW_MIN_WIDTH : width);
+        client->want_h = (unsigned int)(height < WINDOW_MIN_HEIGHT ? WINDOW_MIN_HEIGHT : height);
+        compositor_configure(client);
+}
+
+/*
+        Filling the work area, or half of it: a window is asked for the size
+        the rectangle gives its contents and put where the rectangle begins,
+        and the rectangle it had is kept, from the time it left floating and
+        not at every arrangement, so snapping left, then right, then dragging
+        off puts it back where it was and not on the left half. The edge that
+        is the screen's stays where it is whatever size comes back: the right
+        half is held by its right.
+*/
+static void compositor_arrange(struct compositor_client *client, unsigned int how)
+{
+        struct compositor_area work;
+        int border = COMPOSITOR_BORDER * compositor.scale, title = compositor_title_height(client);
+        int half, left, right;
+
+        if (!(client->lock & SURFACE_LOCK_RESIZABLE) || !compositor_framed(client) || !client->shown)
+                return;
+
+        compositor_work(compositor.width, compositor.height, compositor.scale, compositor.bottom, &work);
+        half = (work.x2 - work.x1) / 2;
+        left = how == COMPOSITOR_RIGHT ? work.x1 + half : work.x1;
+        right = how == COMPOSITOR_LEFT ? work.x1 + half : work.x2;
+
+        if (client->arranged == COMPOSITOR_FLOATING)
+        {
+                client->saved_x = client->x;
+                client->saved_y = client->y;
+                client->saved_w = client->width;
+                client->saved_h = client->height;
+        }
+        client->arranged = how;
+
+        compositor_damage_client(client);
+        client->edges = how == COMPOSITOR_RIGHT ? COMPOSITOR_EDGE_LEFT : 0;
+        client->right = right - border;
+        compositor_put(client, left + border, work.y1 + border);
+        compositor_damage_client(client);
+        compositor_want(client, right - left - border * 2, work.y2 - work.y1 - title - border * 3);
+}
+
+// Back to the rectangle it had, wherever it was put since.
+static void compositor_float(struct compositor_client *client)
+{
+        if (client->arranged == COMPOSITOR_FLOATING)
+                return;
+
+        client->arranged = COMPOSITOR_FLOATING;
+        client->edges = 0;
+        compositor_damage_client(client);
+        compositor_put(client, client->saved_x, client->saved_y);
+        compositor_damage_client(client);
+        compositor_want(client, (int)client->saved_w, (int)client->saved_h);
+}
+
+/*
+        Taking an arranged titlebar takes the window it was: back to the size
+        it had, under the hand where the hand had it, so taking the right
+        side does not make the window jump until its left is under the pointer.
+*/
+static void compositor_float_for_drag(struct compositor_client *client)
+{
+        int title = compositor_title_height(client);
+        int width = (int)client->saved_w < WINDOW_MIN_WIDTH ? WINDOW_MIN_WIDTH : (int)client->saved_w;
+        int grab = (int)((long)(compositor.pointer_x - client->x) * width / (client->width ? (int)client->width : 1));
+        int at = compositor.pointer_y - client->y;
+
+        at = at < 0 ? 0 : at > title - 1 ? (title > 0 ? title - 1 : 0) : at;
+        client->arranged = COMPOSITOR_FLOATING;
+        client->edges = 0;
+        compositor_damage_client(client);
+        compositor_put(client, compositor.pointer_x - grab, compositor.pointer_y - at);
+        compositor_damage_client(client);
+        compositor_want(client, width, (int)client->saved_h);
+}
+
 /*
         A create: the request checked, then the page, then what the role
         says. An application window is anybody's. Every other role needs a
@@ -3141,6 +3253,53 @@ static void compositor_expire(positive now)
 }
 
 /*
+        Where a window goes the first time it shows: where it asked to be, or
+        the middle of the work area when it asked to be centred, and a window
+        asking for the place another holds is put down and across, a titlebar
+        a step, until it is on none that it can be seen from. Bounded: eight
+        titlebars down is most of the way across a small screen, and past
+        that the honest answer is to stop and let them overlap; a step that
+        would put it off the bottom or the right stops the search too.
+*/
+static void compositor_first_place(const struct compositor_client *client, int *x, int *y)
+{
+        struct compositor_area work;
+        int step = COMPOSITOR_TITLE * compositor.scale, title = compositor_title_height(client);
+        int width = (int)client->width, height = (int)client->height;
+
+        compositor_work(compositor.width, compositor.height, compositor.scale, compositor.bottom, &work);
+
+        if (client->page->window.region == WINDOW_CENTRED)
+        {
+                *x = work.x1 + (work.x2 - work.x1 - width) / 2;
+                *y = work.y1 + (work.y2 - work.y1 - (height + title)) / 2;
+        }
+
+        for (int at = 0; at < 8; at++)
+        {
+                int taken = 0, tx = *x + at * step, ty = *y + at * step;
+
+                if (tx + width > work.x2 || ty + height + title > work.y2)
+                        break;
+
+                for (unsigned int other = 0; other < COMPOSITOR_CLIENTS; other++)
+                {
+                        const struct compositor_client *window = &compositor.clients[other];
+
+                        taken |= window != client && window->handle >= 0 && window->page && window->shown &&
+                                 window->active && compositor_framed(window) && window->x == tx && window->y == ty;
+                }
+
+                if (!taken)
+                {
+                        *x += at * step;
+                        *y += at * step;
+                        return;
+                }
+        }
+}
+
+/*
         A commit: what the page says now, read once into the compositor's own
         copy and clamped there, then damaged. The geometry stays what create
         checked; the program moves, frames or minimizes its window, and names
@@ -3185,6 +3344,10 @@ static void compositor_commit(struct compositor_client *client)
         // The answer to the last CONFIGURE.
         if (__atomic_load_n(&page->acked_serial, __ATOMIC_RELAXED) == client->serial)
                 client->outstanding = 0;
+
+        if (!client->shown && compositor_roles[client->role].fit == COMPOSITOR_FIT_FREE &&
+            compositor_framed(client) && (client->lock & SURFACE_LOCK_MOVABLE))
+                compositor_first_place(client, &x, &y);
 
         if (!(client->lock & SURFACE_LOCK_MOVABLE))
         {
@@ -3681,6 +3844,15 @@ static void compositor_motion(void)
         {
                 struct compositor_client *client = compositor.drag;
 
+                // Taken by the hand and moved: a window that fills a place is the window it was, under
+                // the hand, from the first motion (a press that does not move it is half a double click).
+                if (client->arranged != COMPOSITOR_FLOATING)
+                {
+                        compositor_float_for_drag(client);
+                        compositor.drag_x = compositor.pointer_x - client->x;
+                        compositor.drag_y = compositor.pointer_y - client->y;
+                }
+
                 // Kept on the work area as it is moved, as when it was placed.
                 compositor_damage_client(client);
                 compositor_place(client, compositor.pointer_x - compositor.drag_x,
@@ -3710,6 +3882,43 @@ static void compositor_motion(void)
         }
 }
 
+// Where a drag ended, read as an arrangement: the pointer and not the window,
+// because the pointer is what the hand aimed. The top before the sides, so a
+// corner fills the screen.
+static unsigned int compositor_snap(int x, int y)
+{
+        int margin = COMPOSITOR_SNAP * compositor.scale;
+
+        if (y < margin)
+                return COMPOSITOR_MAXIMIZED;
+        if (x < margin)
+                return COMPOSITOR_LEFT;
+        if (compositor.width - 1 - x < margin)
+                return COMPOSITOR_RIGHT;
+        return COMPOSITOR_FLOATING;
+}
+
+// The button is let go. A window that was being moved is arranged by where the
+// hand let go, unless the release is not the hand's (the device went away).
+static void compositor_release(unsigned int code, int snap)
+{
+        struct compositor_client *grab = compositor.grab, *dragged = compositor.drag;
+
+        compositor.drag = null;
+        compositor.grab = null;
+        if (compositor.resize)
+        {
+                struct compositor_client *client = compositor.resize;
+
+                compositor.resize = null;
+                compositor_configure(client);
+        }
+        if (compositor_wants_pointer(grab))
+                compositor_post(grab, SURFACE_EVENT_POINTER_BUTTON, 0, 0, (int)code, 0);
+        if (dragged && snap && compositor_snap(compositor.pointer_x, compositor.pointer_y) != COMPOSITOR_FLOATING)
+                compositor_arrange(dragged, compositor_snap(compositor.pointer_x, compositor.pointer_y));
+}
+
 static void compositor_button(unsigned int code, int down)
 {
         struct compositor_client *under;
@@ -3720,19 +3929,7 @@ static void compositor_button(unsigned int code, int down)
 
         if (!down)
         {
-                struct compositor_client *grab = compositor.grab;
-
-                compositor.drag = null;
-                compositor.grab = null;
-                if (compositor.resize)
-                {
-                        struct compositor_client *client = compositor.resize;
-
-                        compositor.resize = null;
-                        compositor_configure(client);
-                }
-                if (compositor_wants_pointer(grab))
-                        compositor_post(grab, SURFACE_EVENT_POINTER_BUTTON, 0, 0, (int)code, 0);
+                compositor_release(code, 1);
                 return;
         }
 
@@ -3758,6 +3955,10 @@ static void compositor_button(unsigned int code, int down)
                 struct compositor_frame frame;
                 unsigned int edges;
                 int cx, cy, side;
+                positive now = clock_monotonic_nanoseconds();
+                int in_title = compositor.pointer_y >= under->y && compositor.pointer_x >= under->x &&
+                               compositor.pointer_x < under->x + (int)under->width &&
+                               compositor.pointer_y < under->y + compositor_title_height(under);
 
                 // A raise stays in the surface's layer; a surface that takes
                 // no focus on a press (a panel) does not take it.
@@ -3765,25 +3966,67 @@ static void compositor_button(unsigned int code, int down)
                 if (!(under->lock & SURFACE_LOCK_NO_FOCUS_CLICK))
                         compositor_focus(under);
 
+                /*
+                        Alt and anywhere on a window moves it. A window with no
+                        titlebar has nothing to take hold of, and the keys
+                        have said which of the two the hand meant, so this is
+                        before the edges: Alt over a corner moves.
+                */
+                if ((under->lock & SURFACE_LOCK_MOVABLE) && (compositor_modifiers() & SURFACE_KEY_ALT))
+                {
+                        compositor.drag = under;
+                        compositor.drag_x = compositor.pointer_x - under->x;
+                        compositor.drag_y = compositor.pointer_y - under->y;
+                        return;
+                }
+
+                /*
+                        The close box after the edges and before everything else: the box's
+                        square and the corner's grip overlap by a few pixels, and a
+                        window that cannot be resized from its own corner is worse than
+                        a button that has to be hit a little further in. A press on it
+                        is not one of a pair, or a second click would fill the screen on
+                        its way out.
+                */
+                edges = compositor_edges(under, compositor.pointer_x, compositor.pointer_y);
                 compositor_frame_of(under, &frame);
-                if (compositor_close_box(&frame, &cx, &cy, &side) &&
+                if (!edges && compositor_close_box(&frame, &cx, &cy, &side) &&
                     compositor.pointer_x >= cx && compositor.pointer_x < cx + side &&
                     compositor.pointer_y >= cy && compositor.pointer_y < cy + side)
                 {
+                        compositor.press = null;
                         under->page->window.state |= WINDOW_CLOSING;
                         compositor_post(under, SURFACE_EVENT_CLOSE, 0, 0, SURFACE_CLOSE_REQUESTED, 0);
                         return;
                 }
 
-                edges = compositor_edges(under, compositor.pointer_x, compositor.pointer_y);
+                // Two presses on the same titlebar close together fill the work area, or undo it.
+                {
+                        int again = under == compositor.press && now - compositor.press_ns <= COMPOSITOR_AGAIN_NS;
+
+                        compositor.press = under;
+                        compositor.press_ns = now;
+                        if (again && in_title && (under->lock & SURFACE_LOCK_RESIZABLE))
+                        {
+                                compositor.press = null;
+                                if (under->arranged == COMPOSITOR_MAXIMIZED)
+                                        compositor_float(under);
+                                else
+                                        compositor_arrange(under, COMPOSITOR_MAXIMIZED);
+                                return;
+                        }
+                }
+
                 if (edges)
                 {
+                        // An edge resize makes this ordinary geometry: a double click
+                        // after it fills the screen and does not restore what was.
+                        under->arranged = COMPOSITOR_FLOATING;
                         compositor_resize_begin(under, edges);
                         return;
                 }
 
-                if ((under->lock & SURFACE_LOCK_MOVABLE) &&
-                    compositor.pointer_y < under->y + compositor_title_height(under))
+                if ((under->lock & SURFACE_LOCK_MOVABLE) && compositor.pointer_y < under->y + compositor_title_height(under))
                 {
                         compositor.drag = under;
                         compositor.drag_x = compositor.pointer_x - under->x;
@@ -3872,7 +4115,7 @@ static void compositor_input_read(unsigned int at)
 
                         // What it held down will never be let go of: not a key, not a button.
                         compositor.held[at] = 0;
-                        compositor_button(COMPOSITOR_BTN_LEFT, 0);
+                        compositor_release(COMPOSITOR_BTN_LEFT, 0);
                 }
 
                 if (got <= 0)
@@ -4435,12 +4678,13 @@ static b32 compositor_main()
 // surface ----------------------------------------------------------
 /*
         A test client: surface [-x X] [-y Y] [-w WIDTH] [-h HEIGHT]
-        [-c RRGGBB] [-r ROLE] [-p] [-L] [-n] [-m] [-2] [-F COMMITS] [-W WRITERS]
+        [-c RRGGBB] [-r ROLE] [-p] [-L] [-R] [-n] [-m] [-2] [-F COMMITS] [-W WRITERS]
         [-O OFFSET] [-z WIDTH] [-T TITLE] [-N COUNT] [-X COUNT] [-f FONT.ttf] [-t TEXT] [-s SECONDS].
 
         A window of one colour at X, Y, a line of TEXT drawn with font.c on
         it when FONT is given, pointer events asked for with -p (or the wheel
-        alone with -L), and every
+        alone with -L), the size it is asked for taken with -R (a new page of that
+        size, in its colour, and the answer to the ask), and every
         event it is sent written to standard output, one line each. It lives
         until its close box is pressed, the compositor goes, or SECONDS. -n
         never commits, and -F commits COMMITS times in a row, whole window
@@ -4571,7 +4815,7 @@ static b32 surface_main()
 {
         bipolar x = -1, y = -1, width = 320, height = 200, colour = 0x3366aa, role = SURFACE_ROLE_APP;
         bipolar seconds = -1;
-        b32 pointer = 0, wheel = 0, never = 0, twice = 0, away = 0;
+        b32 pointer = 0, wheel = 0, never = 0, twice = 0, away = 0, sized = 0;
         bipolar flood = 0, offset = -1, writers = 1, wider = -1, many = 0, again = 0;
         string_address title = null;
         b32 child = 0;
@@ -4588,9 +4832,11 @@ static b32 surface_main()
 
                 if (option[0] != '-' || !option[1] || option[2])
                         continue;
-                if (option[1] == 'p' || option[1] == 'L' || option[1] == 'n' || option[1] == '2' || option[1] == 'm')
+                if (option[1] == 'p' || option[1] == 'L' || option[1] == 'n' || option[1] == '2' || option[1] == 'm' ||
+                    option[1] == 'R')
                 {
                         pointer |= option[1] == 'p';
+                        sized |= option[1] == 'R';
                         wheel |= option[1] == 'L';
                         never |= option[1] == 'n';
                         twice |= option[1] == '2';
@@ -4774,6 +5020,30 @@ static b32 surface_main()
                         string_format(log, "surface: event %p %p %b %b\n", (positive)event.type,
                                       (positive)event.flags, (bipolar)event.a, (bipolar)event.b);
                         closing |= event.type == SURFACE_EVENT_CLOSE;
+
+                        // The size asked for, made and answered, as a terminal does in whole cells.
+                        if (sized && event.type == SURFACE_EVENT_CONFIGURE && event.a > 0 && event.b > 0)
+                        {
+                                struct surface *made = (unsigned int)event.a == (unsigned int)width &&
+                                                               (unsigned int)event.b == (unsigned int)height
+                                                           ? surface
+                                                           : surface_resize(surface, (unsigned int)event.a,
+                                                                            (unsigned int)event.b);
+
+                                if (made != surface)
+                                {
+                                        surface = made;
+                                        width = event.a;
+                                        height = event.b;
+                                        memory_fill_u32(surface_buffer(surface, 0), (positive)(width * height),
+                                                        (p32)colour & 0xffffff);
+                                }
+                                surface->buffer_index = 0;
+                                surface->acked_serial = event.serial;
+                                surface->damage_count = 0;
+                                surface_commit(surface);
+                                string_format(log, "surface: size %b %b\n", width, height);
+                        }
                 }
                 log_flush();
 
