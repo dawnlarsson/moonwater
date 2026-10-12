@@ -55897,7 +55897,8 @@ static fn error_frames(void)
                 socket_send(pair[1], &more, sizeof more, 0, null, 0);
                 socket_send(pair[1], &finished, sizeof finished, 0, null, 0);
                 check("an interrupted netlink dump fails after draining the rest",
-                      netlink_walk(pair[0], &request, 91, &reply, null, null) == -1 &&
+                      netlink_walk(pair[0], &request, 91, &reply, null, null) ==
+                          NETLINK_DUMP_CHANGED &&
                           socket_receive(pair[0], left, sizeof left, MSG_DONTWAIT,
                                          null, null) == NETWORK_TRY_AGAIN);
                 p8 discarded[NETLINK_HEADER];
@@ -55908,6 +55909,96 @@ static fn error_frames(void)
         }
         netlink_forget(&request);
         netlink_forget(&reply);
+        socket_close(pair[0]);
+        socket_close(pair[1]);
+}
+
+/* A link message named eth9, on the peer at one sequence. */
+static fn netlink_named_link(b32 peer, p32 sequence, p32 index)
+{
+        netlink_buffer message = {0};
+
+        if (netlink_begin(address_of message, RTM_NEWLINK, 0, sequence,
+                          sizeof(netlink_link)) &&
+            netlink_attribute_add(address_of message, IFLA_IFNAME, "eth9", 5))
+        {
+                netlink_link address_to link = netlink_body(address_of message);
+
+                link->kind = NETLINK_LINK_ETHER;
+                link->index = index;
+                socket_send(peer, message.bytes, message.used, 0, null, 0);
+        }
+        netlink_forget(address_of message);
+}
+
+static fn netlink_done(b32 peer, p32 sequence)
+{
+        netlink_header done = {.length = NETLINK_HEADER,
+                               .type = NLMSG_IS_DONE, .sequence = sequence};
+
+        socket_send(peer, &done, sizeof done, 0, null, 0);
+}
+
+/* A dump the kernel changed under: a marked message and a DONE marked too. */
+static fn netlink_changed_dump(b32 peer, p32 sequence)
+{
+        netlink_header marked = {.length = NETLINK_HEADER,
+                                 .type = RTM_NEWLINK,
+                                 .flags = 2 | NLM_DUMP_INTERRUPTED,
+                                 .sequence = sequence};
+        netlink_header finished = {.length = NETLINK_HEADER,
+                                   .type = NLMSG_IS_DONE,
+                                   .flags = NLM_DUMP_INTERRUPTED,
+                                   .sequence = sequence};
+
+        socket_send(peer, &marked, sizeof marked, 0, null, 0);
+        socket_send(peer, &finished, sizeof finished, 0, null, 0);
+}
+
+/* A dump the kernel changed underneath is asked again, whole, under the next
+   sequence number, by a visitor that starts over, and three changed dumps in
+   a row are the answer: no fourth try. The replies are queued on the peer,
+   at the sequence numbers the calls will take, before the call. */
+static fn dump_restart_frames(void)
+{
+        b32 pair[2];
+        bipolar opened = system_call_4(syscall(socketpair), AF_UNIX,
+                                       SOCK_DGRAM, 0, (positive)pair);
+        netlink_search search;
+        p32 first;
+        p8 left[NETLINK_HEADER];
+
+        check("dump restart test socket pair opens", opened == 0);
+        if (opened)
+                return;
+
+        /* The first try finds eth9 as index 8 before the kernel says the
+           table changed, so a visitor left as it was keeps index 8. */
+        first = netlink_sequence_next;
+        netlink_named_link(pair[1], first, 8);
+        netlink_changed_dump(pair[1], first);
+        netlink_named_link(pair[1], first + 1, 9);
+        netlink_done(pair[1], first + 1);
+        memory_fill(address_of search, 0, sizeof search);
+        search.wanted = (string_address)"eth9";
+        check("a changed dump is asked again and the answer kept is the second",
+              netlink_link_find((b32)pair[0], address_of search) == 0 &&
+                  search.found && search.index == 9);
+
+        first = netlink_sequence_next;
+        netlink_changed_dump(pair[1], first);
+        netlink_changed_dump(pair[1], first + 1);
+        netlink_changed_dump(pair[1], first + 2);
+        netlink_changed_dump(pair[1], first + 3);
+        memory_fill(address_of search, 0, sizeof search);
+        search.wanted = (string_address)"eth9";
+        check("a dump changed on every try is the answer after three tries",
+              netlink_link_find((b32)pair[0], address_of search) ==
+                  NETLINK_DUMP_CHANGED);
+        check("and the fourth dump queued was never asked for",
+              socket_receive(pair[0], left, sizeof left, MSG_DONTWAIT,
+                             null, null) == NETLINK_HEADER);
+
         socket_close(pair[0]);
         socket_close(pair[1]);
 }
@@ -76977,6 +77068,7 @@ b32 main(void)
         net_group(leasing_datagrams);
         net_group(dhcp_transaction_randomness);
         //      fold netlink: new groups below this line
+        net_group(dump_restart_frames);
         //
         //      fold dns: new groups below this line
         //

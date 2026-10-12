@@ -58,6 +58,9 @@
 #define NETLINK_HEADER 16
 #define NETLINK_DATAGRAM_MAX (16u * 1024u * 1024u)
 #define NETLINK_TRANSACTION_SECONDS 10
+//      A dump the kernel changed underneath, and the tries it gets.
+#define NETLINK_DUMP_CHANGED (-11) /* EAGAIN, spelled out: the fuzz lifts have no errno names */
+#define NETLINK_DUMP_TRIES 3
 
 #define NLM_REQUEST 0x0001
 #define NLM_ACK 0x0004
@@ -600,7 +603,8 @@ static COLD bool netlink_turn_take(netlink_header address_to header,
         {
                 bipolar status = netlink_status(header, true);
 
-                turn->status = turn->interrupted && !status ? -1 : status;
+                turn->status = turn->interrupted && !status
+                                   ? NETLINK_DUMP_CHANGED : status;
                 turn->done = true;
                 return false;
         }
@@ -766,6 +770,24 @@ static bipolar netlink_dump(b32 handle, p16 type, positive body, p8 family,
 
         return netlink_transact(handle, address_of request, sequence,
                                 visit, context);
+}
+
+//      Asked again while the kernel says the table changed under it, with the
+//      visitor's state put back to the copy taken before the first try.
+static COLD bipolar netlink_dump_again(b32 handle, p16 type, positive body,
+                                       p8 family, netlink_visitor visit,
+                                       address_any context, address_any first,
+                                       positive size)
+{
+        bipolar status = NETLINK_DUMP_CHANGED;
+
+        for (positive tries = 0; tries < NETLINK_DUMP_TRIES &&
+                                 status == NETLINK_DUMP_CHANGED; tries++)
+        {
+                memory_copy(context, first, size);
+                status = netlink_dump(handle, type, body, family, visit, context);
+        }
+        return status;
 }
 
 /*
@@ -1080,11 +1102,13 @@ static bool netlink_link_seen(netlink_header address_to header, address_any cont
 */
 static bipolar netlink_link_find(b32 handle, netlink_search address_to search)
 {
+        netlink_search first = address_to search;
         bipolar status;
 
-        search->found = search->has_hardware = false;
-        status = netlink_dump(handle, RTM_GETLINK, sizeof(netlink_link),
-                              AF_UNSPEC, netlink_link_seen, search);
+        first.found = first.has_hardware = false;
+        status = netlink_dump_again(handle, RTM_GETLINK, sizeof(netlink_link),
+                                    AF_UNSPEC, netlink_link_seen, search,
+                                    address_of first, sizeof first);
         if (status < 0)
                 return status;
 
@@ -1155,9 +1179,11 @@ static bool netlink_wired_seen(netlink_header address_to header, address_any con
 
 static bipolar netlink_wired_list(b32 handle, netlink_wired address_to wired)
 {
-        wired->count = 0;
-        return netlink_dump(handle, RTM_GETLINK, sizeof(netlink_link), AF_UNSPEC,
-                            netlink_wired_seen, wired);
+        netlink_wired first = {.count = 0};
+
+        return netlink_dump_again(handle, RTM_GETLINK, sizeof(netlink_link),
+                                  AF_UNSPEC, netlink_wired_seen, wired,
+                                  address_of first, sizeof first);
 }
 
 /*
@@ -1348,8 +1374,11 @@ static COLD bool netlink_lease_seen(netlink_header address_to header,
 static COLD bipolar netlink_leases_on(b32 handle,
                                       netlink_lease_search address_to search)
 {
-        return netlink_dump(handle, RTM_GETADDR, sizeof(netlink_address),
-                            AF_INET, netlink_lease_seen, search);
+        netlink_lease_search first = address_to search;
+
+        return netlink_dump_again(handle, RTM_GETADDR, sizeof(netlink_address),
+                                  AF_INET, netlink_lease_seen, search,
+                                  address_of first, sizeof first);
 }
 
 #endif // STANDARD_MODERN_C_NET_NETLINK
