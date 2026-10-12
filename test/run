@@ -18971,6 +18971,101 @@ else
 fi
 fi
 
+#       Canvas at boot (stage recover): the image's settings, a bit of which
+#       says Canvas stays off.
+#
+#       The settings are a section of the boot image that the firmware's loader
+#       hands the kernel, so reading one takes a firmware boot. A copy of the
+#       image has the newer slot of its .mwset section written with the bit set
+#       (and its sum, which the kernel checks), and is booted beside the image
+#       as it is. The guest's own serial shell reads what Canvas says.
+if [ -z "${CANVAS_ONLY:-}" ] || [ "${CANVAS_ONLY:-}" = r4 ]; then
+PYTHONPATH=$work python3 - "$image" > "$work/r4-answers" 2>"$work/r4-why" <<'PY'
+import os, re, socket, struct, sys, time, zlib
+from qmp_guest import *
+
+image = sys.argv[1]
+work = os.environ["MOONWATER_CANVAS_WORK"] + "/r4"
+os.makedirs(work, exist_ok=True)
+out = []
+ovmf = next((path for path in ("/usr/share/edk2/x64/OVMF.4m.fd", "/usr/share/OVMF/OVMF_CODE.fd",
+                               "/usr/share/edk2/ovmf/OVMF_CODE.fd") if os.path.exists(path)), "")
+names = ("R4.1 an image whose settings say Canvas stays off boots on the text console: Canvas is off, and says why",
+         "and moonwater canvas on starts it afterwards, with no warning from the kernel",
+         "R4.2 the same image with its settings as built starts Canvas at boot")
+
+def guest_of(name, kernel):
+    directory = work + "/" + name
+    os.makedirs(directory, exist_ok=True)
+    path = directory + "/ser"
+    guest = Guest(["qemu-system-x86_64", "-m", "2G", "-smp", "2"] +
+                  (["-cpu", "host", "-enable-kvm"] if os.access("/dev/kvm", os.R_OK | os.W_OK) else ["-cpu", "Nehalem"]) + [
+        "-kernel", kernel, "-vga", "none", "-device", "ramfb", "-bios", ovmf,
+        "-device", "qemu-xhci", "-device", "usb-tablet", "-device", "usb-kbd",
+        "-chardev", "socket,id=s0,path=" + path + ",server=on,wait=off", "-serial", "chardev:s0",
+        "-no-reboot", "-display", "none",
+        "-append", "console=ttyS0 printk.time=1"],
+        directory + "/qmp", directory + "/mon", directory, sockets=(path,))
+    time.sleep(35)
+    shell = Shell(path)
+    shell.ready()
+    return guest, shell
+
+def over(guest):
+    try:
+        guest.quit()
+        guest.wait(10)
+    except Exception:
+        guest.kill()
+
+if ovmf:
+    data = bytearray(open(image, "rb").read())
+    pe = struct.unpack_from("<I", data, 0x3c)[0]
+    table = pe + 24 + struct.unpack_from("<H", data, pe + 20)[0]
+    raw = [struct.unpack_from("<I", data, table + 40 * i + 20)[0]
+           for i in range(struct.unpack_from("<H", data, pe + 6)[0])
+           if data[table + 40 * i:table + 40 * i + 8] == b".mwset\0\0"][0]
+    slot = bytearray(16384)
+    struct.pack_into("<QHHIQ", slot, 0, 0x474e54544553574d, 1, 64, 16384, 1)
+    slot[24:40] = bytes(range(16))
+    struct.pack_into("<I", slot, 48, 1)
+    struct.pack_into("<I", slot, 44, zlib.crc32(bytes(slot[:44]) + b"\0\0\0\0" + bytes(slot[48:64])))
+    data[raw:raw + 16384] = slot
+    open(work + "/off.efi", "wb").write(data)
+
+    guest, shell = guest_of("off", work + "/off.efi")
+    state = shell.run("moonwater canvas | head -1")[0]
+    wording = shell.run("moonwater bind init canvas")[0].split("\n")[-1]
+    said = shell.number("dmesg | grep -c 'off at boot, as the image'")
+    shell.run("moonwater canvas on")
+    after = "on" if "Canvas is on" in shell.run("moonwater canvas | head -1")[0] else "off"
+    out.append((names[0], "%s / %s / %s" % ("off" if "Canvas is off" in state else state, wording, said),
+                "off / [Moonwater] init canvas off / 1"))
+    out.append((names[1], "%s %s" % (after, shell.number("dmesg | grep -c 'WARNING:'")), "on 0"))
+    over(guest)
+
+    guest, shell = guest_of("on", image)
+    out.append((names[2], "%s / %s" % ("on" if "Canvas is on" in shell.run("moonwater canvas | head -1")[0] else "off",
+                                       shell.run("moonwater bind init canvas")[0].split("\n")[-1]),
+                "on / [Moonwater] init canvas on"))
+    over(guest)
+else:
+    for name in names:
+        out.append((name, "not run: no OVMF", "yes"))
+
+for name, got, want in out:
+    print("%s|%s|%s" % (name, got, want))
+PY
+if [ ! -s "$work/r4-answers" ]; then
+        same "the firmware boots answered" "yes" "no"
+        sed 's/^/    /' "$work/r4-why" | tail -5
+else
+        while IFS='|' read -r name got want; do
+                same "$name" "$want" "$got"
+        done < "$work/r4-answers"
+fi
+fi
+
 #       The terminal on the compositor in userspace (canvas milestone M5).
 #
 #       /terminal is a program that makes its own pixels: it runs a shell on

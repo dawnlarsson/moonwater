@@ -2052,6 +2052,17 @@ static COLD void __init settings_start(void)
 #endif
 }
 
+unsigned int moonwater_settings_flags(void)
+{
+        unsigned int flags;
+
+        mutex_lock(&settings_lock);
+        flags = settings_current ? settings_current->flags : 0;
+        mutex_unlock(&settings_lock);
+
+        return flags;
+}
+
 static long settings_get(struct spark_settings_request __user *request)
 {
         struct spark_settings_request asked;

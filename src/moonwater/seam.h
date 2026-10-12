@@ -70,6 +70,13 @@ void moonwater_bind_fire(unsigned int event);
 _Bool moonwater_bind_swallowed(unsigned int code, int value);
 
 /*
+        The flags of the settings this machine booted with, or those a later
+        SET replaced them with; zero where there are none, which is every
+        default. The bits are spark.c's and canvas_abi.h's.
+*/
+unsigned int moonwater_settings_flags(void);
+
+/*
         What an input handler costs, counted where it runs.
 
         A handler is called for every report of every device it is attached

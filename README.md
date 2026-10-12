@@ -34,6 +34,7 @@ moonwater bind init                    what runs at every boot, with ids
 moonwater bind init add "command"      run a command at boot, once disks settle
 moonwater bind init remove ID|"command"  stop running one at boot
 moonwater bind init mount [on|off]     mount kept disks at boot [on]
+moonwater bind init canvas [on|off]    start Canvas at boot [on]
 moonwater bind exit                    what runs at poweroff or reboot
 moonwater bind exit add "command"      run a command before the disks go read-only
 moonwater bind exit remove ID|"command"  stop running one at the stop
@@ -270,7 +271,7 @@ a session already keeps is refused.
 **The same line twice is the same machine.** A settings verb that finds the
 state as asked says so and writes nothing: `bind init add` of a line already in
 the list (it is not added a second time), `bind EVENT COMMAND` of the command
-the event runs, `bind init mount`, `wifi add` of a saved network with its
+the event runs, `bind init mount`, `bind init canvas`, `wifi add` of a saved network with its
 password (and, while it is joined and kept, no leaving and joining again),
 `bluetooth add`, `dns`, `timezone`, `keyboard`, `ntp`, `priority`, `wired`,
 `name NAME`, `link add`, `link allow`, `link group`, `link on`. What is a
@@ -385,6 +386,13 @@ profile has to be installed (`bowl profile desktop`), and the choice is kept in
 way it was started, from any terminal or from the serial port. A machine script
 of one's own, in `/root`, starts nothing unless it runs `moonwater desktop boot`
 in its `moonwater_canvas` function, as the builtin one does.
+
+`moonwater bind init canvas off` keeps Canvas from starting at boot at all, and
+the machine comes up on the text console; it is a bit in the settings the boot
+image carries, read by the kernel before it looks for a card, so it holds across
+an install. `moonwater canvas on` starts Canvas afterwards as it would after any
+off. It is not `moonwater desktop off`, which lets Canvas start and turns it off
+as soon as it has.
 
 `moonwater latency` says where a report from a mouse or a keyboard spends its
 time on this machine, as far as the machine can see: the two input handlers

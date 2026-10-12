@@ -9982,7 +9982,6 @@ static COLD void canvas_probe(struct work_struct *work)
 
 static void __maybe_unused canvas_start_probing(void)
 {
-        INIT_DELAYED_WORK(&canvas_probe_work, canvas_probe);
         schedule_delayed_work(&canvas_probe_work, 0);
 }
 
@@ -12323,6 +12322,24 @@ void canvas_client_release(struct file *file)
 // The device is registered and the bindings work: look for a card.
 void canvas_boot(void)
 {
+#ifdef CONFIG_MOONWATER_CANVAS_AUTOSTART
+        // Set up whether or not it is scheduled: turning Canvas on cancels it.
+        INIT_DELAYED_WORK(&canvas_probe_work, canvas_probe);
+#endif
+
+        /*
+                The image's settings can say Canvas stays off at boot
+                (moonwater bind init canvas off), and the text console is then
+                what is on the screen. The settings are read before this runs,
+                at the start of the core. moonwater canvas on starts Canvas
+                afterwards as it would after any off.
+        */
+        if (moonwater_settings_flags() & SPARK_SETTINGS_CANVAS_OFF)
+        {
+                pr_info("[moonwater canvas] " "off at boot, as the image's settings say; moonwater canvas on starts it\n");
+                return;
+        }
+
 #ifdef CONFIG_MOONWATER_CANVAS_AUTOSTART
         canvas_start_probing();
 #endif
