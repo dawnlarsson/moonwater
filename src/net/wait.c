@@ -68,7 +68,6 @@ static bool network_deadline_begin_within(
 {
         network_deadline enclosing;
         positive elapsed;
-        positive left;
 
         if (outer)
                 enclosing = *outer;
@@ -81,9 +80,8 @@ static bool network_deadline_begin_within(
         elapsed = deadline->began - enclosing.began;
         if (elapsed >= enclosing.budget)
                 return false;
-        left = enclosing.budget - elapsed;
-        if (deadline->budget > left)
-                deadline->budget = left;
+        if (deadline->budget > enclosing.budget - elapsed)
+                deadline->budget = enclosing.budget - elapsed;
         return true;
 }
 
@@ -149,43 +147,36 @@ static bipolar network_wait_set(
         }
 }
 
-static bipolar network_wait_until(
-    bipolar handle, b16 events,
-    const network_deadline address_to deadline)
-{
-        system_poll_descriptor waited = {(b32)handle, events, 0};
-
-        return network_wait_set(address_of waited, 1, deadline);
-}
-
 static bipolar network_wait_readable_until(
     bipolar handle, const network_deadline address_to deadline)
 {
-        return network_wait_until(handle, SYSTEM_POLL_READ, deadline);
+        system_poll_descriptor waited = {(b32)handle, SYSTEM_POLL_READ, 0};
+
+        return network_wait_set(address_of waited, 1, deadline);
 }
 
 static bipolar network_wait_writable_until(
     bipolar handle, const network_deadline address_to deadline)
 {
-        return network_wait_until(handle, SYSTEM_POLL_WRITE, deadline);
+        system_poll_descriptor waited = {(b32)handle, SYSTEM_POLL_WRITE, 0};
+
+        return network_wait_set(address_of waited, 1, deadline);
 }
 
 /* What network_receive_next answers when the deadline went by with nothing to
    read: no errno is as large as this. */
 #define NETWORK_SILENT (-4096)
 
-/* The next datagram to reach handle before the deadline, cut to room (the
-   length is what it was, MSG_TRUNC's way, so a longer one says so): that
-   length, NETWORK_SILENT when the deadline went by first, or the error that
-   ended the wait or the receive. Queued datagrams need no readiness poll;
-   only EAGAIN waits. Interruption and vanished readiness are
-   retried under the same deadline; the receive itself never blocks. A peer
-   is filled for the datagram, with its size, when asked for; sntp's, which
-   reads the stamps the kernel leaves beside a datagram, is its own. */
-static bipolar network_receive_next(
-    bipolar handle, p8 address_to into, positive room,
+/* The one receive loop under every deadline-bound read. Queued data answers
+   at once with no readiness poll; only EAGAIN waits, and the receive itself
+   never blocks (MSG_DONTWAIT is always set here, whatever flags the caller
+   adds). Interruption and vanished readiness retry under the same deadline.
+   Answers silent at the deadline, or the error that ended the wait or the
+   receive. */
+static bipolar network_receive_until(
+    bipolar handle, p8 address_to into, positive room, b32 flags,
     socket_address_internet address_to peer, p32 address_to peer_size,
-    const network_deadline address_to deadline)
+    const network_deadline address_to deadline, bipolar silent)
 {
         for (;;)
         {
@@ -195,15 +186,9 @@ static bipolar network_receive_next(
 
                 if (!network_deadline_left(deadline, address_of seconds,
                                            address_of nanoseconds))
-                        return NETWORK_SILENT;
-                if (peer)
-                {
-                        memory_fill(peer, 0, sizeof *peer);
-                        address_to peer_size = sizeof *peer;
-                }
+                        return silent;
                 got = socket_receive((b32)handle, into, room,
-                                     MSG_TRUNC | MSG_DONTWAIT, peer,
-                                     peer_size);
+                                     flags | MSG_DONTWAIT, peer, peer_size);
                 if (got != NETWORK_INTERRUPTED && got != NETWORK_TRY_AGAIN)
                         return got;
                 if (got == NETWORK_TRY_AGAIN)
@@ -212,42 +197,42 @@ static bipolar network_receive_next(
                                                                      deadline);
 
                         if (ready <= 0)
-                                return ready ? ready : NETWORK_SILENT;
+                                return ready < 0 ? ready : silent;
                 }
         }
+}
+
+/* The next datagram to reach handle before the deadline, cut to room (the
+   length is what it was, MSG_TRUNC's way, so a longer one says so): that
+   length, NETWORK_SILENT when the deadline went by first, or the error that
+   ended the wait or the receive. A peer is filled for the datagram, with its
+   size, when asked for; sntp's, which reads the stamps the kernel leaves
+   beside a datagram, is its own. The kernel writes the peer only on a
+   datagram, so filling it once serves every retry. */
+static bipolar network_receive_next(
+    bipolar handle, p8 address_to into, positive room,
+    socket_address_internet address_to peer, p32 address_to peer_size,
+    const network_deadline address_to deadline)
+{
+        if (peer)
+        {
+                memory_fill(peer, 0, sizeof *peer);
+                address_to peer_size = sizeof *peer;
+        }
+        return network_receive_until(handle, into, room, MSG_TRUNC, peer,
+                                     peer_size, deadline, NETWORK_SILENT);
 }
 
 /* Deadline-bound stream reads must not enter a blocking read merely because
    one byte was ready: a peer could then trickle the rest forever under the
    socket's renewing idle timeout. Poll the absolute budget and consume only
-   bytes immediately available before recomputing what remains. Queued data
-   needs no readiness syscall; an empty socket waits before trying again. */
+   bytes immediately available before recomputing what remains. */
 static bipolar network_stream_read_some_until(
     bipolar handle, p8 address_to into, positive length,
     const network_deadline address_to deadline)
 {
-        for (;;)
-        {
-                positive seconds;
-                positive nanoseconds;
-
-                if (!network_deadline_left(deadline, address_of seconds,
-                                           address_of nanoseconds))
-                        return -1;
-                bipolar got = socket_receive((b32)handle, into, length,
-                                             MSG_DONTWAIT, null, 0);
-
-                if (got != NETWORK_TRY_AGAIN && got != NETWORK_INTERRUPTED)
-                        return got;
-                if (got == NETWORK_TRY_AGAIN)
-                {
-                        bipolar ready = network_wait_readable_until(handle,
-                                                                     deadline);
-
-                        if (ready <= 0)
-                                return ready < 0 ? ready : -1;
-                }
-        }
+        return network_receive_until(handle, into, length, 0, null, null,
+                                     deadline, -1);
 }
 
 /* A read in the middle of a stream, where bytes are usually queued already:

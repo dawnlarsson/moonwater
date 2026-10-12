@@ -68987,16 +68987,10 @@ NET_MUTATION_EQUIVALENT = {
         "A frame of no bytes is no frame: it is answered 0, as the refusal of a frame is.",
     ("dhcp_ask", "(wait < 250 ? 250 : wait % 1000) * 1000000))", "<", 1):
         "At wait == 250 both arms are 250.",
-    ("network_deadline_begin_within", "if (deadline->budget > left)", ">", 1):
-        "At budget == left both arms leave it left.",
     ("network_deadline_left", "if (!deadline->began || !now || now < deadline->began)", "||", 2):
         "A clock that reads 0 or behind the start makes the elapsed time wrap past any budget, which answers false as this does.",
     ("network_wait_set", "for (positive at = 0; ready > 0 && at < count; at++)", ">", 1):
         "A poll that answers 0 leaves every revents 0, so no descriptor reads as invalid either way.",
-    ("network_receive_next", "if (ready <= 0)", "<=", 1):
-        "A wait that answers 0 is a deadline gone by; going round again, the loop's own deadline check answers NETWORK_SILENT, as this does.",
-    ("network_stream_read_some_until", "if (ready <= 0)", "<=", 1):
-        "A wait that answers 0 is a deadline gone by; going round again, the loop's own deadline check answers -1, as this does.",
     ("network_stream_read_some_for", "if (ready <= 0)", "<=", 1):
         "A wait that answers 0 is a deadline gone by, and network_stream_read_some_until, whose first step is that deadline's check, answers -1 as this does.",
     ("network_stream_send_all_until", "if (network_wait_writable_until(handle, deadline) <= 0)", "<=", 1):
@@ -69046,6 +69040,10 @@ NET_MUTATION_EQUIVALENT = {
     #
     # ---- fold apart: entries below this line
     #
+    ("network_deadline_begin_within", "if (deadline->budget > enclosing.budget - elapsed)", ">", 1):
+        "At budget == enclosing.budget - elapsed both arms leave it that.",
+    ("network_receive_until", "if (ready <= 0)", "<=", 1):
+        "A wait that answers 0 is a deadline gone by; going round again, the loop's own deadline check answers the silent value, as this does.",
     # ---- fold dhcp: entries below this line
     #
     # ---- fold shnet: entries below this line
@@ -69402,8 +69400,9 @@ def harness_net_math_proof(argv):
     checks(all(guard in clamp_source for guard in (
         "enclosing = *outer;", "deadline->began < enclosing.began",
         "elapsed = deadline->began - enclosing.began;",
-        "if (elapsed >= enclosing.budget)", "left = enclosing.budget - elapsed;",
-        "if (deadline->budget > left)", "deadline->budget = left;")),
+        "if (elapsed >= enclosing.budget)",
+        "if (deadline->budget > enclosing.budget - elapsed)",
+        "deadline->budget = enclosing.budget - elapsed;")),
         "production nested-deadline guards and clamp match the proved arithmetic")
 
     # Bit-blast x + 1 and x & (x + 1), least-significant bit first. States
