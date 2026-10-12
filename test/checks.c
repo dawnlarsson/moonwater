@@ -54105,6 +54105,11 @@ static bipolar net_test_socket_send(b32 handle, address_any data, positive size,
                              size, (positive)flags, (positive)to, to_size);
 }
 
+/* The next receive answers this length and reads nothing, as a datagram's
+   MSG_TRUNC peek of that length or a fill that came back empty would. */
+static bool net_recv_report;
+static positive net_recv_report_length;
+
 static bipolar net_test_socket_receive(b32 handle, address_any data,
                                        positive size, b32 flags,
                                        address_any from, address_any from_size)
@@ -54132,6 +54137,14 @@ static bipolar net_test_socket_receive(b32 handle, address_any data,
                 return system_call_6(syscall(recvfrom), (positive)handle,
                                     (positive)data, size, (positive)flags,
                                     (positive)from, (positive)from_size);
+        }
+        if (net_recv_report)
+        {
+                net_recv_report = false;
+                net_recv_short_hit = true;
+                if (from && from_size)
+                        memory_fill(from, 0, *(p32 address_to)from_size);
+                return (bipolar)net_recv_report_length;
         }
         if (net_recv_eintr_sticky || net_recv_eintr_once)
         {
@@ -54183,18 +54196,30 @@ static bipolar net_test_socket_receive(b32 handle, address_any data,
 }
 
 static positive net_poll_calls;
+//      Polls that answer at once that nothing became ready: a deadline gone by.
+static positive net_poll_silent;
 
 static bipolar net_test_poll_wait(system_poll_descriptor address_to descriptors,
                                   positive count, timespec address_to limit,
                                   positive address_to signal_mask)
 {
         net_poll_calls++;
+        if (net_poll_silent)
+        {
+                net_poll_silent--;
+                return 0;
+        }
         return system_poll_wait(descriptors, count, limit, signal_mask);
 }
 
 static positive net_slurp_calls;
 static positive net_search_bytes;
 static positive net_name_calls;
+//      getsockname refused, or answered as a netlink socket on that port, so a
+//      datagram pair stands for a routing socket that hears only the kernel.
+static bipolar net_name_error;
+static bool net_name_short;
+static p32 net_name_netlink_port;
 static positive net_text_span_calls;
 static fn net_io_faults_clear(void);
 
@@ -54208,13 +54233,73 @@ static bipolar net_test_socket_name(b32 handle, address_any address,
                                     p32 address_to length)
 {
         net_name_calls++;
+        if (net_name_error)
+                return net_name_error;
+        if (net_name_short)
+        {
+                net_name_short = false;
+                address_to length = 1;
+                return 0;
+        }
+        if (net_name_netlink_port)
+        {
+                socket_address_netlink self = {.family = AF_NETLINK,
+                                               .port = net_name_netlink_port};
+
+                memory_copy(address, address_of self, sizeof self);
+                address_to length = sizeof self;
+                return 0;
+        }
         return socket_name(handle, address, length);
+}
+
+/* A file read that answers this text instead, as resolv.conf would. */
+static string_address net_slurp_text;
+
+/* connect: done, then answered as this status; bind: counted; randomness:
+   refused this many times, as a pool that is not ready refuses. */
+static bool net_connect_report;
+static bipolar net_connect_report_status;
+static positive net_bind_calls;
+static positive net_random_refuse;
+
+static bipolar net_test_socket_connect(b32 handle, address_any address, positive size)
+{
+        bipolar status = socket_connect(handle, address, size);
+
+        if (!net_connect_report)
+                return status;
+        net_connect_report = false;
+        return net_connect_report_status;
+}
+
+static bipolar net_test_socket_bind(b32 handle, address_any address, positive size)
+{
+        net_bind_calls++;
+        return socket_bind(handle, address, size);
+}
+
+static bipolar net_test_random_fill(address_any into, positive length, positive flags)
+{
+        if (net_random_refuse)
+        {
+                net_random_refuse--;
+                return -EAGAIN;
+        }
+        return system_random_fill(into, length, flags);
 }
 
 static bipolar net_test_file_slurp(string_address path, p8 address_to into,
                                    positive capacity)
 {
         net_slurp_calls++;
+        if (net_slurp_text)
+        {
+                positive length = min(string_length(net_slurp_text), capacity);
+
+                memory_copy(into, net_slurp_text, length);
+                return (bipolar)length;
+        }
         return file_slurp(path, into, capacity);
 }
 
@@ -54229,6 +54314,9 @@ static address_any net_test_memory_search(address_any block, positive size,
 #define memory_search net_test_memory_search
 #define memory_text_span net_test_memory_text_span
 #define socket_name net_test_socket_name
+#define socket_connect(...) net_test_socket_connect(__VA_ARGS__)
+#define socket_bind(...) net_test_socket_bind(__VA_ARGS__)
+#define system_random_fill(...) net_test_random_fill(__VA_ARGS__)
 #define system_poll_wait net_test_poll_wait
 #define system_call_3(...) http_net_call3(__VA_ARGS__)
 #define socket_send(...) net_test_socket_send(__VA_ARGS__)
@@ -54241,6 +54329,9 @@ static address_any net_test_memory_search(address_any block, positive size,
 #undef memory_search
 #undef memory_text_span
 #undef socket_name
+#undef socket_connect
+#undef socket_bind
+#undef system_random_fill
 #undef system_poll_wait
 #undef memory_reserve
 #undef socket_receive
@@ -54846,6 +54937,261 @@ static fn netlink_nonblocking_retries(void)
                         socket_close(pair[0]);
                         socket_close(pair[1]);
                 }
+}
+
+/*
+        The edges of the certificate name and DER decisions: a length of four
+        bytes, a BOOLEAN reader at its end, a host of 256 bytes, the address
+        0.0.0.0, a wildcard over a name that ends in a dot, an excluded
+        wildcard of no labels, and a mailbox whose host is the base itself.
+*/
+static fn tls_decision_edges(void)
+{
+        {
+                p8 four[] = {0x84, 0x01, 0x02, 0x03, 0x04};
+                positive at = 0, length = 0;
+
+                check("a DER length of four bytes is refused, however long the value",
+                      tls_asn1_length(four, sizeof four, address_of at, address_of length) ==
+                          TLS_FAIL);
+        }
+        {
+                //      The BOOLEAN would start at 1, which is where its
+                //      container ends; the byte there belongs to whatever
+                //      comes next, and happens to be a BOOLEAN's tag.
+                p8 bytes[] = {0x30, 0x01, 0x01, 0xff};
+                positive at = 1;
+                bool value = false;
+
+                check("a BOOLEAN reader at the end of its container reads nothing past it",
+                      tls_asn1_true(bytes, 1, address_of at, address_of value) == TLS_OK &&
+                          !value && at == 1);
+        }
+        {
+                static char host[257];
+                p8 zero[4] = {0};
+
+                memory_fill(host, 'a', 256);
+                check("a host of 256 bytes matches no name, even its own",
+                      !tls_general_name_match(host, 0x82, (p8 address_to)host, 256));
+                check("the address 0.0.0.0 matches an iPAddress of 0.0.0.0",
+                      tls_general_name_match("0.0.0.0", 0x87, zero, 4));
+        }
+        check("a wildcard over a name ending in a dot leaves no label beneath it",
+              !tls_host_match("x.a.", (p8 address_to)"*.a..", 5));
+        check("an excluded wildcard of no labels is not taken into a base it differs from",
+              !tls_dns_within((p8 address_to)"*.", 2, (p8 address_to)"x..", 3, true));
+        check("a mailbox whose host is the base .b itself is not under it",
+              tls_email_within((p8 address_to)"u@.example.com", 14,
+                               (p8 address_to)".example.com", 12) == TLS_OUTSIDE);
+}
+
+/*
+        The edges of each netlink decision, one check at each: a body or an
+        attribute of exactly the most its length field holds, an attribute of
+        no payload in the middle of a chain and at its end, a message of
+        exactly its header and body, a datagram of exactly the most, a fill
+        that came back empty, a socket whose name could not be had, a request
+        of nothing, a walk whose deadline went by and one that heard only
+        somebody who is not the kernel, a link raised, and a socket that the
+        kernel numbered 0.
+*/
+static p8 netlink_edge_payload[0xffff];
+
+static fn netlink_decision_edges(void)
+{
+        netlink_buffer request = {0}, reply = {0};
+        b32 pair[2];
+        bipolar opened;
+
+        net_memory_reserve_fail = true;
+        net_memory_reserve_fail_hit = false;
+        check("a netlink body of the most nlmsg_len holds is asked room for, not refused",
+              !netlink_begin(address_of request, RTM_GETLINK, NLM_REQUEST, 1,
+                             0xffffffffu - NETLINK_HEADER) &&
+                  net_memory_reserve_fail_hit && !request.failed);
+        net_memory_reserve_fail = false;
+        net_memory_reserve_fail_hit = false;
+        check("a netlink body one byte past it is refused before any room is asked",
+              !netlink_begin(address_of request, RTM_GETLINK, NLM_REQUEST, 1,
+                             0xffffffffu - NETLINK_HEADER + 1) &&
+                  request.failed && !net_memory_reserve_fail_hit);
+        netlink_forget(address_of request);
+
+        check("an attribute of the most payload rta_len holds is added whole",
+              netlink_begin(address_of request, RTM_NEWLINK, NLM_REQUEST, 1, 0) &&
+                  netlink_attribute_add(address_of request, 1, netlink_edge_payload,
+                                        0xffffu - sizeof(netlink_attribute)) &&
+                  !request.failed &&
+                  ((netlink_attribute address_to)(request.bytes + NETLINK_HEADER))->length ==
+                      0xffffu);
+        check("an attribute one byte longer is refused",
+              !netlink_attribute_add(address_of request, 1, netlink_edge_payload,
+                                     0xffffu - sizeof(netlink_attribute) + 1) &&
+                  request.failed);
+        netlink_forget(address_of request);
+
+        {
+                //      An empty attribute, then one of four bytes; then the
+                //      same the other way round, the empty one last.
+                p8 chain[12] = {4, 0, 1, 0, 8, 0, 2, 0, 'w', 'x', 'y', 'z'};
+                p8 tail[12] = {8, 0, 1, 0, 'w', 'x', 'y', 'z', 4, 0, 2, 0};
+                positive size = 99;
+                p8 address_to found = netlink_find_span(chain, sizeof chain, 2, address_of size);
+
+                check("an attribute with no payload does not end the chain",
+                      found == chain + 8 && size == 4);
+                size = 99;
+                found = netlink_find_span(tail, sizeof tail, 2, address_of size);
+                check("an attribute with no payload is found at the very end",
+                      found == tail + 12 && size == 0);
+        }
+        {
+                struct { netlink_header header; netlink_link link; } whole = {
+                    .header = {.length = NETLINK_HEADER + sizeof(netlink_link)}};
+
+                check("a message of exactly its header and body has that body",
+                      netlink_message_body(address_of whole.header, sizeof(netlink_link)) ==
+                          (address_any)address_of whole.link);
+        }
+
+        opened = system_call_4(syscall(socketpair), AF_UNIX, SOCK_DGRAM, 0,
+                               (positive)pair);
+        check("netlink decision fixture opens", opened == 0);
+        if (opened)
+                return;
+        {
+                netlink_header frame = {.length = NETLINK_HEADER, .type = RTM_NEWLINK};
+                netlink_header drained;
+                p32 port = 77;
+
+                (void)socket_send(pair[1], address_of frame, sizeof frame, 0, null, 0);
+                net_io_faults_clear();
+                net_recv_report = true;
+                net_recv_report_length = NETLINK_DATAGRAM_MAX;
+                net_memory_reserve_fail = true;
+                net_memory_reserve_fail_hit = false;
+                check("a datagram of exactly the most is given room, not refused as too big",
+                      netlink_receive_one(pair[0], address_of reply, false) == -1 &&
+                          net_memory_reserve_fail_hit);
+                net_memory_reserve_fail = false;
+                net_io_faults_clear();
+
+                net_recv_arm_after = 1;
+                net_recv_report = true;
+                net_recv_report_length = 0;
+                check("a fill that comes back empty after a datagram was seen is a failure",
+                      netlink_receive_one(pair[0], address_of reply, false) == -1 &&
+                          reply.used == 0);
+                net_io_faults_clear();
+
+                check("netlink_receive reads a waiting datagram whole",
+                      netlink_receive(pair[0], address_of reply, address_of port) ==
+                              (bipolar)sizeof frame &&
+                          port == 0);
+                (void)socket_send(pair[1], address_of frame, sizeof frame, 0, null, 0);
+                port = 77;
+                net_name_error = -EBADF;
+                check("a socket whose name cannot be had is refused before it is read",
+                      netlink_receive(pair[0], address_of reply, address_of port) == -EBADF &&
+                          port == 77);
+                net_io_faults_clear();
+                net_name_short = true;
+                check("a socket name shorter than its family is refused",
+                      netlink_receive(pair[0], address_of reply, address_of port) == -1 &&
+                          port == 77);
+                net_io_faults_clear();
+                while (socket_receive(pair[0], address_of drained, sizeof drained, MSG_DONTWAIT,
+                                      null, null) > 0)
+                        ;
+        }
+        {
+                struct { netlink_header header; b32 status; } refused = {
+                    .header = {.length = NETLINK_HEADER + 4, .type = NLMSG_IS_ERROR,
+                               .sequence = 91},
+                    .status = -EIO};
+                netlink_buffer nothing = {0};
+                netlink_header drained;
+
+                (void)socket_send(pair[1], address_of refused, sizeof refused, 0, null, 0);
+                check("a request of nothing is still sent and its answer read",
+                      netlink_walk(pair[0], address_of nothing, 91, address_of reply, null,
+                                   null) == -EIO);
+                while (socket_receive(pair[1], address_of drained, sizeof drained, MSG_DONTWAIT,
+                                      null, null) >= 0)
+                        ;
+
+                check("netlink walk fixture request builds",
+                      netlink_begin(address_of request, RTM_GETLINK, NLM_REQUEST, 92, 0));
+                net_io_faults_clear();
+                net_poll_silent = 1;
+                check("a walk whose deadline goes by with nothing heard fails",
+                      netlink_walk(pair[0], address_of request, 92, address_of reply, null,
+                                   null) == -1);
+                net_io_faults_clear();
+                while (socket_receive(pair[1], address_of drained, sizeof drained, MSG_DONTWAIT,
+                                      null, null) >= 0)
+                        ;
+
+                refused.header.sequence = 93;
+                (void)socket_send(pair[1], address_of refused, sizeof refused, 0, null, 0);
+                net_name_netlink_port = 4242;
+                net_poll_silent = 1;
+                check("a walk that hears only a sender who is not the kernel waits on, then fails",
+                      netlink_begin(address_of request, RTM_GETLINK, NLM_REQUEST, 93, 0) &&
+                          netlink_walk(pair[0], address_of request, 93, address_of reply, null,
+                                       null) == -1);
+                net_io_faults_clear();
+                while (socket_receive(pair[1], address_of drained, sizeof drained, MSG_DONTWAIT,
+                                      null, null) >= 0)
+                        ;
+                netlink_forget(address_of request);
+        }
+        {
+                struct { netlink_header header; b32 status; } done = {
+                    .header = {.length = NETLINK_HEADER + 4, .type = NLMSG_IS_ERROR,
+                               .sequence = netlink_sequence_next},
+                    .status = 0};
+                struct { netlink_header header; netlink_link link; } sent = {0};
+
+                (void)socket_send(pair[1], address_of done, sizeof done, 0, null, 0);
+                check("a link is raised by one acknowledged request",
+                      netlink_link_flag_up(pair[0], 7, true) == 0);
+                check("the request raises IFF_UP on that link and changes nothing else",
+                      socket_receive(pair[1], address_of sent, sizeof sent, MSG_DONTWAIT, null,
+                                     null) == (bipolar)sizeof sent &&
+                          sent.header.type == RTM_NEWLINK && sent.link.index == 7 &&
+                          sent.link.flags == IFF_UP && sent.link.change == IFF_UP);
+        }
+        netlink_forget(address_of reply);
+        socket_close(pair[0]);
+        socket_close(pair[1]);
+
+        {
+                //      The kernel hands out the lowest free number, and with
+                //      standard input closed that is 0: still a socket, which
+                //      has to be bound like any other.
+                bipolar saved = system_call_1(syscall(dup), 0);
+                bipolar handle;
+                socket_address_netlink self = {0};
+                p32 length = sizeof self;
+                bool bound;
+
+                if (saved >= 0)
+                        system_close(0);
+                handle = netlink_open_groups(0);
+                bound = handle == 0 && socket_name(0, address_of self, address_of length) == 0 &&
+                        self.family == AF_NETLINK && self.port != 0;
+                if (handle >= 0)
+                        socket_close((b32)handle);
+                if (saved >= 0)
+                {
+                        system_call_2(syscall(dup2), (positive)saved, 0);
+                        system_close((b32)saved);
+                }
+                check("a netlink socket numbered 0 is bound like any other",
+                      bound || (handle < 0 && net_as_emulated()));
+        }
 }
 
 /*
@@ -56519,6 +56865,343 @@ static fn resolving_truncated(void)
               dns_tcp_loopback_case(DNS_TCP_DEADLINE, null,
                                      address_of elapsed) == DNS_NO_REPLY &&
                   elapsed < NETWORK_NANOSECONDS + NETWORK_NANOSECONDS / 2);
+}
+
+/*
+        A loopback server that answers one DNS question as the case says: an
+        address over UDP, the same after an empty datagram, a bare rcode, an
+        address over TCP, or a TCP frame that names the most a reply may be
+        and then ends. The question is echoed without its EDNS0 option.
+*/
+enum
+{
+        DNS_ANSWER_UDP,
+        DNS_ANSWER_UDP_EMPTY_FIRST,
+        DNS_ANSWER_UDP_FORMERR,
+        DNS_ANSWER_UDP_REFUSED,
+        DNS_ANSWER_TCP,
+        DNS_ANSWER_TCP_MOST,
+};
+
+static positive dns_answer_build(p8 address_to reply, const p8 address_to request,
+                                 positive got, p16 code)
+{
+        static const p8 record[] = {0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4,
+                                    192, 0, 2, 7};
+        positive question = got - DNS_HEADER -
+                            (network_load_16((p8 address_to)request + 10) ? DNS_EDNS_LENGTH : 0);
+        positive length = DNS_HEADER + question;
+
+        memory_copy(reply, request, length);
+        network_store_16(reply + 2, network_load_16((p8 address_to)request + 2) |
+                                        DNS_FLAG_RESPONSE | code);
+        network_store_16(reply + 6, code ? 0 : 1);
+        network_store_16(reply + 8, 0);
+        network_store_16(reply + 10, 0);
+        if (!code)
+        {
+                memory_copy(reply + length, record, sizeof record);
+                length += sizeof record;
+        }
+        return length;
+}
+
+static DEAD_END fn dns_answer_server(bipolar datagram, bipolar listening, positive which)
+{
+        p8 request[DNS_MAX_MESSAGE];
+        p8 reply[DNS_MAX_MESSAGE];
+        p8 frame[2];
+        socket_address_internet client;
+        p32 client_size = sizeof client;
+        network_deadline deadline;
+        bipolar got;
+        positive length;
+
+        if (!network_deadline_begin(address_of deadline, 5, 0))
+                system_call_1(syscall(exit_group), 1);
+        if (which == DNS_ANSWER_TCP || which == DNS_ANSWER_TCP_MOST)
+        {
+                bipolar stream;
+
+                if (network_wait_readable_until(listening, address_of deadline) <= 0)
+                        system_call_1(syscall(exit_group), 1);
+                stream = socket_accept((b32)listening, null, null, SOCK_CLOEXEC);
+                if (stream < 0 ||
+                    !network_stream_read_all(stream, frame, 2, address_of deadline))
+                        system_call_1(syscall(exit_group), 1);
+                got = network_load_16(frame);
+                if ((positive)got > sizeof request ||
+                    !network_stream_read_all(stream, request, (positive)got, address_of deadline))
+                        system_call_1(syscall(exit_group), 1);
+                if (which == DNS_ANSWER_TCP_MOST)
+                {
+                        network_store_16(frame, DNS_MAX_MESSAGE);
+                        network_stream_send_all_for(stream, frame, 2, 5, 0);
+                }
+                else
+                {
+                        length = dns_answer_build(reply, request, (positive)got, 0);
+                        network_store_16(frame, (p16)length);
+                        network_stream_send_all_for(stream, frame, 2, 5, 0);
+                        network_stream_send_all_for(stream, reply, length, 5, 0);
+                }
+                socket_close((b32)stream);
+                system_call_1(syscall(exit_group), 0);
+        }
+        if (network_wait_readable_until(datagram, address_of deadline) <= 0)
+                system_call_1(syscall(exit_group), 1);
+        got = socket_receive((b32)datagram, request, sizeof request, 0, address_of client,
+                             address_of client_size);
+        if (got < DNS_HEADER)
+                system_call_1(syscall(exit_group), 1);
+        length = dns_answer_build(reply, request, (positive)got,
+                                  which == DNS_ANSWER_UDP_FORMERR    ? 1
+                                  : which == DNS_ANSWER_UDP_REFUSED ? 5
+                                                                    : 0);
+        if (which == DNS_ANSWER_UDP_EMPTY_FIRST)
+                (void)socket_send((b32)datagram, reply, 0, 0, address_of client, sizeof client);
+        (void)socket_send((b32)datagram, reply, length, 0, address_of client, sizeof client);
+        system_call_1(syscall(exit_group), 0);
+}
+
+/* The case asked of a server on a loopback port, over UDP by dns_query_once
+   or over TCP by dns_retry_tcp, with standard input closed for the asking
+   when stdin_closed is, so the asking socket is numbered 0. */
+static bipolar dns_answer_case(positive which, bool edns, bool stdin_closed,
+                               p32 address_to found)
+{
+        socket_address_internet where = {
+            .family = AF_INET, .host = network_order_32(HOST_LOOPBACK)};
+        p32 size = sizeof where;
+        bipolar listening = socket_new(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        bipolar datagram = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+        bipolar child;
+        bipolar result = DNS_NO_SERVER;
+        bipolar saved = -1;
+        positive raw = 0;
+
+        if (listening < 0 || datagram < 0 ||
+            socket_bind((b32)listening, address_of where, sizeof where) < 0 ||
+            socket_listen((b32)listening, 1) < 0 ||
+            socket_name((b32)listening, address_of where, address_of size) < 0 ||
+            socket_bind((b32)datagram, address_of where, sizeof where) < 0)
+                goto done;
+        child = system_call_2(syscall(clone), SIGCHLD, 0);
+        if (child < 0)
+                goto done;
+        if (!child)
+                dns_answer_server(datagram, listening, which);
+        if (stdin_closed)
+        {
+                saved = system_call_1(syscall(dup), 0);
+                if (saved >= 0)
+                        system_close(0);
+        }
+        {
+                network_deadline deadline;
+
+                if (!network_deadline_begin(address_of deadline, 3, 0))
+                        result = DNS_NO_REPLY;
+                else if (which == DNS_ANSWER_TCP || which == DNS_ANSWER_TCP_MOST)
+                {
+                        p8 request[DNS_MAX_MESSAGE];
+                        positive question_length, request_length;
+                        bool mixed = false;
+
+                        if (dns_build_request(request, sizeof request,
+                                              (string_address)"answer.example", 0x5150,
+                                              address_of mixed, false, address_of question_length,
+                                              address_of request_length) > 0)
+                                result = dns_retry_tcp(address_of where, request, request_length,
+                                                       0x5150, question_length, found,
+                                                       address_of deadline);
+                }
+                else
+                        result = dns_query_once(HOST_LOOPBACK, network_order_16(where.port),
+                                                (string_address)"answer.example", found, false,
+                                                edns, address_of deadline);
+        }
+        if (saved >= 0)
+        {
+                system_call_2(syscall(dup2), (positive)saved, 0);
+                system_close((b32)saved);
+        }
+        if (system_wait4_retry((b32)child, address_of raw, 0, null) != child)
+                result = DNS_NO_SERVER;
+done:
+        if (datagram >= 0)
+                socket_close((b32)datagram);
+        if (listening >= 0)
+                socket_close((b32)listening);
+        return result;
+}
+
+//      A loopback TCP port that refuses, and one that listens.
+static p16 dns_port_refusing(void)
+{
+        socket_address_internet where = {
+            .family = AF_INET, .host = network_order_32(HOST_LOOPBACK)};
+        p32 size = sizeof where;
+        bipolar handle = socket_new(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+
+        if (handle < 0)
+                return 0;
+        if (socket_bind((b32)handle, address_of where, sizeof where) < 0 ||
+            socket_name((b32)handle, address_of where, address_of size) < 0)
+                where.port = 0;
+        socket_close((b32)handle);
+        return where.port;
+}
+
+/*
+        The edges of the resolver's own decisions: its socket numbered 0, an
+        empty datagram before the answer, rcodes with and without EDNS0, a
+        TCP frame of the most and a query of the most, a connect that
+        finished at once or was already under way or never became writable,
+        the bind of a random port and the letters at the ends of the
+        alphabet, a nameserver of 0.0.0.0, the literal 0.0.0.0 itself, and
+        randomness refused.
+*/
+static fn resolving_decision_edges(void)
+{
+        p32 found = 0;
+
+        check("a resolver whose socket is numbered 0 still asks and is answered",
+              dns_answer_case(DNS_ANSWER_UDP, false, true, address_of found) == DNS_OK &&
+                  found == 0xc0000207);
+        found = 0;
+        check("a TCP retry whose socket is numbered 0 still asks and is answered",
+              dns_answer_case(DNS_ANSWER_TCP, false, true, address_of found) == DNS_OK &&
+                  found == 0xc0000207);
+        found = 0;
+        check("an empty datagram before the answer is passed over, not taken as no server",
+              dns_answer_case(DNS_ANSWER_UDP_EMPTY_FIRST, false, false, address_of found) ==
+                      DNS_OK &&
+                  found == 0xc0000207);
+        check("FORMERR to a query without EDNS0 is a refusal, not a cue to drop EDNS0",
+              dns_answer_case(DNS_ANSWER_UDP_FORMERR, false, false, null) == DNS_REFUSED);
+        check("REFUSED to a query with EDNS0 is a refusal, not a cue to drop EDNS0",
+              dns_answer_case(DNS_ANSWER_UDP_REFUSED, true, false, null) == DNS_REFUSED);
+        check("a TCP frame of the most a reply may be is read, not refused as too big",
+              dns_answer_case(DNS_ANSWER_TCP_MOST, false, false, null) == DNS_NO_REPLY);
+        {
+                static p8 most[DNS_MAX_MESSAGE];
+                socket_address_internet dead = {.family = AF_INET,
+                                                .port = dns_port_refusing(),
+                                                .host = network_order_32(HOST_LOOPBACK)};
+                network_deadline deadline;
+
+                check("a query of the most a message may be is sent, not refused",
+                      dead.port && network_deadline_begin(address_of deadline, 2, 0) &&
+                          dns_retry_tcp(address_of dead, most, DNS_MAX_MESSAGE, 1, 1, null,
+                                        address_of deadline) == DNS_NO_REPLY);
+        }
+        {
+                socket_address_internet where = {
+                    .family = AF_INET, .host = network_order_32(HOST_LOOPBACK)};
+                p32 size = sizeof where;
+                bipolar listening = socket_new(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+                network_deadline deadline;
+                bipolar handle;
+                bipolar saved;
+
+                if (listening < 0 ||
+                    socket_bind((b32)listening, address_of where, sizeof where) < 0 ||
+                    socket_listen((b32)listening, 8) < 0 ||
+                    socket_name((b32)listening, address_of where, address_of size) < 0 ||
+                    !network_deadline_begin(address_of deadline, 2, 0))
+                {
+                        check("DNS connect fixture listens", false);
+                        if (listening >= 0)
+                                socket_close((b32)listening);
+                        return;
+                }
+                saved = system_call_1(syscall(dup), 0);
+                if (saved >= 0)
+                        system_close(0);
+                handle = dns_stream_connect_until(address_of where, address_of deadline);
+                if (handle >= 0)
+                        socket_close((b32)handle);
+                if (saved >= 0)
+                {
+                        system_call_2(syscall(dup2), (positive)saved, 0);
+                        system_close((b32)saved);
+                }
+                check("a TCP connect whose socket is numbered 0 is kept", handle == 0);
+
+                net_connect_report = true;
+                net_connect_report_status = 0;
+                handle = dns_stream_connect_until(address_of where, address_of deadline);
+                check("a connect that finished at once is used", handle >= 0);
+                if (handle >= 0)
+                        socket_close((b32)handle);
+                net_connect_report = true;
+                net_connect_report_status = -EALREADY;
+                handle = dns_stream_connect_until(address_of where, address_of deadline);
+                check("a connect already under way is waited for, not given up", handle >= 0);
+                if (handle >= 0)
+                        socket_close((b32)handle);
+                net_connect_report = true;
+                net_connect_report_status = -EINPROGRESS;
+                net_poll_silent = 1;
+                handle = dns_stream_connect_until(address_of where, address_of deadline);
+                check("a connect that never became writable before the deadline fails", handle < 0);
+                if (handle >= 0)
+                        socket_close((b32)handle);
+                net_io_faults_clear();
+                socket_close((b32)listening);
+        }
+        {
+                bipolar handle = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+
+                net_bind_calls = 0;
+                if (handle >= 0)
+                        dns_bind_random_port((b32)handle);
+                check("a random port is bound at the first try that takes", net_bind_calls == 1);
+                net_bind_calls = 0;
+                if (handle >= 0)
+                        dns_bind_random_port((b32)handle);
+                check("a socket that will not bind is tried eight times and no more",
+                      net_bind_calls == 8);
+                if (handle >= 0)
+                        socket_close((b32)handle);
+        }
+        {
+                p8 low[63], high[63];
+                bool upper = false, lower = false;
+
+                memory_fill(low, 'a', sizeof low);
+                memory_fill(high, 'z', sizeof high);
+                check("the name's case is mixed", dns_mix_case(low, sizeof low) &&
+                                                     dns_mix_case(high, sizeof high));
+                for (positive at = 0; at < sizeof low; at++)
+                {
+                        upper |= low[at] == 'A';
+                        lower |= high[at] == 'Z';
+                }
+                check("an a takes either case", upper);
+                check("a z takes either case", lower);
+        }
+        {
+                p32 servers[2] = {9, 9};
+
+                net_slurp_text = (string_address)"nameserver 0.0.0.0\n";
+                check("a nameserver of 0.0.0.0 is a nameserver",
+                      dns_servers((string_address)"/etc/resolv.conf", servers, 2) == 1 &&
+                          servers[0] == 0);
+                net_slurp_text = (string_address)"";
+                found = 9;
+                check("the literal 0.0.0.0 is its own address, asked of nobody",
+                      net_resolve_v4((string_address)"0.0.0.0", address_of found, 1) == DNS_OK &&
+                          found == 0);
+                net_slurp_text = null;
+        }
+        net_random_refuse = 2;
+        check("a query with no randomness for its id is not asked",
+              dns_query_once(HOST_LOOPBACK, dns_port_refusing(),
+                             (string_address)"answer.example", null, false, false,
+                             &(network_deadline){0, 0}) == DNS_NO_RANDOM);
+        net_io_faults_clear();
 }
 
 static bipolar net_test_write(string_address path, string_address text)
@@ -60095,6 +60778,16 @@ static fn net_io_faults_clear(void)
         net_recv_arm_after = 0;
         net_recv_fill_length = 0;
         memory_fill(net_recv_fill, 0, sizeof net_recv_fill);
+        net_recv_report = false;
+        net_recv_report_length = 0;
+        net_poll_silent = 0;
+        net_name_error = 0;
+        net_name_short = false;
+        net_name_netlink_port = 0;
+        net_slurp_text = null;
+        net_connect_report = false;
+        net_connect_report_status = 0;
+        net_random_refuse = 0;
 }
 
 /* Procedural interruption counts and deadline budgets exercise both recovery
@@ -62854,6 +63547,9 @@ static fn tls_certificate_identity_rules(void)
                     {"1:2:3:4:5:6:7:8", true, {0x00, 0x01, 0x00, 0x02, 0x00, 0x03, 0x00, 0x04, 0x00, 0x05, 0x00, 0x06, 0x00, 0x07, 0x00, 0x08}},
                     {"1:2:3:4:5:6:192.0.2.1", true, {0x00, 0x01, 0x00, 0x02, 0x00, 0x03, 0x00, 0x04, 0x00, 0x05, 0x00, 0x06, 0xc0, 0x00, 0x02, 0x01}},
                     {"1:2:3:4:5:6:7::", true, {0x00, 0x01, 0x00, 0x02, 0x00, 0x03, 0x00, 0x04, 0x00, 0x05, 0x00, 0x06, 0x00, 0x07, 0x00, 0x00}},
+                    {"a:A:f:F:9::", true, {0x00, 0x0a, 0x00, 0x0a, 0x00, 0x0f, 0x00, 0x0f, 0x00, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
+                    {"::0.0.0.0", true, {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
+                    {"1:2:3:4:5:6:7x8", false, {0}},
                     {"1:2:3:4:5:6:7:8:9", false, {0}},
                     {"1::2::3", false, {0}},
                     {":1", false, {0}},
@@ -74590,6 +75286,8 @@ b32 main(void)
         net_group(netlink_each_stops);
         net_group(netlink_multipart_identity);
         net_group(netlink_nonblocking_retries);
+        net_group(netlink_decision_edges);
+        net_group(tls_decision_edges);
         net_group(link_candidates);
         net_group(link_choice);
         net_group(wired_listing);
@@ -74599,6 +75297,7 @@ b32 main(void)
         net_group(resolving_edges);
         net_group(dns_shared_pointer_work);
         net_group(resolving_truncated);
+        net_group(resolving_decision_edges);
         net_group(resolving_policy);
         net_group(resolving_walk);
         net_group(resolving_servers);

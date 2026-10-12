@@ -58494,13 +58494,22 @@ def public_suffix_is_suffix(rules, name):
 def public_suffix_probes(tables):
     """Names derived from every entry: the rule, a name under it and its
     parent, a wildcard's expansions and base, an exception and a name under
-    it, mixed case."""
+    it, mixed case -- and the names beside each in the sorted table, whose
+    first label is one byte shorter, one byte longer, or ends a letter
+    either side, which is where a front-coded walk decides it has passed
+    the key."""
     plain, wildcards, exceptions = tables
     names = set()
     for entry in plain + wildcards + exceptions:
         name = ".".join(reversed(entry.split(".")))
         names.update((name, "zz." + name, "zz.zz." + name, name.upper(),
                       name.partition(".")[2]))
+        first, _, rest = name.partition(".")
+        last = first[-1]
+        for near in (first[:-1], first + "a", first + "z",
+                     first[:-1] + chr(ord(last) - 1), first[:-1] + chr(ord(last) + 1)):
+            if near and rest and all(c.isalnum() or c == "-" for c in near):
+                names.add(near + "." + rest)
     names.update(("example.com", "example.foo", "co.uk.example", "github.io", "appspot.com"))
     return sorted(n for n in names if n.count(".") >= 1)
 
@@ -68769,6 +68778,69 @@ NET_MUTATION_EQUIVALENT = {
     ("dhcp_walk", "taken = before < 4 ? min(byte_reader_left(&value), 4 - before)", "<", 1):
         "At before == 4 the taken branch is min(left, 0) == 0, the other branch's value.",
     ("tls_parse_key_usage", "if (unused > 7 || at >= stop)", "||", 1): 'With no bit octet the unused-count octet is read as the final one; for unused 0 it is zero (refused), and for 1 to 7 its trailing-zero count is below its value, so the canonical test refuses it as the original does.',
+    ("netlink_attribute_add", "if (message_length > 0xffffffffu - padded)", ">", 1):
+        "message_length and padded are both rounded up to four, so their sum is never 0xffffffff, the one value where > and >= part.",
+    ("netlink_attribute_add", "if (padded > length)", ">", 1):
+        "At padded == length the fill is of no bytes.",
+    ("netlink_nested_end", "if (buffer->used - start > 0xffffu)", ">", 1):
+        "Every append moves used by a multiple of four from a start that is one, so the span is never 0xffff, the one value where > and >= part.",
+    ("netlink_receive_one", "return got < 0 ? got : 0;", "<", 1):
+        "At got == 0 both arms answer 0.",
+    ("netlink_walk", "if (got <= 0)", "<=", 1):
+        "A wait that answers 0 is a deadline gone by; going round again, the walk's own deadline check answers -1, as this does.",
+    ("netlink_find", "if (header->length < at)", "<", 1):
+        "At header->length == at the span is empty and holds no attribute, so the search answers null as the refusal does.",
+    ("netlink_link_seen", "for (positive at = 0; at < search->skip_count && at < 8; at++)", "<", 2):
+        "skip_count is never above 8: the watcher adds to skip only below 8 and the radio's list of other links holds at most 8, so at < skip_count already ends the loop by 8.",
+    ("dns_write_name", "if (used >= room || !length || length > 63 ||", ">=", 1):
+        "At used == room the next test, length > room - used, refuses every label, which has at least one byte.",
+    ("dns_copy_name", "if (target >= here || ++jumps > DNS_POINTER_HOPS)", ">=", 1):
+        "A pointer to its own offset moves the ceiling there, so the next read finds nothing left and the name is refused as malformed either way.",
+    ("dns_answer_address", "if (wanted_length < 0)", "<", 1): "a copied name holds at least its terminating zero byte, so its length is never 0 and < 0 and <= 0 agree.",
+    ("dns_answer_address", "if (owner_length < 0 || !byte_reader_ok(&tail))", "<", 1): "a copied name holds at least its terminating zero byte, so its length is never 0 and < 0 and <= 0 agree.",
+    ("dns_answer_address", "if (alias_length < 0 ||", "<", 1): "a copied name holds at least its terminating zero byte, so its length is never 0 and < 0 and <= 0 agree.",
+    ("dns_answer_address", "if (alias_length == wanted_length &&", "==", 1):
+        "Names of different lengths cannot share the shorter one's bytes, whose last is its zero end, where the longer still has a label. At equal lengths a CNAME to itself is found again on every pass until the hops run out, and the walk answers DNS_MALFORMED as the refusal does.",
+    ("dns_records_end", "if (length < 0)", "<", 1): "a copied name holds at least its terminating zero byte, so its length is never 0 and < 0 and <= 0 agree.",
+    ("dns_reply_result", "positive available = size > DNS_MAX_MESSAGE ? DNS_MAX_MESSAGE : size;", ">", 1):
+        "At size == DNS_MAX_MESSAGE both arms are DNS_MAX_MESSAGE.",
+    ("dns_reply_result", "if (records_end < 0)", "<", 1):
+        "A records end is at least the header and the question, never 0.",
+    ("dns_reply_result", "if (records_end < 0 || (positive)records_end != size)", "<", 1):
+        "A records end is at least the header and the question, never 0.",
+    ("dns_stream_connect_until", "if (status < 0)", "<", 1):
+        "A connect that answered 0 is connected: waiting for it to be writable returns at once and SO_ERROR is 0, so the socket is answered either way.",
+    ("dns_servers", "if (got <= 0)", "<=", 1):
+        "An empty file gives the loop nothing to read, and no servers are answered either way.",
+    ("dns_servers", "if (stop - line < 12 ||", "<", 1):
+        "A line of twelve leaves one byte for the address, and string_to_host takes only a dotted quad of seven to fifteen.",
+    ("dns_servers", "if (!length || length >= sizeof kept)", ">=", 1):
+        "A word of sixty-four bytes is no dotted quad, which string_to_host takes only up to fifteen, so it names no server either way.",
+    ("dns_mix_case", "for (positive at = 0; at < length; at++)", "<", 1):
+        "The byte after the name is where dns_build_request writes the question's type next, over whatever case it was given.",
+    ("dns_build_request", "if (room < DNS_HEADER + 4 + DNS_EDNS_LENGTH)", "<", 1):
+        "At that room the name is given none, and every name needs at least its zero byte: dns_write_name refuses it either way.",
+    ("dns_build_request", "if (written < 0)", "<", 1): "a copied name holds at least its terminating zero byte, so its length is never 0 and < 0 and <= 0 agree.",
+    ("dns_query_once", "if (written < 0)", "<", 1):
+        "The request's name is at least one byte, and the send of a request at least a header long answers its length or an error, never 0.",
+    ("dns_resolve_at", "for (positive attempt = 0; attempt < 3; attempt++)", "<", 1):
+        "Each fallback turns its own feature off and the statuses that ask for one come back only while it is on, so after two the third attempt always breaks.",
+    ("dns_resolve_at", "return status == DNS_CASE_FOLDED || status == DNS_EDNS_SILENT", "||", 1):
+        "DNS_CASE_FOLDED and DNS_EDNS_SILENT come back only while mixing and EDNS0 are on, and each turns its own off and asks again, so neither is ever the status the loop ends with.",
+    ("net_ipv6_literal", "if (length < 2 || text[length - 1] != ']')", "<", 1):
+        "At length 2 the text is \"[]\", which leaves nothing inside and holds no colon, so it is refused either way.",
+    ("net_ipv6_literal", "for (; at < length && digits < 5; at++, digits++)", "<", 1):
+        "The text is terminated at length, so reading text[length] finds the end byte, which is no hex digit, and the group ends there either way.",
+    ("net_ipv6_literal", "for (; at < length && digits < 5; at++, digits++)", "&&", 1):
+        "Past length the end byte stops the group as above; past four digits the group is refused as too long however many more are read.",
+    ("net_ipv6_literal", "for (; at < length && digits < 5; at++, digits++)", "<", 2):
+        "A sixth digit is refused by digits > 4 as the fifth was.",
+    ("net_ipv6_literal", "gap = gap < count ? gap : count;", "<", 1):
+        "At gap == count both arms are the same value.",
+    ("tls_host_match", "if (!name_length || name[0] != '*' || name_length < 3 || name[1] != '.')", "<", 1):
+        "A wildcard of three bytes, \"*.x\", leaves one label beneath its star, and the next test refuses that (dot + 1 >= rest) as this one does.",
+    ("tls_suffix_in", "for (positive at = 0; at < size && list[at];)", "<", 1):
+        "Every list ends in the literal's own NUL at size - 1 after its last entry's, so the walk stops on list[at] before at reaches size.",
     ("tls_parse_key_usage", "if (unused > 7 || at >= stop)", ">=", 1): 'With no bit octet the unused-count octet is read as the final one; for unused 0 it is zero (refused), and for 1 to 7 its trailing-zero count is below its value, so the canonical test refuses it as the original does.',
 }
 
