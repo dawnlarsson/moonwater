@@ -54253,6 +54253,19 @@ static bipolar net_test_socket_name(b32 handle, address_any address,
         return socket_name(handle, address, length);
 }
 
+/* The wall clock, read as this when it is set. */
+static bool net_time_set;
+static time_t net_time_stamp;
+
+static time_t net_test_time(time_t address_to into)
+{
+        time_t stamp = net_time_set ? net_time_stamp : time(null);
+
+        if (into)
+                address_to into = stamp;
+        return stamp;
+}
+
 /* A file read that answers this text instead, as resolv.conf would. */
 static string_address net_slurp_text;
 
@@ -54316,6 +54329,7 @@ static address_any net_test_memory_search(address_any block, positive size,
 #define socket_name net_test_socket_name
 #define socket_connect(...) net_test_socket_connect(__VA_ARGS__)
 #define socket_bind(...) net_test_socket_bind(__VA_ARGS__)
+#define time(...) net_test_time(__VA_ARGS__)
 #define system_random_fill(...) net_test_random_fill(__VA_ARGS__)
 #define system_poll_wait net_test_poll_wait
 #define system_call_3(...) http_net_call3(__VA_ARGS__)
@@ -54331,6 +54345,7 @@ static address_any net_test_memory_search(address_any block, positive size,
 #undef socket_name
 #undef socket_connect
 #undef socket_bind
+#undef time
 #undef system_random_fill
 #undef system_poll_wait
 #undef memory_reserve
@@ -54940,6 +54955,61 @@ static fn netlink_nonblocking_retries(void)
 }
 
 /*
+        The edges of the HTTP framing decisions: header lines ended by a bare
+        LF, a name that is the start of a longer one, a header that is not
+        there, the first status that is not a success, chunk-size lines and
+        trailers without their LF, and chunk extensions whose name, value or
+        quoted string carries one byte out of place.
+*/
+static fn http_decision_edges(void)
+{
+        static p8 bare[] = "HTTP/1.1 200 OK\nX-A: abc\n\n";
+        static p8 prefixed[] = "HTTP/1.1 200 OK\r\nX-Ab: 1\r\n\r\n";
+        positive length = 77;
+        string_address value;
+
+        value = http_header(bare, sizeof bare - 1, "X-A", address_of length, null);
+        check("a header line ended by a bare LF keeps its last byte",
+              value && length == 3 && !memory_compare(value, "abc", 3));
+        length = 77;
+        check("a header whose name only starts with the one asked for is not it",
+              !http_header(prefixed, sizeof prefixed - 1, "X-A", address_of length, null) &&
+                  length == 77);
+        check("300 is not a success and 299 is",
+              !http_response_is_success(300) && http_response_is_success(299));
+        {
+                static const struct
+                {
+                        const char address_to line;
+                        bipolar want;
+                } chunks[] = {
+                    {"5;a b\r\n", HTTP_MALFORMED},       // a blank inside a name
+                    {"5;a=b c\r\n", HTTP_MALFORMED},     // and inside a value
+                    {"1;a;\"x\"\r\n", HTTP_MALFORMED},   // a name that is a quoted string
+                    {"1;a=\"\\\"x\"\r\n", HTTP_OK},      // an escaped quote inside one
+                    {"1;a=\"bc\"\r\n", HTTP_OK},
+                    {"5\r", HTTP_MALFORMED},             // no LF
+                    {"5;a\n", HTTP_OK},                  // a bare LF after an extension
+                };
+                positive wrong = 0;
+
+                for (positive at = 0; at < array_count(chunks); at++)
+                {
+                        positive size = 99;
+
+                        wrong += http_chunk_line((p8 address_to)chunks[at].line,
+                                                 string_length(chunks[at].line),
+                                                 address_of size) != chunks[at].want;
+                }
+                check("chunk-size lines at the edges of their grammar", wrong == 0);
+        }
+        check("a trailer without its LF is refused",
+              http_trailer_line((p8 address_to)"X: y", 4) == HTTP_MALFORMED);
+        check("a trailer whose last byte is a control is refused",
+              http_trailer_line((p8 address_to)"X:\x01\n", 4) == HTTP_MALFORMED);
+}
+
+/*
         The edges of the certificate name and DER decisions: a length of four
         bytes, a BOOLEAN reader at its end, a host of 256 bytes, the address
         0.0.0.0, a wildcard over a name that ends in a dot, an excluded
@@ -54981,9 +55051,55 @@ static fn tls_decision_edges(void)
               !tls_host_match("x.a.", (p8 address_to)"*.a..", 5));
         check("an excluded wildcard of no labels is not taken into a base it differs from",
               !tls_dns_within((p8 address_to)"*.", 2, (p8 address_to)"x..", 3, true));
+        {
+                p64 now = 0, floor = 0;
+
+                net_time_set = true;
+                net_time_stamp = (time_t)clock_trust_floor();
+                check("a clock that reads the trust floor exactly is believed",
+                      tls_date_now(address_of now) && tls_date_floor(address_of floor) &&
+                          now == floor);
+                net_time_stamp = (time_t)clock_trust_floor() - 1;
+                check("a clock a second below the floor is not",
+                      !tls_date_now(address_of now));
+                net_io_faults_clear();
+        }
         check("a mailbox whose host is the base .b itself is not under it",
               tls_email_within((p8 address_to)"u@.example.com", 14,
                                (p8 address_to)".example.com", 12) == TLS_OUTSIDE);
+        {
+                //      basicConstraints: cA TRUE, and after the value the
+                //      byte that follows it in the buffer, which is no part
+                //      of it -- here an INTEGER's tag.
+                static p8 ca_then[] = {0x30, 0x03, 0x01, 0x01, 0xff, 0x02};
+                static p8 empty_integer[] = {0x30, 0x05, 0x01, 0x01, 0xff, 0x02, 0x00, 0x00};
+                static p8 eight[] = {0x30, 0x0d, 0x01, 0x01, 0xff, 0x02, 0x08,
+                                     0x01, 0, 0, 0, 0, 0, 0, 0};
+                static p8 negative[] = {0x30, 0x06, 0x01, 0x01, 0xff, 0x02, 0x01, 0x80};
+                static p8 trailing[] = {0x30, 0x06, 0x01, 0x01, 0xff, 0x04, 0x01, 0x00};
+                static tls_cert cert;
+
+                memory_fill(address_of cert, 0, sizeof cert);
+                check("basicConstraints ends at its own length, not at the byte after it",
+                      tls_parse_basic_constraints(ca_then, 5, address_of cert) == TLS_OK &&
+                          cert.ca && !cert.path_length_present);
+                memory_fill(address_of cert, 0, sizeof cert);
+                check("a pathLenConstraint of no bytes is refused",
+                      tls_parse_basic_constraints(empty_integer, 7, address_of cert) == TLS_FAIL);
+                memory_fill(address_of cert, 0, sizeof cert);
+                check("a pathLenConstraint of eight bytes is read",
+                      tls_parse_basic_constraints(eight, sizeof eight, address_of cert) ==
+                              TLS_OK &&
+                          cert.path_length == (positive)1 << 56);
+                memory_fill(address_of cert, 0, sizeof cert);
+                check("a negative pathLenConstraint of one byte is refused",
+                      tls_parse_basic_constraints(negative, sizeof negative, address_of cert) ==
+                          TLS_FAIL);
+                memory_fill(address_of cert, 0, sizeof cert);
+                check("basicConstraints with bytes after its fields is refused",
+                      tls_parse_basic_constraints(trailing, sizeof trailing, address_of cert) ==
+                          TLS_FAIL);
+        }
 }
 
 /*
@@ -60788,6 +60904,7 @@ static fn net_io_faults_clear(void)
         net_connect_report = false;
         net_connect_report_status = 0;
         net_random_refuse = 0;
+        net_time_set = false;
 }
 
 /* Procedural interruption counts and deadline budgets exercise both recovery
@@ -71521,6 +71638,23 @@ static fn tls_ct_real(void)
         certs[0].scts[2 + 2 + 118 - 1] ^= 1;
         check("with one SCT broken, two are too few for 355 days",
               !tls_ct_holds(certs, chain, 1, certs + 1));
+        {
+                //      The tier decides whether that refuses the path: from
+                //      the tight one up it does, for being unlogged, and
+                //      below it the path goes on to its revocation checks.
+                static tls_conn conn;
+                bool held;
+
+                memory_fill(address_of conn, 0, sizeof conn);
+                held = tls_trust_holds(address_of conn, certs, chain, 1, certs + 1, null, 0,
+                                       20260601000000);
+                if (MOONWATER_STRICT_NET >= STRICT_TIGHT)
+                        check("at this tier a path whose leaf is unlogged is refused for that",
+                              !held && conn.fault == TLS_FAULT_UNLOGGED);
+                else
+                        check("below the tight tier an unlogged leaf is no reason to refuse",
+                              conn.fault != TLS_FAULT_UNLOGGED);
+        }
         certs[0].scts[2 + 2 + 118 - 1] ^= 1;
         check("and mended, it holds again", tls_ct_holds(certs, chain, 1, certs + 1));
         certs[1].spki[certs[1].spki_length - 1] ^= 1;
@@ -75288,6 +75422,7 @@ b32 main(void)
         net_group(netlink_nonblocking_retries);
         net_group(netlink_decision_edges);
         net_group(tls_decision_edges);
+        net_group(http_decision_edges);
         net_group(link_candidates);
         net_group(link_choice);
         net_group(wired_listing);

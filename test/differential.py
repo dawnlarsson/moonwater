@@ -68841,6 +68841,37 @@ NET_MUTATION_EQUIVALENT = {
         "A wildcard of three bytes, \"*.x\", leaves one label beneath its star, and the next test refuses that (dot + 1 >= rest) as this one does.",
     ("tls_suffix_in", "for (positive at = 0; at < size && list[at];)", "<", 1):
         "Every list ends in the literal's own NUL at size - 1 after its last entry's, so the walk stops on list[at] before at reaches size.",
+    ("tls_parse_validity", "if (address_to at >= validity_stop)", ">=", 1):
+        "At at == validity_stop the next step, tls_asn1_enter bounded by validity_stop, reads nothing and refuses, as this does.",
+    ("tls_date_now", "return stamp >= 0 && (p64)stamp >= clock_trust_floor() &&", ">=", 1):
+        "A clock that reads 0 is below the trust floor, which is the build's own date, so the next test refuses it either way.",
+    ("http_header_end", "if (full && (!bare || full < bare))", "<", 1):
+        "A block ending CRLF CRLF holds no bare LF LF at the same place, so full and bare are never equal.",
+    ("http_line_valid", "return http_field_name(line, stop) >= 0;", ">=", 1):
+        "http_field_name answers -1 for an empty name, so it never answers 0.",
+    ("http_header", "if (stop > line && bytes[stop - 1] == '\\r')", ">", 1):
+        "An empty line after the first follows a LF, never a CR; one at offset 0 starts with LF, which no header name starts with, so whatever stop becomes the line is passed over.",
+    ("http_header", "if (stop - line <= want || bytes[line + want] != ':')", "<=", 1):
+        "At stop - line == want the byte at line + want is the line's CR or LF, never ':', so the line is passed over either way.",
+    ("http_response_fields", "while (at < size)", "<", 1):
+        "One more turn at at == size finds a line with no LF and answers false, which is what the loop's end answers.",
+    ("http_response_fields", "if (stop > line && bytes[stop - 1] == '\\r')", ">", 1):
+        "An empty line after the first follows a LF; at offset 0 the status line is empty and refused, and a stop moved by the byte before the buffer is a status line refused as well.",
+    ("http_chunk_extensions_valid", "while (at < stop && http_token_byte(*at))", "<", 1): "The byte at stop is the line's own CR or LF, which is no token byte, no '=', no '\"' and no blank, so reading it changes nothing.",
+    ("http_chunk_extensions_valid", "if (at < stop && *at == '=')", "<", 1): "The byte at stop is the line's own CR or LF, which is no token byte, no '=', no '\"' and no blank, so reading it changes nothing.",
+    ("http_chunk_extensions_valid", "for (at++; at < stop && *at != '\"'; at++)", "<", 1):
+        "At at == stop the byte read is the line's CR or LF: a control, refused in the loop, as the unclosed quote is refused after it.",
+    ("http_chunk_line", "if (stop > number && stop[-1] == '\\r')", ">", 1):
+        "A line of only a LF has no size digits, and is refused as malformed whatever stop becomes.",
+    ("http_chunk_line", "if (number < stop && byte_is_blank(number[0]))", "<", 1): "The byte at stop is the line's own CR or LF, which is no token byte, no '=', no '\"' and no blank, so reading it changes nothing.",
+    ("http_chunk_line", "if (number < stop && byte_is_blank(number[0]))", "&&", 1):
+        "Where number[0] is not a blank, the span of blanks it would skip is empty; at stop the byte is CR or LF, no blank.",
+    ("http_chunk_line", "if (number < stop && !http_chunk_extensions_valid(number, stop))", "<", 1):
+        "At number == stop the extensions are empty and valid.",
+    ("http_url_escape", "if (scheme > length)", ">", 1):
+        "At scheme == length nothing follows the scheme: the slashes test reads nothing, and the verbatim walk and the escaping run the same either way.",
+    ("http_origin_form", "if ((path[0] != '/' && !root) || length > room ||", ">", 1):
+        "At length == room the next test, root >= room - length, refuses it as this does.",
     ("tls_parse_key_usage", "if (unused > 7 || at >= stop)", ">=", 1): 'With no bit octet the unused-count octet is read as the final one; for unused 0 it is zero (refused), and for 1 to 7 its trailing-zero count is below its value, so the canonical test refuses it as the original does.',
 }
 
@@ -69016,6 +69047,21 @@ def harness_net_mutation(argv):
             if ran.returncode or not re.search(r" 0 failures\s*$", ran.stdout):
                 caught = re.search(r"FAIL ([^\n]*)", ran.stdout)
                 return index, "killed", "CHECK_net" + (": " + caught.group(1)[:80] if caught else "")
+            #   A decision a tier compiles in is only there in that tier's
+            #   build: the hardened and the locked CHECK_net, as the net lane
+            #   runs them, judge a mutant on a line that names one.
+            if "MOONWATER_STRICT" in mutant["text"]:
+                for tier in ("2", "3"):
+                    built = subprocess.run(build[:-1] + ["-DMOONWATER_STRICT=" + tier, "-o",
+                                                         str(tree / "chk"), "test/checks.c"],
+                                           cwd=tree, capture_output=True, text=True,
+                                           timeout=600)
+                    if built.returncode:
+                        return index, "invalid", ""
+                    ran = subprocess.run([str(tree / "chk")], cwd=tree, capture_output=True,
+                                         text=True, timeout=300)
+                    if ran.returncode or not re.search(r" 0 failures\s*$", ran.stdout):
+                        return index, "killed", "CHECK_net at tier " + tier
             if options["--oracle"] == "full":
                 for family, harnesses in families:
                     if not re.match(family, mutant["function"]):
