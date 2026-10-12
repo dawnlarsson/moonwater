@@ -881,7 +881,7 @@ static bool build_have(string_address name)
         walks want to look backwards as well as forwards, and a build that
         cannot hold linux/.config in memory cannot build a kernel either.
 */
-#define BUILD_FILE_ROOM (4 << 20)
+#define BUILD_FILE_ROOM (16 << 20)
 
 static p8 build_file_one[BUILD_FILE_ROOM];
 static p8 build_file_two[BUILD_FILE_ROOM];
@@ -3210,6 +3210,19 @@ static b32 build_spark(string_address source, string_address output,
                        SPARK_HEADER_SIZE;
                 got = file_slurp(text_binary, build_file_one, BUILD_FILE_ROOM);
 
+                //      A section that fills the buffer it is read into was
+                //      cut by it, and the padding below would make the cut
+                //      look whole: a program whose code ends in zeros, which
+                //      the shell's was once past four megabytes. Refused,
+                //      never packed.
+                if (got >= (bipolar)(BUILD_FILE_ROOM - 1))
+                {
+                        close(handle);
+                        return string_report(log_error, 1,
+                                             "spark: the text of %s fills the %p bytes the packer reads and was cut\n",
+                                             output, (positive)BUILD_FILE_ROOM);
+                }
+
                 if (got > 0)
                         good = good && write(handle, build_file_one,
                                              (positive)got) == got;
@@ -3221,6 +3234,14 @@ static b32 build_spark(string_address source, string_address output,
                 {
                         got = file_slurp(data_binary, build_file_one,
                                           BUILD_FILE_ROOM);
+
+                        if (got >= (bipolar)(BUILD_FILE_ROOM - 1))
+                        {
+                                close(handle);
+                                return string_report(log_error, 1,
+                                                     "spark: the data of %s fills the %p bytes the packer reads and was cut\n",
+                                                     output, (positive)BUILD_FILE_ROOM);
+                        }
 
                         if (got > 0)
                                 good = good && write(handle, build_file_one,
