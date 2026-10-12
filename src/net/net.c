@@ -12142,8 +12142,6 @@ static bipolar http_trailer_line(p8 address_to line, positive line_length)
         return http_line_valid(line, stop, true) ? 0 : HTTP_MALFORMED;
 }
 
-static bipolar http_unchunk(p8 address_to bytes, positive size);
-
 /*
         The whole exchange.
 
@@ -12680,43 +12678,9 @@ typedef struct
         positive undeclared_seen;
 } http_body;
 
-static bipolar http_body_read(http_body address_to body, p8 address_to into,
-                              positive room, positive address_to got);
-static bipolar http_copy(http_body address_to body, bipolar dest, positive want,
-                         bool exact);
-static bipolar http_copy_chunked(http_body address_to body, bipolar dest);
 static bipolar http_body_borrow(http_body address_to body, positive room,
                                 p8 address_to address_to data,
                                 positive address_to got);
-
-/* A final response's body, by the framing its head declared.  A memory store
-   refuses a close-delimited body beyond its limit as it arrives, so an EOF
-   that lands exactly on the limit is still a complete body.  So does a body's
-   ceiling on what declared no length (undeclared_most): exactly that many
-   bytes and then the close is a body, and one byte more is
-   HTTP_UNDECLARED, asked for only once the ceiling is reached and never
-   written. */
-static bipolar http_copy_body(http_body address_to body, bipolar dest,
-                              const http_response address_to response)
-{
-        bipolar copied;
-        p8 address_to more = null;
-        positive got = 0;
-
-        if (response->body_kind == HTTP_BODY_CHUNKED)
-                return http_copy_chunked(body, dest);
-        if (response->body_kind == HTTP_BODY_LENGTH)
-                return http_copy(body, dest, response->body_length, true);
-        copied = http_copy(body, dest,
-                           body->undeclared_most ? body->undeclared_most
-                                                 : positive_max,
-                           false);
-        if (copied || !body->undeclared_most)
-                return copied;
-        if (http_body_borrow(body, 1, address_of more, address_of got))
-                return HTTP_NO_REPLY;
-        return got ? HTTP_UNDECLARED : HTTP_OK;
-}
 
 //      One progress wait, shortened by a whole-body budget when one is active;
 //      inline, because a read of an unbudgeted body asks only for the idle limit.
@@ -13094,6 +13058,34 @@ static bipolar http_copy_chunked(http_body address_to body, bipolar dest)
         }
 }
 
+/* A final response's body, by the framing its head declared.  A memory store
+   refuses a close-delimited body beyond its limit as it arrives, so an EOF
+   that lands exactly on the limit is still a complete body.  So does a body's
+   ceiling on what declared no length (undeclared_most): exactly that many
+   bytes and then the close is a body, and one byte more is
+   HTTP_UNDECLARED, asked for only once the ceiling is reached and never
+   written. */
+static bipolar http_copy_body(http_body address_to body, bipolar dest,
+                              const http_response address_to response)
+{
+        bipolar copied;
+        p8 address_to more = null;
+        positive got = 0;
+
+        if (response->body_kind == HTTP_BODY_CHUNKED)
+                return http_copy_chunked(body, dest);
+        if (response->body_kind == HTTP_BODY_LENGTH)
+                return http_copy(body, dest, response->body_length, true);
+        copied = http_copy(body, dest,
+                           body->undeclared_most ? body->undeclared_most
+                                                 : positive_max,
+                           false);
+        if (copied || !body->undeclared_most)
+                return copied;
+        if (http_body_borrow(body, 1, address_of more, address_of got))
+                return HTTP_NO_REPLY;
+        return got ? HTTP_UNDECLARED : HTTP_OK;
+}
 
 /* The memory frontend retains strict whole-body consumption and transfers no
    allocation: the same chunk decoder compacts within the response store. */
