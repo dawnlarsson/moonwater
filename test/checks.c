@@ -102645,6 +102645,127 @@ static void check_compositor_cross(void) {
     }
 }
 
+/* The keymap is a function of a state and a key, so a layout is typed at
+   with no card: what the Swedish keys make (å ä ö, AltGr levels, the 102nd
+   key), the dead accents and what they make with a letter, Caps Lock, the
+   Control fold, and that the other layouts say what the kernel desktop's
+   tables said. */
+/* cc_check names its argument twice, and these rows have effects: evaluated once. */
+#define ck_ok(x) do{int ok_=!!(x);if(!ok_)fprintf(stderr,"keymap row failed, line %d: %s\n",__LINE__,#x);check(ok_);}while(0)
+#define KEY_ALTGR SURFACE_KEY_ALTGR
+#define KEY_SHIFT SURFACE_KEY_SHIFT
+#define KEY_CTRL SURFACE_KEY_CONTROL
+static int ck_press(struct compositor_keymap *map,unsigned code,unsigned mods,unsigned out[2]) {
+    unsigned scratch[2]={0,0};
+    int n=compositor_keymap_event(map,code,1,mods,out);
+    int up=compositor_keymap_event(map,code,0,mods,scratch);
+    ck_ok(up==(n<0?-1:0));
+    return n;
+}
+static unsigned ck_one(struct compositor_keymap *map,unsigned code,unsigned mods) {
+    unsigned out[2]={0,0};
+    return ck_press(map,code,mods,out)==1?out[0]:0xffffffffu;
+}
+static int ck_layout(struct compositor_keymap *map,const char *name) {
+    int at=compositor_layout_index(name);
+    memset(map,0,sizeof(*map));
+    if(at>=0)map->layout=(unsigned char)at;
+    return at;
+}
+static void check_compositor_keymap(void) {
+    struct compositor_keymap m;
+    unsigned out[2];
+    int n;
+    /* The US base: what the kernel's table said, and a layout that does not exist. */
+    ck_ok(ck_layout(&m,"us")==0&&ck_layout(&m,"xx")<0&&ck_layout(&m,"s")<0&&ck_layout(&m,"sev")<0);
+    ck_ok(ck_one(&m,30,0)=='a'&&ck_one(&m,30,KEY_SHIFT)=='A'&&ck_one(&m,2,KEY_SHIFT)=='!');
+    ck_ok(ck_one(&m,28,0)=='\n'&&ck_one(&m,14,0)==127&&ck_one(&m,1,0)==27&&ck_one(&m,57,0)==' ');
+    ck_ok(ck_one(&m,82,0)=='0'&&ck_one(&m,98,0)=='/'&&ck_one(&m,96,0)=='\n'&&ck_one(&m,55,0)=='*');
+    ck_ok(ck_one(&m,30,KEY_CTRL)==1&&ck_one(&m,46,KEY_CTRL|KEY_SHIFT)==3&&ck_one(&m,2,KEY_CTRL)=='1');
+    ck_ok(ck_one(&m,CK_102ND,0)==0xffffffffu&&ck_one(&m,59,0)==0xffffffffu&&ck_one(&m,103,0)==0xffffffffu);
+    ck_ok(compositor_keymap_event(&m,30,0,0,out)==0&&compositor_keymap_event(&m,200,1,0,out)==0);
+    /* Swedish: the three letters, the AltGr level, the key beside the left shift. */
+    ck_ok(ck_layout(&m,"se")>0);
+    ck_ok(ck_one(&m,26,0)==0xE5&&ck_one(&m,39,0)==0xF6&&ck_one(&m,40,0)==0xE4);
+    ck_ok(ck_one(&m,26,KEY_SHIFT)==0xC5&&ck_one(&m,39,KEY_SHIFT)==0xD6&&ck_one(&m,40,KEY_SHIFT)==0xC4);
+    ck_ok(ck_one(&m,3,KEY_ALTGR)=='@'&&ck_one(&m,3,KEY_SHIFT)=='"'&&ck_one(&m,4,KEY_ALTGR)==0xA3);
+    ck_ok(ck_one(&m,8,KEY_ALTGR)=='{'&&ck_one(&m,9,KEY_ALTGR)=='['&&ck_one(&m,10,KEY_ALTGR)==']'&&ck_one(&m,11,KEY_ALTGR)=='}');
+    ck_ok(ck_one(&m,8,KEY_SHIFT)=='/'&&ck_one(&m,12,KEY_ALTGR)=='\\'&&ck_one(&m,6,KEY_ALTGR)==0x20AC);
+    ck_ok(ck_one(&m,CK_102ND,0)=='<'&&ck_one(&m,CK_102ND,KEY_SHIFT)=='>'&&ck_one(&m,CK_102ND,KEY_ALTGR)=='|');
+    ck_ok(ck_one(&m,53,0)=='-'&&ck_one(&m,53,KEY_SHIFT)=='_'&&ck_one(&m,41,0)==0xA7&&ck_one(&m,41,KEY_SHIFT)==0xBD);
+    /* AltGr with Shift, where the layout has nothing there, is AltGr; Shift where it has nothing is plain. */
+    ck_ok(ck_one(&m,8,KEY_ALTGR|KEY_SHIFT)=='{'&&ck_one(&m,57,KEY_ALTGR)==' ');
+    /* A dead key makes nothing and is taken whole: its release and its repeats. */
+    ck_ok(compositor_keymap_event(&m,13,1,0,out)==-1&&compositor_keymap_event(&m,13,2,0,out)==-1&&
+             compositor_keymap_event(&m,42,1,0,out)==0&&compositor_keymap_event(&m,13,0,0,out)==-1&&
+             compositor_keymap_event(&m,13,0,0,out)==0);
+    ck_ok(m.dead==CK_ACUTE);
+    /* ´ and e is é, ´ and E is É, and nothing is left waiting. */
+    ck_ok(ck_one(&m,18,0)==0xE9&&m.dead==0&&ck_one(&m,18,0)=='e');
+    ck_press(&m,13,0,out);ck_ok(ck_one(&m,18,KEY_SHIFT)==0xC9);
+    /* ` (Shift and the same key) and a is à, ¨ and u is ü, ^ (Shift and ¨) and o is ô. */
+    ck_press(&m,13,KEY_SHIFT,out);ck_ok(ck_one(&m,30,0)==0xE0);
+    ck_press(&m,27,0,out);ck_ok(ck_one(&m,22,0)==0xFC);
+    ck_press(&m,27,KEY_SHIFT,out);ck_ok(ck_one(&m,24,0)==0xF4);
+    /* AltGr and ¨ is a dead tilde, and with n it is ñ, with a ã, with o õ. */
+    ck_press(&m,27,KEY_ALTGR,out);ck_ok(ck_one(&m,49,0)==0xF1);
+    ck_press(&m,27,KEY_ALTGR,out);ck_ok(ck_one(&m,30,KEY_SHIFT)==0xC3);
+    ck_press(&m,27,KEY_ALTGR,out);ck_ok(ck_one(&m,24,0)==0xF5);
+    /* The accent on its own: with a space, or twice, it is the spacing accent. */
+    ck_press(&m,13,0,out);ck_ok(ck_one(&m,57,0)==CK_ACUTE);
+    ck_press(&m,13,0,out);ck_ok(ck_one(&m,13,0)==CK_ACUTE&&m.dead==0);
+    ck_press(&m,27,KEY_ALTGR,out);ck_ok(ck_one(&m,57,0)=='~');
+    /* On a letter it does not go on, the accent is typed and then the letter: nothing is lost. */
+    ck_press(&m,13,0,out);n=ck_press(&m,45,0,out);
+    ck_ok(n==2&&out[0]==CK_ACUTE&&out[1]=='x'&&m.dead==0);
+    /* A second accent over the first types the first and waits with the second. */
+    ck_press(&m,13,0,out);n=ck_press(&m,27,0,out);
+    ck_ok(n==1&&out[0]==CK_ACUTE&&m.dead==CK_DIAERESIS);
+    ck_ok(ck_one(&m,30,0)==0xE4&&m.dead==0);
+    /* A key that is no character leaves it waiting; a control character ends it. */
+    ck_press(&m,13,0,out);ck_ok(compositor_keymap_event(&m,103,1,0,out)==0&&m.dead==CK_ACUTE);
+    ck_ok(ck_one(&m,28,0)=='\n'&&m.dead==0);
+    /* Control over a dead key's letter is a control code and no accent. */
+    ck_press(&m,13,0,out);ck_ok(ck_one(&m,30,KEY_CTRL)==1&&m.dead==0);
+    /* Caps Lock turns a letter over, å and ä with it, and nothing that is not one. */
+    ck_ok(compositor_keymap_event(&m,58,1,0,out)==0&&compositor_keymap_event(&m,58,2,0,out)==0&&m.caps==1);
+    ck_ok(ck_one(&m,30,0)=='A'&&ck_one(&m,26,0)==0xC5&&ck_one(&m,40,0)==0xC4&&ck_one(&m,39,0)==0xD6);
+    ck_ok(ck_one(&m,30,KEY_SHIFT)=='a'&&ck_one(&m,26,KEY_SHIFT)==0xE5&&ck_one(&m,2,0)=='1');
+    ck_ok(ck_one(&m,3,KEY_ALTGR)=='@'&&ck_one(&m,53,0)=='-');
+    ck_press(&m,13,0,out);ck_ok(ck_one(&m,18,0)==0xC9);
+    compositor_keymap_event(&m,58,0,0,out);compositor_keymap_event(&m,58,1,0,out);
+    ck_ok(m.caps==0&&ck_one(&m,30,0)=='a');
+    /* The other layouts are the kernel desktop's, and aliased as the CLI names them. */
+    #define SAME(a,b) (compositor_layouts[ck_layout(&m,a)].patch==compositor_layouts[compositor_layout_index(b)].patch)
+    ck_ok(SAME("sv","se")&&SAME("fi","se")&&SAME("gb","uk")&&SAME("nb","no")&&SAME("dk","no"));
+    #undef SAME
+    ck_ok(ck_layout(&m,"uk")>0&&ck_one(&m,4,KEY_SHIFT)==0xA3&&ck_one(&m,43,0)=='#'&&ck_one(&m,CK_102ND,0)=='\\');
+    ck_ok(ck_layout(&m,"de")>0&&ck_one(&m,21,0)=='z'&&ck_one(&m,44,0)=='y'&&ck_one(&m,12,0)==0xDF&&ck_one(&m,16,KEY_ALTGR)=='@');
+    ck_press(&m,13,0,out);ck_ok(ck_one(&m,18,0)==0xE9);
+    ck_ok(ck_layout(&m,"no")>0&&ck_one(&m,39,0)==0xF8&&ck_one(&m,40,0)==0xE6&&ck_one(&m,26,0)==0xE5&&ck_one(&m,13,0)=='\\');
+    ck_press(&m,27,0,out);ck_ok(ck_one(&m,24,0)==0xF6);
+    ck_ok(ck_layout(&m,"fr")>0&&ck_one(&m,16,0)=='a'&&ck_one(&m,2,0)=='&'&&ck_one(&m,2,KEY_SHIFT)=='1'&&ck_one(&m,3,0)==0xE9);
+    ck_press(&m,26,0,out);ck_ok(ck_one(&m,18,0)==0xEA);
+    compositor_keymap_event(&m,58,1,0,out);ck_ok(ck_one(&m,3,0)==0xC9&&ck_one(&m,3,KEY_SHIFT)=='2');
+    ck_ok(ck_layout(&m,"es")>0&&ck_one(&m,39,0)==0xF1&&ck_one(&m,13,0)==0xA1&&ck_one(&m,43,0)==0xE7);
+    ck_press(&m,40,0,out);ck_ok(ck_one(&m,30,0)==0xE1);
+    ck_ok(ck_layout(&m,"it")>0&&ck_one(&m,26,0)==0xE8&&ck_one(&m,26,KEY_SHIFT)==0xE9&&ck_one(&m,39,0)==0xF2&&ck_one(&m,41,0)=='\\');
+    /* Every layout, every key: a character that is not a letter of Latin-1, an accent, or the euro is a bug. */
+    for(unsigned l=0;l<sizeof(compositor_layouts)/sizeof(compositor_layouts[0]);l++)
+        for(unsigned code=0;code<CK_TABLE;code++)
+            for(unsigned mods=0;mods<4;mods++) {
+                struct compositor_keymap k={0};k.layout=(unsigned char)l;
+                unsigned c=compositor_keymap_character(&k,code,(mods&1?KEY_SHIFT:0)|(mods&2?KEY_ALTGR:0));
+                ck_ok(c<0x100||c==0x20AC||(c&CK_DEAD&&(c&~CK_DEAD)<0x100));
+            }
+    /* What is held is a bit a key, and one keyboard letting go of Shift is not another's. */
+    ck_ok(compositor_held_flags(compositor_held_bit(42)|compositor_held_bit(54))==SURFACE_KEY_SHIFT);
+    ck_ok(compositor_held_flags(compositor_held_bit(97))==SURFACE_KEY_CONTROL&&compositor_held_flags(compositor_held_bit(29))==SURFACE_KEY_CONTROL);
+    ck_ok(compositor_held_flags(compositor_held_bit(100))==SURFACE_KEY_ALTGR&&compositor_held_flags(compositor_held_bit(56))==SURFACE_KEY_ALT);
+    ck_ok(compositor_held_flags(compositor_held_bit(125))==SURFACE_KEY_SUPER&&compositor_held_flags(compositor_held_bit(126))==SURFACE_KEY_SUPER);
+    ck_ok(compositor_held_bit(30)==0&&compositor_held_flags(0)==0);
+}
+
 /* The scene is the painter's picture: surfaces drawn bottom to top over a
    desktop, inside the damage, and no pixel outside it. Random surfaces (some
    off the screen, some framed, some not, some one over another, some the
@@ -103016,6 +103137,7 @@ int main(void) {
     check_compositor_panel_slots();
     check_compositor_panel_once();
     check_compositor_cross();
+    check_compositor_keymap();
     check_compositor_scene();
     for(unsigned i=0;i<sizeof(font_bits);i++)font_bits[i]=(i*29+i/16*73)&255;
     struct window_cell cells[96];unsigned seed=123;

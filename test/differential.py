@@ -26570,7 +26570,10 @@ def harness_core_state(argv):
             (root / "src/canvas/canvas_abi.h").read_text() + section(
             (root / "src/canvas/compositor.c").read_text(),
             "/* ---- backend: the classic look on the CPU ---- */",
-            "/* ---- end of the backend ---- */"))
+            "/* ---- end of the backend ---- */") + section(
+            (root / "src/canvas/compositor.c").read_text(),
+            "/* ---- keymap: what a key means ---- */",
+            "/* ---- end of the keymap ---- */"))
         # The renderer's own assembly bodies. lib.c assembles them only into
         # a kernel build with Canvas, so they are lifted out of it rather than linked.
         target = work / "canvas.S"

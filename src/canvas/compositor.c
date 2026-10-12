@@ -623,6 +623,382 @@ static void compositor_scene(const struct compositor_target *t,
 
 /* ---- end of the backend ---- */
 
+/* ---- keymap: what a key means ---- */
+
+/*
+        What a keyboard means is the compositor's to decide, as what a
+        string looks like is: a program is handed characters and not
+        scancodes and a table of its own. These are the kernel desktop's
+        tables, the US one and a patch over it for each of the other
+        layouts, and the same rules over them -- AltGr is level three and
+        Shift adds one, a level a layout leaves empty falls back the way it
+        always did, and Control over a letter is the control code that
+        letter names. Built on top of them, which the kernel desktop never
+        had: dead keys, Caps Lock, and the characters a dead key and a
+        letter make between them.
+
+        A patch is a key and its four levels (plain, Shift, AltGr, AltGr and
+        Shift); a character with CK_DEAD on is an accent that waits for the
+        letter it goes on. Layouts are named as the CLI names them.
+
+        A pure function of a state and a key: the checks drive it with no
+        card and no compositor.
+*/
+#define CK_DEAD 0x8000u
+#define CK_TABLE 99
+#define CK_LEVELS 4
+#define CK_102ND 86
+#define CK_CAPSLOCK 58
+#define CK_ACUTE 0xB4u
+#define CK_GRAVE '`'
+#define CK_DIAERESIS 0xA8u
+#define CK_CIRCUMFLEX '^'
+#define CK_TILDE '~'
+#define D(c) (CK_DEAD | (c))
+
+struct compositor_patch
+{
+        unsigned char code;
+        unsigned short level[CK_LEVELS];
+};
+
+// Backspace is DEL and Return a line feed, as every window has read them.
+static const unsigned char compositor_us[CK_TABLE][2] = {
+    [1] = {27, 27},
+    [2] = {'1', '!'},  [3] = {'2', '@'},  [4] = {'3', '#'},
+    [5] = {'4', '$'},  [6] = {'5', '%'},  [7] = {'6', '^'},
+    [8] = {'7', '&'},  [9] = {'8', '*'},  [10] = {'9', '('},
+    [11] = {'0', ')'}, [12] = {'-', '_'}, [13] = {'=', '+'},
+    [14] = {127, 127}, [15] = {'\t', '\t'},
+    [16] = {'q', 'Q'}, [17] = {'w', 'W'}, [18] = {'e', 'E'},
+    [19] = {'r', 'R'}, [20] = {'t', 'T'}, [21] = {'y', 'Y'},
+    [22] = {'u', 'U'}, [23] = {'i', 'I'}, [24] = {'o', 'O'},
+    [25] = {'p', 'P'}, [26] = {'[', '{'}, [27] = {']', '}'},
+    [28] = {'\n', '\n'},
+    [30] = {'a', 'A'}, [31] = {'s', 'S'}, [32] = {'d', 'D'},
+    [33] = {'f', 'F'}, [34] = {'g', 'G'}, [35] = {'h', 'H'},
+    [36] = {'j', 'J'}, [37] = {'k', 'K'}, [38] = {'l', 'L'},
+    [39] = {';', ':'}, [40] = {'\'', '"'}, [41] = {'`', '~'},
+    [43] = {'\\', '|'},
+    [44] = {'z', 'Z'}, [45] = {'x', 'X'}, [46] = {'c', 'C'},
+    [47] = {'v', 'V'}, [48] = {'b', 'B'}, [49] = {'n', 'N'},
+    [50] = {'m', 'M'}, [51] = {',', '<'}, [52] = {'.', '>'},
+    [53] = {'/', '?'}, [55] = {'*', '*'}, [57] = {' ', ' '},
+    [71] = {'7', '7'}, [72] = {'8', '8'}, [73] = {'9', '9'},
+    [74] = {'-', '-'}, [75] = {'4', '4'}, [76] = {'5', '5'},
+    [77] = {'6', '6'}, [78] = {'+', '+'}, [79] = {'1', '1'},
+    [80] = {'2', '2'}, [81] = {'3', '3'}, [82] = {'0', '0'},
+    [83] = {'.', '.'}, [96] = {'\n', '\n'}, [98] = {'/', '/'},
+};
+
+static const struct compositor_patch compositor_uk[] = {
+    {3, {'2', '"', '@'}},   {4, {'3', 0xA3, 0xA3}}, {40, {'\'', '@'}},
+    {41, {'`', 0xAC, 0xA6}}, {43, {'#', '~', '\\'}}, {CK_102ND, {'\\', '|'}},
+};
+
+static const struct compositor_patch compositor_de[] = {
+    {12, {0xDF, '?', '\\'}}, {13, {D(CK_ACUTE), D(CK_GRAVE)}}, {21, {'z', 'Z'}},
+    {26, {0xFC, 0xDC}},      {27, {'+', '*', '~'}},            {39, {0xF6, 0xD6}},
+    {40, {0xE4, 0xC4}},      {41, {D(CK_CIRCUMFLEX), 0xB0}},   {43, {'#', '\''}},
+    {44, {'y', 'Y'}},        {CK_102ND, {'<', '>', '|'}},      {8, {'7', '/', '{'}},
+    {9, {'8', '(', '['}},    {10, {'9', ')', ']'}},            {11, {'0', '=', '}'}},
+    {16, {'q', 'Q', '@'}},   {18, {'e', 'E', 0x20AC}},
+};
+
+static const struct compositor_patch compositor_se[] = {
+    {3, {'2', '"', '@'}},   {4, {'3', '#', 0xA3}},   {5, {'4', 0xA4, '$'}},
+    {6, {'5', '%', 0x20AC}}, {7, {'6', '&'}},        {8, {'7', '/', '{'}},
+    {9, {'8', '(', '['}},   {10, {'9', ')', ']'}},   {11, {'0', '=', '}'}},
+    {12, {'+', '?', '\\'}}, {13, {D(CK_ACUTE), D(CK_GRAVE)}},
+    {26, {0xE5, 0xC5}},     {27, {D(CK_DIAERESIS), D(CK_CIRCUMFLEX), D(CK_TILDE)}},
+    {39, {0xF6, 0xD6}},     {40, {0xE4, 0xC4}},      {41, {0xA7, 0xBD}},
+    {43, {'\'', '*'}},      {53, {'-', '_'}},        {CK_102ND, {'<', '>', '|'}},
+};
+
+// The Norwegian table has the ¨ ^ ~ key the kernel desktop's left as the US bracket.
+static const struct compositor_patch compositor_no[] = {
+    {3, {'2', '"', '@'}},   {4, {'3', '#', 0xA3}},   {5, {'4', 0xA4, '$'}},
+    {6, {'5', '%', 0x20AC}}, {8, {'7', '/', '{'}},   {9, {'8', '(', '['}},
+    {10, {'9', ')', ']'}},  {11, {'0', '=', '}'}},   {12, {'+', '?'}},
+    {13, {'\\', D(CK_GRAVE), D(CK_ACUTE)}},          {26, {0xE5, 0xC5}},
+    {27, {D(CK_DIAERESIS), D(CK_CIRCUMFLEX), D(CK_TILDE)}},
+    {39, {0xF8, 0xD8}},     {40, {0xE6, 0xC6}},      {41, {'|', 0xA7}},
+    {43, {'\'', '*'}},      {53, {'-', '_'}},        {CK_102ND, {'<', '>'}},
+};
+
+static const struct compositor_patch compositor_fr[] = {
+    {2, {'&', '1'}},         {3, {0xE9, '2', '~'}},   {4, {'"', '3', '#'}},
+    {5, {'\'', '4', '{'}},   {6, {'(', '5', '['}},    {7, {'-', '6', '|'}},
+    {8, {0xE8, '7', '`'}},   {9, {'_', '8', '\\'}},   {10, {0xE7, '9', '^'}},
+    {11, {0xE0, '0', '@'}},  {12, {')', 0xB0, ']'}},  {13, {'=', '+', '}'}},
+    {16, {'a', 'A'}},        {17, {'z', 'Z'}},        {18, {'e', 'E', 0x20AC}},
+    {26, {D(CK_CIRCUMFLEX), D(CK_DIAERESIS)}},        {27, {'$', 0xA3, 0xA4}},
+    {30, {'q', 'Q'}},        {38, {'m', 'M'}},        {39, {0xF9, '%'}},
+    {40, {'*', 0xB5}},       {44, {'w', 'W'}},        {50, {',', '?'}},
+    {51, {';', '.'}},        {52, {':', '/'}},        {53, {'!', 0xA7}},
+    {CK_102ND, {'<', '>'}},
+};
+
+static const struct compositor_patch compositor_es[] = {
+    {3, {'2', '"', '@'}},    {4, {'3', 0xB7, '#'}},   {8, {'7', '/', '{'}},
+    {11, {'0', '=', '}'}},   {12, {'\'', '?'}},       {13, {0xA1, 0xBF}},
+    {26, {D(CK_GRAVE), D(CK_CIRCUMFLEX), '['}},       {27, {'+', '*', ']'}},
+    {39, {0xF1, 0xD1}},      {40, {D(CK_ACUTE), D(CK_DIAERESIS), '{'}},
+    {41, {0xBA, 0xAA, '\\'}}, {43, {0xE7, 0xC7, '}'}}, {CK_102ND, {'<', '>'}},
+    {18, {'e', 'E', 0x20AC}},
+};
+
+static const struct compositor_patch compositor_it[] = {
+    {3, {'2', '"'}},         {4, {'3', 0xA3}},        {8, {'7', '{'}},
+    {9, {'8', '['}},         {10, {'9', ']'}},        {11, {'0', '}'}},
+    {12, {'\'', '?'}},       {13, {0xEC, '^'}},       {26, {0xE8, 0xE9, '['}},
+    {27, {'+', '*', ']'}},   {39, {0xF2, 0xE7, '@'}}, {40, {0xE0, 0xB0, '#'}},
+    {41, {'\\', '|'}},       {43, {0xF9, 0xA7}},      {CK_102ND, {'<', '>'}},
+    {18, {'e', 'E', 0x20AC}},
+};
+
+#define CK_LAYOUT(name, table) {name, table, sizeof(table) / sizeof((table)[0])}
+static const struct
+{
+        char name[3];
+        const struct compositor_patch *patch;
+        unsigned char count;
+} compositor_layouts[] = {
+    {"us", 0, 0},
+    CK_LAYOUT("uk", compositor_uk), CK_LAYOUT("gb", compositor_uk), CK_LAYOUT("de", compositor_de),
+    CK_LAYOUT("se", compositor_se), CK_LAYOUT("sv", compositor_se), CK_LAYOUT("fi", compositor_se),
+    CK_LAYOUT("no", compositor_no), CK_LAYOUT("nb", compositor_no), CK_LAYOUT("dk", compositor_no),
+    CK_LAYOUT("fr", compositor_fr), CK_LAYOUT("es", compositor_es), CK_LAYOUT("it", compositor_it),
+};
+
+// A dead accent and the letters it goes on, and what they make (Latin-1).
+static const struct
+{
+        unsigned short accent;
+        char bases[13];
+        unsigned char made[12];
+} compositor_composed[] = {
+    {CK_ACUTE, "aeiouyAEIOUY", {0xE1, 0xE9, 0xED, 0xF3, 0xFA, 0xFD, 0xC1, 0xC9, 0xCD, 0xD3, 0xDA, 0xDD}},
+    {CK_GRAVE, "aeiouAEIOU", {0xE0, 0xE8, 0xEC, 0xF2, 0xF9, 0xC0, 0xC8, 0xCC, 0xD2, 0xD9}},
+    {CK_DIAERESIS, "aeiouyAEIOU", {0xE4, 0xEB, 0xEF, 0xF6, 0xFC, 0xFF, 0xC4, 0xCB, 0xCF, 0xD6, 0xDC}},
+    {CK_CIRCUMFLEX, "aeiouAEIOU", {0xE2, 0xEA, 0xEE, 0xF4, 0xFB, 0xC2, 0xCA, 0xCE, 0xD4, 0xDB}},
+    {CK_TILDE, "anoANO", {0xE3, 0xF1, 0xF5, 0xC3, 0xD1, 0xD5}},
+};
+#undef D
+
+// The keys that are modifiers, as the bit each is held in: the held word is
+// per device, so that one keyboard letting go of Shift is not another's.
+#define CK_HELD_LSHIFT 1u
+#define CK_HELD_RSHIFT 2u
+#define CK_HELD_LCONTROL 4u
+#define CK_HELD_RCONTROL 8u
+#define CK_HELD_ALT 16u
+#define CK_HELD_ALTGR 32u
+#define CK_HELD_LSUPER 64u
+#define CK_HELD_RSUPER 128u
+
+static unsigned int compositor_held_bit(unsigned int code)
+{
+        switch (code)
+        {
+        case 42: return CK_HELD_LSHIFT;
+        case 54: return CK_HELD_RSHIFT;
+        case 29: return CK_HELD_LCONTROL;
+        case 97: return CK_HELD_RCONTROL;
+        case 56: return CK_HELD_ALT;
+        case 100: return CK_HELD_ALTGR; // the right Alt is AltGr, the right Control is Control
+        case 125: return CK_HELD_LSUPER;
+        case 126: return CK_HELD_RSUPER;
+        }
+        return 0;
+}
+
+// What is held, as the flags a key event carries.
+static unsigned int compositor_held_flags(unsigned int held)
+{
+        return (held & (CK_HELD_LSHIFT | CK_HELD_RSHIFT) ? SURFACE_KEY_SHIFT : 0) |
+               (held & (CK_HELD_LCONTROL | CK_HELD_RCONTROL) ? SURFACE_KEY_CONTROL : 0) |
+               (held & CK_HELD_ALT ? SURFACE_KEY_ALT : 0) |
+               (held & CK_HELD_ALTGR ? SURFACE_KEY_ALTGR : 0) |
+               (held & (CK_HELD_LSUPER | CK_HELD_RSUPER) ? SURFACE_KEY_SUPER : 0);
+}
+
+struct compositor_keymap
+{
+        unsigned char layout;    // an index into compositor_layouts
+        unsigned char caps;      // Caps Lock is on
+        unsigned short dead;     // the accent that waits for a letter, or 0
+        unsigned int hidden[4];  // keys whose press was taken and so whose release is
+};
+
+// A layout by name, or -1; the name it is kept under is what asked for it.
+static int compositor_layout_index(const char *name)
+{
+        for (unsigned int at = 0; at < sizeof(compositor_layouts) / sizeof(compositor_layouts[0]); at++)
+                if (name[0] == compositor_layouts[at].name[0] && name[1] == compositor_layouts[at].name[1] &&
+                    !name[2])
+                        return (int)at;
+        return -1;
+}
+
+// The case of a letter turned over, which is what Caps Lock does to one.
+static unsigned int compositor_letter_flip(unsigned int c)
+{
+        if ((c | 0x20) - 'a' < 26u)
+                return c ^ 0x20;
+        if ((c >= 0xE0 && c <= 0xFE && c != 0xF7) || (c >= 0xC0 && c <= 0xDE && c != 0xD7))
+                return c ^ 0x20;
+        return c;
+}
+
+// What a key says at the levels the modifiers pick, with CK_DEAD on an accent.
+static unsigned int compositor_keymap_character(const struct compositor_keymap *map, unsigned int code,
+                                                unsigned int modifiers)
+{
+        const struct compositor_patch *patch = compositor_layouts[map->layout].patch;
+        unsigned int count = compositor_layouts[map->layout].count;
+        unsigned short level[CK_LEVELS] = {0, 0, 0, 0};
+        unsigned int at, want = 0, c;
+
+        if (code >= CK_TABLE)
+                return 0;
+
+        level[0] = compositor_us[code][0];
+        level[1] = compositor_us[code][1];
+        for (at = 0; at < count; at++)
+                if (patch[at].code == code)
+                        for (unsigned int l = 0; l < CK_LEVELS; l++)
+                                level[l] = patch[at].level[l];
+
+        if (modifiers & SURFACE_KEY_ALTGR)
+                want += 2;
+        if (modifiers & SURFACE_KEY_SHIFT)
+                want += 1;
+
+        // A level the layout leaves empty is the one below it.
+        c = level[want];
+        if (!c && want)
+                c = level[want & 2];
+        if (!c && (modifiers & SURFACE_KEY_SHIFT))
+                c = level[1];
+        if (!c)
+                c = level[0];
+        if (!c)
+                return 0;
+
+        if (map->caps && !(c & CK_DEAD))
+                c = compositor_letter_flip(c);
+
+        // Control turns a letter into the control code that letter names,
+        // which is the whole of why a terminal wants a modifier at all.
+        if ((modifiers & SURFACE_KEY_CONTROL) && !(c & CK_DEAD) && (c | 0x20) - 'a' < 26u)
+                return c & 0x1f;
+
+        return c;
+}
+
+// What a dead accent and a character make together, or 0 when they make nothing.
+static unsigned int compositor_keymap_compose(unsigned int accent, unsigned int c)
+{
+        if (c == ' ' || c == accent)
+                return accent;
+
+        for (unsigned int row = 0; row < sizeof(compositor_composed) / sizeof(compositor_composed[0]); row++)
+                if (compositor_composed[row].accent == accent)
+                        for (unsigned int at = 0; compositor_composed[row].bases[at]; at++)
+                                if (compositor_composed[row].bases[at] == (char)c)
+                                        return compositor_composed[row].made[at];
+        return 0;
+}
+
+/*
+        A key went down (value 1), repeated (2) or came up (0), with these
+        modifiers held. What comes back is how many characters it makes, which
+        go out one event each: none for a key that means nothing, a release
+        or a modifier; one, and with a dead accent waiting a letter that
+        takes it is that letter made; two when the letter takes no accent, as
+        the accent and then the letter, so that nothing typed is lost. A dead
+        key makes none and is taken whole -- its release and its repeats too --
+        and the answer is -1 for a key that is not to be delivered at all.
+        A key that is not a character (an arrow, a function key, Escape,
+        Return, Backspace) leaves a waiting accent alone or, for those that
+        are control characters, ends it.
+*/
+static int compositor_keymap_event(struct compositor_keymap *map, unsigned int code, int value,
+                                   unsigned int modifiers, unsigned int out[2])
+{
+        unsigned int bit = 1u << (code & 31), c, made;
+        int taken = code < 128 && (map->hidden[code >> 5] & bit);
+
+        if (code >= 128)
+                return 0;
+
+        if (!value)
+        {
+                map->hidden[code >> 5] &= ~bit;
+                return taken ? -1 : 0;
+        }
+
+        if (taken)
+                return -1;
+
+        if (code == CK_CAPSLOCK)
+        {
+                if (value == 1)
+                        map->caps ^= 1;
+                return 0;
+        }
+
+        c = compositor_keymap_character(map, code, modifiers);
+        if (!c)
+                return 0;
+
+        if (c & CK_DEAD)
+        {
+                unsigned int accent = c & ~CK_DEAD, was = map->dead;
+
+                map->hidden[code >> 5] |= bit;
+                map->dead = (unsigned short)accent;
+                if (!was)
+                        return -1;
+
+                // Typed, so it is a press and its release goes out with it.
+                map->hidden[code >> 5] &= ~bit;
+                if (was == accent)
+                        map->dead = 0;
+                out[0] = was; // twice the same is that accent; another types the first
+                return 1;
+        }
+
+        if (!map->dead)
+        {
+                out[0] = c;
+                return 1;
+        }
+
+        if (c < ' ' || c == 127)
+        {
+                map->dead = 0;
+                out[0] = c;
+                return 1;
+        }
+
+        made = compositor_keymap_compose(map->dead, c);
+        if (made)
+        {
+                map->dead = 0;
+                out[0] = made;
+                return 1;
+        }
+
+        out[0] = map->dead;
+        out[1] = c;
+        map->dead = 0;
+        return 2;
+}
+
+/* ---- end of the keymap ---- */
+
 /*
         The DRM and evdev interface this needs, as the kernel's uapi lays it
         out. The ioctl numbers are _IOWR('d', n, size) with the size in bits
@@ -771,6 +1147,7 @@ struct compositor_poll
 #define COMPOSITOR_EOPNOTSUPP 95
 #define COMPOSITOR_SOL_SOCKET 1
 #define COMPOSITOR_SO_PEERCRED 17
+#define COMPOSITOR_IN_CLOSE_WRITE 0x8u
 #define COMPOSITOR_IN_CREATE 0x100u
 #define COMPOSITOR_IN_MOVED_TO 0x80u
 
@@ -861,7 +1238,9 @@ static struct
         // The surface being resized, how large it was and where the hand took hold.
         int resize_w, resize_h, press_x, press_y;
         int pointer_x, pointer_y;
-        unsigned int modifiers;
+        struct compositor_keymap keymap;
+        unsigned char held[COMPOSITOR_INPUTS]; // the modifiers each keyboard holds down
+        int layout_given; // -l named one, and the settings are not looked at
         unsigned int next_id, placed, connections;
         unsigned long painted; // pixels composed, all frames
         positive period, presented; // a frame in nanoseconds, and when the last one went out
@@ -1290,6 +1669,29 @@ static void compositor_cursor_move(void)
                 system_control(compositor.card, COMPOSITOR_CURSOR, address_of cursor);
 }
 
+// The layout Canvas has, which is the one `moonwater keyboard` last set.
+static void compositor_layout_read(void)
+{
+        struct canvas_control control = {0};
+        b32 spark = system_open_at(AT_FDCWD, SPARK_DEVICE, FILE_READ_WRITE | O_CLOEXEC);
+        int layout;
+
+        if (spark < 0)
+                return;
+
+        control.request = SPARK_CANVAS_LAYOUT;
+        layout = system_control(spark, SPARK_IOCTL_CANVAS, address_of control) >= 0
+                     ? compositor_layout_index(control.master_command)
+                     : -1;
+        system_close(spark);
+
+        if (layout >= 0 && layout != compositor.keymap.layout)
+        {
+                compositor.keymap.layout = (unsigned char)layout;
+                compositor.keymap.dead = 0;
+        }
+}
+
 /*
         Every keyboard and pointer evdev has, now and as they come. Read
         beside Canvas's own handler, not grabbed from it: a grab would take
@@ -1345,6 +1747,7 @@ static void compositor_input_add(unsigned int number)
 
         compositor.absolute_x[at][0] = compositor.absolute_x[at][1] = 0;
         compositor.absolute_y[at][0] = compositor.absolute_y[at][1] = 0;
+        compositor.held[at] = 0;
 
         if (tablet)
         {
@@ -1378,11 +1781,18 @@ static void compositor_inputs_open(void)
                 compositor.watch = -1;
         }
 
+        // The keyboard setting is kept in /root/keyboard, written when it is changed.
+        if (compositor.watch >= 0)
+                compositor_call(syscall(inotify_add_watch), (positive)compositor.watch, (positive) "/root",
+                                COMPOSITOR_IN_CLOSE_WRITE | COMPOSITOR_IN_MOVED_TO | COMPOSITOR_IN_CREATE,
+                                0, 0, 0);
+
         for (unsigned int number = 0; number < COMPOSITOR_DEVICES; number++)
                 compositor_input_add(number);
 }
 
-// What appeared in /dev/input since the last look: a name that is eventN is a device.
+// What appeared in /dev/input since the last look: a name that is eventN is a device;
+// and a keyboard written in /root is a layout that was changed.
 static void compositor_inputs_watch(void)
 {
         for (;;)
@@ -1400,7 +1810,10 @@ static void compositor_inputs_watch(void)
                         if (at + 16 + (long)length > got)
                                 break;
 
-                        if (length > 5 && name[0] == 'e' && name[1] == 'v' && name[2] == 'e' &&
+                        if (length > 8 && !string_compare_max((string_address)name, (string_address) "keyboard", 8) && !name[8] &&
+                            !compositor.layout_given)
+                                compositor_layout_read();
+                        else if (length > 5 && name[0] == 'e' && name[1] == 'v' && name[2] == 'e' &&
                             name[3] == 'n' && name[4] == 't')
                         {
                                 for (unsigned int digit = 5; digit < length && name[digit] >= '0' &&
@@ -2642,48 +3055,40 @@ static void compositor_accept(void)
         }
 }
 
-// The US layout, enough to name what a test types; anything else is 0.
-static const char compositor_plain[58] =
-    "\0\x1b" "1234567890-=" "\b\t" "qwertyuiop[]" "\r\0" "asdfghjkl;'`" "\0\\" "zxcvbnm,./" "\0*\0 ";
-static const char compositor_shifted[58] =
-    "\0\x1b" "!@#$%^&*()_+" "\b\t" "QWERTYUIOP{}" "\r\0" "ASDFGHJKL:\"~" "\0|" "ZXCVBNM<>?" "\0*\0 ";
-
-static unsigned int compositor_modifier(unsigned int code)
+// What is held on every keyboard, as the flags a key event carries.
+static unsigned int compositor_modifiers(void)
 {
-        switch (code)
-        {
-        case 42: case 54: return SURFACE_KEY_SHIFT;
-        case 29: case 97: return SURFACE_KEY_CONTROL;
-        case 56: return SURFACE_KEY_ALT;
-        case 100: return SURFACE_KEY_ALTGR;
-        case 125: case 126: return SURFACE_KEY_SUPER;
-        }
-        return 0;
+        unsigned int held = 0;
+
+        for (unsigned int at = 0; at < compositor.input_count; at++)
+                held |= compositor.held[at];
+        return compositor_held_flags(held);
 }
 
-static void compositor_key(unsigned int code, int value)
+// A key from the keyboard on input number at: the characters it makes go to
+// the surface that has the keys, one event each.
+static void compositor_key(unsigned int at, unsigned int code, int value)
 {
-        unsigned int modifier = compositor_modifier(code);
-        unsigned int character = 0;
-        unsigned int flags;
+        unsigned int bit = compositor_held_bit(code), characters[2] = {0, 0}, flags, modifiers;
+        int count;
 
-        if (modifier)
+        if (bit)
         {
                 if (value)
-                        compositor.modifiers |= modifier;
+                        compositor.held[at] |= (unsigned char)bit;
                 else
-                        compositor.modifiers &= ~modifier;
+                        compositor.held[at] &= (unsigned char)~bit;
         }
 
-        if (code < sizeof(compositor_plain))
-                character = (unsigned char)(compositor.modifiers & SURFACE_KEY_SHIFT
-                                                ? compositor_shifted[code]
-                                                : compositor_plain[code]);
+        modifiers = compositor_modifiers();
+        count = compositor_keymap_event(&compositor.keymap, code, value, modifiers, characters);
+        if (count < 0 || !compositor.focus)
+                return;
 
-        flags = compositor.modifiers | (value ? SURFACE_KEY_DOWN : 0) | (value == 2 ? SURFACE_KEY_REPEAT : 0);
-
-        if (compositor.focus)
-                compositor_post(compositor.focus, SURFACE_EVENT_KEY, flags, 0, (int)code, (int)character);
+        flags = modifiers | (value ? SURFACE_KEY_DOWN : 0) | (value == 2 ? SURFACE_KEY_REPEAT : 0);
+        for (int each = 0; each < (count ? count : 1); each++)
+                compositor_post(compositor.focus, SURFACE_EVENT_KEY, flags, 0, (int)code,
+                                (int)characters[each]);
 }
 
 // Where the pointer is in a surface's buffer.
@@ -2865,7 +3270,8 @@ static void compositor_input_read(unsigned int at)
                         compositor.inputs[at] = -1;
                         compositor.devices &= ~(1ul << compositor.device_number[at]);
 
-                        // A press that was held on it will never be released.
+                        // What it held down will never be let go of: not a key, not a button.
+                        compositor.held[at] = 0;
                         compositor_button(COMPOSITOR_BTN_LEFT, 0);
                 }
 
@@ -2912,7 +3318,7 @@ static void compositor_input_read(unsigned int at)
                                 compositor_button(event->code, event->value != 0);
                         }
                         else if (event->type == COMPOSITOR_EV_KEY && event->code < 256)
-                                compositor_key(event->code, event->value);
+                                compositor_key(at, event->code, event->value);
                 }
         }
 
@@ -3182,11 +3588,13 @@ static b32 compositor_grant_main(void)
 }
 
 /*
-        compositor [-s SCALE] [-t] [-H WIDTHxHEIGHT FILE] [-i FILE]
+        compositor [-s SCALE] [-l LAYOUT] [-t] [-H WIDTHxHEIGHT FILE] [-i FILE]
 
         Takes the card, or with -H maps FILE as the screen instead and takes
         none. -s is the desktop scale when Canvas is not there to say, -t puts
-        the panel on the top edge and not the bottom, and -i reads one more
+        the panel on the top edge and not the bottom, -l is the keyboard layout
+        when Canvas is not there to say (it is otherwise the one `moonwater
+        keyboard` set, and follows it when it is set again), and -i reads one more
         input device, a file of evdev records: what a test types and points
         with when there is no hardware to do it.
 */
@@ -3222,6 +3630,13 @@ static b32 compositor_main()
                         file = program_argument(at + 2);
                         at += 2;
                 }
+                else if (at + 1 < program_argument_count() && compositor_option(option, 'l'))
+                {
+                        int layout = compositor_layout_index((const char *)program_argument(++at));
+
+                        if (layout >= 0)
+                                compositor.keymap.layout = (unsigned char)layout, compositor.layout_given = 1;
+                }
                 else if (at + 1 < program_argument_count() && compositor_option(option, 'i'))
                         extra = (int)system_open_at(AT_FDCWD, program_argument(++at),
                                                     FILE_READ | O_CLOEXEC | O_NONBLOCK);
@@ -3229,6 +3644,8 @@ static b32 compositor_main()
 
         if (compositor.scale < 1 || compositor.scale > SPARK_CANVAS_SCALE_MOST)
                 compositor.scale = headless ? 1 : compositor_scale_read();
+        if (!headless && !compositor.layout_given)
+                compositor_layout_read();
 
         status = headless ? compositor_headless(headless, file) : compositor_card_open();
         if (status < 0)

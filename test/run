@@ -18343,6 +18343,36 @@ wait $c
 echo m3-done
 """)
 
+#   The keyboard: what the keys of a Swedish layout make for the window that has
+#   them, and what the layout does when it is changed under a running
+#   compositor. The window writes every event it is sent to a file; the script
+#   gives the file to the serial line between the markers the lane types at.
+open(stick + "/m4", "w").write(r"""exec > /dev/ttyS0 2>&1
+moonwater keyboard se
+/compositor &
+c=$!
+sleep 2
+/surface -x 300 -y 200 -w 300 -h 150 -c 336699 -T keys -s 90 >> /tmp/k.out &
+sleep 1
+echo m4-ready
+sleep 24
+echo m4-se-dump
+cat /tmp/k.out
+echo m4-se-end
+: > /tmp/k.out
+moonwater keyboard de
+sleep 1
+echo m4-de-ready
+sleep 8
+echo m4-de-dump
+cat /tmp/k.out
+echo m4-de-end
+moonwater keyboard us
+kill $c
+wait $c
+echo m4-done
+""")
+
 open(stick + "/m1", "w").write(r"""exec > /dev/ttyS0 2>&1
 /compositor &
 c=$!
@@ -18619,6 +18649,58 @@ out.append(("M2.28 the panel is told what its role gives it: the top layer, held
             "role 2 state 2 layer 3 anchor 14 zone 24 lock 12"))
 out.append(("M2.29 the compositor says what scale it draws at",
             "%s" % (scale3[-1] if scale3 else "none"), "1"))
+
+#   The keyboard. The window of the m4 script is clicked for the keys and the
+#   keys are typed at it by their US names (QEMU's qcodes are the physical
+#   keys): the key that is the left bracket on a US board is the Swedish å.
+type_text("sh /mnt/m4\n")
+ready4 = wait_for(b"m4-ready", 60)
+time.sleep(0.5)
+click(350, 300)
+key("bracket_left")
+key("semicolon")
+key("apostrophe")
+chord("shift_r", "bracket_left")
+key("less")
+chord("alt_r", "2")
+chord("alt_r", "7")
+key("equal")
+key("e")
+chord("alt_r", "bracket_right")
+key("n")
+key("equal")
+key("spc")
+key("caps_lock")
+key("a")
+key("bracket_left")
+key("caps_lock")
+key("a")
+wait_for(b"m4-se-end", 60)
+wait_for(b"m4-de-ready", 30)
+key("y")
+chord("alt_r", "q")
+key("z")
+done4 = wait_for(b"m4-done", 60)
+text = serial().decode("latin1")
+
+def typed(first, last):
+    # The characters the window was sent, in order, as code:character.
+    found = re.search(first + r"(.*?)" + last, text, re.S)
+    got = []
+    for flags, code, char in re.findall(r"surface: event 6 (\d+) (\d+) (\d+)", found.group(1) if found else ""):
+        if int(flags) & 1 and int(char):
+            got.append("%s:%s" % (code, char))
+    return " ".join(got)
+
+out.append(("K1.1 a Swedish keyboard types å ö ä Å, < and AltGr's @ and {",
+            " ".join(typed("m4-se-dump", "m4-se-end").split()[:7]),
+            "26:229 39:246 40:228 26:197 86:60 3:64 8:123"))
+out.append(("K1.2 a dead acute and e make é, AltGr's dead tilde and n make ñ, and a dead acute and a space an acute",
+            " ".join(typed("m4-se-dump", "m4-se-end").split()[7:10]), "18:233 49:241 57:180"))
+out.append(("K1.3 Caps Lock turns a letter over, å included, and turning it off turns it back",
+            " ".join(typed("m4-se-dump", "m4-se-end").split()[10:]), "30:65 26:197 30:97"))
+out.append(("K1.4 the layout set while the compositor runs is the layout it types with: de has z where y is, and @ on AltGr and q",
+            typed("m4-de-dump", "m4-de-end"), "21:122 16:64 44:121"))
 
 qcmd({"execute": "quit"})
 try:
