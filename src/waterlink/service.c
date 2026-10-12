@@ -293,16 +293,6 @@ static bipolar link_read_private_records(string_address path,
         return 0;
 }
 
-/* Whether a change to a records file may go on from a read of it: the file
-   was read, or was never written and is empty. One that is there and cannot
-   be read -- refused for what it is, cut short, a failed read -- is not an
-   empty list, and saving over it would forget every record in it. The peers
-   and the groups both change their files by this. */
-static bool link_records_for_change(bipolar read)
-{
-        return read >= 0 || read == -ENOENT;
-}
-
 /* Written beside its name and renamed over it: whole or not at all. Synced,
    the bytes are on disk before the name shows them and /root is synced after
    the rename, so a power cut cannot bring back the peers or the groups from
@@ -403,10 +393,16 @@ static fn link_peers_load(link_peers address_to peers)
         (void)link_peers_read(peers);
 }
 
-//      The peers, to change them: only a file never written is empty.
+/* Whether a change to a records file may go on from a read of it: the file
+   was read, or was never written and is empty. One that is there and cannot
+   be read -- refused for what it is, cut short, a failed read -- is not an
+   empty list, and saving over it would forget every record in it. The peers
+   and the groups both change their files by this. */
 static bool link_peers_for_change(link_peers address_to peers)
 {
-        return link_records_for_change(link_peers_read(peers));
+        bipolar read = link_peers_read(peers);
+
+        return read >= 0 || read == -ENOENT;
 }
 
 static bipolar link_peers_save(link_peers address_to peers)

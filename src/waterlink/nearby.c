@@ -115,7 +115,7 @@ static bool link_groups_for_change(link_groups address_to groups)
 
         if (read >= 0 && old)
                 (void)link_groups_scrub(old);
-        return link_records_for_change(read);
+        return read >= 0 || read == -ENOENT;
 }
 
 /* The groups as the file says, with no groups and the reason when it cannot
