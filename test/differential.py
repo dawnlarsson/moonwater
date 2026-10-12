@@ -74980,6 +74980,8 @@ typedef struct
 } nl80211;
 #define NL80211_KEYTYPE_GROUP 0
 #define NL80211_KEYTYPE_PAIRWISE 1
+#define WLAN_CIPHER_CCMP 0x000fac04u
+#define WLAN_CIPHER_BIP_CMAC_128 0x000fac06u
 #define WIFI_EAPOL_HDR 99
 #define PACKET_HOST 0
 #ifndef STRICT_TIGHT
@@ -75101,13 +75103,16 @@ static bipolar system_random_fill(address_any into, positive length, positive fl
    never twice the same (a reinstalled key is a reset nonce: KRACK) and
    never back over a key the access point made after it (an old group key
    in again is the same reset, of a key it has moved on from). */
+static bipolar fz_new_igtk(p8 idx, p8 *key);
 static bipolar nl80211_new_key(nl80211 *session, p32 index, p8 idx, p32 type, p8 *mac,
                                p8 *key, positive key_length, p8 *seq, positive seq_length,
-                               bool group_default)
+                               bool group_default, p32 cipher)
 {
         positive when;
 
         (void)session, (void)index, (void)seq;
+        if (cipher == WLAN_CIPHER_BIP_CMAC_128)
+                return fz_new_igtk(idx, key);
         if (key_length != 16)
                 abort();
         if (fz_key_error)
@@ -75161,11 +75166,10 @@ static void fz_igtk_add(p8 idx, const p8 *key)
                 memcpy(fz_igtk_made[fz_igtk_made_count++] + 1, key, 16);
         }
 }
-static bipolar nl80211_new_igtk(nl80211 *session, p32 index, p8 idx, p8 *key, p8 *seq)
+static bipolar fz_new_igtk(p8 idx, p8 *key)
 {
         bool made = false;
 
-        (void)session, (void)index, (void)seq;
         if (!fz_protected || (idx != 4 && idx != 5))
                 abort();
         for (positive at = 0; at < fz_igtk_made_count; at++)

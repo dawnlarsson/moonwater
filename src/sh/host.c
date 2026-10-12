@@ -6381,11 +6381,10 @@ static COLD bipolar nl80211_station(nl80211 address_to session, p32 index,
 static COLD bipolar nl80211_new_key(nl80211 address_to session, p32 index, p8 idx,
                                p32 type, p8 address_to mac, p8 address_to key,
                                positive key_length, p8 address_to seq,
-                               positive seq_length, bool group_default)
+                               positive seq_length, bool group_default, p32 cipher)
 {
         netlink_buffer request = {0};
         p32 sequence = netlink_sequence_take();
-        p32 ccmp = WLAN_CIPHER_CCMP;
 
         if (!nl80211_begin(address_of request, session->family, NL80211_CMD_NEW_KEY,
                            NLM_REQUEST | NLM_ACK, sequence))
@@ -6395,7 +6394,7 @@ static COLD bipolar nl80211_new_key(nl80211 address_to session, p32 index, p8 id
                               key_length);
         netlink_attribute_add(address_of request, NL80211_ATTR_KEY_IDX, address_of idx,
                               1);
-        nl80211_attribute_u32(address_of request, NL80211_ATTR_KEY_CIPHER, ccmp);
+        nl80211_attribute_u32(address_of request, NL80211_ATTR_KEY_CIPHER, cipher);
         nl80211_attribute_u32(address_of request, NL80211_ATTR_KEY_TYPE, type);
         if (mac)
                 netlink_attribute_add(address_of request, NL80211_ATTR_MAC, mac, 6);
@@ -6407,27 +6406,6 @@ static COLD bipolar nl80211_new_key(nl80211 address_to session, p32 index, p8 id
                                       null, 0);
         return netlink_transact(session->handle, address_of request, sequence,
                                 null, null);
-}
-
-/* The group management key of an access point that protects its management
-   frames: BIP-CMAC-128 under key id 4 or 5, its packet number the six bytes
-   at seq. */
-static COLD bipolar nl80211_new_igtk(nl80211 address_to session, p32 index, p8 idx,
-                                     p8 address_to key, p8 address_to seq)
-{
-        netlink_buffer request = {0};
-        p32 sequence = netlink_sequence_take();
-        p32 cipher = WLAN_CIPHER_BIP_CMAC_128;
-
-        if (!nl80211_begin(address_of request, session->family, NL80211_CMD_NEW_KEY,
-                           NLM_REQUEST | NLM_ACK, sequence))
-                return -1;
-        nl80211_attribute_u32(address_of request, NL80211_ATTR_IFINDEX, index);
-        netlink_attribute_add(address_of request, NL80211_ATTR_KEY_DATA, key, 16);
-        netlink_attribute_add(address_of request, NL80211_ATTR_KEY_IDX, address_of idx, 1);
-        nl80211_attribute_u32(address_of request, NL80211_ATTR_KEY_CIPHER, cipher);
-        netlink_attribute_add(address_of request, NL80211_ATTR_KEY_SEQ, seq, 6);
-        return netlink_transact(session->handle, address_of request, sequence, null, null);
 }
 
 static COLD bipolar nl80211_authorize(nl80211 address_to session, p32 index,
@@ -6814,7 +6792,7 @@ static COLD bipolar wifi_eapol_step(wifi_link address_to link, p8 address_to fra
                                                                     kck + 32, 16)))
                 failed = nl80211_new_key(address_of link->session, link->index, 0,
                                          NL80211_KEYTYPE_PAIRWISE, link->bssid, kck + 32,
-                                         16, null, 0, false);
+                                         16, null, 0, false, WLAN_CIPHER_CCMP);
         if (!failed && fresh)
         {
                 memory_copy(link->ptk, link->pending, sizeof(link->ptk));
@@ -6833,7 +6811,7 @@ static COLD bipolar wifi_eapol_step(wifi_link address_to link, p8 address_to fra
         {
                 failed = nl80211_new_key(address_of link->session, link->index, idx,
                                          NL80211_KEYTYPE_GROUP, null, what.gtk, 16, frame + 65,
-                                         6, true);
+                                         6, true, WLAN_CIPHER_CCMP);
                 if (!failed)
                 {
                         memory_copy(link->gtk[idx], what.gtk, 16);
@@ -6849,8 +6827,11 @@ static COLD bipolar wifi_eapol_step(wifi_link address_to link, p8 address_to fra
             (!(link->igtk_installed & (1u << (what.igtk_id - 4))) ||
              memory_compare(what.igtk + 6, link->igtk[what.igtk_id - 4], 16)))
         {
-                failed = nl80211_new_igtk(address_of link->session, link->index, what.igtk_id,
-                                          what.igtk + 6, what.igtk);
+                //      The IGTK is a group key of its own cipher, its packet
+                //      number the six bytes at what.igtk.
+                failed = nl80211_new_key(address_of link->session, link->index, what.igtk_id,
+                                         NL80211_KEYTYPE_GROUP, null, what.igtk + 6, 16,
+                                         what.igtk, 6, false, WLAN_CIPHER_BIP_CMAC_128);
                 if (!failed)
                 {
                         memory_copy(link->igtk[what.igtk_id - 4], what.igtk + 6, 16);
