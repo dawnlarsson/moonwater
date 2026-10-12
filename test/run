@@ -19614,23 +19614,65 @@ if font:
                 kids, "1 1"))
     said("R1.2b")
 
-    #   Control-Shift-T asks the machine for a terminal and the machine script starts it: one more, whose
-    #   parent is not the compositor, that stays up and answers. Everything on the desktop is started by
-    #   the script and by nothing else.
+    #   What is on the screen of a plain boot with a font: the panel with its text, the kernel log behind
+    #   with the boot's messages in it, and the terminal in front with its prompt, each where its share of
+    #   the output puts it. Programs are read by what started them: the machine script, not the compositor.
     def pids(name):
         return shell.run("grep -l '^%s$' /proc/[0-9]*/comm | sed 's#/proc/\\([0-9]*\\)/comm#\\1#'" % name, 20)[0].split()
 
     def ppid(pid):
         return shell.number("cut -d' ' -f4 /proc/%s/stat" % pid, 20) if pid else ""
 
+    until(lambda: len(pids("klog")) == 1, 60)
     time.sleep(3)
+
+    def light(data, width, x1, y1, x2, y2, floor=0x90):
+        return sum(1 for y in range(y1, y2) for x in range(x1, x2) if data[(y * width + x) * 3] > floor)
+
+    log_pids = pids("klog")
+    out.append(("R1.2c the kernel log is a program on the compositor, made by the machine script and not by it",
+                "%s %s" % ("yes" if len(log_pids) == 1 else "no",
+                           "script" if log_pids and ppid(log_pids[0]) not in ("", compositor() or "-") else "compositor"), "yes script"))
+    shot("r1-desktop", 1)
+    width, height, data = load("r1-desktop")
+    log_x, log_y = width * 3 // 100, height * 6 // 100
+    term_x, term_y = width * 44 // 100, height * 14 // 100
+    out.append(("R1.2d the panel carries text: its band holds light pixels where the window buttons and the clock are",
+                "yes" if light(data, width, 0, height - 20, width, height - 4, 0xb0) > 150 else "no", "yes"))
+    out.append(("R1.2e the kernel log window shows the boot's messages: light text in the part of it the terminal does not cover",
+                "yes" if light(data, width, log_x + 4, log_y + 30, width * 40 // 100, log_y + 330) > 2000 else "no", "yes"))
+    out.append(("R1.2f the terminal shows its prompt, in the share of the output the machine script's start leaves it",
+                "yes" if light(data, width, term_x + 4, term_y + 30, term_x + 300, term_y + 90) > 20 else "no", "yes"))
+    out.append(("R1.2g the terminal is in front of the log: its titlebar crosses the log's right part, as the log's body does at its left",
+                "yes" if (data[((term_y + 8) * width + width * 50 // 100) * 3:][:3] !=
+                          data[((term_y + 8) * width + width * 30 // 100) * 3:][:3]) else "no", "yes"))
+    out.append(("R1.2h the terminal is as wide as its share of the output: a pixel at 95 percent across is the terminal's body, not the desktop's ground",
+                "yes" if data[((height * 40 // 100) * width + width * 95 // 100) * 3:][:3] != bytes([0x1b, 0x27, 0x33]) else "no", "yes"))
+
+    #   A line written to the kernel log is on the screen in a frame, with nothing polled for it.
+    shell.run("echo r1-klog-written-here-one > /dev/kmsg; echo r1-klog-written-here-two > /dev/kmsg", 10)
+    time.sleep(1)
+    shot("r1-desktop2", 1)
+    width, height, after = load("r1-desktop2")
+    changed = sum(1 for y in range(log_y + 30, log_y + 330) for x in range(log_x + 4, width * 40 // 100)
+                  if after[(y * width + x) * 3:][:3] != data[(y * width + x) * 3:][:3])
+    out.append(("R1.2i a message written to /dev/kmsg is drawn in the log window", "yes" if changed > 100 else "no (%d)" % changed, "yes"))
+    pid = log_pids[0] if log_pids else "0"
+    print("r1 klog memory %s" % shell.run("grep -E '^(VmRSS|RssAnon|RssFile|RssShmem):' /proc/%s/status | tr -s '\\t ' ' ' | tr '\\n' ' '" % pid, 20)[0], file=sys.stderr)
+    first = shell.number("grep voluntary_ctxt_switches /proc/%s/status | tr -dc '0-9\\n' | head -1" % pid, 20)
+    time.sleep(5)
+    second = shell.number("grep voluntary_ctxt_switches /proc/%s/status | tr -dc '0-9\\n' | head -1" % pid, 20)
+    out.append(("R1.2j an idle kernel log window wakes no time in five seconds", "yes" if first and first == second else "%s %s" % (first, second), "yes"))
+
+    #   Control-Shift-T asks the machine for a terminal and the machine script starts it: one more, whose
+    #   parent is not the compositor, that stays up and answers.
     before = pids("terminal")
     chord("ctrl", "shift", "t")
     more, _ = until(lambda: len(pids("terminal")) == len(before) + 1, 20)
     time.sleep(3)
     now = pids("terminal")
     added = [pid for pid in now if pid not in before]
-    out.append(("R1.2c Control-Shift-T is a request the machine script answers: one more terminal, not the compositor's child, still there after three seconds",
+    out.append(("R1.2k Control-Shift-T is a request the machine script answers: one more terminal, not the compositor's child, still there after three seconds",
                 "%s %s" % ("one more" if more and len(now) == len(before) + 1 else "no (%d to %d)" % (len(before), len(now)),
                            "script" if added and ppid(added[0]) not in ("", compositor() or "-") else "compositor"), "one more script"))
 else:

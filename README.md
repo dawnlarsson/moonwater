@@ -387,7 +387,9 @@ The press, its repeat and its release are all taken, so no program sees half of
 the chord.
 
 The desktop the machine script starts is the userspace compositor, under a
-supervisor: `/compositor`, and with a font its panel and a terminal on it. The
+supervisor: `/compositor`, and with a font its panel, the kernel log (`/klog`,
+which follows `/dev/kmsg` from the boot's first message and scrolls with the
+keys and the wheel) behind a terminal, each sized as a share of the output. The
 compositor runs in a session of its own; when it ends or dies it is started
 again at once, then after half a second, then after two, and one that has ended
 four times without living half a minute is given up: Canvas, which has the card

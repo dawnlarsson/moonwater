@@ -46,6 +46,19 @@
 // them, and never fewer than two screens of the tallest window the output could hold.
 #define TERMINAL_HISTORY 512
 #define TERMINAL_FACES 4
+// The window of each on a plain boot, as percents of the output: the width and height it takes and where its top left
+// corner goes. The log is behind and the terminal in front, over the log's right edge; the compositor keeps both on the
+// work area, which the shares leave room for at any scale a panel takes.
+#define TERMINAL_WIDE 52
+#define TERMINAL_HIGH 62
+#define TERMINAL_LEFT 44
+#define TERMINAL_TOP 14
+#define TERMINAL_LOG_WIDE 52
+#define TERMINAL_LOG_HIGH 62
+#define TERMINAL_LOG_LEFT 3
+#define TERMINAL_LOG_TOP 6
+// Lines the log keeps: the kernel's own ring is 128 KiB of text and is what this follows from the start.
+#define TERMINAL_LOG_HISTORY 1024
 #define TERMINAL_SIZE 16
 #define TERMINAL_ATLAS 512
 // A ring is cut for the widest display there is, or this, as the kernel's was.
@@ -807,6 +820,48 @@ static unsigned int terminal_pixels(unsigned int columns, unsigned int rows, uns
 }
 
 /*
+        The surface this program draws on, made as large as a share of the output holds in whole cells, and
+        where that share puts it. What the output is, the compositor says once there is a surface, so one
+        cell is made first and the page the program draws on is made at its size before anything is shown;
+        the shares are percents, which is what lets one rule size a window on any screen. The window goes
+        where left and top (percents of the output) put it and the compositor keeps it on the work area.
+*/
+static struct surface *terminal_open(unsigned int wide, unsigned int high, unsigned int left, unsigned int top,
+                                     unsigned int address_to columns, unsigned int address_to rows)
+{
+        unsigned int pixels_h, pixels_w = terminal_pixels(1, 1, &pixels_h);
+        struct surface *surface = surface_open(pixels_w, pixels_h, SURFACE_ROLE_APP), *made;
+        unsigned int display_w, display_h, share_w;
+
+        if (!surface)
+                return surface;
+
+        display_w = surface->window.display_width;
+        display_h = surface->window.display_height;
+        share_w = display_w * wide / 100;
+        address_to columns = share_w > terminal.bar ? (share_w - terminal.bar) / terminal.cell_w : 1;
+        address_to rows = display_h * high / 100 / terminal.cell_h;
+        address_to columns = address_to columns < 20 ? COLUMNS_WANTED : address_to columns;
+        address_to rows = address_to rows < 4 ? ROWS_WANTED : address_to rows;
+        pixels_w = terminal_pixels(address_to columns, address_to rows, &pixels_h);
+        made = surface_resize(surface, pixels_w, pixels_h);
+
+        // Refused: the cell it is, which a configure from the compositor grows.
+        if (made == surface)
+        {
+                address_to columns = address_to rows = 1;
+                pixels_w = terminal_pixels(1, 1, &pixels_h);
+        }
+
+        surface = made;
+        terminal.width = pixels_w;
+        terminal.height = pixels_h;
+        surface->window.x = (int)(display_w * left / 100);
+        surface->window.y = (int)(display_h * top / 100);
+        return surface;
+}
+
+/*
         Said to the compositor: the ask with this serial has been answered. A
         commit whose damage is nothing, for when the answer was that the size
         stands.
@@ -1038,15 +1093,23 @@ static b32 terminal_receive(b32 master, const struct surface_event address_to ev
         return true;
 }
 
-static b32 terminal_main()
+static b32 klog_drain(b32 far, b32 address_to gone, positive budget);
+static b32 klog_receive(const struct surface_event address_to event, b32 address_to dirty, b32 address_to closing,
+                        unsigned int address_to resize);
+
+/*
+        The program, which is a shell on a pty, or with reading the kernel's log on /dev/kmsg (klog.c): the same
+        cells, window, bar and wheel, a far end that is read and never written to, and keys that scroll.
+*/
+static b32 terminal_run(b32 reading)
 {
         string_address paths[TERMINAL_FACES];
-        string_address bold = null;
-        unsigned int count = 0, size = TERMINAL_SIZE, pixels_h, pixels_w, resize[3] = {0, 0, 0};
-        unsigned int max_columns, hung = 0;
+        string_address bold = null, ready_file = null;
+        unsigned int count = 0, size = TERMINAL_SIZE, columns, rows, resize[3] = {0, 0, 0};
+        unsigned int max_columns, hung = reading;
         b32 master, gone = false, dirty = true, closing = false, held = false, paced;
-        positive oom_kills, sync_since = 0, stalled_since = 0, last_frame = 0;
-        bipolar child;
+        positive oom_kills = 0, sync_since = 0, stalled_since = 0, last_frame = 0;
+        bipolar child = 0;
         struct surface address_to surface;
 
         claim_standard_descriptors();
@@ -1065,13 +1128,18 @@ static b32 terminal_main()
                         bold = value;
                 else if (option[1] == 's')
                         size = (unsigned int)surface_number(value, 0);
+                else if (option[1] == 'w')
+                        ready_file = value;
         }
 
         size = size < 6 ? 6 : size > 200 ? 200 : size;
 
         if (!terminal_fonts(paths, count, bold, size))
         {
-                log_direct(str("terminal: no font; give one with -f FONT.ttf\n"));
+                if (reading)
+                        log_direct(str("klog: no font; give one with -f FONT.ttf\n"));
+                else
+                        log_direct(str("terminal: no font; give one with -f FONT.ttf\n"));
                 return 1;
         }
 
@@ -1081,8 +1149,11 @@ static b32 terminal_main()
 
         term_cell_w = terminal.cell_w;
         term_cell_h = terminal.cell_h;
-        pixels_w = terminal_pixels(COLUMNS_WANTED, ROWS_WANTED, &pixels_h);
-        surface = surface_open(pixels_w, pixels_h, SURFACE_ROLE_APP);
+
+        // Shares of the output, in percent: the log at the left and the terminal across from it, over the
+        // log's right edge, so that the log's lines can be read and the terminal is the one in front.
+        surface = reading ? terminal_open(TERMINAL_LOG_WIDE, TERMINAL_LOG_HIGH, TERMINAL_LOG_LEFT, TERMINAL_LOG_TOP, &columns, &rows)
+                      : terminal_open(TERMINAL_WIDE, TERMINAL_HIGH, TERMINAL_LEFT, TERMINAL_TOP, &columns, &rows);
 
         if (!surface)
         {
@@ -1092,16 +1163,12 @@ static b32 terminal_main()
         }
 
         terminal.surface = surface;
-        terminal.width = pixels_w;
-        terminal.height = pixels_h;
         terminal.bar_grab = -1;
 
         // Named, because the compositor puts a window of its own beside this one and two
         // untitled terminals are a guessing game. The pointer is wanted for the wheel.
-        string_copy((string_address)surface->window.title, (string_address) "shell");
+        string_copy((string_address)surface->window.title, (string_address)(reading ? "kernel log" : "shell"));
         surface->window.want = WINDOW_WANT_POINTER;
-        surface->window.x = ((int)surface->window.display_width - (int)pixels_w) / 2;
-        surface->window.y = ((int)surface->window.display_height - (int)pixels_h) / 2;
 
         max_columns = (surface->window.display_width > TERMINAL_CEILING ? surface->window.display_width
                                                                        : TERMINAL_CEILING) /
@@ -1111,8 +1178,9 @@ static b32 terminal_main()
                                             ? surface->window.display_height
                                             : TERMINAL_CEILING * 9 / 16) / terminal.cell_h;
 
-                window = window_grid_open(COLUMNS_WANTED, ROWS_WANTED, max_columns,
-                                          tallest * 2 + 1 > TERMINAL_HISTORY ? tallest * 2 + 1 : TERMINAL_HISTORY);
+                unsigned int history = reading ? TERMINAL_LOG_HISTORY : TERMINAL_HISTORY;
+
+                window = window_grid_open(columns, rows, max_columns, tallest * 2 + 1 > history ? tallest * 2 + 1 : history);
         }
 
         if (window)
@@ -1127,10 +1195,21 @@ static b32 terminal_main()
 
         full_reset();
 
-        child = term_session(&master, &oom_kills);
+        if (reading)
+        {
+                // Not a terminal's cursor, and nothing to follow but the log: read without waiting, and waited for
+                // with the compositor's events, which is what makes an idle log wake nothing.
+                cursor_visible = false;
+                master = (b32)system_open_at(AT_FDCWD, (string_address) "/dev/kmsg", FILE_READ | O_NONBLOCK | O_CLOEXEC);
+                child = (bipolar)master;
+        }
+        else
+                child = term_session(&master, &oom_kills);
 
         if (child < 0)
         {
+                string_format(log, "%s: cannot open its far end (%b)\n", reading ? "klog" : "terminal", child);
+                log_flush();
                 surface_close(surface);
                 return 1;
         }
@@ -1138,6 +1217,10 @@ static b32 terminal_main()
         cursor_show();
         terminal_frame();
         last_frame = clock_monotonic_nanoseconds();
+
+        // The first picture is committed: whoever is starting windows in an order may start the next.
+        if (ready_file)
+                system_close(system_open_at(AT_FDCWD, ready_file, FILE_WRITE | O_CLOEXEC));
 
         for (;;)
         {
@@ -1153,10 +1236,12 @@ static b32 terminal_main()
                         touched_bottom = 0;
                 }
 
-                term_follow_modes(master);
+                if (!reading)
+                        term_follow_modes(master);
 
                 while (surface_event(terminal.surface, &event))
-                        if (!terminal_receive(master, &event, &dirty, &closing, resize))
+                        if (!(reading ? klog_receive(&event, &dirty, &closing, resize)
+                                      : terminal_receive(master, &event, &dirty, &closing, resize)))
                                 gone = true;
 
                 if (resize[2] && resize[2] != terminal.serial)
@@ -1171,7 +1256,7 @@ static b32 terminal_main()
                 if (!gone && !term_send(master))
                         gone = true;
 
-                changed = term_drain(master, &gone, TERMINAL_BUDGET);
+                changed = reading ? klog_drain(master, &gone, TERMINAL_BUDGET) : term_drain(master, &gone, TERMINAL_BUDGET);
 
                 if (!gone && !term_send(master))
                         gone = true;
@@ -1248,6 +1333,10 @@ static b32 terminal_main()
                 if (!dirty)
                         stalled_since = 0;
 
+                // The X in the titlebar ends a log, which has no shell to hang up on.
+                if (reading && closing)
+                        gone = true;
+
                 if (gone)
                         break;
 
@@ -1289,7 +1378,10 @@ static b32 terminal_main()
                 }
         }
 
-        if (term_finish(child, master, hung, oom_kills))
+        if (reading)
+                system_close(master);
+
+        if (!reading && term_finish(child, master, hung, oom_kills))
         {
                 // What is left of a window whose shell is gone: its cells, until the X.
                 cursor_show();
@@ -1309,6 +1401,11 @@ static b32 terminal_main()
 
         surface_close(terminal.surface);
         return 0;
+}
+
+static b32 terminal_main()
+{
+        return terminal_run(false);
 }
 
 #endif // MOONWATER_CANVAS_TERMINAL

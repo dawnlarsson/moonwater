@@ -104,8 +104,9 @@ function moonwater_desktop_terminal {
 }
 
 # The desktop Canvas starts with: the compositor, which holds the card and
-# draws windows; the panel and a terminal on it; and, under them, the kernel's
-# own desktop, which has the card whenever the compositor does not.
+# draws windows; the panel, the kernel log and a terminal on it; and, under
+# them, the kernel's own desktop, which has the card whenever the compositor
+# does not.
 #
 # The compositor runs under a supervisor. When it exits or dies it is started
 # again at once, then after half a second, then after two; a compositor that
@@ -148,6 +149,24 @@ function desktop_run {
   echo $! >> /run/moonwater/desktop.kids
 }
 
+# The kernel log, as a window on the compositor: started first, so that it sits
+# behind the terminal, and waited for until its first picture is committed (it
+# makes the file named by -w then), because the order in which two windows are
+# made is the order they stack in.
+function desktop_log {
+  desktop_font
+  if [ -z "$desktop_face" ]; then
+    return
+  fi
+  rm -f /run/moonwater/klog.up
+  desktop_run /klog -f "$desktop_face" -w /run/moonwater/klog.up
+  desktop_wait=0
+  until [ -e /run/moonwater/klog.up ] || ! kill -0 $! 2> /dev/null || [ $desktop_wait -ge 100 ]; do
+    sleep 0.05
+    desktop_wait=$((desktop_wait + 1))
+  done
+}
+
 # A terminal on the compositor.
 function desktop_terminal {
   desktop_font
@@ -175,6 +194,7 @@ function desktop_session {
   if [ -n "$desktop_face" ]; then
     desktop_run /compositor grant panel /panel -f "$desktop_face"
   fi
+  desktop_log
   desktop_terminal
   wait $desktop_compositor
   echo "desktop: the compositor (pid $desktop_compositor) ended, status $?" > /dev/kmsg
