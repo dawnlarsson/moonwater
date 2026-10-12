@@ -159,6 +159,7 @@ static build_setting build_settings[BUILD_SETTING_ROOM] = {
         {"shell_source", "programs/shell"},
         {"utilities_source", "programs/utilities"},
         {"monitor_source", "programs/monitor.sh"},
+        {"font_source", "fonts"},
         {"patch_script", "kernel/patch/apply"},
         {"replace_script", "kernel/replace/apply"},
         {"firmware_script", "kernel/firmware/apply"},
@@ -5088,6 +5089,56 @@ static b32 build_kernel_source()
         "head -c 16777216 /coverage.map | gzip -c | base64 > /dev/ttyS1\n"   \
         "echo ok | base64 > /dev/ttyS1\n"
 
+/*
+        The fonts the panel and the terminal on the compositor draw with.
+
+        fonts/ holds the files of the Inter and IBM Plex Mono releases as the
+        projects shipped them, each family with its own OFL.txt, and they go
+        into the image as /usr/share/fonts/<family>/, licence beside the
+        files, which is where the machine script looks (THIRD-PARTY says what
+        they are and under what terms). They are only a font to something
+        that draws text: a build without the compositor, the panel or the
+        terminal ships none, and one that dropped them clears what the last
+        build put there, as the firmware does.
+*/
+static bool build_tool_named_on(string_address name)
+{
+        for (positive at = 0; at < build_tool_count; at++)
+                if (word_is(build_tool_table[at].name, name))
+                        return build_tool_on(address_of build_tool_table[at]);
+
+        return false;
+}
+
+static b32 build_fonts(string_address image)
+{
+        static const string_address families[] = {"inter", "ibm-plex-mono", null};
+        string_address source = build_setting_get("font_source");
+        string_address where = build_join(image, "/usr/share/fonts", null);
+
+        //      An empty image_root would make this the host's own /usr.
+        return_if(!*image, build_die("fonts: image_root is empty"));
+
+        if (build_tool("rm", "-rf", where, null))
+                return build_die("clearing the fonts");
+
+        if (!build_tool_named_on("panel") && !build_tool_named_on("terminal"))
+                return 0;
+
+        if (build_tool("mkdir", "-p", where, null))
+                return build_die("making the fonts directory");
+
+        for (positive at = 0; families[at]; at++)
+        {
+                string_address from = build_join(source, "/", families[at], null);
+
+                if (build_tool("cp", "-R", from, where, null))
+                        return build_die(build_join("installing the fonts of ", from, null));
+        }
+
+        return 0;
+}
+
 static b32 build_userspace()
 {
         string_address image = build_setting_get("image_root");
@@ -5283,7 +5334,7 @@ static b32 build_userspace()
         if (applet && build_tool_links(image, applet, false))
                 return 1;
 
-        return 0;
+        return build_fonts(image);
 }
 
 static b32 build_local(string_address address_to profiles, positive count,

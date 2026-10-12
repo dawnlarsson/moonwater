@@ -396,10 +396,14 @@ four times without living half a minute is given up: Canvas, which has the card
 the moment the compositor lets go, opens the kernel's terminal, so there is a
 shell on a screen. Control-Alt-Backspace on a compositor that hangs is therefore
 a restart of the desktop, not the end of it. The panel and the terminal take
-their text from a font and the image carries none: the path is the first line of
-`/root/font`, or the first mono face in `/usr/share/fonts`. With none the
-compositor runs alone, with its own panel and no terminal, and the log says why
-(`desktop: no font ...`). `moonwater.desktop=kernel` on the kernel's command
+their text from a font, and the image carries two families under
+`/usr/share/fonts`, as the projects released them (`fonts/`, under the SIL Open
+Font License; `THIRD-PARTY` says which and where from): the terminal draws with
+IBM Plex Mono, Regular and Bold, and the panel with Inter. The first line of
+`/root/font` is a path that takes both instead, with no bold. A build without
+those files falls back to the first mono face in `/usr/share/fonts`; with none
+the compositor runs alone, with its own panel and no terminal, and the log says
+why (`desktop: no font ...`). `moonwater.desktop=kernel` on the kernel's command
 line, or a `/root/desktop` that names anything but `canvas`, leaves the kernel's
 own desktop as it was: the log and a terminal of its own.
 

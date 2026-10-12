@@ -117,10 +117,13 @@ function moonwater_desktop_terminal {
 # Backspace turns Canvas off, to the text console, and the supervisor goes with
 # it. A moonwater canvas on after that starts the desktop again.
 #
-# The panel and the terminal take their text from a font, and nothing in the
-# image is one. The path is the first line of /root/font, or the first mono
-# face in /usr/share/fonts. With none the compositor runs alone: its own panel,
-# no terminal, and a line in the log saying why.
+# The panel, the kernel log and the terminal take their text from a font. The
+# image carries two families under /usr/share/fonts (fonts/ in the repository,
+# THIRD-PARTY for what they are): the terminal and the log draw with IBM Plex
+# Mono, Regular and Bold, and the panel with Inter. /root/font, whose first line is a path, takes both
+# instead, with no bold. A build without those files falls back to the first
+# mono face in /usr/share/fonts for both. With none the compositor runs alone:
+# its own panel, no terminal, and a line in the log saying why.
 #
 # moonwater.desktop=kernel on the kernel's command line, or /root/desktop
 # naming anything but canvas, leaves the kernel's desktop as it was: its log
@@ -129,12 +132,30 @@ function moonwater_desktop_terminal {
 # These helpers are not named moonwater_: a name that is would be an event.
 function desktop_font {
   desktop_face=
-  for desktop_try in "$(cat /root/font 2>/dev/null)" /usr/share/fonts/*/*Mono*Regular*.ttf /usr/share/fonts/*Mono*.ttf; do
+  desktop_bold=
+  desktop_text=
+  desktop_try=$(cat /root/font 2>/dev/null)
+  if [ -r "$desktop_try" ]; then
+    desktop_face=$desktop_try
+    desktop_text=$desktop_try
+    return
+  fi
+  for desktop_try in /usr/share/fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf /usr/share/fonts/*/*Mono*Regular*.ttf /usr/share/fonts/*Mono*.ttf; do
     if [ -r "$desktop_try" ]; then
       desktop_face=$desktop_try
-      return
+      break
     fi
   done
+  if [ -z "$desktop_face" ]; then
+    return
+  fi
+  desktop_text=$desktop_face
+  if [ "$desktop_face" = /usr/share/fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf ] && [ -r /usr/share/fonts/ibm-plex-mono/IBMPlexMono-Bold.ttf ]; then
+    desktop_bold=/usr/share/fonts/ibm-plex-mono/IBMPlexMono-Bold.ttf
+  fi
+  if [ -r /usr/share/fonts/inter/Inter-Regular.ttf ]; then
+    desktop_text=/usr/share/fonts/inter/Inter-Regular.ttf
+  fi
 }
 
 # Everything on the desktop is started here and by nothing else: the compositor
@@ -159,7 +180,7 @@ function desktop_log {
     return
   fi
   rm -f /run/moonwater/klog.up
-  desktop_run /klog -f "$desktop_face" -w /run/moonwater/klog.up
+  desktop_run /klog -f "$desktop_face" ${desktop_bold:+-b "$desktop_bold"} -w /run/moonwater/klog.up
   desktop_wait=0
   until [ -e /run/moonwater/klog.up ] || ! kill -0 $! 2> /dev/null || [ $desktop_wait -ge 100 ]; do
     sleep 0.05
@@ -171,7 +192,7 @@ function desktop_log {
 function desktop_terminal {
   desktop_font
   if [ -n "$desktop_face" ]; then
-    desktop_run /terminal -f "$desktop_face"
+    desktop_run /terminal -f "$desktop_face" ${desktop_bold:+-b "$desktop_bold"}
   else
     echo "desktop: no font in /root/font or /usr/share/fonts, so no terminal on the compositor" > /dev/kmsg
   fi
@@ -192,7 +213,7 @@ function desktop_session {
   desktop_font
   : > /run/moonwater/desktop.kids
   if [ -n "$desktop_face" ]; then
-    desktop_run /compositor grant panel /panel -f "$desktop_face"
+    desktop_run /compositor grant panel /panel -f "$desktop_text"
   fi
   desktop_log
   desktop_terminal

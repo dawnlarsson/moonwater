@@ -32,7 +32,8 @@
         differ from the buffer being drawn into, and those that differ from the
         one on the screen, which are not always the same.
 
-        The font is a path: the repository carries none.
+        The font is a path: the image carries IBM Plex Mono under
+        /usr/share/fonts, and the machine script names it.
 
             terminal [-s PIXELS] [-f FONT.ttf]... [-b BOLD.ttf]
 

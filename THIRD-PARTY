@@ -1,0 +1,71 @@
+Third-party material shipped in the Moonwater image
+
+Everything in this file is separate from the project's own code and is under
+its own licence, not the project's. The project's licence is in
+.github/LICENSE and does not apply to the files below, and nothing here
+changes it.
+
+
+Fonts
+
+Four font files are shipped, unmodified, as the projects released them: the
+bytes in fonts/ are the bytes in the release archives, not subset, not
+converted, not renamed inside (the SIL Open Font License's rule on Reserved
+Font Names concerns modified versions, and there are none). The build copies
+them, with each family's licence text beside them, into the image under
+/usr/share/fonts/ (fonts/inter/ to /usr/share/fonts/inter/, fonts/ibm-plex-mono/
+to /usr/share/fonts/ibm-plex-mono/). They are TrueType outlines (glyf), static
+instances, which is what src/canvas/font.c reads.
+
+Licence of both families: SIL Open Font License, Version 1.1 (26 February
+2007), the text kept next to each family's files as OFL.txt, exactly as the
+project ships it. The fonts are not sold by themselves; the licence text and
+the copyright notice travel with them.
+
+
+Inter
+
+  Copyright:  Copyright (c) 2016 The Inter Project Authors
+              (https://github.com/rsms/inter)
+  Licence:    SIL Open Font License 1.1, fonts/inter/OFL.txt
+              (the LICENSE.txt of the release archive, byte for byte)
+  Source:     https://github.com/rsms/inter/releases/tag/v4.1
+              https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip
+  Release:    4.1 (the fonts say "Version 4.001;git-9221beed3")
+  Archive:    Inter-4.1.zip
+              sha256 9883fdd4a49d4fb66bd8177ba6625ef9a64aa45899767dde3d36aa425756b11e
+              (computed after download: the project does not publish a
+              digest for it, and GitHub reports none for this asset)
+
+  fonts/inter/Inter-Regular.ttf   411640 bytes   from extras/ttf/Inter-Regular.ttf
+      sha256 40d692fce188e4471e2b3cba937be967878f631ad3ebbbdcd587687c7ebe0c82
+  fonts/inter/Inter-Bold.ttf      420428 bytes   from extras/ttf/Inter-Bold.ttf
+      sha256 288316099b1e0a47a4716d159098005eef7c0066921f34e3200393dbdb01947f
+  fonts/inter/OFL.txt               4380 bytes   from LICENSE.txt
+      sha256 262481e844521b326f5ecd053e59b98c8b2da78c8ee1bdbb6e8174305e54935a
+
+
+IBM Plex Mono
+
+  Copyright:  Copyright © 2017 IBM Corp. with Reserved Font Name "Plex"
+              (the fonts' own notice: "Copyright 2017 IBM Corp. All rights
+              reserved.")
+  Licence:    SIL Open Font License 1.1, fonts/ibm-plex-mono/OFL.txt
+              (fonts/complete/ttf/license.txt of the release archive, byte
+              for byte)
+  Source:     https://github.com/IBM/plex/releases/tag/%40ibm/plex-mono%402.5.0
+              https://github.com/IBM/plex/releases/download/%40ibm/plex-mono%402.5.0/ibm-plex-mono.zip
+  Release:    @ibm/plex-mono@2.5.0 (the fonts say "Version 2.005")
+  Archive:    ibm-plex-mono.zip
+              sha256 6d23f01257663d8cc49a0d64c22ced630b79e0e2a0ac08a0da86e9a38bbc481c
+              (the digest GitHub publishes for the asset, matched)
+
+  fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf   173052 bytes
+      from ibm-plex-mono/fonts/complete/ttf/IBMPlexMono-Regular.ttf
+      sha256 7c6fbddca4b700be918f5f6183d9bd4464fa427fe435f0b480d77fe2bb8c5a43
+  fonts/ibm-plex-mono/IBMPlexMono-Bold.ttf      175096 bytes
+      from ibm-plex-mono/fonts/complete/ttf/IBMPlexMono-Bold.ttf
+      sha256 74e5eedcfa4596497d34e19023cabdabd3a8c852b903007a5654a59591a72ffb
+  fonts/ibm-plex-mono/OFL.txt                     4360 bytes
+      from ibm-plex-mono/fonts/complete/ttf/license.txt
+      sha256 91c25c350d3cac39da2736d74f7ba37ef648f5237a4e330a240615bc8d8c4360

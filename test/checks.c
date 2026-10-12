@@ -98776,6 +98776,13 @@ b32 main()
 #define BOWL_DEFAULT_PATH "/fixture/bin"
 #include "../src/canvas/terminfo.c"
 static fn host_terminal_opening() {}
+// Control-Shift-T asks the machine for a terminal; nothing answers here.
+static bipolar host_bind_request(unsigned int op, unsigned int event, string_address command,
+                                 struct bind_control address_to control)
+{
+        (void)op, (void)event, (void)command, (void)control;
+        return -1;
+}
 static bipolar shell_exec_file(string_address path, string_address address_to arguments, positive count,
                                string_address address_to environment)
 {
@@ -98812,7 +98819,10 @@ static string_address address_to bowl_environment(string_address address_to inhe
         other buffer released or not, so buffers are drawn a frame behind, two
         behind, and not at all.
 
-        The font is the first argument: the repository carries none.
+        The fonts are the arguments, the repository's own: the first is what
+        the grid is drawn with and the second its bold, and every one after
+        them, with the second, has to load and have a letter A, which is the
+        four files the image ships.
 */
 static p64 render_state = 0x9e3779b97f4a7c15ull;
 
@@ -99234,9 +99244,25 @@ b32 main()
         }
 
         paths[0] = program_argument(1);
-        check("fonts: the face loads", terminal_fonts(paths, 1, null, 16));
+        check("fonts: the face loads", terminal_fonts(paths, 1, program_argument_count() > 2 ? program_argument(2) : null, 16));
         if (failures)
                 return test_report(null);
+
+        {
+                unsigned int shipped = 0, wanted = 0;
+
+                for (unsigned int at = 2; at < program_argument_count(); at++)
+                {
+                        font_face other;
+                        positive length = 0;
+                        positive bytes = surface_map_file(program_argument(at), &length);
+
+                        wanted++;
+                        if (bytes && font_load(&other, (const p8 address_to)bytes, length, 0) == 0 && font_glyph(&other, 'A'))
+                                shipped++;
+                }
+                check("fonts: every face the image ships loads and has the letter A", wanted && shipped == wanted);
+        }
 
         for (unsigned int at = 0; at < 256; at++)
                 terminal_colour[at] = window_cell_colour(at);

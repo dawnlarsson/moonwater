@@ -9552,25 +9552,19 @@ fi
 #       of the compositor's screen, runs the emulator through a stream of
 #       everything a terminal is sent with resizes, the wheel and frames at
 #       random between, and holds the screen and the buffer to a full draw
-#       of the grid after every frame. It needs a monospace font, which the
-#       repository does not carry: the first of the usual places has one.
+#       of the grid after every frame. The fonts are the repository's own
+#       (fonts/, the four files the image ships): IBM Plex Mono and its bold
+#       draw the grid, and all four have to load.
 group render
-render_font=
-for candidate in /usr/share/fonts/TTF/Hack-Regular.ttf /usr/share/fonts/TTF/DejaVuSansMono.ttf \
-        /usr/share/fonts/dejavu/DejaVuSansMono.ttf /usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf \
-        /usr/share/fonts/noto/NotoSansMono-Regular.ttf; do
-        if [ -f "$candidate" ]; then
-                render_font=$candidate
-                break
-        fi
-done
+render_font=fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf
+render_fonts="fonts/ibm-plex-mono/IBMPlexMono-Bold.ttf fonts/inter/Inter-Regular.ttf fonts/inter/Inter-Bold.ttf"
 if [ -n "${TEST_RUNNER:-}" ]; then
         :
-elif [ -z "$render_font" ]; then
-        note "terminal frames: NOT RUN, no monospace font in the usual places"
+elif [ ! -f "$render_font" ]; then
+        note "terminal frames: NOT RUN, the repository's fonts are not here"
 elif ! freestanding_check terminal "$work/terminal-check"; then
         lost 'terminal frames: the check did not build' ''
-elif "$work/terminal-check" "$render_font" > "$work/terminal-check.out" 2>&1; then
+elif "$work/terminal-check" "$render_font" $render_fonts > "$work/terminal-check.out" 2>&1; then
         won
 else
         lost 'terminal frames against a full draw' "$(grep 'FAIL\|first pixel' "$work/terminal-check.out" | head -3 | tr '\n' ' ')"
@@ -18550,7 +18544,8 @@ echo m10-done
 """)
 
 #   Control-Shift-T: a terminal started by the compositor, with the font the machine
-#   names in /root/font (the image has none, so the stick carries the host's).
+#   names in /root/font (this boot has the kernel's desktop and starts a compositor
+#   by hand, so the stick carries a font from the host).
 font11 = next((path for path in ("/usr/share/fonts/TTF/Hack-Regular.ttf", "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
                                  "/usr/share/fonts/dejavu/DejaVuSansMono.ttf",
                                  "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
@@ -19491,36 +19486,21 @@ fi
 #       QMP, and the kernel's own timestamps (a /dev/kmsg line written just
 #       before a kill, and the kernel's line when the card is Canvas's again)
 #       give the times. What is said of a stopped compositor is said of the
-#       recorded pid only. No font is in the image, so the pixels read are the
-#       compositor's ground and its own panel, not text.
+#       recorded pid only. The image carries the fonts the machine script finds
+#       (fonts/: IBM Plex Mono for the terminal, Inter for the panel), so the
+#       pixels read include text, on the panel and in the terminal.
 if [ -z "${CANVAS_ONLY:-}" ] || [ "${CANVAS_ONLY:-}" = r1 ]; then
-r1_font=
-for candidate in /usr/share/fonts/TTF/Hack-Regular.ttf /usr/share/fonts/TTF/DejaVuSansMono.ttf \
-        /usr/share/fonts/dejavu/DejaVuSansMono.ttf /usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf \
-        /usr/share/fonts/noto/NotoSansMono-Regular.ttf; do
-        if [ -f "$candidate" ]; then
-                r1_font=$candidate
-                break
-        fi
-done
-PYTHONPATH=$work python3 - "$image" "$r1_font" > "$work/r1-answers" 2>"$work/r1-why" <<'PY'
-import os, re, shutil, sys, time
+PYTHONPATH=$work python3 - "$image" > "$work/r1-answers" 2>"$work/r1-why" <<'PY'
+import os, re, sys, time
 from qmp_guest import *
 
-image, font = sys.argv[1:3]
+image = sys.argv[1]
 work = os.environ["MOONWATER_CANVAS_WORK"] + "/r1"
-stick = work + "/stick"
-os.makedirs(stick, exist_ok=True)
-if font:
-    shutil.copy(font, stick + "/font.ttf")
-else:
-    open(stick + "/none", "w").write("no font on this host\n")
+os.makedirs(work, exist_ok=True)
 out = []
 ser = work + "/ser"
 
 guest = Guest(desktop(image) + [
-    "-drive", "if=none,id=stick,format=raw,file=fat:ro:" + stick + ",readonly=on",
-    "-device", "usb-storage,drive=stick,removable=on",
     "-chardev", "socket,id=s0,path=" + ser + ",server=on,wait=off", "-serial", "chardev:s0",
     "-no-reboot", "-display", "none",
     "-append", "console=ttyS0 drm_client_lib.active= printk.time=1 moonwater.cursor_plane=0"],
@@ -19568,8 +19548,72 @@ out.append(("R1.1 a plain boot reaches the userspace compositor: its ground, its
             "1b2733 2f3f52 alive"))
 out.append(("and no tool's start was refused memory by the kernel (the shell's reserve is not counted)",
             shell.number("dmesg | grep -c __vm_enough_memory"), "0"))
-out.append(("and with no font in the image the log says why there is no terminal on it",
-            "yes" if "desktop: no font" in shell.run("dmesg | grep 'desktop:'")[0] else "no", "yes"))
+#   The image's fonts start the panel and a terminal with no help: the machine
+#   script finds them under /usr/share/fonts, and says nothing of a missing one.
+#   The terminal loads its font while the guest's two processors do everything else.
+until(lambda: shell.number("ps | grep -c '[t]erminal'", 30) == "1" and shell.number("ps | grep -c '[p]anel'", 30) == "1", 60)
+
+def command_lines(name):
+    return shell.run(r'for p in /proc/[0-9]*; do c=$(tr "\0" " " < $p/cmdline 2>/dev/null); case $c in "/%s "*) echo "$c";; esac; done' % name, 15)[0]
+
+out.append(("R1.1b with no font named, the image's fonts start the panel (Inter) and a terminal (IBM Plex Mono, with its bold), and the log is not missing one",
+            "%s %s %s" % ("panel-inter" if "/panel -f /usr/share/fonts/inter/Inter-Regular.ttf" in command_lines("panel") else "panel-other",
+                          "terminal-plex" if ("/terminal -f /usr/share/fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf -b "
+                                              "/usr/share/fonts/ibm-plex-mono/IBMPlexMono-Bold.ttf") in command_lines("terminal") else "terminal-other",
+                          "none missing" if "desktop: no font" not in shell.run("dmesg | grep 'desktop:'")[0] else "one missing"),
+            "panel-inter terminal-plex none missing"))
+
+#   Text is pixels. The panel's clock is lit in its tray, at the right end of
+#   the band along the bottom, which has nothing else bright in it, and the
+#   terminal's first row has its prompt, which the shell writes once it is up:
+#   the terminal is found as the black paper along the middle row (the desktop
+#   around it is 1b2733, and a pointer is not three hundred pixels wide).
+def bright(at, x0, y0, x1, y1):
+    n = 0
+    for y in range(y0, y1):
+        for x in range(x0, x1):
+            r, g, b = (int(at(x, y)[i:i + 2], 16) for i in (0, 2, 4))
+            n += r > 0x90 and g > 0x90 and b > 0x90
+    return n
+
+def terminal_body(width, height, at):
+    """The left and top of a run of black paper at least 300 pixels wide, or None."""
+    y = height // 2
+    best, start = (0, 0), None
+    for x in range(width + 1):
+        black = x < width and at(x, y) == "000000"
+        if black and start is None:
+            start = x
+        elif not black and start is not None:
+            best = max(best, (x - start, start))
+            start = None
+    if best[0] < 300:
+        return None
+    top = y
+    while top > 0 and at(best[1] + 8, top - 1) == "000000":
+        top -= 1
+    return best[1], top
+
+panel_lit = terminal_lit = 0
+body = None
+for _ in range(6):
+    width, height, at = picture("r1-text")
+    panel_lit = bright(at, W - 76, H - 24, W - 2, H)
+    body = terminal_body(width, height, at)
+    terminal_lit = bright(at, body[0], body[1], body[0] + 160, body[1] + 24) if body else 0
+    if panel_lit > 20 and terminal_lit > 12:
+        break
+    time.sleep(2)
+print("r1 text pixels: panel %d lit, terminal first row %d lit, terminal at %s" % (panel_lit, terminal_lit, body), file=sys.stderr)
+out.append(("R1.1c a plain boot draws text on the panel: the clock is lit in its tray",
+            "yes" if panel_lit > 20 else "%d lit pixels" % panel_lit, "yes"))
+out.append(("and the terminal on it draws its prompt in the first row of its paper",
+            "yes" if terminal_lit > 12 else "%d lit pixels" % terminal_lit, "yes"))
+def status_of(name):
+    return shell.run(r'for p in /proc/[0-9]*; do c=$(tr "\0" " " < $p/cmdline 2>/dev/null); case $c in "/%s"*) grep -E "^(VmRSS|RssAnon|RssFile|RssShmem):" $p/status; break;; esac; done' % name, 15)[0]
+
+print("r1 memory (kB): " + " | ".join("%s %s" % (name, " ".join(status_of(name).split())) for name in ("compositor", "panel", "terminal")) +
+      " | " + " ".join(shell.run(r'grep -E "^(MemFree|Shmem|Cached):" /proc/meminfo', 10)[0].split()), file=sys.stderr)
 
 #   Killed, the card goes back to Canvas and the supervisor starts it again.
 handback, restart = [], []
@@ -19595,89 +19639,100 @@ out.append(("and both inside a second (the first restart is at once, the second 
             "yes" if handback and restart and max(handback) < 1.0 and max(restart) < 2.0 else "%s %s" % (handback, restart),
             "yes"))
 
-#   With a font (the host's, on the stick: the image has none) the panel and a
-#   terminal are started on the compositor too, and a restart of the desktop
-#   brings them back.
-if font:
-    shell.run("mkdir -p /mnt; mount -r -t vfat /dev/sda1 /mnt; echo /mnt/font.ttf > /root/font", 20)
-    shell.run("moonwater canvas off", 15)
-    #   The machine script ends the desktop when it hears of Canvas going off, a
-    #   moment after the kernel has; a Canvas turned on before that finds the
-    #   compositor still holding the card and stays off, as it does for any program.
-    until(lambda: canvas() == "off" and shell.number("ps | grep -c '[c]ompositor'") == "0", 10)
-    shell.run("moonwater canvas on", 15)
-    until(lambda: newer(""), 15)
-    #   The terminal loads its font while the guest's two processors do everything else.
-    until(lambda: shell.number("ps | grep -c '[t]erminal'", 30) == "1" and shell.number("ps | grep -c '[p]anel'", 30) == "1", 60)
-    kids = "%s %s" % (shell.number("ps | grep -c '[t]erminal'", 30), shell.number("ps | grep -c '[p]anel'", 30))
-    out.append(("R1.2b with a font in /root/font the panel and a terminal are started on the compositor, after canvas off and on",
-                kids, "1 1"))
-    said("R1.2b")
+#   A font named in /root/font takes the panel's and the terminal's place, with
+#   no bold, and a restart of the desktop (canvas off and on) brings them back
+#   with it. The image's own bold face is a font that is not the default.
+override = "/usr/share/fonts/ibm-plex-mono/IBMPlexMono-Bold.ttf"
+shell.run("echo %s > /root/font" % override, 20)
+shell.run("moonwater canvas off", 15)
+#   The machine script ends the desktop when it hears of Canvas going off, a
+#   moment after the kernel has; a Canvas turned on before that finds the
+#   compositor still holding the card and stays off, as it does for any program.
+until(lambda: canvas() == "off" and shell.number("ps | grep -c '[c]ompositor'") == "0", 10)
+shell.run("moonwater canvas on", 15)
+until(lambda: newer(""), 15)
+#   The terminal loads its font while the guest's two processors do everything else.
+until(lambda: shell.number("ps | grep -c '[t]erminal'", 30) == "1" and shell.number("ps | grep -c '[p]anel'", 30) == "1", 60)
+kids = "%s %s" % (shell.number("ps | grep -c '[t]erminal'", 30), shell.number("ps | grep -c '[p]anel'", 30))
+out.append(("R1.2b with a font in /root/font the panel and a terminal are started on the compositor, after canvas off and on",
+            kids, "1 1"))
+terminal_line, panel_line = command_lines("terminal"), command_lines("panel")
+out.append(("and both draw with it, the terminal with no bold of its own",
+            "%s %s" % ("terminal-override" if "/terminal -f %s" % override in terminal_line and " -b " not in terminal_line else terminal_line,
+                       "panel-override" if "/panel -f %s" % override in panel_line else panel_line),
+            "terminal-override panel-override"))
+said("R1.2b")
 
-    #   What is on the screen of a plain boot with a font: the panel with its text, the kernel log behind
-    #   with the boot's messages in it, and the terminal in front with its prompt, each where its share of
-    #   the output puts it. Programs are read by what started them: the machine script, not the compositor.
-    def pids(name):
-        return shell.run("grep -l '^%s$' /proc/[0-9]*/comm | sed 's#/proc/\\([0-9]*\\)/comm#\\1#'" % name, 20)[0].split()
+#   Back to the image's own fonts: the same restart without /root/font, and then what a plain boot
+#   with fonts has on its screen.
+shell.run("rm -f /root/font", 20)
+shell.run("moonwater canvas off", 15)
+until(lambda: canvas() == "off" and shell.number("ps | grep -c '[c]ompositor'") == "0", 10)
+shell.run("moonwater canvas on", 15)
+until(lambda: newer(""), 15)
+until(lambda: shell.number("ps | grep -c '[t]erminal'", 30) == "1" and shell.number("ps | grep -c '[p]anel'", 30) == "1", 60)
 
-    def ppid(pid):
-        return shell.number("cut -d' ' -f4 /proc/%s/stat" % pid, 20) if pid else ""
+#   What is on the screen of a boot with the image's fonts: the panel with its text, the kernel log behind
+#   with the boot's messages in it, and the terminal in front with its prompt, each where its share of
+#   the output puts it. Programs are read by what started them: the machine script, not the compositor.
+def pids(name):
+    return shell.run("grep -l '^%s$' /proc/[0-9]*/comm | sed 's#/proc/\\([0-9]*\\)/comm#\\1#'" % name, 20)[0].split()
 
-    until(lambda: len(pids("klog")) == 1, 60)
-    time.sleep(3)
+def ppid(pid):
+    return shell.number("cut -d' ' -f4 /proc/%s/stat" % pid, 20) if pid else ""
 
-    def light(data, width, x1, y1, x2, y2, floor=0x90):
-        return sum(1 for y in range(y1, y2) for x in range(x1, x2) if data[(y * width + x) * 3] > floor)
+until(lambda: len(pids("klog")) == 1, 60)
+time.sleep(3)
 
-    log_pids = pids("klog")
-    out.append(("R1.2c the kernel log is a program on the compositor, made by the machine script and not by it",
-                "%s %s" % ("yes" if len(log_pids) == 1 else "no",
-                           "script" if log_pids and ppid(log_pids[0]) not in ("", compositor() or "-") else "compositor"), "yes script"))
-    shot("r1-desktop", 1)
-    width, height, data = load("r1-desktop")
-    log_x, log_y = width * 3 // 100, height * 6 // 100
-    term_x, term_y = width * 44 // 100, height * 14 // 100
-    out.append(("R1.2d the panel carries text: its band holds light pixels where the window buttons and the clock are",
-                "yes" if light(data, width, 0, height - 20, width, height - 4, 0xb0) > 150 else "no", "yes"))
-    out.append(("R1.2e the kernel log window shows the boot's messages: light text in the part of it the terminal does not cover",
-                "yes" if light(data, width, log_x + 4, log_y + 30, width * 40 // 100, log_y + 330) > 2000 else "no", "yes"))
-    out.append(("R1.2f the terminal shows its prompt, in the share of the output the machine script's start leaves it",
-                "yes" if light(data, width, term_x + 4, term_y + 30, term_x + 300, term_y + 90) > 20 else "no", "yes"))
-    out.append(("R1.2g the terminal is in front of the log: its titlebar crosses the log's right part, as the log's body does at its left",
-                "yes" if (data[((term_y + 8) * width + width * 50 // 100) * 3:][:3] !=
-                          data[((term_y + 8) * width + width * 30 // 100) * 3:][:3]) else "no", "yes"))
-    out.append(("R1.2h the terminal is as wide as its share of the output: a pixel at 95 percent across is the terminal's body, not the desktop's ground",
-                "yes" if data[((height * 40 // 100) * width + width * 95 // 100) * 3:][:3] != bytes([0x1b, 0x27, 0x33]) else "no", "yes"))
+def light(data, width, x1, y1, x2, y2, floor=0x90):
+    return sum(1 for y in range(y1, y2) for x in range(x1, x2) if data[(y * width + x) * 3] > floor)
 
-    #   A line written to the kernel log is on the screen in a frame, with nothing polled for it.
-    shell.run("echo r1-klog-written-here-one > /dev/kmsg; echo r1-klog-written-here-two > /dev/kmsg", 10)
-    time.sleep(1)
-    shot("r1-desktop2", 1)
-    width, height, after = load("r1-desktop2")
-    changed = sum(1 for y in range(log_y + 30, log_y + 330) for x in range(log_x + 4, width * 40 // 100)
-                  if after[(y * width + x) * 3:][:3] != data[(y * width + x) * 3:][:3])
-    out.append(("R1.2i a message written to /dev/kmsg is drawn in the log window", "yes" if changed > 100 else "no (%d)" % changed, "yes"))
-    pid = log_pids[0] if log_pids else "0"
-    print("r1 klog memory %s" % shell.run("grep -E '^(VmRSS|RssAnon|RssFile|RssShmem):' /proc/%s/status | tr -s '\\t ' ' ' | tr '\\n' ' '" % pid, 20)[0], file=sys.stderr)
-    first = shell.number("grep voluntary_ctxt_switches /proc/%s/status | tr -dc '0-9\\n' | head -1" % pid, 20)
-    time.sleep(5)
-    second = shell.number("grep voluntary_ctxt_switches /proc/%s/status | tr -dc '0-9\\n' | head -1" % pid, 20)
-    out.append(("R1.2j an idle kernel log window wakes no time in five seconds", "yes" if first and first == second else "%s %s" % (first, second), "yes"))
+log_pids = pids("klog")
+out.append(("R1.2c the kernel log is a program on the compositor, made by the machine script and not by it",
+            "%s %s" % ("yes" if len(log_pids) == 1 else "no",
+                       "script" if log_pids and ppid(log_pids[0]) not in ("", compositor() or "-") else "compositor"), "yes script"))
+shot("r1-desktop", 1)
+width, height, data = load("r1-desktop")
+log_x, log_y = width * 3 // 100, height * 6 // 100
+term_x, term_y = width * 44 // 100, height * 14 // 100
+out.append(("R1.2d the panel carries text: its band holds light pixels where the window buttons and the clock are",
+            "yes" if light(data, width, 0, height - 20, width, height - 4, 0xb0) > 150 else "no", "yes"))
+out.append(("R1.2e the kernel log window shows the boot's messages: light text in the part of it the terminal does not cover",
+            "yes" if light(data, width, log_x + 4, log_y + 30, width * 40 // 100, log_y + 330) > 2000 else "no", "yes"))
+out.append(("R1.2f the terminal shows its prompt, in the share of the output the machine script's start leaves it",
+            "yes" if light(data, width, term_x + 4, term_y + 30, term_x + 300, term_y + 90) > 20 else "no", "yes"))
+out.append(("R1.2g the terminal is in front of the log: its titlebar crosses the log's right part, as the log's body does at its left",
+            "yes" if (data[((term_y + 8) * width + width * 50 // 100) * 3:][:3] !=
+                      data[((term_y + 8) * width + width * 30 // 100) * 3:][:3]) else "no", "yes"))
+out.append(("R1.2h the terminal is as wide as its share of the output: a pixel at 95 percent across is the terminal's body, not the desktop's ground",
+            "yes" if data[((height * 40 // 100) * width + width * 95 // 100) * 3:][:3] != bytes([0x1b, 0x27, 0x33]) else "no", "yes"))
 
-    #   Control-Shift-T asks the machine for a terminal and the machine script starts it: one more, whose
-    #   parent is not the compositor, that stays up and answers.
-    before = pids("terminal")
-    chord("ctrl", "shift", "t")
-    more, _ = until(lambda: len(pids("terminal")) == len(before) + 1, 20)
-    time.sleep(3)
-    now = pids("terminal")
-    added = [pid for pid in now if pid not in before]
-    out.append(("R1.2k Control-Shift-T is a request the machine script answers: one more terminal, not the compositor's child, still there after three seconds",
-                "%s %s" % ("one more" if more and len(now) == len(before) + 1 else "no (%d to %d)" % (len(before), len(now)),
-                           "script" if added and ppid(added[0]) not in ("", compositor() or "-") else "compositor"), "one more script"))
-else:
-    out.append(("R1.2b with a font in /root/font the panel and a terminal are started on the compositor, after canvas off and on",
-                "not run: no monospace font on the host", "1 1"))
+#   A line written to the kernel log is on the screen in a frame, with nothing polled for it.
+shell.run("echo r1-klog-written-here-one > /dev/kmsg; echo r1-klog-written-here-two > /dev/kmsg", 10)
+time.sleep(1)
+shot("r1-desktop2", 1)
+width, height, after = load("r1-desktop2")
+changed = sum(1 for y in range(log_y + 30, log_y + 330) for x in range(log_x + 4, width * 40 // 100)
+              if after[(y * width + x) * 3:][:3] != data[(y * width + x) * 3:][:3])
+out.append(("R1.2i a message written to /dev/kmsg is drawn in the log window", "yes" if changed > 100 else "no (%d)" % changed, "yes"))
+pid = log_pids[0] if log_pids else "0"
+print("r1 klog memory %s" % shell.run("grep -E '^(VmRSS|RssAnon|RssFile|RssShmem):' /proc/%s/status | tr -s '\\t ' ' ' | tr '\\n' ' '" % pid, 20)[0], file=sys.stderr)
+first = shell.number("grep voluntary_ctxt_switches /proc/%s/status | tr -dc '0-9\\n' | head -1" % pid, 20)
+time.sleep(5)
+second = shell.number("grep voluntary_ctxt_switches /proc/%s/status | tr -dc '0-9\\n' | head -1" % pid, 20)
+out.append(("R1.2j an idle kernel log window wakes no time in five seconds", "yes" if first and first == second else "%s %s" % (first, second), "yes"))
+
+#   Control-Shift-T asks the machine for a terminal and the machine script starts it: one more, whose
+#   parent is not the compositor, that stays up and answers.
+before = pids("terminal")
+chord("ctrl", "shift", "t")
+more, _ = until(lambda: len(pids("terminal")) == len(before) + 1, 20)
+time.sleep(3)
+now = pids("terminal")
+added = [pid for pid in now if pid not in before]
+out.append(("R1.2k Control-Shift-T is a request the machine script answers: one more terminal, not the compositor's child, still there after three seconds",
+            "%s %s" % ("one more" if more and len(now) == len(before) + 1 else "no (%d to %d)" % (len(before), len(now)),
+                       "script" if added and ppid(added[0]) not in ("", compositor() or "-") else "compositor"), "one more script"))
 
 #   A compositor that has stopped answering: Control-Alt-Backspace ends it and
 #   a new one is started, with the keyboard heard by the kernel alone.
@@ -20599,8 +20654,8 @@ for label, extra in (("plain", ""), ("dark", "moonwater.pm_dark=5"), ("undone", 
 #       And with the compositor in userspace holding the card, which nothing
 #       tells that the machine slept: it finds out from the clocks when the
 #       key that wakes it arrives, says so in the machine's log, and draws the
-#       screen again. The plain boot starts it, with its own panel and no terminal
-#       (the image has no font), so the shell is the serial line.
+#       screen again. The plain boot starts it, with its panel and a terminal
+#       the image's fonts draw, and the shell the lane drives is the serial line.
 label = "compositor"
 work = base + "/" + label
 os.makedirs(work, exist_ok=True)
