@@ -699,6 +699,9 @@ static const argument_option wget_options[] = {
     {null},
 };
 
+/* The way out that ends every certificate refusal, in GNU wget's words. */
+#define NET_WGET_INSECURE "To connect to %w insecurely, use `--no-check-certificate'.\n"
+
 /* wget's exit statuses are GNU wget's: 1 anything else, 2 a command line
    it cannot parse, 3 a file it cannot write, 4 the network, 6 a server
    refusing credentials, 8 a server answering with an error. */
@@ -794,24 +797,20 @@ static COLD b32 net_wget_failed(bipolar status, b32 code, p8 address_to where,
         case HTTP_UNTRUSTED:
                 return string_report(log_error, WGET_SSL,
                                      "ERROR: The certificate of '%w' is not trusted.\n"
-                                     "To connect to %w insecurely, use "
-                                     "`--no-check-certificate'.\n",
+                                     NET_WGET_INSECURE,
                                      writer_terminal_quoted_name, host,
                                      writer_terminal_quoted_name, host);
         case HTTP_MISMATCH:
                 return string_report(log_error, WGET_SSL,
                                      "The certificate's owner does not match "
-                                     "hostname '%w'\n"
-                                     "To connect to %w insecurely, use "
-                                     "`--no-check-certificate'.\n",
+                                     "hostname '%w'\n" NET_WGET_INSECURE,
                                      writer_terminal_quoted_name, host,
                                      writer_terminal_quoted_name, host);
         case HTTP_EXPIRED:
         case HTTP_NOT_YET:
                 return string_report(log_error, WGET_SSL,
                                      "ERROR: The certificate of '%w' %s.\n"
-                                     "To connect to %w insecurely, use "
-                                     "`--no-check-certificate'.\n",
+                                     NET_WGET_INSECURE,
                                      writer_terminal_quoted_name, host,
                                      status == HTTP_EXPIRED
                                          ? "has expired" : "is not yet activated",
@@ -824,16 +823,14 @@ static COLD b32 net_wget_failed(bipolar status, b32 code, p8 address_to where,
         case HTTP_REVOKED:
                 return string_report(log_error, WGET_SSL,
                                      "ERROR: The certificate of '%w' has been revoked.\n"
-                                     "To connect to %w insecurely, use "
-                                     "`--no-check-certificate'.\n",
+                                     NET_WGET_INSECURE,
                                      writer_terminal_quoted_name, host,
                                      writer_terminal_quoted_name, host);
         case HTTP_UNCHECKED:
                 return string_report(log_error, WGET_SSL,
                                      "ERROR: Whether the certificate of '%w' is "
                                      "revoked could not be checked.\n"
-                                     "To connect to %w insecurely, use "
-                                     "`--no-check-certificate'.\n",
+                                     NET_WGET_INSECURE,
                                      writer_terminal_quoted_name, host,
                                      writer_terminal_quoted_name, host);
         //      Not a wrong clock but an unset one: it reads earlier than the
@@ -856,8 +853,7 @@ static COLD b32 net_wget_failed(bipolar status, b32 code, p8 address_to where,
                 return string_report(log_error, WGET_SSL,
                                      "ERROR: The certificate of '%w' was not "
                                      "logged as Certificate Transparency asks "
-                                     "(SCTs from two log operators).\nTo connect "
-                                     "to %w insecurely, use `--no-check-certificate'.\n",
+                                     "(SCTs from two log operators).\n" NET_WGET_INSECURE,
                                      writer_terminal_quoted_name, host,
                                      writer_terminal_quoted_name, host);
         case HTTP_PRIVATE:
