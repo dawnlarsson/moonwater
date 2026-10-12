@@ -18565,9 +18565,11 @@ if [ -z "${CANVAS_ONLY:-}" ] || [ "${CANVAS_ONLY:-}" = m1 ]; then
 #       clicks go in through the tablet in between. The boot terminal is the
 #       one that has the keyboard, so it has it again once the card is back.
 #
-#       The first window is at (40, 40) and 320 by 200: its border starts at
-#       38, its titlebar is rows 40 to 59 and its body rows 60 to 259. The
-#       second, at (240, 140), covers the first's body from (238, 138).
+#       The first window is at (40, 40) and 320 by 200, its body rows 40 to
+#       239 and nothing around it; the second, at (240, 140), covers the
+#       first's body from there. A window's corners are round, so the points
+#       read are away from them. Which window has the keys is the panel's to
+#       show: its button is lit (4c6785) and the others' are not (2b3a4c).
 PYTHONPATH=$work python3 - "$image" > "$work/m1-answers" 2>"$work/m1-why" <<'PY'
 import os, re, sys, time
 from qmp_guest import *
@@ -18969,6 +18971,9 @@ def click(x, y):
     send([{"type": "btn", "data": {"down": False, "button": "left"}}])
     time.sleep(0.5)
 
+band = 24
+button = lambda i: 54 + i * 194 + 96
+
 width, height, before = picture("m1-before")
 kernel_windows = windows(width, height, before)
 
@@ -18984,8 +18989,8 @@ width, height, two = picture("m1-two")
 out.append(("M1.1 the compositor's desktop is the classic ink and a surface's body its fill",
             "yes" if two(4, 4) == "1b2733" and two(100, 100) == "336699" and two(1200, 700) == "1b2733"
             else "(4,4) %s, body %s, (1200,700) %s" % (two(4, 4), two(100, 100), two(1200, 700)), "yes"))
-out.append(("M1.2 the frame is drawn: border 2f3f52, an unfocused titlebar 2b3a4c",
-            "%s %s" % (two(39, 100), two(100, 50)), "2f3f52 2b3a4c"))
+out.append(("M1.2 there is no frame: a line of one pixel just outside the body, unlit, the desktop past it, and the body's own top row",
+            "%s %s %s" % (two(38, 100), two(39, 100), two(100, 40)), "1b2733 2f3f52 336699"))
 out.append(("the window opened second stacks above the first where they overlap",
             two(300, 200), "996633"))
 
@@ -18993,11 +18998,11 @@ click(100, 150)
 width, height, clicked = picture("m1-click")
 out.append(("a click on the first window raises it above the second",
             clicked(300, 200), "336699"))
-out.append(("M1.2 and focuses it: its titlebar lit 4c6785, the other's 2b3a4c",
-            "%s %s" % (clicked(100, 50), clicked(500, 150)), "4c6785 2b3a4c"))
+out.append(("M1.2 and focuses it: its button in the panel lit 4c6785, the other's 2b3a4c",
+            "%s %s" % (clicked(button(0), H - band // 2), clicked(button(1), H - band // 2)), "4c6785 2b3a4c"))
 said = re.findall(rb"surface: event 3 0 (-?\d+) (-?\d+)\r?\nsurface: event 4 1 272 0", serial())
-out.append(("M1.6 the press reaches the surface as POINTER_BUTTON at buffer pixel (60, 90)",
-            "%s,%s" % (said[-1][0].decode(), said[-1][1].decode()) if said else "no event", "60,90"))
+out.append(("M1.6 the press reaches the surface as POINTER_BUTTON at buffer pixel (60, 110)",
+            "%s,%s" % (said[-1][0].decode(), said[-1][1].decode()) if said else "no event", "60,110"))
 
 done = wait_for(b"m1-done", 30)
 time.sleep(1)
@@ -19027,12 +19032,11 @@ type_text("sh /mnt/m2\n")
 ready2 = wait_for(b"m2-ready", 40)
 time.sleep(0.5)
 width, height, off = picture("m2-off")
-#   200 by 100 with its frame, asked for at (99999, 99999), is put with its
-#   body at (W-202, H-148): the panel's 24 rows are not the window's, so its
-#   border ends where the panel's band begins, and its titlebar is the 20
-#   rows from there down.
-out.append(("M2.1 a window asked for far off the output is put on the work area, its titlebar above the panel",
-            off(W - 100, H - 138), "2b3a4c"))
+#   200 by 100, asked for at (99999, 99999), is put with its body at
+#   (W-201, H-125): the panel's 24 rows are not the window's, so its line
+#   of one pixel ends where the panel's band begins.
+out.append(("M2.1 a window asked for far off the output is put on the work area, just above the panel",
+            "%s %s %s" % (off(W - 100, H - 74), off(W - 100, H - 126), off(W - 100, H - 127)), "996633 2f3f52 1b2733"))
 #   Not where the first compositor's click went: a tablet that is told the
 #   place it already has reports nothing, and a pointer that starts in the
 #   middle of the output would press there.
@@ -19067,8 +19071,6 @@ type_text("sh /mnt/m3\n")
 ready3 = wait_for(b"m3-windows", 60)
 time.sleep(0.5)
 scale3 = [int(v) for v in re.findall(rb"\(scale (\d+)\)", serial())]
-band = 24
-button = lambda i: 54 + i * 194 + 96
 width, height, panel_up = picture("m3-windows")
 out.append(("M2.7 the compositor's own panel: its ink in the band along the bottom, the desktop's above it",
             "%s %s" % (panel_up(W // 2, H - band // 2), panel_up(W // 2, H - band - 1)), "2f3f52 1b2733"))
@@ -19083,10 +19085,10 @@ out.append(("M2.10 a panel claimed with no grant is refused",
             said(r"m3 no grant: (\d+)"), "1"))
 
 #   A device plugged in after the compositor started is heard: a mouse added
-#   to the running guest moves the pointer from one window's titlebar to
-#   another's (the tablet put it on the first, and only the new mouse has
-#   relative axes, so only it takes the moves), and a press on the tablet
-#   from there lights the window the pointer is over. A mouse nobody opened
+#   to the running guest moves the pointer from one window to another (the
+#   tablet put it on the first, and only the new mouse has relative axes, so
+#   only it takes the moves), and a press on the tablet from there lights the
+#   button of the window the pointer is over. A mouse nobody opened
 #   leaves the press on the first window. QEMU takes input-send-event's
 #   device argument for a hot-plugged mouse by dying, so it is not used.
 qcmd({"execute": "device_add", "arguments": {"driver": "usb-mouse", "id": "hot1"}})
@@ -19101,20 +19103,21 @@ for down in (True, False):
 time.sleep(0.4)
 width, height, plugged = picture("m3-plugged")
 out.append(("M2.11 a mouse plugged in after the compositor started presses: the window it pressed on is lit",
-            "%s %s" % (plugged(800, 210), plugged(400, 210)), "4c6785 2b3a4c"))
-click(400, 210)           # alpha's titlebar: it has the keys and is lit
+            "%s %s" % (plugged(button(1), H - band // 2), plugged(button(0), H - band // 2)), "4c6785 2b3a4c"))
+click(400, 210)           # alpha: it has the keys and its button is lit
 width, height, lit = picture("m3-focus")
-out.append(("M2.12 the window that was clicked has its button lit, as its titlebar is",
+out.append(("M2.12 the window that was clicked has its button lit",
             "%s %s" % (lit(button(0), H - band // 2), lit(button(1), H - band // 2)), "4c6785 2b3a4c"))
 click(W // 2, H - band // 2)         # the panel, away from every button
 type_text("a")
 width, height, after_panel = picture("m3-panel-click")
 out.append(("M2.13 a click on the panel does not move the keys: the window is still lit",
-            after_panel(400, 210), "4c6785"))
+            after_panel(button(0), H - band // 2), "4c6785"))
 click(button(1), H - band // 2)      # beta's button
 width, height, raised = picture("m3-button")
-out.append(("M2.14 a window's button brings its window up and gives it the keys",
-            "%s %s" % (raised(800, 210), raised(400, 210)), "4c6785 2b3a4c"))
+#   A window with the keys has its line lit: beta's left line is at x 699, alpha's right at 600.
+out.append(("M2.14 a window's button brings its window up and gives it the keys: its line lit, the other's not",
+            "%s %s %s" % (raised(699, 260), raised(600, 260), raised(750, 210)), "4c6785 2f3f52 996633"))
 click(button(2), H - band // 2)      # gamma's button: put away, and back
 width, height, restored = picture("m3-restore")
 out.append(("M2.15 the button of a window that was put away brings it back",
@@ -19228,15 +19231,16 @@ out.append(("K1.3 Caps Lock turns a letter over, å included, and turning it off
 out.append(("K1.4 the layout set while the compositor runs is the layout it types with: de has z where y is, and @ on AltGr and q",
             typed("m4-de-dump", "m4-de-end"), "21:122 16:64 44:121"))
 
-#   Alt-Tab and Alt-F9 on three windows. The titlebar of the window that has the
-#   keys is lit (4c6785) and the others' are not (2b3a4c); a window put away is
-#   not on the screen (the desktop's ink in its place). The windows are at x 100, 500 and 900, y 100.
+#   Alt-Tab and Alt-F9 on three windows. The button in the panel of the window that has
+#   the keys is lit (4c6785) and the others' are not (2b3a4c); a window put away has
+#   only the outline of a button (the panel's own ink inside it) and is not on the
+#   screen (the desktop's ink in its place). The windows are at x 100, 500 and 900, y 100.
 type_text("sh /mnt/m6\n")
 ready6 = wait_for(b"m6-ready", 60)
 time.sleep(0.5)
-lit = lambda at, n: "".join("L" if at(100 + 400 * i + 60, 110) == "4c6785" else
-                            "-" if at(100 + 400 * i + 60, 110) == "2b3a4c" else
-                            "." if at(100 + 400 * i + 60, 110) == "1b2733" else "?" for i in range(3))
+lit = lambda at, n: "".join("L" if at(button(i), H - band // 2) == "4c6785" else
+                            "-" if at(button(i), H - band // 2) == "2b3a4c" else
+                            "." if at(button(i), H - band // 2) == "2f3f52" else "?" for i in range(3))
 click(160, 200)
 width, height, six = picture("m6-one")
 first = lit(six, 0)
@@ -19261,7 +19265,7 @@ key("a")
 time.sleep(0.5)
 done6 = wait_for(b"m6-done", 60)
 text = serial().decode("latin1")
-out.append(("M6.1 a click gives the keys to its window: the first window's titlebar lit and the others not",
+out.append(("M6.1 a click gives the keys to its window: the first window's button lit and the others not",
             first, "L--"))
 out.append(("M6.2 Alt-Tab goes to the window behind the one on top, which is the third, and Alt letting go raises it",
             second, "--L"))
@@ -19325,7 +19329,7 @@ def reach(row):
     # How far the pointer went along a row of the window, from where the tablet put it.
     xs = [x for x, y in moves if abs(y - row) <= 2]
     return max(xs) - min(xs) if xs else -1
-slow7, fast7 = reach(300 - 120), reach(500 - 120)
+slow7, fast7 = reach(300 - 100), reach(500 - 100)
 out.append(("P1.1 a mouse moved slowly goes one to one: sixty reports of ten counts are 600 pixels",
             str(slow7), "600"))
 out.append(("P1.2 and quickly goes farther, by no more than the curve's two and a half",
@@ -19375,14 +19379,15 @@ def wears(name, x, y):
     return cursor_at(at, x, y, height, width)
 out.append(("C1.1 the pointer over the desktop is the arrow, drawn by the compositor",
             wears("m8-arrow", 2000, 910), "55 46 11x18 tl"))
-out.append(("C1.2 over a window's right edge it is the arrow across",
-            wears("m8-right", 1000, 460), "25 40 15x9 -"))
-out.append(("C1.3 over its bottom edge it is the arrow up and down",
-            wears("m8-bottom", 800, 621), "25 40 9x15 -"))
-out.append(("C1.4 over its bottom right corner it is the one that leans left",
-            wears("m8-corner", 1000, 621), "25 48 13x13 tl"))
-out.append(("C1.5 over its top right corner it is the one that leans right",
-            wears("m8-other", 1000, 301), "25 48 13x13 -"))
+#   The window is 400 by 300 at (600, 300), and its edges are the six pixels just outside it.
+out.append(("C1.2 just outside a window's right edge it is the arrow across",
+            wears("m8-right", 1002, 460), "25 40 15x9 -"))
+out.append(("C1.3 just below its bottom edge it is the arrow up and down",
+            wears("m8-bottom", 800, 602), "25 40 9x15 -"))
+out.append(("C1.4 off its bottom right corner it is the one that leans left",
+            wears("m8-corner", 1002, 602), "25 48 13x13 tl"))
+out.append(("C1.5 off its top right corner it is the one that leans right",
+            wears("m8-other", 1002, 297), "25 48 13x13 -"))
 out.append(("C1.6 and back over the desktop it is the arrow again",
             wears("m8-back", 1600, 900), "55 46 11x18 tl"))
 for step in range(12):
@@ -19396,14 +19401,14 @@ out.append(("C1.8 and a second after it is its size again",
             wears("m8-small", 1000, 900), "55 46 11x18 tl"))
 wait_for(b"m8-done", 90)
 
-#   Windows. Two windows were asked to be at the same place: the second is put a
-#   titlebar down and across (20 pixels), and the pixel that tells is one the
-#   second would cover if it were where it asked and does not where it is.
+#   Windows. Two windows were asked to be at the same place: the second is put
+#   twenty pixels down and across, and the pixel that tells is one the second
+#   would cover if it were where it asked and does not where it is.
 type_text("sh /mnt/m10\n")
 ready10 = wait_for(b"m10-ready", 60)
 time.sleep(0.5)
 width, height, w0 = picture("m10-cascade")
-out.append(("W1.1 a window put where another is goes a titlebar down and across: the first still shows at its left",
+out.append(("W1.1 a window put where another is goes down and across: the first still shows at its left",
             "%s %s" % (w0(305, 300), w0(330, 400)), "336699 996633"))
 
 def drag_to(x0, y0, x1, y1, hold=0.3):
@@ -19427,48 +19432,56 @@ def quick_double(x, y):
         time.sleep(0.08)
     time.sleep(1.2)
 
-#   A double click on the second window's titlebar fills the work area; another gives it back.
-quick_double(500, 230)
+def with_alt(do, *where):
+    # A window is taken hold of with Alt held: there is no titlebar to take.
+    send([press("alt", True)])
+    time.sleep(0.2)
+    do(*where)
+    send([press("alt", False)])
+    time.sleep(0.5)
+
+#   Alt and a double click on the second window fill the work area; another gives it back.
+with_alt(quick_double, 500, 230)
 width, height, w3 = picture("m10-maximized")
-out.append(("W3.1 a double click on a titlebar fills the work area (the panel's zone left alone)",
+out.append(("W3.1 Alt and a double click on a window fill the work area (the panel's zone left alone)",
             "%s %s %s" % (w3(2000, 600), w3(2000, 1050), w3(2000, 1058)), "996633 996633 2f3f52"))
-quick_double(1200, 12)
+with_alt(quick_double, 1200, 12)
 width, height, w4 = picture("m10-restored")
 out.append(("W3.2 and another puts it back where it was",
             "%s %s" % (w4(2000, 600), w4(500, 400)), "1b2733 996633"))
 
 #   A window dragged to the top edge fills the work area, and taken from there it is the size it was.
-drag_to(500, 230, 500, 3)
+with_alt(drag_to, 500, 230, 500, 3)
 width, height, w5 = picture("m10-top")
 out.append(("W4.1 a window let go of at the top edge fills the work area",
             "%s" % w5(2000, 600), "996633"))
-drag_to(1000, 12, 1000, 400)
+with_alt(drag_to, 1000, 12, 1000, 400)
 width, height, w6 = picture("m10-unsnapped")
-out.append(("W4.2 taken by its titlebar from there it is the size it was, under the hand",
+out.append(("W4.2 taken from there it is the size it was, under the hand",
             "%s %s" % (w6(900, 600), w6(2000, 600)), "996633 1b2733"))
-drag_to(900, 400, 3, 500)
+with_alt(drag_to, 900, 400, 3, 500)
 width, height, w7 = picture("m10-left")
 out.append(("W4.3 let go of at the left edge it fills the left half",
             "%s %s" % (w7(600, 700), w7(1400, 700)), "996633 1b2733"))
-drag_to(500, 12, 2557, 500)
+with_alt(drag_to, 500, 12, 2557, 500)
 width, height, w8 = picture("m10-right")
 out.append(("W4.4 and at the right edge the right half",
             "%s %s" % (w8(1400, 700), w8(600, 700)), "996633 1b2733"))
 
 #   Dragged by the bottom right corner, the first window grows: it is asked for the
-#   size the hand points at and answers with it. (The corner is where its outline,
-#   two pixels round its contents and the titlebar above them, ends.) Then by the
+#   size the hand points at and answers with it. (Its body is (300, 200) to
+#   (900, 500), and a corner is the six pixels each way just off it.) Then by the
 #   top left, and the corner that was not held stays where it was.
-drag_to(900, 522, 1100, 700)
+drag_to(902, 502, 1100, 700)
 width, height, w1 = picture("m10-grown")
 out.append(("W2.1 a window taken by its bottom right corner and dragged is the size the hand points at",
             "%s %s %s" % (w1(1000, 600), w1(1000, 720), w1(1150, 600)), "336699 1b2733 1b2733"))
-drag_to(299, 199, 199, 149)
+drag_to(297, 197, 197, 147)
 width, height, w2 = picture("m10-grown2")
 out.append(("W2.2 and by its top left corner grows up and to the left, the corner that was not held where it was",
             "%s %s %s" % (w2(230, 300), w2(1000, 600), w2(150, 300)), "336699 336699 1b2733"))
 
-#   Alt held, a press anywhere on a window takes hold of it, the body as much as the titlebar.
+#   Alt held, a press anywhere on a window takes hold of it.
 send([press("alt", True)])
 time.sleep(0.3)
 drag_to(500, 400, 700, 500)
@@ -19527,7 +19540,7 @@ stop = time.time() + 60
 while b"m9-ready" not in serial_plane() and time.time() < stop:
     time.sleep(0.2)
 time.sleep(0.5)
-for x, y in ((1000, 460), (800, 621), (1000, 621), (1000, 301), (2000, 900)):
+for x, y in ((1002, 460), (800, 602), (1002, 602), (1002, 297), (2000, 900)):
     moveto(x, y)
     time.sleep(0.3)
 #   A press on the window gives it the keys, and five typed at it say how long the compositor takes with a key.
@@ -19926,8 +19939,8 @@ body = None
 for _ in range(6):
     width, height, at = picture("r1-text")
     panel_lit = bright(at, W - 76, H - 24, W - 2, H)
-    #   Where the terminal is: its share of the output puts its top left at 44 and 14 percent, under its titlebar.
-    body = (width * 44 // 100 + 2, height * 14 // 100 + 24)
+    #   Where the terminal is: its share of the output puts its top left at 44 and 14 percent, its paper from there.
+    body = (width * 44 // 100, height * 14 // 100)
     terminal_lit = bright(at, body[0], body[1], body[0] + 160, body[1] + 24) if body else 0
     if panel_lit > 20 and terminal_lit > 12:
         break
@@ -20030,10 +20043,15 @@ out.append(("R1.2d the panel carries text: its band holds light pixels where the
 out.append(("R1.2e the kernel log window shows the boot's messages: light text in the part of it the terminal does not cover",
             "yes" if light(data, width, log_x + 4, log_y + 30, width * 40 // 100, log_y + 330) > 2000 else "no", "yes"))
 out.append(("R1.2f the terminal shows its prompt, in the share of the output the machine script's start leaves it",
-            "yes" if light(data, width, term_x + 4, term_y + 30, term_x + 300, term_y + 90) > 20 else "no", "yes"))
-out.append(("R1.2g the terminal is in front of the log: its titlebar crosses the log's right part, as the log's body does at its left",
-            "yes" if (data[((term_y + 8) * width + width * 50 // 100) * 3:][:3] !=
-                      data[((term_y + 8) * width + width * 30 // 100) * 3:][:3]) else "no", "yes"))
+            "yes" if light(data, width, term_x + 4, term_y + 2, term_x + 300, term_y + 70) > 20 else "no", "yes"))
+#   The log is 3 to 55 percent across and the terminal from 44: where they meet, below the
+#   terminal's banner and prompt, the log's lines show in front of a terminal that is behind it
+#   and the terminal's empty paper does if it is in front.
+#   Above the middle of the output, where the pointer starts and is drawn (an arrow is 55 white pixels).
+meet = light(data, width, width * 45 // 100, term_y + 160, width * 54 // 100, height * 47 // 100)
+beside = light(data, width, log_x + 4, term_y + 160, width * 40 // 100, height * 47 // 100)
+out.append(("R1.2g the terminal is in front of the log: where they meet, its empty paper hides the log's lines",
+            "yes" if meet < 30 and beside > 200 else "%d light where they meet, %d beside" % (meet, beside), "yes"))
 out.append(("R1.2h the terminal is as wide as its share of the output: a pixel at 95 percent across is the terminal's body, not the desktop's ground",
             "yes" if data[((height * 40 // 100) * width + width * 95 // 100) * 3:][:3] != bytes([0x1b, 0x27, 0x33]) else "no", "yes"))
 
@@ -20356,12 +20374,21 @@ DESKTOP = (0x1b, 0x27, 0x33)
 
 def window(width, height, at):
     """The terminal's body, as (left, top, right, bottom) of its black: the
-    desktop around it is 1b2733 and the body is black where nothing is drawn."""
+    desktop around it is 1b2733 and the body is black where nothing is drawn.
+    Across, the longest run that is not the desktop, so the pointer drawn
+    beside the window is not taken for its edge."""
     y = height // 2
-    left = next((x for x in range(width) if at(x, y) != DESKTOP), None)
-    right = next((x for x in range(width - 1, -1, -1) if at(x, y) != DESKTOP), None)
-    if left is None:
+    runs, start = [], None
+    for x in range(width + 1):
+        lit = x < width and at(x, y) != DESKTOP
+        if lit and start is None:
+            start = x
+        elif not lit and start is not None:
+            runs.append((start, x - 1))
+            start = None
+    if not runs:
         return None
+    left, right = max(runs, key=lambda run: run[1] - run[0])
     x = (left + right) // 2
     top = next((v for v in range(height) if at(x, v) == (0, 0, 0)), None)
     bottom = next((v for v in range(height - 1, -1, -1) if at(x, v) == (0, 0, 0)), None)
@@ -20429,7 +20456,8 @@ if not box or box[1] is None:
     out.append(("M5 the terminal is on the screen", "no window found", "yes"))
     box = (w // 2 - 300, h // 2 - 200, w // 2 + 300, h // 2 + 200)
 left, top, right, bottom = box
-first = lit(at, left, top, left + 120, top + 16)
+# The grid has a third of a cell of paper round it, inside the window's round corners.
+first = lit(at, left, top, left + 120, top + 28)
 out.append(("M5.3 the terminal shows text: the prompt is drawn in its first row",
             "yes" if first > 12 else "%d lit pixels" % first, "yes"))
 out.append(("and its paper is black below it",
@@ -20437,13 +20465,13 @@ out.append(("and its paper is black below it",
 
 # Keys go to the surface with focus, which a click gives.
 click((left + right) // 2, (top + bottom) // 2)
-before = lit(at, left, top, left + 400, top + 16)
+before = lit(at, left, top, left + 400, top + 28)
 type_text("echo m5-typed")
 # A slow guest is given a few looks: what is asked is that it gets there, and it is the
 # frames of the compositor that say how soon.
 for _ in range(4):
     w, h, at = picture("m5-typed")
-    after = lit(at, left, top, left + 400, top + 16)
+    after = lit(at, left, top, left + 400, top + 28)
     if after > before + 40:
         break
 out.append(("M5.3 a typed key's echo is on the screen",
@@ -20464,7 +20492,7 @@ w, h, at = picture("m5-before-resize")
 box = window(w, h, at) or box
 left, top, right, bottom = box
 count = len(sizes())
-drag(right - 2, (top + bottom) // 2, right - 202, (top + bottom) // 2)
+drag(right + 3, (top + bottom) // 2, right - 197, (top + bottom) // 2)
 time.sleep(1)
 w, h, at = picture("m5-narrow")
 narrow = window(w, h, at)
@@ -20513,6 +20541,9 @@ out.append(("and the rest of its string never runs", str(text.count(b"stringran-
 type_shell("seq 1 300\n")
 time.sleep(1.5)
 w, h, at = picture("m5-seq")
+# The wheel goes to the window under the pointer: put it on the terminal, wherever the drags left it.
+moveto((left + right) // 2, (top + bottom) // 2)
+time.sleep(0.3)
 for _ in range(4):
     send([{"type": "btn", "data": {"down": True, "button": "wheel-up"}},
           {"type": "btn", "data": {"down": False, "button": "wheel-up"}}])
@@ -20522,22 +20553,22 @@ w, h, again = picture("m5-wheel")
 moved = sum(1 for y in range(top, bottom, 3) for x in range(left, left + 60, 2) if at(x, y) != again(x, y))
 out.append(("M5 the wheel scrolls back through what was said",
             "yes" if moved > 150 else "%d pixels differ" % moved, "yes"))
-# The thumb is a pill in the gutter, which is the paper: in the gutter's middle column it is
-# whatever is not black, and the gutter has no track.
-bar = sum(1 for y in range(top, bottom) if again(right - 8, y) != (0, 0, 0))
+# The thumb is a pill in the gutter, which is the paper with no track, between the grid and the
+# paper round it: the column of the last twenty of the window with the most of what is not black.
+gutter = max(range(right - 19, right), key=lambda x: sum(1 for y in range(top, bottom, 2) if again(x, y) != (0, 0, 0)))
+bar = sum(1 for y in range(top, bottom) if again(gutter, y) != (0, 0, 0))
 out.append(("and the bar's thumb is in the gutter",
             "yes" if bar > 8 else "%d thumb pixels" % bar, "yes"))
 
 # And the bar is something to take hold of: the thumb dragged to the top is the oldest of it.
-thumb = [y for y in range(top, bottom) if again(right - 8, y) != (0, 0, 0)]
+thumb = [y for y in range(top, bottom) if again(gutter, y) != (0, 0, 0)]
 if thumb:
-    # Eight in: the pixels at a window's edge are the edge's, to resize by.
-    drag(right - 8, (thumb[0] + thumb[-1]) // 2, right - 8, top + 2)
+    drag(gutter, (thumb[0] + thumb[-1]) // 2, gutter, top + 2)
     time.sleep(0.5)
 w, h, dragged = picture("m5-bar")
-moved_to = [y for y in range(top, bottom) if dragged(right - 8, y) != (0, 0, 0)]
+moved_to = [y for y in range(top, bottom) if dragged(gutter, y) != (0, 0, 0)]
 out.append(("M5 a drag on the bar's thumb moves the view to where the thumb is",
-            "yes" if thumb and moved_to and moved_to[0] <= top + 12 and
+            "yes" if thumb and moved_to and moved_to[0] <= top + 20 and
             sum(1 for y in range(top, bottom, 3) for x in range(left, left + 60, 2) if again(x, y) != dragged(x, y)) > 150
             else "thumb %s then %s" % (thumb[:1], moved_to[:1]), "yes"))
 
@@ -20547,16 +20578,17 @@ if btop:
     w, h, at = picture("m5-btop-small")
     box = window(w, h, at) or (left, top, right, bottom)
     left, top, right, bottom = box
-    small = lit(at, left, top, right, bottom)
+    # Inside the window's line, which is lit while it has the keys and is no panel of btop's.
+    small = lit(at, left + 2, top, right - 2, bottom)
     type_shell("/mnt/lib/ld.so --library-path /mnt/lib /mnt/btop --force-utf\n")
     time.sleep(5)
     w, h, at = picture("m5-btop-narrow")
-    narrow = lit(at, left, top, right, bottom)
-    drag(right - 2, (top + bottom) // 2, right + 398, (top + bottom) // 2)
+    narrow = lit(at, left + 2, top, right - 2, bottom)
+    drag(right + 3, (top + bottom) // 2, right + 403, (top + bottom) // 2)
     time.sleep(3)
     w, h, at = picture("m5-btop-wide")
     wide = window(w, h, at)
-    full = lit(at, wide[0], wide[1], wide[2], wide[3]) if wide else 0
+    full = lit(at, wide[0] + 2, wide[1], wide[2] - 2, wide[3]) if wide else 0
     strip = lit(at, wide[2] - 120, wide[1], wide[2] - 14, wide[3]) if wide else 0
     out.append(("M5.6 btop redraws at the new size at once: wider by the drag, every panel of it drawn",
                 "yes" if wide and wide[2] > right + 250 and full > 6 * narrow and strip > 150

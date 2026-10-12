@@ -20,9 +20,11 @@
         the line are the program's to write and the compositor reads them; the
         ones below are the compositor's and the program reads them.
 
-        The pixels are the window's contents. The compositor draws the frame
-        and the titlebar around them, so x,y is the top left of the whole
-        window and the contents land WINDOW_TITLE below it.
+        The pixels are the window's contents. The kernel desktop draws a frame
+        and a titlebar around them, so there x,y is the top left of the whole
+        window and the contents land WINDOW_TITLE below it; the compositor
+        draws nothing around them, only rounds their corners, and there x,y
+        is the contents' own top left.
 
         z is the order they stack in: higher is in front. Clicking a window
         puts it above every other, and the compositor writes the new value
@@ -64,7 +66,7 @@
 // and the pixels stay page aligned.
 #define WINDOW_PIXELS 4096
 
-// The titlebar the compositor draws above the contents.
+// The titlebar the kernel desktop draws above the contents.
 #define WINDOW_TITLE 20
 
 // The handle of a window of cells the program holds itself (window_grid_open):
@@ -111,8 +113,10 @@
 
         Asking, because it cannot do more: the pages are the program's and the
         task is the kernel's, and a compositor that could end either would be a
-        compositor that can be told to end any of them. The X in the titlebar
-        sets this and wakes the program; what happens next is the program's,
+        compositor that can be told to end any of them. The X in the kernel
+        desktop's titlebar, or Alt-F4 or a middle press on the window's button
+        in the compositor's panel, sets this and wakes the program; what
+        happens next is the program's,
         and one that ignores it keeps its window.
 */
 #define WINDOW_CLOSING 2u
@@ -381,6 +385,11 @@ static inline unsigned int window_cell_colour(unsigned int index)
 /* A bar down the left edge of the cell: the terminal's cursor when a program
    has asked for a bar rather than a block. */
 #define WINDOW_CELL_BAR 512u
+
+/* On the first cell of a prompt's line: the command typed there ended with a
+   status that was not 0, as the shell said in OSC 133 ; D. The terminal marks
+   the line in the margin; nothing draws the cell differently. */
+#define WINDOW_CELL_FAILED 1024u
 
 /* The program writes this; the compositor reads it. A terminal that has
    asked for mouse tracking sets WINDOW_WANT_POINTER so clicks, drags and

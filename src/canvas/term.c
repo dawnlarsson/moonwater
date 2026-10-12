@@ -41,6 +41,16 @@ static struct window *window;
 // is resized.
 static unsigned int COLUMNS, ROWS;
 static unsigned int row, column;
+
+/*
+        The prompt a shell said it wrote (OSC 133 ; A), as the line counter of
+        the cursor's row then, and whether a command was started from it since
+        (OSC 133 ; C): only a line a command ran from is marked when the shell
+        says how it ended (OSC 133 ; D ; status), so a prompt drawn again, or
+        a line left empty, is never marked with the status of the one before.
+*/
+static unsigned int prompt_line;
+static unsigned char prompt_state; // 0 none, 1 a prompt, 2 a command started from it
 static unsigned char ink = 7, paper = 0;
 static unsigned short style;
 static b32 reverse;
@@ -929,6 +939,37 @@ static fn osc_finish(b32 bell)
 
         if (i < osc_length && osc_bytes[i] == ';')
                 i++;
+
+        // FinalTerm's semantic prompt, as iTerm2, kitty and VTE read it: A where a prompt
+        // begins, C where its command starts, D ; status where it ended.
+        if (command == 133 && window && i < osc_length)
+        {
+                p8 kind = osc_bytes[i++];
+
+                if (kind == 'A')
+                {
+                        prompt_line = window->head - ROWS + row;
+                        prompt_state = 1;
+                }
+                else if (kind == 'C' && prompt_state == 1)
+                        prompt_state = 2;
+                else if (kind == 'D')
+                {
+                        unsigned int status = 0;
+
+                        if (i < osc_length && osc_bytes[i] == ';')
+                        {
+                                i++;
+                                status = osc_number(address_of i);
+                        }
+                        // Still in the ring, and still holding what was written on it.
+                        if (prompt_state == 2 && status && window->head - prompt_line <= window->history &&
+                            *window_length(window, prompt_line))
+                                window_line(window, prompt_line)[0].flags |= WINDOW_CELL_FAILED;
+                        prompt_state = 0;
+                }
+                return;
+        }
 
         if ((command == 0 || command == 2) && window)
         {
@@ -3824,6 +3865,9 @@ fn regrid(b32 master)
 #ifndef KERNEL_MODE
         b32 cursor_was_shown = shown;
 #endif
+
+        // The lines are laid out again: the prompt's counter no longer names its line.
+        prompt_state = 0;
 
         /* A resize is itself a synchronous publication in the new geometry.
            End any program-held frame first; SIGWINCH will ask a full-screen

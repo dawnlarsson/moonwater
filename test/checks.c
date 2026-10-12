@@ -99515,10 +99515,14 @@ static fn render_reference(p32 address_to into, const struct window_cell address
         unsigned int first, shown, total;
 
         memory_fill_u32(into, (positive)terminal.width * terminal.height, 0x123456);
+        terminal_paper_round(into);
         for (unsigned int row = 0; row < ROWS; row++)
-                terminal_row(into, row, cells + (unsigned long)row * COLUMNS, null, 0, COLUMNS);
+        {
+                terminal_row(terminal_grid(into), row, cells + (unsigned long)row * COLUMNS, null, 0, COLUMNS);
+                terminal_mark(into, row, (cells[(unsigned long)row * COLUMNS].flags & WINDOW_CELL_FAILED) != 0);
+        }
         terminal_extent(&first, &shown, &total);
-        terminal_bar(into, first, shown, total);
+        terminal_bar(terminal_grid(into), first, shown, total);
 }
 
 // A new surface of the size the grid needs, and nothing on any screen yet. The
@@ -99720,13 +99724,14 @@ static fn check_keys(void)
         The pointer, when a program has asked for it: where it is in cells
         from where it is in pixels, the button it pressed and let go of, and
         the wheel as the buttons after the last. Pixels are the surface's, so
-        the cell is whole cells of this font's size.
+        the cell is whole cells of this font's size from the grid's top left,
+        past the paper round it.
 */
 static fn check_pointer(void)
 {
         unsigned int column = 3, row = 4;
-        int x = (int)((column - 1) * terminal.cell_w + terminal.cell_w / 2);
-        int y = (int)((row - 1) * terminal.cell_h + terminal.cell_h / 2);
+        int x = (int)(terminal.pad + (column - 1) * terminal.cell_w + terminal.cell_w / 2);
+        int y = (int)(terminal.pad_y + (row - 1) * terminal.cell_h + terminal.cell_h / 2);
         struct surface_event motion = {SURFACE_EVENT_POINTER_MOTION, 0, 0, x, y};
         struct surface_event press = {SURFACE_EVENT_POINTER_BUTTON, SURFACE_KEY_DOWN, 0, 0x110, 0};
         struct surface_event release = {SURFACE_EVENT_POINTER_BUTTON, 0, 0, 0x110, 0};
@@ -99974,6 +99979,7 @@ b32 main()
                 cursor_show();
                 to_shell_length = 0;
                 pixels = render_frame();
+                pixels = pixels ? terminal_grid(pixels) : null;
                 if (!pixels)
                         every = false;
                 else
@@ -103195,13 +103201,13 @@ static void check_golden_gs1(const u32 *ink) {
     desktop.scale=1;
 }
 
-/* M1.3: src/canvas/compositor.c's CPU backend draws G-S1 to the kernel's
-   hashes at scale 1, where its close box is the kernel's own bitmap. Above
-   scale 1 the box's X is the same two strokes drawn at the device's size,
-   with exact coverage, where the kernel scales the bitmap by whole pixels:
-   those three differ from the kernel's on purpose (the commit that made the
-   cross resolution independent names it), and are pinned here so a later
-   change to them is as deliberate. */
+/* M1.3: src/canvas/compositor.c's CPU backend draws G-S1 its own way: the
+   window is its pixels and nothing around them (no border, titlebar or close
+   box, which the kernel desktop still draws), a line of one logical pixel
+   round them and corners round at 4, so its four hashes are its own,
+   recorded from the backend
+   that made them and pinned so a later change to the look is as
+   deliberate. */
 static unsigned long compositor_written;
 static void memory_fill_u32_rect(u32 *into,unsigned long stride,unsigned long width,
                                  unsigned long height,u32 value) {
@@ -103211,22 +103217,38 @@ static void memory_fill_u32_rect(u32 *into,unsigned long stride,unsigned long wi
 #include "compositor-backend.inc"
 /* A failed row says which one, not only that one failed. */
 #define cc_check(x) do{if(!(x))fprintf(stderr,"compositor row failed, line %d: %s\n",__LINE__,#x);check(x);}while(0)
-#define COMPOSITOR_GS1_2 "823937fb9eec24b584627e9dc188fb603a4d1634ea00b1855961252f3a633fc9"
-#define COMPOSITOR_GS1_3 "12634bcd9694c007e18898c46767619a6329d5ae52937e382a2d85d85f29228b"
-#define COMPOSITOR_GS1_4 "a739b40c9a925ce33b8a9cfbe5943fa737ef8eaa4f1ba9e22b6c7f968bb8b19a"
-static const char *const compositor_gs1[4]={GOLDEN_GS1_1,COMPOSITOR_GS1_2,COMPOSITOR_GS1_3,COMPOSITOR_GS1_4};
+#define COMPOSITOR_GS1_1 "e721b4eafe58ff7e23dfa0615633b9e468852920a7595054b110da341af42250"
+#define COMPOSITOR_GS1_2 "aa88e2622468feff912317ee4fd94fc989ffab289a8c059cabb549a8ca533e61"
+#define COMPOSITOR_GS1_3 "875013a46cecb9c601eabf0b7b8b6baa1bde1f0ba844c6773b7050bfc410135f"
+#define COMPOSITOR_GS1_4 "58ec2fedd65033f52aa690311d2690fddb8534d79efa5218dcd6b0c7d1017132"
+static const char *const compositor_gs1[4]={COMPOSITOR_GS1_1,COMPOSITOR_GS1_2,COMPOSITOR_GS1_3,COMPOSITOR_GS1_4};
 static void check_compositor_gs1(void) {
     static u32 body[128*64];
     for(unsigned i=0;i<128*64;i++)body[i]=0x3a5a7a;
     for(int scale=1;scale<=4;scale++) {
         struct compositor_target t={golden_screen,1024,1024,768,0,0,1024,768};
-        struct compositor_frame f={80,80,128,64,scale,1,1,1,body,128};
+        struct compositor_frame f={80,80,128,64,scale,body,128,0,0,0,COMPOSITOR_RADIUS*scale,COMPOSITOR_LINE*scale,
+            COMPOSITOR_INK_BUTTON_LIT};
         compositor_fill(&t,0,0,1024,768,COMPOSITOR_INK_DESKTOP);
         compositor_draw(&t,&f);
         char got[65];golden_sha256(golden_screen,1024*768,got);
         if(strcmp(got,compositor_gs1[scale-1]))
             fprintf(stderr,"the compositor's G-S1 at scale %d is %s, not the golden %s\n",scale,got,compositor_gs1[scale-1]);
         cc_check(!strcmp(got,compositor_gs1[scale-1]));
+        /* The window is its pixels inside a line of its own, round at the
+           corners: the corner pixel of the line's square is the desktop, the
+           middle of the line's top and left are the line, the middle of the
+           contents' top row and left column are the contents, the pixels
+           just outside the line the desktop, and where the arc leaves the
+           line's top row a pixel is between the desktop and the line. */
+        int line=COMPOSITOR_LINE*scale,top=80-line,between=0;
+        u32 edge=COMPOSITOR_INK_BUTTON_LIT;
+        cc_check(golden_screen[top*1024+top]==COMPOSITOR_INK_DESKTOP);
+        cc_check(golden_screen[top*1024+80+64]==edge&&golden_screen[(80+32)*1024+top]==edge);
+        cc_check(golden_screen[80*1024+80+64]==0x3a5a7a&&golden_screen[(80+32)*1024+80]==0x3a5a7a);
+        cc_check(golden_screen[(top-1)*1024+100]==COMPOSITOR_INK_DESKTOP&&golden_screen[(80+32)*1024+top-1]==COMPOSITOR_INK_DESKTOP);
+        for(int x=top;x<top+COMPOSITOR_RADIUS*scale;x++){u32 p=golden_screen[top*1024+x];between|=p!=COMPOSITOR_INK_DESKTOP&&p!=edge;}
+        cc_check(between);
         /* Damage is a clip, not a different picture: the same scene drawn
            in four quarters is the same buffer. */
         for(int q=0;q<4;q++) {
@@ -103242,15 +103264,15 @@ static void check_compositor_gs1(void) {
     }
 }
 
-/* G-S2 (canvas spec 05 section 1.3): G-S1 with the classic panel at its
+/* G-S2 (canvas spec 05 section 1.3): G-S1 with the compositor's panel at its
    default height, 24 logical pixels, on the bottom edge, and no text. The
-   panel lists the scene's one window, which has the keys. No earlier code
-   drew a panel, so these are recorded from the backend and are the
-   reference for every later build of it. */
-#define COMPOSITOR_GS2_1 "c67e5e629e5e15d969bcccc9960252720acc6698cf1509f7eb2931e2e6c1cd2d"
-#define COMPOSITOR_GS2_2 "4ee7c02c9569fb81f48a9b70674a94712420341abba4fe6b030533174847aafa"
-#define COMPOSITOR_GS2_3 "57dbb9bf0b59e1859af871c6fb99a0a9ed8576a80497ccf9b52092e061290087"
-#define COMPOSITOR_GS2_4 "09540dc4f6a31e4b640596209070266f61e273770fb6ac9ca019d05918a7bfb6"
+   panel lists the scene's one window, which has the keys. Recorded from the
+   backend with the window's round corners, and the reference for every
+   later build of it. */
+#define COMPOSITOR_GS2_1 "c74313265fe701919797137ee89875745805c41a56e1861ca873200d1a1a6f1e"
+#define COMPOSITOR_GS2_2 "6e201188e583c23304d9ad0953943e1d5662fd45fc147f1ff97562cf4affb922"
+#define COMPOSITOR_GS2_3 "299080c584a3a44b8e11e3347266e771a42da9dc168c076a4b0df7474c3b2301"
+#define COMPOSITOR_GS2_4 "a5c2e799dac1bf55d388ddbfd798fe28aa0e468f198054646f64c7d3b4ebebdc"
 static const char *const compositor_gs2[4]={COMPOSITOR_GS2_1,COMPOSITOR_GS2_2,COMPOSITOR_GS2_3,COMPOSITOR_GS2_4};
 static void check_compositor_gs2(void) {
     static u32 body[128*64];
@@ -103261,8 +103283,8 @@ static void check_compositor_gs2(void) {
         cc_check(bx==0&&bw==1024&&bh==24*scale&&by==768-24*scale);
         static const unsigned char marks[1]={SURFACE_LIST_FOCUSED};
         struct compositor_frame frames[2]={
-            {80,80,128,64,scale,1,1,1,body,128,0,0,0},
-            {bx,by,bw,bh,scale,0,0,0,0,0,1,marks,1}};
+            {80,80,128,64,scale,body,128,0,0,0,COMPOSITOR_RADIUS*scale,COMPOSITOR_LINE*scale,COMPOSITOR_INK_BUTTON_LIT},
+            {bx,by,bw,bh,scale,0,0,1,marks,1}};
         struct compositor_target t={golden_screen,1024,1024,768,0,0,1024,768};
         compositor_scene(&t,frames,2);
         char got[65];golden_sha256(golden_screen,1024*768,got);
@@ -103318,7 +103340,7 @@ static void check_compositor_roles(void) {
 static void check_compositor_panel_slots(void) {
     for(int scale=1;scale<=4;scale++)for(unsigned count=0;count<=COMPOSITOR_CLIENTS;count++) {
         unsigned char marks[COMPOSITOR_CLIENTS]={0};
-        struct compositor_frame f={0,768-24*scale,1024,24*scale,scale,0,0,0,0,0,1,marks,count};
+        struct compositor_frame f={0,768-24*scale,1024,24*scale,scale,0,0,1,marks,count};
         int seen[COMPOSITOR_CLIENTS+2][4],n=0;
         for(int which=-2;which<(int)count;which++) {
             int x,y,w,h;
@@ -103345,7 +103367,7 @@ static void check_compositor_panel_once(void) {
     for(unsigned pattern=0;pattern<4;pattern++) {
         unsigned char marks[COMPOSITOR_CLIENTS];
         for(unsigned i=0;i<count;i++)marks[i]=(unsigned char)((pattern>>(i&1))&1?(i%3==0?2:1):0);
-        struct compositor_frame f={0,768-24*scale,1024,24*scale,scale,0,0,0,0,0,1,marks,count};
+        struct compositor_frame f={0,768-24*scale,1024,24*scale,scale,0,0,1,marks,count};
         struct compositor_target t={screen,1024,1024,768,0,0,1024,768};
         for(unsigned i=0;i<1024*768;i++)screen[i]=0xdeadbeefu;
         compositor_written=0;
@@ -103355,35 +103377,6 @@ static void check_compositor_panel_once(void) {
         cc_check(compositor_written==1024ul*24*scale);
         for(int y=768-24*scale;y<768;y++)for(int x=0;x<1024;x++)
             if(screen[y*1024+x]==0xdeadbeefu){cc_check(0);y=768;break;}
-    }
-}
-
-/* The close box's X: the classic bitmap at scale 1, and at every scale the
-   same shape, symmetric about both axes, full where the strokes cross and
-   at the corners, empty a long way from them, and made of coverage that
-   grows with the scale's area the way a stroke of fixed logical width must. */
-static void check_compositor_cross(void) {
-    for(int scale=1;scale<=COMPOSITOR_CROSS_SCALES;scale++) {
-        int n=COMPOSITOR_CELL*scale;
-        compositor_cross_scale=0;
-        compositor_cross_make(scale);
-        long total=0;
-        for(int y=0;y<n;y++)for(int x=0;x<n;x++) {
-            unsigned c=compositor_cross_mask[y*n+x];
-            total+=c;
-            cc_check(c==compositor_cross_mask[y*n+(n-1-x)]);
-            cc_check(c==compositor_cross_mask[(n-1-y)*n+x]);
-            cc_check(c==compositor_cross_mask[x*n+y]);
-            if(scale==1)cc_check(c==((compositor_close_bits[y]&(0x80>>x))?255u:0u));
-        }
-        cc_check(compositor_cross_mask[0]==255&&compositor_cross_mask[n*n-1]==255);
-        cc_check(compositor_cross_mask[(n/2)*n+n/2]==255&&compositor_cross_mask[(n/2-1)*n+n/2-1]==255);
-        cc_check(compositor_cross_mask[(n/2)*n]==0&&compositor_cross_mask[n-1+(n/2)*n]==0);
-        /* Area in logical pixels, from the mask: the two strokes' area is
-           what 3 pixels across a row of 8 gives, less where they overlap
-           and are cut by the square: between 24 and 40 of the 64. */
-        long area=total/255/ (scale*scale);
-        cc_check(area>=24&&area<=40);
     }
 }
 
@@ -103625,8 +103618,10 @@ static void check_compositor_pointer(void) {
 
 /* The scene is the painter's picture: surfaces drawn bottom to top over a
    desktop, inside the damage, and no pixel outside it. Random surfaces (some
-   off the screen, some framed, some not, some one over another, some the
-   panel), random damage, byte for byte. */
+   off the screen, some with round corners of every radius up to past half
+   their smaller side, some square, some with a line round them of up to
+   three pixels, some one over another, some the panel),
+   random damage, byte for byte -- the corners' scratch included. */
 static void check_compositor_scene(void) {
     enum { W=200, H=150 };
     static u32 seen[W*H], want[W*H], body[COMPOSITOR_CLIENTS][96*80];
@@ -103641,13 +103636,13 @@ static void check_compositor_scene(void) {
             int w=1+RND(96),h=1+RND(80);
             for(int p=0;p<w*h;p++)body[i][p]=0x400000u|(u32)(i<<16)|(u32)p;
             frames[i]=(struct compositor_frame){RND(W+60)-40,RND(H+60)-40,w,h,1+RND(2),
-                RND(4)!=0,RND(2),1,body[i],(unsigned long)w,0,0,0};
+                body[i],(unsigned long)w,0,0,0,RND(3)?RND(60):0,RND(3)?RND(4):0,0x203040u+(u32)i};
         }
         /* The compositor's panel, somewhere among them, as wide as it likes. */
         if(count<COMPOSITOR_FRAMES&&scene%3==0) {
             unsigned at=(unsigned)RND(count+1);
             for(unsigned i=count;i>at;i--)frames[i]=frames[i-1];
-            frames[at]=(struct compositor_frame){RND(W)-20,RND(H)-10,40+RND(W),12+RND(30),1+RND(2),0,0,0,0,0,1,marks,
+            frames[at]=(struct compositor_frame){RND(W)-20,RND(H)-10,40+RND(W),12+RND(30),1+RND(2),0,0,1,marks,
                 (unsigned)RND(sizeof(marks)+1)};
             count++;
         }
@@ -103993,7 +103988,6 @@ int main(void) {
     check_compositor_roles();
     check_compositor_panel_slots();
     check_compositor_panel_once();
-    check_compositor_cross();
     check_compositor_keymap();
     check_compositor_pointer();
     check_compositor_scene();

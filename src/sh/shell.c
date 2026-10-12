@@ -2769,6 +2769,19 @@ fn shell_input_end()
         }
 }
 
+// Whether a command has been run from the prompt last written, which the next
+// prompt says the status of to the terminal (OSC 133 ; D).
+static bool shell_prompt_ran;
+
+// The terminal marks prompts and the commands run from them when it is the
+// Moonwater terminal, which says so in TERM_PROGRAM; nothing else is sent them.
+static bool shell_prompt_marks()
+{
+        string_address program = env_get("TERM_PROGRAM");
+
+        return program && string_equals(program, "moonwater");
+}
+
 // A prompt is for somebody watching. Asking the terminal about itself is the
 // only way to know whether anybody is: a script piped in gets none, which is
 // also what keeps its output free of them.

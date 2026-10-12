@@ -106,7 +106,9 @@ static struct
         font_engine *engine;
         font_metrics grid;
         unsigned int size; // in 26.6, which is what font.c takes
-        unsigned int cell_w, cell_h, bar;
+        // The paper round the grid: a cell at the left (pad), where a command that failed is marked, a cell at
+        // the right (bar), where the scroll bar is, and a quarter of a cell above and below (pad_y).
+        unsigned int cell_w, cell_h, bar, pad, pad_y;
         unsigned int width, height; // the surface, in pixels
 
         /*
@@ -306,23 +308,29 @@ static void terminal_view_clamp(void)
                 terminal_view_live();
 }
 
+// The bar's track: the grid's height, beside it in the gutter.
+static unsigned int terminal_track(void)
+{
+        return ROWS * terminal.cell_h;
+}
+
 // The bar put under the hand: where the pointer is in it, as a place in the rows.
 static b32 terminal_bar_move(int y)
 {
         unsigned int first, shown, total;
-        unsigned int span, thumb;
+        unsigned int span, thumb, track = terminal_track();
         int top;
 
-        if (!terminal_extent(&first, &shown, &total) || !terminal.height)
+        if (!terminal_extent(&first, &shown, &total) || !track)
                 return false;
 
-        thumb = (unsigned int)((unsigned long)terminal.height * shown / total);
+        thumb = (unsigned int)((unsigned long)track * shown / total);
         thumb = thumb < terminal.cell_h ? terminal.cell_h : thumb;
-        span = terminal.height > thumb ? terminal.height - thumb : 0;
+        span = track > thumb ? track - thumb : 0;
         top = y - terminal.bar_grab;
         top = top < 0 ? 0 : (unsigned int)top > span ? (int)span : top;
 
-        return terminal_view_set((unsigned int)((unsigned long)top * total / terminal.height));
+        return terminal_view_set((unsigned int)((unsigned long)top * total / track));
 }
 
 /* ---- the frame: what is on the screen, as cells ---- */
@@ -611,24 +619,23 @@ static void terminal_row(unsigned int address_to pixels, unsigned int row,
 static void terminal_bar(unsigned int address_to pixels, unsigned int first, unsigned int shown,
                          unsigned int total)
 {
-        unsigned int x = COLUMNS * terminal.cell_w, paper = terminal_colour[0];
-        unsigned int thumb, at, gutter, inset, wide;
+        unsigned int x = COLUMNS * terminal.cell_w, paper = terminal_colour[0], track = terminal_track();
+        unsigned int thumb, at, gutter = terminal.bar, inset, wide;
         unsigned int ink = terminal_mix(terminal_mix(terminal_colour[7], paper), paper);
 
-        if (x >= terminal.width)
+        if (!gutter || terminal.pad + x + gutter > terminal.width)
                 return;
 
-        terminal_fill(pixels, (int)x, 0, terminal.width - x, terminal.height, paper);
+        terminal_fill(pixels, (int)x, 0, gutter, track, paper);
 
         if (total <= shown)
                 return;
 
-        thumb = (unsigned int)((unsigned long)terminal.height * shown / total);
+        thumb = (unsigned int)((unsigned long)track * shown / total);
         thumb = thumb < terminal.cell_h ? terminal.cell_h : thumb;
-        at = (unsigned int)((unsigned long)terminal.height * first / total);
-        at = at + thumb > terminal.height ? terminal.height - thumb : at;
+        at = (unsigned int)((unsigned long)track * first / total);
+        at = at + thumb > track ? track - thumb : at;
 
-        gutter = terminal.width - x;
         inset = gutter / 4 ? gutter / 4 : 1;
         wide = gutter > 2 * inset ? gutter - 2 * inset : 1;
         if (thumb <= 2 * inset + wide)
@@ -670,6 +677,66 @@ static void terminal_bar(unsigned int address_to pixels, unsigned int first, uns
                         }
                 }
         }
+}
+
+/*
+        The margin at the left of a row: the paper, and where the line holds a
+        prompt whose command ended badly (WINDOW_CELL_FAILED on its first
+        cell, which the shell's OSC 133 put there), a dot in the theme's red
+        the middle of the margin, half a cell across, each pixel the share of
+        its sixteen sample points inside it mixed with the paper. Drawn
+        through the buffer's own top left: the margin is outside the grid.
+*/
+static void terminal_mark(unsigned int address_to whole, unsigned int row, b32 failed)
+{
+        unsigned int paper = terminal_colour[0], ink = terminal_colour[1];
+        unsigned int top = terminal.pad_y + row * terminal.cell_h, side = terminal.pad;
+        int across = (int)(side < terminal.cell_h ? side : terminal.cell_h) / 2;
+
+        terminal_fill(whole, 0, (int)top, side, terminal.cell_h, paper);
+        if (!failed || across < 2)
+                return;
+
+        // In eighths of a pixel from the dot's box, sample centres odd.
+        int left = (int)(side - (unsigned int)across) / 2, high = (int)top + (int)(terminal.cell_h - (unsigned int)across) / 2;
+
+        for (int y = 0; y < across; y++)
+                for (int x = 0; x < across; x++)
+                {
+                        unsigned int inside = 0, mixed = 0;
+
+                        for (int sy = 0; sy < 4; sy++)
+                                for (int sx = 0; sx < 4; sx++)
+                                {
+                                        int dx = 8 * x + 2 * sx + 1 - 4 * across, dy = 8 * y + 2 * sy + 1 - 4 * across;
+
+                                        inside += dx * dx + dy * dy <= 16 * across * across;
+                                }
+                        if (!inside)
+                                continue;
+                        for (unsigned int shift = 0; shift < 24; shift += 8)
+                                mixed |= (((paper >> shift & 255) * (16 - inside) + (ink >> shift & 255) * inside + 8) / 16) << shift;
+                        whole[(unsigned long)(high + y) * terminal.width + (unsigned long)(left + x)] = mixed;
+                }
+}
+
+// The paper round the grid, in a buffer drawn whole: above and below it, and either side.
+static void terminal_paper_round(unsigned int address_to whole)
+{
+        unsigned int pad = terminal.pad, top = terminal.pad_y, inner = terminal_track(), paper = terminal_colour[0];
+        unsigned int right = pad + COLUMNS * terminal.cell_w + terminal.bar;
+
+        terminal_fill(whole, 0, 0, terminal.width, top, paper);
+        terminal_fill(whole, 0, (int)(top + inner), terminal.width,
+                      terminal.height > top + inner ? terminal.height - top - inner : 0, paper);
+        terminal_fill(whole, 0, (int)top, pad, inner, paper);
+        terminal_fill(whole, (int)right, (int)top, terminal.width > right ? terminal.width - right : 0, inner, paper);
+}
+
+// The grid's top left in a buffer, which the cells and the bar are drawn from.
+static unsigned int address_to terminal_grid(unsigned int address_to whole)
+{
+        return whole + (unsigned long)terminal.pad_y * terminal.width + terminal.pad;
 }
 
 /* ---- the buffers ---- */
@@ -745,7 +812,7 @@ static void terminal_discard(void)
 static b32 terminal_frame(void)
 {
         int slot = terminal_next();
-        unsigned int address_to pixels;
+        unsigned int address_to pixels, address_to whole;
         struct surface address_to surface = terminal.surface;
         struct window_cell address_to now = terminal.frame[2];
         struct window_cell address_to drawn;
@@ -774,6 +841,13 @@ static b32 terminal_frame(void)
         terminal_extent(&first, &shown, &total);
         pixels = surface_slot(surface, (unsigned int)slot, terminal.width, terminal.height);
         drawn = terminal.valid[slot] ? terminal.frame[slot] : null;
+
+        // A buffer drawn whole has its paper round the grid painted too; then everything below is drawn
+        // through the grid's own top left, but the marks in the margin at the left.
+        whole = pixels;
+        if (!drawn)
+                terminal_paper_round(whole);
+        pixels = terminal_grid(whole);
         screen = terminal.shown >= 0 && terminal.valid[terminal.shown] ? terminal.frame[terminal.shown] : null;
 
         // The bar is drawn where the buffer's own was not the same, and the compositor is
@@ -797,6 +871,8 @@ static b32 terminal_frame(void)
 
                 if (a1 > a0)
                         terminal_row(pixels, row, line, drawn ? drawn + (unsigned long)row * COLUMNS : null, a0, a1);
+                if (a1 > a0 && !a0)
+                        terminal_mark(whole, row, (line[0].flags & WINDOW_CELL_FAILED) != 0);
                 any |= a1 > a0 || b1 > b0;
 
                 // What the compositor reads again is what differs from what it shows: a cell
@@ -844,15 +920,16 @@ static b32 terminal_frame(void)
                                 break;
                         }
 
+                        // A band from the first column takes the margin's mark with it.
                         surface->damage[rects++] = (struct surface_damage){
-                            (int)(x0 * terminal.cell_w), (int)(from * terminal.cell_h),
-                            (int)((x1 - x0) * terminal.cell_w), (int)((row - from) * terminal.cell_h)};
+                            (int)(x0 ? terminal.pad + x0 * terminal.cell_w : 0), (int)(terminal.pad_y + from * terminal.cell_h),
+                            (int)((x1 - x0) * terminal.cell_w + (x0 ? 0 : terminal.pad)), (int)((row - from) * terminal.cell_h)};
                 }
 
-                if (bar_told && !overflow && COLUMNS * terminal.cell_w < terminal.width)
+                if (bar_told && !overflow && terminal.bar)
                         surface->damage[rects++] = (struct surface_damage){
-                            (int)(COLUMNS * terminal.cell_w), 0,
-                            (int)(terminal.width - COLUMNS * terminal.cell_w), (int)terminal.height};
+                            (int)(terminal.pad + COLUMNS * terminal.cell_w), (int)terminal.pad_y, (int)terminal.bar,
+                            (int)terminal_track()};
 
                 // None is a rectangle of nothing, not the whole buffer.
                 if (!rects && !overflow)
@@ -875,6 +952,14 @@ static b32 terminal_frame(void)
 }
 
 /* ---- the program ---- */
+
+// The paper round the grid, for the cell the font gives: a cell each side, a quarter of one above and below.
+static void terminal_margins(void)
+{
+        terminal.pad = terminal.cell_w;
+        terminal.bar = terminal.cell_w;
+        terminal.pad_y = terminal.cell_h / 4;
+}
 
 /*
         The faces, loaded from the files named. A font is the caller's bytes
@@ -928,16 +1013,28 @@ static b32 terminal_fonts(string_address address_to paths, unsigned int count, s
         terminal.grid = font_metrics_at(terminal.plain[0], terminal.size);
         terminal.cell_w = (unsigned int)terminal.grid.cell_width;
         terminal.cell_h = (unsigned int)terminal.grid.cell_height;
-        // The gutter the bar lives in, as wide as the kernel's was beside its cell.
-        terminal.bar = terminal.cell_h * 5 / 8;
+        terminal_margins();
         return true;
 }
 
-// The window size the surface needs for a grid, and the grid a size has room for.
+// The window size the surface needs for a grid, the paper round it included.
 static unsigned int terminal_pixels(unsigned int columns, unsigned int rows, unsigned int address_to height)
 {
-        address_to height = rows * terminal.cell_h;
-        return columns * terminal.cell_w + terminal.bar;
+        address_to height = rows * terminal.cell_h + 2 * terminal.pad_y;
+        return columns * terminal.cell_w + terminal.pad + terminal.bar;
+}
+
+// The cells a window's width or height has room for, the paper and the gutter taken off.
+static unsigned int terminal_columns(unsigned int width)
+{
+        unsigned int edge = terminal.pad + terminal.bar;
+
+        return width > edge ? (width - edge) / terminal.cell_w : 1;
+}
+
+static unsigned int terminal_rows(unsigned int height)
+{
+        return height > 2 * terminal.pad_y ? (height - 2 * terminal.pad_y) / terminal.cell_h : 1;
 }
 
 /*
@@ -961,8 +1058,8 @@ static struct surface *terminal_open(unsigned int wide, unsigned int high, unsig
         display_w = surface->window.display_width;
         display_h = surface->window.display_height;
         share_w = display_w * wide / 100;
-        address_to columns = share_w > terminal.bar ? (share_w - terminal.bar) / terminal.cell_w : 1;
-        address_to rows = display_h * high / 100 / terminal.cell_h;
+        address_to columns = terminal_columns(share_w);
+        address_to rows = terminal_rows(display_h * high / 100);
         address_to columns = address_to columns < 20 ? COLUMNS_WANTED : address_to columns;
         address_to rows = address_to rows < 4 ? ROWS_WANTED : address_to rows;
 
@@ -1016,8 +1113,8 @@ static void terminal_acknowledge(unsigned int serial)
 */
 static void terminal_configure(b32 master, unsigned int width, unsigned int height, unsigned int serial)
 {
-        unsigned int columns = width > terminal.bar ? (width - terminal.bar) / terminal.cell_w : 1;
-        unsigned int rows = height / terminal.cell_h;
+        unsigned int columns = terminal_columns(width);
+        unsigned int rows = terminal_rows(height);
         unsigned int pixels_h, pixels_w;
         struct surface address_to made;
 
@@ -1140,7 +1237,7 @@ static void terminal_text_set(b32 master, unsigned int size)
         terminal.grid = font_metrics_at(terminal.plain[0], terminal.size);
         terminal.cell_w = (unsigned int)terminal.grid.cell_width;
         terminal.cell_h = (unsigned int)terminal.grid.cell_height;
-        terminal.bar = terminal.cell_h * 5 / 8;
+        terminal_margins();
         term_cell_w = terminal.cell_w;
         term_cell_h = terminal.cell_h;
         terminal_configure(master, terminal.width, terminal.height, terminal.serial);
@@ -1364,15 +1461,16 @@ static b32 terminal_receive(b32 master, const struct surface_event address_to ev
                 return true;
 
         case SURFACE_EVENT_POINTER_MOTION:
-                terminal.pointer_x = event->a;
-                terminal.pointer_y = event->b;
+                // Where the pointer is from the grid's top left: the paper round it is no cell's.
+                terminal.pointer_x = event->a - (int)terminal.pad;
+                terminal.pointer_y = event->b - (int)terminal.pad_y;
 
                 if (!mouse_mode && terminal.bar_grab < 0)
                         return true;
 
                 if (terminal.bar_grab >= 0)
                 {
-                        if (terminal_bar_move(event->b))
+                        if (terminal_bar_move(terminal.pointer_y))
                                 address_to dirty = true;
                         return true;
                 }
@@ -1390,11 +1488,11 @@ static b32 terminal_receive(b32 master, const struct surface_event address_to ev
                         return true;
 
                 // The gutter is the bar's, not the program's.
-                if (event->a == 0x110 && down && (unsigned int)terminal.pointer_x >= COLUMNS * terminal.cell_w &&
+                if (event->a == 0x110 && down && terminal.pointer_x >= (int)(COLUMNS * terminal.cell_w) &&
                     terminal_extent(&first, &shown, &total))
                 {
-                        unsigned int thumb = (unsigned int)((unsigned long)terminal.height * shown / total);
-                        unsigned int top = (unsigned int)((unsigned long)terminal.height * first / total);
+                        unsigned int thumb = (unsigned int)((unsigned long)terminal_track() * shown / total);
+                        unsigned int top = (unsigned int)((unsigned long)terminal_track() * first / total);
 
                         thumb = thumb < terminal.cell_h ? terminal.cell_h : thumb;
                         terminal.bar_grab = (unsigned int)terminal.pointer_y >= top &&
@@ -1675,7 +1773,7 @@ static b32 terminal_run(b32 reading)
                 if (!gone && !term_send(master))
                         gone = true;
 
-                // The X in the titlebar is the line hanging up, once, to the group.
+                // Being asked to go (Alt-F4, or the X of the kernel desktop's titlebar) is the line hanging up, once, to the group.
                 if (!gone && !hung && closing)
                 {
                         system_call_2(syscall(kill), (positive)(-child), SIGHUP);
@@ -1747,7 +1845,7 @@ static b32 terminal_run(b32 reading)
                 if (!dirty)
                         stalled_since = 0;
 
-                // The X in the titlebar ends a log, which has no shell to hang up on.
+                // Being asked to go ends a log, which has no shell to hang up on.
                 if (reading && closing)
                         gone = true;
 

@@ -1183,9 +1183,25 @@ b32 main()
                 //      the next line was written over it.
                 if (interactive && terminal_input)
                 {
+                        //      The Moonwater terminal is told where the prompt
+                        //      is and how the last command run from one ended
+                        //      (OSC 133), to mark a failed one in its margin.
+                        bool marks = shell_prompt_marks() && !shell_reading_more();
+
                         log_direct(str(TERM_MAIN_BUFFER_ONLY TERM_RESET
                                            TERM_SHOW_CURSOR));
+                        if (marks && shell_prompt_ran)
+                        {
+                                log_direct(str("\x1b]133;D;"));
+                                positive_to_string(log_direct, (positive)(p8)shell_status);
+                                log_direct(str("\x07"));
+                        }
+                        shell_prompt_ran = false;
+                        if (marks)
+                                log_direct(str("\x1b]133;A\x07"));
                         shell_prompt_write(log_direct, shell_reading_more());
+                        if (marks)
+                                log_direct(str("\x1b]133;B\x07"));
                 }
                 //      -i with no terminal on standard input: the prompt
                 //      goes to standard error, as both references write it,
@@ -1281,6 +1297,20 @@ b32 main()
                                 total = line_end;
                         }
                 }
+
+                //      A line with something on it is a command started from the prompt.
+                if (interactive && terminal_input && !shell_prompt_ran && shell_prompt_marks())
+                        for (positive at_byte = 0; at_byte < (positive)got; at_byte++)
+                        {
+                                p8 byte = shell_buffer[held + at_byte];
+
+                                if (byte != ' ' && byte != '\t' && byte != '\n')
+                                {
+                                        log_direct(str("\x1b]133;C\x07"));
+                                        shell_prompt_ran = true;
+                                        break;
+                                }
+                        }
 
                 at = shell_run_complete_lines(shell_buffer, total, false);
 

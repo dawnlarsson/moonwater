@@ -11,15 +11,16 @@
         if it ever stops answering. When it exits, the card's last file
         closes and Canvas's restore hook redraws the kernel desktop at once.
 
-        What it draws is the classic look of the kernel's compose path, pixel
-        for pixel -- the desktop ink, and around each surface the border, the
-        titlebar and the close box -- so the golden scene G-S1 hashes the
-        same from either at scale one (test/checks.c). Surfaces are protocol
+        What it draws is the desktop ink and each surface's own pixels, with
+        nothing around them: a window has no border, no titlebar and no close
+        box. Surfaces are protocol
         version 2 (canvas_abi.h, window.c): a program connects to
         SURFACE_SOCKET, hands over a sealed page, and commits buffers into
         it. A surface has a role (canvas spec 02). An application window
-        stacks, the press of a button raises and focuses it, its titlebar
-        drags it, its close box asks it to go, keys reach it while it has
+        stacks, the press of a button raises and focuses it, Alt and a press
+        anywhere on it drags it, a press just outside its edges resizes it,
+        Alt-F4 or a middle press on its button in the panel asks it to go,
+        keys reach it while it has
         focus and the pointer reaches it when it asks for the pointer, and it
         is kept on the work area, which is the output less the panel's zone.
         Any other role is the compositor's to give: a layer, the edges it is
@@ -40,11 +41,13 @@
         What the kernel desktop did for a hand and a keyboard it does here:
         keys are the characters of the layout `moonwater keyboard` set (every
         layout the kernel had, AltGr as the third level, dead accents and
-        Caps Lock besides), Alt-Tab, Alt-F9 and Control-Shift-T are the
-        compositor's, the pointer is gained by the speed of the hand and wears
-        a shape for the edge it is over, a window is arranged to fill the work
-        area or half of it by a double click or by a drag to an edge, and a
-        machine that slept has its screen drawn again.
+        Caps Lock besides), Alt-Tab, Alt-F4, Alt-F9 and Control-Shift-T are
+        the compositor's, the pointer is gained by the speed of the hand and
+        wears a shape for the edge it is over, a window is arranged to fill
+        the work area or half of it by a double click with Alt held or by a
+        drag to an edge, Alt and the right button resize it from the corner
+        nearest the hand, and a machine that slept has its screen drawn
+        again.
 
         `surface` is a test client: a window of one colour, a line of text
         drawn with font.c when it is given a TrueType file, and a report on
@@ -58,21 +61,21 @@
 #ifndef MOONWATER_CANVAS_COMPOSITOR
 #define MOONWATER_CANVAS_COMPOSITOR
 
-/* ---- backend: the classic look on the CPU ---- */
+/* ---- backend: the look on the CPU ---- */
 
-// The classic palette (canvas spec 03 section 4), today's kernel inks.
+// The palette: the desktop, the panel's band, and its buttons, dark and lit.
 #define COMPOSITOR_INK_DESKTOP 0x1b2733u
-#define COMPOSITOR_INK_FRAME 0x2f3f52u
-#define COMPOSITOR_INK_TITLE 0x2b3a4cu
-#define COMPOSITOR_INK_TITLE_LIT 0x4c6785u
+#define COMPOSITOR_INK_PANEL 0x2f3f52u
+#define COMPOSITOR_INK_BUTTON 0x2b3a4cu
+#define COMPOSITOR_INK_BUTTON_LIT 0x4c6785u
 #define COMPOSITOR_INK_TEXT 0xdfe7efu
-#define COMPOSITOR_INK_PANEL COMPOSITOR_INK_FRAME
 
-// The metrics the kernel draws with, in logical pixels, and the panel's.
-#define COMPOSITOR_TITLE 20
-#define COMPOSITOR_BORDER 2
-#define COMPOSITOR_CELL 8
+// The panel's height, the radius of a window's corners and the width of the line round it, in logical
+// pixels; and the largest radius in device pixels, which is what the corners' scratch is made for.
 #define COMPOSITOR_PANEL 24
+#define COMPOSITOR_RADIUS 4
+#define COMPOSITOR_LINE 1
+#define COMPOSITOR_RADIUS_MOST 64
 
 struct compositor_target
 {
@@ -80,61 +83,30 @@ struct compositor_target
         unsigned long pitch; // pixels a row
         int width, height;
         int x1, y1, x2, y2;  // the damage: nothing outside it is written
+        int ox, oy;          // the point pixels[0] is, on the output (a corner's scratch); 0 for the output
 };
 
 /*
-        One thing to draw. A surface is its buffer inside the frame the role
-        gives it (framed or not); the compositor's own panel is a frame with
-        no buffer and a mark a window, one byte each: SURFACE_LIST_FOCUSED
-        and SURFACE_LIST_MINIMIZED. A panel program draws the same shapes
-        into its own buffer, from the window list it is sent.
+        One thing to draw. A surface is its buffer and nothing around it; the
+        compositor's own panel is a frame with no buffer and a mark a window,
+        one byte each: SURFACE_LIST_FOCUSED and SURFACE_LIST_MINIMIZED. A
+        panel program draws the same shapes into its own buffer, from the
+        window list it is sent.
 */
 struct compositor_frame
 {
-        int x, y;            // the titlebar's top left, as version 1 has it
+        int x, y;            // the contents' top left
         int width, height;   // the contents
         int scale;
-        int framed, focused, closable;
         const unsigned int *pixels;
         unsigned long pitch;
         int builtin;         // the panel: no pixels, the marks are its buttons
         const unsigned char *marks;
         unsigned int mark_count;
+        int radius;          // the corners of the window and its line, in device pixels; 0 for square
+        int line;            // the line round the contents, outside them, in device pixels; 0 for none
+        unsigned int edge;   // the line's colour
 };
-
-// The surface's whole rectangle: border, titlebar, contents, border.
-static void compositor_outline(const struct compositor_frame *frame, int *x, int *y,
-                               int *width, int *height)
-{
-        int border = frame->framed ? COMPOSITOR_BORDER * frame->scale : 0;
-        int title = frame->framed ? COMPOSITOR_TITLE * frame->scale : 0;
-
-        *x = frame->x - border;
-        *y = frame->y - border;
-        *width = frame->width + border * 2;
-        *height = frame->height + title + border * 3;
-}
-
-/*
-        The close box, for drawing and for the press alike: one square in the
-        titlebar's right end, inset by the border, and none on a window too
-        narrow to hold it and two cells of titlebar beside it.
-*/
-static int compositor_close_box(const struct compositor_frame *frame, int *x, int *y,
-                                int *side)
-{
-        int border = COMPOSITOR_BORDER * frame->scale;
-        int box = COMPOSITOR_TITLE * frame->scale - border * 2;
-
-        if (!frame->framed || !frame->closable || box <= 0 ||
-            frame->width < box + COMPOSITOR_CELL * frame->scale * 2)
-                return 0;
-
-        *side = box;
-        *x = frame->x + frame->width - box - border;
-        *y = frame->y + border;
-        return 1;
-}
 
 static void compositor_fill(const struct compositor_target *t, int x, int y, int width,
                             int height, unsigned int colour)
@@ -149,7 +121,7 @@ static void compositor_fill(const struct compositor_target *t, int x, int y, int
         if (x2 <= x || y2 <= y)
                 return;
 
-        memory_fill_u32_rect(t->pixels + (unsigned long)y * t->pitch + (unsigned long)x,
+        memory_fill_u32_rect(t->pixels + (unsigned long)(y - t->oy) * t->pitch + (unsigned long)(x - t->ox),
                              t->pitch, (unsigned long)(x2 - x), (unsigned long)(y2 - y),
                              colour);
 }
@@ -166,116 +138,9 @@ static void compositor_blit(const struct compositor_target *t, int x, int y, int
                 return;
 
         for (int row = y1; row < y2; row++)
-                memory_copy(t->pixels + (unsigned long)row * t->pitch + (unsigned long)x1,
+                memory_copy(t->pixels + (unsigned long)(row - t->oy) * t->pitch + (unsigned long)(x1 - t->ox),
                             source + (unsigned long)(row - y) * pitch + (unsigned long)(x1 - x),
                             (unsigned long)(x2 - x1) * 4);
-}
-
-/*
-        The close box's X, drawn at any scale from the same two strokes.
-
-        Each stroke is a band along a diagonal of the glyph's square, 3
-        logical pixels wide across a row and cut off by the square, so at
-        scale one it is the classic X of the kernel's bitmap bit for bit
-        (the bitmap, below, is that scale's coverage) and at every other
-        scale it is the same shape at the device's size. A pixel's coverage
-        is the exact area of the band in it, in 1/256: the share of the unit
-        square where the two coordinates differ by less than the half width,
-        which is the triangular distribution's integral, in integers, so
-        every machine draws the same bytes. Where the strokes cross a pixel
-        holds parts of both and the union is counted by 256 samples. The
-        mask is made once for a scale and the glyph is blended over the
-        titlebar's own ink, which the draw knows, so nothing is read back.
-*/
-static const unsigned char compositor_close_bits[8] = {
-    0xc3, 0xe7, 0x7e, 0x3c, 0x3c, 0x7e, 0xe7, 0xc3,
-};
-
-#define COMPOSITOR_CROSS_SCALES 8
-static unsigned char compositor_cross_mask[COMPOSITOR_CELL * COMPOSITOR_CROSS_SCALES *
-                                           COMPOSITOR_CELL * COMPOSITOR_CROSS_SCALES];
-static int compositor_cross_scale;
-
-// How much of the unit square has x - y below z (Q8): the triangle's integral.
-static int compositor_tri(int z)
-{
-        if (z <= -256)
-                return 0;
-        if (z >= 256)
-                return 256;
-        return z <= 0 ? ((256 + z) * (256 + z)) >> 9 : 256 - (((256 - z) * (256 - z)) >> 9);
-}
-
-static void compositor_cross_make(int scale)
-{
-        int n = COMPOSITOR_CELL * scale;
-        int half = 384 * scale; // 1.5 logical pixels, Q8
-
-        if (scale == compositor_cross_scale)
-                return;
-
-        for (int y = 0; y < n; y++)
-                for (int x = 0; x < n; x++)
-                {
-                        int d1 = (x - y) * 256, d2 = (x - (n - 1 - y)) * 256;
-                        int a = compositor_tri(half - d1) - compositor_tri(-half - d1);
-                        int b = compositor_tri(half - d2) - compositor_tri(-half - d2);
-                        int cover = a > b ? a : b;
-
-                        if (scale == 1)
-                                cover = compositor_close_bits[y] & (0x80 >> x) ? 256 : 0;
-                        else if (a && b && a < 256 && b < 256)
-                        {
-                                cover = 0;
-                                for (int j = 0; j < 16; j++)
-                                        for (int i = 0; i < 16; i++)
-                                        {
-                                                int u = (2 * i + 1) * 8, v = (2 * j + 1) * 8;
-                                                int s1 = d1 + u - v, s2 = d2 + u + v - 256;
-
-                                                cover += (s1 <= half && s1 >= -half) ||
-                                                         (s2 <= half && s2 >= -half);
-                                        }
-                        }
-
-                        compositor_cross_mask[y * n + x] = (unsigned char)((cover * 255 + 128) >> 8);
-                }
-
-        compositor_cross_scale = scale;
-}
-
-static unsigned int compositor_mix(unsigned int ground, unsigned int ink, unsigned int cover)
-{
-        unsigned int out = 0;
-
-        for (unsigned int shift = 0; shift < 24; shift += 8)
-                out |= ((((ground >> shift & 255) * (255 - cover) + (ink >> shift & 255) * cover + 127) / 255)
-                        & 255) << shift;
-
-        return out;
-}
-
-static void compositor_cross(const struct compositor_target *t, int x, int y, int scale,
-                             unsigned int ground, unsigned int colour)
-{
-        int n = COMPOSITOR_CELL * scale;
-
-        // A glyph the damage does not touch is not made.
-        if (scale < 1 || scale > COMPOSITOR_CROSS_SCALES || x >= t->x2 || x + n <= t->x1 ||
-            y >= t->y2 || y + n <= t->y1)
-                return;
-
-        compositor_cross_make(scale);
-
-        for (int row = y > t->y1 ? 0 : t->y1 - y; row < n && y + row < t->y2; row++)
-                for (int column = x > t->x1 ? 0 : t->x1 - x; column < n && x + column < t->x2; column++)
-                {
-                        unsigned int cover = compositor_cross_mask[row * n + column];
-
-                        if (cover)
-                                t->pixels[(unsigned long)(y + row) * t->pitch + (unsigned long)(x + column)] =
-                                    cover == 255 ? colour : compositor_mix(ground, colour, cover);
-                }
 }
 
 /*
@@ -377,43 +242,129 @@ static void compositor_panel(const struct compositor_target *t, const struct com
                 {
                         int mark_side = height / 2;
 
-                        compositor_fill(t, x, y, width, (height - mark_side) / 2, COMPOSITOR_INK_TITLE_LIT);
+                        compositor_fill(t, x, y, width, (height - mark_side) / 2, COMPOSITOR_INK_BUTTON_LIT);
                         compositor_fill(t, x, y + (height - mark_side) / 2, (width - mark_side) / 2, mark_side,
-                                        COMPOSITOR_INK_TITLE_LIT);
+                                        COMPOSITOR_INK_BUTTON_LIT);
                         compositor_fill(t, x + (width - mark_side) / 2, y + (height - mark_side) / 2, mark_side,
                                         mark_side, COMPOSITOR_INK_TEXT);
                         compositor_fill(t, x + (width - mark_side) / 2 + mark_side,
                                         y + (height - mark_side) / 2, width - (width - mark_side) / 2 - mark_side,
-                                        mark_side, COMPOSITOR_INK_TITLE_LIT);
+                                        mark_side, COMPOSITOR_INK_BUTTON_LIT);
                         compositor_fill(t, x, y + (height - mark_side) / 2 + mark_side, width,
-                                        height - (height - mark_side) / 2 - mark_side, COMPOSITOR_INK_TITLE_LIT);
+                                        height - (height - mark_side) / 2 - mark_side, COMPOSITOR_INK_BUTTON_LIT);
                 }
                 else if (slot == -2)
                         compositor_fill(t, x, y, width, height, COMPOSITOR_INK_DESKTOP);
                 else if ((mark & SURFACE_LIST_MINIMIZED) && width > 2 * line && height > 2 * line)
                 {
                         // Put away: the button is only its outline.
-                        compositor_fill(t, x, y, width, line, COMPOSITOR_INK_TITLE);
-                        compositor_fill(t, x, y + line, line, height - 2 * line, COMPOSITOR_INK_TITLE);
+                        compositor_fill(t, x, y, width, line, COMPOSITOR_INK_BUTTON);
+                        compositor_fill(t, x, y + line, line, height - 2 * line, COMPOSITOR_INK_BUTTON);
                         compositor_fill(t, x + line, y + line, width - 2 * line, height - 2 * line,
                                         COMPOSITOR_INK_PANEL);
                         compositor_fill(t, x + width - line, y + line, line, height - 2 * line,
-                                        COMPOSITOR_INK_TITLE);
-                        compositor_fill(t, x, y + height - line, width, line, COMPOSITOR_INK_TITLE);
+                                        COMPOSITOR_INK_BUTTON);
+                        compositor_fill(t, x, y + height - line, width, line, COMPOSITOR_INK_BUTTON);
                 }
                 else
                         compositor_fill(t, x, y, width, height,
-                                        mark & SURFACE_LIST_FOCUSED ? COMPOSITOR_INK_TITLE_LIT
-                                                                    : COMPOSITOR_INK_TITLE);
+                                        mark & SURFACE_LIST_FOCUSED ? COMPOSITOR_INK_BUTTON_LIT
+                                                                    : COMPOSITOR_INK_BUTTON);
         }
 
         compositor_fill(t, edge, top, frame->x + frame->width - edge, bottom - top, COMPOSITOR_INK_PANEL);
 }
 
+/*
+        A window's corners are quarters of a circle: the line's outside at
+        the radius, the contents' inside it by the line's width. A mask is
+        the top left quarter, each pixel's share of its sixteen sample
+        points inside the circle, made once for a radius and kept, one for
+        the outside (which 0) and one for the inside (which 1); the other
+        three corners read it mirrored.
+*/
+static unsigned char compositor_corner_masks[2][COMPOSITOR_RADIUS_MOST * COMPOSITOR_RADIUS_MOST];
+static int compositor_corner_radii[2] = {-1, -1};
+
+static const unsigned char *compositor_corner_mask(int radius, int which)
+{
+        if (compositor_corner_radii[which] != radius)
+        {
+                unsigned char *mask = compositor_corner_masks[which];
+
+                for (int y = 0; y < radius; y++)
+                        for (int x = 0; x < radius; x++)
+                        {
+                                int inside = 0;
+
+                                // In eighths of a pixel, sample centres odd, the circle's centre at 8 radius.
+                                for (int sy = 0; sy < 4; sy++)
+                                        for (int sx = 0; sx < 4; sx++)
+                                        {
+                                                int dx = 8 * radius - (8 * x + 2 * sx + 1);
+                                                int dy = 8 * radius - (8 * y + 2 * sy + 1);
+
+                                                inside += dx * dx + dy * dy <= 64 * radius * radius;
+                                        }
+                                mask[y * radius + x] = (unsigned char)((inside * 255 + 8) / 16);
+                        }
+                compositor_corner_radii[which] = radius;
+        }
+        return compositor_corner_masks[which];
+}
+
+// The rectangle a frame covers: its contents and the line round them.
+static void compositor_outline(const struct compositor_frame *frame, int *x, int *y, int *width, int *height)
+{
+        int line = frame->builtin || frame->line < 0 ? 0 : frame->line;
+
+        *x = frame->x - line;
+        *y = frame->y - line;
+        *width = frame->width + 2 * line;
+        *height = frame->height + 2 * line;
+}
+
+/*
+        A frame's radius as it is drawn, the line's outside: none for the
+        panel, at least the line's width so the line has corners of its own,
+        at most half the smaller side and the scratch's.
+*/
+static int compositor_radius(const struct compositor_frame *frame)
+{
+        int x, y, width, height, line = frame->builtin || frame->line < 0 ? 0 : frame->line;
+        int radius = frame->builtin ? 0 : frame->radius < line ? line : frame->radius;
+
+        compositor_outline(frame, &x, &y, &width, &height);
+        radius = radius > width / 2 ? width / 2 : radius;
+        radius = radius > height / 2 ? height / 2 : radius;
+        return radius < 0 ? 0 : radius > COMPOSITOR_RADIUS_MOST ? COMPOSITOR_RADIUS_MOST : radius;
+}
+
+static unsigned int compositor_mix(unsigned int ground, unsigned int ink, unsigned int cover)
+{
+        unsigned int out = 0;
+
+        for (unsigned int shift = 0; shift < 24; shift += 8)
+                out |= (((ground >> shift & 255) * (255 - cover) + (ink >> shift & 255) * cover + 127) / 255) << shift;
+        return out;
+}
+
+/*
+        A frame drawn over what the target holds: the panel, or a window --
+        its line, then its pixels. Square, the line is four bands and the
+        pixels one rectangle. Round, the pixels are a cross that leaves out
+        the four corner squares of the line's radius, the line is four bands
+        between them, and in each square a pixel is the target's with the
+        line's outside mixed over it by the outer mask and the contents'
+        mixed over that by the inner one: the one place anything here reads
+        the target, which the scene makes sure is memory of its own and
+        never the scanout.
+*/
 static void compositor_draw(const struct compositor_target *t,
                             const struct compositor_frame *frame)
 {
-        int title = frame->framed ? COMPOSITOR_TITLE * frame->scale : 0;
+        int r = compositor_radius(frame), x = frame->x, y = frame->y, w = frame->width, h = frame->height;
+        int ox, oy, ow, oh, b, ri;
 
         if (frame->builtin)
         {
@@ -421,29 +372,62 @@ static void compositor_draw(const struct compositor_target *t,
                 return;
         }
 
-        if (frame->framed)
+        compositor_outline(frame, &ox, &oy, &ow, &oh);
+        b = x - ox;
+        ri = r > b ? r - b : 0;
+
+        // The line, between the corner squares.
+        if (b)
         {
-                int fx, fy, fw, fh, cx, cy, side;
-                int bottom = frame->y + title + frame->height;
-                int span = title + frame->height;
-                unsigned int ground = frame->focused ? COMPOSITOR_INK_TITLE_LIT : COMPOSITOR_INK_TITLE;
-
-                compositor_outline(frame, &fx, &fy, &fw, &fh);
-                compositor_fill(t, fx, fy, fw, frame->y - fy, COMPOSITOR_INK_FRAME);
-                compositor_fill(t, fx, bottom, fw, fy + fh - bottom, COMPOSITOR_INK_FRAME);
-                compositor_fill(t, fx, frame->y, frame->x - fx, span, COMPOSITOR_INK_FRAME);
-                compositor_fill(t, frame->x + frame->width, frame->y,
-                                fx + fw - (frame->x + frame->width), span, COMPOSITOR_INK_FRAME);
-                compositor_fill(t, frame->x, frame->y, frame->width, title, ground);
-
-                if (compositor_close_box(frame, &cx, &cy, &side))
-                        compositor_cross(t, cx + (side - COMPOSITOR_CELL * frame->scale) / 2,
-                                         cy + (side - COMPOSITOR_CELL * frame->scale) / 2,
-                                         frame->scale, ground, COMPOSITOR_INK_TEXT);
+                compositor_fill(t, ox + r, oy, ow - 2 * r, b, frame->edge);
+                compositor_fill(t, ox + r, y + h, ow - 2 * r, b, frame->edge);
+                compositor_fill(t, ox, oy + r, b, oh - 2 * r, frame->edge);
+                compositor_fill(t, x + w, oy + r, b, oh - 2 * r, frame->edge);
         }
 
-        compositor_blit(t, frame->x, frame->y + title, frame->width, frame->height,
-                        frame->pixels, frame->pitch);
+        // The pixels, but for the corners' squares.
+        if (!r)
+        {
+                compositor_blit(t, x, y, w, h, frame->pixels, frame->pitch);
+                return;
+        }
+        compositor_blit(t, x + ri, y, w - 2 * ri, ri, frame->pixels + ri, frame->pitch);
+        compositor_blit(t, x, y + ri, w, h - 2 * ri, frame->pixels + (unsigned long)ri * frame->pitch, frame->pitch);
+        compositor_blit(t, x + ri, y + h - ri, w - 2 * ri, ri, frame->pixels + (unsigned long)(h - ri) * frame->pitch + ri,
+                        frame->pitch);
+
+        const unsigned char *outer = compositor_corner_mask(r, 0), *inner = ri ? compositor_corner_mask(ri, 1) : 0;
+
+        for (int corner = 0; corner < 4; corner++)
+        {
+                int cx = corner & 1 ? ox + ow - r : ox, cy = corner & 2 ? oy + oh - r : oy;
+                int x1 = cx > t->x1 ? cx : t->x1, y1 = cy > t->y1 ? cy : t->y1;
+                int x2 = cx + r < t->x2 ? cx + r : t->x2, y2 = cy + r < t->y2 ? cy + r : t->y2;
+
+                for (int py = y1; py < y2; py++)
+                        for (int px = x1; px < x2; px++)
+                        {
+                                int mx = corner & 1 ? cx + r - 1 - px : px - cx, my = corner & 2 ? cy + r - 1 - py : py - cy;
+                                unsigned int cover = outer[my * r + mx];
+                                unsigned int *at = t->pixels + (unsigned long)(py - t->oy) * t->pitch + (unsigned long)(px - t->ox);
+                                unsigned int pixel = *at;
+
+                                // The line where the outer circle is; the contents where the inner one is, which is
+                                // the part of the square inside the contents, b in from its outer sides.
+                                if (cover)
+                                        pixel = b ? compositor_mix(pixel, frame->edge, cover) : pixel;
+                                if (px >= x && px < x + w && py >= y && py < y + h)
+                                {
+                                        unsigned int in = inner ? inner[(my - b) * ri + (mx - b)] : 0;
+                                        unsigned int ink = frame->pixels[(unsigned long)(py - y) * frame->pitch + (unsigned long)(px - x)];
+
+                                        if (!b)
+                                                in = cover;
+                                        pixel = in == 255 ? ink : in ? compositor_mix(pixel, ink, in) : pixel;
+                                }
+                                *at = pixel;
+                        }
+        }
 }
 
 /*
@@ -539,47 +523,73 @@ static const struct compositor_role compositor_roles[SURFACE_ROLE_LEGACY + 1] = 
         written once and none read. The frames are bottom first.
 
         The damage is cut into bands at the top and bottom edge of every
-        surface, so in one band each surface covers the same columns from
-        the band's top to its bottom. The columns are given out from the top
-        surface down: each takes what it covers of the spans still unclaimed
-        and leaves the rest, which are never more than one more than there
-        are surfaces. What no surface claims is desktop. The target is
-        drawn on through a clip of the cell, so the picture is the one the
-        surfaces drawn bottom to top over a desktop would be.
+        piece of a surface -- a square one is one piece, a round one three,
+        its middle and its two sides between the corners -- so in one band
+        each piece covers the same columns from the band's top to its
+        bottom. The columns are given out from the top piece down: each
+        takes what it covers of the spans still unclaimed and leaves the
+        rest, which are never more than one more than there are pieces.
+        What no piece claims is desktop. The target is drawn on through a
+        clip of the cell, so the picture is the one the surfaces drawn bottom
+        to top over a desktop would be, but in the corners of round windows,
+        which no piece holds: each of those squares is drawn so, every frame
+        bottom to top, into a scratch of its own, and then copied out. The
+        target is written and never read.
 */
+#define COMPOSITOR_PIECES (3 * COMPOSITOR_FRAMES)
+
+static unsigned int compositor_corner_scratch[COMPOSITOR_RADIUS_MOST * COMPOSITOR_RADIUS_MOST];
+
 static void compositor_scene(const struct compositor_target *t,
                              const struct compositor_frame *frames, unsigned int count)
 {
-        int edge[2 * COMPOSITOR_FRAMES + 2];
-        int box[COMPOSITOR_FRAMES][4];
-        unsigned int edges = 2;
+        int edge[2 * COMPOSITOR_PIECES + 2];
+        int box[COMPOSITOR_PIECES][4];
+        unsigned char owner[COMPOSITOR_PIECES];
+        unsigned int edges = 2, pieces = 0;
 
         edge[0] = t->y1;
         edge[1] = t->y2;
 
         for (unsigned int at = 0; at < count; at++)
         {
-                int width, height;
+                const struct compositor_frame *f = &frames[at];
+                int r = compositor_radius(f), fx, fy, fw, fh, x2, y2;
+                unsigned int first = pieces;
 
-                compositor_outline(&frames[at], &box[at][0], &box[at][1], &width, &height);
-                box[at][2] = box[at][0] + width;
-                box[at][3] = box[at][1] + height;
+                compositor_outline(f, &fx, &fy, &fw, &fh);
+                x2 = fx + fw, y2 = fy + fh;
+                if (!r)
+                {
+                        box[pieces][0] = fx, box[pieces][1] = fy, box[pieces][2] = x2, box[pieces][3] = y2;
+                        owner[pieces++] = (unsigned char)at;
+                }
+                else
+                {
+                        box[pieces][0] = fx + r, box[pieces][1] = fy, box[pieces][2] = x2 - r, box[pieces][3] = y2;
+                        owner[pieces++] = (unsigned char)at;
+                        box[pieces][0] = fx, box[pieces][1] = fy + r, box[pieces][2] = fx + r, box[pieces][3] = y2 - r;
+                        owner[pieces++] = (unsigned char)at;
+                        box[pieces][0] = x2 - r, box[pieces][1] = fy + r, box[pieces][2] = x2, box[pieces][3] = y2 - r;
+                        owner[pieces++] = (unsigned char)at;
+                }
 
-                for (unsigned int side = 1; side < 4; side += 2)
-                        if (box[at][side] > t->y1 && box[at][side] < t->y2)
-                        {
-                                unsigned int place = edges++;
+                for (unsigned int piece = first; piece < pieces; piece++)
+                        for (unsigned int side = 1; side < 4; side += 2)
+                                if (box[piece][side] > t->y1 && box[piece][side] < t->y2)
+                                {
+                                        unsigned int place = edges++;
 
-                                for (; place && edge[place - 1] > box[at][side]; place--)
-                                        edge[place] = edge[place - 1];
-                                edge[place] = box[at][side];
-                        }
+                                        for (; place && edge[place - 1] > box[piece][side]; place--)
+                                                edge[place] = edge[place - 1];
+                                        edge[place] = box[piece][side];
+                                }
         }
 
         for (unsigned int band = 0; band + 1 < edges; band++)
         {
                 int top = edge[band], bottom = edge[band + 1];
-                int span[COMPOSITOR_FRAMES + 1][2];
+                int span[COMPOSITOR_PIECES + 1][2];
                 unsigned int spans = 1;
 
                 if (bottom <= top)
@@ -588,9 +598,9 @@ static void compositor_scene(const struct compositor_target *t,
                 span[0][0] = t->x1;
                 span[0][1] = t->x2;
 
-                for (unsigned int at = count; at-- && spans;)
+                for (unsigned int at = pieces; at-- && spans;)
                 {
-                        if (box[at][1] >= bottom || box[at][3] <= top)
+                        if (box[at][1] >= bottom || box[at][3] <= top || box[at][2] <= box[at][0])
                                 continue;
 
                         for (unsigned int s = 0; s < spans; s++)
@@ -607,7 +617,7 @@ static void compositor_scene(const struct compositor_target *t,
                                 cell.y1 = top;
                                 cell.x2 = x2;
                                 cell.y2 = bottom;
-                                compositor_draw(&cell, &frames[at]);
+                                compositor_draw(&cell, &frames[owner[at]]);
 
                                 if (low < x1 && x2 < high)
                                 {
@@ -633,6 +643,29 @@ static void compositor_scene(const struct compositor_target *t,
                 for (unsigned int s = 0; s < spans; s++)
                         compositor_fill(t, span[s][0], top, span[s][1] - span[s][0], bottom - top,
                                         COMPOSITOR_INK_DESKTOP);
+        }
+
+        for (unsigned int at = 0; at < count; at++)
+        {
+                const struct compositor_frame *f = &frames[at];
+                int r = compositor_radius(f), fx, fy, fw, fh;
+
+                compositor_outline(f, &fx, &fy, &fw, &fh);
+                for (int corner = 0; r && corner < 4; corner++)
+                {
+                        int cx = corner & 1 ? fx + fw - r : fx, cy = corner & 2 ? fy + fh - r : fy;
+                        struct compositor_target square = {compositor_corner_scratch, (unsigned long)r, t->width, t->height,
+                                                           cx > t->x1 ? cx : t->x1, cy > t->y1 ? cy : t->y1,
+                                                           cx + r < t->x2 ? cx + r : t->x2, cy + r < t->y2 ? cy + r : t->y2,
+                                                           cx, cy};
+
+                        if (square.x2 <= square.x1 || square.y2 <= square.y1)
+                                continue;
+                        compositor_fill(&square, cx, cy, r, r, COMPOSITOR_INK_DESKTOP);
+                        for (unsigned int each = 0; each < count; each++)
+                                compositor_draw(&square, &frames[each]);
+                        compositor_blit(t, cx, cy, r, r, compositor_corner_scratch, (unsigned long)r);
+                }
         }
 }
 
@@ -666,6 +699,7 @@ static void compositor_scene(const struct compositor_target *t,
 #define CK_CAPSLOCK 58
 #define CK_KEY_BACKSPACE 14
 #define CK_KEY_TAB 15
+#define CK_KEY_F4 62
 #define CK_KEY_F9 67
 #define CK_KEY_T 20
 #define CK_ACUTE 0xB4u
@@ -1397,6 +1431,8 @@ struct compositor_absinfo
 #define COMPOSITOR_BTN_TOUCH 0x14au
 #define COMPOSITOR_EVIOCSCLOCKID 0x400445a0u
 #define COMPOSITOR_BTN_LEFT 0x110u
+#define COMPOSITOR_BTN_RIGHT 0x111u
+#define COMPOSITOR_BTN_MIDDLE 0x112u
 #define COMPOSITOR_BTN_TASK 0x117u
 #define COMPOSITOR_KEY_A 30u
 #define COMPOSITOR_KEY_POWER 116u
@@ -1425,6 +1461,17 @@ struct compositor_poll
 // Two presses on a titlebar are a pair when the second comes this soon after the first,
 // and a drag that ends this near the edge of the output fills the work area or half of it.
 #define COMPOSITOR_AGAIN_NS 400000000ull
+
+// The band at a window's edges a press resizes it by -- six pixels outside them and two inside, so a hand
+// a pixel short of a line one pixel wide still has it -- and the step a new window is put down and across
+// from one in its place, in logical pixels.
+#define COMPOSITOR_GRIP 6
+#define COMPOSITOR_GRIP_IN 2
+#define COMPOSITOR_STEP 20
+#define COMPOSITOR_EDGE_LEFT CP_EDGE_LEFT
+#define COMPOSITOR_EDGE_RIGHT CP_EDGE_RIGHT
+#define COMPOSITOR_EDGE_TOP CP_EDGE_TOP
+#define COMPOSITOR_EDGE_BOTTOM CP_EDGE_BOTTOM
 #define COMPOSITOR_SNAP 8
 // How long a pointer that was shaken stays large.
 #define COMPOSITOR_MAGNIFIED_NS 1200000000ull
@@ -1671,14 +1718,18 @@ static int compositor_visible(const struct compositor_client *client)
         return client->shown && client->active && !(client->style & WINDOW_MINIMIZED);
 }
 
+// A window, as against a panel or a background: it can be taken hold of at its edges.
 static int compositor_framed(const struct compositor_client *client)
 {
         return compositor_roles[client->role].framed && (client->style & WINDOW_FRAME);
 }
 
-static int compositor_title_height(const struct compositor_client *client)
+// The line round a window while it floats, in device pixels; a window filling the work area or half of
+// it meets the area's edges with none, and square.
+static int compositor_line(const struct compositor_client *client)
 {
-        return compositor_framed(client) ? COMPOSITOR_TITLE * compositor.scale : 0;
+        return compositor_framed(client) && client->arranged == COMPOSITOR_FLOATING ? COMPOSITOR_LINE * compositor.scale
+                                                                                     : 0;
 }
 
 static void compositor_frame_of(const struct compositor_client *client,
@@ -1690,13 +1741,15 @@ static void compositor_frame_of(const struct compositor_client *client,
         unsigned int height = client->old.page ? client->old.height : client->height;
         unsigned int slot = client->old.page ? client->old.slot : client->slot;
 
-        *frame = (struct compositor_frame){client->x, client->y, (int)width, (int)height,
-                                           compositor.scale, compositor_framed(client),
-                                           client == compositor.focus, 1,
+        // A floating window is round at its corners and has its line, lit while it has the keys; filling
+        // the work area or half of it, it has neither.
+        *frame = (struct compositor_frame){client->x, client->y, (int)width, (int)height, compositor.scale,
                                            // Not surface_buffer: the page is the program's, and
                                            // its buffer_offset is whatever it last wrote.
-                                           surface_slot(page, slot, width, height),
-                                           width, 0, null, 0};
+                                           surface_slot(page, slot, width, height), width, 0, null, 0,
+                                           compositor_line(client) ? COMPOSITOR_RADIUS * compositor.scale : 0,
+                                           compositor_line(client),
+                                           client == compositor.focus ? COMPOSITOR_INK_BUTTON_LIT : COMPOSITOR_INK_PANEL};
 }
 
 // The windows a panel lists, in the order they were made, and what shows of each.
@@ -1738,7 +1791,7 @@ static int compositor_panel_frame(struct compositor_frame *frame)
         compositor_band(compositor.width, compositor.height, compositor.scale, compositor.bottom,
                         &x, &y, &width, &height);
         compositor.listing = compositor_windows();
-        *frame = (struct compositor_frame){x, y, width, height, compositor.scale, 0, 0, 0, null, 0,
+        *frame = (struct compositor_frame){x, y, width, height, compositor.scale, null, 0,
                                            1, compositor.marks, compositor.listing};
         return 1;
 }
@@ -1746,10 +1799,11 @@ static int compositor_panel_frame(struct compositor_frame *frame)
 static void compositor_damage_client(const struct compositor_client *client)
 {
         struct compositor_frame frame;
-        int x, y, width, height;
 
         if (!client->shown || !client->active)
                 return;
+
+        int x, y, width, height;
 
         compositor_frame_of(client, &frame);
         compositor_outline(&frame, &x, &y, &width, &height);
@@ -2604,6 +2658,33 @@ static void compositor_raise(struct compositor_client *client)
         panel is in the top layer, over the windows and under an overlay.
         A surface that lets the pointer through is not there.
 */
+// Whether a point is in the band at a window's edges that resizes it -- just inside its contents, its line,
+// and past it -- and which edges.
+static unsigned int compositor_edge_zone(const struct compositor_client *client, int x, int y)
+{
+        int grip = COMPOSITOR_GRIP * compositor.scale + compositor_line(client), x2, y2;
+        int in = COMPOSITOR_GRIP_IN * compositor.scale;
+        unsigned int edges = 0;
+
+        if (!compositor_framed(client) || !(client->lock & SURFACE_LOCK_RESIZABLE))
+                return 0;
+
+        x2 = client->x + (int)client->width;
+        y2 = client->y + (int)client->height;
+        if (x < client->x - grip || x >= x2 + grip || y < client->y - grip || y >= y2 + grip)
+                return 0;
+
+        edges |= x < client->x + in ? COMPOSITOR_EDGE_LEFT : x >= x2 - in ? COMPOSITOR_EDGE_RIGHT : 0;
+        edges |= y < client->y + in ? COMPOSITOR_EDGE_TOP : y >= y2 - in ? COMPOSITOR_EDGE_BOTTOM : 0;
+        return edges;
+}
+
+/*
+        What is under a point: the panel's band, the top surface whose
+        contents hold it, or a window whose grip, just outside its edges,
+        does -- above whatever is under that, as the edge of a window that
+        had a frame was.
+*/
 static struct compositor_client *compositor_under(int x, int y, int *panel)
 {
         int bar_x, bar_y, bar_width, bar_height;
@@ -2617,8 +2698,6 @@ static struct compositor_client *compositor_under(int x, int y, int *panel)
         for (;;)
         {
                 struct compositor_client *client = at ? compositor.stack[at - 1] : null;
-                struct compositor_frame frame;
-                int fx, fy, fw, fh;
 
                 if (bar && (!client || client->layer <= SURFACE_LAYER_TOP))
                 {
@@ -2637,9 +2716,9 @@ static struct compositor_client *compositor_under(int x, int y, int *panel)
                 if (!compositor_visible(client) || client->lock & SURFACE_LOCK_PASS_POINTER)
                         continue;
 
-                compositor_frame_of(client, &frame);
-                compositor_outline(&frame, &fx, &fy, &fw, &fh);
-                if (x >= fx && x < fx + fw && y >= fy && y < fy + fh)
+                if ((x >= client->x && x < client->x + (int)client->width && y >= client->y &&
+                     y < client->y + (int)client->height) ||
+                    compositor_edge_zone(client, x, y))
                         return client;
         }
 }
@@ -2658,13 +2737,12 @@ static void compositor_put(struct compositor_client *client, int x, int y)
         too: the whole output, the panel's band, the work area, beside the
         panel for a menu. Any other is put where it asked, all of it on the
         work area when it fits and its top left when it does not, so a
-        person can always reach its titlebar. A position asked for outside
+        person can always reach it. A position asked for outside
         that is moved in, not refused (canvas spec 02 section 7), and the
         program is told where it is.
 */
 static void compositor_place(struct compositor_client *client, int x, int y)
 {
-        int border = compositor_framed(client) ? COMPOSITOR_BORDER * compositor.scale : 0;
         struct compositor_area work;
         int band_width, band_height;
 
@@ -2686,8 +2764,9 @@ static void compositor_place(struct compositor_client *client, int x, int y)
                 break;
         default:
         {
-                int high_x = work.x2 - (int)client->width - border;
-                int high_y = work.y2 - (int)client->height - compositor_title_height(client) - border * 2;
+                int line = compositor_line(client);
+                int high_x = work.x2 - (int)client->width - line;
+                int high_y = work.y2 - (int)client->height - line;
 
                 if (client->role == SURFACE_ROLE_LAUNCHER)
                 {
@@ -2699,8 +2778,8 @@ static void compositor_place(struct compositor_client *client, int x, int y)
 
                 x = x > high_x ? high_x : x;
                 y = y > high_y ? high_y : y;
-                x = x < work.x1 + border ? work.x1 + border : x;
-                y = y < work.y1 + border ? work.y1 + border : y;
+                x = x < work.x1 + line ? work.x1 + line : x;
+                y = y < work.y1 + line ? work.y1 + line : y;
         }
         }
 
@@ -3044,11 +3123,6 @@ static int compositor_map(const struct surface_request *request, int file, struc
         and not one a motion. The edges the hand does not hold stay where they
         were, whatever size comes back.
 */
-#define COMPOSITOR_EDGE_LEFT CP_EDGE_LEFT
-#define COMPOSITOR_EDGE_RIGHT CP_EDGE_RIGHT
-#define COMPOSITOR_EDGE_TOP CP_EDGE_TOP
-#define COMPOSITOR_EDGE_BOTTOM CP_EDGE_BOTTOM
-#define COMPOSITOR_GRIP 6
 
 static void compositor_configure(struct compositor_client *client)
 {
@@ -3074,32 +3148,6 @@ static void compositor_configure(struct compositor_client *client)
                         (int)client->asked_h);
 }
 
-// Which edges of a framed surface that may be resized the point is within the grip of.
-static unsigned int compositor_edge_zone(const struct compositor_client *client, int x, int y)
-{
-        struct compositor_frame frame;
-        unsigned int edges = 0;
-        int fx, fy, fw, fh, grip = COMPOSITOR_GRIP * compositor.scale;
-
-        if (!compositor_framed(client) || !(client->lock & SURFACE_LOCK_RESIZABLE))
-                return 0;
-
-        compositor_frame_of(client, &frame);
-        compositor_outline(&frame, &fx, &fy, &fw, &fh);
-
-        if (x < fx + grip)
-                edges |= COMPOSITOR_EDGE_LEFT;
-        else if (x >= fx + fw - grip)
-                edges |= COMPOSITOR_EDGE_RIGHT;
-
-        if (y < fy + grip)
-                edges |= COMPOSITOR_EDGE_TOP;
-        else if (y >= fy + fh - grip)
-                edges |= COMPOSITOR_EDGE_BOTTOM;
-
-        return edges;
-}
-
 // The same, and only when a hand may take hold now: not while an ask for a size is out.
 static unsigned int compositor_edges(const struct compositor_client *client, int x, int y)
 {
@@ -3115,7 +3163,7 @@ static void compositor_resize_begin(struct compositor_client *client, unsigned i
         compositor.press_y = compositor.pointer_y;
         client->edges = edges;
         client->right = client->x + (int)client->width;
-        client->bottom = client->y + compositor_title_height(client) + (int)client->height;
+        client->bottom = client->y + (int)client->height;
         client->want_w = client->asked_w = client->width;
         client->want_h = client->asked_h = client->height;
 }
@@ -3127,12 +3175,11 @@ static void compositor_resize_move(void)
         int dx = compositor.pointer_x - compositor.press_x;
         int dy = compositor.pointer_y - compositor.press_y;
         int w = compositor.resize_w, h = compositor.resize_h;
-        int border = COMPOSITOR_BORDER * compositor.scale;
         int max_w, max_h;
 
         compositor_work(compositor.width, compositor.height, compositor.scale, compositor.bottom, &work);
-        max_w = work.x2 - work.x1 - border * 2;
-        max_h = work.y2 - work.y1 - compositor_title_height(client) - border * 3;
+        max_w = work.x2 - work.x1 - 2 * compositor_line(client);
+        max_h = work.y2 - work.y1 - 2 * compositor_line(client);
 
         if (client->edges & COMPOSITOR_EDGE_LEFT)
                 w -= dx;
@@ -3176,7 +3223,6 @@ static void compositor_want(struct compositor_client *client, int width, int hei
 static void compositor_arrange(struct compositor_client *client, unsigned int how)
 {
         struct compositor_area work;
-        int border = COMPOSITOR_BORDER * compositor.scale, title = compositor_title_height(client);
         int half, left, right;
 
         if (!(client->lock & SURFACE_LOCK_RESIZABLE) || !compositor_framed(client) || !client->shown)
@@ -3194,14 +3240,14 @@ static void compositor_arrange(struct compositor_client *client, unsigned int ho
                 client->saved_w = client->width;
                 client->saved_h = client->height;
         }
+        // Its line goes with it: the outline it had is damaged before it is a filling one.
+        compositor_damage_client(client);
         client->arranged = how;
-
-        compositor_damage_client(client);
         client->edges = how == COMPOSITOR_RIGHT ? COMPOSITOR_EDGE_LEFT : 0;
-        client->right = right - border;
-        compositor_put(client, left + border, work.y1 + border);
+        client->right = right;
+        compositor_put(client, left, work.y1);
         compositor_damage_client(client);
-        compositor_want(client, right - left - border * 2, work.y2 - work.y1 - title - border * 3);
+        compositor_want(client, right - left, work.y2 - work.y1);
 }
 
 // Back to the rectangle it had, wherever it was put since.
@@ -3219,18 +3265,18 @@ static void compositor_float(struct compositor_client *client)
 }
 
 /*
-        Taking an arranged titlebar takes the window it was: back to the size
-        it had, under the hand where the hand had it, so taking the right
-        side does not make the window jump until its left is under the pointer.
+        Taking an arranged window takes the window it was: back to the size
+        it had, under the hand where the hand had it, at the same share of
+        its width and height, so taking the right side does not make the
+        window jump until its left is under the pointer.
 */
 static void compositor_float_for_drag(struct compositor_client *client)
 {
-        int title = compositor_title_height(client);
         int width = (int)client->saved_w < WINDOW_MIN_WIDTH ? WINDOW_MIN_WIDTH : (int)client->saved_w;
+        int height = (int)client->saved_h < WINDOW_MIN_HEIGHT ? WINDOW_MIN_HEIGHT : (int)client->saved_h;
         int grab = (int)((long)(compositor.pointer_x - client->x) * width / (client->width ? (int)client->width : 1));
-        int at = compositor.pointer_y - client->y;
+        int at = (int)((long)(compositor.pointer_y - client->y) * height / (client->height ? (int)client->height : 1));
 
-        at = at < 0 ? 0 : at > title - 1 ? (title > 0 ? title - 1 : 0) : at;
         client->arranged = COMPOSITOR_FLOATING;
         client->edges = 0;
         compositor_damage_client(client);
@@ -3503,16 +3549,16 @@ static void compositor_expire(positive now)
 /*
         Where a window goes the first time it shows: where it asked to be, or
         the middle of the work area when it asked to be centred, and a window
-        asking for the place another holds is put down and across, a titlebar
-        a step, until it is on none that it can be seen from. Bounded: eight
-        titlebars down is most of the way across a small screen, and past
+        asking for the place another holds is put down and across, twenty
+        pixels a step, until it is on none that it can be seen from. Bounded:
+        eight steps down is most of the way across a small screen, and past
         that the honest answer is to stop and let them overlap; a step that
         would put it off the bottom or the right stops the search too.
 */
 static void compositor_first_place(const struct compositor_client *client, int *x, int *y)
 {
         struct compositor_area work;
-        int step = COMPOSITOR_TITLE * compositor.scale, title = compositor_title_height(client);
+        int step = COMPOSITOR_STEP * compositor.scale;
         int width = (int)client->width, height = (int)client->height;
 
         compositor_work(compositor.width, compositor.height, compositor.scale, compositor.bottom, &work);
@@ -3520,14 +3566,14 @@ static void compositor_first_place(const struct compositor_client *client, int *
         if (client->page->window.region == WINDOW_CENTRED)
         {
                 *x = work.x1 + (work.x2 - work.x1 - width) / 2;
-                *y = work.y1 + (work.y2 - work.y1 - (height + title)) / 2;
+                *y = work.y1 + (work.y2 - work.y1 - height) / 2;
         }
 
         for (int at = 0; at < 8; at++)
         {
                 int taken = 0, tx = *x + at * step, ty = *y + at * step;
 
-                if (tx + width > work.x2 || ty + height + title > work.y2)
+                if (tx + width > work.x2 || ty + height > work.y2)
                         break;
 
                 for (unsigned int other = 0; other < COMPOSITOR_CLIENTS; other++)
@@ -3585,7 +3631,7 @@ static void compositor_commit(struct compositor_client *client)
                 if (client->edges & COMPOSITOR_EDGE_LEFT)
                         x = client->right - (int)client->width;
                 if (client->edges & COMPOSITOR_EDGE_TOP)
-                        y = client->bottom - (int)client->height - compositor_title_height(client);
+                        y = client->bottom - (int)client->height;
                 whole = 1;
         }
 
@@ -3699,9 +3745,7 @@ static void compositor_commit(struct compositor_client *client)
                 if (rectangle.width <= 0 || rectangle.height <= 0 || x2 <= x1 || y2 <= y1)
                         continue;
 
-                compositor_damage(client->x + (int)x1,
-                                  client->y + compositor_title_height(client) + (int)y1,
-                                  (int)(x2 - x1), (int)(y2 - y1));
+                compositor_damage(client->x + (int)x1, client->y + (int)y1, (int)(x2 - x1), (int)(y2 - y1));
         }
 }
 
@@ -4068,6 +4112,8 @@ static unsigned int compositor_modifiers(void)
         which Canvas hears for itself and acts on. The rest make characters, one event each, for the surface that has
         the keys; with none, a key gives them to the topmost.
 */
+static void compositor_close(struct compositor_client *client);
+
 static void compositor_key(unsigned int at, unsigned int code, int value, positive reported)
 {
         unsigned int bit = compositor_held_bit(code), characters[2] = {0, 0}, flags, modifiers, chord;
@@ -4095,6 +4141,13 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
         {
                 if (value)
                         compositor_focus_step();
+                return;
+        }
+
+        if (chord == SURFACE_KEY_ALT && code == CK_KEY_F4 && !compositor.cycle)
+        {
+                if (value == 1)
+                        compositor_close(compositor.focus);
                 return;
         }
 
@@ -4157,7 +4210,7 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
 static void compositor_local(const struct compositor_client *client, int *x, int *y)
 {
         *x = compositor.pointer_x - client->x;
-        *y = compositor.pointer_y - client->y - compositor_title_height(client);
+        *y = compositor.pointer_y - client->y;
 }
 
 // The pointer stays on the output, wherever the motions of a burst took it.
@@ -4285,10 +4338,19 @@ static void compositor_release(unsigned int code, int snap)
                 compositor_arrange(dragged, compositor_snap(compositor.pointer_x, compositor.pointer_y));
 }
 
+// A window asked to go: by Alt-F4, or a middle press on its button in the panel.
+static void compositor_close(struct compositor_client *client)
+{
+        if (!client || !client->page || !compositor_roles[client->role].framed)
+                return;
+        client->page->window.state |= WINDOW_CLOSING;
+        compositor_post(client, SURFACE_EVENT_CLOSE, 0, 0, SURFACE_CLOSE_REQUESTED, 0);
+}
+
 static void compositor_button(unsigned int code, int down)
 {
         struct compositor_client *under;
-        int x, y, panel;
+        int x, y, panel, alt = (compositor_modifiers() & SURFACE_KEY_ALT) != 0;
 
         compositor_pointer_clamp();
         under = compositor_under(compositor.pointer_x, compositor.pointer_y, &panel);
@@ -4300,31 +4362,32 @@ static void compositor_button(unsigned int code, int down)
         }
 
         // The compositor's own panel: a press on a window's button brings the
-        // window up, as a program's panel asks for it to be. Nothing else of
-        // the panel takes a press, and none of it takes the keys.
+        // window up, as a program's panel asks for it to be, and a middle press
+        // asks it to go. Nothing else of the panel takes a press, and none of
+        // it takes the keys.
         if (panel)
         {
                 struct compositor_frame bar;
                 int hit;
 
-                if (code == COMPOSITOR_BTN_LEFT && compositor_panel_frame(&bar) &&
+                if ((code == COMPOSITOR_BTN_LEFT || code == COMPOSITOR_BTN_MIDDLE) && compositor_panel_frame(&bar) &&
                     (hit = compositor_panel_hit(&bar, compositor.pointer_x, compositor.pointer_y)) >= 0)
-                        compositor_reveal(compositor.listed[hit]->id);
+                {
+                        if (code == COMPOSITOR_BTN_MIDDLE)
+                                compositor_close(compositor.listed[hit]);
+                        else
+                                compositor_reveal(compositor.listed[hit]->id);
+                }
                 return;
         }
 
         if (!under)
                 return;
 
-        if (code == COMPOSITOR_BTN_LEFT && !compositor.grab)
+        if ((code == COMPOSITOR_BTN_LEFT || (code == COMPOSITOR_BTN_RIGHT && alt)) && !compositor.grab)
         {
-                struct compositor_frame frame;
-                unsigned int edges;
-                int cx, cy, side;
+                unsigned int edges = compositor_edges(under, compositor.pointer_x, compositor.pointer_y);
                 positive now = clock_monotonic_nanoseconds();
-                int in_title = compositor.pointer_y >= under->y && compositor.pointer_x >= under->x &&
-                               compositor.pointer_x < under->x + (int)under->width &&
-                               compositor.pointer_y < under->y + compositor_title_height(under);
 
                 // A raise stays in the surface's layer; a surface that takes
                 // no focus on a press (a panel) does not take it.
@@ -4332,47 +4395,47 @@ static void compositor_button(unsigned int code, int down)
                 if (!(under->lock & SURFACE_LOCK_NO_FOCUS_CLICK))
                         compositor_focus(under);
 
-                /*
-                        Alt and anywhere on a window moves it. A window with no
-                        titlebar has nothing to take hold of, and the keys
-                        have said which of the two the hand meant, so this is
-                        before the edges: Alt over a corner moves.
-                */
-                if ((under->lock & SURFACE_LOCK_MOVABLE) && (compositor_modifiers() & SURFACE_KEY_ALT))
+                // Just outside a window's edges is the edge, to resize by. An edge resize makes
+                // this ordinary geometry: a double click after it fills the screen and does not
+                // restore what was.
+                if (edges && code == COMPOSITOR_BTN_LEFT)
                 {
-                        compositor.drag = under;
-                        compositor.drag_x = compositor.pointer_x - under->x;
-                        compositor.drag_y = compositor.pointer_y - under->y;
+                        under->arranged = COMPOSITOR_FLOATING;
+                        compositor_resize_begin(under, edges);
                         return;
                 }
 
                 /*
-                        The close box after the edges and before everything else: the box's
-                        square and the corner's grip overlap by a few pixels, and a
-                        window that cannot be resized from its own corner is worse than
-                        a button that has to be hit a little further in. A press on it
-                        is not one of a pair, or a second click would fill the screen on
-                        its way out.
+                        With Alt held, a window is the window and not what is in
+                        it: the left button takes hold of it anywhere, twice
+                        quickly fills the work area or gives it back, and the
+                        right button resizes it from the corner nearest the
+                        hand, which a window filling the work area has no
+                        other way to be.
                 */
-                edges = compositor_edges(under, compositor.pointer_x, compositor.pointer_y);
-                compositor_frame_of(under, &frame);
-                if (!edges && compositor_close_box(&frame, &cx, &cy, &side) &&
-                    compositor.pointer_x >= cx && compositor.pointer_x < cx + side &&
-                    compositor.pointer_y >= cy && compositor.pointer_y < cy + side)
+                if (alt && code == COMPOSITOR_BTN_RIGHT)
                 {
-                        compositor.press = null;
-                        under->page->window.state |= WINDOW_CLOSING;
-                        compositor_post(under, SURFACE_EVENT_CLOSE, 0, 0, SURFACE_CLOSE_REQUESTED, 0);
+                        if ((under->lock & SURFACE_LOCK_RESIZABLE) && compositor_framed(under) &&
+                            !under->old.page && !under->outstanding)
+                        {
+                                int centre_x = under->x + (int)under->width / 2, centre_y = under->y + (int)under->height / 2;
+
+                                under->arranged = COMPOSITOR_FLOATING;
+                                compositor_resize_begin(under, (compositor.pointer_x < centre_x ? COMPOSITOR_EDGE_LEFT
+                                                                                                : COMPOSITOR_EDGE_RIGHT) |
+                                                                   (compositor.pointer_y < centre_y ? COMPOSITOR_EDGE_TOP
+                                                                                                    : COMPOSITOR_EDGE_BOTTOM));
+                        }
                         return;
                 }
 
-                // Two presses on the same titlebar close together fill the work area, or undo it.
+                if (alt)
                 {
                         int again = under == compositor.press && now - compositor.press_ns <= COMPOSITOR_AGAIN_NS;
 
                         compositor.press = under;
                         compositor.press_ns = now;
-                        if (again && in_title && (under->lock & SURFACE_LOCK_RESIZABLE))
+                        if (again && (under->lock & SURFACE_LOCK_RESIZABLE))
                         {
                                 compositor.press = null;
                                 if (under->arranged == COMPOSITOR_MAXIMIZED)
@@ -4381,28 +4444,18 @@ static void compositor_button(unsigned int code, int down)
                                         compositor_arrange(under, COMPOSITOR_MAXIMIZED);
                                 return;
                         }
-                }
-
-                if (edges)
-                {
-                        // An edge resize makes this ordinary geometry: a double click
-                        // after it fills the screen and does not restore what was.
-                        under->arranged = COMPOSITOR_FLOATING;
-                        compositor_resize_begin(under, edges);
-                        return;
-                }
-
-                if ((under->lock & SURFACE_LOCK_MOVABLE) && compositor.pointer_y < under->y + compositor_title_height(under))
-                {
-                        compositor.drag = under;
-                        compositor.drag_x = compositor.pointer_x - under->x;
-                        compositor.drag_y = compositor.pointer_y - under->y;
-                        return;
+                        if (under->lock & SURFACE_LOCK_MOVABLE)
+                        {
+                                compositor.drag = under;
+                                compositor.drag_x = compositor.pointer_x - under->x;
+                                compositor.drag_y = compositor.pointer_y - under->y;
+                                return;
+                        }
                 }
         }
 
         compositor_local(under, &x, &y);
-        if (y < 0 || x < 0 || x >= (int)under->width)
+        if (y < 0 || x < 0 || x >= (int)under->width || y >= (int)under->height)
                 return;
 
         compositor.grab = compositor.grab ? compositor.grab : under;
@@ -5511,7 +5564,7 @@ static void panel_frame(struct compositor_frame *frame, unsigned char *marks)
         for (unsigned int at = 0; at < panel.listing.count; at++)
                 marks[at] = (unsigned char)panel.listing.entry[at].state;
 
-        *frame = (struct compositor_frame){0, 0, panel.width, panel.height, panel.scale, 0, 0, 0, null, 0,
+        *frame = (struct compositor_frame){0, 0, panel.width, panel.height, panel.scale, null, 0,
                                            1, marks, panel.listing.count};
 }
 
@@ -5570,8 +5623,8 @@ static void panel_draw(void)
                 if (compositor_panel_slot(&frame, (int)at, &x, &y, &width, &height))
                         panel_text(x, y, width, height, panel.listing.entry[at].title,
                                    marks[at] & SURFACE_LIST_MINIMIZED ? COMPOSITOR_INK_PANEL
-                                   : marks[at] & SURFACE_LIST_FOCUSED ? COMPOSITOR_INK_TITLE_LIT
-                                                                     : COMPOSITOR_INK_TITLE,
+                                   : marks[at] & SURFACE_LIST_FOCUSED ? COMPOSITOR_INK_BUTTON_LIT
+                                                                     : COMPOSITOR_INK_BUTTON,
                                    0);
 
         if (compositor_panel_slot(&frame, -2, &x, &y, &width, &height))
