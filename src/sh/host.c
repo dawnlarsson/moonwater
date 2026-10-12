@@ -8931,9 +8931,12 @@ static COLD bipolar nl80211_join_once(p8 address_to ssid, positive ssid_length,
         wait the failure earns. A louder twin that refuses every join -- WPA3
         under a password its owner never chose, say -- otherwise held the real
         one off for as long as that wait grew, a minute at the last. A join a
-        person asked for answers at once and pays for no second look; a wrong
-        password at the one access point there is finds nothing else and
-        waits as it did.
+        person asked for answers at once and pays for no second look, but for
+        an access point that never answered at all: one heard a moment ago
+        and gone since is still in the kernel's list of what was heard, and
+        the add said "did not associate" with the network itself in range,
+        as wpa_supplicant goes on to the next. A wrong password at the one
+        access point there is finds nothing else and waits as it did.
 */
 static COLD bipolar nl80211_join(p8 address_to ssid, positive ssid_length, p8 address_to pass,
                                  positive pass_length, bool force, wifi_link address_to link)
@@ -8942,7 +8945,8 @@ static COLD bipolar nl80211_join(p8 address_to ssid, positive ssid_length, p8 ad
                                            link);
         bipolar again;
 
-        if (!failed || force || failed == -19 || failed == -113 || failed == WIFI_REFUSE_SAE_BUDGET)
+        if (!failed || (force && failed != -110) || failed == -19 || failed == -113 ||
+            failed == WIFI_REFUSE_SAE_BUDGET)
                 return failed;
         again = nl80211_join_once(ssid, ssid_length, pass, pass_length, force, true, link);
         return again == RADIO_JOIN_NO_OTHER ? failed : again;

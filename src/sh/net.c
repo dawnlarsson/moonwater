@@ -79,10 +79,30 @@
 
         A record is one write, so the bytes are gathered until a newline
         rather than passed through as string_format produces them.
+
+        And each record is its own open. The kernel lets one open of
+        /dev/kmsg write ten records in five seconds and drops the rest
+        without a word -- their count is said only when it is closed, which
+        the watcher never does -- and a radio coming up says more than ten:
+        the lease it took was in place and its line was not in the log. The
+        handle held is for a child of the watcher (a confined one may not
+        open anything) and for a node that went away since.
 */
 static b32 net_kmsg_handle = -1;
+static bipolar net_kmsg_owner;
 static p8 net_kmsg_line[512];
 static positive net_kmsg_used;
+
+static COLD fn net_kmsg_record(void)
+{
+        bipolar fresh = -1;
+
+        if (system_call(syscall(getpid)) == net_kmsg_owner)
+                fresh = system_open_at(AT_FDCWD, "/dev/kmsg", 1 | O_CLOEXEC);
+        kmsg_write(fresh >= 0 ? fresh : net_kmsg_handle, net_kmsg_line, net_kmsg_used);
+        if (fresh >= 0)
+                system_close((b32)fresh);
+}
 
 static COLD fn net_kmsg(address_any data, positive length)
 {
@@ -97,8 +117,7 @@ static COLD fn net_kmsg(address_any data, positive length)
                 if (bytes[at] == '\n' || net_kmsg_used + 1 >= sizeof net_kmsg_line)
                 {
                         if (net_kmsg_used)
-                                kmsg_write(net_kmsg_handle, net_kmsg_line,
-                                           net_kmsg_used);
+                                net_kmsg_record();
 
                         net_kmsg_used = 0;
 
@@ -2994,6 +3013,7 @@ static COLD b32 net_watch(void)
 
         if (net_kmsg_handle >= 0)
         {
+                net_kmsg_owner = system_call(syscall(getpid));
                 net_kmsg_used = 0;
                 net_out = net_kmsg;
         }
