@@ -17003,15 +17003,8 @@ static positive locale_nts_servers(p8 address_to into, positive stride)
 
 static bool locale_nts_state_ok(const nts_state address_to state)
 {
-        if (state->count > NTS_COOKIES || !state->origin_port || !state->port ||
-            !nts_name_ok(state->origin, string_length((string_address)state->origin)) ||
-            (state->server[0] &&
-             !nts_name_ok(state->server, string_length((string_address)state->server))))
-                return false;
-        for (positive at = 0; at < state->count; at++)
-                if (!state->length[at] || state->length[at] > NTS_COOKIE_MAX)
-                        return false;
-        return true;
+        return nts_state_ok(state) && state->origin_port &&
+               nts_name_ok(state->origin, string_length((string_address)state->origin));
 }
 
 static bool locale_nts_load(nts_state address_to state)

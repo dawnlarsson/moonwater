@@ -16163,13 +16163,11 @@ static COLD bool nts_ke_task(address_any context, bipolar answer)
         return wrote;
 }
 
-static COLD bool nts_ke_believed(nts_ke_said address_to said)
+//      A state as nts_ke_reply and the cookies it took leave it: one to eight
+//      cookies, each of a length a cookie may have, a port that is not zero
+//      and a time server that is a name or empty. The origin is the caller's.
+static COLD bool nts_state_ok(const nts_state address_to state)
 {
-        nts_state address_to state = address_of said->state;
-
-        if (said->status)
-                return http_apart_status(said->status);
-        state->server[sizeof state->server - 1] = end;
         if (!state->count || state->count > NTS_COOKIES || !state->port ||
             (state->server[0] &&
              !nts_name_ok(state->server, string_length((string_address)state->server))))
@@ -16178,6 +16176,16 @@ static COLD bool nts_ke_believed(nts_ke_said address_to said)
                 if (!state->length[at] || state->length[at] > NTS_COOKIE_MAX)
                         return false;
         return true;
+}
+
+static COLD bool nts_ke_believed(nts_ke_said address_to said)
+{
+        nts_state address_to state = address_of said->state;
+
+        if (said->status)
+                return http_apart_status(said->status);
+        state->server[sizeof state->server - 1] = end;
+        return nts_state_ok(state);
 }
 
 static COLD bipolar nts_ke_apart(string_address host, p16 port, bool bootstrap,
