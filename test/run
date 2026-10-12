@@ -19066,6 +19066,91 @@ else
 fi
 fi
 
+#       The key that always gets out (stage recover).
+#
+#       A compositor that has stopped answering holds the card and every key.
+#       Control-Alt-Shift-Backspace is heard in the kernel's input core, so it
+#       is not the compositor's to swallow: it ends the holder, however it is
+#       stopped, and turns Canvas off, to the text console. The compositor here
+#       is started by hand from the guest's serial shell, and stopped with
+#       SIGSTOP: the recorded pid only.
+if [ -z "${CANVAS_ONLY:-}" ] || [ "${CANVAS_ONLY:-}" = r2 ]; then
+PYTHONPATH=$work python3 - "$image" > "$work/r2-answers" 2>"$work/r2-why" <<'PY'
+import os, re, sys, time
+from qmp_guest import *
+
+image = sys.argv[1]
+work = os.environ["MOONWATER_CANVAS_WORK"] + "/r2"
+os.makedirs(work, exist_ok=True)
+out = []
+ser = work + "/ser"
+
+guest = Guest(desktop(image) + [
+    "-chardev", "socket,id=s0,path=" + ser + ",server=on,wait=off", "-serial", "chardev:s0",
+    "-no-reboot", "-display", "none",
+    "-append", "console=ttyS0 drm_client_lib.active= printk.time=1 moonwater.cursor_plane=0"],
+    work + "/qmp", work + "/mon", work, sockets=(ser,))
+time.sleep(25)
+shell = Shell(ser)
+shell.ready()
+
+def canvas():
+    text = shell.run("moonwater canvas | head -1", 10)[0]
+    return "off" if "Canvas is off" in text else "on" if "Canvas is on" in text else "?"
+
+def alive(pid):
+    return bool(pid) and "yes" in shell.run("kill -0 %s && echo yes" % pid, 10)[0]
+
+pid = ""
+for round_ in (1, 2):
+    shell.run("moonwater canvas on")
+    until(lambda: canvas() == "on", 10)
+    time.sleep(2)
+    if round_ == 1:
+        #   The compositor holds the card and is stopped.
+        shell.run("/compositor > /dev/null 2>&1 & echo $! > /tmp/r2.pid; sleep 2")
+        pid = shell.number("cat /tmp/r2.pid")
+        held = alive(pid) and "T" in shell.run("kill -STOP %s; sleep 0.3; grep State /proc/%s/status" % (pid, pid))[0]
+    time.sleep(1)
+    chord("ctrl", "alt", "shift", "backspace")
+    state, took = until(lambda: canvas() == "off" and "off", 10)
+    time.sleep(3)
+    log = shell.run("dmesg | tail -30")[0]
+    if round_ == 1:
+        out.append(("R2.1 a stopped compositor does not hold the screen from Control-Alt-Shift-Backspace: Canvas is off, it is gone",
+                    "%s %s %s" % (canvas(), "gone" if not alive(pid) else "still there", "stopped" if held else "not stopped"),
+                    "off gone stopped"))
+        out.append(("and the kernel's console has the screen",
+                    "yes" if "switching to colour frame buffer device" in log else "no", "yes"))
+        print("r2 stopped compositor, Control-Alt-Shift-Backspace to Canvas off: %.2f s" % took, file=sys.stderr)
+    else:
+        out.append(("R2.2 with nobody holding the card the same chord turns Canvas off, and nothing is left running",
+                    "%s %s" % (canvas(), shell.number("ps | grep -c '[c]ompositor'")), "off 0"))
+        print("r2 Control-Alt-Shift-Backspace on the kernel's own desktop to Canvas off: %.2f s" % took, file=sys.stderr)
+
+shell.run("moonwater canvas on")
+until(lambda: canvas() == "on", 10)
+out.append(("and moonwater canvas on brings the desktop back", canvas(), "on"))
+
+for name, got, want in out:
+    print("%s|%s|%s" % (name, got, want))
+try:
+    guest.quit()
+    guest.wait(10)
+except Exception:
+    guest.kill()
+PY
+if [ ! -s "$work/r2-answers" ]; then
+        same "the chord boot answered" "yes" "no"
+        sed 's/^/    /' "$work/r2-why" | tail -5
+else
+        while IFS='|' read -r name got want; do
+                same "$name" "$want" "$got"
+        done < "$work/r2-answers"
+        sed -n 's/^r2 /  canvas       /p' "$work/r2-why"
+fi
+fi
+
 #       The terminal on the compositor in userspace (canvas milestone M5).
 #
 #       /terminal is a program that makes its own pixels: it runs a shell on

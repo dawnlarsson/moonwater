@@ -376,6 +376,16 @@ is every shell on a console that was never given another, is not ended: only
 the program, which a session started there has to be ended by hand. Pressed
 with nobody holding the card it is the key it always was.
 
+Two more keys are Canvas's, heard in the kernel's input core and never passed
+through a compositor or a window, so a compositor that has stopped answering
+cannot swallow either. **Control-Alt-Backspace** ends the program that holds the
+card, as above. **Control-Alt-Shift-Backspace** turns Canvas off, to the text
+console, whoever holds the card or whether anyone does: the holder and its
+session are ended first (a stopped program is ended too), and the console takes
+the screen back within a second; `moonwater canvas on` starts the desktop again.
+The press, its repeat and its release are all taken, so no program sees half of
+the chord.
+
 `moonwater desktop` is what the machine starts as its desktop: Canvas, the
 default; `off`, which turns Canvas off as soon as it has started, for a machine
 that is a text console; or a bowl profile, whose session the machine script's

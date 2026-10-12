@@ -27188,6 +27188,7 @@ static _Bool atomic_try_cmpxchg(atomic_t *p,int *old,int value) {
 }
 static int test_bit(unsigned bit,const unsigned long *bits) { return (bits[bit/64]>>(bit%64))&1; }
 static void canvas_thread_wake(void) { wakes++; }
+static void canvas_exit_request(void) { wakes++; }
 /* What both input handlers count themselves with is the seam's, per
    processor; here it is a count, and nothing is timed. */
 struct handler_cost { unsigned long events,samples,total_ns,worst_ns; };

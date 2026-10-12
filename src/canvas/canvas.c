@@ -8492,6 +8492,8 @@ static void desktop_resume(void)
                 cursor_plane_armed_x = desktop.cursor_x;
                 cursor_plane_armed_y = desktop.cursor_y;
         }
+
+        pr_info("[moonwater canvas] " "the card is Canvas's again, and the desktop is drawn\n");
 }
 
 /*
@@ -9175,6 +9177,34 @@ static void keyboard_reclaim(unsigned int modifiers, unsigned int code, int valu
 }
 
 /*
+        Control-Alt-Shift-Backspace turns Canvas off, to the kernel's text
+        console, whoever holds the card.
+
+        Control-Alt-Backspace ends the program that holds it, and a supervisor
+        starts the next; this is for a desktop that will not stay up. It is
+        heard here, in the input core, and never passes through the compositor
+        or the canvas thread, so a compositor that has stopped answering
+        cannot swallow it. Turning Canvas off stops the thread and waits on
+        locks, so a work item does it, and the key press, its repeat and its
+        release are all taken, so no program sees half of a chord.
+*/
+static void canvas_exit_request(void);
+
+static _Bool keyboard_exit(unsigned int modifiers, unsigned int code, int value)
+{
+        if ((modifiers & (WINDOW_KEY_ALT | WINDOW_KEY_SHIFT |
+                          WINDOW_KEY_CONTROL)) !=
+                (WINDOW_KEY_ALT | WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL) ||
+            code != KEY_BACKSPACE)
+                return false;
+
+        if (value == 1)
+                canvas_exit_request();
+
+        return true;
+}
+
+/*
         Called by the input core, so no lock and no sleeping. Which window has
         focus is decided under desktop.lock and the window can be freed, so
         this records what happened and the thread hands it over.
@@ -9220,6 +9250,11 @@ static void keyboard_event(struct input_handle *handle, unsigned int code, int v
                         return;
                 }
         }
+
+        // Before anything is asked of a program or a window: a compositor that
+        // hangs holds the card and every key, and this is the way out.
+        if (keyboard_exit(modifiers, code, value))
+                return;
 
         // Another program has the display, and what is typed is its: the one
         // chord that is Canvas's is the way to end it, and nothing else is
@@ -11780,6 +11815,49 @@ static void canvas_reclaim(void)
                 canvas_master_end(cards[--count]);
                 drm_dev_put(cards[count]);
         }
+}
+
+/*
+        The work behind Control-Alt-Shift-Backspace.
+
+        The holder of the card and its session are ended first, as
+        Control-Alt-Backspace ends them: a stopped or hung program holds the
+        card against the text console, which cannot take a screen that has a
+        master. SIGKILL reaches a stopped process. Canvas is turned off once
+        nobody is master, or after CANVAS_EXIT_WAIT_MS if somebody still is,
+        so a holder that cannot die does not keep the machine from at least
+        leaving Canvas; the console takes the card when it lets go.
+*/
+#define CANVAS_EXIT_WAIT_MS 2000
+
+static void canvas_exit_work(struct work_struct *work)
+{
+        unsigned int waited;
+        _Bool taken = false;
+
+        pr_info("[moonwater canvas] " "Control-Alt-Shift-Backspace: Canvas off, to the text console\n");
+        canvas_reclaim();
+
+        for (waited = 0; waited < CANVAS_EXIT_WAIT_MS; waited += 5)
+        {
+                rt_mutex_lock(&desktop.lock);
+                taken = desktop_taken();
+                rt_mutex_unlock(&desktop.lock);
+
+                if (!taken)
+                        break;
+
+                msleep(5);
+        }
+
+        canvas_turn_off();
+}
+
+static DECLARE_WORK(canvas_exit, canvas_exit_work);
+
+static void canvas_exit_request(void)
+{
+        queue_work(system_dfl_long_wq, &canvas_exit);
 }
 
 static _Bool canvas_suspend_check(void)
