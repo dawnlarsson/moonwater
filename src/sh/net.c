@@ -2408,13 +2408,7 @@ static COLD b32 net_auto(b32 handle, net_holding address_to held)
         for (tried = 0;; tried++)
         {
                 if (netlink_link_find(handle, address_of search) < 0)
-                {
-                        if (tried)
-                                return 1;
-                        string_format(net_out, "ip: no interface to configure\n");
-                        net_flush();
-                        return 1;
-                }
+                        return tried ? 1 : net_ip_refused("no interface to configure");
 
                 if (held && held->index == search.index && !held->lost)
                         return 0;
@@ -2468,20 +2462,11 @@ static COLD b32 net_auto(b32 handle, net_holding address_to held)
         }
 
         if (status != DHCP_OK)
-        {
-                if (status == DHCP_REFUSED)
-                        string_format(net_out, "ip: the server refused the request\n");
-                else if (status == DHCP_NO_OFFER)
-                        string_format(net_out, "ip: nobody offered a lease\n");
-                else if (status == DHCP_NO_RANDOM)
-                        string_format(net_out,
-                                      "ip: kernel randomness is unavailable\n");
-                else
-                        string_format(net_out, "ip: could not ask for a lease\n");
-
-                net_flush();
-                return 1;
-        }
+                return net_ip_refused(
+                    status == DHCP_REFUSED ? "the server refused the request"
+                    : status == DHCP_NO_OFFER ? "nobody offered a lease"
+                    : status == DHCP_NO_RANDOM ? "kernel randomness is unavailable"
+                                               : "could not ask for a lease");
 
         status = net_arp_conflict(search.index, search.hardware, lease.address);
         if (status == -2)
@@ -2497,19 +2482,12 @@ static COLD b32 net_auto(b32 handle, net_holding address_to held)
 
                 if (held)
                         net_decline_hold(search.index);
-                string_format(net_out,
-                              declined == DHCP_OK
-                                  ? "ip: the offered address is already in use; declined\n"
-                                  : "ip: the offered address is already in use\n");
-                net_flush();
-                return 1;
+                return net_ip_refused(declined == DHCP_OK
+                                          ? "the offered address is already in use; declined"
+                                          : "the offered address is already in use");
         }
         if (status)
-        {
-                string_format(net_out, "ip: could not check the offered address\n");
-                net_flush();
-                return 1;
-        }
+                return net_ip_refused("could not check the offered address");
 
         if (net_apply_lease(handle, search.index, search.name,
                             search.hardware, address_of lease, held, true))
@@ -3018,8 +2996,7 @@ static COLD b32 net_watch(void)
 
         if (events < 0)
         {
-                string_format(net_out, "ip: %s\n", (string_address) "cannot listen for link changes");
-                net_flush();
+                (void)net_ip_refused("cannot listen for link changes");
                 net_kmsg_close();
                 return 1;
         }
@@ -3342,14 +3319,14 @@ static COLD b32 net_ip(void)
 
         if (!object || net_word_is(object, "help", 4))
         {
-                string_format(log, "usage: ip auto | link | addr | route\n");
-                string_format(log, "       ip auto   find a link, bring it up, "
-                                   "take a lease\n");
-                string_format(log, "       ip watch  the same, now and whenever "
-                                   "a cable changes\n");
-                string_format(log, "       ip link set NAME up\n");
-                string_format(log, "       ip addr add A.B.C.D/N dev NAME\n");
-                string_format(log, "       ip route add default via A.B.C.D [dev NAME]\n");
+                string_format(log, "usage: ip auto | link | addr | route\n"
+                                   "       ip auto   find a link, bring it up, "
+                                   "take a lease\n"
+                                   "       ip watch  the same, now and whenever "
+                                   "a cable changes\n"
+                                   "       ip link set NAME up\n"
+                                   "       ip addr add A.B.C.D/N dev NAME\n"
+                                   "       ip route add default via A.B.C.D [dev NAME]\n");
                 log_flush();
                 return object ? 0 : 1;
         }
