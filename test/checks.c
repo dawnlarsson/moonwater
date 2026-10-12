@@ -76538,6 +76538,41 @@ static fn tls_revocation_handshake(void)
                           !memory_compare(scratch + 17 + cert, status + 4, response));
                 check("a CertificateStatus nothing waits for is refused",
                       !tls12_certificate_status(tls, status, 4 + response, scratch));
+                /* Two certificates: the staple's extension opens a gap
+                   after the leaf, so the certificate behind it moves
+                   right over itself and must arrive byte for byte. */
+                {
+                        static p8 pair[3 + 2 * (3 + 1024)];
+                        static p8 two[5 + TLS_PLAINTEXT_MAX];
+                        positive second = revocation_ca.length;
+                        positive list = 6 + cert + second;
+                        positive at = 17 + cert + response;
+
+                        pair[0] = (p8)(list >> 16);
+                        network_store_16(pair + 1, (p16)list);
+                        pair[3] = 0;
+                        network_store_16(pair + 4, (p16)cert);
+                        memory_copy(pair + 6, revocation_leaf.der, cert);
+                        pair[6 + cert] = 0;
+                        network_store_16(pair + 7 + cert, (p16)second);
+                        memory_copy(pair + 9 + cert, revocation_ca.der, second);
+                        memory_fill(tls, 0, TLS_CONN_HEAD);
+                        tls->tls12 = true;
+                        tls->suite = 0xc02b;
+                        tls->host = "revocation.example";
+                        tls->status_requested = tls->status_echoed = true;
+                        check("two certificates in a TLS 1.2 list wait for one staple",
+                              tls12_certificate(tls, pair, 9 + cert + second, two) &&
+                                  tls->chain_pending);
+                        (void)tls12_certificate_status(tls, status, 4 + response, two);
+                        check("a staple between two certificates keeps the leaf and the one behind it whole",
+                              tls_load_24(two + 1) == 18 + cert + second + response &&
+                                  !memory_compare(two + 7, revocation_leaf.der, cert) &&
+                                  network_load_16(two + 7 + cert) == 8 + response &&
+                                  tls_load_24(two + at) == second &&
+                                  !memory_compare(two + at + 3, revocation_ca.der, second) &&
+                                  network_load_16(two + at + 3 + second) == 0);
+                }
         }
 }
 
