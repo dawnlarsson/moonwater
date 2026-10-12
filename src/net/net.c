@@ -17537,14 +17537,14 @@ static bipolar dhcp_ask(string_address device, p8 address_to hardware,
                         the first DISCOVER nowhere (a capture of the wire had
                         only the second) and took the lease 250 ms late.
                 */
-                wait = !attempt ? 50 : attempt < 12 ? 250 : (attempt - 11) * 2000;
                 //      The backoff, once a server has had three seconds
                 //      to answer, moves by up to a second either way (RFC
                 //      2131 4.1), so that machines that lost their server
                 //      together -- a power cut, a switch restarting -- do
                 //      not keep asking it in step.
-                if (attempt >= 12)
-                        wait = wait - 1000 + spread[attempt - 12] * 2000 / 255;
+                wait = !attempt ? 50 : attempt < 12 ? 250
+                       : (attempt - 11) * 2000 - 1000 +
+                             spread[attempt - 12] * 2000 / 255;
                 length = dhcp_build(packet, sizeof packet, DHCP_DISCOVER,
                                     transaction, hardware, 0, 0, 0, true);
 
@@ -17687,21 +17687,16 @@ static bipolar dhcp_reacquire(string_address device, p8 address_to hardware,
 
         if (socket_send((b32)handle, packet, length, 0, address_of where,
                         sizeof where) < 0)
-        {
                 status = DHCP_NO_SOCKET;
-                goto done;
-        }
-
         //      An ACK keeps what the renewal said, including the new lease
         //      time, but does not lose what it left out: it need not repeat
         //      every option.
-        if (network_deadline_begin(address_of deadline, wait, 0))
+        else if (network_deadline_begin(address_of deadline, wait, 0))
                 status = dhcp_complete(handle, packet, sizeof packet,
                                        transaction, hardware, lease,
                                        address_of expected, rebinding,
                                        address_of deadline);
 
-done:
         socket_close((b32)handle);
         return status;
 }
