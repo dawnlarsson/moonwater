@@ -11897,12 +11897,14 @@ static bipolar http_origin_form(string_address path, p8 address_to into,
 //      Where the header ends: the blank line, in either spelling.
 static PURE bipolar http_header_end(p8 address_to bytes, positive size)
 {
-        //      Both spellings are looked for at once and the one that
-        //      starts first wins. A header block ending \r\n\r\n contains no
-        //      bare \n\n -- there is a \r between them -- so the two can never
-        //      both match at the same place.
+        //      The blank line is an LF, then a bare LF or a CRLF.  The field
+        //      walk drops the CR of a blank line as it does of any line, so
+        //      "Name: v\n\r\n" ends the head there too, and the finder must
+        //      agree or the head waits for bytes that never come.  Both
+        //      spellings are looked for at once and the one that starts
+        //      first wins; they start at different LFs, so they never tie.
         //
-        //      Once the full spelling is found at some offset, only a bare
+        //      Once the CRLF spelling is found at some offset, only a bare
         //      one starting before it can win, so the second search stops
         //      there rather than walking the rest of the buffer. A block
         //      ending \r\n\r\n holds no \n\n at all, so searching the whole
@@ -11910,12 +11912,12 @@ static PURE bipolar http_header_end(p8 address_to bytes, positive size)
         //      read, and once more per informational response ahead of the
         //      final one, which is what a peer sending 1xx after 1xx one
         //      byte at a time was buying.
-        p8 address_to full = (p8 address_to)memory_search(bytes, size, "\r\n\r\n", 4);
-        positive span = full ? (positive)(full - bytes) + 1 : size;
+        p8 address_to crlf = (p8 address_to)memory_search(bytes, size, "\n\r\n", 3);
+        positive span = crlf ? (positive)(crlf - bytes) + 1 : size;
         p8 address_to bare = (p8 address_to)memory_search(bytes, span, "\n\n", 2);
 
-        if (full && (!bare || full < bare))
-                return (bipolar)(full - bytes) + 4;
+        if (crlf && (!bare || crlf < bare))
+                return (bipolar)(crlf - bytes) + 3;
 
         if (bare)
                 return (bipolar)(bare - bytes) + 2;

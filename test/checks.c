@@ -71694,6 +71694,54 @@ static fn http_canned_url(p8 address_to url, p16 port, string_address path)
 }
 
 /*
+        A head's blank line is one line end, the same whichever of its
+        spellings it has: a lone LF before a CRLF blank line ("Name: v\n\r\n")
+        ends the head as the field walk ends it (the CR of a blank line is
+        dropped there), so header_end, the framing and the body all agree on
+        where the head stops.  A head that ended on such a blank line used to
+        find no terminator at all and waited for more bytes until the peer
+        closed or the head limit was hit.
+*/
+static fn http_mixed_line_ends(void)
+{
+        static const p8 lf_then_crlf[] =
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\n\r\n";
+        static const p8 lone_lf_then_crlf[] =
+            "HTTP/1.1 200 OK\nContent-Length: 0\n\r\n";
+        static const p8 crlf_then_lf[] =
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\n";
+        http_response response;
+        positive header = 0;
+        bipolar head_end;
+
+        head_end = http_header_end((p8 address_to)lf_then_crlf,
+                              sizeof lf_then_crlf - 1);
+        check("a head ending LF CRLF ends where its blank line does",
+              head_end == (bipolar)(sizeof lf_then_crlf - 1));
+        head_end = http_header_end((p8 address_to)lone_lf_then_crlf,
+                              sizeof lone_lf_then_crlf - 1);
+        check("a head with only LF line ends before a CRLF blank line ends",
+              head_end == (bipolar)(sizeof lone_lf_then_crlf - 1));
+        check("a response whose blank line is LF CRLF is framed whole",
+              http_response_framing((p8 address_to)lf_then_crlf,
+                                    sizeof lf_then_crlf - 1, address_of header,
+                                    address_of response) == HTTP_OK &&
+                  header == sizeof lf_then_crlf - 1 &&
+                  response.code == 200 && response.body_kind == HTTP_BODY_LENGTH);
+        check("a response with a lone LF first is framed whole",
+              http_response_framing((p8 address_to)lone_lf_then_crlf,
+                                    sizeof lone_lf_then_crlf - 1,
+                                    address_of header,
+                                    address_of response) == HTTP_OK &&
+                  header == sizeof lone_lf_then_crlf - 1);
+        check("a response with CRLF then a lone LF blank line still is",
+              http_response_framing((p8 address_to)crlf_then_lf,
+                                    sizeof crlf_then_lf - 1, address_of header,
+                                    address_of response) == HTTP_OK &&
+                  header == sizeof crlf_then_lf - 1);
+}
+
+/*
         The edges of a whole fetch (http_run) and of one run apart
         (http_run_apart): a path with a dot segment, the code and the head
         kept only for an answer and both left alone for a refusal, TLS
@@ -76832,6 +76880,8 @@ b32 main(void)
         net_group(tls_crl_spent_budget);
         //
         //      fold http: new groups below this line
+        //
+        net_group(http_mixed_line_ends);
         //
         //      fold nts: new groups below this line
         //

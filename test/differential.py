@@ -69038,6 +69038,9 @@ NET_MUTATION_EQUIVALENT = {
     # ---- fold revoke-ct: entries below this line
     #
     # ---- fold http: entries below this line
+    ("http_header_end", "if (crlf && (!bare || crlf < bare))", "<", 1):
+        "crlf and bare are the LFs that begin \\n\\r\\n and \\n\\n. The byte after the LF is CR in one and LF in the other, "
+        "so the two positions are never equal, and crlf <= bare picks the same spelling as crlf < bare.",
     #
     # ---- fold nts: entries below this line
     #
