@@ -69948,6 +69948,56 @@ static fn nts_ke_pieces(void)
                   !nts_name_ok((const p8 address_to)"a\x1b" "b", 3) &&
                   !nts_name_ok(cookie, 64));
 
+        /*
+                nts_state_ok at its bounds: one to eight cookies, a cookie of
+                one to NTS_COOKIE_MAX bytes, a port that is not zero, and a
+                time server that is a name or empty. Each rule is tested
+                alone, so each one's negation is refused by one row.
+        */
+        {
+                static nts_state good;
+
+                memory_zero(&good, sizeof good);
+                good.port = NTS_NTP_PORT;
+                good.count = 1;
+                good.length[0] = 1;
+                check("nts_state_ok takes one cookie of one byte, on the default port",
+                      nts_state_ok(&good));
+                good.count = NTS_COOKIES;
+                for (positive at = 0; at < NTS_COOKIES; at++)
+                        good.length[at] = 1;
+                check("nts_state_ok takes eight cookies, all of one byte",
+                      nts_state_ok(&good));
+                good.count = NTS_COOKIES + 1;
+                check("nts_state_ok refuses nine cookies", !nts_state_ok(&good));
+                good.count = 0;
+                check("nts_state_ok refuses no cookies", !nts_state_ok(&good));
+                good.count = 2;
+                good.length[0] = NTS_COOKIE_MAX;
+                good.length[1] = NTS_COOKIE_MAX;
+                check("nts_state_ok takes two cookies of the largest size",
+                      nts_state_ok(&good));
+                good.length[1] = NTS_COOKIE_MAX + 1;
+                check("nts_state_ok refuses a second cookie one byte too long",
+                      !nts_state_ok(&good));
+                good.length[1] = 0;
+                check("nts_state_ok refuses an empty second cookie", !nts_state_ok(&good));
+                good.length[1] = 1;
+                good.length[0] = 0;
+                check("nts_state_ok refuses an empty first cookie", !nts_state_ok(&good));
+                good.length[0] = 1;
+                good.port = 0;
+                check("nts_state_ok refuses port zero", !nts_state_ok(&good));
+                good.port = NTS_NTP_PORT;
+                memory_copy(good.server, "time.example", 13);
+                good.server[13] = end;
+                check("nts_state_ok takes a time server that is a name",
+                      nts_state_ok(&good));
+                memory_copy(good.server, "a b", 4);
+                check("nts_state_ok refuses a time server that is not a name",
+                      !nts_state_ok(&good));
+        }
+
         /* Whether NTS is asked: on, off and only as written, and anything
            else, a missing file included, the tier's default -- only at the
            tight tier, where plain time is not taken unless someone says so,
