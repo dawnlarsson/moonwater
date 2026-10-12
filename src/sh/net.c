@@ -2552,9 +2552,9 @@ static COLD b32 net_reconfigure(b32 handle, net_holding address_to held)
         it changes the radio or the preference file. If the fifo is missing
         at start, the watcher opens it again on the next idle pass.
 
-        With no lease, idle is a few seconds and grows to half a minute, so a
-        DHCP server that comes back, or a wireless interface that appears
-        after firmware, is configured without waiting for a cable event.
+        With no lease, idle is a few seconds and grows to ten, so a DHCP
+        server that comes back, or a wireless interface that appears after
+        firmware, is configured without waiting for a cable event.
 
         Re-running is safe to do at any time. Adding an address uses REPLACE
         and adding a route is idempotent, so a spurious run costs a DHCP
