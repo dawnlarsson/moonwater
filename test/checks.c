@@ -54095,12 +54095,20 @@ static bipolar http_net_call3(positive number, positive one, positive two,
         return (system_call_3)(number, one, two, three);
 }
 
+//      The next send answers that it moved nothing.
+static bool net_send_zero;
+
 static bipolar net_test_socket_send(b32 handle, address_any data, positive size,
                                     b32 flags, address_any to, positive to_size)
 {
         net_send_calls++;
         if (!(flags & MSG_DONTWAIT))
                 net_send_blocking_calls++;
+        if (net_send_zero)
+        {
+                net_send_zero = false;
+                return 0;
+        }
         if (net_send_capture)
         {
                 net_send_capture_length = min(size, net_send_capture_room);
@@ -55320,6 +55328,64 @@ static fn tls_decision_edges(void)
                       tls_parse_basic_constraints(trailing, sizeof trailing, address_of cert) ==
                           TLS_FAIL);
         }
+}
+
+/*
+        The edges of the waits every exchange is built on: a deadline that
+        never began, a random draw as wide as a word, a read whose wait went
+        by, a send that moved nothing, and a send that moved part of its
+        bytes and then found the wait for the rest already over.
+*/
+static fn network_wait_edges(void)
+{
+        b32 pair[2];
+        p8 data[4] = "abcd";
+        p8 drained[16];
+        network_deadline deadline;
+        positive seconds = 0, nanoseconds = 0;
+        p64 word = 0;
+
+        net_clock_now = 1000;
+        net_clock_step = 1;
+        deadline = (network_deadline){0, 1000000000000};
+        check("a deadline that never began has no time left",
+              !network_deadline_left(address_of deadline, address_of seconds,
+                                     address_of nanoseconds));
+        net_clock_step = 0;
+        check("a random draw as wide as a word is made, and one wider is not",
+              network_transaction_secure(address_of word, sizeof word) &&
+                  !network_transaction_secure(address_of word, sizeof word + 1));
+        if (system_call_4(syscall(socketpair), AF_UNIX, SOCK_STREAM, 0, (positive)pair) != 0)
+        {
+                check("network wait fixture opens", false);
+                return;
+        }
+        net_io_faults_clear();
+        net_poll_silent = 1;
+        check("a read whose wait goes by answers -1, not 0",
+              network_deadline_begin(address_of deadline, 5, 0) &&
+                  network_stream_read_some_until(pair[0], drained, sizeof drained,
+                                                 address_of deadline) == -1);
+        net_io_faults_clear();
+        net_send_zero = true;
+        check("a send that moves nothing fails, and is not tried for ever",
+              network_deadline_begin(address_of deadline, 5, 0) &&
+                  !network_stream_send_all_until(pair[0], data, sizeof data,
+                                                 address_of deadline));
+        net_io_faults_clear();
+        net_send_zero = true;
+        check("a first send that moves nothing fails too",
+              !network_stream_send_all_for(pair[0], data, sizeof data, 5, 0));
+        net_io_faults_clear();
+        net_send_short_limit = 2;
+        net_poll_silent = 1;
+        check("a send that moved part of its bytes sends the rest without waiting to be writable",
+              network_stream_send_all_for(pair[0], data, sizeof data, 5, 0));
+        net_io_faults_clear();
+        while (socket_receive(pair[1], drained, sizeof drained, MSG_DONTWAIT, null, null) > 0)
+                ;
+        socket_close(pair[0]);
+        socket_close(pair[1]);
 }
 
 /*
@@ -61125,6 +61191,7 @@ static fn net_io_faults_clear(void)
         net_connect_report_status = 0;
         net_random_refuse = 0;
         net_time_set = false;
+        net_send_zero = false;
 }
 
 /* Procedural interruption counts and deadline budgets exercise both recovery
@@ -76217,6 +76284,7 @@ b32 main(void)
         net_group(netlink_decision_edges);
         net_group(tls_decision_edges);
         net_group(http_decision_edges);
+        net_group(network_wait_edges);
         net_group(link_candidates);
         net_group(link_choice);
         net_group(wired_listing);

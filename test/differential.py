@@ -68974,6 +68974,22 @@ NET_MUTATION_EQUIVALENT = {
         "A frame of no bytes is no frame: it is answered 0, as the refusal of a frame is.",
     ("dhcp_ask", "(wait < 250 ? 250 : wait % 1000) * 1000000))", "<", 1):
         "At wait == 250 both arms are 250.",
+    ("network_deadline_begin_within", "if (deadline->budget > left)", ">", 1):
+        "At budget == left both arms leave it left.",
+    ("network_deadline_left", "if (!deadline->began || !now || now < deadline->began)", "||", 2):
+        "A clock that reads 0 or behind the start makes the elapsed time wrap past any budget, which answers false as this does.",
+    ("network_wait_set", "for (positive at = 0; ready > 0 && at < count; at++)", ">", 1):
+        "A poll that answers 0 leaves every revents 0, so no descriptor reads as invalid either way.",
+    ("network_receive_next", "if (ready <= 0)", "<=", 1):
+        "A wait that answers 0 is a deadline gone by; going round again, the loop's own deadline check answers NETWORK_SILENT, as this does.",
+    ("network_stream_read_some_until", "if (ready <= 0)", "<=", 1):
+        "A wait that answers 0 is a deadline gone by; going round again, the loop's own deadline check answers -1, as this does.",
+    ("network_stream_read_some_for", "if (ready <= 0)", "<=", 1):
+        "A wait that answers 0 is a deadline gone by, and network_stream_read_some_until, whose first step is that deadline's check, answers -1 as this does.",
+    ("network_stream_send_all_until", "if (network_wait_writable_until(handle, deadline) <= 0)", "<=", 1):
+        "A wait that answers 0 is a deadline gone by; going round again, the loop's own deadline check answers false, as this does.",
+    ("network_stream_timeout", "if ((!seconds && !microseconds) || microseconds >= 1000000)", ">=", 1):
+        "A timeval of a million microseconds is refused by setsockopt with EDOM, and false is answered either way.",
     ("tls_parse_key_usage", "if (unused > 7 || at >= stop)", ">=", 1): 'With no bit octet the unused-count octet is read as the final one; for unused 0 it is zero (refused), and for 1 to 7 its trailing-zero count is below its value, so the canonical test refuses it as the original does.',
 }
 
