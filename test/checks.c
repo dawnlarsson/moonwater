@@ -98531,6 +98531,55 @@ static fn check_cells(font_engine address_to with, const font_face address_to tw
         }
 }
 
+/*
+        Horizontal bars and overshoots: bars snapped as the stems are, with
+        the axes swapped, keeping the fitted lines; a round letter's reach
+        past the x-height and under the baseline flattened onto its line
+        while it is under half a pixel, a whole pixel when it is not.
+*/
+static fn check_bars()
+{
+        font_face face = {.units = 1024, .x_height = 500, .cap_height = 700};
+        p32 size = 16 * 64;
+        static const b64 lines[2] = {0, 7168};
+
+        engine.snap_widest = engine.snap_widest ? engine.snap_widest : 256;
+        {
+                const b32 bar[] = {0, 3379, 0, 4608, 10240, 4608, 10240, 3379};
+
+                snap_load(bar, 4, false);
+                font_bars(&engine, &face, size, snap_standard(1229), lines, 2);
+                check("bars: a 1.2 px bar at 3.3 px is the row from 3 to 4",
+                      engine.points[0].y == 3072 && engine.points[1].y == 4096 && engine.points[2].y == 4096 &&
+                          engine.points[3].y == 3072);
+        }
+        {
+                const b32 bar[] = {0, 5939, 0, 7168, 10240, 7168, 10240, 5939};
+
+                snap_load(bar, 4, false);
+                font_bars(&engine, &face, size, snap_standard(1229), lines, 2);
+                check("bars: a bar on the x-height keeps it and takes a whole pixel below",
+                      engine.points[1].y == 7168 && engine.points[0].y == 6144);
+        }
+
+        //      x-height 500 of 1024 at 16 px is 7.81 px, fitted to 8; o reaches
+        //      15 units over it (0.23 px) and 15 under the baseline: both are
+        //      flattened. At 48 px the 0.70 px reach is a whole pixel.
+        static const b32 zones[4] = {15, 15, 0, 0};
+        b64 fitted[3];
+        const b32 round16[] = {0, 8240, 0, -240, 100, 0, 100, 8000};
+        snap_load(round16, 4, false);
+        font_fit(&engine, &face, 16 * 64, zones, fitted);
+        check("fit: an overshoot under half a pixel lies on the x-height and the baseline",
+              engine.points[0].y == 8192 && engine.points[1].y == 0 && engine.points[3].y == 8192 && fitted[1] == 8192);
+
+        const b32 round48[] = {0, 24720, 0, 24000};
+        snap_load(round48, 2, false);
+        font_fit(&engine, &face, 48 * 64, zones, fitted);
+        check("fit: an overshoot over half a pixel is a whole pixel over the x-height",
+              engine.points[0].y == fitted[1] + 1024 && engine.points[1].y == fitted[1]);
+}
+
 static fn ground(p32 address_to pixels)
 {
         for (p32 i = 0; i < 96 * 96; i++)
@@ -99142,6 +99191,7 @@ b32 main()
         check_drawn();
         check_shapes();
         check_snap();
+        check_bars();
         check_drawing(&one, &two);
         check_cells(&engine, &two);
         check_cells(&small_engine, &two);
