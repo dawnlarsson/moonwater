@@ -16764,19 +16764,13 @@ static COLD fn dhcp_lease_merge(dhcp_lease address_to lease,
         }
 }
 
-/* What a server may hand out. The address and the router come from the unicast
-   space: not 0/8 (this network), 127/8 (the machine itself), nor 224/3
-   (multicast, the reserved block and the limited broadcast). A router is the
-   address of another host, so it is not the leased address itself. The prefix
-   the mask implies (an omitted mask is the /24 policy above) must not reach
-   0/8, 127/8 or 224/3 either: a /1 mask on a 10/8 address would route the
-   machine's own loopback and every multicast group onto the wire. On a subnet
-   wider than a /31 the first and last addresses name the subnet and are not
-   hosts. A /32 lease and its off-link router stay legal (the clouds hand
-   them out); every wider prefix requires its router on that link, since the
-   kernel cannot reach an off-link next hop without a route through that same
-   next hop. Every server that speaks
-   to this machine can send any of these; none of them is a network. */
+/* What a server may hand out. The address, the router and the prefix the mask
+   implies (an omitted mask is the /24 policy) must be unicast: not 0/8, 127/8
+   or 224/3, so a /1 mask on a 10/8 address cannot route the loopback and every
+   multicast group onto the wire. A router is another host, not the leased
+   address. On a subnet wider than a /31 the first and last addresses name the
+   subnet, not a host. A /32 may have an off-link router (the clouds hand them
+   out); a wider prefix needs its router on that link. */
 static CONST COLD bool dhcp_address_unicast(p32 address)
 {
         return (address >> 24) && (address >> 24) != 127 && address < 0xe0000000u;
@@ -16873,22 +16867,14 @@ static COLD bool dhcp_reacquisition_answer_matches(
 }
 
 /*
-        A reply as the wire carries it, judged as IP and UDP would have.
-
-        An acquisition reads its answers off a packet socket (dhcp_frames_open
-        below), which is handed each frame after the link header and before
-        IP has looked at it. So what the kernel's IP and UDP layers would
-        have refused is refused here, the way they refuse it: version 4 and a
-        header of five words or more; a total length that covers the header
-        and a UDP header and no more than was read (what follows it is link
-        padding); no fragment, not even the first of several (a DHCP message
-        fits one frame, and nothing here puts pieces together); UDP; the
-        header's own checksum; a UDP length of at least its header and no
-        more than the IP payload, the rest cut off as the kernel cuts it; the
-        UDP checksum when the sender wrote one, unless the kernel vouches for
-        it (dhcp_frame_vouched); and from port 67 to port 68.
-        What is left is the DHCP message, and the addresses and source port a
-        UDP socket would have named.
+        A reply as the wire carries it, judged as IP and UDP would have: IPv4
+        with a header of five words or more; a total length covering the
+        headers and no more than was read (link padding follows); no fragment,
+        not even the first of several; UDP; the header checksum; a UDP length
+        within the IP payload, the rest cut off as the kernel cuts it; the UDP
+        checksum when the sender wrote one, unless the kernel vouches for it
+        (dhcp_frame_vouched); and port 67 to port 68. What is left is the DHCP
+        message, and the addresses and source port a UDP socket would name.
 */
 typedef struct
 {
@@ -16977,19 +16963,12 @@ static COLD bool dhcp_unframe(const p8 address_to frame, positive size,
 }
 
 /*
-        Whether the kernel vouches for a frame's UDP checksum.
-
-        A frame sent from this machine to itself across a virtual wire (a veth
-        pair into a namespace, a bridge to a guest) carries its UDP checksum
-        unfinished: the kernel left it for a card to complete, and no card
-        did. And a card that checks checksums on the way in has checked this
-        one. The receive's control messages say either -- PACKET_AUXDATA's
-        tp_status has TP_STATUS_CSUMNOTREADY or TP_STATUS_CSUM_VALID -- and
-        the UDP layer would then not have asked, so neither does
-        dhcp_unframe. Each message is its length (a size_t, its sixteen-byte
-        header included), its level and type, its data, and padding to eight
-        bytes. The messages are the kernel's, not the wire's; the caller
-        believes none from a buffer the kernel cut short.
+        Whether the kernel vouches for a frame's UDP checksum. PACKET_AUXDATA's
+        tp_status says CSUMNOTREADY (a frame sent from this machine across a
+        virtual wire, its checksum left for a card that never runs) or
+        CSUM_VALID (a card checked it on the way in); the UDP layer would not
+        have asked either, so neither does dhcp_unframe. The messages are the
+        kernel's, not the wire's, and none is believed from a cut-short buffer.
 */
 #define DHCP_SOL_PACKET 263
 #define DHCP_PACKET_AUXDATA 8
@@ -17160,24 +17139,17 @@ static COLD bipolar dhcp_open(string_address device, p32 host, bool broadcast)
 /*
         The replies, read where reverse-path filtering cannot drop them.
 
-        Before the client has an address the kernel's UDP receive path drops
-        an OFFER whenever rp_filter is on: the server's address has no route
-        yet, and rp_filter 1 or 2 discards a packet whose source would not be
-        routed back out of the interface it came in on (measured in a KVM
-        guest on a tap with rp_filter 2: OFFERs went out and no REQUEST came
-        back). So an acquisition reads its answers as dhclient and dhcpcd do,
-        from a packet socket on the interface, which is handed each IPv4
-        frame before IP sees it, and still sends on its UDP socket. The
-        kernel runs dhcp_frame_filter for the socket, which keeps UDP to
-        port 68 that is not a later fragment and drops the rest of the
-        link's traffic before it is queued; it is a prefilter, and
-        dhcp_unframe judges every frame it keeps. The filter is attached and
-        locked while the socket has no protocol and so receives nothing, and
-        only then is it bound, so no frame gets in that the filter has not
-        seen, and the confined child cannot take it off. -1 when the kernel
-        has no packet sockets or the caller may not open one: the acquisition
-        then reads its UDP socket as it always did. Renewals hold an address
-        and a route, and stay on UDP.
+        Before the client has an address, rp_filter 1 or 2 drops an OFFER
+        whose source has no route back (measured on a KVM tap: OFFERs went
+        out and no REQUEST came back). So an acquisition reads its answers
+        from a packet socket on the interface, as dhclient and dhcpcd do,
+        and still sends on its UDP socket. dhcp_frame_filter keeps UDP to
+        port 68 that is not a later fragment; dhcp_unframe judges every
+        frame it keeps. The filter is attached and locked before the socket
+        is bound, so no frame gets in unseen and the confined child cannot
+        remove it. -1 when packet sockets are refused: the acquisition then
+        reads its UDP socket. Renewals hold an address and a route and stay
+        on UDP.
 */
 #define DHCP_SO_ATTACH_FILTER 26
 #define DHCP_SO_LOCK_FILTER 44
@@ -17441,37 +17413,16 @@ static COLD bipolar dhcp_complete(bipolar handle, p8 address_to packet,
 /*
         The exchange, with a schedule rather than a single try.
 
-        A server that is slow, or a link that has only just come up and whose
-        switch port is still learning, is the ordinary case at boot rather
-        than the exception. A link brought up a moment ago has not finished
-        negotiating, the first DISCOVERs go into that gap and are simply lost,
-        and what decides when a machine is on the network is how soon after
-        carrier the next one goes out. So it asks four times a second for the
-        first three seconds and backs off after that.
+        A link brought up a moment ago has not finished negotiating, and the
+        first DISCOVERs sent into that gap are lost, so what decides when a
+        machine is on the network is how soon after carrier the next one goes
+        out: four a second for the first three seconds, then backing off.
 
-        A note on where the time went, because it was not where it looked.
-
-        A boot reached carrier at three seconds and had no address until
-        fifteen. Counting showed the whole exchange was one send, one poll,
-        one offer and one poll for the acknowledgement -- perhaps two seconds
-        of work -- inside fourteen seconds of wall clock, and a direct test
-        showed ppoll honouring its timeout to the millisecond.
-
-        It was getrandom. With no flags it waits for the kernel's entropy pool
-        to be initialised, and early in boot it is not. Twelve seconds of a
-        boot were spent there, before a single packet moved, asking for a
-        number to put in a header. That wait used to be avoided with
-        GRND_NONBLOCK and the kernel's explicit early-boot insecure stream.
-        DHCP now prefers the initialized CSPRNG without waiting, then blocks
-        on that same CSPRNG rather than drawing a guessable xid; if neither
-        path can fill the transaction id, acquisition fails before I/O.
-
-        The wait is short now: the first blocking getrandom sets the kernel
-        generating entropy itself, and crng is ready about 0.85 s later. On
-        KVM with no RDRAND/RDSEED and no virtio-rng (kernel 7.2) the lease
-        came 0.6-0.95 s later than with GRND_INSECURE, and never failed;
-        with RDRAND or virtio-rng the pool is ready before DHCP asks and
-        nothing waits.
+        The transaction id comes from the initialized CSPRNG without waiting,
+        else from a blocking read of that same CSPRNG, never GRND_INSECURE: a
+        guessable xid lets an off-path reply through. The blocking read costs
+        about 0.85 s once, on a machine with neither RDRAND nor virtio-rng;
+        with either, nothing waits.
 */
 static bipolar dhcp_ask(string_address device, p8 address_to hardware,
                         dhcp_lease address_to lease)
@@ -17518,24 +17469,12 @@ static bipolar dhcp_ask(string_address device, p8 address_to hardware,
                 positive remaining = NETWORK_DISCARD_MAX;
 
                 /*
-                        A quarter second apart while it matters.
-
-                        The link comes up about three seconds into a boot and
-                        the DISCOVERs before that are lost, so what decides
-                        when a machine is on the network is how soon after
-                        carrier the next one goes out. At one second that was
-                        the whole of the remaining delay; at a quarter it is
-                        within noise of the card itself.
-
-                        Twelve quick tries covers three seconds of that, and
-                        the backoff after it is for a network with no server
-                        on it, which should not be broadcast at forever.
-
-                        The first waits only 50 ms. A link brought up a moment
-                        ago drops what is sent before its queue starts while
-                        the send reports success: on KVM half of all boots put
-                        the first DISCOVER nowhere (a capture of the wire had
-                        only the second) and took the lease 250 ms late.
+                        A quarter second apart for the first three seconds,
+                        then the backoff, for a network with no server on it.
+                        The first waits only 50 ms: a link brought up a moment
+                        ago drops the first send while reporting success (on
+                        KVM half of all boots put it nowhere, and took the
+                        lease 250 ms late).
                 */
                 //      The backoff, once a server has had three seconds
                 //      to answer, moves by up to a second either way (RFC
@@ -17632,26 +17571,15 @@ static bipolar dhcp_ask(string_address device, p8 address_to hardware,
 /*
         Keeping the address we already have.
 
-        A lease is a loan with a time on it. Half way through, a client is
-        supposed to ask to keep what it has -- unicast to the server that gave
-        it, with ciaddr set to the address and no server identifier, which is
-        what distinguishes "may I keep this" from "may I have one". The server
-        answers with an ACK and a fresh lease time.
+        Half way through a lease the client asks, unicast to the server that
+        gave it, to keep what it has: ciaddr set and no server identifier,
+        which is what says "may I keep this" rather than "may I have one". A
+        fresh DISCOVER may come back with a different address, and every
+        connection open on this one dies with it.
 
-        This matters more than it looks on a machine that stays up. qemu hands
-        out a lease measured in days and nothing here would ever notice, but a
-        home router giving an hour means a machine that has been up since
-        yesterday is holding an address the server considers free, and the
-        first thing that goes wrong is somebody else being given it.
-
-        Renewing rather than starting over is the whole point: a fresh
-        DISCOVER may come back with a different address, and every connection
-        open at the time dies with it.
-
-        A timeout here is not fatal and does not discard the address. The
-        caller retries within the current state, switches from unicast renewal
-        to broadcast rebinding at T2, and starts discovery only after a NAK or
-        the lease's actual expiry.
+        A timeout is not fatal and does not discard the address: the caller
+        retries, switches to broadcast rebinding at T2, and starts discovery
+        only after a NAK or the lease's expiry.
 */
 static bipolar dhcp_reacquire(string_address device, p8 address_to hardware,
                               dhcp_lease address_to lease, bool rebinding,
@@ -17704,26 +17632,17 @@ static bipolar dhcp_reacquire(string_address device, p8 address_to hardware,
 /*
         Giving back an address somebody else answers for.
 
-        The watcher ARP-probes an acknowledged address before it installs it,
-        and a station that answers means the server handed out an address in
-        use: a stale lease, a machine configured by hand, or a host that says
-        so to keep this one off the network. RFC 2131 4.4.1 has the client
-        broadcast a DHCPDECLINE naming the address (option 50) and the server
-        that gave it (option 54), under a transaction id of its own, and wait
-        ten seconds before it asks again; the server marks the address in use
-        and offers another. Without it the server offered the same address on
-        every DISCOVER until its lease ran out, and the link had none.
-
-        And giving back an address nobody here will use. An exchange the
-        watcher cut while its REQUEST was out and unanswered (net_dhcp_apart)
-        leaves a server holding the offered address for this client; RFC 2131
-        4.4.6's DHCPRELEASE hands it back, naming it in ciaddr and the server
-        in option 54 and asking for nothing. With no address configured to
-        send from it is broadcast, as the DECLINE is.
-
-        Nothing answers either, so each is one send, from the same confined
-        child as the other exchanges: its filter already allows sendto.
-        `kind` is DHCP_DECLINE or DHCP_RELEASE.
+        A station that answers the watcher's ARP probe of a fresh address
+        means the server handed out an address in use. RFC 2131 4.4.1: the
+        client broadcasts a DHCPDECLINE naming it (option 50) and the server
+        (option 54), so the server marks it taken and offers another. Without
+        that the same address came back on every DISCOVER until its lease ran
+        out. And an exchange the watcher cut while its REQUEST was unanswered
+        leaves the offered address held for this client: RFC 2131 4.4.6's
+        DHCPRELEASE (ciaddr set, option 54, nothing asked) hands it back.
+        Neither is answered, so each is one send from the confined child,
+        whose filter already allows sendto. `kind` is DHCP_DECLINE or
+        DHCP_RELEASE.
 */
 static bipolar dhcp_give_back(string_address device, p8 address_to hardware,
                               const dhcp_lease address_to lease, p8 kind)
