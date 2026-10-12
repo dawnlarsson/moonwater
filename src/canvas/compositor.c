@@ -1444,6 +1444,7 @@ struct compositor_poll
 #define COMPOSITOR_EOPNOTSUPP 95
 #define COMPOSITOR_SOL_SOCKET 1
 #define COMPOSITOR_SO_PEERCRED 17
+#define COMPOSITOR_SO_PEERPIDFD 77
 #define COMPOSITOR_IN_CLOSE_WRITE 0x8u
 #define COMPOSITOR_IN_CREATE 0x100u
 #define COMPOSITOR_IN_MOVED_TO 0x80u
@@ -1472,6 +1473,7 @@ struct compositor_client
         unsigned int role, layer, lock;
         unsigned int active; // it holds what its role gives: composed, and heard
         unsigned int pid, uid; // who is on the other end, as the kernel says
+        int peer;            // a pidfd for that same process: readable once it is gone, whatever its number
         char title[SURFACE_LISTING_TITLE]; // what the window list was last told
 
         // A resize: the page it had until the new one has committed, so what is on
@@ -2860,6 +2862,8 @@ static void compositor_destroy(struct compositor_client *client)
         }
 
         system_close(client->handle);
+        if (client->peer > 0)
+                system_close(client->peer);
         memory_zero(client, sizeof(*client));
         client->handle = -1;
 }
@@ -2870,6 +2874,22 @@ static void compositor_reply(struct compositor_client *client, unsigned int kind
         struct surface_message message = {kind, status, *request};
 
         surface_send(client->handle, &message, -1);
+}
+
+/*
+        Whether the program that made the connection is gone. The number in
+        client->pid is the one it had when it connected, and a child that
+        kept the connection after its parent went is not that process: the
+        pid can be a new process's that has a grant, and the child would have
+        it. The pidfd is the connector's and is readable once it has exited.
+*/
+static int compositor_peer_gone(const struct compositor_client *client)
+{
+        struct compositor_poll gone = {client->peer, COMPOSITOR_POLLIN, 0};
+        long zero[2] = {0, 0};
+
+        return client->peer > 0 &&
+               compositor_call(syscall(ppoll), (positive)&gone, 1, (positive)zero, 0, 0, 0) > 0;
 }
 
 /*
@@ -3265,7 +3285,7 @@ static int compositor_create(struct compositor_client *client, struct surface_re
 
         if (request->role != SURFACE_ROLE_APP)
         {
-                granted = compositor_granted(client->pid, request->role);
+                granted = compositor_peer_gone(client) ? -1 : compositor_granted(client->pid, request->role);
                 if (granted < 0)
                         return -COMPOSITOR_EPERM;
         }
@@ -3940,6 +3960,16 @@ static void compositor_accept(void)
                                 free_slot->pid = cred[0];
                                 free_slot->uid = cred[1];
                         }
+                }
+
+                // The same process as a pidfd, which is what says whether it is still there.
+                {
+                        int peer = -1;
+                        unsigned int length = sizeof(peer);
+
+                        if (compositor_call(syscall(getsockopt), (positive)handle, COMPOSITOR_SOL_SOCKET,
+                                            COMPOSITOR_SO_PEERPIDFD, (positive)&peer, (positive)&length, 0) == 0)
+                                free_slot->peer = peer;
                 }
         }
 }
