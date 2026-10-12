@@ -2814,6 +2814,41 @@ static bool build_pad(b32 handle, positive from, positive to)
         return true;
 }
 
+//      A region's content copied onto the image, a buffer at a time, and
+//      the bytes it was. A section larger than one buffer was cut at the
+//      buffer by a single slurp, and the pad after it zeroed the rest: the
+//      shell's text passed 4 MiB and its last 40 KB, the cold code the link
+//      puts last, became zeroes that every program jumping into them ran.
+//      No file is no content; more than the region holds is a failure.
+static bool build_append(b32 handle, string_address path, positive room, positive address_to put)
+{
+        b32 from = open(path, O_RDONLY, 0);
+
+        address_to put = 0;
+        if (from < 0)
+                return true;
+
+        bool good = true;
+        for (;;)
+        {
+                bipolar got = read(from, build_file_one, BUILD_FILE_ROOM);
+
+                if (got <= 0)
+                {
+                        good = got == 0;
+                        break;
+                }
+                address_to put += (positive)got;
+                if (address_to put > room || write(handle, build_file_one, (positive)got) != got)
+                {
+                        good = false;
+                        break;
+                }
+        }
+        close(from);
+        return good;
+}
+
 //      Appending split words onto an argument vector under construction.
 static positive build_add_split(string_address address_to words, positive count,
                                 positive room, string_address text)
@@ -3198,7 +3233,7 @@ static b32 build_spark(string_address source, string_address output,
 
         {
                 b32 handle = open(output, O_WRONLY | O_CREAT | O_TRUNC, 0755);
-                bipolar got;
+                positive got = 0;
                 bool good;
 
                 refuse_if(handle < 0, 1, "spark: cannot write %s\n", output);
@@ -3208,27 +3243,14 @@ static b32 build_spark(string_address source, string_address output,
                 //      that nothing maps.
                 good = write(handle, address_of head, SPARK_HEADER_SIZE) ==
                        SPARK_HEADER_SIZE;
-                got = file_slurp(text_binary, build_file_one, BUILD_FILE_ROOM);
-
-                if (got > 0)
-                        good = good && write(handle, build_file_one,
-                                             (positive)got) == got;
-
-                good = good && build_pad(handle, (positive)(got > 0 ? got : 0),
-                                         text_size - SPARK_HEADER_SIZE);
+                good = good && build_append(handle, text_binary, text_size - SPARK_HEADER_SIZE,
+                                            address_of got);
+                good = good && build_pad(handle, got, text_size - SPARK_HEADER_SIZE);
 
                 if (data_size > 0)
                 {
-                        got = file_slurp(data_binary, build_file_one,
-                                          BUILD_FILE_ROOM);
-
-                        if (got > 0)
-                                good = good && write(handle, build_file_one,
-                                                     (positive)got) == got;
-
-                        good = good && build_pad(handle,
-                                                 (positive)(got > 0 ? got : 0),
-                                                 data_size);
+                        good = good && build_append(handle, data_binary, data_size, address_of got);
+                        good = good && build_pad(handle, got, data_size);
                 }
 
                 close(handle);
