@@ -56457,7 +56457,7 @@ static fn talking(void)
                 check("adding it again is not an error",
                       netlink_address_add((b32)handle, 1, mine, 24) == 0);
                 check("exclusive acquisition refuses an address already present",
-                      netlink_address_acquire((b32)handle, 1, mine, 24) == -17);
+                      netlink_address_lease((b32)handle, 1, mine, 24, 0, true) == -17);
 
                 probe = socket_new(AF_INET, SOCK_DGRAM, 0);
                 check("a probe socket opens", probe >= 0);
@@ -56487,8 +56487,10 @@ static fn talking(void)
                    EXCLUSIVE must leave the first route installed. */
                 check("exclusive acquisition refuses a pre-existing default route",
                       route_added == 0 &&
-                          netlink_route_acquire((b32)handle, 0, 0,
-                                                0x0a090802, 1) == -17);
+                          netlink_route_change((b32)handle, RTM_NEWROUTE,
+                                               NLM_REQUEST | NLM_ACK | NLM_CREATE |
+                                                   NLM_EXCLUSIVE,
+                                               0, 0, 0x0a090802, 1, 0) == -17);
 
                 //      And one through a gateway no configured address can
                 //      reach, which the kernel refuses -- "Nexthop has invalid

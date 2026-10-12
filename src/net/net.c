@@ -273,8 +273,6 @@ static COLD bool netlink_attribute_add(netlink_buffer address_to buffer, p16 typ
         netlink_attribute address_to attribute;
         positive length;
         positive padded;
-        p32 message_length;
-        netlink_header address_to header;
 
         if (buffer->failed)
                 return false;
@@ -289,13 +287,13 @@ static COLD bool netlink_attribute_add(netlink_buffer address_to buffer, p16 typ
         }
 
         /* The attribute starts at the aligned end of the message, as
-           iproute2's addattr_l places it, whatever the body length was. */
+           iproute2's addattr_l places it, whatever the body length was. The
+           message's length is that end too: the header is aligned and every
+           attribute before this one left the cursor and nlmsg_len equal. */
         length = sizeof(netlink_attribute) + size;
         padded = netlink_align(length);
-        message_length = netlink_align(
-            ((netlink_header address_to)buffer->bytes)->length);
 
-        if (message_length > 0xffffffffu - padded)
+        if (buffer->used > 0xffffffffu - padded)
         {
                 buffer->failed = true;
                 return false;
@@ -306,8 +304,6 @@ static COLD bool netlink_attribute_add(netlink_buffer address_to buffer, p16 typ
 
         /* net_room may move the allocation. Never carry an interior pointer
            across it. */
-        header = (netlink_header address_to)buffer->bytes;
-
         attribute = (netlink_attribute address_to)(buffer->bytes + buffer->used);
         attribute->length = (p16)length;
         attribute->type = type;
@@ -324,8 +320,7 @@ static COLD bool netlink_attribute_add(netlink_buffer address_to buffer, p16 typ
                             0, padded - length);
 
         buffer->used += padded;
-
-        header->length = (p32)(message_length + padded);
+        ((netlink_header address_to)buffer->bytes)->length = (p32)buffer->used;
 
         return true;
 }
@@ -401,6 +396,13 @@ static bipolar netlink_open_protocol(p32 protocol, p32 groups)
 
 #define netlink_open_groups(groups) netlink_open_protocol(NETLINK_ROUTE, groups)
 
+static bool netlink_source_is_kernel(
+    const socket_address_netlink address_to source, p32 length)
+{
+        return length >= sizeof(*source) && source->family == AF_NETLINK &&
+               source->port == 0;
+}
+
 /*
         One datagram, however big it turns out to be.
 
@@ -411,13 +413,6 @@ static bipolar netlink_open_protocol(p32 protocol, p32 groups)
         larger than the buffer arrives silently shortened, and a dump that
         loses its tail looks exactly like a dump that ended.
 */
-static bool netlink_source_is_kernel(
-    const socket_address_netlink address_to source, p32 length)
-{
-        return length >= sizeof(*source) && source->family == AF_NETLINK &&
-               source->port == 0;
-}
-
 static COLD bipolar netlink_receive_one(b32 handle,
                                    netlink_buffer address_to buffer,
                                    bool require_kernel)
@@ -572,28 +567,6 @@ static COLD bool netlink_each(netlink_buffer address_to reply,
         return true;
 }
 
-static COLD bipolar netlink_walk(b32 handle, netlink_buffer address_to request,
-                            p32 sequence, netlink_buffer address_to reply,
-                            netlink_visitor visit, address_any context);
-
-/*
-        The tail every acknowledged request shares: sent, answered, and both
-        buffers given back whatever the answer was.
-*/
-static COLD bipolar netlink_transact(b32 handle, netlink_buffer address_to request,
-                                p32 sequence, netlink_visitor visit,
-                                address_any context)
-{
-        netlink_buffer reply = {0};
-        bipolar status = netlink_walk(handle, request, sequence, address_of reply,
-                                      visit, context);
-
-        netlink_forget(request);
-        netlink_forget(address_of reply);
-
-        return status;
-}
-
 typedef struct
 {
         netlink_visitor visit;
@@ -740,6 +713,62 @@ static bipolar netlink_walk(b32 handle, netlink_buffer address_to request,
 }
 
 /*
+        The tail every acknowledged request shares: sent, answered, and both
+        buffers given back whatever the answer was.
+*/
+static COLD bipolar netlink_transact(b32 handle, netlink_buffer address_to request,
+                                p32 sequence, netlink_visitor visit,
+                                address_any context)
+{
+        netlink_buffer reply = {0};
+        bipolar status = netlink_walk(handle, request, sequence, address_of reply,
+                                      visit, context);
+
+        netlink_forget(request);
+        netlink_forget(address_of reply);
+
+        return status;
+}
+
+static p32 netlink_sequence_next = 1;
+
+/* Sequence zero conventionally labels unsolicited notifications. Keep every
+   request/reply correlation in the nonzero namespace even after wraparound. */
+static p32 netlink_sequence_take(void)
+{
+        p32 sequence = netlink_sequence_next;
+
+        netlink_sequence_next++;
+        if (!netlink_sequence_next)
+                netlink_sequence_next = 1;
+
+        return sequence;
+}
+
+/*
+        Everything of one kind, walked.
+
+        Links, addresses and routes all begin their body with a family byte,
+        so one request shape asks for all three. The body size differs and the
+        caller says which, because it is also what tells netlink_find where
+        the attributes start.
+*/
+static bipolar netlink_dump(b32 handle, p16 type, positive body, p8 family,
+                            netlink_visitor visit, address_any context)
+{
+        netlink_buffer request = {0};
+        p32 sequence = netlink_sequence_take();
+        if (!netlink_begin(address_of request, type, NLM_REQUEST | NLM_DUMP,
+                           sequence, body))
+                return -1;
+
+        address_to(p8 address_to) netlink_body(address_of request) = family;
+
+        return netlink_transact(handle, address_of request, sequence,
+                                visit, context);
+}
+
+/*
         The attributes of a message, found by type.
 
         Attributes are a length-prefixed chain: a header of four bytes, then
@@ -873,21 +902,6 @@ static COLD address_any netlink_message_body(netlink_header address_to header,
         change a route that is not there yet and answers ENOENT.
 */
 
-static p32 netlink_sequence_next = 1;
-
-/* Sequence zero conventionally labels unsolicited notifications. Keep every
-   request/reply correlation in the nonzero namespace even after wraparound. */
-static p32 netlink_sequence_take(void)
-{
-        p32 sequence = netlink_sequence_next;
-
-        netlink_sequence_next++;
-        if (!netlink_sequence_next)
-                netlink_sequence_next = 1;
-
-        return sequence;
-}
-
 typedef struct
 {
         string_address wanted;
@@ -908,9 +922,6 @@ typedef struct
         p8 name[IFNAME_SIZE];
         p8 hardware[6];
 } netlink_search;
-
-static bipolar netlink_dump(b32 handle, p16 type, positive body, p8 family,
-                            netlink_visitor visit, address_any context);
 
 static inline INLINE string_address netlink_link_name(
     netlink_header address_to header, netlink_link address_to address_to link)
@@ -978,13 +989,12 @@ static bool netlink_link_seen(netlink_header address_to header, address_any cont
         if (search->skip_loopback)
         {
                 /*
-                        Only a link a lease can be had on: Ethernet framing
-                        (ARPHRD_ETHER), which a wifi station has too, and not
-                        one of the wifi links the caller named in skip -- an
-                        access point or anything else that is no station.
-                        A radio's monitor (hwsim0, ARPHRD_IEEE80211_RADIOTAP)
-                        was taken, and DHCP waited out its whole schedule
-                        on it before the station was looked at.
+                        Only a link a lease can be had on, and not one of the
+                        wifi links the caller named in skip -- an access point
+                        or anything else that is no station. A radio's monitor
+                        (hwsim0, ARPHRD_IEEE80211_RADIOTAP) was taken, and DHCP
+                        waited out its whole schedule on it before the station
+                        was looked at.
                 */
                 if ((link->flags & IFF_LOOPBACK) || link->kind != NETLINK_LINK_ETHER)
                         return true;
@@ -1014,24 +1024,15 @@ static bool netlink_link_seen(netlink_header address_to header, address_any cont
                 {
                         bool had = (search->flags & IFF_RUNNING) != 0;
                         bool has = (link->flags & IFF_RUNNING) != 0;
+                        bool better = had != has ? has
+                            : search->prefer == NETLINK_PREFER_WIFI
+                                ? wireless && !search->wireless
+                            : search->prefer == NETLINK_PREFER_WIRED
+                                ? !wireless && search->wireless
+                                : false;
 
-                        if (had && !has)
+                        if (!better)
                                 return true;
-                        if (had == has)
-                        {
-                                if (search->prefer == NETLINK_PREFER_WIFI)
-                                {
-                                        if (!(wireless && !search->wireless))
-                                                return true;
-                                }
-                                else if (search->prefer == NETLINK_PREFER_WIRED)
-                                {
-                                        if (!(!wireless && search->wireless))
-                                                return true;
-                                }
-                                else
-                                        return true;
-                        }
                 }
         }
         else if (search->found || !string_equals(name, search->wanted))
@@ -1079,11 +1080,11 @@ static bool netlink_link_seen(netlink_header address_to header, address_any cont
 */
 static bipolar netlink_link_find(b32 handle, netlink_search address_to search)
 {
+        bipolar status;
+
         search->found = search->has_hardware = false;
-
-        bipolar status = netlink_dump(handle, RTM_GETLINK, sizeof(netlink_link),
-                                      AF_UNSPEC, netlink_link_seen, search);
-
+        status = netlink_dump(handle, RTM_GETLINK, sizeof(netlink_link),
+                              AF_UNSPEC, netlink_link_seen, search);
         if (status < 0)
                 return status;
 
@@ -1113,10 +1114,7 @@ static bipolar netlink_link_flag_up(b32 handle, p32 index, bool up)
                                 null, null);
 }
 
-static bipolar netlink_link_up(b32 handle, p32 index)
-{
-        return netlink_link_flag_up(handle, index, true);
-}
+#define netlink_link_up(handle, index) netlink_link_flag_up(handle, index, true)
 
 /*
         The wired links: Ethernet framing, not loopback and not a wireless
@@ -1212,12 +1210,11 @@ static bipolar netlink_address_change(b32 handle, p16 type, p16 flags,
                                 null, null);
 }
 
-#define netlink_address_add(handle, index, host, prefix) netlink_address_change( \
-        handle, RTM_NEWADDR, NLM_REQUEST | NLM_ACK | NLM_CREATE | NLM_REPLACE,   \
-        index, host, prefix, 0)
-
 /* A leased address, created exclusively or put in place of the one there,
-   its lifetimes the lease's. */
+   its lifetimes the lease's. Automatic configuration must acquire a kernel
+   object before it can later claim the right to remove it, so it asks for
+   EXCLUSIVE: that tells a newly installed address from an identical one an
+   operator or another network manager already owns, which REPLACE cannot. */
 #define netlink_address_lease(handle, index, host, prefix, seconds, exclusive) \
         netlink_address_change(                                                \
             handle, RTM_NEWADDR,                                                \
@@ -1225,13 +1222,8 @@ static bipolar netlink_address_change(b32 handle, p16 type, p16 flags,
                 ((exclusive) ? NLM_EXCLUSIVE : NLM_REPLACE),                    \
             index, host, prefix, seconds)
 
-/* Automatic configuration must acquire a kernel object before it can later
-   claim the right to remove it.  EXCLUSIVE distinguishes a newly installed
-   address from an identical address which was already owned by an operator or
-   another network manager; REPLACE cannot make that distinction. */
-#define netlink_address_acquire(handle, index, host, prefix) netlink_address_change( \
-        handle, RTM_NEWADDR, NLM_REQUEST | NLM_ACK | NLM_CREATE | NLM_EXCLUSIVE,     \
-        index, host, prefix, 0)
+#define netlink_address_add(handle, index, host, prefix) \
+        netlink_address_lease(handle, index, host, prefix, 0, false)
 
 #define netlink_address_delete(handle, index, host, prefix) netlink_address_change( \
         handle, RTM_DELADDR, NLM_REQUEST | NLM_ACK, index, host, prefix, 0)
@@ -1296,37 +1288,11 @@ static bipolar netlink_route_change(b32 handle, p16 type, p16 flags,
         destination, bits, gateway, index, 0)
 
 /* An existing route is state, not spare capacity.  Initial DHCP acquisition
-   uses EXCLUSIVE so a pre-existing default route is reported as a conflict
-   and remains byte-for-byte kernel state owned by whoever installed it. */
-#define netlink_route_acquire(handle, destination, bits, gateway, index) netlink_route_change( \
-        handle, RTM_NEWROUTE, NLM_REQUEST | NLM_ACK | NLM_CREATE | NLM_EXCLUSIVE,              \
-        destination, bits, gateway, index, 0)
-
+   asks route_change for EXCLUSIVE so a pre-existing default route is reported
+   as a conflict and remains byte-for-byte kernel state owned by whoever
+   installed it. */
 #define netlink_route_delete(handle, destination, bits, gateway, index) netlink_route_change( \
         handle, RTM_DELROUTE, NLM_REQUEST | NLM_ACK, destination, bits, gateway, index, 0)
-
-/*
-        Everything of one kind, walked.
-
-        Links, addresses and routes all begin their body with a family byte,
-        so one request shape asks for all three. The body size differs and the
-        caller says which, because it is also what tells netlink_find where
-        the attributes start.
-*/
-static bipolar netlink_dump(b32 handle, p16 type, positive body, p8 family,
-                            netlink_visitor visit, address_any context)
-{
-        netlink_buffer request = {0};
-        p32 sequence = netlink_sequence_take();
-        if (!netlink_begin(address_of request, type, NLM_REQUEST | NLM_DUMP,
-                           sequence, body))
-                return -1;
-
-        address_to(p8 address_to) netlink_body(address_of request) = family;
-
-        return netlink_transact(handle, address_of request, sequence,
-                                visit, context);
-}
 
 #define NETLINK_LEASES_MAX 8
 

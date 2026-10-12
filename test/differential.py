@@ -68814,8 +68814,6 @@ NET_MUTATION_EQUIVALENT = {
     ("dhcp_walk", "taken = before < 4 ? min(byte_reader_left(&value), 4 - before)", "<", 1):
         "At before == 4 the taken branch is min(left, 0) == 0, the other branch's value.",
     ("tls_parse_key_usage", "if (unused > 7 || at >= stop)", "||", 1): 'With no bit octet the unused-count octet is read as the final one; for unused 0 it is zero (refused), and for 1 to 7 its trailing-zero count is below its value, so the canonical test refuses it as the original does.',
-    ("netlink_attribute_add", "if (message_length > 0xffffffffu - padded)", ">", 1):
-        "message_length and padded are both rounded up to four, so their sum is never 0xffffffff, the one value where > and >= part.",
     ("netlink_attribute_add", "if (padded > length)", ">", 1):
         "At padded == length the fill is of no bytes.",
     ("netlink_nested_end", "if (buffer->used - start > 0xffffu)", ">", 1):
@@ -69019,6 +69017,8 @@ NET_MUTATION_EQUIVALENT = {
     ("tls_parse_key_usage", "if (unused > 7 || at >= stop)", ">=", 1): 'With no bit octet the unused-count octet is read as the final one; for unused 0 it is zero (refused), and for 1 to 7 its trailing-zero count is below its value, so the canonical test refuses it as the original does.',
     # ---- fold netlink: entries below this line
     #
+    ("netlink_attribute_add", "if (buffer->used > 0xffffffffu - padded)", ">", 1):
+        "used and padded are both multiples of four (the header is aligned and every append adds a padded length), so their sum is never 0xffffffff, the one value where > and >= part.",
     # ---- fold dns: entries below this line
     #
     # ---- fold crypto: entries below this line
