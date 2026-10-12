@@ -99175,6 +99175,49 @@ static fn check_pointer(void)
         to_shell_length = 0;
 }
 
+/*
+        A program that commits twice before the compositor has looked at
+        either has its first buffer back all the same. The compositor reads
+        the page when it gets the message, so it finds the second commit's
+        sequence and slot and has never shown the first buffer: what it owes
+        the program is the release of every commit before this one, or the
+        program waits for one that never comes and draws nothing again.
+*/
+static fn check_release(void)
+{
+        static struct compositor_client client;
+        struct surface address_to page = (struct surface address_to)system_call_6(
+            syscall(mmap), 0, WINDOW_PIXELS + 2 * 4096 * 4, 3, 0x22, (positive)-1, 0);
+
+        memory_zero(&client, sizeof(client));
+        client.handle = -1;
+        client.page = page;
+        client.width = client.height = 16;
+        client.slots = 2;
+        client.role = SURFACE_ROLE_APP;
+        client.lock = SURFACE_LOCK_MOVABLE | SURFACE_LOCK_RESIZABLE;
+        client.active = 1;
+        client.style = WINDOW_FRAME;
+        page->window.sequence = 2;
+        page->buffer_index = 1;
+
+        compositor_commit(&client);
+        check("compositor: a commit that finds two released the first buffer it never showed",
+              page->release_serial == 1 && client.slot == 1);
+
+        // And the ordinary case, a buffer at a time: showing 2 on slot 1, then 3 on slot 0.
+        page->window.sequence = 3;
+        page->buffer_index = 0;
+        compositor_commit(&client);
+        check("compositor: a commit on the other buffer releases the one before it",
+              page->release_serial == 2 && client.slot == 0);
+
+        // The same buffer again releases nothing.
+        page->window.sequence = 4;
+        compositor_commit(&client);
+        check("compositor: a commit on the same buffer releases nothing", page->release_serial == 2);
+}
+
 b32 main()
 {
         string_address paths[1];
@@ -99210,6 +99253,7 @@ b32 main()
 
         check_keys();
         check_pointer();
+        check_release();
         check("frames: a buffer is refused only while the compositor may still be reading it", !refused);
         check("frames: some were drawn", compared > 1000);
         check("frames: the screen and the buffer are always the full draw", !wrong);

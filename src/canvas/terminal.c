@@ -42,8 +42,9 @@
 #ifndef MOONWATER_CANVAS_TERMINAL
 #define MOONWATER_CANVAS_TERMINAL
 
-// Lines kept: what is on the screen and what has scrolled off it.
-#define TERMINAL_HISTORY 2048
+// Lines kept at least: what is on the screen and what has scrolled off it, as the kernel's window kept
+// them, and never fewer than two screens of the tallest window the output could hold.
+#define TERMINAL_HISTORY 512
 #define TERMINAL_FACES 4
 #define TERMINAL_SIZE 16
 #define TERMINAL_ATLAS 512
@@ -59,6 +60,11 @@
 #define TERMINAL_SYNC_NANOSECONDS 200000000ll
 // A buffer that is not on the screen is given back after the terminal has been left alone this long.
 #define TERMINAL_IDLE_NANOSECONDS 1000000000ll
+// The longest a frame of the output lasts, when the compositor does not say.
+#define TERMINAL_FRAME_NANOSECONDS 16666667ll
+// A frame that has waited this long for a buffer to be released draws into it regardless: the
+// compositor not on the screen is not reading it, and a terminal that never draws again is worse.
+#define TERMINAL_STALL_NANOSECONDS 250000000ll
 
 typedef unsigned long long __attribute__((may_alias)) terminal_word;
 
@@ -1033,8 +1039,8 @@ static b32 terminal_main()
         string_address bold = null;
         unsigned int count = 0, size = TERMINAL_SIZE, pixels_h, pixels_w, resize[3] = {0, 0, 0};
         unsigned int max_columns, hung = 0;
-        b32 master, gone = false, dirty = true, closing = false, held = false;
-        positive oom_kills, sync_since = 0;
+        b32 master, gone = false, dirty = true, closing = false, held = false, paced;
+        positive oom_kills, sync_since = 0, stalled_since = 0, last_frame = 0;
         bipolar child;
         struct surface address_to surface;
 
@@ -1094,7 +1100,14 @@ static b32 terminal_main()
         max_columns = (surface->window.display_width > TERMINAL_CEILING ? surface->window.display_width
                                                                        : TERMINAL_CEILING) /
                       terminal.cell_w;
-        window = window_grid_open(COLUMNS_WANTED, ROWS_WANTED, max_columns, TERMINAL_HISTORY);
+        {
+                unsigned int tallest = (surface->window.display_height > TERMINAL_CEILING * 9 / 16
+                                            ? surface->window.display_height
+                                            : TERMINAL_CEILING * 9 / 16) / terminal.cell_h;
+
+                window = window_grid_open(COLUMNS_WANTED, ROWS_WANTED, max_columns,
+                                          tallest * 2 + 1 > TERMINAL_HISTORY ? tallest * 2 + 1 : TERMINAL_HISTORY);
+        }
 
         if (window)
                 grid_take();
@@ -1118,6 +1131,7 @@ static b32 terminal_main()
 
         cursor_show();
         terminal_frame();
+        last_frame = clock_monotonic_nanoseconds();
 
         for (;;)
         {
@@ -1185,13 +1199,48 @@ static b32 terminal_main()
 
                 dirty |= changed;
 
-                if (dirty && !synchronized_output)
+                /*
+                        A frame is made at most once an output frame: more are made over
+                        before they are shown, and a stream of output would be drawn six
+                        hundred times a second where sixty are seen. The first after a quiet
+                        time is made at once, so a key's echo does not wait; what comes
+                        sooner than a frame after the last waits out the rest of it.
+                */
+                paced = false;
+                if (dirty && !synchronized_output && last_frame)
+                {
+                        positive period = terminal.surface->frame_period ? terminal.surface->frame_period
+                                                                         : TERMINAL_FRAME_NANOSECONDS;
+                        positive since = clock_monotonic_nanoseconds() - last_frame;
+
+                        if (since < period)
+                        {
+                                paced = true;
+                                timeout = (long)(period - since);
+                        }
+                }
+
+                if (dirty && !synchronized_output && !paced)
                 {
                         cursor_show();
 
                         if (terminal_frame())
+                        {
                                 dirty = false;
+                                last_frame = clock_monotonic_nanoseconds();
+                        }
+                        else if (!stalled_since)
+                                stalled_since = clock_monotonic_nanoseconds();
+                        else if (clock_monotonic_nanoseconds() - stalled_since >= TERMINAL_STALL_NANOSECONDS)
+                        {
+                                // Waited for a release that has not come: the buffer is taken.
+                                terminal.committed[1 - terminal.shown] = 0;
+                                stalled_since = 0;
+                        }
                 }
+
+                if (!dirty)
+                        stalled_since = 0;
 
                 if (gone)
                         break;
@@ -1210,8 +1259,11 @@ static b32 terminal_main()
                 {
                         b32 spare = !dirty && !synchronized_output && terminal.shown >= 0 &&
                                     terminal.valid[1 - terminal.shown];
+                        b32 stalled = dirty && !synchronized_output && terminal.shown >= 0;
                         long ready = surface_wait(terminal.surface, master,
-                                                  spare && timeout < 0 ? TERMINAL_IDLE_NANOSECONDS : timeout);
+                                                  spare && timeout < 0     ? TERMINAL_IDLE_NANOSECONDS
+                                                  : stalled && timeout < 0 ? TERMINAL_STALL_NANOSECONDS
+                                                                           : timeout);
 
                         if (ready < 0)
                         {
@@ -1226,6 +1278,8 @@ static b32 terminal_main()
 
                         if (!ready && spare && timeout < 0)
                                 terminal_discard();
+
+
                 }
         }
 

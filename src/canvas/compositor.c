@@ -2185,6 +2185,7 @@ static int compositor_create(struct compositor_client *client, struct surface_re
         page->buffer_size = request->width * request->height * 4;
         page->buffer_offset[0] = WINDOW_PIXELS;
         page->buffer_offset[1] = (unsigned int)(WINDOW_PIXELS + slot);
+        page->frame_period = (unsigned int)compositor.period;
         __atomic_store_n(&page->magic, SURFACE_MAGIC, __ATOMIC_RELEASE);
 
         client->sequence = page->window.sequence;
@@ -2410,11 +2411,18 @@ static void compositor_commit(struct compositor_client *client)
                 whole = 1;
         }
 
-        // The slot that was showing is the program's again.
-        if (client->shown && slot != client->slot)
+        /*
+                The slot that was showing is the program's again. Every commit
+                before this one is over with, so that is what is released, and
+                not only the one the slot was last committed in: a program
+                that commits a second time before the first was looked at
+                has the first slot back all the same, and must not wait for
+                a release that would otherwise never come.
+        */
+        if (slot != client->slot)
         {
-                page->release_serial = client->committed;
-                compositor_post(client, SURFACE_EVENT_RELEASE, 0, client->committed,
+                page->release_serial = sequence - 1;
+                compositor_post(client, SURFACE_EVENT_RELEASE, 0, sequence - 1,
                                 (int)client->slot, 0);
                 whole = 1;
         }

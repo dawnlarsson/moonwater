@@ -539,7 +539,10 @@ struct surface
         unsigned int event_head;
         unsigned int event_tail;
         unsigned int event_dropped;
-        unsigned int reserved;
+        // How long a frame of the output lasts, in nanoseconds, when the compositor made the
+        // page: a program that draws more often than that is drawing what is not shown. Zero
+        // when it is not said (the spec's reserved word, which is zero in a page that does not).
+        unsigned int frame_period;
         struct surface_event event[SURFACE_EVENTS];
         unsigned int theme_generation;
         unsigned int theme_foreground;
@@ -594,7 +597,7 @@ SURFACE_AT(style_applied, 1668);
 SURFACE_AT(event_head, 1796);
 SURFACE_AT(event_tail, 1800);
 SURFACE_AT(event_dropped, 1804);
-SURFACE_AT(reserved, 1808);
+SURFACE_AT(frame_period, 1808);
 SURFACE_AT(event, 1812);
 SURFACE_AT(theme_generation, 2836);
 SURFACE_AT(theme_foreground, 2840);
