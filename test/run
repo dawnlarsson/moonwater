@@ -8791,6 +8791,7 @@ group autowrap
 same 'on by default' '[abcdef]|[ghi]|[]'         6 3 in 'abcdefghi' dump
 same 'off overwrites' '[abcdei]|[]|[]'           6 3 in '\e[?7labcdefghi' dump
 same 'on again'      '[abcdef]|[gh]|[]'          6 3 in '\e[?7l\e[?7habcdefgh' dump
+same 'on after the last column' '[01235]|[6789]|[]' 5 3 in '\e[?7l01234\e[?7h56789' dump
 
 group cursor
 #       DECTCEM says whether there is a block to draw at all.
@@ -8922,6 +8923,7 @@ group string
 same 'osc to bell'   '[XY]'                      20 3 in '\e]0;a title\aXY' row 0
 same 'osc to st'     '[XY]'                      20 3 in '\e]0;a title\e\\XY' row 0
 same 'dcs'           '[XY]'                      20 3 in '\ePq#0;2;0;0;0\e\\XY' row 0
+same 'dcs ignores a bell' '[Z]'                 20 3 in '\ePqqq\aXY\e\\Z' row 0
 same 'apc'           '[XY]'                      20 3 in '\e_Gf=100,a=T\e\\XY' row 0
 same 'privacy message' '[XY]'                    20 3 in '\e^anything\e\\XY' row 0
 #       Only an OSC names the window. DCS, SOS, PM and APC are read the same
@@ -9046,7 +9048,7 @@ same 'mark takes none' '[ex]|0,2'                8 2 in 'e\xcc\x81x' row 0 curso
 same 'wraps whole'    '[abc]|[<6f22>]|1,2'       4 2 in 'abc\xe6\xbc\xa2' dump cursor
 same 'right half hit' '[ x]'                     10 2 in '\xe6\xbc\xa2' in '\e[1;2Hx' row 0
 same 'left half hit'  '[x ]'                     10 2 in '\xe6\xbc\xa2' in '\e[1;1Hx' row 0
-same 'pinned at the edge' '[ab<6f22>]|0,4'       4 2 in '\e[?7l' in 'abc\xe6\xbc\xa2' row 0 cursor
+same 'pinned at the edge' '[ab<6f22>]|0,3'       4 2 in '\e[?7l' in 'abc\xe6\xbc\xa2' row 0 cursor
 #       Erasing half of a double-width character erases the other half too,
 #       so what is written over the pair afterwards stands whole.
 same 'erasing the left half' '[ab]'              8 2 in '\xe6\xbc\xa2\e[1;1H\e[Xab' row 0
@@ -9070,7 +9072,7 @@ group runs
 #       insert mode and the line-drawing set, a character cut between two
 #       reads, and the bytes that are not text at all.
 same 'run wraps rows' '[abcd]|[efgh]|[ij]|2,2'    4 3 in 'abcdefghij' dump cursor
-same 'run pinned'    '[abcg]|0,4'                 4 2 in '\e[?7l' in 'abcdefg' row 0 cursor
+same 'run pinned'    '[abcg]|0,3'                 4 2 in '\e[?7l' in 'abcdefg' row 0 cursor
 same 'run over a pair' '[ xy]|0,3'                8 2 in '\xe6\xbc\xa2' in '\e[1;2Hxy' row 0 cursor
 #       An erase over either half takes the pair, so a run written where
 #       the pair was stands whole even when it arrives in a read of its own.
@@ -9115,9 +9117,9 @@ group malformed
 same 'cut short'      '[a<fffd>z]'               8 2 in 'a\xc3z' row 0
 same 'cut by a lead'  '[<fffd><00e9>]'           8 2 in '\xe2\xc3\xa9' row 0
 same 'stray continuation' '[<fffd>a]'            8 2 in '\x80a' row 0
-same 'overlong'       '[<fffd>]'                 8 2 in '\xc0\xaf' row 0
-same 'a surrogate half' '[<fffd>]'               8 2 in '\xed\xa0\x80' row 0
-same 'past the last character' '[<fffd>]'        8 2 in '\xf7\xbf\xbf\xbf' row 0
+same 'overlong'       '[<fffd><fffd>]'           8 2 in '\xc0\xaf' row 0
+same 'a surrogate half' '[<fffd><fffd><fffd>]'     8 2 in '\xed\xa0\x80' row 0
+same 'past the last character' '[<fffd><fffd><fffd><fffd>]' 8 2 in '\xf7\xbf\xbf\xbf' row 0
 same 'an escape ends one' '[<fffd>]|[]'          8 2 in '\xc3\e[2;1H' dump
 
 #

@@ -561,6 +561,18 @@ static inline INLINE fn wrap_for(unsigned int width)
         }
 }
 
+/*
+        With autowrap off the cursor stops on the last column, where a write
+        leaves it. Past that column is the state autowrap waits in, for the
+        next character to wrap, so a program that turns autowrap on after
+        writing the last column must not find the wait already there.
+*/
+static inline INLINE fn column_held(void)
+{
+        if (!autowrap && column >= COLUMNS)
+                column = COLUMNS - 1;
+}
+
 // A cell's colours and flags where BLANK_CELL_WORD lays them out, above the
 // character.
 static PURE positive cell_attribute()
@@ -620,6 +632,7 @@ static fn put_cells(unsigned int character, unsigned int width)
 
         if (address_to length < column)
                 address_to length = column;
+        column_held();
 }
 
 /*
@@ -1920,24 +1933,60 @@ static fn csi_final(unsigned int final)
 */
 static memory_utf8_state terminal_utf8;
 
+/*
+        Whether some character starts with the bits so far: value, with left
+        more bytes to come, and the least a character of this length may be.
+        A prefix that no character can start is refused at the byte that makes
+        it one, which is how the replacement is counted: the bytes before that
+        byte are one U+FFFD and the byte is a byte of its own (Unicode's
+        maximal subpart). So C0 AF is two, E0 80 80 three, and F5 80 80 80 four.
+*/
+static b32 utf8_possible(unsigned int value, unsigned int left, unsigned int least)
+{
+        unsigned long low = (unsigned long)value << (6 * left);
+        unsigned long high = low + ((1ul << (6 * left)) - 1);
+
+        if (high < least || low > 0x10ffff)
+                return false;
+        return !(low >= 0xd800 && high <= 0xdfff);
+}
+
 static fn utf8_byte(unsigned int c)
 {
-        // A byte that cuts a sequence short is refused along with it, and it
-        // is still a byte of its own: the feed leaves replaying it to us.
-        bool cut = terminal_utf8.left && ((p8)c & 0xc0) != 0x80;
-        b32 result = memory_utf8_feed(address_of terminal_utf8, (p8)c);
+        p8 byte = (p8)c;
 
-        if (result < 0 && cut)
+        if (terminal_utf8.left)
+        {
+                unsigned int value = terminal_utf8.value << 6 | (byte & 0x3f);
+
+                if ((byte & 0xc0) == 0x80 && utf8_possible(value, terminal_utf8.left - 1, terminal_utf8.least))
+                {
+                        terminal_utf8.value = value;
+                        // A C1 control spelled in UTF-8 is a control nothing here acts on, not a character to draw.
+                        if (--terminal_utf8.left == 0 && value >= 0xa0)
+                                put(value);
+                        return;
+                }
+
+                // The bytes so far are one replacement, and the byte that refused them starts again below.
+                terminal_utf8.left = 0;
+                put(0xfffd);
+        }
+
+        if (byte < 0xc0 || byte >= 0xf8)
         {
                 put(0xfffd);
-                result = memory_utf8_feed(address_of terminal_utf8, (p8)c);
+                return;
         }
-        // A C1 control spelled in UTF-8 is a control nothing here acts on,
-        // not a character to draw.
-        if (result < 0)
+
+        terminal_utf8.left = byte < 0xe0 ? 1 : byte < 0xf0 ? 2 : 3;
+        terminal_utf8.least = terminal_utf8.left == 1 ? 0x80 : terminal_utf8.left == 2 ? 0x800 : 0x10000;
+        terminal_utf8.value = byte & (0x3f >> terminal_utf8.left);
+        if (!utf8_possible(terminal_utf8.value, terminal_utf8.left, terminal_utf8.least))
+        {
+                terminal_utf8.left = 0;
                 put(0xfffd);
-        else if (result && terminal_utf8.value >= 0xa0)
-                put(terminal_utf8.value);
+        }
 }
 
 static fn line_forget();
@@ -2014,7 +2063,8 @@ static fn consume(unsigned int c)
                 {
                         if (c == 27)
                                 string_escape = true;
-                        else if (c == 7)
+                        // BEL ends an OSC and nothing else: a DCS runs to its ST, as tmux and xterm read it.
+                        else if (c == 7 && string_kind == ']')
                         {
                                 osc_finish(true);
                                 in_string = in_escape = false;
@@ -2312,6 +2362,7 @@ static positive text_ascii(const p8 address_to bytes, positive count)
 
         if (address_to length < column)
                 address_to length = column;
+        column_held();
 
         return n;
 }
@@ -2470,6 +2521,7 @@ static positive __attribute__((__noinline__)) text_wide(const p8 address_to byte
 
                 if (address_to length < column)
                         address_to length = column;
+                column_held();
         }
 
         /*
