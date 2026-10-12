@@ -13843,7 +13843,7 @@ static COLD bool tls_ct_sct_verifies(const tls_ct_sct address_to sct,
 
 /* Whether a counted SCT's log may count it now: not retired, or retired
    after it was made; taking the leaf's notAfter; made by now. */
-static CONST COLD bool tls_ct_log_counts(const tls_ct_log address_to log, p64 timestamp,
+static PURE COLD bool tls_ct_log_counts(const tls_ct_log address_to log, p64 timestamp,
                                          p64 not_after_ms, p64 now_ms)
 {
         return timestamp <= now_ms && (!log->retired || timestamp < log->retired) &&

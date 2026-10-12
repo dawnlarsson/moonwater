@@ -68872,6 +68872,53 @@ NET_MUTATION_EQUIVALENT = {
         "At scheme == length nothing follows the scheme: the slashes test reads nothing, and the verbatim walk and the escaping run the same either way.",
     ("http_origin_form", "if ((path[0] != '/' && !root) || length > room ||", ">", 1):
         "At length == room the next test, root >= room - length, refuses it as this does.",
+    ("http_response_fields", "if (name < 0)", "<", 1):
+        "http_field_name answers -1 for an empty name, so it never answers 0.",
+    ("http_response_framing_scan", "if (scan > HTTP_HEAD_MAX)", ">", 1):
+        "At scan == HTTP_HEAD_MAX both arms leave it HTTP_HEAD_MAX.",
+    ("http_response_framing_scan", "return status == HTTP_NO_REPLY &&", "==", 1):
+        "http_status_code answers HTTP_NO_REPLY only below thirteen bytes, never with HTTP_HEAD_MAX of them, and HTTP_MALFORMED stays HTTP_MALFORMED either way.",
+    ("http_response_framing_scan", "if (header < 0)", "<", 1):
+        "http_header_end answers the end of a terminator, at least 2, or -1; never 0.",
+    ("http_response_framing_scan", "address_to searched = max(at, scan > 3 ? scan - 3 : 0);", ">", 1):
+        "At scan == 3 both arms are 0.",
+    ("http_body_read", "if (n < 0 || (positive)n > room)", "||", 1):
+        "A negative n, read as a positive, is past any room, so the conjunction holds wherever n < 0 does; a read never answers more than room.",
+    ("http_write_spans", "while (count && (positive)wrote >= spans->length)", ">=", 1):
+        "A span written exactly is left at length 0, which the next writev writes as nothing: the same bytes go out.",
+    ("http_copy", "if (body->store->used > body->store_limit ||", ">", 1):
+        "At used == store_limit the next test refuses every got, which is never 0 there.",
+    ("http_line", "while (used < limit)", "<", 1):
+        "At used == limit the line has no room left: another read finds it too long all the same, and the loop's end answers HTTP_MALFORMED.",
+    ("http_copy_trailers", "while (total < HTTP_HEAD_MAX)", "<", 1):
+        "At total == HTTP_HEAD_MAX every further line is longer than the room left and refused, as the loop's end refuses.",
+    ("http_absolutize", "if (length >= sizeof kept ||", ">=", 1):
+        "The one caller escapes the Location into a buffer of HTTP_URL_MAX first, so it is never as long as kept.",
+    ("http_absolutize", "if (used + length + 1 > sizeof merged)", ">", 1):
+        "A merged path that fills merged exactly is refused by http_put_url, which puts the scheme and host before it in a room of the same size.",
+    ("http_lookup", "if (string_to_host(host) < 0 && http_host_loopback(host))", "<", 1):
+        "string_to_host answers 0 only for 0.0.0.0, which is no loopback name.",
+    ("http_lookup_wanted", "if (string_to_host(host) >= 0 || http_host_loopback(host))", ">=", 1):
+        "0.0.0.0 answers 0 either way: as its own address through http_lookup, or as no address from a resolver.",
+    ("http_address_public", "if (a == 127)", "==", 1): "Bench only: the line is compiled under TLS_BENCH_ANCHOR or TLS_BENCH_CT, which only the loopback HTTPS bench defines, never a shipped image or a check build.",
+    ("tls_ct_log_find", "for (positive at = 0; at < array_count(tls_bench_ct_logs); at++)", "<", 1): "Bench only: the line is compiled under TLS_BENCH_ANCHOR or TLS_BENCH_CT, which only the loopback HTTPS bench defines, never a shipped image or a check build.",
+    ("tls_ct_holds", "if (top->curve == 2 && !memory_compare(top->qx, tls_bench_anchor_x, 48) &&", "==", 1): "Bench only: the line is compiled under TLS_BENCH_ANCHOR or TLS_BENCH_CT, which only the loopback HTTPS bench defines, never a shipped image or a check build.",
+    ("tls_ct_holds", "if (top->curve == 2 && !memory_compare(top->qx, tls_bench_anchor_x, 48) &&", "&&", 1): "Bench only: the line is compiled under TLS_BENCH_ANCHOR or TLS_BENCH_CT, which only the loopback HTTPS bench defines, never a shipped image or a check build.",
+    ("tls_ct_holds", "if (top->curve == 2 && !memory_compare(top->qx, tls_bench_anchor_x, 48) &&", "!", 1): "Bench only: the line is compiled under TLS_BENCH_ANCHOR or TLS_BENCH_CT, which only the loopback HTTPS bench defines, never a shipped image or a check build.",
+    ("tls_ct_log_find", "for (positive at = 0; at < array_count(tls_ct_logs); at++)", "<", 1):
+        "One entry past the table is no log: its 32 bytes would have to equal an SCT's log id, which names a log in the table or none.",
+    ("tls_ct_precert", "if (!leaf->scts || !leaf->extensions || leaf->extensions < tbs ||", "||", 1):
+        "tls_ct_holds asks for a precertificate only of a leaf with SCTs.",
+    ("tls_ct_precert", "if (!leaf->scts || !leaf->extensions || leaf->extensions < tbs ||", "||", 2):
+        "tls_parse_cert sets extensions inside the TBSCertificate, so it is never below tbs.",
+    ("tls_ct_precert", "if (!leaf->scts || !leaf->extensions || leaf->extensions < tbs ||", "<", 1):
+        "tls_parse_cert sets extensions past the TBSCertificate's own header, so it is never tbs itself.",
+    ("tls_ct_precert", "if (cut < list_at || cut_length > list_stop - cut)", "||", 1):
+        "tls_parse_cert takes the SCT extension from inside the extension list, so it never runs past the list's end.",
+    ("tls_ct_sct_verifies", "if (precert_length >= 1u << 24 ||", ">=", 1):
+        "A precertificate of 2^24 bytes cannot be named in the three length bytes a log signed, so no signature verifies over what the mutant would sign either.",
+    ("tls_ct_holds", "if (!length || !byte_reader_ok(address_of list) || !byte_reader_end(address_of list))", "||", 1):
+        "With no precertificate no SCT's signature verifies, so the leaf is not held either way.",
     ("tls_parse_key_usage", "if (unused > 7 || at >= stop)", ">=", 1): 'With no bit octet the unused-count octet is read as the final one; for unused 0 it is zero (refused), and for 1 to 7 its trailing-zero count is below its value, so the canonical test refuses it as the original does.',
 }
 

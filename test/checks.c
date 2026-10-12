@@ -54006,9 +54006,17 @@ typedef struct
         positive length;
 } http_test_span;
 
+//      The next writev answers that it wrote nothing.
+static bool http_writev_zero;
+
 static bipolar http_net_call3(positive number, positive one, positive two,
                               positive three)
 {
+        if (number == syscall(writev) && http_writev_zero)
+        {
+                http_writev_zero = false;
+                return 0;
+        }
         if (number == syscall(writev))
                 http_writev_calls++;
         if (number == syscall(writev) && http_writev_short_limit)
@@ -55007,6 +55015,127 @@ static fn http_decision_edges(void)
               http_trailer_line((p8 address_to)"X: y", 4) == HTTP_MALFORMED);
         check("a trailer whose last byte is a control is refused",
               http_trailer_line((p8 address_to)"X:\x01\n", 4) == HTTP_MALFORMED);
+        {
+                static p8 foreign[] = "HTTP/1.1 200 OK\r\nX-Abcdefghijklmno: chunked\r\n"
+                                      "X-Abcdefghijkl: 5\r\n\r\n";
+                static p8 blank[] = "HTTP/1.1 200 OK\r\nTransfer-Encoding: \r\n\r\n";
+                http_response response = {.code = 200};
+                http_framing_fields fields;
+
+                check("headers as long as the framing ones but named otherwise frame nothing",
+                      http_response_fields(foreign, sizeof foreign - 1, address_of response,
+                                           address_of fields) &&
+                          !fields.transfer && !fields.length && !fields.length_value);
+                check("a framing header whose value is only a blank has a value of nothing",
+                      http_response_fields(blank, sizeof blank - 1, address_of response,
+                                           address_of fields) &&
+                          fields.transfer && fields.transfer_size == 0);
+        }
+        {
+                static const char *codes[] = {"HTTP/1.1 599 X\r\n\r\n", "HTTP/1.1 600 X\r\n\r\n"};
+                bipolar status[2];
+
+                for (positive at = 0; at < 2; at++)
+                {
+                        http_response response = {0};
+                        positive resume = 0, searched = 0, header_length = 0;
+
+                        status[at] = http_response_framing_scan(
+                            (p8 address_to)codes[at], string_length(codes[at]), address_of resume,
+                            address_of searched, address_of header_length, address_of response);
+                }
+                check("a status of 599 is a status and 600 is not",
+                      status[0] != HTTP_MALFORMED && status[1] == HTTP_MALFORMED);
+        }
+        {
+                bipolar saved = system_call_1(syscall(dup), 0);
+                http_link link = {.handle = -1};
+
+                if (saved >= 0)
+                        system_close(0);
+                link.handle = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+                http_link_close(address_of link);
+                check("a connection on descriptor 0 is closed like any other",
+                      system_call_3(syscall(fcntl), 0, 1, 0) < 0 && link.handle == -1);
+                if (saved >= 0)
+                {
+                        system_call_2(syscall(dup2), (positive)saved, 0);
+                        system_close((b32)saved);
+                }
+        }
+        {
+                static const bipolar pairs[][2] = {
+                    {TLS_UNTRUSTED, HTTP_UNTRUSTED}, {TLS_EXPIRED, HTTP_EXPIRED},
+                    {TLS_NOT_YET, HTTP_NOT_YET},     {TLS_MISMATCH, HTTP_MISMATCH},
+                    {TLS_REVOKED, HTTP_REVOKED},     {TLS_UNCHECKED, HTTP_UNCHECKED},
+                    {TLS_CLOCK, HTTP_CLOCK},         {TLS_UNLOGGED, HTTP_UNLOGGED},
+                };
+                positive wrong = 0;
+
+                for (positive at = 0; at < array_count(pairs); at++)
+                        wrong += http_tls_status(pairs[at][0]) != pairs[at][1];
+                check("each TLS refusal is said as its own HTTP status", wrong == 0);
+        }
+        {
+                b32 ends[2];
+                p8 bytes[4] = "abcd";
+                http_span spans[1] = {{bytes, 4}};
+
+                if (system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC) == 0)
+                {
+                        http_writev_zero = true;
+                        http_write_failure = 0;
+                        check("a write that moves nothing is a full disk, not a loop",
+                              !http_write_spans(ends[1], spans, 1, 4) &&
+                                  http_write_failure == -ENOSPC);
+                        http_writev_zero = false;
+                        system_close(ends[0]);
+                        system_close(ends[1]);
+                }
+        }
+        {
+                http_body body = {0};
+                positive seconds = 0, nanoseconds = 0;
+
+                body.read_seconds = 2;
+                body.deadline = (network_deadline){1000000000, 2500000000};
+                net_clock_now = 1000000000;
+                net_clock_step = 1;
+                check("a body's whole budget shortens the idle wait only when it is shorter",
+                      http_body_wait(address_of body, address_of seconds, address_of nanoseconds) &&
+                          seconds == 2 && nanoseconds == 0);
+                net_clock_step = 0;
+        }
+        check("a target's percent that spells no hex digit is not decoded",
+              http_request_component_valid("/%z0", HTTP_REQUEST_TARGET));
+        check("a target's CR spelled after a percent that spells none is found",
+              !http_request_component_valid("/%0%0d", HTTP_REQUEST_TARGET));
+        check("a field's percent is no escape",
+              http_request_component_valid("a%0d", HTTP_REQUEST_FIELD));
+        {
+                p8 out[16];
+
+                check("an absolute Location as long as the room is refused",
+                      http_absolutize(false, "h", 80, "/", "http://h/x", out, 10) ==
+                          HTTP_BAD_URL);
+                check("a scheme-relative Location that fits the room exactly is taken",
+                      http_absolutize(true, "h", 443, "/", "//h/x", out, 12) == HTTP_OK &&
+                          !memory_compare(out, "https://h/x", 12));
+        }
+        {
+                b32 code = 0;
+
+                check("a status line of thirteen bytes is read",
+                      http_status_code((p8 address_to)"HTTP/1.1 200 ", 13, address_of code) ==
+                              HTTP_OK &&
+                          code == 200);
+        }
+        net_slurp_text = (string_address)"nameserver 127.0.0.1\n";
+        net_random_refuse = 1000;
+        check("a name that is not the machine's is not looked up as loopback",
+              http_lookup("example.invalid") == 0);
+        net_io_faults_clear();
+        check("the literal 0.0.0.0 is no name rebound", !http_name_rebound("0.0.0.0", 0));
 }
 
 /*
@@ -55063,6 +55192,28 @@ static fn tls_decision_edges(void)
                 check("a clock a second below the floor is not",
                       !tls_date_now(address_of now));
                 net_io_faults_clear();
+        }
+        {
+                //      A TBSCertificate whose extensions start with the SCT
+                //      list: the precertificate is the same TBS without it.
+                static p8 tbs[] = {0x30, 0x15, 0x02, 0x01, 0x01, 0xa3, 0x10, 0x30, 0x0e,
+                                   0x30, 0x05, 0x06, 0x03, 0x01, 0x02, 0x03,
+                                   0x30, 0x05, 0x06, 0x03, 0x04, 0x05, 0x06};
+                static const p8 want[] = {0x30, 0x0e, 0x02, 0x01, 0x01, 0xa3, 0x09, 0x30, 0x07,
+                                          0x30, 0x05, 0x06, 0x03, 0x04, 0x05, 0x06};
+                static tls_cert leaf;
+                p8 out[sizeof tbs];
+
+                memory_fill(address_of leaf, 0, sizeof leaf);
+                leaf.tbs = tbs;
+                leaf.tbs_length = sizeof tbs;
+                leaf.extensions = tbs + 5;
+                leaf.sct_extension = tbs + 9;
+                leaf.sct_extension_length = 7;
+                leaf.scts = tbs;
+                check("an SCT extension that is the first of the extensions is cut from the precertificate",
+                      tls_ct_precert(address_of leaf, out, sizeof out) == sizeof want &&
+                          !memory_compare(out, want, sizeof want));
         }
         check("a mailbox whose host is the base .b itself is not under it",
               tls_email_within((p8 address_to)"u@.example.com", 14,
@@ -61121,6 +61272,47 @@ static fn tls_lending_and_fatal_states(void)
                         tls_forget(address_of sender);
                         tls_forget(address_of link.session);
                 }
+
+        {
+                //      The body's first byte waits in the stash and the next
+                //      record is forged: the copy fails at the record, and
+                //      writes nothing of what it had gathered for the write.
+                b32 pair[2];
+                b32 ends[2];
+                tls_conn sender = {0};
+                http_link link = {.tls = true, .session = {
+                    .encrypted = true, .application = true}};
+                http_body body = {.link = address_of link,
+                    .stash = (p8 address_to)"a", .stash_used = 1};
+                bool opened = system_call_4(syscall(socketpair), AF_UNIX, SOCK_STREAM, 0,
+                                            (positive)pair) == 0 &&
+                              system_call_2(syscall(pipe2), (positive)ends,
+                                            O_CLOEXEC | O_NONBLOCK) == 0;
+                p8 drained[4];
+
+                check("TLS lending failure fixture opens", opened);
+                if (opened)
+                {
+                        link.handle = link.session.handle = pair[0];
+                        crypto_aesgcm_prepare(address_of sender.c_gcm, key);
+                        crypto_aesgcm_prepare(address_of link.session.s_gcm, key);
+                        crypto_aesgcm_prepare(address_of link.session.c_gcm, key);
+                        link.session.receive_end = tls_seal(address_of sender, TLS_CT_APP,
+                            (p8 address_to)"b", 1, link.session.receive);
+                        link.session.receive[link.session.receive_end - 1] ^= 1;
+                        link.session.receive_high = link.session.receive_end;
+                        net_io_faults_clear();
+                        check("a body whose next record is forged fails without writing what it gathered",
+                              http_copy(address_of body, ends[1], 2, true) == HTTP_NO_REPLY &&
+                                  system_read_once((positive)ends[0], drained, sizeof drained) < 0);
+                        system_close(ends[0]);
+                        system_close(ends[1]);
+                        socket_close(pair[0]);
+                        socket_close(pair[1]);
+                        tls_forget(address_of sender);
+                        tls_forget(address_of link.session);
+                }
+        }
 
         for (positive version = 0; version < 2; version++)
         {
@@ -71657,6 +71849,111 @@ static fn tls_ct_real(void)
         }
         certs[0].scts[2 + 2 + 118 - 1] ^= 1;
         check("and mended, it holds again", tls_ct_holds(certs, chain, 1, certs + 1));
+        {
+                static p8 roomy[sizeof ct_real_leaf];
+                static p8 exact[sizeof ct_real_leaf];
+                positive need = tls_ct_precert(certs, roomy, sizeof roomy);
+
+                check("a precertificate fits a room of exactly its length",
+                      need && tls_ct_precert(certs, exact, need) == need &&
+                          !memory_compare(roomy, exact, need));
+        }
+        {
+                //      The fixture's SCTs, three of them for a leaf of 355
+                //      days, after fourteen from a log nobody knows: the
+                //      first sixteen read hold only two of the three.
+                static p8 list[2 + 17 * 160];
+                p8 address_to kept = certs[0].scts;
+                positive kept_length = certs[0].scts_length;
+                byte_reader reader = byte_reader_open(kept, kept_length);
+                byte_reader entries = byte_reader_vector16(address_of reader);
+                const p8 address_to real[3] = {0};
+                positive real_length[3] = {0};
+                positive found = 0, used = 2;
+
+                while (byte_reader_left(address_of entries) && found < 3)
+                {
+                        byte_reader one = byte_reader_vector16(address_of entries);
+
+                        real[found] = byte_reader_here(address_of one);
+                        real_length[found++] = byte_reader_left(address_of one);
+                }
+                for (positive at = 0; found == 3 && at < 17; at++)
+                {
+                        const p8 address_to from = at < 14 ? real[0] : real[at - 14];
+                        positive length = at < 14 ? real_length[0] : real_length[at - 14];
+
+                        if (used + 2 + length > sizeof list)
+                                break;
+                        network_store_16(list + used, (p16)length);
+                        memory_copy(list + used + 2, from, length);
+                        if (at < 14)
+                                list[used + 2 + 1] ^= 0xff; // another log's id
+                        used += 2 + length;
+                }
+                network_store_16(list, (p16)(used - 2));
+                certs[0].scts = list;
+                certs[0].scts_length = used;
+                check("the fixture has three SCTs to rebuild its list from", found == 3);
+                check("no more than sixteen SCTs of a list are read",
+                      !tls_ct_holds(certs, chain, 1, certs + 1));
+                certs[0].scts = null;
+                check("a leaf with no SCTs is not logged", !tls_ct_holds(certs, chain, 1, certs + 1));
+                certs[0].scts = kept;
+                certs[0].scts_length = kept_length;
+                {
+                        const p8 address_to key = certs[1].spki;
+
+                        certs[1].spki = null;
+                        check("an issuer with no key logs nothing",
+                              !tls_ct_holds(certs, chain, 1, certs + 1));
+                        certs[1].spki = key;
+                }
+        }
+        {
+                p8 out[4];
+
+                check("DER lengths at their edges take the next form",
+                      tls_der_length_put(out, 0x7f) == 1 && out[0] == 0x7f &&
+                          tls_der_length_put(out, 0x80) == 2 && out[0] == 0x81 &&
+                          out[1] == 0x80 && tls_der_length_put(out, 0xff) == 2 &&
+                          tls_der_length_put(out, 0x100) == 3 && out[0] == 0x82 &&
+                          tls_der_length_put(out, 0xffff) == 3 &&
+                          tls_der_length_put(out, 0x10000) == 4 && out[0] == 0x83 &&
+                          out[1] == 1 && !out[2] && !out[3]);
+        }
+        {
+                tls_ct_log ct = {0};
+
+                check("an SCT made this very millisecond counts",
+                      tls_ct_log_counts(address_of ct, 5000, 0, 5000));
+                ct.retired = 5000;
+                check("an SCT made the millisecond its log retired does not",
+                      !tls_ct_log_counts(address_of ct, 5000, 0, 9000) &&
+                          tls_ct_log_counts(address_of ct, 4999, 0, 9000));
+        }
+        {
+                //      v1, an id, a timestamp, no extensions, SHA-256 and
+                //      ECDSA, then the signature's length and its bytes.
+                static p8 sct[1 + 32 + 8 + 2 + 2 + 2 + 2];
+                tls_ct_sct read;
+                byte_reader reader;
+
+                memory_fill(sct, 0, sizeof sct);
+                sct[1 + 32 + 8 + 2] = 4;
+                sct[1 + 32 + 8 + 2 + 1] = 3;
+                sct[1 + 32 + 8 + 2 + 2 + 1] = 1; // one byte of signature
+                reader = byte_reader_open(sct, sizeof sct - 1);
+                check("an SCT read whole is taken",
+                      tls_ct_sct_read(address_of reader, address_of read));
+                reader = byte_reader_open(sct, sizeof sct);
+                check("an SCT with a byte after it is refused",
+                      !tls_ct_sct_read(address_of reader, address_of read));
+                sct[1 + 32 + 8 + 2 + 2 + 1] = 0;
+                reader = byte_reader_open(sct, sizeof sct - 2);
+                check("an SCT with no signature is refused",
+                      !tls_ct_sct_read(address_of reader, address_of read));
+        }
         certs[1].spki[certs[1].spki_length - 1] ^= 1;
         check("under another issuer's key, no SCT holds", !tls_ct_holds(certs, chain, 1, certs + 1));
 }
