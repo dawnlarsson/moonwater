@@ -18373,6 +18373,27 @@ wait $c
 echo m4-done
 """)
 
+#   Alt-Tab, Alt-F9 and what the keys do while they are used: three windows side
+#   by side, the lane presses the chords between the markers, and the script
+#   reports how many keys each window was sent.
+open(stick + "/m6", "w").write(r"""exec > /dev/ttyS0 2>&1
+/compositor &
+c=$!
+sleep 2
+/surface -x 100 -y 100 -w 300 -h 200 -c 336699 -T one -s 120 > /tmp/w1.out &
+sleep 1
+/surface -x 500 -y 100 -w 300 -h 200 -c 996633 -T two -s 120 > /tmp/w2.out &
+sleep 1
+/surface -x 900 -y 100 -w 300 -h 200 -c 55aa55 -T three -s 120 > /tmp/w3.out &
+sleep 1
+echo m6-ready
+sleep 40
+echo "m6 keys: one $(grep -c 'surface: event 6' /tmp/w1.out) two $(grep -c 'surface: event 6' /tmp/w2.out) three $(grep -c 'surface: event 6' /tmp/w3.out)"
+kill $c
+wait $c
+echo m6-done
+""")
+
 open(stick + "/m1", "w").write(r"""exec > /dev/ttyS0 2>&1
 /compositor &
 c=$!
@@ -18701,6 +18722,54 @@ out.append(("K1.3 Caps Lock turns a letter over, å included, and turning it off
             " ".join(typed("m4-se-dump", "m4-se-end").split()[10:]), "30:65 26:197 30:97"))
 out.append(("K1.4 the layout set while the compositor runs is the layout it types with: de has z where y is, and @ on AltGr and q",
             typed("m4-de-dump", "m4-de-end"), "21:122 16:64 44:121"))
+
+#   Alt-Tab and Alt-F9 on three windows. The titlebar of the window that has the
+#   keys is lit (4c6785) and the others' are not (2b3a4c); a window put away is
+#   not on the screen (the desktop's ink in its place). The windows are at x 100, 500 and 900, y 100.
+type_text("sh /mnt/m6\n")
+ready6 = wait_for(b"m6-ready", 60)
+time.sleep(0.5)
+lit = lambda at, n: "".join("L" if at(100 + 400 * i + 60, 110) == "4c6785" else
+                            "-" if at(100 + 400 * i + 60, 110) == "2b3a4c" else
+                            "." if at(100 + 400 * i + 60, 110) == "1b2733" else "?" for i in range(3))
+click(160, 200)
+width, height, six = picture("m6-one")
+first = lit(six, 0)
+chord("alt", "tab")
+width, height, six = picture("m6-tab")
+second = lit(six, 0)
+chord("alt", "f9")
+width, height, six = picture("m6-f9")
+third = lit(six, 0)
+away = six(1000, 200)
+chord("alt", "tab")
+width, height, six = picture("m6-back")
+fourth = lit(six, 0)
+back = six(1000, 200)
+#   Two steps with Alt held: the keys go down two windows, and Alt letting go raises the one it ended on.
+send([press("alt", True), press("tab", True), press("tab", False), press("tab", True),
+      press("tab", False), press("alt", False)])
+time.sleep(0.5)
+width, height, six = picture("m6-twice")
+fifth = lit(six, 0)
+key("a")
+time.sleep(0.5)
+done6 = wait_for(b"m6-done", 60)
+text = serial().decode("latin1")
+out.append(("M6.1 a click gives the keys to its window: the first window's titlebar lit and the others not",
+            first, "L--"))
+out.append(("M6.2 Alt-Tab goes to the window behind the one on top, which is the third, and Alt letting go raises it",
+            second, "--L"))
+out.append(("M6.3 Alt-F9 puts the window with the keys away and the keys go to the one under it, which is the first",
+            "%s %s" % (third, away), "L-. 1b2733"))
+out.append(("M6.4 Alt-Tab with the top window put away brings it back with the keys",
+            "%s %s" % (fourth, back), "--L 55aa55"))
+out.append(("M6.5 two Alt-Tab steps with Alt held go down two windows: the second has the keys",
+            fifth, "-L-"))
+sent = re.findall(r"m6 keys: one (\d+) two (\d+) three (\d+)", text)
+out.append(("M6.6 Alt and Tab and F9 are the compositor's: of everything typed only the letter, pressed and let go, reached a window: the one with the keys",
+            " ".join(sent[-1]) if sent else "none", "0 2 0"))
+
 
 qcmd({"execute": "quit"})
 try:

@@ -649,6 +649,9 @@ static void compositor_scene(const struct compositor_target *t,
 #define CK_LEVELS 4
 #define CK_102ND 86
 #define CK_CAPSLOCK 58
+#define CK_KEY_BACKSPACE 14
+#define CK_KEY_TAB 15
+#define CK_KEY_F9 67
 #define CK_ACUTE 0xB4u
 #define CK_GRAVE '`'
 #define CK_DIAERESIS 0xA8u
@@ -1239,6 +1242,7 @@ static struct
         int resize_w, resize_h, press_x, press_y;
         int pointer_x, pointer_y;
         struct compositor_keymap keymap;
+        int cycle;           // an Alt-Tab is under way: the z of the window it is on, from 1
         unsigned char held[COMPOSITOR_INPUTS]; // the modifiers each keyboard holds down
         int layout_given; // -l named one, and the settings are not looked at
         unsigned int next_id, placed, connections;
@@ -2911,6 +2915,92 @@ static void compositor_reveal(unsigned int id)
         }
 }
 
+/*
+        Alt-Tab, which is the kernel desktop's: a window that can be given
+        the keys, put away or not, whatever its place in the stack. One step
+        gives the keys to the next one down and leaves the stack as it is,
+        so a window put away can be looked at and passed; letting go of Alt
+        brings the one it stopped on back if it was put away and raises it.
+        Starting from the top, when the window with the keys is the one that
+        is on top, it is the one behind; when it is not (it was put away and
+        the keys went down) it is the one on top, which is the one that was
+        put away, so one Alt-Tab restores it.
+*/
+static int compositor_cyclable(const struct compositor_client *client)
+{
+        return client->handle >= 0 && client->page && client->active && client->shown &&
+               compositor_roles[client->role].framed && !(client->lock & SURFACE_LOCK_NO_KEYBOARD);
+}
+
+// The z of the highest window below z that can be stepped to, or 0.
+static int compositor_cycle_below(int below)
+{
+        for (int at = (int)compositor.stacked < below - 1 ? (int)compositor.stacked : below - 1; at > 0; at--)
+                if (compositor_cyclable(compositor.stack[at - 1]))
+                        return at;
+        return 0;
+}
+
+static void compositor_focus_step(void)
+{
+        int top = compositor_cycle_below((int)compositor.stacked + 1), below, next;
+        int focused = 0;
+
+        for (int at = 0; at < (int)compositor.stacked; at++)
+                if (compositor.stack[at] == compositor.focus)
+                        focused = at + 1;
+
+        below = compositor.cycle ? compositor.cycle : focused && focused == top ? focused : (int)compositor.stacked + 1;
+        next = compositor_cycle_below(below);
+        if (!next)
+                next = top;
+
+        if (!next || next == focused)
+                return;
+
+        compositor.cycle = next;
+        compositor_focus(compositor.stack[next - 1]);
+}
+
+static void compositor_focus_commit(void)
+{
+        struct compositor_client *client = compositor.focus;
+
+        compositor.cycle = 0;
+        if (!client || !compositor_cyclable(client))
+                return;
+
+        if (client->style & WINDOW_MINIMIZED)
+        {
+                client->style &= ~WINDOW_MINIMIZED;
+                client->page->window.style &= ~WINDOW_MINIMIZED;
+                compositor_damage_client(client);
+                compositor_list_changed();
+        }
+
+        compositor_raise(client);
+}
+
+// Alt-F9: the window with the keys is put away, and the keys go to the one under it.
+static void compositor_minimize_focused(void)
+{
+        struct compositor_client *client = compositor.focus, *next = null;
+
+        if (!client || !compositor_visible(client) || !compositor_roles[client->role].framed)
+                return;
+
+        compositor_damage_client(client);
+        client->style |= WINDOW_MINIMIZED;
+        client->page->window.style |= WINDOW_MINIMIZED;
+
+        for (unsigned int at = compositor.stacked; at-- && !next;)
+                if (compositor_visible(compositor.stack[at]) && compositor_cyclable(compositor.stack[at]))
+                        next = compositor.stack[at];
+
+        compositor_focus(next);
+        compositor_list_changed();
+}
+
 // What a connection has said, until it would block or has said a burst's worth:
 // a program that never stops talking waits its turn behind the rest, and what
 // is left is still there for the next poll.
@@ -3065,11 +3155,21 @@ static unsigned int compositor_modifiers(void)
         return compositor_held_flags(held);
 }
 
-// A key from the keyboard on input number at: the characters it makes go to
-// the surface that has the keys, one event each.
+/*
+        A key from the keyboard on input number at.
+
+        Some are the compositor's and go no further, as the kernel desktop's
+        were: Alt and AltGr themselves (a window that was sent Alt going down
+        and then, with the keys moved on by Alt-Tab, Alt going up would hold a
+        modifier that never was), Alt-Tab and Alt-F9 with both edges of the
+        key and whatever repeats, any other key typed while an Alt-Tab is under
+        way, and Control-Alt-Backspace, which Canvas hears for itself and acts
+        on. The rest make characters, one event each, for the surface that has
+        the keys; with none, a key gives them to the topmost.
+*/
 static void compositor_key(unsigned int at, unsigned int code, int value)
 {
-        unsigned int bit = compositor_held_bit(code), characters[2] = {0, 0}, flags, modifiers;
+        unsigned int bit = compositor_held_bit(code), characters[2] = {0, 0}, flags, modifiers, chord;
         int count;
 
         if (bit)
@@ -3081,8 +3181,40 @@ static void compositor_key(unsigned int at, unsigned int code, int value)
         }
 
         modifiers = compositor_modifiers();
+        chord = modifiers & (SURFACE_KEY_SHIFT | SURFACE_KEY_CONTROL | SURFACE_KEY_ALT);
+
+        if (bit & (CK_HELD_ALT | CK_HELD_ALTGR))
+        {
+                if (!(modifiers & SURFACE_KEY_ALT) && compositor.cycle)
+                        compositor_focus_commit();
+                return;
+        }
+
+        if (chord == SURFACE_KEY_ALT && code == CK_KEY_TAB)
+        {
+                if (value)
+                        compositor_focus_step();
+                return;
+        }
+
+        if (chord == SURFACE_KEY_ALT && code == CK_KEY_F9 && !compositor.cycle)
+        {
+                if (value == 1)
+                        compositor_minimize_focused();
+                return;
+        }
+
+        if ((chord == (SURFACE_KEY_ALT | SURFACE_KEY_CONTROL) && code == CK_KEY_BACKSPACE) ||
+            ((modifiers & SURFACE_KEY_ALT) && compositor.cycle))
+                return;
+
         count = compositor_keymap_event(&compositor.keymap, code, value, modifiers, characters);
-        if (count < 0 || !compositor.focus)
+        if (count < 0)
+                return;
+
+        if (!compositor.focus)
+                compositor_refocus();
+        if (!compositor.focus)
                 return;
 
         flags = modifiers | (value ? SURFACE_KEY_DOWN : 0) | (value == 2 ? SURFACE_KEY_REPEAT : 0);
