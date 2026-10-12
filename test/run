@@ -18460,6 +18460,43 @@ wait $c
 echo m6-done
 """)
 
+#   A key held while the keyboard goes to another window: the repeats and the
+#   release of a key whose press went to one window do not reach the one that has
+#   the keys after an Alt-Tab, and the one it went to is let go of at the change.
+#   The keys come from a FIFO the compositor reads as a device (-i): QEMU's keyboard
+#   does not repeat. Each record is a struct input_event: 16 bytes of time, the type,
+#   the code and the value, little-endian.
+open(stick + "/m12", "w").write(r"""exec > /dev/ttyS0 2>&1
+Z='\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000'
+ev() { printf "$Z$1" >&3; }
+mkfifo /tmp/kin
+exec 3<>/tmp/kin
+/compositor -i /tmp/kin &
+c=$!
+sleep 2
+/surface -x 100 -y 100 -w 300 -h 200 -c 336699 -T one -s 120 > /tmp/k1.out &
+sleep 1
+/surface -x 500 -y 100 -w 300 -h 200 -c 996633 -T two -s 120 > /tmp/k2.out &
+sleep 2
+echo m12-ready
+ev '\001\000\036\000\001\000\000\000'
+sleep 1
+ev '\001\000\036\000\002\000\000\000'
+sleep 1
+ev '\001\000\070\000\001\000\000\000'
+ev '\001\000\017\000\001\000\000\000'
+ev '\001\000\017\000\000\000\000\000'
+ev '\001\000\070\000\000\000\000\000'
+sleep 1
+ev '\001\000\036\000\002\000\000\000'
+ev '\001\000\036\000\000\000\000\000'
+sleep 2
+echo "m12 keys: two $(grep -c 'surface: event 6 ' /tmp/k2.out) one $(grep -c 'surface: event 6 ' /tmp/k1.out)"
+kill $c
+wait $c
+echo m12-done
+""")
+
 #   The hand: how far a mouse moves the pointer at a slow pace and at a fast
 #   one (the compositor's acceleration is the kernel desktop's curve), and the
 #   wheel for a window that asked for the wheel alone. The windows write what
@@ -18939,6 +18976,17 @@ out.append(("M6.5 two Alt-Tab steps with Alt held go down two windows: the secon
 sent = re.findall(r"m6 keys: one (\d+) two (\d+) three (\d+)", text)
 out.append(("M6.6 Alt and Tab and F9 are the compositor's: of everything typed only the letter, pressed and let go, reached a window: the one with the keys",
             " ".join(sent[-1]) if sent else "none", "0 2 0"))
+
+#   The FIFO's keys (m12): a press, its repeat, then Alt-Tab with the key still down,
+#   the repeat and the release after the change. The window with the keys at the
+#   press gets the press, the repeat and the release the change sends it (three);
+#   the one Alt-Tab gives the keys to gets none of the key's events.
+type_text("sh /mnt/m12\n")
+wait_for(b"m12-ready", 60)
+wait_for(b"m12-done", 60)
+sent12 = re.findall(r"m12 keys: two (\d+) one (\d+)", serial().decode("latin1"))
+out.append(("M6.7 a key held across an Alt-Tab reaches the window it went to, and the release at the change, and nothing of it reaches the one Alt-Tab gives the keys to",
+            " ".join(sent12[-1]) if sent12 else "none", "3 0"))
 
 #   A mouse, slowly and quickly: the same sixty reports of ten counts, twenty
 #   milliseconds apart and then as fast as they can be sent. The first is

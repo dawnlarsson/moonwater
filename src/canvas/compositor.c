@@ -1540,6 +1540,10 @@ static struct
         int resize_w, resize_h, press_x, press_y;
         int pointer_x, pointer_y;
         struct compositor_keymap keymap;
+        // The keys whose press went to keys_to, one bit a code: their repeats and
+        // their release follow the press, and a focus change ends them (see compositor_keys_release).
+        unsigned char keys_down[16];
+        struct compositor_client *keys_to;
         struct
         {
                 unsigned int handle[2]; // the plane's two buffers, 0 when it has none
@@ -2523,6 +2527,29 @@ static void compositor_stack_remove(const struct compositor_client *client)
         compositor_stack_number();
 }
 
+static unsigned int compositor_modifiers(void);
+
+/*
+        The keys that are down on the surface that has the keyboard, by code.
+        A key's repeats and its release follow its press, so a key held when
+        the keyboard goes to another surface is over for the one it was sent
+        to: its release is sent there (its press was), and nothing further of
+        it goes to the surface that has the keys now, which never saw it go down.
+*/
+static void compositor_keys_release(void)
+{
+        struct compositor_client *to = compositor.keys_to;
+
+        compositor.keys_to = null;
+        if (!to)
+                return;
+
+        for (unsigned int code = 0; code < 128; code++)
+                if (compositor.keys_down[code >> 3] & (1u << (code & 7)))
+                        compositor_post(to, SURFACE_EVENT_KEY, compositor_modifiers(), 0, (int)code, 0);
+        memory_zero(compositor.keys_down, sizeof(compositor.keys_down));
+}
+
 static void compositor_focus(struct compositor_client *client)
 {
         struct compositor_client *was = compositor.focus;
@@ -2532,6 +2559,8 @@ static void compositor_focus(struct compositor_client *client)
                 return;
 
         compositor.focus = client;
+        if (compositor.keys_to != client)
+                compositor_keys_release();
 
         if (was)
         {
@@ -2692,6 +2721,10 @@ static void compositor_refocus(void)
                         break;
                 }
         }
+
+        // Nobody has the keys: the keys that were down go to the surface they were sent to.
+        if (!compositor.focus)
+                compositor_keys_release();
 }
 
 /*
@@ -2770,6 +2803,13 @@ static void compositor_destroy(struct compositor_client *client)
         unsigned int role = client->role;
         struct compositor_client *next;
         int listed = 0;
+
+        // Its keys are its own no longer: nothing is sent to a surface that is going.
+        if (compositor.keys_to == client)
+        {
+                compositor.keys_to = null;
+                memory_zero(compositor.keys_down, sizeof(compositor.keys_down));
+        }
 
         if (client->page)
         {
@@ -4055,6 +4095,25 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
                 compositor_refocus();
         if (!compositor.focus)
                 return;
+
+        // A press goes to the surface that has the keys and is held there; a repeat or a
+        // release of a key whose press went elsewhere (or nowhere) is nobody's to hear.
+        if (code < 128)
+        {
+                unsigned char mask = (unsigned char)(1u << (code & 7)), *down = &compositor.keys_down[code >> 3];
+
+                if (value == 1)
+                {
+                        if (compositor.keys_to != compositor.focus)
+                                compositor_keys_release();
+                        *down |= mask;
+                        compositor.keys_to = compositor.focus;
+                }
+                else if (!(*down & mask))
+                        return;
+                else if (!value)
+                        *down &= (unsigned char)~mask;
+        }
 
         flags = modifiers | (value ? SURFACE_KEY_DOWN : 0) | (value == 2 ? SURFACE_KEY_REPEAT : 0);
         for (int each = 0; each < (count ? count : 1); each++)
