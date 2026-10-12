@@ -18490,6 +18490,35 @@ wait $c
 echo m7-done
 """)
 
+#   The pointer: what it wears over a window's edges and corners, that a shake makes
+#   it large and a second later it is its size again, and (m9, in a guest that
+#   has the card's cursor plane, which a screendump does not show) that the plane
+#   is given the shapes and takes them.
+open(stick + "/m8", "w").write(r"""exec > /dev/ttyS0 2>&1
+/compositor &
+c=$!
+sleep 2
+/surface -x 600 -y 300 -w 400 -h 300 -c 336699 -T edge -s 120 > /tmp/e1.out &
+sleep 1
+echo m8-ready
+sleep 50
+kill $c
+wait $c
+echo m8-done
+""")
+open(stick + "/m9", "w").write(r"""exec > /dev/ttyS0 2>&1
+/compositor &
+c=$!
+sleep 2
+/surface -x 600 -y 300 -w 400 -h 300 -c 336699 -T edge -s 40 > /tmp/e2.out &
+sleep 1
+echo m9-ready
+sleep 14
+kill $c
+wait $c
+echo m9-done
+""")
+
 open(stick + "/m1", "w").write(r"""exec > /dev/ttyS0 2>&1
 /compositor &
 c=$!
@@ -18920,8 +18949,103 @@ out.append(("P1.4 a window that asked for the wheel alone is sent it (down, -120
             "%s %d" % (" ".join(a + ":" + b for t, a, b in types7 if t == "5"), sum(t in ("1", "3") for t, a, b in types7)),
             "-120:0 0"))
 
+#   What the pointer wears. The guest's kernel draws no cursor of its own with the
+#   plane off, and the compositor's is drawn into the scanout there, so the screen
+#   holds it: white and black pixels of the cursor's two inks, counted around
+#   where the pointer was put. An arrow is 55 white and 46 black in a box 11 by 18;
+#   a resize shape is 25 white and 40 black (15 by 9 across, 9 by 15 up) or 48 (13
+#   by 13, the corner at the top left of the box black for the one that leans
+#   left and not for the other).
+type_text("sh /mnt/m8\n")
+ready8 = wait_for(b"m8-ready", 60)
+time.sleep(0.5)
+def cursor_at(at, x, y, height, width):
+    white = black = 0
+    xs, ys = [], []
+    for py in range(max(y - 24, 0), min(y + 80, height)):
+        for px in range(max(x - 24, 0), min(x + 64, width)):
+            pixel = at(px, py)
+            white += pixel == "ffffff"
+            if pixel == "000000":
+                black += 1
+                xs.append(px)
+                ys.append(py)
+    if not xs:
+        return "%d %d" % (white, black)
+    return "%d %d %dx%d %s" % (white, black, max(xs) - min(xs) + 1, max(ys) - min(ys) + 1,
+                               "tl" if (min(xs), min(ys)) in zip(xs, ys) else "-")
+def wears(name, x, y):
+    # (the tablet reports an axis only when it changed, and the compositor starts mid-screen)
+    moveto(x, y)
+    time.sleep(0.4)
+    width, height, at = picture(name)
+    return cursor_at(at, x, y, height, width)
+out.append(("C1.1 the pointer over the desktop is the arrow, drawn by the compositor",
+            wears("m8-arrow", 2000, 910), "55 46 11x18 tl"))
+out.append(("C1.2 over a window's right edge it is the arrow across",
+            wears("m8-right", 1000, 460), "25 40 15x9 -"))
+out.append(("C1.3 over its bottom edge it is the arrow up and down",
+            wears("m8-bottom", 800, 621), "25 40 9x15 -"))
+out.append(("C1.4 over its bottom right corner it is the one that leans left",
+            wears("m8-corner", 1000, 621), "25 48 13x13 tl"))
+out.append(("C1.5 over its top right corner it is the one that leans right",
+            wears("m8-other", 1000, 301), "25 48 13x13 -"))
+out.append(("C1.6 and back over the desktop it is the arrow again",
+            wears("m8-back", 1600, 900), "55 46 11x18 tl"))
+for step in range(12):
+    send([{"type": "rel", "data": {"axis": "x", "value": 12 if step % 2 == 0 else -12}}])
+    time.sleep(0.03)
+width, height, at = picture("m8-shaken")
+out.append(("C1.7 shaking the mouse makes the pointer large, three times its size: nine times the pixels",
+            " ".join(cursor_at(at, 1600, 900, height, width).split()[0:2]), "495 414"))
+time.sleep(1.6)
+out.append(("C1.8 and a second after it is its size again",
+            wears("m8-small", 1000, 900), "55 46 11x18 tl"))
+wait_for(b"m8-done", 90)
 
 
+
+
+qcmd({"execute": "quit"})
+try:
+    guest.wait(10)
+except Exception:
+    guest.kill()
+
+#   The cursor plane, in a guest that has it: the compositor says its pointer is on
+#   the plane, hands it a shape for each the pointer wears, and has none refused.
+guest = Guest(desktop(image) + [
+    "-drive", "if=none,id=stick,format=raw,file=fat:ro:" + stick + ",readonly=on",
+    "-device", "usb-storage,drive=stick,removable=on",
+    "-no-reboot", "-display", "none", "-serial", "file:" + work + "/serial-plane",
+    "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel " + os.environ.get("CANVAS_APPEND", "")],
+    work + "/qmp2", work + "/mon2", work)
+time.sleep(25)
+serial_plane = lambda: open(work + "/serial-plane", "rb").read()
+type_text("mkdir -p /mnt\n")
+time.sleep(1)
+type_text("mount -r -t vfat /dev/sda1 /mnt\n")
+time.sleep(2)
+type_text("sh /mnt/m9\n")
+stop = time.time() + 60
+while b"m9-ready" not in serial_plane() and time.time() < stop:
+    time.sleep(0.2)
+time.sleep(0.5)
+for x, y in ((1000, 460), (800, 621), (1000, 621), (1000, 301), (2000, 900)):
+    moveto(x, y)
+    time.sleep(0.3)
+stop = time.time() + 60
+while b"m9-done" not in serial_plane() and time.time() < stop:
+    time.sleep(0.2)
+plane = serial_plane().decode("latin1")
+mode = re.findall(r"pointer (drawn|on the plane|none), listening", plane)
+given = re.findall(r"the plane was given (\d+) shapes and (\d+) moves and refused (\d+) times", plane)
+out.append(("C1.9 on a card with a cursor plane the pointer is on the plane",
+            mode[-1] if mode else "no line", "on the plane"))
+out.append(("C1.10 and the plane is given its shapes (the arrow to begin with and a change of shape five times) and refuses none",
+            "%s %s" % (
+                "yes" if given and int(given[-1][0]) >= 5 else (given[-1] if given else "none"),
+                given[-1][2] if given else "?"), "yes 0"))
 qcmd({"execute": "quit"})
 try:
     guest.wait(10)

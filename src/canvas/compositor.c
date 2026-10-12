@@ -1083,6 +1083,165 @@ static int compositor_tablet(int value, int minimum, int maximum, int size)
         return (int)(offset * size / span);
 }
 
+/*
+        Shake to find it: reversing direction takes a real movement each
+        time, so a slow wobble or a hand resting on the mouse is not a shake,
+        and the reversals have to come inside one window or the count starts
+        again.
+*/
+#define CP_SHAKE_WINDOW 700000000ull
+#define CP_SHAKE_STEP 6
+#define CP_SHAKE_REVERSALS 5
+
+struct compositor_shake
+{
+        unsigned long long window;
+        int direction, count;
+};
+
+static int compositor_shake(struct compositor_shake *shake, int delta, unsigned long long now)
+{
+        int direction;
+
+        if (delta > -CP_SHAKE_STEP && delta < CP_SHAKE_STEP)
+                return 0;
+
+        direction = delta > 0 ? 1 : -1;
+        if (now - shake->window > CP_SHAKE_WINDOW)
+        {
+                shake->window = now;
+                shake->count = 0;
+        }
+
+        if (direction == shake->direction)
+                return 0;
+
+        shake->direction = direction;
+        if (++shake->count >= CP_SHAKE_REVERSALS)
+        {
+                shake->count = 0;
+                return 1;
+        }
+        return 0;
+}
+
+
+/*
+        Cursors: one cell for every shape, so a shape change is a different
+        bitmap and nothing else. Each word is a row of sixteen pixels, the
+        first eight in its low byte, as the kernel desktop's are. The hotspot
+        is the pixel the pointer is: the corner of the arrow and the centre of
+        the resize shapes.
+*/
+#define CP_CURSOR_W 16
+#define CP_CURSOR_H 20
+#define CP_ARROW 0
+#define CP_RESIZE_H 1
+#define CP_RESIZE_V 2
+#define CP_RESIZE_NWSE 3
+#define CP_RESIZE_NESW 4
+#define CP_SHAPES 5
+// The cursor plane is as large as the smallest a driver makes: no shape is drawn larger than it takes.
+#define CP_PLANE 64
+
+static const unsigned short compositor_cursor_edge[CP_SHAPES][CP_CURSOR_H] = {
+    {0x0080, 0x00c0, 0x00a0, 0x0090, 0x0088, 0x0084, 0x0082, 0x0081, 0x8080, 0x4080,
+     0xe083, 0x0092, 0x00a9, 0x00c9, 0x8084, 0x8004, 0x8002, 0x8003, 0x0000, 0x0000},
+    {0x0000, 0x0000, 0x0000, 0x2008, 0x3018, 0x2828, 0xe44f, 0x0280, 0xe44f, 0x2828,
+     0x3018, 0x2008, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    {0x0001, 0x8002, 0x4004, 0x2008, 0xf01e, 0x8002, 0x8002, 0x8002, 0x8002, 0x8002,
+     0xf01e, 0x2008, 0x4004, 0x8002, 0x0001, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    {0x0000, 0x007f, 0x0042, 0x0044, 0x004c, 0x005a, 0x0065, 0x8442, 0x4c01, 0xb400,
+     0x6400, 0x4400, 0x8400, 0xfc01, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    {0x0000, 0xfc01, 0x8400, 0x4400, 0x6400, 0xb400, 0x4c01, 0x8442, 0x0065, 0x005a,
+     0x004c, 0x0044, 0x0042, 0x007f, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+};
+
+static const unsigned short compositor_cursor_fill[CP_SHAPES][CP_CURSOR_H] = {
+    {0x0000, 0x0000, 0x0040, 0x0060, 0x0070, 0x0078, 0x007c, 0x007e, 0x007f, 0x807f,
+     0x007c, 0x006c, 0x0046, 0x0006, 0x0003, 0x0003, 0x0001, 0x0000, 0x0000, 0x0000},
+    {0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x1010, 0x1830, 0xfc7f, 0x1830, 0x1010,
+     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    {0x0000, 0x0001, 0x8003, 0xc007, 0x0001, 0x0001, 0x0001, 0x0001, 0x0001, 0x0001,
+     0x0001, 0xc007, 0x8003, 0x0001, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    {0x0000, 0x0000, 0x003c, 0x0038, 0x0030, 0x0024, 0x0002, 0x0001, 0x8000, 0x4800,
+     0x1800, 0x3800, 0x7800, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    {0x0000, 0x0000, 0x7800, 0x3800, 0x1800, 0x4800, 0x8000, 0x0001, 0x0002, 0x0024,
+     0x0030, 0x0038, 0x003c, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+};
+
+static const signed char compositor_cursor_hot[CP_SHAPES] = {0, 7, 7, 7, 7};
+
+// The edges of a window a hand has hold of, and the shape that says so.
+#define CP_EDGE_LEFT 1u
+#define CP_EDGE_RIGHT 2u
+#define CP_EDGE_TOP 4u
+#define CP_EDGE_BOTTOM 8u
+static const unsigned char compositor_cursor_by_edges[16] = {
+    [CP_EDGE_LEFT] = CP_RESIZE_H,
+    [CP_EDGE_RIGHT] = CP_RESIZE_H,
+    [CP_EDGE_TOP] = CP_RESIZE_V,
+    [CP_EDGE_BOTTOM] = CP_RESIZE_V,
+    [CP_EDGE_TOP | CP_EDGE_LEFT] = CP_RESIZE_NWSE,
+    [CP_EDGE_BOTTOM | CP_EDGE_RIGHT] = CP_RESIZE_NWSE,
+    [CP_EDGE_TOP | CP_EDGE_RIGHT] = CP_RESIZE_NESW,
+    [CP_EDGE_BOTTOM | CP_EDGE_LEFT] = CP_RESIZE_NESW,
+};
+
+// The cell of a shape at a scale with the pointer at x, y: its top left.
+static void compositor_cursor_cell(int *left, int *top, int x, int y, unsigned int shape, int scale)
+{
+        int hot = compositor_cursor_hot[shape < CP_SHAPES ? shape : 0] * scale;
+
+        *left = x - hot;
+        *top = y - hot;
+}
+
+// The largest whole scale of a shape the plane holds.
+static int compositor_cursor_fit(int scale)
+{
+        int most = CP_PLANE / CP_CURSOR_H < CP_PLANE / CP_CURSOR_W ? CP_PLANE / CP_CURSOR_H : CP_PLANE / CP_CURSOR_W;
+
+        return scale < most ? scale : most;
+}
+
+/*
+        The cursor with its hotspot at x, y, in two colours that never share a
+        pixel: runs of a row become rectangles, clipped to the target's damage
+        like everything else it draws.
+*/
+static void compositor_cursor_draw(const struct compositor_target *t, int x, int y, unsigned int shape,
+                                   int scale, unsigned int fill, unsigned int edge)
+{
+        int left, top;
+
+        if (shape >= CP_SHAPES)
+                shape = CP_ARROW;
+        compositor_cursor_cell(&left, &top, x, y, shape, scale);
+
+        for (int pass = 0; pass < 2; pass++)
+                for (int row = 0; row < CP_CURSOR_H; row++)
+                {
+                        unsigned int bits = pass ? compositor_cursor_edge[shape][row] : compositor_cursor_fill[shape][row];
+
+                        for (int column = 0; column < CP_CURSOR_W;)
+                        {
+                                int run = column;
+
+                                while (run < CP_CURSOR_W && (bits & (run < 8 ? 0x80u >> run : 0x8000u >> (run - 8))))
+                                        run++;
+                                if (run == column)
+                                {
+                                        column++;
+                                        continue;
+                                }
+                                compositor_fill(t, left + column * scale, top + row * scale, (run - column) * scale, scale,
+                                                pass ? edge : fill);
+                                column = run;
+                        }
+                }
+}
+
 /* ---- end of the pointer ---- */
 
 /*
@@ -1222,6 +1381,8 @@ struct compositor_poll
 #define COMPOSITOR_INPUTS 16
 #define COMPOSITOR_DEVICES 64 // evdev numbers the hotplug watch can name
 #define COMPOSITOR_GRANTS 16
+// How long a pointer that was shaken stays large.
+#define COMPOSITOR_MAGNIFIED_NS 1200000000ull
 #define COMPOSITOR_DAMAGE 8
 #define COMPOSITOR_BURST 16
 // How many surfaces a program may hold that have never shown anything.
@@ -1295,7 +1456,7 @@ static struct
         int card;
         unsigned int *scanout;
         unsigned long scanout_bytes, scanout_pitch; // pitch in bytes
-        unsigned int fb, crtc, cursor_handle;
+        unsigned int fb, crtc;
         int width, height;
         int damage[COMPOSITOR_DAMAGE][4]; // x1, y1, x2, y2: what changed, apart
         unsigned int damages;
@@ -1330,6 +1491,22 @@ static struct
         int resize_w, resize_h, press_x, press_y;
         int pointer_x, pointer_y;
         struct compositor_keymap keymap;
+        struct
+        {
+                unsigned int handle[2]; // the plane's two buffers, 0 when it has none
+                int back;               // the one that is not showing
+                int plane_shape, plane_scale; // what the plane wears
+                int soft;               // the pointer is drawn into the scanout
+                int drawn, x, y;        // where the software pointer was last damaged,
+                unsigned int drawn_shape;
+                int drawn_scale;
+                unsigned int shape;     // what the pointer wears now
+                int magnified;          // it is shaken: found
+                positive magnified_until;
+                int magnify;            // the hand shook it since the last motion
+                unsigned long paints, moves, refused; // on the plane: shapes given it, moves, and times it refused
+        } cursor;
+        struct compositor_shake shake;
         int cycle;           // an Alt-Tab is under way: the z of the window it is on, from 1
         int raw_x, raw_y;    // what the mouse has said since its last report
         int accel_x, accel_y; // the fraction of a pixel the gain has not yet paid out
@@ -1576,6 +1753,11 @@ static void compositor_present(void)
 
                 compositor_scene(&target, frames, count);
 
+                if (compositor.cursor.soft && compositor.cursor.drawn)
+                        compositor_cursor_draw(&target, compositor.cursor.x, compositor.cursor.y,
+                                               compositor.cursor.drawn_shape, compositor.cursor.drawn_scale,
+                                               0xffffffu, 0x000000u);
+
                 for (unsigned int side = 0; side < 4; side++)
                         clip[at][side] = (unsigned short)rectangle[side];
                 compositor.painted += (unsigned long)compositor_area(rectangle);
@@ -1704,66 +1886,179 @@ static b32 compositor_card_open(void)
 }
 
 /*
-        The pointer on the card's cursor plane: the kernel's arrow, white
-        edged in black. A card with no plane has no pointer drawn, and still
-        has one that moves and presses.
+        The pointer: on the card's cursor plane where it has one, and drawn into
+        the scanout where it has not, as the kernel desktop does. It has none
+        where the driver's plane does not take a dumb buffer (i915 and xe
+        stop the pipe), where Canvas was started without one (moonwater.cursor_plane=0,
+        which the lane's pixel checks need, as a screendump has no plane in it),
+        and where the card refuses what it is given; a card with no plane has
+        a pointer that moves and presses all the same.
+
+        The plane holds the shape the pointer wears, at the scale of the
+        desktop but no larger than it takes, in one of two buffers: a shape
+        change is painted into the one not showing and set, because a driver
+        that keeps its framebuffer elsewhere sends the image only when the
+        framebuffer changes. The software pointer is a rectangle of damage
+        where it was and where it is, and is drawn over what is composed there.
 */
-static const unsigned short compositor_arrow_edge[20] = {
-    0x0080, 0x00c0, 0x00a0, 0x0090, 0x0088, 0x0084, 0x0082, 0x0081, 0x8080, 0x4080,
-    0xe083, 0x0092, 0x00a9, 0x00c9, 0x8084, 0x8004, 0x8002, 0x8003, 0x0000, 0x0000};
-static const unsigned short compositor_arrow_fill[20] = {
-    0x0000, 0x0000, 0x0040, 0x0060, 0x0070, 0x0078, 0x007c, 0x007e, 0x007f, 0x807f,
-    0x007c, 0x006c, 0x0046, 0x0006, 0x0003, 0x0003, 0x0001, 0x0000, 0x0000, 0x0000};
+struct compositor_version
+{
+        int major, minor, patchlevel;
+        unsigned long name_length;
+        char *name;
+        unsigned long date_length;
+        char *date;
+        unsigned long description_length;
+        char *description;
+};
+
+_Static_assert(sizeof(struct compositor_version) == 64, "drm_version");
+
+#define COMPOSITOR_VERSION COMPOSITOR_DRM(0x00u, 64u)
+
+// A pointer's cell, in the scale and shape it is drawn: where it was last damaged and drawn.
+static int compositor_cursor_scale(void)
+{
+        return compositor.cursor.magnified ? 3 * compositor.scale : compositor.scale;
+}
+
+static void compositor_cursor_cell_damage(int x, int y, unsigned int shape, int scale)
+{
+        int left, top;
+
+        compositor_cursor_cell(&left, &top, x, y, shape, scale);
+        compositor_damage(left, top, CP_CURSOR_W * scale, CP_CURSOR_H * scale);
+}
+
+// Whether this card's cursor plane is worth using: the driver's name and the setting Canvas was started with.
+static int compositor_cursor_plane_wanted(void)
+{
+        struct compositor_version version = {0};
+        char name[16] = {0};
+        p8 setting[4] = {0};
+        bipolar handle;
+
+        version.name_length = sizeof(name) - 1;
+        version.name = name;
+        if (system_control(compositor.card, COMPOSITOR_VERSION, address_of version) == 0 &&
+            ((name[0] == 'i' && name[1] == '9' && name[2] == '1' && name[3] == '5' && !name[4]) ||
+             (name[0] == 'x' && name[1] == 'e' && !name[2])))
+                return 0;
+
+        handle = system_open_at(AT_FDCWD, (string_address) "/sys/module/moonwater/parameters/cursor_plane",
+                                FILE_READ | O_CLOEXEC);
+        if (handle >= 0)
+        {
+                bipolar got = system_read_once(handle, setting, sizeof(setting) - 1);
+
+                system_close(handle);
+                if (got > 0 && (setting[0] == 'N' || setting[0] == 'n' || setting[0] == '0'))
+                        return 0;
+        }
+        return 1;
+}
+
+// A shape painted into the buffer of the plane that is not showing, and the plane given it.
+static int compositor_cursor_paint(unsigned int shape, int fitted, int left, int top)
+{
+        struct compositor_map_dumb map = {compositor.cursor.handle[compositor.cursor.back], 0};
+        struct compositor_cursor cursor = {3, compositor.crtc, left, top, CP_PLANE, CP_PLANE, map.handle};
+        long mapped;
+
+        if (system_control(compositor.card, COMPOSITOR_MAP_DUMB, address_of map) != 0)
+                return -1;
+
+        mapped = compositor_call(syscall(mmap), 0, CP_PLANE * CP_PLANE * 4, 3, 1, (positive)compositor.card, map.offset);
+        if (mapped < 0 && mapped > -4096)
+                return -1;
+
+        memory_zero((void *)mapped, CP_PLANE * CP_PLANE * 4);
+        {
+                struct compositor_target t = {(unsigned int *)mapped, CP_PLANE, CP_PLANE, CP_PLANE, 0, 0, CP_PLANE, CP_PLANE};
+
+                compositor_cursor_draw(&t, compositor_cursor_hot[shape] * fitted, compositor_cursor_hot[shape] * fitted,
+                                       shape, fitted, 0xffffffffu, 0xff000000u);
+        }
+        compositor_call(syscall(munmap), (positive)mapped, CP_PLANE * CP_PLANE * 4, 0, 0, 0, 0);
+
+        if (system_control(compositor.card, COMPOSITOR_CURSOR, address_of cursor) != 0)
+                return -1;
+
+        compositor.cursor.back ^= 1;
+        compositor.cursor.paints++;
+        compositor.cursor.plane_shape = (int)shape;
+        compositor.cursor.plane_scale = fitted;
+        return 0;
+}
 
 static void compositor_cursor_start(void)
 {
-        struct compositor_dumb dumb = {64, 64, 32, 0, 0, 0, 0};
-        struct compositor_map_dumb map = {0};
-        struct compositor_cursor cursor = {1, compositor.crtc, 0, 0, 64, 64, 0};
-        long mapped;
+        struct compositor_dumb dumb[2] = {{CP_PLANE, CP_PLANE, 32, 0, 0, 0, 0}, {CP_PLANE, CP_PLANE, 32, 0, 0, 0, 0}};
 
-        if (system_control(compositor.card, COMPOSITOR_CREATE_DUMB, address_of dumb) != 0)
-                return;
-
-        map.handle = dumb.handle;
-        if (system_control(compositor.card, COMPOSITOR_MAP_DUMB, address_of map) != 0)
-                return;
-
-        mapped = compositor_call(syscall(mmap), 0, dumb.size, 3, 1,
-                                 (positive)compositor.card, map.offset);
-        if (mapped < 0 && mapped > -4096)
-                return;
-
-        for (unsigned int y = 0; y < 64; y++)
+        compositor.cursor.plane_shape = -1;
+        if (compositor.card < 0 || !compositor_cursor_plane_wanted() ||
+            system_control(compositor.card, COMPOSITOR_CREATE_DUMB, address_of dumb[0]) != 0 ||
+            system_control(compositor.card, COMPOSITOR_CREATE_DUMB, address_of dumb[1]) != 0)
         {
-                unsigned int *row = (unsigned int *)((p8 address_to)mapped + (positive)y * dumb.pitch);
-
-                for (unsigned int x = 0; x < 64; x++)
-                {
-                        unsigned int bit = x < 16 && y < 20
-                                               ? (x < 8 ? 0x80u >> x : 0x8000u >> (x - 8))
-                                               : 0;
-                        unsigned int edge = bit && (compositor_arrow_edge[y] & bit);
-                        unsigned int fill = bit && (compositor_arrow_fill[y] & bit);
-
-                        row[x] = edge ? 0xff000000u : fill ? 0xffffffffu : 0;
-                }
+                compositor.cursor.soft = compositor.card >= 0;
+                return;
         }
 
-        compositor_call(syscall(munmap), (positive)mapped, dumb.size, 0, 0, 0, 0);
-
-        cursor.handle = dumb.handle;
-        if (system_control(compositor.card, COMPOSITOR_CURSOR, address_of cursor) == 0)
-                compositor.cursor_handle = dumb.handle;
+        compositor.cursor.handle[0] = dumb[0].handle;
+        compositor.cursor.handle[1] = dumb[1].handle;
 }
 
 static void compositor_cursor_move(void)
 {
-        struct compositor_cursor cursor = {2, compositor.crtc, compositor.pointer_x,
-                                           compositor.pointer_y, 0, 0, 0};
+        int scale = compositor_cursor_scale();
+        unsigned int shape = compositor.cursor.shape;
 
-        if (compositor.cursor_handle)
-                system_control(compositor.card, COMPOSITOR_CURSOR, address_of cursor);
+        if (compositor.cursor.soft)
+        {
+                if (compositor.cursor.drawn)
+                        compositor_cursor_cell_damage(compositor.cursor.x, compositor.cursor.y, compositor.cursor.drawn_shape,
+                                                      compositor.cursor.drawn_scale);
+                compositor.cursor.x = compositor.pointer_x;
+                compositor.cursor.y = compositor.pointer_y;
+                compositor.cursor.drawn_shape = shape;
+                compositor.cursor.drawn_scale = scale;
+                compositor.cursor.drawn = 1;
+                compositor_cursor_cell_damage(compositor.cursor.x, compositor.cursor.y, shape, scale);
+                return;
+        }
+
+        if (!compositor.cursor.handle[0])
+                return;
+
+        {
+                int fitted = compositor_cursor_fit(scale), left, top;
+
+                compositor_cursor_cell(&left, &top, compositor.pointer_x, compositor.pointer_y, shape, fitted);
+
+                if ((int)shape != compositor.cursor.plane_shape || fitted != compositor.cursor.plane_scale)
+                {
+                        if (compositor_cursor_paint(shape, fitted, left, top) == 0)
+                                return;
+
+                        // The card will not take it: the pointer is drawn from here on.
+                        {
+                                struct compositor_cursor gone = {1, compositor.crtc, 0, 0, CP_PLANE, CP_PLANE, 0};
+
+                                system_control(compositor.card, COMPOSITOR_CURSOR, address_of gone);
+                        }
+                        compositor.cursor.handle[0] = compositor.cursor.handle[1] = 0;
+                        compositor.cursor.refused++;
+                        compositor.cursor.soft = 1;
+                        compositor_cursor_move();
+                        return;
+                }
+
+                {
+                        struct compositor_cursor move = {2, compositor.crtc, left, top, 0, 0, 0};
+
+                        compositor.cursor.moves += system_control(compositor.card, COMPOSITOR_CURSOR, address_of move) == 0;
+                }
+        }
 }
 
 // The layout Canvas has, which is the one `moonwater keyboard` last set.
@@ -2477,10 +2772,10 @@ static int compositor_map(const struct surface_request *request, int file, struc
         and not one a motion. The edges the hand does not hold stay where they
         were, whatever size comes back.
 */
-#define COMPOSITOR_EDGE_LEFT 1u
-#define COMPOSITOR_EDGE_RIGHT 2u
-#define COMPOSITOR_EDGE_TOP 4u
-#define COMPOSITOR_EDGE_BOTTOM 8u
+#define COMPOSITOR_EDGE_LEFT CP_EDGE_LEFT
+#define COMPOSITOR_EDGE_RIGHT CP_EDGE_RIGHT
+#define COMPOSITOR_EDGE_TOP CP_EDGE_TOP
+#define COMPOSITOR_EDGE_BOTTOM CP_EDGE_BOTTOM
 #define COMPOSITOR_GRIP 6
 
 static void compositor_configure(struct compositor_client *client)
@@ -2508,14 +2803,13 @@ static void compositor_configure(struct compositor_client *client)
 }
 
 // Which edges of a framed surface that may be resized the point is within the grip of.
-static unsigned int compositor_edges(const struct compositor_client *client, int x, int y)
+static unsigned int compositor_edge_zone(const struct compositor_client *client, int x, int y)
 {
         struct compositor_frame frame;
         unsigned int edges = 0;
         int fx, fy, fw, fh, grip = COMPOSITOR_GRIP * compositor.scale;
 
-        if (!compositor_framed(client) || !(client->lock & SURFACE_LOCK_RESIZABLE) ||
-            client->old.page || client->outstanding)
+        if (!compositor_framed(client) || !(client->lock & SURFACE_LOCK_RESIZABLE))
                 return 0;
 
         compositor_frame_of(client, &frame);
@@ -2532,6 +2826,12 @@ static unsigned int compositor_edges(const struct compositor_client *client, int
                 edges |= COMPOSITOR_EDGE_BOTTOM;
 
         return edges;
+}
+
+// The same, and only when a hand may take hold now: not while an ask for a size is out.
+static unsigned int compositor_edges(const struct compositor_client *client, int x, int y)
+{
+        return client->old.page || client->outstanding ? 0 : compositor_edge_zone(client, x, y);
 }
 
 static void compositor_resize_begin(struct compositor_client *client, unsigned int edges)
@@ -3356,6 +3656,19 @@ static void compositor_motion(void)
 
         compositor_pointer_clamp();
         under = compositor_under(compositor.pointer_x, compositor.pointer_y, &panel);
+
+        // The shape of what the hand has hold of or is over: the edges it could take.
+        compositor.cursor.shape = compositor.resize ? compositor_cursor_by_edges[compositor.resize->edges & 15]
+                                  : compositor.drag || !under
+                                      ? CP_ARROW
+                                      : compositor_cursor_by_edges[compositor_edge_zone(under, compositor.pointer_x,
+                                                                                         compositor.pointer_y) & 15];
+        if (compositor.cursor.magnify)
+        {
+                compositor.cursor.magnify = 0;
+                compositor.cursor.magnified = 1;
+                compositor.cursor.magnified_until = clock_monotonic_nanoseconds() + COMPOSITOR_MAGNIFIED_NS;
+        }
         compositor_cursor_move();
 
         if (compositor.resize)
@@ -3571,7 +3884,11 @@ static void compositor_input_read(unsigned int at)
                         positive now = (positive)event->seconds * 1000000000ull + (positive)event->microseconds * 1000ull;
 
                         if (event->type == COMPOSITOR_EV_REL && event->code == COMPOSITOR_REL_X)
+                        {
                                 compositor.raw_x += event->value;
+                                if (compositor_shake(&compositor.shake, event->value, now))
+                                        compositor.cursor.magnify = 1;
+                        }
                         else if (event->type == COMPOSITOR_EV_REL && event->code == COMPOSITOR_REL_Y)
                                 compositor.raw_y += event->value;
                         else if (event->type == COMPOSITOR_EV_REL &&
@@ -3964,9 +4281,11 @@ static b32 compositor_main()
                 return 1;
         }
 
-        string_format(log, "compositor: %b by %b (scale %b), %p input devices, listening on %s\n",
+        string_format(log, "compositor: %b by %b (scale %b), %p input devices, pointer %s, listening on %s\n",
                       (bipolar)compositor.width, (bipolar)compositor.height,
-                      (bipolar)compositor.scale, (positive)compositor.input_count, SURFACE_SOCKET);
+                      (bipolar)compositor.scale, (positive)compositor.input_count,
+                      compositor.cursor.soft ? "drawn" : compositor.cursor.handle[0] ? "on the plane" : "none",
+                      SURFACE_SOCKET);
         log_flush();
 
         while (running)
@@ -4012,6 +4331,13 @@ static b32 compositor_main()
                                                                                     : until;
                         }
 
+                if (compositor.cursor.magnified)
+                {
+                        now = clock_monotonic_nanoseconds();
+                        until = !until || compositor.cursor.magnified_until < until ? compositor.cursor.magnified_until
+                                                                                     : until;
+                }
+
                 if (compositor.damages)
                 {
                         positive frame;
@@ -4055,6 +4381,13 @@ static b32 compositor_main()
                 if (until)
                         compositor_expire(clock_monotonic_nanoseconds());
 
+                // A pointer that was shaken is its own size again when its time is up.
+                if (compositor.cursor.magnified && clock_monotonic_nanoseconds() >= compositor.cursor.magnified_until)
+                {
+                        compositor.cursor.magnified = 0;
+                        compositor_cursor_move();
+                }
+
                 if (compositor.list_changed)
                         compositor_list_send();
 
@@ -4090,7 +4423,9 @@ static b32 compositor_main()
                         compositor_destroy(&compositor.clients[at]);
 
         compositor_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)SURFACE_SOCKET, 0, 0, 0, 0);
-        string_format(log, "compositor: %p pixels composed\n", (positive)compositor.painted);
+        string_format(log, "compositor: %p pixels composed, the plane was given %p shapes and %p moves and refused %p times\n",
+                      (positive)compositor.painted, (positive)compositor.cursor.paints, (positive)compositor.cursor.moves,
+                      (positive)compositor.cursor.refused);
         log_flush();
         if (!headless)
                 compositor_hand_back();

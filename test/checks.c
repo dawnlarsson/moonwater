@@ -102815,6 +102815,70 @@ static void check_compositor_pointer(void) {
         short_by_one+=compositor_tablet((int)(x*32767LL/2560),0,32767,2560)==x-1;
     }
     ck_ok(short_by_one>0);
+    /* Shake to find it: five reversals of six counts or more inside 700 ms, and no less. */
+    {
+        struct compositor_shake shake={0};
+        unsigned long long now=1000000000ull;
+        int found=0;
+        for(int step=0;step<12;step++){found+=compositor_shake(&shake,step&1?-8:8,now);now+=50000000ull;}
+        ck_ok(found==2); /* the fifth reversal and the tenth */
+        memset(&shake,0,sizeof(shake));found=0;now=1000000000ull;
+        for(int step=0;step<12;step++){found+=compositor_shake(&shake,step&1?-8:8,now);now+=200000000ull;}
+        ck_ok(found==0); /* a wobble that takes too long */
+        memset(&shake,0,sizeof(shake));found=0;now=1000000000ull;
+        for(int step=0;step<12;step++){found+=compositor_shake(&shake,step&1?-5:5,now);now+=10000000ull;}
+        ck_ok(found==0); /* a hand resting on the mouse */
+        memset(&shake,0,sizeof(shake));found=0;now=1000000000ull;
+        for(int step=0;step<12;step++){found+=compositor_shake(&shake,8,now);now+=10000000ull;}
+        ck_ok(found==0); /* a hand going the one way */
+    }
+    /* The cursors: the arrow is 55 white and 46 black pixels, the resize shapes 25 and 40 or 48, each
+       at its scale squared; the hotspot is the corner of the arrow and the middle of the others, and
+       what is drawn stays inside the damage. */
+    {
+        static const int white[CP_SHAPES]={55,25,25,25,25},black[CP_SHAPES]={46,40,40,48,48};
+        static u32 plane[64*64];
+        for(unsigned shape=0;shape<CP_SHAPES;shape++)
+            for(int scale=1;scale<=3;scale++) {
+                struct compositor_target t={plane,64,64,64,0,0,64,64};
+                memset(plane,0,sizeof(plane));
+                compositor_cursor_draw(&t,compositor_cursor_hot[shape]*scale,compositor_cursor_hot[shape]*scale,
+                                       shape,scale,0xffffffffu,0xff000000u);
+                int w=0,b=0,other=0,outside=0;
+                for(int y=0;y<64;y++)for(int x=0;x<64;x++) {
+                    u32 v=plane[y*64+x];
+                    w+=v==0xffffffffu;b+=v==0xff000000u;other+=v&&v!=0xffffffffu&&v!=0xff000000u;
+                    outside+=v&&(x>=CP_CURSOR_W*scale||y>=CP_CURSOR_H*scale);
+                }
+                ck_ok(w==white[shape]*scale*scale&&b==black[shape]*scale*scale&&!other&&!outside);
+            }
+        /* The same into a damaged part of a screen: nothing outside the damage is written. */
+        static u32 screen[200*100];
+        for(unsigned shape=0;shape<CP_SHAPES;shape++) {
+            struct compositor_target t={screen,200,200,100,50,30,90,60};
+            for(unsigned i=0;i<sizeof(screen)/sizeof(screen[0]);i++)screen[i]=7;
+            compositor_cursor_draw(&t,60,40,shape,2,0xffffffu,0);
+            int inside_changed=0,outside_changed=0;
+            for(int y=0;y<100;y++)for(int x=0;x<200;x++) {
+                int inside=x>=50&&x<90&&y>=30&&y<60;
+                if(screen[y*200+x]!=7){if(inside)inside_changed++;else outside_changed++;}
+            }
+            ck_ok(inside_changed>0&&!outside_changed);
+        }
+        int left,top;
+        compositor_cursor_cell(&left,&top,100,50,CP_ARROW,3);ck_ok(left==100&&top==50);
+        compositor_cursor_cell(&left,&top,100,50,CP_RESIZE_H,2);ck_ok(left==86&&top==36);
+        compositor_cursor_cell(&left,&top,100,50,77,2);ck_ok(left==100&&top==50);
+        ck_ok(compositor_cursor_fit(1)==1&&compositor_cursor_fit(2)==2&&compositor_cursor_fit(3)==3&&compositor_cursor_fit(9)==3);
+        ck_ok(compositor_cursor_by_edges[0]==CP_ARROW&&compositor_cursor_by_edges[CP_EDGE_LEFT]==CP_RESIZE_H&&
+              compositor_cursor_by_edges[CP_EDGE_RIGHT]==CP_RESIZE_H&&compositor_cursor_by_edges[CP_EDGE_TOP]==CP_RESIZE_V&&
+              compositor_cursor_by_edges[CP_EDGE_BOTTOM]==CP_RESIZE_V&&
+              compositor_cursor_by_edges[CP_EDGE_TOP|CP_EDGE_LEFT]==CP_RESIZE_NWSE&&
+              compositor_cursor_by_edges[CP_EDGE_BOTTOM|CP_EDGE_RIGHT]==CP_RESIZE_NWSE&&
+              compositor_cursor_by_edges[CP_EDGE_TOP|CP_EDGE_RIGHT]==CP_RESIZE_NESW&&
+              compositor_cursor_by_edges[CP_EDGE_BOTTOM|CP_EDGE_LEFT]==CP_RESIZE_NESW&&
+              compositor_cursor_by_edges[CP_EDGE_LEFT|CP_EDGE_RIGHT]==CP_ARROW);
+    }
 }
 
 /* The scene is the painter's picture: surfaces drawn bottom to top over a
