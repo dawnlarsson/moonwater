@@ -2207,7 +2207,7 @@ static void compositor_kmsg(string_address text, positive value, string_address 
                 line[length++] = tail[at];
         line[length++] = '\n';
 
-        handle = system_open_at(AT_FDCWD, (string_address) "/dev/kmsg", FILE_WRITE | O_CLOEXEC);
+        handle = system_open_at(AT_FDCWD, (string_address) "/dev/kmsg", O_WRONLY | O_CLOEXEC);
         if (handle < 0)
                 return;
         system_write_once(handle, line, length);
@@ -3937,7 +3937,7 @@ static void compositor_hold_touch(positive now)
         if (compositor.hold >= 0 || compositor.holds == ~0ul)
                 return;
 
-        compositor.hold = (int)system_open_at(AT_FDCWD, (string_address) "/dev/cpu_dma_latency", FILE_WRITE | O_CLOEXEC);
+        compositor.hold = (int)system_open_at(AT_FDCWD, (string_address) "/dev/cpu_dma_latency", O_WRONLY | O_CLOEXEC);
         if (compositor.hold < 0)
         {
                 // Not there on this machine: it is not asked for again.

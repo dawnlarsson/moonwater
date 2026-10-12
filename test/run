@@ -18519,7 +18519,7 @@ sleep 5
 b=$(grep '^voluntary_ctxt_switches' /proc/$c/status)
 echo "m9 idle: $a -> $b"
 cat /proc/$c/status
-echo "m9 held: $(ls -l /proc/$c/fd | grep -c cpu_dma_latency)"
+echo "m9 held: $(ls -l /proc/$c/fd | grep -c cpu_dma_latency) $([ -c /dev/cpu_dma_latency ] && echo device || echo missing)"
 kill $c
 wait $c
 echo m9-done
@@ -19221,13 +19221,14 @@ for kind, count, average, worst in re.findall(r"compositor: (pointer to the plan
     print("m1 compositor latency, %s: %s events, on average %s us, worst %s us" % (kind, count, average, worst), file=sys.stderr)
 memory = dict((name, int(value)) for name, value in re.findall(r"(VmRSS|RssAnon|RssFile|RssShmem|VmData):\s+(\d+) kB", plane))
 print("m1 compositor memory, kB: %s" % memory, file=sys.stderr)
-held = re.findall(r"m9 held: (\d+)", plane)
+held = re.findall(r"m9 held: (\d+) (device|missing)", plane)
 taken = re.findall(r"the processor was held (\d+) times", plane)
 out.append(("C1.12 and what it holds of its own (anonymous memory) is under 1,500 kB",
             "yes" if memory and memory.get("RssAnon", 99999) < 1500 else str(memory), "yes"))
 out.append(("C1.13 the processor was held out of its idle states while a person was at the machine, and not five seconds after",
-            "%s %s" % ("yes" if taken and int(taken[-1]) >= 1 else (taken[-1] if taken else "no line"), held[-1] if held else "?"),
-            "yes 0"))
+            "%s %s %s" % ("yes" if taken and int(taken[-1]) >= 1 else (taken[-1] if taken else "no line"),
+                          held[-1][0] if held else "?", held[-1][1] if held else "?"),
+            "yes 0 device"))
 
 qcmd({"execute": "quit"})
 try:
