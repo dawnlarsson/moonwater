@@ -9609,7 +9609,18 @@ static int client_restore(struct drm_client_dev *client, _Bool in_atomic)
                 // The last program that held the card has closed it.
                 if (desktop.suspended)
                         desktop_resume();
-                else
+
+                /*
+                        Not suspended: nobody held the card when it was closed,
+                        or the canvas thread had already drawn the desktop
+                        when it noticed the card let go. That commit is the
+                        picture, and a second one here is a modeset under
+                        desktop.lock on the exit of the program that closed the
+                        card -- 49 ms on the parent after a SIGKILL, the
+                        compositor's next start waiting behind it. Drawn again
+                        only where the screen does not show the desktop.
+                */
+                else if (!desktop_lit())
                         desktop_redraw();
         }
         rt_mutex_unlock(&desktop.lock);
