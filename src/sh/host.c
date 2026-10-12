@@ -6467,7 +6467,6 @@ static COLD bipolar nl80211_authorize(nl80211 address_to session, p32 index,
 #define WIFI_KEY_REQUEST 0x0800
 #define WIFI_KEY_ENCRYPTED 0x1000
 #define WIFI_KEEP_CHECK_SECONDS 30
-#define WIFI_NETLINK_DROP_MEMBERSHIP 2
 
 typedef struct
 {
@@ -10844,9 +10843,6 @@ static bool radio_pick_seen(netlink_header address_to header, address_any contex
 /* Whether the last choice of an access point answered "none" from the scan of
    a moment ago and not from one of its own. */
 static bool radio_scan_declined;
-//      And whether the one it chose had been given up on (declared with
-//      nl80211_join, which asks).
-static bool radio_pick_given_up;
 
 /*
         The access point a join asks for by its BSSID. A join by name alone
