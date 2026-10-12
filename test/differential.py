@@ -69018,6 +69018,10 @@ NET_MUTATION_EQUIVALENT = {
     ("dns_resolve_wanted", "for (positive at = 0; at < have; at++)", "<", 1): "Past the walk's end the mutant reads one slot past what was filled -- uninitialized, or past the array -- and asks whatever server those bytes name; no input sets them, so no check can tell it apart but by luck. Which servers the walk does ask is held by dns_tls.",
     ("dns_resolve_wanted", "for (; count < array_count(dns_tls_public); count++)", "<", 1): "Past the walk's end the mutant reads one slot past what was filled -- uninitialized, or past the array -- and asks whatever server those bytes name; no input sets them, so no check can tell it apart but by luck. Which servers the walk does ask is held by dns_tls.",
     ("dns_resolve_wanted", "for (positive at = 0; at < count; at++)", "<", 1): "Past the walk's end the mutant reads one slot past what was filled -- uninitialized, or past the array -- and asks whatever server those bytes name; no input sets them, so no check can tell it apart but by luck. Which servers the walk does ask is held by dns_tls.",
+    ("http_run", "if (string_length(start) >= sizeof url)", ">=", 1):
+        "A URL of HTTP_URL_MAX bytes is refused as HTTP_BAD_URL by http_split_into, which takes fewer, so the answer is the same.",
+    ("net_resolve_v4_apart", "if (numeric >= 0)", ">=", 1):
+        "0.0.0.0 asked of the child is answered by the child's own net_resolve_v4 as the literal it is: DNS_OK and 0, as here.",
     ("tls_parse_key_usage", "if (unused > 7 || at >= stop)", ">=", 1): 'With no bit octet the unused-count octet is read as the final one; for unused 0 it is zero (refused), and for 1 to 7 its trailing-zero count is below its value, so the canonical test refuses it as the original does.',
 }
 

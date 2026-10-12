@@ -55393,6 +55393,10 @@ static fn network_wait_edges(void)
         check("a send that moved part of its bytes sends the rest without waiting to be writable",
               network_stream_send_all_for(pair[0], data, sizeof data, 5, 0));
         net_io_faults_clear();
+        net_send_error = NETWORK_TRY_AGAIN;
+        check("a first send told to try again waits and sends",
+              network_stream_send_all_for(pair[0], data, sizeof data, 5, 0));
+        net_io_faults_clear();
         while (socket_receive(pair[1], drained, sizeof drained, MSG_DONTWAIT, null, null) > 0)
                 ;
         socket_close(pair[0]);
@@ -71806,6 +71810,41 @@ static fn http_run_edges(void)
                 byte_store_release(address_of body);
         }
         http_canned_end(child, lines);
+        {
+                //      Heads that parse, then fail: a Content-Length that is
+                //      no number, and a chunked body whose size is none.
+                static const p8 bad_length[] = "HTTP/1.1 200 OK\r\nContent-Length: x\r\n\r\n";
+                static const p8 bad_chunk[] = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                                              "zz\r\n";
+                http_canned failing[2] = {
+                    {bad_length, sizeof bad_length - 1, sizeof bad_length - 1, 0},
+                    {bad_chunk, sizeof bad_chunk - 1, sizeof bad_chunk - 1, 0}};
+                bipolar server = http_canned_serve(failing, net_as_emulated() ? 1 : 2,
+                                                   address_of port, address_of lines);
+                b32 code = 777;
+
+                check("the failing HTTP server starts", server > 0);
+                http_canned_url(url, port, "/");
+                check("a fetch whose head fails leaves the code alone",
+                      server > 0 &&
+                          http_run((string_address)url, address_of http_manners_fetch, false, -1,
+                                   null, address_of code, null, null) == HTTP_MALFORMED &&
+                          code == 777);
+                if (server > 0 && !net_as_emulated())
+                {
+                        http_buffer head = {0};
+                        http_buffer body = {0};
+
+                        check("a fetch apart whose body fails after its head is kept still fails",
+                              http_run_apart((string_address)url, address_of http_manners_fetch,
+                                             false, -1, address_of body, null, null,
+                                             address_of head) == HTTP_MALFORMED);
+                        byte_store_release(address_of head);
+                        byte_store_release(address_of body);
+                }
+                http_canned_end(server, lines);
+                lines = -1;
+        }
         {
                 http_buffer head = {0};
                 b32 code = 777;
