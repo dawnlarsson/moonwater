@@ -336,6 +336,7 @@ typedef struct
         p32 darken;             // darkening at small sizes, 1/64 pixel (12)
         p32 darken_until;       // size in pixels where it has faded out (32)
         p32 contrast;           // dark text's contrast boost, 1/64 (128)
+        p32 snap_widest;        // widest standard stem snapped in cells, 1/64 pixel (256)
         bool linear;            // blend in linear light (true)
 
         //      What a glyph being drawn touches first, together, then the
@@ -1225,6 +1226,347 @@ static fn font_embolden(font_engine address_to e, f32 strength)
                         before = here;
                         here = after;
                 }
+        }
+}
+
+/*
+        Stem snapping, for the terminal's cells, where every glyph's pen is a
+        whole pixel and one shared eighth: the vertical stems move so that
+        each edge lands on a pixel boundary, and the outline between them is
+        stretched to follow. Unsnapped, a stem 1.4 px wide at a fractional x
+        is three grey columns; snapped it is one or two black ones.
+
+        An edge is a run of the outline's points at one x, at least a third
+        of the x-height tall, so serifs and the vertical tangents of curves
+        are left to the stretch. Which side of it the ink is on comes from
+        the glyph's own winding (TrueType's outer contours run clockwise and
+        put the ink on the right of travel, but a converted font may not). A
+        stem is a left edge and the nearest right edge across from it that
+        overlaps it by half, no wider than a quarter of the em.
+
+        One standard width a face, the median stem of l n m h i u I H in font
+        units, measured once and kept in the glyph memo, so every stem near
+        it rounds to the same whole pixels and a line of text has one weight:
+        rounding each stem alone gives n one pixel and l two. A stem within a
+        quarter of the standard takes the standard's rounding, others round on
+        their own, none to less than a pixel. Each stem then sits on the whole
+        pixels nearest its centre. A snap that would reorder two stems, or
+        close the counter between them to less than a pixel where it was half
+        a pixel or more, is dropped, the stem that moved most first.
+
+        Whole widths only where they change the standard stem by a fifth or
+        less; otherwise each stem keeps its width and only its nearer edge
+        moves onto the grid. Points between two edges move by the straight
+        line between the two moves, and the glyph's own left and right ends
+        stay put, so an arm stretches instead of riding into the next cell.
+        Snapping stops where the standard stem is snap_widest, four pixels,
+        and at the fitting's own ceiling, hint_until.
+*/
+#define FONT_STEMS 32
+
+typedef struct
+{
+        b64 x, low, high;
+        b32 side;
+        bool used;
+} font_run;
+
+static p32 font_runs(const font_engine address_to e, b64 slack, b64 least, font_run address_to run)
+{
+        f64 area = 0;
+        p32 first = 0, count = 0;
+
+        for (p32 c = 0; c < e->contour_count; first = e->contour[c++].last + 1u)
+                for (p32 i = first; i <= e->contour[c].last; i++)
+                {
+                        font_point a = e->points[i], b = e->points[i == e->contour[c].last ? first : i + 1];
+
+                        area += (f64)a.x * b.y - (f64)b.x * a.y;
+                }
+
+        //      Up a left edge or down a right one when the ink is on the right.
+        b32 right = area < 0 ? 1 : -1;
+        first = 0;
+        for (p32 c = 0; c < e->contour_count; first = e->contour[c++].last + 1u)
+        {
+                p32 last = e->contour[c].last, n = last - first + 1;
+                if (last <= first)
+                        continue;
+
+                //      Start where an edge is not vertical, so that no run is
+                //      cut in two by the contour's first point.
+                p32 start = n;
+                for (p32 k = 0; k < n && start == n; k++)
+                {
+                        font_point a = e->points[first + (k + n - 1) % n], b = e->points[first + k];
+                        b64 dx = b.x - a.x;
+
+                        if (dx > slack || dx < -slack || b.y == a.y)
+                                start = k;
+                }
+                if (start == n)
+                        continue;
+
+                font_run here = {0};
+                b32 going = 0;
+                for (p32 k = 0; k <= n; k++)
+                {
+                        font_point a = e->points[first + (start + k) % n], b = e->points[first + (start + k + 1) % n];
+                        b64 dx = b.x - here.x;
+                        b32 way = b.y > a.y ? 1 : b.y < a.y ? -1 : 0;
+                        bool vertical = k < n && way && (going == 0 ? b.x - a.x <= slack && a.x - b.x <= slack
+                                                                   : way == going && dx <= slack && -dx <= slack);
+
+                        if (vertical && going == 0)
+                        {
+                                here = (font_run){a.x, a.y < b.y ? a.y : b.y, a.y < b.y ? b.y : a.y, 0, false};
+                                going = way;
+                        }
+                        else if (vertical)
+                        {
+                                here.low = b.y < here.low ? b.y : here.low;
+                                here.high = b.y > here.high ? b.y : here.high;
+                        }
+                        if (!vertical || k == n)
+                        {
+                                if (going && here.high - here.low >= least && count < FONT_STEMS * 2)
+                                {
+                                        here.side = going * right;
+                                        run[count++] = here;
+                                }
+                                going = 0;
+                                if (k < n && way && b.x - a.x <= slack && a.x - b.x <= slack)
+                                {
+                                        here = (font_run){a.x, a.y < b.y ? a.y : b.y, a.y < b.y ? b.y : a.y, 0, false};
+                                        going = way;
+                                }
+                        }
+                }
+        }
+        return count;
+}
+
+//      Left edges paired with right ones, the narrowest pairs first: stems as
+//      their two x, sorted left to right.
+static p32 font_stems(font_run address_to run, p32 runs, b64 widest, b64 address_to stem)
+{
+        p32 count = 0;
+
+        for (;;)
+        {
+                b64 best = widest + 1;
+                p32 left = 0, right = 0;
+
+                for (p32 a = 0; a < runs; a++)
+                        if (!run[a].used && run[a].side > 0)
+                                for (p32 b = 0; b < runs; b++)
+                                {
+                                        if (run[b].used || run[b].side > 0 || run[b].x <= run[a].x)
+                                                continue;
+
+                                        b64 width = run[b].x - run[a].x;
+                                        b64 low = run[a].low > run[b].low ? run[a].low : run[b].low;
+                                        b64 high = run[a].high < run[b].high ? run[a].high : run[b].high;
+                                        b64 shorter = run[a].high - run[a].low < run[b].high - run[b].low
+                                                          ? run[a].high - run[a].low
+                                                          : run[b].high - run[b].low;
+
+                                        if (width < best && 2 * (high - low) >= shorter)
+                                                best = width, left = a, right = b;
+                                }
+                if (best > widest || count == FONT_STEMS)
+                        break;
+                run[left].used = run[right].used = true;
+                stem[2 * count] = run[left].x;
+                stem[2 * count + 1] = run[right].x;
+                count++;
+        }
+        for (p32 i = 1; i < count; i++)
+                for (p32 j = i; j > 0 && stem[2 * j] < stem[2 * j - 2]; j--)
+                {
+                        b64 x0 = stem[2 * j], x1 = stem[2 * j + 1];
+
+                        stem[2 * j] = stem[2 * j - 2], stem[2 * j + 1] = stem[2 * j - 1];
+                        stem[2 * j - 2] = x0, stem[2 * j - 1] = x1;
+                }
+        return count;
+}
+
+static font_memo address_to font_recall(font_memo address_to memo, p64 key);
+
+//      The face's standard stem in font units times 2^14, or 0 for none.
+static b32 font_stem_standard(font_engine address_to e, const font_face address_to face)
+{
+        p64 key = (p64)1 << 63 | (p64)face->id << 32 | 0xffffffffu;
+        font_memo address_to memo = font_recall(e->glyph_memo, key);
+
+        if (memo->key == key)
+                return memo->value;
+
+        static const char references[] = "lnmhiuIH";
+        b64 width[FONT_STEMS], stem[2 * FONT_STEMS];
+        font_run run[2 * FONT_STEMS];
+        p32 found = 0;
+        b64 one = (b64)face->units << FONT_EXACT;
+        b64 least = ((b64)(face->x_height > 0 ? face->x_height : face->units / 2) << FONT_EXACT) / 3;
+
+        for (p32 r = 0; references[r] && found < FONT_STEMS; r++)
+        {
+                p32 glyph = font_glyph(face, (p32)references[r]);
+
+                e->point_count = e->contour_count = e->components = 0;
+                if (!glyph || font_outline(e, face, glyph, 0) < 0)
+                        continue;
+
+                p32 runs = font_runs(e, one / 512, least, run);
+                p32 stems = font_stems(run, runs, one / 4, stem);
+                for (p32 s = 0; s < stems && found < FONT_STEMS; s++)
+                        width[found++] = stem[2 * s + 1] - stem[2 * s];
+        }
+        e->point_count = e->contour_count = e->components = 0;
+
+        for (p32 i = 1; i < found; i++)
+                for (p32 j = i; j > 0 && width[j] < width[j - 1]; j--)
+                {
+                        b64 t = width[j];
+                        width[j] = width[j - 1], width[j - 1] = t;
+                }
+        b32 standard = found ? (b32)width[found / 2] : 0;
+        *memo = (font_memo){key, standard};
+        return standard;
+}
+
+static fn font_snap(font_engine address_to e, const font_face address_to face, p32 size, b32 standard)
+{
+        b64 scale = (b64)size * (FONT_ONE / 64);
+        b64 normal = font_divide((b64)standard * scale, (b64)face->units << FONT_EXACT);
+
+        if (normal <= 0 || normal >= (b64)e->snap_widest * (FONT_ONE / 64))
+                return;
+
+        b64 x_height = font_divide((b64)(face->x_height > 0 ? face->x_height : face->units / 2) * scale, face->units);
+        font_run run[2 * FONT_STEMS];
+        b64 stem[2 * FONT_STEMS], to[2 * FONT_STEMS];
+        p32 runs = font_runs(e, FONT_ONE / 32, x_height / 3, run);
+        p32 stems = font_stems(run, runs, scale / 4, stem);
+        bool dropped[FONT_STEMS] = {0};
+        b64 rounded = (normal + FONT_ONE / 2) & ~(b64)(FONT_ONE - 1);
+
+        rounded = rounded < FONT_ONE ? FONT_ONE : rounded;
+
+        //      Whole widths only where they change the standard stem by a
+        //      fifth or less: 1.12 px to 1 is a thin line still, 1.44 px to 1
+        //      or 2 is a third lighter or heavier. Past that each stem keeps
+        //      its width and puts its nearer edge on the grid, one sharp
+        //      edge and the weight unchanged.
+        bool whole = 5 * (rounded - normal) <= normal && 5 * (normal - rounded) <= normal;
+        for (p32 s = 0; s < stems; s++)
+        {
+                b64 width = stem[2 * s + 1] - stem[2 * s];
+
+                if (!whole)
+                {
+                        b64 left = stem[2 * s], right = stem[2 * s + 1];
+                        b64 l = ((left + FONT_ONE / 2) & ~(b64)(FONT_ONE - 1)) - left;
+                        b64 r = ((right + FONT_ONE / 2) & ~(b64)(FONT_ONE - 1)) - right;
+                        b64 move = (l < 0 ? -l : l) <= (r < 0 ? -r : r) ? l : r;
+
+                        to[2 * s] = left + move;
+                        to[2 * s + 1] = right + move;
+                        continue;
+                }
+
+                b64 snapped = 4 * (width - normal) <= normal && 4 * (normal - width) <= normal
+                                  ? rounded
+                                  : (width + FONT_ONE / 2) & ~(b64)(FONT_ONE - 1);
+
+                snapped = snapped < FONT_ONE ? FONT_ONE : snapped;
+
+                //      The whole pixels nearest the stem's centre: the left
+                //      edge rounds where the centre less half the new width is.
+                b64 left = 2 * stem[2 * s] + width - snapped;
+                left = ((left + FONT_ONE) >> (FONT_SHIFT + 1)) << FONT_SHIFT;
+                to[2 * s] = left;
+                to[2 * s + 1] = left + snapped;
+        }
+
+        //      Drop snaps that reorder stems or shut a counter, the stem that
+        //      moved most first, until none does.
+        for (bool again = true; again;)
+        {
+                again = false;
+                p32 previous = FONT_STEMS;
+                for (p32 s = 0; s < stems; s++)
+                {
+                        if (dropped[s])
+                                continue;
+                        if (previous < FONT_STEMS)
+                        {
+                                b64 gap = stem[2 * s] - stem[2 * previous + 1];
+                                b64 kept = to[2 * s] - to[2 * previous + 1];
+
+                                if (gap < 0 || kept < 0 || (gap >= FONT_ONE / 2 && kept < FONT_ONE))
+                                {
+                                        b64 here = to[2 * s] - stem[2 * s], there = to[2 * previous] - stem[2 * previous];
+
+                                        here = here < 0 ? -here : here;
+                                        there = there < 0 ? -there : there;
+                                        dropped[here >= there ? s : previous] = true;
+                                        again = true;
+                                        break;
+                                }
+                        }
+                        previous = s;
+                }
+        }
+
+        //      The edges that stay, as one map, left to right, between the
+        //      glyph's own left and right ends, which stay where they are: an
+        //      arm reaching out from a stem stretches or shrinks rather than
+        //      riding the stem's move into the next cell (the arms of [ and ]
+        //      would otherwise meet across the cell boundary).
+        b64 from[2 * FONT_STEMS + 2], onto[2 * FONT_STEMS + 2];
+        b64 least = (b64)1 << 62, most = -least;
+        p32 edges = 0;
+        for (p32 i = 0; i < e->point_count; i++)
+        {
+                least = e->points[i].x < least ? e->points[i].x : least;
+                most = e->points[i].x > most ? e->points[i].x : most;
+        }
+        for (p32 s = 0; s < stems; s++)
+                if (!dropped[s])
+                {
+                        if (!edges && least < stem[2 * s] && least < to[2 * s])
+                                from[edges] = onto[edges] = least, edges++;
+                        from[edges] = stem[2 * s], onto[edges++] = to[2 * s];
+                        from[edges] = stem[2 * s + 1], onto[edges++] = to[2 * s + 1];
+                }
+        if (!edges)
+                return;
+        if (most > from[edges - 1] && most > onto[edges - 1])
+                from[edges] = onto[edges] = most, edges++;
+
+        for (p32 i = 0; i < e->point_count; i++)
+        {
+                b64 x = e->points[i].x;
+                p32 k = 0;
+
+                while (k < edges && from[k] < x)
+                        k++;
+                if (k == 0)
+                        x += onto[0] - from[0];
+                else if (k == edges)
+                        x += onto[edges - 1] - from[edges - 1];
+                else if (from[k] == x)
+                        x = onto[k];
+                else
+                {
+                        //      In doubles, which a hostile font's coordinates cannot
+                        //      overflow and which every machine rounds alike.
+                        f64 t = (f64)(x - from[k - 1]) * (f64)(onto[k] - onto[k - 1]) / (f64)(from[k] - from[k - 1]);
+                        x = onto[k - 1] + (b64)(t < 0 ? t - 0.5 : t + 0.5);
+                }
+                e->points[i].x = x;
         }
 }
 
@@ -2351,6 +2693,7 @@ static b32 font_shape(font_engine address_to e, const font_face address_to face,
         if (size >= FONT_SIZE_LIMIT)
                 return FONT_TOO_LARGE;
 
+        b32 standard = style & 4 ? font_stem_standard(e, face) : 0;
         b32 refused = font_outline(e, face, glyph, 0);
         if (refused < 0 || !e->point_count)
                 return refused;
@@ -2391,6 +2734,8 @@ static b32 font_shape(font_engine address_to e, const font_face address_to face,
                 if (amount > 0)
                         font_embolden(e, (f32)(FONT_ONE / 64) * amount);
         }
+        if (standard)
+                font_snap(e, face, size, standard);
 
         b64 left = (b64)1 << 62, bottom = left, right = -left, top = -left;
         for (p32 i = 0; i < e->point_count; i++)
@@ -3001,7 +3346,7 @@ static font_bitmap font_cached(font_engine address_to e, const font_face address
 {
         p64 key = (p64)1 << 63 | (p64)(face ? face->id : 0) << 47 | (p64)(code & 0xffff) << 31 |
                   (p64)(face ? size & 0x3fffff : (size >> 16 & 0x7ff) << 11 | (size & 0x7ff)) << 9 |
-                  (p64)(phase & 7) << 6 | (p64)(style & 3) << 4;
+                  (p64)(phase & 7) << 6 | (p64)(style & 7) << 3;
         font_bitmap box = {0};
 
         if (face && size >= FONT_SIZE_LIMIT)
@@ -3202,6 +3547,7 @@ fn font_start(font_engine address_to e, p8 address_to atlas, p32 width, p32 heig
         e->darken = 12;
         e->darken_until = 32;
         e->contrast = 128;
+        e->snap_widest = 256;
         e->linear = true;
         e->atlas = atlas;
         e->atlas_width = width > 0xffff ? 0xffff : width;
@@ -3555,6 +3901,8 @@ fn font_cell(font_engine address_to e, const font_face address_to const address_
                 b32 eighth = font_eighths(((width << 16) - font_advance(faces[face], glyph, size)) / 2);
                 p32 style = font_style(e, size, flags);
 
+                //      A cell's pen is a whole pixel, so its stems can be too.
+                style |= style & 1 ? 4 : 0;
                 box = font_cached(e, faces[face], glyph, size, (p32)eighth & 7, style,
                                   (p64)(p16)width << 48 | (p64)(p16)height << 32 |
                                       (p64)(p16)grid->baseline << 16 | (p16)(eighth >> 3));

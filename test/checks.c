@@ -98401,6 +98401,101 @@ static fn check_shapes(void)
 */
 static p32 canvas[96 * 96], canvas_again[96 * 96];
 
+/*
+        Stem snapping for the terminal's cells, on outlines laid straight into
+        the engine in 1024ths of a pixel: a face of 1024 units at 16 px, so a
+        unit of the standard stem is 1/64 px, 1229 a stem of 1.2 px.
+*/
+static fn snap_load(const b32 address_to xy, p32 count, bool turned)
+{
+        engine.point_count = count;
+        engine.contour_count = 1;
+        engine.contour[0].last = (p16)(count - 1);
+        for (p32 i = 0; i < count; i++)
+        {
+                p32 k = turned ? count - 1 - i : i;
+                engine.points[i] = (font_point){xy[2 * k], xy[2 * k + 1], 1};
+        }
+}
+
+static b32 snap_standard(b32 pixels1024)
+{
+        return (b32)((b64)pixels1024 * (1024 << FONT_EXACT) / (16 * 1024));
+}
+
+static fn check_snap()
+{
+        font_face face = {.units = 1024, .x_height = 500};
+        p32 size = 16 * 64;
+        static p8 bits[16 * 16];
+
+        engine.snap_widest = engine.snap_widest ? engine.snap_widest : 256;
+
+        //      A stem 1.2 px wide at 1.3 px: within a fifth of a whole pixel,
+        //      so it becomes the pixel nearest its centre, one column of 255
+        //      between two of 0, wound either way.
+        for (p32 turned = 0; turned < 2; turned++)
+        {
+                const b32 stem[] = {1331, 0, 1331, 10240, 2560, 10240, 2560, 0};
+
+                snap_load(stem, 4, turned);
+                font_snap(&engine, &face, size, snap_standard(1229));
+                bool snapped = true;
+                for (p32 i = 0; i < 4; i++)
+                        snapped = snapped && engine.points[i].x == (stem[2 * (turned ? 3 - i : i)] == 1331 ? 1024 : 2048);
+                memory_zero(bits, sizeof(bits));
+                font_raster(&engine, 3, 10, bits, 3);
+                for (p32 r = 0; r < 10; r++)
+                        snapped = snapped && bits[3 * r] == 0 && bits[3 * r + 1] == 255 && bits[3 * r + 2] == 0;
+                if (turned)
+                        check("snap: a stem wound the other way snaps the same", snapped);
+                else
+                        check("snap: a 1.2 px stem is one column of 255", snapped);
+        }
+
+        //      1.45 px rounds a third away either way: the width stays and the
+        //      nearer edge, the right one, moves onto the grid.
+        {
+                const b32 stem[] = {1331, 0, 1331, 10240, 2816, 10240, 2816, 0};
+
+                snap_load(stem, 4, false);
+                font_snap(&engine, &face, size, snap_standard(1485));
+                check("snap: a 1.45 px stem keeps its width and puts its nearer edge on a pixel",
+                      engine.points[0].x == 1587 && engine.points[2].x == 3072);
+        }
+
+        //      A bracket: the stem snaps, the ends of its arms stay where the
+        //      font put them, so they do not reach into the next cell.
+        {
+                const b32 bracket[] = {1331, 0, 1331, 10240, 4000, 10240, 4000, 9216,
+                                       2560, 9216, 2560, 1024, 4000, 1024, 4000, 0};
+
+                snap_load(bracket, 8, false);
+                font_snap(&engine, &face, size, snap_standard(1229));
+                check("snap: a bracket's stem snaps and its arms' ends stay",
+                      engine.points[0].x == 1024 && engine.points[4].x == 2048 && engine.points[2].x == 4000 &&
+                          engine.points[7].x == 4000);
+        }
+
+        //      Two stems half a pixel apart that would snap shoulder to shoulder:
+        //      the one that moved most is let go, and the counter stays open.
+        {
+                const b32 two[] = {1444, 0, 1444, 10240, 2673, 10240, 2673, 0,
+                                   3185, 0, 3185, 10240, 4414, 10240, 4414, 0};
+
+                engine.point_count = 8;
+                engine.contour_count = 2;
+                engine.contour[0].last = 3;
+                engine.contour[1].last = 7;
+                for (p32 i = 0; i < 8; i++)
+                        engine.points[i] = (font_point){two[2 * i], two[2 * i + 1], 1};
+                font_snap(&engine, &face, size, snap_standard(1229));
+                check("snap: a counter half a pixel wide is not shut",
+                      engine.points[4].x == 3072 && engine.points[6].x == 4096 && engine.points[2].x < 3072 &&
+                          engine.points[0].x < engine.points[2].x);
+        }
+}
+
 static fn ground(p32 address_to pixels)
 {
         for (p32 i = 0; i < 96 * 96; i++)
@@ -99011,6 +99106,7 @@ b32 main()
         check_light();
         check_drawn();
         check_shapes();
+        check_snap();
         check_drawing(&one, &two);
         check_translate();
         check_blend();
