@@ -57483,9 +57483,17 @@ static fn resolving_decision_edges(void)
 {
         p32 found = 0;
 
-        check("a resolver whose socket is numbered 0 still asks and is answered",
-              dns_answer_case(DNS_ANSWER_UDP, false, true, address_of found) == DNS_OK &&
-                  found == 0xc0000207);
+        {
+                //      Said when it fails, with the status the query gave: the
+                //      lane's one failure of this check was otherwise unexplained.
+                bipolar status = dns_answer_case(DNS_ANSWER_UDP, false, true, address_of found);
+
+                if (status != DNS_OK || found != 0xc0000207)
+                        string_format(log, "  numbered-0 query: status %b, found %p\n",
+                                      status, (positive)found);
+                check("a resolver whose socket is numbered 0 still asks and is answered",
+                      status == DNS_OK && found == 0xc0000207);
+        }
         found = 0;
         check("a TCP retry whose socket is numbered 0 still asks and is answered",
               dns_answer_case(DNS_ANSWER_TCP, false, true, address_of found) == DNS_OK &&
