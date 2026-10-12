@@ -131,12 +131,20 @@ function moonwater_desktop_terminal {
 # and a terminal of its own.
 #
 # These helpers are not named moonwater_: a name that is would be an event.
+# The first line of /root/font, which is a path, or nothing.
+function desktop_named {
+  desktop_try=
+  if [ -r /root/font ]; then
+    IFS= read -r desktop_try < /root/font
+  fi
+}
+
 function desktop_font {
   desktop_face=
   desktop_bold=
   desktop_text=
-  desktop_try=$(cat /root/font 2>/dev/null)
-  if [ -r "$desktop_try" ]; then
+  desktop_named
+  if [ -n "$desktop_try" ] && [ -r "$desktop_try" ]; then
     desktop_face=$desktop_try
     desktop_text=$desktop_try
     return
@@ -210,7 +218,11 @@ function desktop_session {
     sleep 0.05
     desktop_wait=$((desktop_wait + 1))
   done
-  echo "desktop: the compositor (pid $desktop_compositor) is up" > /dev/kmsg
+  if [ -S /run/moonwater/surface ]; then
+    echo "desktop: the compositor (pid $desktop_compositor) is up" > /dev/kmsg
+  else
+    echo "desktop: the compositor (pid $desktop_compositor) made no surface" > /dev/kmsg
+  fi
   desktop_font
   : > /run/moonwater/desktop.kids
   if [ -n "$desktop_face" ]; then
@@ -224,29 +236,36 @@ function desktop_session {
   rm -f /run/moonwater/compositor.pid /run/moonwater/desktop.kids
 }
 
+# Whether Canvas is on, which is what keeps a supervisor going.
+function desktop_on {
+  case $(moonwater canvas) in
+  *"Canvas is on"*) return 0 ;;
+  esac
+  return 1
+}
+
 function desktop_supervise {
   desktop_fails=0
-  while :; do
-    case $(moonwater canvas) in
-    *"Canvas is on"*) ;;
-    *) return ;;
-    esac
+  while desktop_on; do
     desktop_began=$SECONDS
     desktop_session
     if [ $((SECONDS - desktop_began)) -ge 30 ]; then
       desktop_fails=0
     fi
     desktop_fails=$((desktop_fails + 1))
+    # Canvas turned off is why the compositor ended: that is not a failure to count.
+    desktop_on || break
     if [ $desktop_fails -ge 4 ]; then
       echo "desktop: the compositor ended $desktop_fails times in a row; Canvas has the card, and a terminal" > /dev/kmsg
       moonwater canvas terminal
-      return
+      break
     fi
     case $desktop_fails in
     2) sleep 0.5 ;;
     3) sleep 2 ;;
     esac
   done
+  rm -f /run/moonwater/supervisor.pid
 }
 
 function desktop_start {
@@ -262,7 +281,7 @@ function desktop_start {
   # and a terminal, keeps the screen, and the log says which file was wanted.
   desktop_font
   if [ -z "$desktop_face" ]; then
-    desktop_try=$(cat /root/font 2>/dev/null)
+    desktop_named
     echo "desktop: no font to draw with: /root/font names ${desktop_try:-no file}, which is not readable, and /usr/share/fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf and every other mono face under /usr/share/fonts are missing; the desktop is the kernel's, with its log and a terminal" > /dev/kmsg
     return 1
   fi
@@ -273,9 +292,18 @@ function desktop_start {
   echo $! > /run/moonwater/supervisor.pid
 }
 
+# Off means the compositor has ended and not that it is on its way out: the card
+# is Canvas's again only when its process is gone, so a Canvas turned on straight
+# after this waits for that (up to three seconds, then it has been asked).
 function desktop_stop {
   kill $(cat /run/moonwater/supervisor.pid) 2> /dev/null
-  kill $(cat /run/moonwater/compositor.pid) 2> /dev/null
+  desktop_pid=$(cat /run/moonwater/compositor.pid 2> /dev/null)
+  kill $desktop_pid 2> /dev/null
+  desktop_wait=0
+  while [ -n "$desktop_pid" ] && kill -0 $desktop_pid 2> /dev/null && [ $desktop_wait -lt 60 ]; do
+    sleep 0.05
+    desktop_wait=$((desktop_wait + 1))
+  done
   rm -f /run/moonwater/supervisor.pid /run/moonwater/compositor.pid
 }
 

@@ -16037,6 +16037,271 @@ counted
 #       Input goes in through QMP rather than the human monitor, because
 #       mouse_move there is relative whatever device is selected and a tablet
 #       has no relative axes to move along.
+#
+#       The machine script's desktop functions, the supervisor's give-up and canvas off, the
+#       stop, the font the terminal draws with and the no-surface line, run the way the machine
+#       runs them: the moonwater shell as bash, which is where the function keyword and $SECONDS
+#       are, against stub programs with the paths they name redirected into a directory of the
+#       lane's own. MOONWATER_DESKTOP_MAIN names another script; the parent's shows the rows fail.
+#       Six of these are red on the commit before the machine script's desktop fixes.
+desktop_script_rows()
+{
+        desktop_main=${MOONWATER_DESKTOP_MAIN:-main.moonwater.sh}
+        desktop_work=$(mktemp -d "${TMPDIR:-/tmp}/dawning-desktop-rows.XXXXXX") || return 0
+
+        if ! unshare -Urpf --mount-proc true 2> /dev/null || ! need_shell > /dev/null 2>&1; then
+                echo "  canvas       desktop script rows NOT RUN -- no unshare -Urpf or no shell"
+                rm -rf "$desktop_work"
+                return 0
+        fi
+
+        ln -sf "$shell_binary" "$desktop_work/bash" || return 0
+        cp "$desktop_main" "$desktop_work/main.sh" || return 0
+        cat > "$desktop_work/runner.sh" <<'RUNNER'
+#!/bin/sh
+# The desktop functions of the machine script, run as the moonwater shell runs them (the bash
+# personality, which has $SECONDS and the function keyword), against stub compositor, klog,
+# terminal, panel and moonwater programs, with the absolute paths they name redirected into a
+# case directory. One row per verdict, tab separated: PASS|FAIL, the row, what it got, what it wants.
+#   runner.sh SHELL ROOT SCRIPT
+SH=$1
+ROOT=$2
+SCRIPT=$3
+
+make_stub()
+{
+        d=$1
+        rm -rf "$d"
+        mkdir -p "$d/bin" "$d/root" "$d/run/moonwater" "$d/fonts"
+        echo on > "$d/canvas"
+        : > "$d/starts"
+        : > "$d/args"
+        : > "$d/kernel"
+        : > "$d/kmsg"
+        echo x > "$d/fonts/A-Mono.ttf"
+        echo x > "$d/fonts/Q-Face.ttf"
+
+        for n in klog terminal panel; do
+                printf '#!/bin/sh\necho "%s $*" >> "$STUB/args"\nexit 0\n' "$n" > "$d/bin/$n"
+        done
+
+        cat > "$d/bin/compositor" <<'EOF'
+#!/bin/sh
+if [ "$1" = grant ]; then
+        echo "grant $*" >> "$STUB/args"
+        exit 0
+fi
+echo "$$" >> "$STUB/starts"
+if [ -e "$STUB/slow" ]; then
+        trap 'sleep 1; echo gone > "$STUB/gone"; exit 0' TERM
+        while :; do sleep 0.05; done
+fi
+if [ ! -s "$STUB/lives" ]; then
+        echo off > "$STUB/canvas"
+        exit 1
+fi
+set -- $(head -n 1 "$STUB/lives")
+tail -n +2 "$STUB/lives" > "$STUB/lives.next"
+mv "$STUB/lives.next" "$STUB/lives"
+if [ "$1" -ge 1 ]; then
+        sleep "$1"
+else
+        sleep 0.3
+fi
+if [ "$2" = off ]; then
+        echo off > "$STUB/canvas"
+fi
+exit 1
+EOF
+
+        cat > "$d/bin/moonwater" <<'EOF'
+#!/bin/sh
+case $1 in
+desktop) echo "desktop canvas" ;;
+canvas)
+        case $2 in
+        "") if [ "$(cat "$STUB/canvas")" = on ]; then echo "Canvas is on"; else echo "Canvas is off"; fi ;;
+        terminal) echo terminal >> "$STUB/kernel" ;;
+        log) echo log >> "$STUB/kernel" ;;
+        esac ;;
+esac
+EOF
+        chmod +x "$d/bin/"*
+}
+
+# The script with its absolute paths pointed into the case directory. The kmsg stub appends, as
+# /dev/kmsg does, and the program paths are matched only where a space follows them.
+redirect()
+{
+        sed -e "s#> /dev/kmsg#>> \$STUB/kmsg#g" \
+            -e "s#/run/moonwater#\$STUB/run/moonwater#g" \
+            -e "s#/root/font#\$STUB/root/font#g" \
+            -e "s#/dev/kmsg#\$STUB/kmsg#g" \
+            -e "s#/usr/share/fonts#\$STUB/fonts#g" \
+            -e "s#/compositor\([ &]\)#\$STUB/bin/compositor\1#g" \
+            -e "s#/klog\([ ]\)#\$STUB/bin/klog\1#g" \
+            -e "s#/terminal\([ ]\)#\$STUB/bin/terminal\1#g" \
+            -e "s#/panel\([ ]\)#\$STUB/bin/panel\1#g" "$1" > "$STUB/main.sed.sh"
+}
+
+# One case: $1 its name. The caller writes lives, root/font, slow and the driver.
+begin()
+{
+        STUB=$ROOT/cases/$1
+        export STUB
+        make_stub "$STUB"
+        redirect "$SCRIPT"
+        PATH=$STUB/bin:/usr/bin:/bin
+        export PATH
+}
+
+# moonwater is a builtin of the shell binary and wins over PATH, so the stub is reached through a
+# function, which is the only thing the drivers see.
+run_driver()
+{
+        printf '%s\n' 'moonwater() { "$STUB/bin/moonwater" "$@"; }' | cat - "$STUB/driver.sh" > "$STUB/driver.run"
+        "$SH" "$STUB/driver.run" > "$STUB/out" 2>&1
+}
+
+# report LABEL GOT WANT
+report()
+{
+        if [ "$2" = "$3" ]; then
+                printf 'PASS\t%s\t%s\t%s\n' "$1" "$2" "$3"
+        else
+                printf 'FAIL\t%s\t%s\t%s\n' "$1" "$2" "$3"
+        fi
+}
+
+rm -rf "$ROOT/cases"
+mkdir -p "$ROOT/cases"
+
+# A: four quick deaths, then a long life (31 s: the count starts again), then a death, then off.
+begin giveup
+printf '0\n0\n0\n31\n0\n0 off\n' > "$STUB/lives"
+cat > "$STUB/driver.sh" <<'EOF'
+. "$STUB/main.sed.sh"
+desktop_start
+sup=$(cat "$STUB/run/moonwater/supervisor.pid")
+wait $sup
+echo "starts=$(wc -l < "$STUB/starts")"
+echo "kernel=$(grep -c terminal "$STUB/kernel")"
+echo "stale=$([ -e "$STUB/run/moonwater/supervisor.pid" ] && echo yes || echo no)"
+EOF
+run_driver
+report "a long life restarts the count of deaths" "$(grep '^starts=' "$STUB/out")" "starts=6"
+report "no give-up terminal after a long life" "$(grep '^kernel=' "$STUB/out")" "kernel=0"
+report "supervisor pid file removed when it ends" "$(grep '^stale=' "$STUB/out")" "stale=no"
+
+# B: four deaths, the fourth with Canvas turned off (the chord): the supervisor ends and is not given up on.
+begin offchord
+printf '0\n0\n0\n0 off\n' > "$STUB/lives"
+cat > "$STUB/driver.sh" <<'EOF'
+. "$STUB/main.sed.sh"
+desktop_start
+sup=$(cat "$STUB/run/moonwater/supervisor.pid")
+wait $sup
+echo "kernel=$(grep -c terminal "$STUB/kernel")"
+echo "stale=$([ -e "$STUB/run/moonwater/supervisor.pid" ] && echo yes || echo no)"
+EOF
+run_driver
+report "canvas off ends a supervisor with no give-up terminal" "$(grep '^kernel=' "$STUB/out")" "kernel=0"
+report "canvas off leaves no supervisor pid file" "$(grep '^stale=' "$STUB/out")" "stale=no"
+
+# C: desktop_stop returns when the compositor has ended, not while it is on its way out.
+begin stop
+touch "$STUB/slow"
+cat > "$STUB/driver.sh" <<'EOF'
+. "$STUB/main.sed.sh"
+desktop_start
+sleep 0.3
+desktop_stop
+echo "gone=$([ -e "$STUB/gone" ] && echo yes || echo no)"
+echo "pidfile=$([ -e "$STUB/run/moonwater/compositor.pid" ] && echo yes || echo no)"
+EOF
+run_driver
+report "canvas off returns once the compositor has ended" "$(grep '^gone=' "$STUB/out")" "gone=yes"
+report "canvas off removes the compositor pid file" "$(grep '^pidfile=' "$STUB/out")" "pidfile=no"
+
+# D: a /root/font whose first line is a path and whose second is not: the first line is the face.
+begin font
+touch "$STUB/slow"
+printf '%s\njunk\n' "$STUB/fonts/Q-Face.ttf" > "$STUB/root/font"
+cat > "$STUB/driver.sh" <<'EOF'
+. "$STUB/main.sed.sh"
+desktop_start
+sleep 7
+desktop_stop
+echo "font=$(grep -c "^terminal -f $STUB/fonts/Q-Face.ttf\$" "$STUB/args")"
+EOF
+run_driver
+report "the first line of /root/font is the face of the terminal" "$(grep '^font=' "$STUB/out")" "font=1"
+
+# E: a compositor that makes no surface is not reported as up, and is seen at once.
+begin surface
+printf '0 off\n' > "$STUB/lives"
+cat > "$STUB/driver.sh" <<'EOF'
+. "$STUB/main.sed.sh"
+t0=$(/usr/bin/date +%s%N)
+desktop_start
+wait $(cat "$STUB/run/moonwater/supervisor.pid") 2> /dev/null
+t1=$(/usr/bin/date +%s%N)
+echo "nosurface=$(grep -c 'made no surface' "$STUB/kmsg")"
+echo "quick=$(( (t1 - t0) < 2000000000 ))"
+EOF
+run_driver
+report "no surface is said, not that the compositor is up" "$(grep '^nosurface=' "$STUB/out")" "nosurface=1"
+report "a compositor that dies at once is seen at once" "$(grep '^quick=' "$STUB/out")" "quick=1"
+
+# F: a second start while a supervisor lives starts nothing.
+begin second
+touch "$STUB/slow"
+cat > "$STUB/driver.sh" <<'EOF'
+. "$STUB/main.sed.sh"
+desktop_start
+s1=$(cat "$STUB/run/moonwater/supervisor.pid")
+sleep 0.2
+desktop_start
+s2=$(cat "$STUB/run/moonwater/supervisor.pid")
+echo "same=$([ "$s1" = "$s2" ] && echo 1 || echo 0)"
+echo "starts=$(wc -l < "$STUB/starts")"
+desktop_stop
+EOF
+run_driver
+report "a second start keeps the one supervisor" "$(grep '^same=' "$STUB/out")" "same=1"
+report "and starts one compositor" "$(grep '^starts=' "$STUB/out")" "starts=1"
+
+# G: a terminal asked for with no compositor is the kernel's, once.
+begin request
+printf '0 off\n' > "$STUB/lives"
+cat > "$STUB/driver.sh" <<'EOF'
+. "$STUB/main.sed.sh"
+desktop_start
+wait $(cat "$STUB/run/moonwater/supervisor.pid") 2> /dev/null
+before=$(grep -c terminal "$STUB/kernel")
+moonwater_desktop_terminal
+after=$(grep -c terminal "$STUB/kernel")
+echo "delta=$((after - before))"
+EOF
+run_driver
+report "one request with no compositor is one kernel terminal" "$(grep '^delta=' "$STUB/out")" "delta=1"
+RUNNER
+        unshare -Urpf --mount-proc sh "$desktop_work/runner.sh" "$desktop_work/bash" "$desktop_work/cases" \
+                "$desktop_work/main.sh" > "$desktop_work/rows" 2>&1
+
+        [ -s "$desktop_work/rows" ] || lost "desktop rows" "the runner printed nothing"
+        desktop_tab=$(printf '\t')
+        while IFS=$desktop_tab read -r desktop_verdict desktop_label desktop_got desktop_want; do
+                if [ "$desktop_verdict" = PASS ]; then
+                        won
+                else
+                        lost "$desktop_label" "got $desktop_got, want $desktop_want"
+                fi
+        done < "$desktop_work/rows"
+
+        rm -rf "$desktop_work"
+}
+
 lane_canvas()
 (
 image=${MOONWATER_IMAGE:-dist/bootx64.efi}
@@ -16057,6 +16322,8 @@ if [ ! -f "$image" ]; then
         echo "  canvas       no image at $image, skipped"
         exit 2
 fi
+
+desktop_script_rows
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/dawning-canvas.XXXXXX") || exit 1
 trap 'rm -rf "$work"' EXIT INT TERM
