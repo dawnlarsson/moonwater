@@ -109,6 +109,11 @@ static struct
 
 static unsigned int terminal_colour[256];
 
+static unsigned int terminal_palette(unsigned int index)
+{
+        return terminal_colour[index & 255];
+}
+
 /* ---- the view: which cells are on the screen ---- */
 
 /*
@@ -1072,6 +1077,7 @@ static b32 terminal_main()
 
         for (unsigned int at = 0; at < 256; at++)
                 terminal_colour[at] = window_cell_colour(at);
+        term_palette = terminal_palette;
 
         term_cell_w = terminal.cell_w;
         term_cell_h = terminal.cell_h;

@@ -853,6 +853,12 @@ static CONST unsigned int acs_character(unsigned int c)
 
 // A colour in xterm's spelling, sixteen bits a channel, ended the way the
 // question was.
+#ifndef KERNEL_MODE
+// Where a colour index is looked up for what a program asks the terminal its colours are: the table a
+// program that paints with a theme paints from, so that what is answered is what is on the screen.
+static unsigned int (*term_palette)(unsigned int index);
+#endif
+
 static fn osc_colour(unsigned int colour, b32 bell)
 {
         p8 text[] = "rgb:0000/0000/0000";
@@ -954,7 +960,11 @@ static fn osc_finish(b32 bell)
                                 positive_to_string(emit_bytes, index);
                                 emit(';');
                         }
+#ifndef KERNEL_MODE
+                        osc_colour(term_palette ? term_palette(index) : window_cell_colour(index), bell);
+#else
                         osc_colour(window_cell_colour(index), bell);
+#endif
                 }
 
                 while (i < osc_length && osc_bytes[i++] != ';')

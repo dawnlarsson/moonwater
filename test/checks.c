@@ -99236,6 +99236,7 @@ b32 main()
 
         for (unsigned int at = 0; at < 256; at++)
                 terminal_colour[at] = window_cell_colour(at);
+        term_palette = terminal_palette;
         terminal.bar_grab = -1;
 
         window = window_grid_open(30, 8, 80, 256);
@@ -99254,6 +99255,26 @@ b32 main()
         check_keys();
         check_pointer();
         check_release();
+
+        // What the terminal says its paper and ink are is what it paints them with.
+        {
+                static const char paper[] = "\x1b]11;rgb:1010/2020/3030\x07", ink[] = "\x1b]10;rgb:c0c0/d0d0/e0e0\x1b\\";
+                unsigned int was_paper = terminal_colour[0], was_ink = terminal_colour[7];
+
+                terminal_colour[0] = 0x102030;
+                terminal_colour[7] = 0xc0d0e0;
+                to_shell_length = 0;
+                term_bytes((const p8 address_to)"\x1b]11;?\x07", 7);
+                check("osc: the paper is asked and answered from the table it is painted from",
+                      to_shell_length == sizeof(paper) - 1 && !memory_compare(to_shell, paper, sizeof(paper) - 1));
+                to_shell_length = 0;
+                term_bytes((const p8 address_to)"\x1b]10;?\x1b\\", 8);
+                check("osc: and the ink",
+                      to_shell_length == sizeof(ink) - 1 && !memory_compare(to_shell, ink, sizeof(ink) - 1));
+                to_shell_length = 0;
+                terminal_colour[0] = was_paper;
+                terminal_colour[7] = was_ink;
+        }
         check("frames: a buffer is refused only while the compositor may still be reading it", !refused);
         check("frames: some were drawn", compared > 1000);
         check("frames: the screen and the buffer are always the full draw", !wrong);
