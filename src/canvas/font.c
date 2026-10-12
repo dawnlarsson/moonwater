@@ -236,6 +236,9 @@
 #define FONT_PAIRS 64
 #define FONT_WAYS 4
 #define FONT_MEMO 512
+#define FONT_RECENT 256
+#define FONT_STRIP (1 << 17)
+#define FONT_RUN 1024
 #define FONT_GROUP 6144
 #define FONT_NEAR 512
 #define FONT_EVENTS 3840
@@ -330,6 +333,17 @@ typedef struct
         b32 value;
 } font_memo;
 
+//      A cell drawn lately: what it was (face, code, size, flags, width) and
+//      the grid it was drawn on, the atlas generation it was found in, and
+//      the bitmap and its place from the cell's corner.
+typedef struct
+{
+        p64 key, grid;
+        p32 generation;
+        b16 dx, dy;
+        font_bitmap box;
+} font_recent;
+
 typedef struct
 {
         p32 hint_until;         // largest size in pixels that is fitted (24)
@@ -346,7 +360,7 @@ typedef struct
         p8 address_to atlas;
         p32 atlas_width, atlas_height, shelf_count, shelf_bottom, slot_count;
         bool started, scratched, clip, gather, overflow, track, mark, direct, ramp_ready;
-        p32 epoch, pair_turns;
+        p32 epoch, pair_turns, generation;
         p32 point_count, contour_count, components;
         b32 left_side;
         b32 band, rows, stride, width, grain, cross, wound, x, y;
@@ -367,6 +381,13 @@ typedef struct
         p16 index[FONT_SLOTS];
         font_pairing pairs[FONT_PAIRS];
         font_memo glyph_memo[FONT_MEMO], kern_memo[FONT_MEMO];
+        font_recent recent[FONT_RECENT];
+
+        //      A run of cells on its way to the target: each cell's bitmap,
+        //      then their coverage rows side by side.
+        font_bitmap run[FONT_RUN];
+        b16 run_dx[FONT_RUN], run_dy[FONT_RUN];
+        p8 strip[FONT_STRIP];
 } font_engine;
 
 /*
@@ -3284,20 +3305,28 @@ static fn font_reset(font_engine address_to e)
         memory_zero(e->index, sizeof(e->index));
         e->slot_count = e->shelf_count = e->shelf_bottom = 0;
         e->scratched = false;
+        e->generation++;
 }
 
 //      Every cache and memo is emptied when a face id has been issued again.
-static fn font_sync(font_engine address_to e)
+//      The test is inline and the emptying is not: a call on every cell had
+//      the compiler spill the cell's arguments around it and read them back
+//      wider than it wrote them, a store that could not be forwarded and the
+//      cell's single largest cost.
+static COLD fn font_resync(font_engine address_to e, p32 epoch)
+{
+        font_reset(e);
+        memory_zero(e->glyph_memo, sizeof(e->glyph_memo));
+        memory_zero(e->kern_memo, sizeof(e->kern_memo));
+        e->epoch = epoch;
+}
+
+static inline fn font_sync(font_engine address_to e)
 {
         p32 epoch = __atomic_load_n(&font_epoch, __ATOMIC_RELAXED);
 
         if (e->epoch != epoch)
-        {
-                font_reset(e);
-                memory_zero(e->glyph_memo, sizeof(e->glyph_memo));
-                memory_zero(e->kern_memo, sizeof(e->kern_memo));
-                e->epoch = epoch;
-        }
+                font_resync(e, epoch);
 }
 
 //      A slot made, at the place in the index the lookup ended at.
@@ -3872,26 +3901,35 @@ static fn font_ground(const font_target address_to target, b32 left, b32 top, b3
                                      (positive)(right - left), (positive)(bottom - top), background & 0xffffff);
 }
 
-/*
-        A terminal cell, whole: its background and its glyph written in one
-        pass, each pixel once, through the pair's tones. A glyph is cached as
-        its whole cell -- the glyph at its place, nothing around it -- so a
-        cell is one rectangle of coverage made into pixels, with no fill on
-        either side. A glyph too big for its cell is drawn from its own
-        bitmap instead, clipped to the cell, which is the terminal's rule
-        for whose pixel it is. With an unknown background only the glyph is
-        blended in.
-*/
-fn font_cell(font_engine address_to e, const font_face address_to const address_to faces,
-             p32 count, p32 code, p32 cells, const font_metrics address_to grid, p32 size,
-             p32 flags, const font_target address_to target, b32 x, b32 y, p32 colour,
-             p32 background)
+//      What a cell is, less its code: one 64-bit key a run shares, and the
+//      grid it lies on.
+static inline INLINE p64 font_cell_base(const font_face address_to const address_to faces, p32 count, p32 size,
+                                        p32 flags, p32 cells)
+{
+        return (p64)1 << 63 | (p64)(count ? faces[0]->id & 0xffff : 0) << 47 | (p64)(size & 0xfffff) << 6 |
+               (p64)(flags & 7) << 3 | (p64)(cells > 1) << 2 | (p64)((count - 1) & 3);
+}
+
+static inline INLINE p64 font_cell_shape(const font_metrics address_to grid)
+{
+        return (p64)(p16)grid->cell_width << 32 | (p64)(p16)grid->cell_height << 16 | (p16)grid->baseline;
+}
+
+//      A cell not drawn lately: its glyph found, drawn into the atlas, and
+//      kept in the recent cells. Out of line, so that the test before it
+//      keeps a run's arguments in registers (spilled around this, they were
+//      read back wider than they were written, a store the machine could not
+//      forward and most of a cell's cost).
+static COLD __attribute__((noinline)) font_bitmap
+font_cell_find(font_engine address_to e, const font_face address_to const address_to faces, p32 count, p32 code,
+               p32 cells, const font_metrics address_to grid, p32 size, p32 flags, p64 key, p64 shape,
+               font_recent address_to recent, b32 address_to dx, b32 address_to dy)
 {
         b32 width = (b32)(cells ? cells : 1) * grid->cell_width, height = grid->cell_height;
         font_bitmap box = {0};
-        b32 gx = x, gy = y;
         p32 face, glyph;
 
+        *dx = *dy = 0;
         if (font_is_drawn(code))
                 box = font_cached(e, null, code, (p32)grid->cell_width << 16 | (p32)height, 0, 0, 0);
         else if (count && code != ' ')
@@ -3909,10 +3947,69 @@ fn font_cell(font_engine address_to e, const font_face address_to const address_
                 if (box.stride == 1)
                 {
                         box = font_cached(e, faces[face], glyph, size, (p32)eighth & 7, style, 0);
-                        gx = x + (eighth >> 3) + box.left;
-                        gy = y + grid->baseline - box.top;
+                        *dx = (eighth >> 3) + box.left;
+                        *dy = grid->baseline - box.top;
                 }
         }
+
+        //      A bitmap drawn into the atlas's scratch is gone with the next
+        //      glyph, so it is not kept.
+        if (!e->scratched)
+                *recent = (font_recent){key, shape, e->generation, (b16)*dx, (b16)*dy, box};
+        else
+                recent->key = 0;
+        return box;
+}
+
+/*
+        The bitmap a cell draws, and where it sits from the cell's corner.
+        The cells of a screen are a few dozen codes in one size and style, so
+        a cell drawn lately is found again here by one hash of what it is,
+        without finding its glyph, its advance (a divide) or its slot again.
+        A reset of the atlas or a face id issued again moves the generation
+        on, and every entry with it; the caller has synced the engine.
+*/
+static inline INLINE font_bitmap font_cell_box(font_engine address_to e, const font_face address_to const address_to faces,
+                                               p32 count, p32 code, p32 cells, const font_metrics address_to grid,
+                                               p32 size, p32 flags, p64 base, p64 shape, b32 address_to dx,
+                                               b32 address_to dy)
+{
+        p64 key = base | (p64)(code & 0x1fffff) << 26;
+        font_recent address_to recent = &e->recent[(key * 0x9e3779b97f4a7c15ull) >> 56];
+
+        if (recent->key == key && recent->grid == shape && recent->generation == e->generation)
+        {
+                *dx = recent->dx;
+                *dy = recent->dy;
+                return recent->box;
+        }
+        return font_cell_find(e, faces, count, code, cells, grid, size, flags, key, shape, recent, dx, dy);
+}
+
+/*
+        A terminal cell, whole: its background and its glyph written in one
+        pass, each pixel once, through the pair's tones. A glyph is cached as
+        its whole cell -- the glyph at its place, nothing around it -- so a
+        cell is one rectangle of coverage made into pixels, with no fill on
+        either side. A glyph too big for its cell is drawn from its own
+        bitmap instead, clipped to the cell, which is the terminal's rule
+        for whose pixel it is. With an unknown background only the glyph is
+        blended in.
+*/
+fn font_cell(font_engine address_to e, const font_face address_to const address_to faces,
+             p32 count, p32 code, p32 cells, const font_metrics address_to grid, p32 size,
+             p32 flags, const font_target address_to target, b32 x, b32 y, p32 colour,
+             p32 background)
+{
+        b32 width = (b32)(cells ? cells : 1) * grid->cell_width, height = grid->cell_height;
+        b32 dx, dy;
+
+        font_sync(e);
+        font_bitmap box = font_cell_box(e, faces, count, code, cells, grid, size, flags,
+                                        font_cell_base(faces, count, size, flags, cells), font_cell_shape(grid),
+                                        &dx, &dy);
+        b32 gx = x + dx, gy = y + dy;
+
         if (background & FONT_UNKNOWN)
         {
                 font_blend(e, target, gx, gy, box, colour, background);
@@ -3938,6 +4035,114 @@ fn font_cell(font_engine address_to e, const font_face address_to const address_
                 memory_translate_u32_rect(target->pixels + (positive)above * target->stride + from, target->stride,
                                           box.coverage + (positive)(above - gy) * box.stride + (from - gx),
                                           box.stride, (positive)(to - from), (positive)(below - above), pixel);
+}
+
+//      Rows from to from + rows of one cell's coverage, width bytes each,
+//      into the strip at into, stride bytes a row. A cell's own bitmap that
+//      is the whole cell is a copy a row: one 16-byte word for cells up to
+//      16 wide, its tail landing on the next cell's place, which that cell
+//      writes after, or in the strip row's padding past the last cell. A
+//      blank or a glyph that hangs out of its cell is the cell's zeros with
+//      what of the glyph is inside.
+typedef p8 font_v16 __attribute__((vector_size(16)));
+
+static inline fn font_lay_cell(p8 address_to into, positive stride, const font_bitmap address_to box, b32 dx,
+                               b32 dy, b32 width, b32 height, b32 from, b32 rows, const p8 address_to limit)
+{
+        if (box->width == width && box->height == height && !dx && !dy && box->coverage)
+        {
+                const p8 address_to source = box->coverage + (positive)from * box->stride;
+
+                //      The word reads past the bitmap's row into the atlas,
+                //      never past the atlas.
+                if (width <= 16 && source + (positive)(rows - 1) * box->stride + 16 <= limit)
+                        for (b32 r = 0; r < rows; r++, into += stride, source += box->stride)
+                                memory_store_unaligned(font_v16, into, memory_load_unaligned(font_v16, source));
+                else
+                        for (b32 r = 0; r < rows; r++, into += stride, source += box->stride)
+                                memory_copy(into, source, (positive)width);
+                return;
+        }
+        for (b32 r = 0; r < rows; r++, into += stride)
+        {
+                b32 g = from + r - dy, left = dx < 0 ? 0 : dx;
+                b32 right = dx + box->width < width ? dx + box->width : width;
+
+                memory_zero(into, (positive)width);
+                if (box->coverage && g >= 0 && g < box->height && left < right)
+                        memory_copy(into + left, box->coverage + (positive)g * box->stride + (left - dx),
+                                    (positive)(right - left));
+        }
+}
+
+/*
+        A run of single cells on one pair of colours, left to right from x:
+        what a terminal's row mostly is. One cell at a time is a rectangle of
+        a few pixels a row through the library, a short masked store a row,
+        and that store, not the glyph, was the cell's cost (11 cycles a row of
+        a cell at 16 px). So the run's cells are found first, their coverage
+        rows laid side by side in the strip, and the strip made pixels in one
+        call: rows as wide as the run, written with whole vector stores.
+
+        Finding a cell can draw a glyph into the atlas, and drawing one can
+        empty the atlas when it is full, which would leave the cells found
+        before it pointing at another glyph's place. So when the generation
+        moves while the run is found it is found again, and a run whose
+        glyphs do not fit the atlas at once is drawn a cell at a time.
+*/
+fn font_cells(font_engine address_to e, const font_face address_to const address_to faces, p32 count,
+              const p32 address_to codes, p32 n, const font_metrics address_to grid, p32 size, p32 flags,
+              const font_target address_to target, b32 x, b32 y, p32 colour, p32 background)
+{
+        b32 width = grid->cell_width, height = grid->cell_height;
+        positive across = (positive)n * (positive)(width > 0 ? width : 0);
+        bool found = false;
+
+        if (!(background & FONT_UNKNOWN) && n && n <= FONT_RUN && width > 0 && height > 0 && x >= 0 && y >= 0 &&
+            x + (b64)across <= target->width && y + height <= target->height && across + 16 <= FONT_STRIP)
+                for (p32 attempt = 0; attempt < 2 && !found; attempt++)
+                {
+                        p32 generation = (font_sync(e), e->generation);
+                        p64 base = font_cell_base(faces, count, size, flags, 1), shape = font_cell_shape(grid);
+
+                        found = true;
+                        for (p32 i = 0; i < n && found; i++)
+                        {
+                                b32 dx, dy;
+
+                                e->run[i] = font_cell_box(e, faces, count, codes[i], 1, grid, size, flags, base, shape,
+                                                          &dx, &dy);
+                                e->run_dx[i] = (b16)dx;
+                                e->run_dy[i] = (b16)dy;
+                                found = !e->scratched;
+                        }
+                        found = found && e->generation == generation;
+                }
+        if (!found)
+        {
+                for (p32 i = 0; i < n; i++)
+                        font_cell(e, faces, count, codes[i], 1, grid, size, flags, target, x + (b32)i * width, y,
+                                  colour, background);
+                return;
+        }
+
+        //      Strip rows are 16 bytes longer than the run, for the last
+        //      cell's word.
+        const p32 address_to pixel = font_tones(e, colour, background);
+        positive stride = across + 16;
+        const p8 address_to limit = e->atlas + (positive)e->atlas_width * e->atlas_height;
+        b32 band = (b32)(FONT_STRIP / stride);
+        band = band > height ? height : band;
+        for (b32 from = 0; from < height; from += band)
+        {
+                b32 rows = from + band > height ? height - from : band;
+
+                for (p32 i = 0; i < n; i++)
+                        font_lay_cell(e->strip + (positive)i * (positive)width, stride, &e->run[i], e->run_dx[i],
+                                      e->run_dy[i], width, height, from, rows, limit);
+                memory_translate_u32_rect(target->pixels + (positive)(y + from) * target->stride + (positive)x,
+                                          target->stride, e->strip, stride, across, (positive)rows, pixel);
+        }
 }
 
 #endif // MOONWATER_CANVAS_FONT

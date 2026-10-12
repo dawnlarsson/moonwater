@@ -98496,6 +98496,41 @@ static fn check_snap()
         }
 }
 
+/*
+        A run of cells is the same pixels as its cells drawn one at a time:
+        glyphs, blanks, drawn box and block cells and a code no face has,
+        on a known ground, from a fresh engine and again from a warm one;
+        a run that reaches past the target's edge, which is drawn a cell at
+        a time; and in an engine whose atlas holds a few cells, so that the
+        run's own glyphs empty it while the run is being found.
+*/
+static p32 cells_one[64 * 400], cells_two[64 * 400];
+
+static fn check_cells(font_engine address_to with, const font_face address_to two)
+{
+        const font_face address_to chain[1] = {two};
+        static const p32 codes[] = {'A', ' ', 'B', 0x2500, 0x253c, 0x2588, 'C', 0x1f600, 'D', 'A', ' ', 0x2593, 'B'};
+        p32 n = sizeof(codes) / sizeof(codes[0]);
+        font_metrics grid = font_metrics_at(two, 18 * 64);
+
+        for (p32 pass = 0; pass < 3; pass++)
+        {
+                //      Pass 2 starts the run so that its last cells hang past
+                //      the right edge.
+                b32 x = pass == 2 ? 400 - (b32)(n - 2) * grid.cell_width : 3;
+                font_target one = {cells_one, 400, 400, 64}, other = {cells_two, 400, 400, 64};
+
+                memory_fill_u32(cells_one, sizeof(cells_one) / 4, 0xabcdef);
+                memory_fill_u32(cells_two, sizeof(cells_two) / 4, 0xabcdef);
+                font_cells(with, chain, 1, codes, n, &grid, 18 * 64, 0, &one, x, 5, 0xdfe7ef, 0x303030);
+                for (p32 i = 0; i < n; i++)
+                        font_cell(with, chain, 1, codes[i], 1, &grid, 18 * 64, 0, &other, x + (b32)i * grid.cell_width,
+                                  5, 0xdfe7ef, 0x303030);
+                bool same = !memory_compare(cells_one, cells_two, sizeof(cells_one));
+                check("cells: a run draws what its cells draw one at a time", same);
+        }
+}
+
 static fn ground(p32 address_to pixels)
 {
         for (p32 i = 0; i < 96 * 96; i++)
@@ -99108,6 +99143,8 @@ b32 main()
         check_shapes();
         check_snap();
         check_drawing(&one, &two);
+        check_cells(&engine, &two);
+        check_cells(&small_engine, &two);
         check_translate();
         check_blend();
         check_fill_rect();

@@ -455,10 +455,14 @@ static void terminal_decorate(unsigned int address_to pixels, const struct windo
 
 /*
         The cells of one row from first to last that differ from what the
-        buffer holds, or all of them where it holds nothing yet. A cell with
-        a glyph is one font_cell: its ground and its glyph in one pass, each
-        pixel once. A run of blanks on one ground is one fill.
+        buffer holds, or all of them where it holds nothing yet. Neighbouring
+        cells with glyphs on one pair of colours and one face are one
+        font_cells, which lays their coverage side by side and makes it
+        pixels in one pass, rows as wide as the run; a cell with a line under
+        or through it, or a wide one, is its own font_cell. A run of blanks
+        on one ground is one fill.
 */
+static p32 terminal_codes[FONT_RUN];
 static void terminal_row(unsigned int address_to pixels, unsigned int row,
                          const struct window_cell address_to now,
                          const struct window_cell address_to old, unsigned int first,
@@ -467,6 +471,19 @@ static void terminal_row(unsigned int address_to pixels, unsigned int row,
         font_target target = {pixels, terminal.width, (b32)terminal.width, (b32)terminal.height};
         int y = (int)(row * terminal.cell_h);
         unsigned int run = 0, run_from = 0, run_colour = 0;
+        unsigned int glyphs = 0, glyphs_from = 0, glyphs_ink = 0, glyphs_paper = 0;
+        b32 glyphs_heavy = 0;
+
+#define TERMINAL_GLYPHS()                                                                              \
+        do                                                                                             \
+        {                                                                                              \
+                if (glyphs)                                                                            \
+                        font_cells(terminal.engine, glyphs_heavy ? terminal.bold : terminal.plain,     \
+                                   glyphs_heavy ? terminal.bold_count : terminal.plain_count,          \
+                                   terminal_codes, glyphs, &terminal.grid, terminal.size, 0, &target,  \
+                                   (b32)(glyphs_from * terminal.cell_w), y, glyphs_ink, glyphs_paper); \
+                glyphs = 0;                                                                            \
+        } while (0)
 
         for (unsigned int at = first; at < last; at++)
         {
@@ -490,6 +507,31 @@ static void terminal_row(unsigned int address_to pixels, unsigned int row,
                         glyph = decor = false;
                         cells = 0;
                 }
+
+                if (glyph && cells == 1 && !decor)
+                {
+                        b32 heavy = (cell->flags & WINDOW_CELL_BOLD) && terminal.bold_count;
+
+                        if (run)
+                                terminal_fill(pixels, (int)(run_from * terminal.cell_w), y, run * terminal.cell_w,
+                                              terminal.cell_h, run_colour);
+                        run = 0;
+                        if (cell->flags & WINDOW_CELL_DIM)
+                                ink = terminal_mix(ink, paper);
+                        if (glyphs && (glyphs_from + glyphs != at || glyphs_ink != ink || glyphs_paper != paper ||
+                                       glyphs_heavy != heavy || glyphs == FONT_RUN))
+                                TERMINAL_GLYPHS();
+                        if (!glyphs)
+                        {
+                                glyphs_from = at;
+                                glyphs_ink = ink;
+                                glyphs_paper = paper;
+                                glyphs_heavy = heavy;
+                        }
+                        terminal_codes[glyphs++] = cell->character;
+                        continue;
+                }
+                TERMINAL_GLYPHS();
 
                 if (cells && !glyph && !decor)
                 {
@@ -538,9 +580,11 @@ static void terminal_row(unsigned int address_to pixels, unsigned int row,
                 at += cells - 1;
         }
 
+        TERMINAL_GLYPHS();
         if (run)
                 terminal_fill(pixels, (int)(run_from * terminal.cell_w), y, run * terminal.cell_w,
                               terminal.cell_h, run_colour);
+#undef TERMINAL_GLYPHS
 }
 
 // The track and the thumb in the gutter, or the gutter empty when everything fits.
