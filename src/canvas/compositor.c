@@ -37,6 +37,15 @@
         Damage is the union of what the programs say changed, composed
         straight onto the scanout, each pixel once.
 
+        What the kernel desktop did for a hand and a keyboard it does here:
+        keys are the characters of the layout `moonwater keyboard` set (every
+        layout the kernel had, AltGr as the third level, dead accents and
+        Caps Lock besides), Alt-Tab, Alt-F9 and Control-Shift-T are the
+        compositor's, the pointer is gained by the speed of the hand and wears
+        a shape for the edge it is over, a window is arranged to fill the work
+        area or half of it by a double click or by a drag to an edge, and a
+        machine that slept has its screen drawn again.
+
         `surface` is a test client: a window of one colour, a line of text
         drawn with font.c when it is given a TrueType file, and a report on
         standard output of every event it is sent. `panel` is the panel as a
@@ -658,6 +667,7 @@ static void compositor_scene(const struct compositor_target *t,
 #define CK_KEY_BACKSPACE 14
 #define CK_KEY_TAB 15
 #define CK_KEY_F9 67
+#define CK_KEY_T 20
 #define CK_ACUTE 0xB4u
 #define CK_GRAVE '`'
 #define CK_DIAERESIS 0xA8u
@@ -1314,6 +1324,21 @@ struct compositor_dirty
         unsigned long clips;
 };
 
+struct compositor_version
+{
+        int major, minor, patchlevel;
+        unsigned long name_length;
+        char *name;
+        unsigned long date_length;
+        char *date;
+        unsigned long description_length;
+        char *description;
+};
+
+_Static_assert(sizeof(struct compositor_version) == 64, "drm_version");
+
+#define COMPOSITOR_VERSION COMPOSITOR_DRM(0x00u, 64u)
+
 struct compositor_cursor
 {
         unsigned int flags, crtc_id;
@@ -1361,6 +1386,7 @@ struct compositor_absinfo
 #define COMPOSITOR_EV_KEY 1u
 #define COMPOSITOR_EV_REL 2u
 #define COMPOSITOR_EV_ABS 3u
+#define COMPOSITOR_EV_SW 5u
 #define COMPOSITOR_REL_X 0u
 #define COMPOSITOR_REL_Y 1u
 #define COMPOSITOR_REL_WHEEL 8u
@@ -1373,6 +1399,7 @@ struct compositor_absinfo
 #define COMPOSITOR_BTN_LEFT 0x110u
 #define COMPOSITOR_BTN_TASK 0x117u
 #define COMPOSITOR_KEY_A 30u
+#define COMPOSITOR_KEY_POWER 116u
 
 struct compositor_poll
 {
@@ -1387,6 +1414,14 @@ struct compositor_poll
 #define COMPOSITOR_INPUTS 16
 #define COMPOSITOR_DEVICES 64 // evdev numbers the hotplug watch can name
 #define COMPOSITOR_GRANTS 16
+// How long the processor is kept out of its deep idle states after the last thing a person did.
+#define COMPOSITOR_HOLD_NS 500000000ull
+// A machine slept when the clock that runs through a sleep got this far ahead of the one that does
+// not, and the screen is drawn again then, at half a second and at two and a half: a card's driver
+// is still settling after a wake, and the later passes are the ones that land.
+#define COMPOSITOR_SLEPT_NS 50000000ull
+#define COMPOSITOR_WAKE_FIRST_NS 500000000ull
+#define COMPOSITOR_WAKE_SECOND_NS 2000000000ull
 // Two presses on a titlebar are a pair when the second comes this soon after the first,
 // and a drag that ends this near the edge of the output fills the work area or half of it.
 #define COMPOSITOR_AGAIN_NS 400000000ull
@@ -1521,6 +1556,18 @@ static struct
                 unsigned long paints, moves, refused; // on the plane: shapes given it, moves, and times it refused
         } cursor;
         struct compositor_shake shake;
+        char driver[16];            // the card's driver, which says whether it is a real card
+        struct compositor_mode mode; // the mode the crtc is on
+        unsigned int connector;
+        positive asleep;            // the clock that runs through a sleep less the one that does not, when last looked at
+        positive wake_at;           // when the next of the redraws after a wake is due
+        int wake_stage;             // 0, or the redraw after a wake that is next: 1 at half a second, 2 at two and a half
+        positive motion_ts;         // when the hand's oldest movement not yet shown was reported
+        int hold;                   // /dev/cpu_dma_latency, open with a zero in it while a person is at the machine, or -1
+        positive hold_until;
+        unsigned long holds;        // how many times it was taken
+        struct { positive total, count, worst; } latency[3]; // pointer to plane, pointer to frame, key to window
+        unsigned char wakeonly[COMPOSITOR_INPUTS]; // a power button or a lid: it wakes the loop and says nothing it uses
         int cycle;           // an Alt-Tab is under way: the z of the window it is on, from 1
         int raw_x, raw_y;    // what the mouse has said since its last report
         int accel_x, accel_y; // the fraction of a pixel the gain has not yet paid out
@@ -1788,12 +1835,14 @@ static void compositor_present(void)
         not a modeset, and what keeps every coordinate the same on both sides
         of it. A connector with no crtc driving it takes its first mode.
 */
+static void compositor_kmsg(string_address text, positive value, string_address tail);
+
 static b32 compositor_card_open(void)
 {
         struct compositor_card_res resources = {0};
         unsigned int connectors[16], crtcs[16];
         struct compositor_mode mode;
-        unsigned int connector = 0, crtc = 0;
+        unsigned int connector = 0, crtc = 0, screens = 0;
         int have_mode = 0;
 
         compositor.card = (int)system_open_at(AT_FDCWD, (string_address) "/dev/dri/card0",
@@ -1805,6 +1854,15 @@ static b32 compositor_card_open(void)
             system_control(compositor.card, COMPOSITOR_GETRESOURCES, address_of resources) != 0)
                 return -COMPOSITOR_EBUSY;
 
+        {
+                struct compositor_version version = {0};
+
+                version.name_length = sizeof(compositor.driver) - 1;
+                version.name = compositor.driver;
+                if (system_control(compositor.card, COMPOSITOR_VERSION, address_of version) != 0)
+                        compositor.driver[0] = 0;
+        }
+
         if (resources.connector_count > 16 || resources.crtc_count > 16 || !resources.crtc_count)
                 return -COMPOSITOR_EINVAL;
 
@@ -1814,7 +1872,7 @@ static b32 compositor_card_open(void)
         if (system_control(compositor.card, COMPOSITOR_GETRESOURCES, address_of resources) != 0)
                 return -COMPOSITOR_EINVAL;
 
-        for (unsigned int at = 0; at < resources.connector_count && !have_mode; at++)
+        for (unsigned int at = 0; at < resources.connector_count; at++)
         {
                 struct compositor_connector probe = {.connector_id = connectors[at]};
                 struct compositor_mode modes[64];
@@ -1823,6 +1881,10 @@ static b32 compositor_card_open(void)
 
                 if (system_control(compositor.card, COMPOSITOR_GETCONNECTOR, address_of probe) != 0 ||
                     probe.connection != 1 || !probe.mode_count)
+                        continue;
+
+                screens++;
+                if (have_mode)
                         continue;
 
                 probe.mode_count = probe.mode_count > 64 ? 64 : probe.mode_count;
@@ -1852,9 +1914,17 @@ static b32 compositor_card_open(void)
         if (!have_mode)
                 return -COMPOSITOR_EINVAL;
 
+        // One screen is drawn on. The kernel desktop was one desktop across every screen of every
+        // card; this is not yet, and says so where the machine's log has it.
+        if (screens > 1)
+                compositor_kmsg((string_address) "compositor: more than one screen is connected and this draws on one of them, screens: ",
+                                screens, (string_address) "");
+
         compositor.width = mode.hdisplay;
         compositor.height = mode.vdisplay;
         compositor.crtc = crtc;
+        compositor.mode = mode;
+        compositor.connector = connector;
         compositor.period = 1000000000ull / (mode.vrefresh >= 24 && mode.vrefresh <= 1000 ? mode.vrefresh : 60);
 
         struct compositor_dumb dumb = {(unsigned int)compositor.height,
@@ -1915,20 +1985,6 @@ static b32 compositor_card_open(void)
         framebuffer changes. The software pointer is a rectangle of damage
         where it was and where it is, and is drawn over what is composed there.
 */
-struct compositor_version
-{
-        int major, minor, patchlevel;
-        unsigned long name_length;
-        char *name;
-        unsigned long date_length;
-        char *date;
-        unsigned long description_length;
-        char *description;
-};
-
-_Static_assert(sizeof(struct compositor_version) == 64, "drm_version");
-
-#define COMPOSITOR_VERSION COMPOSITOR_DRM(0x00u, 64u)
 
 // A pointer's cell, in the scale and shape it is drawn: where it was last damaged and drawn.
 static int compositor_cursor_scale(void)
@@ -1947,16 +2003,12 @@ static void compositor_cursor_cell_damage(int x, int y, unsigned int shape, int 
 // Whether this card's cursor plane is worth using: the driver's name and the setting Canvas was started with.
 static int compositor_cursor_plane_wanted(void)
 {
-        struct compositor_version version = {0};
-        char name[16] = {0};
+        const char *name = compositor.driver;
         p8 setting[4] = {0};
         bipolar handle;
 
-        version.name_length = sizeof(name) - 1;
-        version.name = name;
-        if (system_control(compositor.card, COMPOSITOR_VERSION, address_of version) == 0 &&
-            ((name[0] == 'i' && name[1] == '9' && name[2] == '1' && name[3] == '5' && !name[4]) ||
-             (name[0] == 'x' && name[1] == 'e' && !name[2])))
+        if ((name[0] == 'i' && name[1] == '9' && name[2] == '1' && name[3] == '5' && !name[4]) ||
+            (name[0] == 'x' && name[1] == 'e' && !name[2]))
                 return 0;
 
         handle = system_open_at(AT_FDCWD, (string_address) "/sys/module/moonwater/parameters/cursor_plane",
@@ -2075,21 +2127,153 @@ static void compositor_cursor_move(void)
         }
 }
 
-// The layout Canvas has, which is the one `moonwater keyboard` last set.
+/*
+        What a sleep does to the screen. The card is left to the compositor and
+        nothing tells it the machine slept, so it works it out from the clocks:
+        CLOCK_BOOTTIME runs through a sleep and CLOCK_MONOTONIC does not, and
+        the first thing that wakes the loop afterwards (the key that woke the
+        machine, a power button, a lid) finds them further apart than they
+        were. A real card's driver restores the state it saved, and a panel
+        that state says is on and the hardware is not showing is answered by a
+        plane update as if nothing had happened; only an active change makes it
+        program the pipe again, which is turning the crtc off and on. That is
+        done once, at half a second, where the driver has settled, and not for
+        a virtual card, which has no such drift and does not always get its
+        host window back from an off.
+*/
+static int compositor_virtual(void)
+{
+        static const char *const guests[] = {"bochs-drm", "virtio_gpu", "qxl", "vmwgfx", "cirrus-qemu", "hyperv_drm", "vkms"};
+
+        for (unsigned int at = 0; at < sizeof(guests) / sizeof(guests[0]); at++)
+        {
+                unsigned int same = 0;
+
+                while (guests[at][same] && guests[at][same] == compositor.driver[same])
+                        same++;
+                if (!guests[at][same] && !compositor.driver[same])
+                        return 1;
+        }
+        return 0;
+}
+
+// How far ahead of the clock that stops in a sleep the one that does not is, in nanoseconds.
+static positive compositor_slept_clock(void)
+{
+        long boot[2] = {0, 0}, mono[2] = {0, 0};
+        long long ahead;
+
+        compositor_call(syscall(clock_gettime), 7, (positive)boot, 0, 0, 0, 0);
+        compositor_call(syscall(clock_gettime), 1, (positive)mono, 0, 0, 0, 0);
+        ahead = ((long long)boot[0] - mono[0]) * 1000000000ll + (boot[1] - mono[1]);
+        return ahead < 0 ? 0 : (positive)ahead;
+}
+
+static void compositor_resume(int cycle)
+{
+        if (compositor.card < 0)
+                return;
+
+        if (cycle && !compositor_virtual())
+        {
+                struct compositor_crtc off = {0, 0, compositor.crtc, 0, 0, 0, 0, 0, {0}};
+                struct compositor_crtc on = {(unsigned long)address_of compositor.connector, 1, compositor.crtc,
+                                             compositor.fb, 0, 0, 0, 1, compositor.mode};
+
+                system_control(compositor.card, COMPOSITOR_SETCRTC, address_of off);
+                system_control(compositor.card, COMPOSITOR_SETCRTC, address_of on);
+        }
+
+        // What the plane wears and where it was is whatever the driver put back: say it all again.
+        compositor.cursor.plane_shape = -1;
+        compositor_damage(0, 0, compositor.width, compositor.height);
+        compositor_cursor_move();
+}
+
+// A line in the machine's log: the compositor's own output goes where its parent put it.
+static void compositor_kmsg(string_address text, positive value, string_address tail)
+{
+        p8 line[160];
+        positive length = 0;
+        bipolar handle;
+
+        while (text[length] && length < 100)
+        {
+                line[length] = text[length];
+                length++;
+        }
+        length += positive_into_string(line + length, value);
+        for (positive at = 0; tail[at] && length < sizeof(line) - 1; at++)
+                line[length++] = tail[at];
+        line[length++] = '\n';
+
+        handle = system_open_at(AT_FDCWD, (string_address) "/dev/kmsg", FILE_WRITE | O_CLOEXEC);
+        if (handle < 0)
+                return;
+        system_write_once(handle, line, length);
+        system_close(handle);
+}
+
+// Looked at whenever the loop wakes: whether the machine slept since it last did.
+static void compositor_wake_check(positive now)
+{
+        positive asleep = compositor_slept_clock();
+
+        if (asleep > compositor.asleep + COMPOSITOR_SLEPT_NS)
+        {
+                compositor_kmsg((string_address) "compositor: the machine slept for ",
+                                (asleep - compositor.asleep) / 1000000ull, (string_address) " ms, the screen is drawn again");
+                compositor_resume(0);
+                compositor.wake_stage = 1;
+                compositor.wake_at = now + COMPOSITOR_WAKE_FIRST_NS;
+        }
+        compositor.asleep = asleep;
+}
+
+// The redraws that follow a wake, when they are due.
+static void compositor_wake_pass(positive now)
+{
+        if (!compositor.wake_stage || now < compositor.wake_at)
+                return;
+
+        compositor_resume(compositor.wake_stage == 1);
+        if (++compositor.wake_stage == 3)
+                compositor.wake_stage = 0;
+        else
+                compositor.wake_at = now + COMPOSITOR_WAKE_SECOND_NS;
+}
+
+// The layout the machine keeps, which `moonwater keyboard` writes: the setting itself, and
+// failing that the one Canvas was told, which a machine that has not kept one still has.
 static void compositor_layout_read(void)
 {
         struct canvas_control control = {0};
-        b32 spark = system_open_at(AT_FDCWD, SPARK_DEVICE, FILE_READ_WRITE | O_CLOEXEC);
-        int layout;
+        char name[8] = {0};
+        bipolar handle = system_open_at(AT_FDCWD, (string_address) "/root/keyboard", FILE_READ | O_CLOEXEC);
+        int layout = -1;
 
-        if (spark < 0)
-                return;
+        if (handle >= 0)
+        {
+                bipolar got = system_read_once(handle, name, sizeof(name) - 1);
 
-        control.request = SPARK_CANVAS_LAYOUT;
-        layout = system_control(spark, SPARK_IOCTL_CANVAS, address_of control) >= 0
-                     ? compositor_layout_index(control.master_command)
-                     : -1;
-        system_close(spark);
+                system_close(handle);
+                for (bipolar at = 0; at < (got > 0 ? got : 0); at++)
+                        if (name[at] == '\n' || name[at] == ' ')
+                                name[at] = 0;
+                layout = compositor_layout_index(name);
+        }
+
+        if (layout < 0)
+        {
+                handle = system_open_at(AT_FDCWD, SPARK_DEVICE, FILE_READ_WRITE | O_CLOEXEC);
+                if (handle >= 0)
+                {
+                        control.request = SPARK_CANVAS_LAYOUT;
+                        if (system_control(handle, SPARK_IOCTL_CANVAS, address_of control) >= 0)
+                                layout = compositor_layout_index(control.master_command);
+                        system_close(handle);
+                }
+        }
 
         if (layout >= 0 && layout != compositor.keymap.layout)
         {
@@ -2144,8 +2328,11 @@ static void compositor_input_add(unsigned int number)
                        (keys[COMPOSITOR_KEY_A / 8] >> (COMPOSITOR_KEY_A % 8) & 1);
         int mouse = (kinds >> COMPOSITOR_EV_REL & 1) && (relative & 3) == 3;
         int tablet = (kinds >> COMPOSITOR_EV_ABS & 1) && (absolute & 3) == 3;
+        // A power button and a lid are not typed on, and a machine may be woken by either.
+        int wakes = ((kinds >> COMPOSITOR_EV_KEY & 1) && (keys[COMPOSITOR_KEY_POWER / 8] >> (COMPOSITOR_KEY_POWER % 8) & 1)) ||
+                    (kinds >> COMPOSITOR_EV_SW & 1);
 
-        if (!keyboard && !mouse && !tablet)
+        if (!keyboard && !mouse && !tablet && !wakes)
         {
                 system_close(handle);
                 return;
@@ -2154,6 +2341,7 @@ static void compositor_input_add(unsigned int number)
         compositor.absolute_x[at][0] = compositor.absolute_x[at][1] = 0;
         compositor.absolute_y[at][0] = compositor.absolute_y[at][1] = 0;
         compositor.held[at] = 0;
+        compositor.wakeonly[at] = (unsigned char)(!keyboard && !mouse && !tablet);
         // A wheel that reports in 120ths says so, and its detents are then not counted twice.
         compositor.hires[at] = (unsigned char)(relative >> COMPOSITOR_REL_WHEEL_HI & 1);
         // The events are stamped by the clock the speed of the hand is measured on.
@@ -3716,6 +3904,199 @@ static void compositor_accept(void)
         }
 }
 
+// How long a report took to be on its way to the screen or the window, which `moonwater latency`
+// of the kernel desktop was for: a count, a total and the worst, in nanoseconds.
+static void compositor_latency(unsigned int which, positive reported, positive now)
+{
+        positive took = reported && now > reported ? now - reported : 0;
+
+        compositor.latency[which].count++;
+        compositor.latency[which].total += took;
+        if (took > compositor.latency[which].worst)
+                compositor.latency[which].worst = took;
+}
+
+/*
+        How long the processor is allowed to take waking up. The largest cost
+        from a pointer moving to the program that draws it is the processor
+        coming back from an idle state, and the deeper the state the longer
+        that takes, so while a person is at the machine it is asked to stay
+        out of them: a zero in /dev/cpu_dma_latency, which holds for as long
+        as the file is open, taken after the first thing they do (the first
+        pays the wakeup either way: the processor was idle when the interrupt
+        came) and let go of half a second after the last. What counts is what
+        a hand or a key did and not a program's commit, so a clock ticking in
+        a window does not keep it. A request of zero is a processor polling,
+        which to cpufreq is busy, so it is not held a moment longer than that.
+*/
+static void compositor_hold_touch(positive now)
+{
+        int zero = 0;
+
+        compositor.hold_until = now + COMPOSITOR_HOLD_NS;
+        if (compositor.hold >= 0 || compositor.holds == ~0ul)
+                return;
+
+        compositor.hold = (int)system_open_at(AT_FDCWD, (string_address) "/dev/cpu_dma_latency", FILE_WRITE | O_CLOEXEC);
+        if (compositor.hold < 0)
+        {
+                // Not there on this machine: it is not asked for again.
+                compositor.hold = -1;
+                compositor.holds = ~0ul;
+                return;
+        }
+
+        system_write_once(compositor.hold, &zero, sizeof(zero));
+        compositor.holds++;
+}
+
+static void compositor_hold_drop(positive now)
+{
+        if (compositor.hold < 0 || now < compositor.hold_until)
+                return;
+
+        system_close(compositor.hold);
+        compositor.hold = -1;
+}
+
+// Whether text holds a word.
+static int compositor_has(const char *text, const char *word)
+{
+        for (; *text; text++)
+        {
+                unsigned int at = 0;
+
+                while (word[at] && text[at] == word[at])
+                        at++;
+                if (!word[at])
+                        return 1;
+        }
+        return 0;
+}
+
+// Whether a name ends in a suffix.
+static int compositor_ends(const char *name, const char *suffix)
+{
+        positive length = string_length((string_address)name), tail = string_length((string_address)suffix);
+
+        return length >= tail && !string_compare((string_address)name + length - tail, (string_address)suffix);
+}
+
+// A monospaced regular face in a directory of fonts, and one level of directories below it.
+static int compositor_font_in(const char *directory, int depth, char *into, positive room)
+{
+        char records[2048];
+        bipolar handle = system_open_at(AT_FDCWD, (string_address)directory, FILE_READ | O_CLOEXEC | O_DIRECTORY);
+        int found = 0;
+
+        if (handle < 0)
+                return 0;
+
+        for (bipolar got; !found && (got = system_read_directory(handle, records, sizeof(records))) > 0;)
+                for (bipolar at = 0; !found && at < got;)
+                {
+                        const char *name = records + at + 19;
+                        unsigned int length = *(unsigned short *)(records + at + 16), kind = (unsigned char)records[at + 18];
+                        positive base = string_length((string_address)directory);
+
+                        at += (bipolar)length;
+                        if (name[0] == '.' || base + 1 + string_length((string_address)name) + 1 >= room)
+                                continue;
+
+                        string_copy((string_address)into, (string_address)directory);
+                        into[base] = '/';
+                        string_copy((string_address)into + base + 1, (string_address)name);
+
+                        if (kind == 4 && depth == 0)
+                                found = compositor_font_in(into, 1, into, room);
+                        else if (kind != 4 && compositor_has(name, "Mono") && compositor_ends(name, ".ttf") &&
+                                 (depth == 0 || compositor_has(name, "Regular")))
+                                found = 1;
+                }
+
+        system_close(handle);
+        return found;
+}
+
+// The face a terminal draws with, as the machine script finds it: the first line of /root/font, or the
+// first monospaced one in /usr/share/fonts. The image has none, so a machine without one has no terminal.
+static int compositor_font(char *into, positive room)
+{
+        bipolar handle = system_open_at(AT_FDCWD, (string_address) "/root/font", FILE_READ | O_CLOEXEC);
+
+        if (handle >= 0)
+        {
+                bipolar got = system_read_once(handle, into, room - 1);
+                bipolar at = 0;
+
+                system_close(handle);
+                while (got > 0 && at < got && into[at] != '\n')
+                        at++;
+                into[at > 0 ? at : 0] = 0;
+                if (at > 0)
+                {
+                        bipolar probe = system_open_at(AT_FDCWD, (string_address)into, FILE_READ | O_CLOEXEC);
+
+                        if (probe >= 0)
+                        {
+                                system_close(probe);
+                                return 1;
+                        }
+                }
+        }
+
+        return compositor_font_in("/usr/share/fonts", 0, into, room);
+}
+
+// Control-Shift-T: a new terminal, which is a program of its own on the compositor.
+static void compositor_terminal(void)
+{
+        char face[160];
+        string_address arguments[4];
+
+        if (!compositor_font(face, sizeof(face)))
+        {
+                compositor_kmsg((string_address) "compositor: no font in /root/font or /usr/share/fonts, so no terminal", 0,
+                                (string_address) "");
+                return;
+        }
+
+        {
+                bipolar child = system_fork();
+
+                if (child != 0)
+                {
+                        if (child < 0)
+                                compositor_kmsg((string_address) "compositor: cannot start a terminal, error ", (positive)-child,
+                                                (string_address) "");
+                        return;
+                }
+        }
+
+        {
+                arguments[0] = (string_address) "/terminal";
+                arguments[1] = (string_address) "-f";
+                arguments[2] = (string_address)face;
+                arguments[3] = null;
+                // It stays in this program's session, so that ending the session ends it, and what this
+                // program arranged for itself is not the terminal's: an ignored signal stays
+                // ignored across an exec (a shell that is never told its children ended is a shell
+                // that waits for none), and so does a blocked one.
+                {
+                        unsigned long dfl[4] = {0, 0, 0, 0}, none = 0;
+
+                        compositor_call(syscall(rt_sigaction), 17, (positive)dfl, 0, 8, 0, 0);
+                        compositor_call(syscall(rt_sigprocmask), 2, (positive)&none, 0, 8, 0, 0);
+                }
+                {
+                        bipolar failed = system_execute("/terminal", arguments, program_environment_list());
+
+                        compositor_kmsg((string_address) "compositor: cannot run /terminal, error ", (positive)-failed, (string_address) "");
+                }
+                compositor_call(syscall(exit), 127, 0, 0, 0, 0, 0);
+        }
+}
+
 // What is held on every keyboard, as the flags a key event carries.
 static unsigned int compositor_modifiers(void)
 {
@@ -3734,11 +4115,11 @@ static unsigned int compositor_modifiers(void)
         and then, with the keys moved on by Alt-Tab, Alt going up would hold a
         modifier that never was), Alt-Tab and Alt-F9 with both edges of the
         key and whatever repeats, any other key typed while an Alt-Tab is under
-        way, and Control-Alt-Backspace, which Canvas hears for itself and acts
-        on. The rest make characters, one event each, for the surface that has
+        way, Control-Shift-T, and Control-Alt-Backspace and the same with Shift,
+        which Canvas hears for itself and acts on. The rest make characters, one event each, for the surface that has
         the keys; with none, a key gives them to the topmost.
 */
-static void compositor_key(unsigned int at, unsigned int code, int value)
+static void compositor_key(unsigned int at, unsigned int code, int value, positive reported)
 {
         unsigned int bit = compositor_held_bit(code), characters[2] = {0, 0}, flags, modifiers, chord;
         int count;
@@ -3775,7 +4156,15 @@ static void compositor_key(unsigned int at, unsigned int code, int value)
                 return;
         }
 
-        if ((chord == (SURFACE_KEY_ALT | SURFACE_KEY_CONTROL) && code == CK_KEY_BACKSPACE) ||
+        // A new terminal; a press and not a repeat, so a key held down does not fill the desktop with shells.
+        if (chord == (SURFACE_KEY_SHIFT | SURFACE_KEY_CONTROL) && code == CK_KEY_T)
+        {
+                if (value == 1)
+                        compositor_terminal();
+                return;
+        }
+
+        if (((chord & ~SURFACE_KEY_SHIFT) == (SURFACE_KEY_ALT | SURFACE_KEY_CONTROL) && code == CK_KEY_BACKSPACE) ||
             ((modifiers & SURFACE_KEY_ALT) && compositor.cycle))
                 return;
 
@@ -3792,6 +4181,8 @@ static void compositor_key(unsigned int at, unsigned int code, int value)
         for (int each = 0; each < (count ? count : 1); each++)
                 compositor_post(compositor.focus, SURFACE_EVENT_KEY, flags, 0, (int)code,
                                 (int)characters[each]);
+        if (value == 1)
+                compositor_latency(2, reported, clock_monotonic_nanoseconds());
 }
 
 // Where the pointer is in a surface's buffer.
@@ -3833,6 +4224,13 @@ static void compositor_motion(void)
                 compositor.cursor.magnified_until = clock_monotonic_nanoseconds() + COMPOSITOR_MAGNIFIED_NS;
         }
         compositor_cursor_move();
+
+        // On the plane the pointer is on the screen when the call returns; drawn, when the frame has gone.
+        if (compositor.motion_ts && !compositor.cursor.soft)
+        {
+                compositor_latency(0, compositor.motion_ts, clock_monotonic_nanoseconds());
+                compositor.motion_ts = 0;
+        }
 
         if (compositor.resize)
         {
@@ -4121,10 +4519,17 @@ static void compositor_input_read(unsigned int at)
                 if (got <= 0)
                         break;
 
+                // It woke the loop, and that was all it was for.
+                if (compositor.wakeonly[at])
+                        continue;
+
                 for (unsigned int i = 0; i < (unsigned int)got / sizeof(events[0]); i++)
                 {
                         struct compositor_input_event *event = &events[i];
                         positive now = (positive)event->seconds * 1000000000ull + (positive)event->microseconds * 1000ull;
+
+                        if ((event->type == COMPOSITOR_EV_REL && event->code < 2) || event->type == COMPOSITOR_EV_ABS)
+                                compositor.motion_ts = compositor.motion_ts ? compositor.motion_ts : now;
 
                         if (event->type == COMPOSITOR_EV_REL && event->code == COMPOSITOR_REL_X)
                         {
@@ -4166,12 +4571,15 @@ static void compositor_input_read(unsigned int at)
                                                   event->value != 0);
                         }
                         else if (event->type == COMPOSITOR_EV_KEY && event->code < 256)
-                                compositor_key(at, event->code, event->value);
+                                compositor_key(at, event->code, event->value, now);
                 }
         }
 
         if (moved)
                 compositor_motion();
+
+        if (!compositor.wakeonly[at])
+                compositor_hold_touch(clock_monotonic_nanoseconds());
 }
 
 static int compositor_listen(void)
@@ -4461,6 +4869,7 @@ static b32 compositor_main()
         for (unsigned int at = 0; at < COMPOSITOR_CLIENTS; at++)
                 compositor.clients[at].handle = -1;
         compositor.watch = -1;
+        compositor.hold = -1;
         compositor.bottom = 1;
         compositor.scale = 0;
 
@@ -4531,6 +4940,15 @@ static b32 compositor_main()
                       SURFACE_SOCKET);
         log_flush();
 
+        compositor.asleep = compositor_slept_clock();
+
+        // A terminal that was started and has ended is nobody's to wait for.
+        {
+                unsigned long ignore[4] = {1, 0, 0, 0};
+
+                compositor_call(syscall(rt_sigaction), 17, (positive)ignore, 0, 8, 0, 0);
+        }
+
         while (running)
         {
                 enum { WATCHED = 3 };
@@ -4574,6 +4992,18 @@ static b32 compositor_main()
                                                                                     : until;
                         }
 
+                if (compositor.wake_stage)
+                {
+                        now = clock_monotonic_nanoseconds();
+                        until = !until || compositor.wake_at < until ? compositor.wake_at : until;
+                }
+
+                if (compositor.hold >= 0)
+                {
+                        now = clock_monotonic_nanoseconds();
+                        until = !until || compositor.hold_until < until ? compositor.hold_until : until;
+                }
+
                 if (compositor.cursor.magnified)
                 {
                         now = clock_monotonic_nanoseconds();
@@ -4596,6 +5026,11 @@ static b32 compositor_main()
                 wait[1] = until > now ? (long)(until - now) : 0;
                 awaited = compositor_call(syscall(ppoll), (positive)wanted, count,
                                           until ? (positive)wait : 0, 0, 0, 0);
+
+                // Whatever woke the loop, a sleep may be what it woke from.
+                compositor_wake_check(clock_monotonic_nanoseconds());
+                compositor_wake_pass(clock_monotonic_nanoseconds());
+                compositor_hold_drop(clock_monotonic_nanoseconds());
 
                 if (awaited < 0)
                         continue;
@@ -4644,6 +5079,11 @@ static b32 compositor_main()
                         {
                                 compositor.presented = stamp;
                                 compositor_present();
+                                if (compositor.motion_ts)
+                                {
+                                        compositor_latency(1, compositor.motion_ts, clock_monotonic_nanoseconds());
+                                        compositor.motion_ts = 0;
+                                }
                         }
                 }
 
@@ -4669,6 +5109,15 @@ static b32 compositor_main()
         string_format(log, "compositor: %p pixels composed, the plane was given %p shapes and %p moves and refused %p times\n",
                       (positive)compositor.painted, (positive)compositor.cursor.paints, (positive)compositor.cursor.moves,
                       (positive)compositor.cursor.refused);
+        string_format(log, "compositor: the processor was held %p times\n", (positive)(compositor.holds == ~0ul ? 0 : compositor.holds));
+        for (unsigned int which = 0; which < 3; which++)
+                string_format(log, "compositor: %s: %p, on average %p us, worst %p us\n",
+                              which == 0 ? "pointer to the plane" : which == 1 ? "pointer to the frame" : "key to the window",
+                              (positive)compositor.latency[which].count,
+                              (positive)(compositor.latency[which].count
+                                             ? compositor.latency[which].total / compositor.latency[which].count / 1000
+                                             : 0),
+                              (positive)(compositor.latency[which].worst / 1000));
         log_flush();
         if (!headless)
                 compositor_hand_back();

@@ -18513,7 +18513,13 @@ sleep 2
 /surface -x 600 -y 300 -w 400 -h 300 -c 336699 -T edge -s 40 > /tmp/e2.out &
 sleep 1
 echo m9-ready
-sleep 14
+sleep 10
+a=$(grep '^voluntary_ctxt_switches' /proc/$c/status)
+sleep 5
+b=$(grep '^voluntary_ctxt_switches' /proc/$c/status)
+echo "m9 idle: $a -> $b"
+cat /proc/$c/status
+echo "m9 held: $(ls -l /proc/$c/fd | grep -c cpu_dma_latency)"
 kill $c
 wait $c
 echo m9-done
@@ -18532,7 +18538,7 @@ sleep 1
 /surface -R -x 300 -y 200 -w 400 -h 300 -c 996633 -T second -s 200 > /tmp/b.out &
 sleep 1
 echo m10-ready
-sleep 100
+sleep 75
 echo m10-sizes
 grep 'surface: size' /tmp/a.out | tr '\n' ' '
 echo
@@ -18541,6 +18547,28 @@ echo
 kill $c
 wait $c
 echo m10-done
+""")
+
+#   Control-Shift-T: a terminal started by the compositor, with the font the machine
+#   names in /root/font (the image has none, so the stick carries the host's).
+font11 = next((path for path in ("/usr/share/fonts/TTF/Hack-Regular.ttf", "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+                                 "/usr/share/fonts/dejavu/DejaVuSansMono.ttf",
+                                 "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+                                 "/usr/share/fonts/noto/NotoSansMono-Regular.ttf") if os.path.exists(path)), None)
+if font11:
+    import shutil
+    shutil.copy(font11, stick + "/font.ttf")
+open(stick + "/m11", "w").write(r"""exec > /dev/ttyS0 2>&1
+echo /mnt/font.ttf > /root/font
+/compositor &
+c=$!
+sleep 2
+echo m11-ready
+sleep 30
+echo "m11 terminals: $(ps | grep -c '[t]erminal')"
+kill $c
+wait $c
+echo m11-done
 """)
 
 open(stick + "/m1", "w").write(r"""exec > /dev/ttyS0 2>&1
@@ -19110,6 +19138,21 @@ out.append(("W5.1 Alt and a press on a window's body moves the window by the han
             "%s %s" % (w9(1250, 700), w9(250, 300)), "336699 1b2733"))
 wait_for(b"m10-done", 120)
 
+#   Control-Shift-T, twice: a terminal each, which is the compositor starting a program
+#   of its own, and not the one that holds the keys.
+if font11:
+    type_text("sh /mnt/m11\n")
+    ready11 = wait_for(b"m11-ready", 60)
+    time.sleep(0.5)
+    for press_t in range(2):
+        chord("ctrl", "shift", "t")
+        time.sleep(2)
+    wait_for(b"m11-done", 90)
+    text = serial().decode("latin1")
+    terminals = re.findall(r"m11 terminals: (\d+)", text)
+    out.append(("W6.1 Control-Shift-T starts a terminal: pressed twice there are two",
+                terminals[-1] if terminals else "none", "2"))
+
 
 
 
@@ -19119,6 +19162,10 @@ try:
     guest.wait(10)
 except Exception:
     guest.kill()
+
+for kind, count, average, worst in re.findall(r"compositor: (pointer to the plane|pointer to the frame|key to the window): (\d+), on average (\d+) us, worst (\d+) us", serial().decode("latin1")):
+    if int(count):
+        print("m1 compositor latency (drawn pointer), %s: %s events, on average %s us, worst %s us" % (kind, count, average, worst), file=sys.stderr)
 
 #   The cursor plane, in a guest that has it: the compositor says its pointer is on
 #   the plane, hands it a shape for each the pointer wears, and has none refused.
@@ -19142,6 +19189,16 @@ time.sleep(0.5)
 for x, y in ((1000, 460), (800, 621), (1000, 621), (1000, 301), (2000, 900)):
     moveto(x, y)
     time.sleep(0.3)
+#   A press on the window gives it the keys, and five typed at it say how long the compositor takes with a key.
+moveto(700, 450)
+time.sleep(0.2)
+for down in (True, False):
+    send([{"type": "btn", "data": {"down": down, "button": "left"}}])
+    time.sleep(0.1)
+for letter in "abcde":
+    key(letter)
+    time.sleep(0.1)
+moveto(2000, 900)
 stop = time.time() + 60
 while b"m9-done" not in serial_plane() and time.time() < stop:
     time.sleep(0.2)
@@ -19154,6 +19211,24 @@ out.append(("C1.10 and the plane is given its shapes (the arrow to begin with an
             "%s %s" % (
                 "yes" if given and int(given[-1][0]) >= 5 else (given[-1] if given else "none"),
                 given[-1][2] if given else "?"), "yes 0"))
+#   Idle: five seconds of nothing to the compositor, a window open and the pointer where it
+#   was left, and it was not woken once (the count of times it blocked and was woken is
+#   the process's voluntary context switches); and what it holds that is its own.
+idle = re.findall(r"m9 idle: voluntary_ctxt_switches:\s+(\d+) -> voluntary_ctxt_switches:\s+(\d+)", plane)
+out.append(("C1.11 a compositor with a window open and nothing happening is woken no time in five seconds",
+            str(int(idle[-1][1]) - int(idle[-1][0])) if idle else "no line", "0"))
+for kind, count, average, worst in re.findall(r"compositor: (pointer to the plane|pointer to the frame|key to the window): (\d+), on average (\d+) us, worst (\d+) us", plane):
+    print("m1 compositor latency, %s: %s events, on average %s us, worst %s us" % (kind, count, average, worst), file=sys.stderr)
+memory = dict((name, int(value)) for name, value in re.findall(r"(VmRSS|RssAnon|RssFile|RssShmem|VmData):\s+(\d+) kB", plane))
+print("m1 compositor memory, kB: %s" % memory, file=sys.stderr)
+held = re.findall(r"m9 held: (\d+)", plane)
+taken = re.findall(r"the processor was held (\d+) times", plane)
+out.append(("C1.12 and what it holds of its own (anonymous memory) is under 1,500 kB",
+            "yes" if memory and memory.get("RssAnon", 99999) < 1500 else str(memory), "yes"))
+out.append(("C1.13 the processor was held out of its idle states while a person was at the machine, and not five seconds after",
+            "%s %s" % ("yes" if taken and int(taken[-1]) >= 1 else (taken[-1] if taken else "no line"), held[-1] if held else "?"),
+            "yes 0"))
+
 qcmd({"execute": "quit"})
 try:
     guest.wait(10)
@@ -19175,7 +19250,7 @@ else
         while IFS='|' read -r name got want; do
                 same "$name" "$want" "$got"
         done < "$work/m1-answers"
-        sed -n 's/^m1 hand-back/  canvas       hand-back/p' "$work/m1-why"
+        sed -n 's/^m1 hand-back/  canvas       hand-back/p;s/^m1 compositor memory/  canvas       compositor memory/p;s/^m1 compositor latency/  canvas       compositor latency/p' "$work/m1-why"
 fi
 fi
 
@@ -20336,7 +20411,7 @@ export MOONWATER_SLEEP_WORK
 qmp_guest_module "$work"
 
 PYTHONPATH=$work python3 - "$image" > "$work/answers" 2>"$work/why" <<'PY'
-import os, socket, sys, time
+import os, re, socket, sys, time
 from qmp_guest import *
 
 image = sys.argv[1]
@@ -20356,6 +20431,9 @@ def drawn(name):
     return colours >= 5 and share > 0.05
 
 for label, extra in (("plain", ""), ("dark", "moonwater.pm_dark=5"), ("undone", "moonwater.pm_dark=3")):
+    # SLEEP_ONLY=compositor runs the last guest alone, for a parent and a fix compared in one sitting.
+    if os.environ.get("SLEEP_ONLY") and os.environ["SLEEP_ONLY"] != label:
+        continue
     work = base + "/" + label
     os.makedirs(work, exist_ok=True)
     console = work + "/console"
@@ -20454,6 +20532,88 @@ for label, extra in (("plain", ""), ("dark", "moonwater.pm_dark=5"), ("undone", 
         guest.wait(10)
     except Exception:
         guest.kill()
+
+#       And with the compositor in userspace holding the card, which nothing
+#       tells that the machine slept: it finds out from the clocks when the
+#       key that wakes it arrives, says so in the machine's log, and draws the
+#       screen again. The plain boot starts it, with its own panel and no terminal
+#       (the image has no font), so the shell is the serial line.
+label = "compositor"
+work = base + "/" + label
+os.makedirs(work, exist_ok=True)
+console = work + "/console"
+guest = Guest(["qemu-system-x86_64", "-m", "2G", "-smp", "2", "-cpu", "host", "-enable-kvm",
+    "-kernel", image, "-vga", "std", "-no-reboot", "-display", "none", "-nic", "user,model=e1000",
+    "-chardev", "socket,id=console,path=" + console + ",server=on,wait=off", "-serial", "chardev:console",
+    "-append", "console=ttyS0 drm_client_lib.active="],
+    work + "/qmp", work + "/mon", work, (console,), 0.1)
+serial = socket.socket(socket.AF_UNIX)
+serial.connect(console)
+serial.settimeout(0.2)
+transcript = bytearray()
+
+def pump(seconds):
+    stop = time.time() + seconds
+    while time.time() < stop:
+        try:
+            chunk = serial.recv(65536)
+        except socket.timeout:
+            continue
+        except OSError:
+            return
+        if not chunk:
+            return
+        transcript.extend(chunk)
+
+def wait_for(marker, seconds):
+    stop = time.time() + seconds
+    while marker.encode() not in transcript and time.time() < stop:
+        pump(0.3)
+    return marker.encode() in transcript
+
+def ink(name):
+    # The desktop's ink at the top left and the panel's at the bottom left: the compositor's own picture.
+    w, h, px = load(name)
+    at = lambda x, y: "%02x%02x%02x" % tuple(px[(y * w + x) * 3:(y * w + x) * 3 + 3])
+    return "%s %s" % (at(10, 10), at(300, h - 10))
+
+def asked(command, marker, seconds=20):
+    serial.sendall(command.encode() + b"; echo " + marker.encode() + b"-END\n")
+    wait_for(marker + "-END\r", seconds)
+    return bytes(transcript)
+
+time.sleep(8)
+serial.sendall(b"echo READY-$((20+1))\n")
+out.append((label + ": the serial shell answers", "yes" if wait_for("READY-21", 30) else "no", "yes"))
+shot("up", 1)
+out.append((label + ": the compositor's desktop and panel are on the screen before the sleep", ink("up"), "1b2733 2f3f52"))
+mark = len(transcript)
+serial.sendall(b"moonwater sleep > /dev/ttyS0 2>&1\n")
+out.append((label + ": the verb is sleeping", "yes" if wait_for("mem_sleep", 20) else "no", "yes"))
+time.sleep(4)
+shot("during", 1)
+out.append((label + ": the screen is off while it sleeps", ink("during") != "1b2733 2f3f52" and "yes" or ink("during"), "yes"))
+key("shift")
+out.append((label + ": a key wakes it", "yes" if wait_for("awake again", 40) else "no", "yes"))
+time.sleep(4)
+asked("dmesg | grep -c 'compositor: the machine slept for'", "SLEPT")
+counted = re.findall(rb"\r?\n(\d+)\r?\nSLEPT-END", bytes(transcript))
+out.append((label + ": the compositor finds it slept and says so in the log, once",
+            counted[-1].decode() if counted else "no answer", "1"))
+time.sleep(3)
+shot("after", 1)
+out.append((label + ": its desktop and panel are on the screen again", ink("after"), "1b2733 2f3f52"))
+pump(1)
+after = bytes(transcript[mark:])
+bad = [word for word in ("WARNING:", "BUG:", "Oops", "Call Trace") if word.encode() in after]
+out.append((label + ": the kernel says nothing is wrong", ",".join(bad) or "yes", "yes"))
+guest.quit()
+time.sleep(1)
+guest.terminate()
+try:
+    guest.wait(10)
+except Exception:
+    guest.kill()
 
 for name, got, want in out:
     print("%s|%s|%s" % (name, got, want))
