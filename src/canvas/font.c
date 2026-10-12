@@ -183,10 +183,11 @@
         reads every pixel under the glyph and blends with it instead.
 
         flags: FONT_UNHINTED draws the outline as the font gives it,
-        FONT_DARKEN asks for stem darkening, FONT_UNKERNED leaves pairs
-        alone, FONT_OBLIQUE slants the face 12 degrees for an italic it does
-        not have, FONT_EMBOLDEN thickens it by a 24th of the size for a bold
-        it does not have.
+        FONT_DARKEN asks for stem darkening, which font_draw and font_cell
+        give dark text on a lighter ground unasked and FONT_UNDARKENED takes
+        away, FONT_UNKERNED leaves pairs alone, FONT_OBLIQUE slants the face
+        12 degrees for an italic it does not have, FONT_EMBOLDEN thickens it
+        by a 24th of the size for a bold it does not have.
 
         Dawn Larsson - Apache-2.0 license
         github.com/dawnlarsson/moonwater
@@ -208,6 +209,7 @@
 #define FONT_UNKERNED 4
 #define FONT_OBLIQUE 8
 #define FONT_EMBOLDEN 16
+#define FONT_UNDARKENED 32
 
 #define FONT_DRAWN 0xffff
 #define FONT_UNKNOWN 0xff000000u
@@ -372,7 +374,7 @@ typedef struct
         p32 cover, area, gathered, used[5];
         b32 floor_y, height_y, wide_x;
         p8 ramp[256];
-        p32 ramp_colour, ramp_contrast, plain;
+        p32 ramp_colour, ramp_ground, ramp_contrast, plain;
         p64 shared[FONT_EDGE / 64 + 1];
         font_shelf shelves[FONT_SHELVES];
 
@@ -3060,6 +3062,47 @@ static p32 font_style(const font_engine address_to e, p32 size, p32 flags)
                (flags & FONT_OBLIQUE ? 8 : 0) | (flags & FONT_EMBOLDEN ? 16 : 0);
 }
 
+//      Lightness of a colour as 0.30 red, 0.59 green and 0.11 blue, of 65280.
+static inline p32 font_luma(p32 colour)
+{
+        return 77 * (colour >> 16 & 255) + 150 * (colour >> 8 & 255) + 29 * (colour & 255);
+}
+
+//      Text darker than its ground by three quarters of the way from black
+//      to white or more -- black or near it on a light ground -- is
+//      darkened unasked, unless the caller says FONT_UNDARKENED. Lighter
+//      ink is not: its edge pixels are already fuller of it in linear light
+//      (darkened, 909090 on white read 1.21 times its ink at 48 px at 8 px,
+//      and white on black 1.23 to 1.39 at 8 to 11). On a ground not known,
+//      text under half light is taken for dark on white.
+static inline p32 font_polarity(p32 flags, p32 colour, p32 background)
+{
+        p32 ink = font_luma(colour);
+        p32 ground = background & FONT_UNKNOWN ? (ink < 32640 ? 65280 : 0) : font_luma(background);
+
+        if (flags & FONT_UNDARKENED)
+                return flags & ~(p32)(FONT_DARKEN | FONT_UNDARKENED);
+        return ink + 48960 <= ground ? flags | FONT_DARKEN : flags;
+}
+
+/*
+        How strong dark text's contrast curve is at a size, in 64ths of k:
+        e->contrast where the text is not darkened, and where it is, a
+        quarter of that at 12 px and under, back to all of it at the size
+        darkening has faded out by, as darkening fades. Darkening gives
+        small text the weight the curve was giving it, and both at once was
+        1.13 to 1.25 times the ink at 48 px at 8 to 12 px.
+*/
+static p32 font_strength(const font_engine address_to e, p32 size, p32 flags)
+{
+        b32 pixels = (b32)(size >> 6), until = (b32)e->darken_until;
+
+        if (!(font_style(e, size, flags) & 2) || until <= 12)
+                return e->contrast;
+        b32 faded = pixels <= 12 ? 0 : pixels >= until ? 64 : 64 * (pixels - 12) / (until - 12);
+        return (p32)((b64)e->contrast * (16 + 48 * faded / 64) / 64);
+}
+
 b32 font_render(font_engine address_to e, const font_face address_to face, p32 glyph,
                 p32 size, p32 phase, p32 flags, p8 address_to coverage,
                 positive stride, positive capacity, font_bitmap address_to box)
@@ -3853,15 +3896,26 @@ fn font_start(font_engine address_to e, p8 address_to atlas, p32 width, p32 heig
         font_tables();
 }
 
-static fn font_ramp(font_engine address_to e, p32 colour)
+//      The coverage curve and the share of the plain mix for text of one
+//      colour on another, at a strength from font_strength. Which way the
+//      text is, is the ink's lightness against the ground's. Darker ink
+//      takes the curve by the square of how much darker, all of it at nine
+//      tenths (black on white) and about half at two thirds, where blue
+//      2050c0 and 606060 on white read 1.09 to 1.18 times their ink at 48 px
+//      at 8 to 12 px with all of it, and 0.94 to 1.10 with half. Lighter ink
+//      takes the plain mix, all of it at half lighter. Keyed on the ink's
+//      lightness alone, green 4ec94e on black took two thirds of the curve
+//      meant for dark text and read 1.23 to 1.41 at 8 to 11 px.
+static fn font_ramp(font_engine address_to e, p32 colour, p32 background, p32 strength)
 {
-        if (e->ramp_ready && e->ramp_colour == colour && e->ramp_contrast == e->contrast)
+        if (e->ramp_ready && e->ramp_colour == colour && e->ramp_ground == background && e->ramp_contrast == strength)
                 return;
 
-        f32 light = (0.30f * (colour >> 16 & 255) + 0.59f * (colour >> 8 & 255) + 0.11f * (colour & 255)) / 255;
-        f32 weight = 4 * (0.75f - light);
-        f32 k = e->contrast / 64.0f * (weight < 0 ? 0 : weight > 1 ? 1 : weight);
-        f32 bright = 4 * (light - 0.5f);
+        f32 light = font_luma(colour) / 65280.0f;
+        f32 ground = background & FONT_UNKNOWN ? (light < 0.5f ? 1 : 0) : font_luma(background) / 65280.0f;
+        f32 dark = ground - light, bright = 2 * (light - ground);
+        f32 share = dark <= 0 ? 0 : dark * dark / 0.81f;
+        f32 k = strength / 64.0f * (share > 1 ? 1 : share);
 
         e->plain = (p32)(64 * (bright < 0 ? 0 : bright > 1 ? 1 : bright) + 0.5f);
         for (p32 a = 0; a < 256; a++)
@@ -3871,7 +3925,8 @@ static fn font_ramp(font_engine address_to e, p32 colour)
                 e->ramp[a] = (p8)(255 * x * (k + 1) / (x * k + 1) + 0.5f);
         }
         e->ramp_colour = colour;
-        e->ramp_contrast = e->contrast;
+        e->ramp_ground = background;
+        e->ramp_contrast = strength;
         e->ramp_ready = true;
 }
 
@@ -3920,9 +3975,10 @@ static p32 font_mix(const font_engine address_to e, p32 back, p32 fore, p32 a)
         as four planes of bytes, which is the table memory_translate_u32_rect
         takes. The engine keeps 64 pairs.
 */
-static const p32 address_to font_tones(font_engine address_to e, p32 colour, p32 background)
+static const p32 address_to font_tones(font_engine address_to e, p32 colour, p32 background, p32 strength)
 {
-        p64 key = (p64)1 << 63 | (p64)e->contrast << 48 | (p64)e->linear << 56 |
+        strength = strength > 255 ? 255 : strength;
+        p64 key = (p64)1 << 63 | (p64)strength << 48 | (p64)e->linear << 56 |
                   (p64)(colour & 0xffffff) << 24 | (background & 0xffffff);
         //      Four ways to a set of pairs, and a set picked by the key's hash:
         //      a terminal's colours of a screen are a few dozen pairs, and one
@@ -3938,7 +3994,7 @@ static const p32 address_to font_tones(font_engine address_to e, p32 colour, p32
 
         e->pair_turns = (e->pair_turns & ~(3u << 2 * set)) | (((turn + 1) & 3) << 2 * set);
         pair += turn;
-        font_ramp(e, colour);
+        font_ramp(e, colour, background, strength);
         for (p32 c = 0; c < 256; c++)
         {
                 pair->pixel[c] = font_mix(e, background, colour, e->ramp[c]);
@@ -3956,17 +4012,17 @@ static const p32 address_to font_tones(font_engine address_to e, p32 colour, p32
 //      On a known ground the library lays the tones and stops at a pixel
 //      that is not the ground; that one is mixed here and the rest resumed.
 static fn font_blend(font_engine address_to e, const font_target address_to target,
-                     b32 x, b32 y, font_bitmap glyph, p32 colour, p32 background)
+                     b32 x, b32 y, font_bitmap glyph, p32 colour, p32 background, p32 strength)
 {
         b32 x0 = x < 0 ? -x : 0, y0 = y < 0 ? -y : 0;
         b32 x1 = x + glyph.width > target->width ? target->width - x : glyph.width;
         b32 y1 = y + glyph.height > target->height ? target->height - y : glyph.height;
         bool known = !(background & FONT_UNKNOWN);
-        const p32 address_to pixel = known ? font_tones(e, colour, background) : null;
+        const p32 address_to pixel = known ? font_tones(e, colour, background, strength) : null;
 
         if (x0 >= x1 || y0 >= y1)
                 return;
-        font_ramp(e, colour);
+        font_ramp(e, colour, background, strength > 255 ? 255 : strength);
         colour &= 0xffffff;
 
         positive width = (positive)(x1 - x0), height = (positive)(y1 - y0), stride = target->stride;
@@ -4128,7 +4184,9 @@ b32 font_draw(font_engine address_to e, const font_face address_to const address
         b32 pen = 0;
         font_place last = {0, FONT_DRAWN, 0, 0};
         font_metrics cell = count ? font_metrics_at(faces[0], size) : (font_metrics){0};
-        p32 style = font_style(e, size, flags);
+
+        flags = font_polarity(flags, colour, background);
+        p32 style = font_style(e, size, flags), strength = font_strength(e, size, flags);
 
         while (at < length && count)
         {
@@ -4145,7 +4203,8 @@ b32 font_draw(font_engine address_to e, const font_face address_to const address
                         font_bitmap box = font_cached(e, null, place.glyph,
                                                       (p32)cell.cell_width << 16 | (p32)cell.cell_height, 0, 0, 0);
                         place.advance = cell.cell_width << 16;
-                        font_blend(e, target, eighth >> 3, baseline - cell.baseline, box, colour, background);
+                        font_blend(e, target, eighth >> 3, baseline - cell.baseline, box, colour, background,
+                                   strength);
                 }
                 else
                 {
@@ -4153,7 +4212,7 @@ b32 font_draw(font_engine address_to e, const font_face address_to const address
                                                       (p32)eighth & 7, style, 0);
                         place.advance = font_advance(faces[place.face], place.glyph, size);
                         font_blend(e, target, (eighth >> 3) + box.left, baseline - box.top, box, colour,
-                                   background);
+                                   background, strength);
                 }
                 pen += place.advance;
                 last = place;
@@ -4302,6 +4361,7 @@ fn font_cell(font_engine address_to e, const font_face address_to const address_
         b32 dx, dy;
         b16 ink[2];
 
+        flags = font_polarity(flags, colour, background);
         font_sync(e);
         font_bitmap box = font_cell_box(e, faces, count, code, cells, grid, size, flags,
                                         font_cell_base(faces, count, size, flags), font_cell_shape(grid, count, cells),
@@ -4310,7 +4370,7 @@ fn font_cell(font_engine address_to e, const font_face address_to const address_
 
         if (background & FONT_UNKNOWN)
         {
-                font_blend(e, target, gx, gy, box, colour, background);
+                font_blend(e, target, gx, gy, box, colour, background, font_strength(e, size, flags));
                 return;
         }
 
@@ -4319,7 +4379,7 @@ fn font_cell(font_engine address_to e, const font_face address_to const address_
         b32 top = y < 0 ? 0 : y, bottom = y + height > target->height ? target->height : y + height;
         b32 from = gx > left ? gx : left, to = gx + box.width < right ? gx + box.width : right;
         b32 above = gy > top ? gy : top, below = gy + box.height < bottom ? gy + box.height : bottom;
-        const p32 address_to pixel = font_tones(e, colour, background);
+        const p32 address_to pixel = font_tones(e, colour, background, font_strength(e, size, flags));
 
         if (left >= right || top >= bottom)
                 return;
@@ -4395,7 +4455,9 @@ fn font_cells(font_engine address_to e, const font_face address_to const address
         b32 width = grid->cell_width, height = grid->cell_height;
         positive across = (positive)n * (positive)(width > 0 ? width : 0);
         bool found = false;
+        p32 asked = flags;
 
+        flags = font_polarity(flags, colour, background);
         if (!(background & FONT_UNKNOWN) && n && n <= FONT_RUN && width > 0 && height > 0 && x >= 0 && y >= 0 &&
             x + (b64)across <= target->width && y + height <= target->height && across + 16 <= FONT_STRIP)
                 for (p32 attempt = 0; attempt < 2 && !found; attempt++)
@@ -4423,7 +4485,7 @@ fn font_cells(font_engine address_to e, const font_face address_to const address
         if (!found)
         {
                 for (p32 i = 0; i < n; i++)
-                        font_cell(e, faces, count, codes[i], 1, grid, size, flags, target, x + (b32)i * width, y,
+                        font_cell(e, faces, count, codes[i], 1, grid, size, asked, target, x + (b32)i * width, y,
                                   colour, background);
                 return;
         }
@@ -4450,7 +4512,7 @@ fn font_cells(font_engine address_to e, const font_face address_to const address
 
         //      Strip rows are 16 bytes longer than the run, for the last
         //      cell's word.
-        const p32 address_to pixel = font_tones(e, colour, background);
+        const p32 address_to pixel = font_tones(e, colour, background, font_strength(e, size, flags));
         positive stride = across + 16;
         const p8 address_to limit = e->atlas + (positive)e->atlas_width * e->atlas_height;
         b32 band = (b32)(FONT_STRIP / stride);

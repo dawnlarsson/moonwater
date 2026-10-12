@@ -98203,13 +98203,39 @@ static fn check_light()
                 ends = ends && font_mix(&engine, s * 0x010101, 0x204060, 0) == s * 0x010101 &&
                        font_mix(&engine, s * 0x010101, 0x204060, 255) == 0x204060;
         check("blend: no coverage is the ground, full is the ink", ends);
-        font_ramp(&engine, 0);
+        font_ramp(&engine, 0, 0xffffff, engine.contrast);
         check("blend: half of black over white is half the light", font_mix(&engine, 0xffffff, 0, 127) == 0xbcbcbc);
-        font_ramp(&engine, 0xffffff);
+        font_ramp(&engine, 0xffffff, 0, engine.contrast);
         check("blend: half of white over black is the bytes' mix", font_mix(&engine, 0, 0xffffff, 128) == 0x808080);
 
-        const p32 address_to tones = font_tones(&engine, 0xdfe7ef, 0x101820);
+        const p32 address_to tones = font_tones(&engine, 0xdfe7ef, 0x101820, engine.contrast);
         check("tones: the ends of a pair are its two colours", tones[0] == 0x101820 && tones[255] == 0xdfe7ef);
+
+        //      Which way the text is: the ink against the ground.
+        check("polarity: black on white is darkened, and not with FONT_UNDARKENED",
+              (font_polarity(0, 0, 0xffffff) & FONT_DARKEN) && font_polarity(FONT_UNDARKENED | FONT_DARKEN, 0, 0xffffff) == 0);
+        check("polarity: white on black, grey on white and black on dark grey are not darkened",
+              !(font_polarity(0, 0xffffff, 0) & FONT_DARKEN) && !(font_polarity(0, 0x909090, 0xffffff) & FONT_DARKEN) &&
+                  !(font_polarity(0, 0, 0x404040) & FONT_DARKEN));
+        check("polarity: on a ground not known, dark text is darkened and light text is not",
+              (font_polarity(0, 0x202020, FONT_UNKNOWN) & FONT_DARKEN) && !(font_polarity(0, 0xe0e0e0, FONT_UNKNOWN) & FONT_DARKEN));
+
+        p32 c = engine.contrast;
+        bool rises = true;
+        for (p32 px = 13; px < engine.darken_until; px++)
+                rises = rises && font_strength(&engine, px * 64, FONT_DARKEN) >= font_strength(&engine, (px - 1) * 64, FONT_DARKEN);
+        check("strength: darkened, a quarter at 12 px and under, rising to all of it where darkening ends",
+              font_strength(&engine, 8 * 64, FONT_DARKEN) == c / 4 && font_strength(&engine, 12 * 64, FONT_DARKEN) == c / 4 &&
+                  font_strength(&engine, engine.darken_until * 64, FONT_DARKEN) == c && rises);
+        check("strength: not darkened, all of it at every size",
+              font_strength(&engine, 8 * 64, 0) == c && font_strength(&engine, 20 * 64, FONT_UNHINTED) == c);
+
+        font_ramp(&engine, 0x4ec94e, 0, c);
+        check("ramp: green on black is the plain mix and no curve", engine.plain == 64 && engine.ramp[128] == 128);
+        font_ramp(&engine, 0, 0xffffff, c);
+        check("ramp: black on white is the whole curve and no plain mix", engine.plain == 0 && engine.ramp[128] == 192);
+        font_ramp(&engine, 0x606060, 0xffffff, c);
+        check("ramp: 606060 on white is about half the curve", engine.plain == 0 && engine.ramp[128] > 160 && engine.ramp[128] < 180);
 }
 
 /*
@@ -98652,6 +98678,36 @@ static fn check_synthetic(const font_face address_to one, const font_face addres
                   memory_compare(synthetic_one, synthetic_two, sizeof(synthetic_one)));
 }
 
+/*
+        Darkening by default: a cell of black on white drawn as asked has
+        more ink than with FONT_UNDARKENED, and one of white on black is the
+        same pixels either way.
+*/
+static p32 polarity_one[64 * 400], polarity_two[64 * 400];
+
+static fn check_polarity(const font_face address_to face)
+{
+        const font_face address_to chain[1] = {face};
+        p32 size = 10 * 64;
+        font_metrics grid = font_metrics_at(face, size);
+        font_target one = {polarity_one, 400, 400, 64}, two = {polarity_two, 400, 400, 64};
+        positive plain = 0, darker = 0;
+
+        font_cell(&engine, chain, 1, 'A', 1, &grid, size, FONT_UNDARKENED, &one, 4, 4, 0, 0xffffff);
+        font_cell(&engine, chain, 1, 'A', 1, &grid, size, 0, &two, 4, 4, 0, 0xffffff);
+        for (positive i = 0; i < 64 * 400; i++)
+        {
+                plain += 255 - (polarity_one[i] & 255);
+                darker += 255 - (polarity_two[i] & 255);
+        }
+        check("polarity: black on white drawn as asked has more ink than undarkened", darker > plain);
+
+        font_cell(&engine, chain, 1, 'A', 1, &grid, size, FONT_UNDARKENED, &one, 4, 4, 0xffffff, 0);
+        font_cell(&engine, chain, 1, 'A', 1, &grid, size, 0, &two, 4, 4, 0xffffff, 0);
+        check("polarity: white on black is the same pixels darkened or not",
+              !memory_compare(polarity_one, polarity_two, sizeof(polarity_one)));
+}
+
 static fn ground(p32 address_to pixels)
 {
         for (p32 i = 0; i < 96 * 96; i++)
@@ -98695,7 +98751,7 @@ static fn check_drawing(const font_face address_to one, const font_face address_
 
         //      A cell writes its whole rectangle -- ground or tone -- and nothing else.
         font_metrics grid = font_metrics_at(two, 16 * 64);
-        const p32 address_to tones = font_tones(&engine, 0xdfe7ef, 0x303030);
+        const p32 address_to tones = font_tones(&engine, 0xdfe7ef, 0x303030, engine.contrast);
         static const p32 codes[] = {'A', 0x2500, 0x253c, ' ', 0x1f600, 0x2593};
         for (p32 k = 0; k < sizeof(codes) / sizeof(codes[0]); k++)
         {
@@ -99278,6 +99334,7 @@ b32 main()
         check_drawing(&one, &two);
         check_cells(&engine, &two);
         check_synthetic(&one, &two);
+        check_polarity(&two);
         check_cells(&small_engine, &two);
         check_translate();
         check_blend();
