@@ -20522,18 +20522,20 @@ w, h, again = picture("m5-wheel")
 moved = sum(1 for y in range(top, bottom, 3) for x in range(left, left + 60, 2) if at(x, y) != again(x, y))
 out.append(("M5 the wheel scrolls back through what was said",
             "yes" if moved > 150 else "%d pixels differ" % moved, "yes"))
-bar = sum(1 for y in range(top, bottom) if again(right - 3, y) == (0x4c, 0x67, 0x85))
+# The thumb is a pill in the gutter, which is the paper: in the gutter's middle column it is
+# whatever is not black, and the gutter has no track.
+bar = sum(1 for y in range(top, bottom) if again(right - 8, y) != (0, 0, 0))
 out.append(("and the bar's thumb is in the gutter",
             "yes" if bar > 8 else "%d thumb pixels" % bar, "yes"))
 
 # And the bar is something to take hold of: the thumb dragged to the top is the oldest of it.
-thumb = [y for y in range(top, bottom) if again(right - 8, y) == (0x4c, 0x67, 0x85)]
+thumb = [y for y in range(top, bottom) if again(right - 8, y) != (0, 0, 0)]
 if thumb:
-    # Eight in: the six pixels at the edge of a frame are the edge's, to resize by.
+    # Eight in: the pixels at a window's edge are the edge's, to resize by.
     drag(right - 8, (thumb[0] + thumb[-1]) // 2, right - 8, top + 2)
     time.sleep(0.5)
 w, h, dragged = picture("m5-bar")
-moved_to = [y for y in range(top, bottom) if dragged(right - 8, y) == (0x4c, 0x67, 0x85)]
+moved_to = [y for y in range(top, bottom) if dragged(right - 8, y) != (0, 0, 0)]
 out.append(("M5 a drag on the bar's thumb moves the view to where the thumb is",
             "yes" if thumb and moved_to and moved_to[0] <= top + 12 and
             sum(1 for y in range(top, bottom, 3) for x in range(left, left + 60, 2) if again(x, y) != dragged(x, y)) > 150

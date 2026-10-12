@@ -599,18 +599,26 @@ static void terminal_row(unsigned int address_to pixels, unsigned int row,
 #undef TERMINAL_GLYPHS
 }
 
-// The track and the thumb in the gutter, or the gutter empty when everything fits.
+/*
+        The gutter is the paper, and the thumb a pill in it: as wide as half
+        the gutter, round at both ends, a quarter of the gutter in from every
+        side of the place the thumb has, in a colour between the paper and
+        the text. Where a pixel is part of a round end it is the share of its
+        sixteen points inside the pill, mixed with the paper, which is known:
+        nothing is read back. No track, and nothing at all when everything
+        fits.
+*/
 static void terminal_bar(unsigned int address_to pixels, unsigned int first, unsigned int shown,
                          unsigned int total)
 {
-        unsigned int x = COLUMNS * terminal.cell_w;
-        unsigned int thumb, at;
+        unsigned int x = COLUMNS * terminal.cell_w, paper = terminal_colour[0];
+        unsigned int thumb, at, gutter, inset, wide;
+        unsigned int ink = terminal_mix(terminal_mix(terminal_colour[7], paper), paper);
 
         if (x >= terminal.width)
                 return;
 
-        terminal_fill(pixels, (int)x, 0, terminal.width - x, terminal.height,
-                      total > shown ? 0x2f3f52u : terminal_colour[0]);
+        terminal_fill(pixels, (int)x, 0, terminal.width - x, terminal.height, paper);
 
         if (total <= shown)
                 return;
@@ -619,7 +627,49 @@ static void terminal_bar(unsigned int address_to pixels, unsigned int first, uns
         thumb = thumb < terminal.cell_h ? terminal.cell_h : thumb;
         at = (unsigned int)((unsigned long)terminal.height * first / total);
         at = at + thumb > terminal.height ? terminal.height - thumb : at;
-        terminal_fill(pixels, (int)x, (int)at, terminal.width - x, thumb, 0x4c6785u);
+
+        gutter = terminal.width - x;
+        inset = gutter / 4 ? gutter / 4 : 1;
+        wide = gutter > 2 * inset ? gutter - 2 * inset : 1;
+        if (thumb <= 2 * inset + wide)
+                return;
+
+        // In eighths of a pixel from the pill's top left (sample centres are odd): its ends are half
+        // circles of radius wide / 2.
+        int across = (int)wide * 4, along = (int)(thumb - 2 * inset) * 4, radius = across / 2;
+        unsigned int left = x + inset, top = at + inset;
+
+        for (int row = 0; row < along / 4; row++)
+        {
+                unsigned int address_to line = pixels + (unsigned long)(top + (unsigned int)row) * terminal.width + left;
+
+                for (int column = 0; column < across / 4; column++)
+                {
+                        unsigned int inside = 0;
+
+                        for (int sy = 0; sy < 4; sy++)
+                                for (int sx = 0; sx < 4; sx++)
+                                {
+                                        int px = 2 * (column * 4 + sx) + 1, py = 2 * (row * 4 + sy) + 1;
+                                        int dx = px - across;
+                                        int dy = py < 2 * radius ? py - 2 * radius
+                                                 : py > 2 * (along - radius) ? py - 2 * (along - radius) : 0;
+
+                                        inside += dx * dx + dy * dy <= across * across;
+                                }
+                        if (inside == 16)
+                                line[column] = ink;
+                        else if (inside)
+                        {
+                                unsigned int mixed = 0;
+
+                                for (unsigned int shift = 0; shift < 24; shift += 8)
+                                        mixed |= (((paper >> shift & 255) * (16 - inside) + (ink >> shift & 255) * inside + 8) / 16)
+                                                 << shift;
+                                line[column] = mixed;
+                        }
+                }
+        }
 }
 
 /* ---- the buffers ---- */
