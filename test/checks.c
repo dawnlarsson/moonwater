@@ -76789,6 +76789,35 @@ b32 main(void)
         net_group(dhcp_mixed_discard_budget);
         net_group(leasing_datagrams);
         net_group(dhcp_transaction_randomness);
+        //      fold netlink: new groups below this line
+        //
+        //      fold dns: new groups below this line
+        //
+        //      fold crypto: new groups below this line
+        //
+        //      fold tls-core: new groups below this line
+        //
+        //      fold x509: new groups below this line
+        //
+        //      fold revoke-ct: new groups below this line
+        //
+        //      fold http: new groups below this line
+        //
+        //      fold nts: new groups below this line
+        //
+        //      fold apart: new groups below this line
+        //
+        //      fold dhcp: new groups below this line
+        //
+        //      fold shnet: new groups below this line
+        //
+        //      fold wifi: new groups below this line
+        //
+        //      fold host-net: new groups below this line
+        //
+        //      fold waterlink: new groups below this line
+        //
+        //      Last: it leaves this process in a network namespace of its own.
         net_group(userspace_route_source_in_namespace);
 
         return test_report(null);

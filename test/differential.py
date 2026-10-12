@@ -69023,6 +69023,34 @@ NET_MUTATION_EQUIVALENT = {
     ("net_resolve_v4_apart", "if (numeric >= 0)", ">=", 1):
         "0.0.0.0 asked of the child is answered by the child's own net_resolve_v4 as the literal it is: DNS_OK and 0, as here.",
     ("tls_parse_key_usage", "if (unused > 7 || at >= stop)", ">=", 1): 'With no bit octet the unused-count octet is read as the final one; for unused 0 it is zero (refused), and for 1 to 7 its trailing-zero count is below its value, so the canonical test refuses it as the original does.',
+    # ---- fold netlink: entries below this line
+    #
+    # ---- fold dns: entries below this line
+    #
+    # ---- fold crypto: entries below this line
+    #
+    # ---- fold tls-core: entries below this line
+    #
+    # ---- fold x509: entries below this line
+    #
+    # ---- fold revoke-ct: entries below this line
+    #
+    # ---- fold http: entries below this line
+    #
+    # ---- fold nts: entries below this line
+    #
+    # ---- fold apart: entries below this line
+    #
+    # ---- fold dhcp: entries below this line
+    #
+    # ---- fold shnet: entries below this line
+    #
+    # ---- fold wifi: entries below this line
+    #
+    # ---- fold host-net: entries below this line
+    #
+    # ---- fold waterlink: entries below this line
+    #
 }
 
 NET_MUTATION_FAMILIES = r"^(dns_|netlink_|http_|dhcp_|tls_|network_|net_)"
@@ -69294,6 +69322,13 @@ def harness_net_mutation(argv):
         if journal:
             journal.close()
         shutil.rmtree(workspace, ignore_errors=True)
+    #   An entry whose line no longer exists is a reason for code that is
+    #   gone: every key has to name a mutant of the code as it is.
+    if not options["--functions"]:
+        current = {mutant["key"] for mutant in net_mutants(HARNESS_ROOT, None)}
+        stale = [key for key in NET_MUTATION_EQUIVALENT if key not in current]
+        checks(not stale, "every equivalent mutant names code that is still there: %s" %
+               "; ".join("%s %r" % (key[0], key[1][:60]) for key in stale[:8]))
     explained = [m for m in survivors if m["key"] in NET_MUTATION_EQUIVALENT]
     unexplained = [m for m in survivors if m["key"] not in NET_MUTATION_EQUIVALENT]
     for mutant in unexplained:
