@@ -18,6 +18,32 @@
 static memory_arena utility_arena = {.room = UTILITY_ARENA_BYTES};
 static const diagnostic text_diagnostic;
 
+/* The arena is address space a tool fills as far as its input goes, and is
+   mapped as that: MAP_NORESERVE, so the kernel does not count four gigabytes
+   against the memory the machine has. Counted, a guest with less than that
+   was refused twice, at four and at two gigabytes, and said so on the serial
+   line of every tool that took the arena (splitting the lines a lane reads)
+   before halving to what it could have. The pages are what a tool touches,
+   as before, and the same advice for huge pages memory() gives a mapping this
+   large. A cap on address space (ulimit -v) still refuses it, as it did, and
+   a machine that never overcommits (mode 2) charges it as it always did.
+   Null when refused. */
+#define UTILITY_MAP_NORESERVE 0x4000
+#define UTILITY_MAP_HUGE_MIN 8388608
+static address_any utility_arena_map(positive bytes)
+{
+        bipolar mapped = system_call_6(syscall(mmap), 0, bytes,
+                                       FILE_PROTECT_READ | FILE_PROTECT_WRITE,
+                                       FILE_MAP_PRIVATE | FILE_MAP_ANONYMOUS | UTILITY_MAP_NORESERVE,
+                                       (positive)-1, 0);
+
+        if (mapped < 0 && mapped > -4096)
+                return null;
+        if (bytes >= UTILITY_MAP_HUGE_MIN)
+                system_call_3(syscall(madvise), (positive)mapped, bytes, 14);
+        return (address_any)mapped;
+}
+
 /* Under a cap on address space (ulimit -v) the whole reserve is refused.
    The largest reserve the cap allows is found by halving, and half of that
    is kept, so what the tool maps afterwards still has room; a tool that then
@@ -31,13 +57,13 @@ static COLD address_any utility_arena_reserve(positive address_to room)
         while (!got && size > (1u << 20))
         {
                 size /= 2;
-                got = memory_checked(size);
+                got = utility_arena_map(size);
         }
         if (!got)
                 return null;
         memory_free(got, size);
         address_to room = size / 2;
-        return memory_checked(size / 2);
+        return utility_arena_map(size / 2);
 }
 
 static address_any utility_arena_take(positive bytes)
@@ -46,10 +72,10 @@ static address_any utility_arena_take(positive bytes)
                 goto full;
         if (!utility_arena.bytes)
         {
-                // memory() and not memory_checked: the lscpu harness lifts
-                // this function into a prelude that has only the first.
+                // A function of this file and not memory_checked: the lscpu
+                // harness lifts this function into a prelude with a stub of it.
                 positive room = UTILITY_ARENA_BYTES;
-                positive got = (positive)memory(UTILITY_ARENA_BYTES);
+                positive got = (positive)utility_arena_map(UTILITY_ARENA_BYTES);
                 if (!got || system_failed(got))
                         got = (positive)utility_arena_reserve(address_of room);
                 if (!got || system_failed(got))

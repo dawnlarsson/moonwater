@@ -3416,9 +3416,10 @@ static const struct
 /*
         Which command each switch is spelled under. Moving one is a line here.
 
-        The block also holds the startup list and Canvas at boot, which nothing
-        reads yet: no command takes them until Canvas does, so none is a
-        setting that is accepted and then does nothing.
+        The block also holds the startup list, which nothing reads yet: no
+        command takes it until the machine does, so none is a setting that is
+        accepted and then does nothing. Canvas at boot is read by the kernel
+        before it probes for a card.
 */
 static const struct
 {
@@ -3427,6 +3428,7 @@ static const struct
         p32 flag;
 } host_switches[] = {
     {"init", "mount", SPARK_SETTINGS_MOUNT_OFF},
+    {"init", "canvas", SPARK_SETTINGS_CANVAS_OFF},
 };
 
 static fn host_settings_empty(host_settings address_to settings)
@@ -4390,7 +4392,8 @@ static b32 host_settings_apply(host_settings address_to settings,
 
                 if (overlay)
                 {
-                        if (!string_equals(arguments[2], "mount"))
+                        if (!string_equals(arguments[2], "mount") &&
+                            !string_equals(arguments[2], "canvas"))
                         {
                                 host_machine_refused(verb, overlay);
                                 return HOST_SETTINGS_REFUSED;
@@ -19294,6 +19297,7 @@ static const host_row host_rows[] = {
     {null, "bind init add \"command\"", "run a command at boot, once disks settle", 'f'},
     {null, "bind init remove ID|\"command\"", "stop running one at boot", 'f'},
     {null, "bind init mount [on|off]", "mount kept disks at boot [on]", 'b'},
+    {null, "bind init canvas [on|off]", "start Canvas at boot [on]", 'b'},
     {null, "bind exit", "what runs at poweroff or reboot", 'f'},
     {null, "bind exit add \"command\"", "run a command before the disks go read-only", 'f'},
     {null, "bind exit remove ID|\"command\"", "stop running one at the stop", 'f'},
@@ -19589,6 +19593,8 @@ static b32 host_status(void)
                 host_settings_lines(address_of settings, 0, true);
                 string_format(log, "  init mount is %s\n",
                               settings.flags & SPARK_SETTINGS_MOUNT_OFF ? "off" : "on");
+                string_format(log, "  init canvas is %s\n",
+                              settings.flags & SPARK_SETTINGS_CANVAS_OFF ? "off" : "on");
                 host_settings_lines(address_of settings, 1, true);
         }
         //      Else they are root's and not known to this caller: no line, where

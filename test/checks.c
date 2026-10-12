@@ -53564,6 +53564,7 @@ b32 main(void)
 
 #ifdef CHECK_socket
 #include "../src/lib.util.c"
+#include "../src/canvas/window.c"
 /*
         Byte order, and the socket calls that need it.
 
@@ -53889,12 +53890,356 @@ static fn sockets(void)
 }
 #endif
 
+/*
+        The client of Canvas's surface protocol (src/canvas/window.c), on
+        the three machines' real syscalls: the compositor's end of the
+        connection is the other half of a socketpair, so what is checked is
+        what surface_wait does to a SOCK_SEQPACKET with wakes on it. recvmmsg
+        is syscall 299 on x86-64 and 243 on arm64 and riscv64, and a wrong
+        number would be a different call, not a failure to compile.
+*/
+#ifdef LINUX
+static fn surface_interrupt(b32 number) { (void)number; }
+
+static fn surfaces(void)
+{
+        static struct surface page;
+        static const struct { unsigned int width, height; } sizes[] = {
+                {1, 1}, {64, 32}, {96, 48}, {320, 200}, {1023, 1}, {1024, 768}, {1920, 1080},
+                {3840, 2160}, {4096, 4096}, {16384, 16384}, {1, 16384}, {16384, 1}};
+        struct surface_message wake = {SURFACE_WAKE, 0, {0}}, taken;
+        b32 pair[2] = {-1, -1}, gate[2] = {-1, -1};
+        b32 round = 0;
+        long got;
+
+        /*
+                Where a slot is, found from the size and not from the page:
+                the program can write buffer_offset after the compositor has
+                answered, and 0x7ffff000 there once sent the blit out of the
+                compositor's mapping. surface_slot is what the compositor
+                finds a slot with; it has to say what the create laid out.
+        */
+        for (positive at = 0; at < sizeof(sizes) / sizeof(sizes[0]); at++)
+        {
+                positive width = sizes[at].width, height = sizes[at].height;
+                positive first = SURFACE_PAGE_ROUND(width * height * 4);
+
+                page.buffer_offset[0] = (unsigned int)WINDOW_PIXELS;
+                page.buffer_offset[1] = (unsigned int)(WINDOW_PIXELS + first);
+                check("surface_slot 0 is the first page after the header",
+                      (char *)surface_slot(&page, 0, width, height) == (char *)&page + WINDOW_PIXELS);
+                check("surface_slot 1 is a page-rounded slot further",
+                      (char *)surface_slot(&page, 1, width, height) == (char *)&page + WINDOW_PIXELS + first);
+                check("surface_slot agrees with the offsets the create wrote",
+                      surface_slot(&page, 0, width, height) == surface_buffer(&page, 0) &&
+                      surface_slot(&page, 1, width, height) == surface_buffer(&page, 1));
+                check("a slot number is taken modulo two",
+                      surface_slot(&page, 2, width, height) == surface_slot(&page, 0, width, height) &&
+                      surface_slot(&page, 3, width, height) == surface_slot(&page, 1, width, height));
+
+                page.buffer_offset[0] = 0x7ffff000u;
+                page.buffer_offset[1] = 0xffffffffu;
+                check("surface_slot does not read the page's offsets",
+                      (char *)surface_slot(&page, 0, width, height) == (char *)&page + WINDOW_PIXELS &&
+                      (char *)surface_slot(&page, 1, width, height) == (char *)&page + WINDOW_PIXELS + first);
+        }
+
+        /*
+                The window list a panel is sent: past the header and before
+                the first buffer, read whole and with every title ended,
+                whatever the page holds. The message kinds and the events
+                are numbers programs were built with.
+        */
+        {
+                static union { struct surface page; char bytes[WINDOW_PIXELS]; } shown;
+                struct surface_listing *listing = window_at(&shown.page, struct surface_listing, SURFACE_HEADER);
+                struct surface_listing copy;
+
+                listing->count = 3;
+                for (unsigned int at = 0; at < 3; at++)
+                {
+                        listing->entry[at].id = 10 + at;
+                        listing->entry[at].state = at;
+                        for (unsigned int letter = 0; letter < SURFACE_LISTING_TITLE; letter++)
+                                listing->entry[at].title[letter] = 'a' + (char)at;
+                }
+                listing->generation = 6;
+                check("the window list is read with its generation",
+                      surface_listing_read(&shown.page, &copy) == 6 && copy.count == 3 &&
+                      copy.entry[2].id == 12 && copy.entry[1].state == 1);
+                check("a title the page did not end is ended",
+                      copy.entry[0].title[SURFACE_LISTING_TITLE - 1] == 0 && copy.entry[0].title[0] == 'a');
+                listing->count = 0xffffffffu;
+                surface_listing_read(&shown.page, &copy);
+                check("a count past the list is the list", copy.count == SURFACE_LISTING_MAX);
+                check("the window list ends below the first buffer",
+                      (char *)(listing + 1) <= shown.bytes + WINDOW_PIXELS &&
+                      (char *)listing == shown.bytes + SURFACE_HEADER);
+                check("the message kinds and the events keep their numbers",
+                      SURFACE_CREATE == 1 && SURFACE_COMMIT == 2 && SURFACE_CREATED == 3 && SURFACE_WAKE == 4 &&
+                      SURFACE_ACTIVATE == 5 && SURFACE_GRANT == 6 && SURFACE_GRANTED == 7 &&
+                      SURFACE_EVENT_STYLE == 12 && SURFACE_EVENT_LIST == 13 && SURFACE_EVENT_REFUSED == 14);
+        }
+
+        check("the header sits below the first buffer", SURFACE_HEADER <= WINDOW_PIXELS);
+
+        //      A slot given back reads as zeros, the other slot and the header are
+        //      as they were, and a page whose numbers are out of the mapping is left alone.
+        {
+                static const unsigned long slot = 8192, bytes = 4096 + 2 * 8192;
+                long file = window_call(WINDOW_SYS_MEMFD_CREATE, (long) "surface",
+                                        SURFACE_MFD_CLOEXEC | SURFACE_MFD_ALLOW_SEALING, 0, 0, 0, 0);
+                long mapped = file < 0 ? file : window_call(WINDOW_SYS_FTRUNCATE, file, (long)bytes, 0, 0, 0, 0);
+                unsigned char *map;
+
+                if (mapped >= 0)
+                        mapped = window_call(WINDOW_SYS_FCNTL, file, SURFACE_F_ADD_SEALS, SURFACE_SEAL_FIXED, 0, 0, 0);
+                if (mapped >= 0)
+                        mapped = window_call(WINDOW_SYS_MMAP, 0, (long)bytes, 3, 1, file, 0);
+                check("a sealed memfd for a page", mapped > 0);
+                if (mapped > 0)
+                {
+                        struct surface *shared = (struct surface *)mapped;
+                        int whole = 1, kept = 1, header = 1;
+
+                        map = (unsigned char *)mapped;
+                        memory_fill(map, 0x5a, bytes);
+                        shared->window.mapping = (unsigned int)bytes;
+                        shared->buffer_size = 64 * 32 * 4;
+                        shared->buffer_offset[0] = WINDOW_PIXELS;
+                        shared->buffer_offset[1] = (unsigned int)(WINDOW_PIXELS + slot);
+                        surface_discard(shared, 1);
+                        for (unsigned long at = 0; at < bytes; at++)
+                        {
+                                if (at >= WINDOW_PIXELS + slot && map[at])
+                                        whole = 0;
+                                if (at >= WINDOW_PIXELS && at < WINDOW_PIXELS + slot && map[at] != 0x5a)
+                                        kept = 0;
+                        }
+                        header = map[0] == 0x5a && map[WINDOW_PIXELS - 1] == 0x5a;
+                        //      qemu-user answers madvise success and drops the advice.
+                        if (program_argument_count() > 1 &&
+                            !string_compare(program_argument(1), (string_address) "--emulated"))
+                                log_direct(str("surface_discard: the pages-returned rows NOT RUN under emulation\n"));
+                        else
+                        {
+                                check("surface_discard gives the slot's pages back, zeroed", whole);
+                                check("and leaves the other slot and the header as they were", kept && header);
+                        }
+
+                        memory_fill(map, 0x5a, bytes);
+                        shared->window.mapping = (unsigned int)bytes;
+                        shared->buffer_size = 64 * 32 * 4;
+                        shared->buffer_offset[1] = (unsigned int)(bytes - 4096); // runs past the mapping
+                        surface_discard(shared, 1);
+                        shared->buffer_offset[1] = 100; // in the header, not on a page
+                        surface_discard(shared, 1);
+                        shared->buffer_offset[1] = 0xfffff000u; // far outside
+                        surface_discard(shared, 1);
+                        whole = 1;
+                        for (unsigned long at = 0; at < bytes; at++)
+                                if (at >= 4096 && map[at] != 0x5a)
+                                        whole = 0;
+                        check("a slot outside the mapping or off a page is not touched", whole);
+                        window_call(WINDOW_SYS_MUNMAP, mapped, (long)bytes, 0, 0, 0, 0);
+                }
+                if (file >= 0)
+                        window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
+        }
+
+        check("socketpair", system_call_4(syscall(socketpair), SURFACE_AF_UNIX,
+                                          SURFACE_SOCK_SEQPACKET | SURFACE_SOCK_CLOEXEC, 0,
+                                          (positive)pair) == 0);
+        if (pair[0] < 0)
+                return;
+        page.window.handle = (unsigned int)pair[0];
+
+        //      A wake ends the sleep and is taken: nothing is left on the socket.
+        check("surface_send of a wake", surface_send(pair[1], &wake, -1) == (long)sizeof(wake));
+        check("surface_wait ends on a wake", surface_wait(&page, -1, -1) == 1);
+        got = surface_receive(pair[0], &taken, SURFACE_MSG_DONTWAIT);
+        check("and the wake is gone", got == -11);
+
+        //      Five wakes: every one is taken, however many a call takes at once.
+        for (round = 0; round < 5; round++)
+                surface_send(pair[1], &wake, -1);
+        for (round = 0; round < 8 && surface_wait(&page, -1, 0) > 0; round++)
+                ;
+        got = surface_receive(pair[0], &taken, SURFACE_MSG_DONTWAIT);
+        check("five wakes are all taken", got == -11 && round < 8);
+
+        for (round = 0; round < 5; round++)
+                surface_send(pair[1], &wake, -1);
+        for (round = 0; round < 8; round++)
+                if (surface_wait(&page, -1, -1) < 0)
+                        break;
+                else if (surface_receive(pair[0], &taken, SURFACE_MSG_DONTWAIT) == -11)
+                        break;
+        check("sleeping waits drain them too", round < 8 &&
+              surface_receive(pair[0], &taken, SURFACE_MSG_DONTWAIT) == -11);
+
+        //      The time being up is not the compositor going.
+        check("a wait with nothing to hear times out at zero", surface_wait(&page, -1, 20000000) == 0);
+
+        //      Another descriptor ending the sleep takes nothing off the connection.
+        check("a pipe for the other descriptor", system_pipe(gate, 0) == 0);
+        if (gate[0] >= 0)
+        {
+                check("the other descriptor alone ends the wait",
+                      system_call_3(syscall(write), (positive)gate[1], (positive) "x", 1) == 1 &&
+                      surface_wait(&page, gate[0], 1000000000) == 1);
+                surface_send(pair[1], &wake, -1);
+                check("the wake it left alone is still there",
+                      surface_receive(pair[0], &taken, SURFACE_MSG_DONTWAIT) == (long)sizeof(taken) &&
+                      taken.kind == SURFACE_WAKE);
+                surface_send(pair[1], &wake, -1);
+                check("both ready is two and the wake is taken",
+                      surface_wait(&page, gate[0], 1000000000) == 2 &&
+                      surface_receive(pair[0], &taken, SURFACE_MSG_DONTWAIT) == -11);
+        }
+
+        //      A signal ends a sleep with nothing: the compositor has not gone.
+        {
+                signal_action wanted = {.handler = surface_interrupt}, previous;
+                p64 timer[4] = {0, 20000, 0, 20000};
+
+                check("a handler without SA_RESTART", sigaction(SIGALRM, &wanted, &previous) == 0);
+                system_call_3(syscall(setitimer), 0, (positive)timer, 0);
+                check("a signal in the sleep on the connection is zero", surface_wait(&page, -1, -1) == 0);
+                check("a signal in the sleep with a time is zero", surface_wait(&page, -1, 2000000000) == 0);
+                memory_fill(timer, 0, sizeof(timer));
+                system_call_3(syscall(setitimer), 0, (positive)timer, 0);
+                sigaction(SIGALRM, &previous, 0);
+        }
+
+        //      And a signal does not end the create's wait for its answer: the
+        //      receive is retried, so it comes back with the message.
+        {
+                signal_action wanted = {.handler = surface_interrupt}, previous;
+                p64 timer[4] = {0, 20000, 0, 20000}, nap[2] = {0, 150000000};
+                bipolar child;
+
+                sigaction(SIGALRM, &wanted, &previous);
+                child = system_fork();
+                if (child == 0)
+                {
+                        system_call_2(syscall(nanosleep), (positive)nap, 0);
+                        surface_send(pair[1], &wake, -1);
+                        system_call_1(syscall(exit_group), 0);
+                }
+                system_call_3(syscall(setitimer), 0, (positive)timer, 0);
+                memory_fill(&taken, 0, sizeof(taken));
+                got = surface_receive(pair[0], &taken, 0);
+                check("a signal in a blocking receive does not end it",
+                      got == (long)sizeof(taken) && taken.kind == SURFACE_WAKE);
+                memory_fill(timer, 0, sizeof(timer));
+                system_call_3(syscall(setitimer), 0, (positive)timer, 0);
+                sigaction(SIGALRM, &previous, 0);
+                system_call_4(syscall(wait4), (positive)child, 0, 0, 0);
+        }
+
+        //      A message is one whole struct: a short one and a cut one are not answers.
+        {
+                struct surface_message whole = {SURFACE_CREATED, 0, {0}};
+                char shorty[16] = {0}, long_one[128] = {0};
+
+                system_call_6(syscall(sendto), (positive)pair[1], (positive)shorty, 16,
+                              SURFACE_MSG_NOSIGNAL, 0, 0);
+                check("a short message is refused", surface_receive(pair[0], &taken, 0) == -71);
+                system_call_6(syscall(sendto), (positive)pair[1], (positive)long_one, 128,
+                              SURFACE_MSG_NOSIGNAL, 0, 0);
+                check("an oversized one is refused, not cut to fit", surface_receive(pair[0], &taken, 0) == -71);
+                surface_send(pair[1], &whole, -1);
+                check("a whole one is taken", surface_receive(pair[0], &taken, 0) == (long)sizeof(taken));
+        }
+
+        //      The answer to a create or a resize: wakes ahead of it are skipped,
+        //      and it is refused unless it is CREATED with protocol 2, the size
+        //      the program asked for, and a page the compositor wrote.
+        {
+                static struct surface answered;
+                struct surface_message answer = {SURFACE_CREATED, 0, {0}}, wake = {SURFACE_WAKE, 0, {0}};
+                unsigned long bytes = WINDOW_PIXELS + SURFACE_PAGE_ROUND(64u * 32 * 4) * 2;
+
+                answer.request.protocol = SURFACE_PROTOCOL;
+                answer.request.bytes = (unsigned int)bytes;
+                answered.magic = SURFACE_MAGIC;
+                answered.protocol = SURFACE_PROTOCOL;
+
+                surface_send(pair[1], &wake, -1);
+                surface_send(pair[1], &answer, -1);
+                check("a wake ahead of the answer is skipped", surface_answer(pair[0], &taken, SURFACE_CREATED, &answered, bytes) == 0);
+
+                answer.request.protocol = 0;
+                surface_send(pair[1], &answer, -1);
+                check("an answer that is not protocol 2 is refused", surface_answer(pair[0], &taken, SURFACE_CREATED, &answered, bytes) == -93);
+
+                answer.request.protocol = SURFACE_PROTOCOL;
+                answer.request.bytes = (unsigned int)bytes + 4096;
+                surface_send(pair[1], &answer, -1);
+                check("an answer for another size is refused", surface_answer(pair[0], &taken, SURFACE_CREATED, &answered, bytes) == -93);
+
+                answer.request.bytes = (unsigned int)bytes;
+                answered.magic = 0;
+                surface_send(pair[1], &answer, -1);
+                check("a page the compositor did not write is refused", surface_answer(pair[0], &taken, SURFACE_CREATED, &answered, bytes) == -93);
+                answered.magic = SURFACE_MAGIC;
+
+                answer.kind = SURFACE_RESIZED;
+                surface_send(pair[1], &answer, -1);
+                check("the wrong kind is refused", surface_answer(pair[0], &taken, SURFACE_CREATED, &answered, bytes) == -71);
+
+                answer.kind = SURFACE_CREATED;
+                answer.status = SURFACE_ESIZE;
+                surface_send(pair[1], &answer, -1);
+                check("a refusal's status is the answer", surface_answer(pair[0], &taken, SURFACE_CREATED, &answered, bytes) == SURFACE_ESIZE);
+        }
+
+        //      Slots other than one or two, and a grid with no history or a mapping past 4 GiB, are refused.
+        {
+                struct window *grid;
+                static struct surface one_slot;
+
+                surface_open_slots(64, 32, SURFACE_ROLE_APP, 0);
+                check("zero slots is EINVAL before anything is made", surface_refused == -22);
+                surface_open_slots(64, 32, SURFACE_ROLE_APP, 3);
+                check("three slots is EINVAL before anything is made", surface_refused == -22);
+
+                grid = window_grid_open(80, 24, 80, 0);
+                check("a grid with no history is refused", grid == 0);
+                if (grid)
+                        window_close(grid);
+                grid = window_grid_open(80, 24, 4096, 131073);
+                check("a grid whose mapping is past 4 GiB is refused", grid == 0);
+                if (grid)
+                        window_close(grid);
+                grid = window_grid_open(80, 24, 40, 100);
+                check("a grid is cut no wider than its ring", grid && grid->columns == 40 && grid->stride == 40);
+                if (grid)
+                        window_close(grid);
+
+                one_slot.buffer_slots = 1;
+                one_slot.buffer_offset[0] = WINDOW_PIXELS;
+                one_slot.buffer_offset[1] = WINDOW_PIXELS + 8192;
+                check("a one-slot page draws slot 1 in slot 0", (char *)surface_buffer(&one_slot, 1) == (char *)&one_slot + WINDOW_PIXELS);
+        }
+
+        //      The far end closing is the one thing that is -1, whichever way the sleep goes.
+        socket_close(pair[1]);
+        check("a closed connection ends the sleep with -1", surface_wait(&page, -1, -1) == -1);
+        check("and ends a timed one", surface_wait(&page, -1, 1000000000) == -1);
+        check("and one with another descriptor", surface_wait(&page, gate[0], 1000000000) == -1);
+        socket_close(pair[0]);
+}
+#endif
+
 b32 main(void)
 {
         byte_order();
         addresses();
 #ifdef LINUX
         sockets();
+        surfaces();
 #endif
         return test_report(null);
 }
@@ -103428,7 +103773,11 @@ static fn machine_policy(void)
               MOONWATER_SCRIPT_GET != MOONWATER_SCRIPT_SET);
         check("builtin origin is not disk",
               MOONWATER_ORIGIN_BUILTIN != MOONWATER_ORIGIN_DISK);
-        check("there are twenty-two bind events", SPARK_BIND_EVENTS == 22);
+        check("there are twenty-three bind events", SPARK_BIND_EVENTS == 23);
+        check("the last is the request for a terminal, and no stop",
+              !spark_bind_is_stop(SPARK_BIND_DESKTOP_TERMINAL) &&
+                  string_equals((string_address)spark_bind_event_name[SPARK_BIND_DESKTOP_TERMINAL - 1],
+                                "desktop terminal"));
         check("poweroff, reset and ctrl_alt_delete stop the machine",
               spark_bind_is_stop(SPARK_BIND_POWEROFF) &&
                   spark_bind_is_stop(SPARK_BIND_RESET) &&
@@ -105663,6 +106012,2453 @@ b32 main(void)
         return test_report(null);
 }
 #endif /* CHECK_sensors */
+
+#ifdef CHECK_font
+#include "../src/lib.util.c"
+#include "../src/canvas/font.c"
+
+#define SHARED_counted
+#include "checks.c"
+#undef SHARED_counted
+
+/*
+        The text engine against fonts made here, so that every number it has
+        to produce is known without a reference renderer.
+
+        Two fonts are written byte by byte: a proportional one (units per em
+        1024, long loca, cmap format 4 with a delta segment and a glyph-array
+        segment, GPOS kerning through a format 1 pair, a format 2 class pair
+        behind an extension lookup and a liga feature that must not apply,
+        OS/2 with USE_TYPO_METRICS, composites scaled, turned and
+        point-matched, one that contains itself) and a monospace one (2048,
+        short loca, cmap format 12 preferred over a format 4 that disagrees,
+        the kern table, no x-height in OS/2).
+
+        A square whose corners sit on the 1/1024 grid is drawn exactly, so its
+        bytes are 255 times the overlap of two intervals, rounded to the
+        nearest, at every phase. A circle of eight off-curve points is held to
+        a double-precision rendering of the same quadratics within one level a
+        pixel. Composites are held to the simple glyphs they equal. The drawn
+        cells are held to their seams: an arm reaching an edge leaves the edge
+        exactly as the plain line of its weight does, so neighbours join at
+        every cell size.
+
+        Then the hostile half: each font cut at every length and mutated some
+        thousands of times, every glyph drawn, every pair kerned and a line
+        laid out, with the font's last byte against a page that faults. A read
+        past the end ends the run.
+*/
+
+typedef struct
+{
+        p8 bytes[4096];
+        positive size;
+} font_table;
+
+static fn table16(font_table address_to t, p32 value)
+{
+        t->bytes[t->size++] = (p8)(value >> 8);
+        t->bytes[t->size++] = (p8)value;
+}
+
+static fn table32(font_table address_to t, p32 value)
+{
+        table16(t, value >> 16);
+        table16(t, value & 0xffff);
+}
+
+//      Patch a 16-bit offset at at with the distance from base to here.
+static fn table_mark(font_table address_to t, positive at, positive base)
+{
+        positive value = t->size - base;
+
+        t->bytes[at] = (p8)(value >> 8);
+        t->bytes[at + 1] = (p8)value;
+}
+
+static fn table_pad(font_table address_to t, positive size)
+{
+        while (t->size < size)
+                t->bytes[t->size++] = 0;
+}
+
+//      The sfnt: a directory of count tables, then the tables, each aligned.
+static positive font_build(p8 address_to out, p32 count, const p32 address_to tags,
+                           font_table address_to const address_to tables)
+{
+        positive at = 12 + 16 * (positive)count;
+
+        memory_zero(out, at);
+        out[1] = 1;
+        out[5] = (p8)count;
+        for (p32 i = 0; i < count; i++)
+        {
+                p8 address_to record = out + 12 + 16 * i;
+
+                for (p32 k = 0; k < 4; k++)
+                {
+                        record[k] = (p8)(tags[i] >> (24 - 8 * k));
+                        record[8 + k] = (p8)(at >> (24 - 8 * k));
+                        record[12 + k] = (p8)(tables[i]->size >> (24 - 8 * k));
+                }
+                memory_copy(out + at, tables[i]->bytes, tables[i]->size);
+                at += (tables[i]->size + 3) & ~(positive)3;
+        }
+        return at;
+}
+
+//      A simple glyph, flags and coordinates in their shortest spellings and
+//      repeated flags folded, so that every path of the parser is walked.
+static fn glyph_simple(font_table address_to glyf, const b32 address_to xy, const p8 address_to on,
+                       p32 count, const p16 address_to ends, p32 contours)
+{
+        b32 x0 = 1 << 30, y0 = 1 << 30, x1 = -(1 << 30), y1 = -(1 << 30);
+        p8 flags[64];
+
+        for (p32 i = 0; i < count; i++)
+        {
+                x0 = xy[2 * i] < x0 ? xy[2 * i] : x0;
+                x1 = xy[2 * i] > x1 ? xy[2 * i] : x1;
+                y0 = xy[2 * i + 1] < y0 ? xy[2 * i + 1] : y0;
+                y1 = xy[2 * i + 1] > y1 ? xy[2 * i + 1] : y1;
+        }
+        table16(glyf, contours);
+        table16(glyf, (p32)x0 & 0xffff), table16(glyf, (p32)y0 & 0xffff);
+        table16(glyf, (p32)x1 & 0xffff), table16(glyf, (p32)y1 & 0xffff);
+        for (p32 c = 0; c < contours; c++)
+                table16(glyf, ends[c]);
+        table16(glyf, 2);
+        table16(glyf, 0xb001);
+
+        for (p32 i = 0; i < count; i++)
+        {
+                b32 dx = xy[2 * i] - (i ? xy[2 * i - 2] : 0), dy = xy[2 * i + 1] - (i ? xy[2 * i - 1] : 0);
+                p8 f = on[i];
+
+                f |= !dx ? 0x10 : dx > -256 && dx < 256 ? (p8)(0x02 | (dx > 0 ? 0x10 : 0)) : 0;
+                f |= !dy ? 0x20 : dy > -256 && dy < 256 ? (p8)(0x04 | (dy > 0 ? 0x20 : 0)) : 0;
+                flags[i] = f;
+        }
+        for (p32 i = 0; i < count;)
+        {
+                p32 run = 1;
+
+                while (i + run < count && flags[i + run] == flags[i])
+                        run++;
+                glyf->bytes[glyf->size++] = (p8)(flags[i] | (run > 1 ? 8 : 0));
+                if (run > 1)
+                        glyf->bytes[glyf->size++] = (p8)(run - 1);
+                i += run;
+        }
+        for (p32 axis = 0; axis < 2; axis++)
+                for (p32 i = 0; i < count; i++)
+                {
+                        b32 d = xy[2 * i + axis] - (i ? xy[2 * i - 2 + axis] : 0);
+
+                        if (flags[i] & (axis ? 4 : 2))
+                                glyf->bytes[glyf->size++] = (p8)(d < 0 ? -d : d);
+                        else if (d)
+                                table16(glyf, (p32)d & 0xffff);
+                }
+        table_pad(glyf, (glyf->size + 3) & ~(positive)3);
+}
+
+//      A glyph of components: each with its flags, child, two arguments
+//      (words) and its transform words.
+static fn glyph_composite(font_table address_to glyf, p32 parts, const p32 address_to flags,
+                          const p32 address_to children, const b32 address_to args,
+                          const b16 address_to transforms)
+{
+        table16(glyf, 0xffff);
+        table16(glyf, 0), table16(glyf, 0), table16(glyf, 0), table16(glyf, 0);
+        for (p32 k = 0, t = 0; k < parts; k++)
+        {
+                p32 f = flags[k] | 1 | (k + 1 < parts ? 0x20 : 0);
+                p32 words = f & 8 ? 1 : f & 0x40 ? 2 : f & 0x80 ? 4 : 0;
+
+                table16(glyf, f);
+                table16(glyf, children[k]);
+                table16(glyf, (p32)args[2 * k] & 0xffff);
+                table16(glyf, (p32)args[2 * k + 1] & 0xffff);
+                for (p32 w = 0; w < words; w++)
+                        table16(glyf, (p32)(b32)transforms[t++] & 0xffff);
+        }
+        table_pad(glyf, (glyf->size + 3) & ~(positive)3);
+}
+
+static p8 font_one[8192], font_two[8192];
+static positive font_one_size, font_two_size;
+
+//      One pair adjustment subtable of format 1: first then second is value.
+static fn gpos_pair(font_table address_to t, p32 first, p32 second, b32 value)
+{
+        positive base = t->size;
+
+        table16(t, 1), table16(t, 12), table16(t, 4), table16(t, 0), table16(t, 1), table16(t, 18);
+        table16(t, 1), table16(t, 1), table16(t, first);
+        table16(t, 1), table16(t, second), table16(t, (p32)value & 0xffff);
+        (void)base;
+}
+
+/*
+        The proportional font, units per em 1024. Glyphs:
+            0  the missing glyph, a bar
+            1  a square, x 64..576, y 100..612
+            2  a circle: eight off-curve points round (600, 500)
+            3  glyph 1 at half scale, moved by (100, 200)
+            4  glyph 1 turned a quarter (0 1, -1 0), then a second glyph 1
+               placed by matching its point 0 to the first's point 2
+            5  a box with a hole, the hole wound the other way
+            6  two squares wound alike, overlapping at one corner
+            7  glyph 3 written out: x 132..388, y 250..506
+            8  a composite that contains itself
+            9  a square whose top is the x-height, y 0..500
+           10  glyph 4 written out
+*/
+static const b32 circle_one[] = {1000, 500, 883, 783, 600, 900, 317, 783, 200, 500, 317, 217, 600, 100, 883, 217};
+static const b32 circle_two[] = {2000, 1000, 1766, 1566, 1200, 1800, 634, 1566, 400, 1000, 634, 434, 1200, 200, 1766, 434};
+
+static fn font_make_one()
+{
+        static font_table head, hhea, maxp, os2, hmtx, cmap, loca, glyf, post, gpos;
+        static const b32 bar[] = {100, 0, 100, 700, 400, 700, 400, 0};
+        static const b32 square[] = {64, 100, 64, 612, 576, 612, 576, 100};
+        static const b32 holed[] = {0, 0, 0, 800, 800, 800, 800, 0, 200, 200, 600, 200, 600, 600, 200, 600};
+        static const b32 overlap[] = {0, 0, 0, 600, 600, 600, 600, 0, 580, 580, 580, 900, 900, 900, 900, 580};
+        static const b32 half[] = {132, 250, 132, 506, 388, 506, 388, 250};
+        static const b32 low[] = {64, 0, 64, 500, 576, 500, 576, 0};
+        static const p8 ons[8] = {1, 1, 1, 1, 1, 1, 1, 1}, offs[8] = {0};
+        static const p16 four[1] = {3}, eight[2] = {3, 7}, octagon[1] = {7};
+        b32 turned[16];
+        positive offsets[12];
+
+        for (p32 i = 0; i < 4; i++)
+        {
+                turned[2 * i] = -square[2 * i + 1];
+                turned[2 * i + 1] = square[2 * i];
+                turned[8 + 2 * i] = square[2 * i] + (-612 - 64);
+                turned[8 + 2 * i + 1] = square[2 * i + 1] + (576 - 100);
+        }
+
+        offsets[0] = glyf.size, glyph_simple(&glyf, bar, ons, 4, four, 1);
+        offsets[1] = glyf.size, glyph_simple(&glyf, square, ons, 4, four, 1);
+        offsets[2] = glyf.size, glyph_simple(&glyf, circle_one, offs, 8, octagon, 1);
+        offsets[3] = glyf.size;
+        glyph_composite(&glyf, 1, (const p32[]){0x0a}, (const p32[]){1}, (const b32[]){100, 200},
+                        (const b16[]){8192});
+        offsets[4] = glyf.size;
+        glyph_composite(&glyf, 2, (const p32[]){0x82, 0}, (const p32[]){1, 1}, (const b32[]){0, 0, 2, 0},
+                        (const b16[]){0, 16384, -16384, 0});
+        offsets[5] = glyf.size, glyph_simple(&glyf, holed, ons, 8, eight, 2);
+        offsets[6] = glyf.size, glyph_simple(&glyf, overlap, ons, 8, eight, 2);
+        offsets[7] = glyf.size, glyph_simple(&glyf, half, ons, 4, four, 1);
+        offsets[8] = glyf.size;
+        glyph_composite(&glyf, 1, (const p32[]){0x02}, (const p32[]){8}, (const b32[]){10, 10}, null);
+        offsets[9] = glyf.size, glyph_simple(&glyf, low, ons, 4, four, 1);
+        offsets[10] = glyf.size, glyph_simple(&glyf, turned, ons, 8, eight, 2);
+        offsets[11] = glyf.size;
+        for (p32 g = 0; g < 12; g++)
+                table32(&loca, (p32)offsets[g]);
+
+        table32(&head, 0x00010000), table32(&head, 0x00010000), table32(&head, 0), table32(&head, 0x5f0f3cf5);
+        table16(&head, 0), table16(&head, 1024);
+        table_pad(&head, 50);
+        table16(&head, 1), table16(&head, 0);
+
+        table32(&hhea, 0x00010000), table16(&hhea, 900), table16(&hhea, (p32)-300 & 0xffff), table16(&hhea, 0);
+        table_pad(&hhea, 34);
+        table16(&hhea, 11);
+
+        table32(&maxp, 0x00005000), table16(&maxp, 11);
+
+        static const p32 advances[11] = {500, 640, 1100, 500, 700, 800, 900, 500, 500, 640, 700};
+        static const b32 sides[11] = {100, 64, 200, 0, 0, 0, 0, 132, 0, 64, -612};
+        for (p32 g = 0; g < 11; g++)
+                table16(&hmtx, advances[g]), table16(&hmtx, (p32)sides[g] & 0xffff);
+
+        table16(&os2, 4);
+        table_pad(&os2, 62);
+        table16(&os2, 0x80);
+        table16(&os2, 0x41), table16(&os2, 0x2192);
+        table16(&os2, 800), table16(&os2, (p32)-200 & 0xffff), table16(&os2, 100);
+        table16(&os2, 900), table16(&os2, 300);
+        table32(&os2, 1), table32(&os2, 0);
+        table16(&os2, 500), table16(&os2, 700);
+        table_pad(&os2, 96);
+
+        table32(&post, 0x00030000), table32(&post, 0);
+        table16(&post, (p32)-100 & 0xffff), table16(&post, 50), table32(&post, 0);
+        table_pad(&post, 32);
+
+        //      cmap: one format 4 subtable, (3,1). Segment 0 is A..D by delta,
+        //      segment 1 is U+2190..2192 through the glyph array, then 0xffff.
+        table16(&cmap, 0), table16(&cmap, 1);
+        table16(&cmap, 3), table16(&cmap, 1), table32(&cmap, 12);
+        positive start = cmap.size;
+        table16(&cmap, 4), table16(&cmap, 0), table16(&cmap, 0);
+        table16(&cmap, 6), table16(&cmap, 4), table16(&cmap, 1), table16(&cmap, 2);
+        table16(&cmap, 0x44), table16(&cmap, 0x2192), table16(&cmap, 0xffff);
+        table16(&cmap, 0);
+        table16(&cmap, 0x41), table16(&cmap, 0x2190), table16(&cmap, 0xffff);
+        table16(&cmap, (1 - 0x41) & 0xffff), table16(&cmap, 0), table16(&cmap, 1);
+        table16(&cmap, 0), table16(&cmap, 4), table16(&cmap, 0);
+        table16(&cmap, 5), table16(&cmap, 6), table16(&cmap, 0);
+        cmap.bytes[start + 2] = (p8)((cmap.size - start) >> 8);
+        cmap.bytes[start + 3] = (p8)(cmap.size - start);
+
+        //      GPOS: scripts latn and DFLT. DFLT's default language uses
+        //      features 0 and 1: feature 0 is kern (lookups 0 and 1), feature
+        //      1 is liga (lookup 2). latn's uses feature 2 only, a second kern
+        //      feature reaching lookup 2. Lookup 2 adds 999 to glyph 1 then 1,
+        //      so that pair kerns only if the wrong script, a non-kern feature
+        //      or every kern feature regardless of script is taken.
+        table16(&gpos, 1), table16(&gpos, 0), table16(&gpos, 0), table16(&gpos, 0), table16(&gpos, 0);
+        table_mark(&gpos, 4, 0);
+        positive scripts = gpos.size;
+        table16(&gpos, 2), table32(&gpos, FONT_TAG('l', 'a', 't', 'n')), table16(&gpos, 0);
+        table32(&gpos, FONT_TAG('D', 'F', 'L', 'T')), table16(&gpos, 0);
+        table_mark(&gpos, scripts + 6, scripts);
+        table16(&gpos, 4), table16(&gpos, 0);
+        table16(&gpos, 0), table16(&gpos, 0xffff), table16(&gpos, 1), table16(&gpos, 2);
+        table_mark(&gpos, scripts + 12, scripts);
+        table16(&gpos, 4), table16(&gpos, 0);
+        table16(&gpos, 0), table16(&gpos, 0xffff), table16(&gpos, 2), table16(&gpos, 0), table16(&gpos, 1);
+        table_mark(&gpos, 6, 0);
+        positive features = gpos.size;
+        table16(&gpos, 3), table32(&gpos, FONT_TAG('k', 'e', 'r', 'n')), table16(&gpos, 0);
+        table32(&gpos, FONT_TAG('l', 'i', 'g', 'a')), table16(&gpos, 0);
+        table32(&gpos, FONT_TAG('k', 'e', 'r', 'n')), table16(&gpos, 0);
+        table_mark(&gpos, features + 6, features);
+        table16(&gpos, 0), table16(&gpos, 2), table16(&gpos, 0), table16(&gpos, 1);
+        table_mark(&gpos, features + 12, features);
+        table16(&gpos, 0), table16(&gpos, 1), table16(&gpos, 2);
+        table_mark(&gpos, features + 18, features);
+        table16(&gpos, 0), table16(&gpos, 1), table16(&gpos, 2);
+        table_mark(&gpos, 8, 0);
+        positive list = gpos.size;
+        table16(&gpos, 3), table16(&gpos, 0), table16(&gpos, 0), table16(&gpos, 0);
+
+        //      lookup 0: type 2, format 1, glyph 1 then 2 is -50
+        table_mark(&gpos, list + 2, list);
+        positive lookup = gpos.size;
+        table16(&gpos, 2), table16(&gpos, 0), table16(&gpos, 1), table16(&gpos, 0);
+        table_mark(&gpos, lookup + 6, lookup);
+        gpos_pair(&gpos, 1, 2, -50);
+
+        //      lookup 1: type 9 to a type 2 of format 2, where glyph 3 is class
+        //      1 of the first glyphs and glyph 4 class 1 of the second: -30.
+        table_mark(&gpos, list + 4, list);
+        lookup = gpos.size;
+        table16(&gpos, 9), table16(&gpos, 0), table16(&gpos, 1), table16(&gpos, 0);
+        table_mark(&gpos, lookup + 6, lookup);
+        table16(&gpos, 1), table16(&gpos, 2), table32(&gpos, 8);
+        positive pair = gpos.size;
+        table16(&gpos, 2), table16(&gpos, 0), table16(&gpos, 4), table16(&gpos, 0);
+        table16(&gpos, 0), table16(&gpos, 0), table16(&gpos, 2), table16(&gpos, 2);
+        table16(&gpos, 0), table16(&gpos, 0), table16(&gpos, 0), table16(&gpos, (p32)-30 & 0xffff);
+        table_mark(&gpos, pair + 2, pair);
+        table16(&gpos, 1), table16(&gpos, 1), table16(&gpos, 3);
+        table_mark(&gpos, pair + 8, pair);
+        table16(&gpos, 1), table16(&gpos, 3), table16(&gpos, 1), table16(&gpos, 1);
+        table_mark(&gpos, pair + 10, pair);
+        table16(&gpos, 2), table16(&gpos, 1), table16(&gpos, 4), table16(&gpos, 4), table16(&gpos, 1);
+
+        //      lookup 2: +999 on glyph 1 then 1, from liga and latn's kern
+        table_mark(&gpos, list + 6, list);
+        lookup = gpos.size;
+        table16(&gpos, 2), table16(&gpos, 0), table16(&gpos, 1), table16(&gpos, 0);
+        table_mark(&gpos, lookup + 6, lookup);
+        gpos_pair(&gpos, 1, 1, 999);
+
+        static const p32 tags[] = {
+            FONT_TAG('G', 'P', 'O', 'S'), FONT_TAG('O', 'S', '/', '2'), FONT_TAG('c', 'm', 'a', 'p'),
+            FONT_TAG('g', 'l', 'y', 'f'), FONT_TAG('h', 'e', 'a', 'd'), FONT_TAG('h', 'h', 'e', 'a'),
+            FONT_TAG('h', 'm', 't', 'x'), FONT_TAG('l', 'o', 'c', 'a'), FONT_TAG('m', 'a', 'x', 'p'),
+            FONT_TAG('p', 'o', 's', 't')};
+        font_table address_to const tables[] = {&gpos, &os2, &cmap, &glyf, &head, &hhea, &hmtx, &loca, &maxp, &post};
+        font_one_size = font_build(font_one, 10, tags, tables);
+}
+
+/*
+        The monospace font, units per em 2048, short loca. Glyphs: 0 a bar,
+        1 a square (also 'x', whose top is the measured x-height), 2 a wide
+        square, 3 the circle. cmap has format 12 (3,10) and a format 4 (3,1)
+        that maps A to glyph 2; the format 12 one must win. Kerning is the
+        kern table's: glyph 1 then 2 is -77.
+*/
+static fn font_make_two()
+{
+        static font_table head, hhea, maxp, os2, hmtx, cmap, loca, glyf, post, kern;
+        static const b32 bar[] = {200, 0, 200, 1400, 800, 1400, 800, 0};
+        static const b32 square[] = {128, 0, 128, 1024, 1152, 1024, 1152, 0};
+        static const b32 wide[] = {0, 0, 0, 1024, 1228, 1024, 1228, 0};
+        static const p8 ons[8] = {1, 1, 1, 1, 1, 1, 1, 1}, offs[8] = {0};
+        static const p16 four[1] = {3}, octagon[1] = {7};
+        positive offsets[5];
+
+        offsets[0] = glyf.size, glyph_simple(&glyf, bar, ons, 4, four, 1);
+        offsets[1] = glyf.size, glyph_simple(&glyf, square, ons, 4, four, 1);
+        offsets[2] = glyf.size, glyph_simple(&glyf, wide, ons, 4, four, 1);
+        offsets[3] = glyf.size, glyph_simple(&glyf, circle_two, offs, 8, octagon, 1);
+        offsets[4] = glyf.size;
+        for (p32 g = 0; g < 5; g++)
+                table16(&loca, (p32)(offsets[g] / 2));
+
+        table32(&head, 0x00010000), table32(&head, 0x00010000), table32(&head, 0), table32(&head, 0x5f0f3cf5);
+        table16(&head, 0), table16(&head, 2048);
+        table_pad(&head, 54);
+
+        table32(&hhea, 0x00010000), table16(&hhea, 1600), table16(&hhea, (p32)-400 & 0xffff), table16(&hhea, 0);
+        table_pad(&hhea, 34);
+        table16(&hhea, 1);
+
+        table32(&maxp, 0x00005000), table16(&maxp, 4);
+
+        table16(&hmtx, 1228), table16(&hmtx, 200);
+        table16(&hmtx, 128), table16(&hmtx, 0), table16(&hmtx, 400);
+
+        table16(&os2, 1);
+        table_pad(&os2, 86);
+
+        table32(&post, 0x00030000), table32(&post, 0), table16(&post, 0), table16(&post, 0), table32(&post, 1);
+        table_pad(&post, 32);
+
+        table16(&cmap, 0), table16(&cmap, 2);
+        table16(&cmap, 3), table16(&cmap, 1), table32(&cmap, 20);
+        table16(&cmap, 3), table16(&cmap, 10), table32(&cmap, 52);
+        table16(&cmap, 4), table16(&cmap, 32), table16(&cmap, 0), table16(&cmap, 4), table16(&cmap, 4), table16(&cmap, 1), table16(&cmap, 0);
+        table16(&cmap, 0x41), table16(&cmap, 0xffff), table16(&cmap, 0), table16(&cmap, 0x41), table16(&cmap, 0xffff);
+        table16(&cmap, (2 - 0x41) & 0xffff), table16(&cmap, 1), table16(&cmap, 0), table16(&cmap, 0);
+        table16(&cmap, 12), table16(&cmap, 0), table32(&cmap, 16 + 3 * 12), table32(&cmap, 0), table32(&cmap, 3);
+        table32(&cmap, 0x41), table32(&cmap, 0x42), table32(&cmap, 1);
+        table32(&cmap, 0x78), table32(&cmap, 0x78), table32(&cmap, 1);
+        table32(&cmap, 0x1f600), table32(&cmap, 0x1f600), table32(&cmap, 3);
+
+        table16(&kern, 0), table16(&kern, 1);
+        table16(&kern, 0), table16(&kern, 14 + 6 * 2), table16(&kern, 1);
+        table16(&kern, 2), table16(&kern, 12), table16(&kern, 1), table16(&kern, 0);
+        table16(&kern, 1), table16(&kern, 2), table16(&kern, (p32)-77 & 0xffff);
+        table16(&kern, 2), table16(&kern, 1), table16(&kern, 33);
+
+        static const p32 tags[] = {
+            FONT_TAG('O', 'S', '/', '2'), FONT_TAG('c', 'm', 'a', 'p'), FONT_TAG('g', 'l', 'y', 'f'),
+            FONT_TAG('h', 'e', 'a', 'd'), FONT_TAG('h', 'h', 'e', 'a'), FONT_TAG('h', 'm', 't', 'x'),
+            FONT_TAG('k', 'e', 'r', 'n'), FONT_TAG('l', 'o', 'c', 'a'), FONT_TAG('m', 'a', 'x', 'p'),
+            FONT_TAG('p', 'o', 's', 't')};
+        font_table address_to const tables[] = {&os2, &cmap, &glyf, &head, &hhea, &hmtx, &kern, &loca, &maxp, &post};
+        font_two_size = font_build(font_two, 10, tags, tables);
+}
+
+static font_engine engine, small_engine;
+static p8 atlas[512 * 512], small_atlas[128 * 32];
+static p8 coverage[1 << 16];
+
+static b32 render(const font_face address_to face, p32 glyph, p32 pixels64, p32 phase, p32 flags,
+                  font_bitmap address_to box)
+{
+        memory_zero(coverage, sizeof(coverage));
+        return font_render(&engine, face, glyph, pixels64, phase, flags, coverage, 256, sizeof(coverage), box);
+}
+
+static p32 level_of(p64 numerator, p64 denominator)
+{
+        return (p32)((255 * numerator + denominator / 2) / denominator);
+}
+
+/*
+        Glyph 1, the square, at 16 px (a unit is 1/64 px) and 24 px (3/128),
+        every phase: every edge is on the 1/1024 grid, so every pixel's area
+        is a product of two exact intervals and its byte is known exactly.
+*/
+static fn check_square(const font_face address_to face)
+{
+        for (p32 size = 16; size <= 24; size += 8)
+                for (p32 phase = 0; phase < FONT_PHASES; phase++)
+                {
+                        font_bitmap box;
+                        b32 refused = render(face, 1, size * 64, phase, FONT_UNHINTED, &box);
+                        //      Edges in 1/8192 px, size * 8 of them to the unit.
+                        p64 x0 = 64 * size * 8 + phase * 1024, x1 = 576 * size * 8 + phase * 1024;
+                        p64 y0 = 100 * size * 8, y1 = 612 * size * 8;
+                        bool exact = !refused && box.left == (b32)(x0 >> 13) &&
+                                     box.top == (b32)((y1 + 8191) >> 13) && box.width < 256;
+
+                        for (b32 r = 0; exact && r < box.height; r++)
+                                for (b32 c = 0; c < box.width; c++)
+                                {
+                                        b64 px = (b64)(box.left + c) << 13, py = (b64)(box.top - 1 - r) << 13;
+                                        b64 ox = ((b64)x1 < px + 8192 ? (b64)x1 : px + 8192) - ((b64)x0 > px ? (b64)x0 : px);
+                                        b64 oy = ((b64)y1 < py + 8192 ? (b64)y1 : py + 8192) - ((b64)y0 > py ? (b64)y0 : py);
+                                        p32 want = ox > 0 && oy > 0 ? level_of((p64)(ox * oy), (p64)8192 * 8192) : 0;
+
+                                        exact = exact && coverage[r * 256 + c] == want;
+                                }
+                        check("square: every pixel is 255 times its exact area, every phase and size", exact);
+                }
+}
+
+/*
+        A circle of eight off-curve points against the same quadratics drawn
+        in doubles: each flattened until no piece is 2^-14 px from its curve,
+        and every edge's area per cell exact (the polygon accumulation every
+        reference rasterizer shares). Within one level a pixel.
+*/
+static f64 reference[130 * 130];
+
+static fn reference_line(f64 x0, f64 y0, f64 x1, f64 y1, b32 height)
+{
+        if (y0 == y1)
+                return;
+
+        f64 sign = 1;
+        if (y0 > y1)
+        {
+                f64 t = x0;
+                x0 = x1, x1 = t, t = y0, y0 = y1, y1 = t, sign = -1;
+        }
+        f64 slope = (x1 - x0) / (y1 - y0), x = x0;
+        for (b32 y = (b32)y0; y < height && y < y1; y++)
+        {
+                f64 *row = reference + y * 130;
+                f64 dy = ((y + 1 < y1 ? y + 1 : y1) - (y > y0 ? y : y0)), next = x + slope * dy, d = dy * sign;
+                f64 lo = x < next ? x : next, hi = x < next ? next : x;
+                b32 a = (b32)lo, b = (b32)hi + 1;
+
+                lo = lo < 0 ? 0 : lo;
+                if (b <= a + 1)
+                {
+                        f64 middle = 0.5 * (x + next) - a;
+                        row[a] += d - d * middle;
+                        row[a + 1] += d * middle;
+                }
+                else
+                {
+                        f64 s = 1 / (hi - lo), first = lo - a, last = hi - (b - 1);
+                        f64 a0 = 0.5 * s * (1 - first) * (1 - first), am = 0.5 * s * last * last;
+                        row[a] += d * a0;
+                        if (b == a + 2)
+                                row[a + 1] += d * (1 - a0 - am);
+                        else
+                        {
+                                f64 a1 = s * (1.5 - first);
+                                row[a + 1] += d * (a1 - a0);
+                                for (b32 c = a + 2; c < b - 1; c++)
+                                        row[c] += d * s;
+                                row[b - 1] += d * (1 - (a1 + (b - a - 3) * s) - am);
+                        }
+                        row[b] += d * am;
+                }
+                x = next;
+        }
+}
+
+static fn check_circle(const font_face address_to face, p32 glyph, const b32 address_to points, f64 units)
+{
+        for (p32 size = 9; size <= 57; size += 24)
+        {
+                font_bitmap box;
+                b32 refused = render(face, glyph, size * 64, 3, FONT_UNHINTED, &box);
+                f64 scale = size / units, shift = 3.0 / FONT_PHASES;
+                p32 worst = 0;
+
+                memory_zero(reference, sizeof(reference));
+                for (p32 k = 0; k < 8; k++)
+                {
+                        //      Point k is a control; the curve runs from the midpoint
+                        //      before it to the midpoint after it.
+                        p32 before = (k + 7) % 8, after = (k + 1) % 8;
+                        f64 px[3], py[3];
+                        const b32 address_to q[3] = {points + 2 * before, points + 2 * k, points + 2 * after};
+
+                        for (p32 j = 0; j < 3; j++)
+                        {
+                                px[j] = q[j][0] * scale + shift - box.left;
+                                py[j] = box.top - q[j][1] * scale;
+                        }
+                        f64 ax = 0.5 * (px[0] + px[1]), ay = 0.5 * (py[0] + py[1]);
+                        f64 bx = 0.5 * (px[1] + px[2]), by = 0.5 * (py[1] + py[2]);
+                        f64 lastx = ax, lasty = ay;
+
+                        for (p32 i = 1; i <= 512; i++)
+                        {
+                                f64 t = i / 512.0, u = 1 - t;
+                                f64 x = u * u * ax + 2 * u * t * px[1] + t * t * bx;
+                                f64 y = u * u * ay + 2 * u * t * py[1] + t * t * by;
+
+                                reference_line(lastx, lasty, x, y, box.height);
+                                lastx = x, lasty = y;
+                        }
+                }
+                for (b32 r = 0; r < box.height; r++)
+                {
+                        f64 sum = 0;
+
+                        for (b32 c = 0; c < box.width; c++)
+                        {
+                                sum += reference[r * 130 + c];
+
+                                f64 area = sum < 0 ? -sum : sum;
+                                p32 want = (p32)(255 * (area > 1 ? 1 : area) + 0.5), got = coverage[r * 256 + c];
+                                p32 off = got > want ? got - want : want - got;
+
+                                worst = off > worst ? off : worst;
+                        }
+                }
+                check("circle of quadratics: within one level of the exact area, every pixel",
+                      !refused && box.width && box.width < 128 && box.height < 128 && worst <= 1);
+        }
+}
+
+//      Two glyphs of a face drawn alike at every phase and two sizes.
+static bool same_glyphs(const font_face address_to face, p32 one, p32 two)
+{
+        static p8 first[1 << 16];
+        bool same = true;
+
+        for (p32 size = 13; size <= 40; size += 27)
+                for (p32 phase = 0; phase < FONT_PHASES; phase++)
+                {
+                        font_bitmap a, b;
+
+                        render(face, one, size * 64, phase, FONT_UNHINTED, &a);
+                        memory_copy(first, coverage, sizeof(first));
+                        render(face, two, size * 64, phase, FONT_UNHINTED, &b);
+                        same = same && a.left == b.left && a.top == b.top && a.width == b.width &&
+                               a.height == b.height && !memory_compare(first, coverage, sizeof(first)) &&
+                               a.width > 0;
+                }
+        return same;
+}
+
+static fn check_outlines(const font_face address_to one, const font_face address_to two)
+{
+        font_bitmap box;
+
+        check_square(one);
+        check_circle(one, 2, circle_one, 1024);
+        check_circle(two, 3, circle_two, 2048);
+        check("composite: half scale and an offset draws as the glyph written out", same_glyphs(one, 3, 7));
+        check("composite: a quarter turn and a point match draw as the glyph written out", same_glyphs(one, 4, 10));
+        check("composite: one that contains itself is refused", render(one, 8, 1024, 0, 0, &box) == FONT_BAD);
+
+        //      The box with a hole at 20 px: 800 units is 15.625 px, the hole
+        //      3.90625..11.71875 px. Pixels wholly in the hole are empty, wholly
+        //      in the ring full.
+        render(one, 5, 20 * 64, 0, FONT_UNHINTED, &box);
+        check("hole: the inside wound the other way is empty", coverage[8 * 256 + 8] == 0 && coverage[7 * 256 + 6] == 0);
+        check("hole: the ring is full", coverage[1 * 256 + 1] == 255 && coverage[8 * 256 + 1] == 255);
+
+        //      Two squares wound alike, 0..600 and 580..900 units: at 20 px
+        //      11.71875 and 11.328125 px, so the pixel from 11 to 12 on both
+        //      axes holds a corner of each. Its union is 0.71875^2 + 0.671875^2
+        //      - 0.390625^2 of the pixel, 208; the clamped sum would be 246.
+        render(one, 6, 20 * 64, 0, FONT_UNHINTED, &box);
+        check("overlap: the union of two corners in one pixel is exact, not their sum",
+              box.top == 18 && coverage[6 * 256 + 11] == 208);
+        check("overlap: inside each square full, beside one its own edge",
+              coverage[12 * 256 + 5] == 255 && coverage[3 * 256 + 14] == 255 &&
+                  coverage[12 * 256 + 11] == level_of(736, 1024));
+
+        //      Fitting: glyph 9's top is the x-height, 500 units, 5.37 px at 11
+        //      px. Hinted, the top lands on 5 px and the top row is whole;
+        //      unhinted, it is 6 rows with a top row 0.37 covered.
+        render(one, 9, 11 * 64, 0, 0, &box);
+        check("fitting: the x-height lands on a whole pixel", box.height == 5 && box.top == 5 && coverage[1] == 255);
+        render(one, 9, 11 * 64, 0, FONT_UNHINTED, &box);
+        check("fitting: unhinted, the x-height row is partly covered",
+              box.height == 6 && coverage[1] == level_of(5500 - 5120, 1024));
+
+        //      Darkening thickens at 10 px and leaves 40 px alone.
+        for (p32 size = 10; size <= 40; size += 30)
+        {
+                positive plain = 0, dark = 0;
+
+                render(one, 2, size * 64, 0, FONT_UNHINTED, &box);
+                for (positive i = 0; i < sizeof(coverage); i++)
+                        plain += coverage[i];
+                render(one, 2, size * 64, 0, FONT_UNHINTED | FONT_DARKEN, &box);
+                for (positive i = 0; i < sizeof(coverage); i++)
+                        dark += coverage[i];
+                check("darkening: small text gains weight, large text none", size < 32 ? dark > plain : dark == plain);
+        }
+}
+
+static fn check_tables(const font_face address_to one, const font_face address_to two)
+{
+        p32 size = 16 * 64;
+        font_metrics m = font_metrics_at(one, size);
+
+        check("metrics: typo metrics when USE_TYPO_METRICS is set",
+              m.ascent == 819200 && m.descent == -204800 && m.gap == 102400);
+        check("metrics: x-height and cap height from OS/2", m.x_height == 512000 && m.cap_height == 716800);
+        check("metrics: the cell is the ascent, descent and gap rounded out",
+              m.cell_height == 13 + 4 + 2 && m.baseline == 13 + 1);
+        m = font_metrics_at(two, size);
+        check("metrics: hhea when the typo bit is clear, x-height measured from x",
+              m.ascent == 819200 && m.descent == -204800 && m.x_height == 524288);
+        check("metrics: the monospace cell is the advance rounded", m.cell_width == 10 && m.cell_height == 17);
+
+        check("cmap 4: a delta segment", font_glyph(one, 'A') == 1 && font_glyph(one, 'D') == 4);
+        check("cmap 4: past the segment, nothing", font_glyph(one, 'E') == 0 && font_glyph(one, '@') == 0);
+        check("cmap 4: the glyph array", font_glyph(one, 0x2190) == 5 && font_glyph(one, 0x2191) == 6 &&
+                                            font_glyph(one, 0x2192) == 0);
+        check("cmap 4: nothing past the plane", font_glyph(one, 0x1f600) == 0);
+        check("cmap 12: preferred over format 4", font_glyph(two, 'A') == 1 && font_glyph(two, 'B') == 2);
+        check("cmap 12: a group past the plane", font_glyph(two, 0x1f600) == 3 && font_glyph(two, 0x1f601) == 0);
+
+        check("advance: exact in 16.16", font_advance(one, 1, size) == 655360 && font_advance(two, 3, size) == 628736);
+        check("GPOS: a format 1 pair", font_kerning(one, 1, 2, size) == -51200);
+        check("GPOS: a format 2 class pair behind an extension lookup", font_kerning(one, 3, 4, size) == -30720);
+        check("GPOS: DFLT's kern feature only, not liga's lookup nor latn's kern",
+              font_kerning(one, 1, 1, size) == 0);
+        check("GPOS: a pair no lookup names", font_kerning(one, 2, 1, size) == 0);
+        check("kern: the table's pairs both ways", font_kerning(two, 1, 2, size) == -39424 &&
+                                                     font_kerning(two, 2, 1, size) == 16896);
+}
+
+static fn check_layout(const font_face address_to one, const font_face address_to two)
+{
+        const font_face address_to chain[2] = {one, two};
+        static const p8 text[] = "AB\xf0\x9f\x98\x80x\xff";
+        font_place places[8];
+        positive count = font_layout(&engine, chain, 2, text, sizeof(text) - 1, 16 * 64, 0, places, 8);
+
+        check("layout: one place a code point, the bad byte one too", count == 5);
+        check("layout: each from the first face that has it",
+              places[0].face == 0 && places[0].glyph == 1 && places[1].face == 0 && places[1].glyph == 2 &&
+                  places[2].face == 1 && places[2].glyph == 3 && places[3].face == 1 && places[3].glyph == 1 &&
+                  places[4].face == 0 && places[4].glyph == 0);
+        check("layout: pens exact, kerned within a face only",
+              places[0].x == 0 && places[1].x == 655360 - 51200 && places[2].x == 604160 + 1126400 &&
+                  places[3].x == 1730560 + 628736 && places[4].x == 2359296 + 628736);
+        count = font_layout(&engine, chain, 2, text, 2, 16 * 64, FONT_UNKERNED, places, 8);
+        check("layout: unkerned on request", count == 2 && places[1].x == 655360);
+}
+
+/*
+        The sRGB tables: every byte survives the round trip, light is
+        monotone, a blend at no coverage is the ground and at full the ink,
+        half of black over white is 188, half the light, and half of white
+        over black 128, the light text's mix of the bytes. The way back is
+        8 KB of words for 65536 lights, so each light's answer is held to the
+        definition -- the bytes whose half-step light it has reached, counted
+        -- and a blend to the formula written out over the definition, for
+        every coverage level, and ground and ink bytes from the whole range.
+*/
+static p32 light_begins[257];
+
+static p32 light_byte(p32 light)
+{
+        p32 low = 0, high = 255;
+
+        while (low < high)
+        {
+                p32 middle = (low + high + 1) / 2;
+
+                if (light_begins[middle] <= light)
+                        low = middle;
+                else
+                        high = middle - 1;
+        }
+        return low;
+}
+
+static p32 light_mix(p32 back, p32 fore, p32 a, bool linear, p32 weight)
+{
+        p32 mixed = 0;
+
+        for (p32 shift = 0; shift < 24; shift += 8)
+        {
+                p32 b = back >> shift & 255, f = fore >> shift & 255;
+                p32 plain = (b * (255 - a) + f * a + 127) / 255;
+                p32 value = linear ? light_byte((font_to_linear[b] * (255 - a) + font_to_linear[f] * a + 127) / 255) : plain;
+
+                value = linear ? (value * (64 - weight) + plain * weight + 32) >> 6 : value;
+                mixed |= value << shift;
+        }
+        return mixed;
+}
+
+static fn check_light()
+{
+        bool round = true, rising = true;
+
+        for (p32 s = 0; s < 256; s++)
+        {
+                round = round && font_srgb(font_to_linear[s]) == s;
+                rising = rising && (!s || font_to_linear[s] > font_to_linear[s - 1]);
+        }
+        check("sRGB: every byte survives the round trip through 16-bit light", round);
+        check("sRGB: light rises with every byte", rising && font_to_linear[255] == 65535);
+
+        for (p32 s = 1; s < 256; s++)
+        {
+                f64 half = font_srgb_to_linear((s - 0.5) / 255) * 65535;
+
+                light_begins[s] = (p32)half + ((f64)(p32)half < half);
+        }
+        light_begins[0] = 0;
+        bool back = true;
+        for (p32 light = 0; light < 65536; light++)
+                back = back && font_srgb(light) == light_byte(light);
+        check("sRGB: all 65536 lights go back to the byte whose half step they have reached", back);
+
+        bool same = true;
+        static const struct { bool linear; p32 weight; } modes[] = {{true, 0}, {true, 21}, {true, 43}, {true, 63}, {true, 64}, {false, 0}};
+        for (p32 m = 0; m < 6; m++)
+        {
+                engine.linear = modes[m].linear;
+                engine.plain = modes[m].weight;
+                for (p32 b = 0; b < 256; b += b < 248 ? 7 : 1)
+                        for (p32 f = 0; f < 256; f += f < 240 ? 11 : 1)
+                                for (p32 a = 0; a < 256; a++)
+                                {
+                                        p32 ground = b | (b ^ 0x5a) << 8 | (b * 7 & 255) << 16 | 0xab000000u;
+                                        p32 ink = f | (f * 3 & 255) << 8 | (f ^ 0xa5) << 16;
+
+                                        same = same && font_mix(&engine, ground, ink, a) ==
+                                                           light_mix(ground, ink, a, modes[m].linear, modes[m].weight);
+                                }
+        }
+        engine.linear = true;
+        engine.plain = 0;
+        check("blend: every coverage level of a spread of grounds and inks is the formula over the definition", same);
+
+        bool ends = true;
+        for (p32 s = 0; s < 256; s += 17)
+                ends = ends && font_mix(&engine, s * 0x010101, 0x204060, 0) == s * 0x010101 &&
+                       font_mix(&engine, s * 0x010101, 0x204060, 255) == 0x204060;
+        check("blend: no coverage is the ground, full is the ink", ends);
+        font_ramp(&engine, 0);
+        check("blend: half of black over white is half the light", font_mix(&engine, 0xffffff, 0, 127) == 0xbcbcbc);
+        font_ramp(&engine, 0xffffff);
+        check("blend: half of white over black is the bytes' mix", font_mix(&engine, 0, 0xffffff, 128) == 0x808080);
+
+        const p32 address_to tones = font_tones(&engine, 0xdfe7ef, 0x101820);
+        check("tones: the ends of a pair are its two colours", tones[0] == 0x101820 && tones[255] == 0xdfe7ef);
+}
+
+/*
+        The drawn cells. Each box character's edges against the plain line of
+        each weight: an arm that reaches an edge leaves exactly the plain
+        line's profile there, and an edge with no arm is empty -- at four cell
+        sizes, so that cells join at any of them. Dashed lines leave their
+        edges empty by design; the diagonals are checked for their mirror.
+*/
+static p8 drawn[128 * 128], plain[6][128 * 128];
+
+static fn draw_cell(p32 code, b32 width, b32 height, p8 address_to into)
+{
+        memory_zero(into, 128 * 128);
+        font_drawn(&engine, code, width, height, into, 128);
+}
+
+static bool edge_same(const p8 address_to a, const p8 address_to b, b32 width, b32 height, p32 side)
+{
+        for (b32 i = 0; i < (side < 2 ? width : height); i++)
+        {
+                positive at = side == 0 ? (positive)i : side == 1 ? (positive)(height - 1) * 128 + i
+                              : side == 2 ? (positive)i * 128 : (positive)i * 128 + width - 1;
+
+                if (a[at] != (b ? b[at] : 0))
+                        return false;
+        }
+        return true;
+}
+
+static fn check_drawn()
+{
+        static const b32 sizes[4][2] = {{8, 16}, {10, 21}, {17, 37}, {32, 70}};
+        static const p32 lines[6] = {0x2502, 0x2503, 0x2551, 0x2500, 0x2501, 0x2550};
+
+        for (p32 s = 0; s < 4; s++)
+        {
+                b32 width = sizes[s][0], height = sizes[s][1];
+                bool seams = true;
+
+                for (p32 k = 0; k < 6; k++)
+                        draw_cell(lines[k], width, height, plain[k]);
+                for (p32 code = 0x2500; code <= 0x257f; code++)
+                {
+                        p32 arms = font_box_arms[code - 0x2500];
+
+                        if ((code >= 0x2504 && code <= 0x250b) || (code >= 0x254c && code <= 0x254f) ||
+                            (code >= 0x2571 && code <= 0x2573))
+                                continue;
+                        if (code >= 0x256d && code <= 0x2570)
+                                arms = code == 0x256d ? 0x11 : code == 0x256e ? 0x14 : code == 0x256f ? 0x44 : 0x41;
+                        draw_cell(code, width, height, drawn);
+                        //      sides: 0 top (north), 1 bottom (south), 2 left (west), 3 right (east)
+                        for (p32 side = 0; side < 4; side++)
+                        {
+                                p32 style = arms >> (6 - 2 * side) & 3;
+                                const p8 address_to want = style ? plain[(side < 2 ? 0 : 3) + style - 1] : null;
+
+                                seams = seams && edge_same(drawn, want, width, height, side);
+                        }
+                }
+                check("box drawing: every arm meets its edge as the plain line does, at every cell size", seams);
+
+                draw_cell(0x2571, width, height, drawn);
+                draw_cell(0x2572, width, height, plain[0]);
+                bool mirror = true;
+                for (b32 r = 0; r < height; r++)
+                        for (b32 c = 0; c < width; c++)
+                        {
+                                p32 a = drawn[r * 128 + c], b = plain[0][r * 128 + width - 1 - c];
+                                mirror = mirror && (a > b ? a - b : b - a) <= 1;
+                        }
+                check("box drawing: the two diagonals are mirrors", mirror);
+
+                //      Blocks: halves complementary, shades even, quadrants placed.
+                draw_cell(0x2580, width, height, drawn);
+                draw_cell(0x2584, width, height, plain[0]);
+                bool halves = true;
+                for (b32 r = 0; r < height; r++)
+                        for (b32 c = 0; c < width; c++)
+                                halves = halves && drawn[r * 128 + c] + plain[0][r * 128 + c] == 255;
+                check("blocks: the upper and lower halves tile the cell", halves);
+                draw_cell(0x2592, width, height, drawn);
+                check("blocks: a shade is even", drawn[0] == 128 && drawn[(height - 1) * 128 + width - 1] == 128);
+                draw_cell(0x259a, width, height, drawn);
+                check("blocks: a quadrant pair is where it says",
+                      drawn[0] == 255 && drawn[(height - 1) * 128 + width - 1] == 255 &&
+                          drawn[width - 1] == 0 && drawn[(height - 1) * 128] == 0);
+
+                //      Braille: each dot's centre is lit exactly when its bit is set.
+                bool dots = true;
+                for (p32 pattern = 0; pattern < 256; pattern += 37)
+                {
+                        draw_cell(0x2800 + pattern, width, height, drawn);
+                        for (p32 dot = 0; dot < 8; dot++)
+                        {
+                                p32 column = dot >= 3 && dot != 6, row = dot >= 6 ? 3 : dot % 3;
+                                b32 x = (b32)(width * (1 + 2 * column) / 4), y = (b32)(height * (1 + 2 * row) / 8);
+
+                                dots = dots && (drawn[y * 128 + x] > 64) == !!(pattern & 1u << dot);
+                        }
+                }
+                check("braille: each dot lit exactly when its bit is set", dots);
+        }
+}
+
+/*
+        The shapes the terminal draws with no face: each one lights something at
+        every size, and a hollow one less than its filled twin; the up and right
+        triangles are the down and left ones turned over and mirrored; a full
+        block covers its cell edge to edge; the cross and the arrow light their
+        strokes. Red on the parent, where none of these is drawn.
+*/
+static positive cell_ink(const p8 address_to bits, b32 width, b32 height)
+{
+        positive total = 0;
+
+        for (b32 r = 0; r < height; r++)
+                for (b32 c = 0; c < width; c++)
+                        total += bits[r * 128 + c];
+        return total;
+}
+
+static fn check_shapes(void)
+{
+        static const b32 sizes[4][2] = {{8, 16}, {10, 21}, {17, 37}, {32, 70}};
+        static const p32 pairs[][2] = {{0x25a0, 0x25a1}, {0x25aa, 0x25ab}, {0x25b2, 0x25b3}, {0x25b4, 0x25b5},
+                                       {0x25b6, 0x25b7}, {0x25b8, 0x25b9}, {0x25bc, 0x25bd}, {0x25be, 0x25bf},
+                                       {0x25c0, 0x25c1}, {0x25c2, 0x25c3}, {0x25c6, 0x25c7}, {0x25cf, 0x25cb}};
+        static const p32 alone[] = {0x25e6, 0x25ac, 0x25ca, 0x25c4, 0x25ba, 0x2717, 0x21b5};
+        bool lit = true, lighter = true, mirrors = true, edges = true;
+
+        for (p32 s = 0; s < 4; s++)
+        {
+                b32 width = sizes[s][0], height = sizes[s][1];
+
+                for (p32 k = 0; k < sizeof(pairs) / sizeof(pairs[0]); k++)
+                {
+                        draw_cell(pairs[k][0], width, height, plain[0]);
+                        positive filled = cell_ink(plain[0], width, height);
+                        draw_cell(pairs[k][1], width, height, drawn);
+                        positive hole = cell_ink(drawn, width, height);
+
+                        lit = lit && filled > 0 && hole > 0;
+                        lighter = lighter && hole < filled;
+                        //      A hollow one lies inside its filled twin, pixel by pixel (a rounding pixel either way).
+                        for (b32 r = 0; r < height; r++)
+                                for (b32 c = 0; c < width; c++)
+                                        lighter = lighter && drawn[r * 128 + c] <= plain[0][r * 128 + c] + 1;
+                }
+                for (p32 k = 0; k < sizeof(alone) / sizeof(alone[0]); k++)
+                {
+                        draw_cell(alone[k], width, height, drawn);
+                        lit = lit && cell_ink(drawn, width, height) > 0;
+                }
+
+                draw_cell(0x25b2, width, height, drawn);
+                draw_cell(0x25bc, width, height, plain[0]);
+                draw_cell(0x25b6, width, height, plain[1]);
+                draw_cell(0x25c0, width, height, plain[2]);
+                for (b32 r = 0; r < height; r++)
+                        for (b32 c = 0; c < width; c++)
+                        {
+                                p32 up = drawn[r * 128 + c], down = plain[0][(height - 1 - r) * 128 + c];
+                                p32 right = plain[1][r * 128 + c], left = plain[2][r * 128 + width - 1 - c];
+
+                                mirrors = mirrors && (up > down ? up - down : down - up) <= 2 &&
+                                          (right > left ? right - left : left - right) <= 2;
+                        }
+
+                draw_cell(0x2588, width, height, drawn);
+                for (b32 i = 0; i < width; i++)
+                        edges = edges && drawn[i] == 255 && drawn[(height - 1) * 128 + i] == 255;
+                for (b32 i = 0; i < height; i++)
+                        edges = edges && drawn[i * 128] == 255 && drawn[i * 128 + width - 1] == 255;
+        }
+        check("shapes: every filled and hollow shape lights its cell, and a hollow one lights less than its filled twin",
+              lit && lighter);
+        check("shapes: the down triangle is the up one turned over, and the left the right one mirrored", mirrors);
+        check("blocks: a full block covers its cell edge to edge at every size", edges);
+}
+
+/*
+        Drawing into a target: what a known background draws is what an
+        unknown one blends to over the same ground, a cell writes all of its
+        rectangle and nothing else, clipping at every edge writes nothing
+        outside, and a tiny atlas that empties itself, or must lend itself
+        whole to one glyph, draws what a roomy one draws.
+*/
+static p32 canvas[96 * 96], canvas_again[96 * 96];
+
+/*
+        Stem snapping for the terminal's cells, on outlines laid straight into
+        the engine in 1024ths of a pixel: a face of 1024 units at 16 px, so a
+        unit of the standard stem is 1/64 px, 1229 a stem of 1.2 px.
+*/
+static fn snap_load(const b32 address_to xy, p32 count, bool turned)
+{
+        engine.point_count = count;
+        engine.contour_count = 1;
+        engine.contour[0].last = (p16)(count - 1);
+        for (p32 i = 0; i < count; i++)
+        {
+                p32 k = turned ? count - 1 - i : i;
+                engine.points[i] = (font_point){xy[2 * k], xy[2 * k + 1], 1};
+        }
+}
+
+static b32 snap_standard(b32 pixels1024)
+{
+        return (b32)((b64)pixels1024 * (1024 << FONT_EXACT) / (16 * 1024));
+}
+
+static fn check_snap()
+{
+        font_face face = {.units = 1024, .x_height = 500};
+        p32 size = 16 * 64;
+        static p8 bits[16 * 16];
+
+        engine.snap_widest = engine.snap_widest ? engine.snap_widest : 256;
+
+        //      A stem 1.2 px wide at 1.3 px: within a fifth of a whole pixel,
+        //      so it becomes the pixel nearest its centre, one column of 255
+        //      between two of 0, wound either way.
+        for (p32 turned = 0; turned < 2; turned++)
+        {
+                const b32 stem[] = {1331, 0, 1331, 10240, 2560, 10240, 2560, 0};
+
+                snap_load(stem, 4, turned);
+                font_snap(&engine, &face, size, snap_standard(1229));
+                bool snapped = true;
+                for (p32 i = 0; i < 4; i++)
+                        snapped = snapped && engine.points[i].x == (stem[2 * (turned ? 3 - i : i)] == 1331 ? 1024 : 2048);
+                memory_zero(bits, sizeof(bits));
+                font_raster(&engine, 3, 10, bits, 3);
+                for (p32 r = 0; r < 10; r++)
+                        snapped = snapped && bits[3 * r] == 0 && bits[3 * r + 1] == 255 && bits[3 * r + 2] == 0;
+                if (turned)
+                        check("snap: a stem wound the other way snaps the same", snapped);
+                else
+                        check("snap: a 1.2 px stem is one column of 255", snapped);
+        }
+
+        //      1.45 px rounds a third away either way: the width stays and the
+        //      nearer edge, the right one, moves onto the grid.
+        {
+                const b32 stem[] = {1331, 0, 1331, 10240, 2816, 10240, 2816, 0};
+
+                snap_load(stem, 4, false);
+                font_snap(&engine, &face, size, snap_standard(1485));
+                check("snap: a 1.45 px stem keeps its width and puts its nearer edge on a pixel",
+                      engine.points[0].x == 1587 && engine.points[2].x == 3072);
+        }
+
+        //      A bracket: the stem snaps, the ends of its arms stay where the
+        //      font put them, so they do not reach into the next cell.
+        {
+                const b32 bracket[] = {1331, 0, 1331, 10240, 4000, 10240, 4000, 9216,
+                                       2560, 9216, 2560, 1024, 4000, 1024, 4000, 0};
+
+                snap_load(bracket, 8, false);
+                font_snap(&engine, &face, size, snap_standard(1229));
+                check("snap: a bracket's stem snaps and its arms' ends stay",
+                      engine.points[0].x == 1024 && engine.points[4].x == 2048 && engine.points[2].x == 4000 &&
+                          engine.points[7].x == 4000);
+        }
+
+        //      Two stems half a pixel apart that would snap shoulder to shoulder:
+        //      the one that moved most is let go, and the counter stays open.
+        {
+                const b32 two[] = {1444, 0, 1444, 10240, 2673, 10240, 2673, 0,
+                                   3185, 0, 3185, 10240, 4414, 10240, 4414, 0};
+
+                engine.point_count = 8;
+                engine.contour_count = 2;
+                engine.contour[0].last = 3;
+                engine.contour[1].last = 7;
+                for (p32 i = 0; i < 8; i++)
+                        engine.points[i] = (font_point){two[2 * i], two[2 * i + 1], 1};
+                font_snap(&engine, &face, size, snap_standard(1229));
+                check("snap: a counter half a pixel wide is not shut",
+                      engine.points[4].x == 3072 && engine.points[6].x == 4096 && engine.points[2].x < 3072 &&
+                          engine.points[0].x < engine.points[2].x);
+        }
+}
+
+/*
+        A run of cells is the same pixels as its cells drawn one at a time:
+        glyphs, blanks, drawn box and block cells and a code no face has,
+        on a known ground, from a fresh engine and again from a warm one;
+        a run that reaches past the target's edge, which is drawn a cell at
+        a time; and in an engine whose atlas holds a few cells, so that the
+        run's own glyphs empty it while the run is being found.
+*/
+static p32 cells_one[64 * 400], cells_two[64 * 400];
+
+static fn check_cells(font_engine address_to with, const font_face address_to two)
+{
+        const font_face address_to chain[1] = {two};
+        static const p32 codes[] = {'A', ' ', 'B', 0x2500, 0x253c, 0x2588, 'C', 0x1f600, 'D', 'A', ' ', 0x2593, 'B'};
+        p32 n = sizeof(codes) / sizeof(codes[0]);
+        font_metrics grid = font_metrics_at(two, 18 * 64);
+
+        for (p32 pass = 0; pass < 3; pass++)
+        {
+                //      Pass 2 starts the run so that its last cells hang past
+                //      the right edge.
+                b32 x = pass == 2 ? 400 - (b32)(n - 2) * grid.cell_width : 3;
+                font_target one = {cells_one, 400, 400, 64}, other = {cells_two, 400, 400, 64};
+
+                memory_fill_u32(cells_one, sizeof(cells_one) / 4, 0xabcdef);
+                memory_fill_u32(cells_two, sizeof(cells_two) / 4, 0xabcdef);
+                font_cells(with, chain, 1, codes, n, &grid, 18 * 64, 0, &one, x, 5, 0xdfe7ef, 0x303030);
+                for (p32 i = 0; i < n; i++)
+                        font_cell(with, chain, 1, codes[i], 1, &grid, 18 * 64, 0, &other, x + (b32)i * grid.cell_width,
+                                  5, 0xdfe7ef, 0x303030);
+                bool same = !memory_compare(cells_one, cells_two, sizeof(cells_one));
+                check("cells: a run draws what its cells draw one at a time", same);
+        }
+}
+
+static fn ground(p32 address_to pixels)
+{
+        for (p32 i = 0; i < 96 * 96; i++)
+                pixels[i] = 0xabcdef;
+        for (p32 y = 8; y < 88; y++)
+                for (p32 x = 8; x < 88; x++)
+                        pixels[y * 96 + x] = 0x101820;
+}
+
+static fn check_drawing(const font_face address_to one, const font_face address_to two)
+{
+        const font_face address_to chain[2] = {one, two};
+        font_target target = {canvas + 8 * 96 + 8, 96, 80, 80}, again = {canvas_again + 8 * 96 + 8, 96, 80, 80};
+        static const p8 text[] = "ABCD\xe2\x86\x90\xe2\x94\x80";
+
+        ground(canvas), ground(canvas_again);
+        font_draw(&engine, chain, 2, text, sizeof(text) - 1, 20 * 64, 0, &target, 3 << 16, 40, 0xdfe7ef, 0x101820);
+        font_draw(&engine, chain, 2, text, sizeof(text) - 1, 20 * 64, 0, &again, 3 << 16, 40, 0xdfe7ef, FONT_UNKNOWN);
+        check("draw: a known ground draws what an unknown one blends to",
+              !memory_compare(canvas, canvas_again, sizeof(canvas)));
+
+        bool inside = true;
+        for (p32 i = 0; i < 96 * 96; i++)
+                inside = inside && ((i / 96 >= 8 && i / 96 < 88 && i % 96 >= 8 && i % 96 < 88) || canvas[i] == 0xabcdef);
+        check("draw: nothing outside the target", inside);
+
+        //      Off every edge: the run hangs off the left, the top, the right
+        //      and the bottom in turn, and nothing outside is written.
+        static const b32 corners[4][2] = {{-30, 10}, {10, 5}, {60, 40}, {10, 95}};
+        for (p32 k = 0; k < 4; k++)
+        {
+                ground(canvas);
+                font_draw(&engine, chain, 2, text, sizeof(text) - 1, 30 * 64, 0, &target, corners[k][0] << 16,
+                          corners[k][1], 0xffffff, k & 1 ? FONT_UNKNOWN : 0x101820);
+                bool clipped = true;
+                for (p32 i = 0; i < 96 * 96; i++)
+                        clipped = clipped && ((i / 96 >= 8 && i / 96 < 88 && i % 96 >= 8 && i % 96 < 88) ||
+                                              canvas[i] == 0xabcdef);
+                check("draw: clipped at every edge of the target", clipped);
+        }
+
+        //      A cell writes its whole rectangle -- ground or tone -- and nothing else.
+        font_metrics grid = font_metrics_at(two, 16 * 64);
+        const p32 address_to tones = font_tones(&engine, 0xdfe7ef, 0x303030);
+        static const p32 codes[] = {'A', 0x2500, 0x253c, ' ', 0x1f600, 0x2593};
+        for (p32 k = 0; k < sizeof(codes) / sizeof(codes[0]); k++)
+        {
+                ground(canvas);
+                font_cell(&engine, chain + 1, 1, codes[k], 1, &grid, 16 * 64, 0, &target, 20, 30, 0xdfe7ef, 0x303030);
+                bool whole = true;
+                for (b32 y = 0; y < 96; y++)
+                        for (b32 x = 0; x < 96; x++)
+                        {
+                                bool in = x >= 28 && x < 28 + grid.cell_width && y >= 38 && y < 38 + grid.cell_height;
+                                p32 pixel = canvas[y * 96 + x];
+                                bool tone = false;
+
+                                for (p32 c = 0; c < 256 && in && !tone; c++)
+                                        tone = pixel == tones[c];
+                                whole = whole && (in ? tone && (codes[k] != ' ' || pixel == 0x303030)
+                                                     : pixel == (x >= 8 && x < 88 && y >= 8 && y < 88 ? 0x101820u : 0xabcdefu));
+                        }
+                check("cell: its whole rectangle written in its tones, nothing else", whole);
+        }
+
+        //      A run of blank cells 1000 pixels wide: the background exactly,
+        //      every pixel, and nothing past it.
+        static p32 strip[4 * 1100];
+        font_target wide = {strip, 1100, 1100, 4};
+        memory_fill_u32(strip, sizeof(strip) / 4, 0xabcdef);
+        font_cell(&engine, chain + 1, 1, ' ', 1000 / grid.cell_width, &grid, 16 * 64, 0, &wide, 7, -1, 0xdfe7ef, 0x303030);
+        bool blank = true;
+        for (b32 i = 0; i < 4 * 1100; i++)
+        {
+                b32 x = i % 1100;
+                blank = blank && strip[i] == (x >= 7 && x < 7 + 1000 / grid.cell_width * grid.cell_width ? 0x303030u : 0xabcdefu);
+        }
+        check("cell: a blank run is the background exactly, and no wider", blank);
+
+        //      A tiny atlas, 128 by 32: at 30 px emptied many times over, at
+        //      70 px too short for any glyph's shelf and lent whole to each.
+        for (p32 size = 30; size <= 70; size += 40)
+        {
+                ground(canvas), ground(canvas_again);
+                for (p32 pass = 0; pass < 3; pass++)
+                {
+                        font_draw(&engine, chain, 2, text, sizeof(text) - 1, size * 64, 0, &target, 0, size, 0xffffff, FONT_UNKNOWN);
+                        font_draw(&small_engine, chain, 2, text, sizeof(text) - 1, size * 64, 0, &again, 0, size, 0xffffff, FONT_UNKNOWN);
+                }
+                check("atlas: a tiny one that resets draws what a roomy one draws",
+                      !memory_compare(canvas, canvas_again, sizeof(canvas)));
+        }
+}
+
+/*
+        memory_translate_u32_rect against the loop it replaces: every width
+        from 0 to 80 and every height from 0 to 9 at two strides, then rows
+        about 128, 256 and 640 wide up to three high (bzhi reads only the
+        low byte of its index, which is how a row of 256 once came out
+        empty), the source's last row ending against a page that faults and
+        the destination's too, the words between and before the rows held to
+        a canary. On x86_64 once with the planes body and once with the narrow
+        one; test/run runs riscv64 with V at two lengths and without it.
+*/
+static fn check_translate()
+{
+        static p32 table[512];
+        p8 address_to source = memory(4 * 4096);
+        p32 address_to into = memory(4 * 4096);
+        bool guarded = source && into &&
+                       system_call_3(syscall(mprotect), (positive)(source + 3 * 4096), 4096, 0) == 0 &&
+                       system_call_3(syscall(mprotect), (positive)((p8 address_to)into + 3 * 4096), 4096, 0) == 0;
+        p64 state = 0x8f3a1c5e7b2d9046ull;
+
+        check("translate: guard pages", guarded);
+        if (!guarded)
+                return;
+        for (p32 i = 0; i < 256; i++)
+        {
+                XORSHIFT64(state);
+                table[i] = (p32)state;
+                for (p32 k = 0; k < 4; k++)
+                        ((p8 address_to)(table + 256))[k * 256 + i] = (p8)(table[i] >> (8 * k));
+        }
+#if RISCV64
+        //      The first call asks for V itself, with the height and the
+        //      table in registers the detect does not keep.
+        cpu_has_vector = 0;
+        source[0] = 7, source[1] = 200, source[2] = 9, source[3] = 255;
+        memory_translate_u32_rect(into, 2, source, 2, 2, 2, table);
+        check("translate: the first call asks for V and still has its height and table",
+              into[0] == table[7] && into[1] == table[200] && into[2] == table[9] && into[3] == table[255] &&
+                  cpu_has_vector != 0);
+#endif
+#if X64
+        p8 planes = cpu_has_avx512_vbmi;
+        for (p32 tier = 0; tier < 2; tier++)
+        {
+                cpu_has_avx512_vbmi = tier ? 0 : planes;
+#endif
+                static const positive wide[] = {127, 128, 129, 255, 256, 257, 300, 640};
+                bool fine = true;
+                for (positive w = 0; w <= 80 + sizeof(wide) / sizeof(wide[0]) - 1; w++)
+                        for (positive width = w <= 80 ? w : wide[w - 81], height = 0; height <= (width > 80 ? 3u : 9u); height++)
+                                for (positive gap = 0; gap <= 37; gap += 37)
+                                {
+                                        positive stride = width + gap, span = height ? (height - 1) * stride + width : 0;
+                                        p8 address_to from = source + 3 * 4096 - span;
+                                        p32 address_to to = (p32 address_to)((p8 address_to)into + 3 * 4096) - span;
+
+                                        for (positive i = 0; i < span; i++)
+                                        {
+                                                XORSHIFT64(state);
+                                                from[i] = (p8)state;
+                                        }
+                                        for (positive i = 0; i < span + 16; i++)
+                                                to[(b64)i - 16] = 0xdeadbeef;
+                                        memory_translate_u32_rect(to, stride, from, stride, width, height, table);
+                                        for (b64 i = -16; i < (b64)span; i++)
+                                        {
+                                                bool inside = i >= 0 && (positive)i % stride < width;
+                                                fine = fine && to[i] == (inside ? table[from[i]] : 0xdeadbeef);
+                                        }
+                                }
+                check("translate: every word its byte's, nothing else written, every width and height", fine);
+#if X64
+        }
+        cpu_has_avx512_vbmi = planes;
+#endif
+}
+
+/*
+        memory_blend_u32_rect against the loop it replaces in font_blend:
+        every width to 80 and rows of 127 to 300, heights to 6, two strides,
+        coverage half zero, the pixels the ground but for a few that another
+        glyph drew (none, one, or one in sixty), the bytes' last row and the
+        pixels' last against pages that fault; the index it answers, every
+        pixel before it written, none after. Both x86_64 bodies, and the first
+        riscv64 call that asks for V.
+*/
+static positive blend_reference(p32 address_to into, positive stride, const p8 address_to from, positive from_stride,
+                                positive width, positive height, const p32 address_to table)
+{
+        for (positive r = 0; r < height; r++)
+                for (positive c = 0; c < width; c++)
+                {
+                        p32 a = from[r * from_stride + c], address_to p = &into[r * stride + c];
+
+                        if (!a)
+                                continue;
+                        if ((*p & 0xffffff) != table[512])
+                                return r * width + c;
+                        *p = table[a];
+                }
+        return width * height;
+}
+
+static fn check_blend()
+{
+        static const positive wide[] = {127, 128, 129, 255, 256, 257, 300};
+        static p32 table[513], want[3072];
+        p8 address_to source = memory(4 * 4096);
+        p32 address_to into = memory(4 * 4096);
+        p64 state = 0x2b7e151628aed2a6ull;
+        bool guarded = source && into &&
+                       system_call_3(syscall(mprotect), (positive)(source + 3 * 4096), 4096, 0) == 0 &&
+                       system_call_3(syscall(mprotect), (positive)((p8 address_to)into + 3 * 4096), 4096, 0) == 0;
+
+        check("blend: guard pages", guarded);
+        if (!guarded)
+                return;
+        for (p32 i = 0; i < 256; i++)
+        {
+                XORSHIFT64(state);
+                table[i] = (p32)state & 0xffffff;
+                for (p32 k = 0; k < 4; k++)
+                        ((p8 address_to)(table + 256))[k * 256 + i] = (p8)(table[i] >> (8 * k));
+        }
+        table[512] = 0x203040;
+#if RISCV64
+        cpu_has_vector = 0;
+        source[0] = 9, source[1] = 0, source[2] = 200, source[3] = 7;
+        into[0] = into[1] = into[2] = 0xff203040, into[3] = 0x123456;
+        positive first = memory_blend_u32_rect(into, 2, source, 2, 2, 2, table);
+        check("blend: the first call asks for V and keeps its height and table",
+              first == 3 && into[0] == table[9] && into[1] == 0xff203040 && into[2] == table[200] &&
+                  into[3] == 0x123456 && cpu_has_vector != 0);
+#endif
+#if X64
+        p8 planes = cpu_has_avx512_vbmi;
+        for (p32 tier = 0; tier < 2; tier++)
+        {
+                cpu_has_avx512_vbmi = tier ? 0 : planes;
+#endif
+                bool fine = true;
+                for (positive w = 0; w <= 80 + sizeof(wide) / sizeof(wide[0]) - 1; w++)
+                        for (positive width = w <= 80 ? w : wide[w - 81], height = 0; height <= (width > 80 ? 3u : 6u); height++)
+                                for (positive shape = 0; shape < 6; shape++)
+                                {
+                                        positive gap = shape & 1 ? 0 : 37, stride = width + gap;
+                                        positive span = height ? (height - 1) * stride + width : 0;
+                                        p8 address_to from = source + 3 * 4096 - span;
+                                        p32 address_to to = (p32 address_to)((p8 address_to)into + 3 * 4096) - span;
+
+                                        for (positive i = 0; i < span; i++)
+                                        {
+                                                XORSHIFT64(state);
+                                                from[i] = state & 1 ? 0 : (p8)(state >> 8);
+                                                to[i] = (shape >> 1 == 2 && state % 60 == 7) || (shape >> 1 == 1 && i == span / 2)
+                                                                ? 0x5a5a5a : 0xff203040 - (p32)(state >> 60) * 0x1000000;
+                                                want[i] = to[i];
+                                        }
+                                        positive expected = blend_reference(want, stride, from, stride, width, height, table);
+                                        positive answered = memory_blend_u32_rect(to, stride, from, stride, width, height, table);
+
+                                        fine = fine && answered == expected && !memory_compare(to, want, span * 4);
+                                }
+                check("blend: the ground's pixels its tones, the first other one answered, nothing after touched", fine);
+#if X64
+        }
+        cpu_has_avx512_vbmi = planes;
+#endif
+}
+
+/*
+        memory_fill_u32_rect: every width to 80 and rows of 127 to 300,
+        heights to 6, two strides, the last row against a page that faults,
+        the words between rows and before the first held to a canary; with
+        AVX-512 and without on x86_64, and the first riscv64 call.
+*/
+static fn check_fill_rect()
+{
+        static const positive wide[] = {127, 128, 129, 255, 256, 257, 300};
+        p32 address_to into = memory(4 * 4096);
+        bool guarded = into && system_call_3(syscall(mprotect), (positive)((p8 address_to)into + 3 * 4096), 4096, 0) == 0;
+
+        check("fill: a guard page", guarded);
+        if (!guarded)
+                return;
+#if RISCV64
+        cpu_has_vector = 0;
+        into[0] = into[1] = into[2] = into[3] = 1;
+        memory_fill_u32_rect(into, 2, 1, 2, 7);
+        check("fill: the first call asks for V and keeps its arguments",
+              into[0] == 7 && into[1] == 1 && into[2] == 7 && into[3] == 1 && cpu_has_vector != 0);
+#endif
+#if X64
+        p8 wide_on = cpu_has_avx512;
+        for (p32 tier = 0; tier < 2; tier++)
+        {
+                cpu_has_avx512 = tier ? 0 : wide_on;
+#endif
+                bool fine = true;
+                for (positive w = 0; w <= 80 + sizeof(wide) / sizeof(wide[0]) - 1; w++)
+                        for (positive width = w <= 80 ? w : wide[w - 81], height = 0; height <= (width > 80 ? 3u : 6u); height++)
+                                for (positive gap = 0; gap <= 37; gap += 37)
+                                {
+                                        positive stride = width + gap, span = height ? (height - 1) * stride + width : 0;
+                                        p32 address_to to = (p32 address_to)((p8 address_to)into + 3 * 4096) - span;
+
+                                        for (positive i = 0; i < span + 16; i++)
+                                                to[(b64)i - 16] = 0xdeadbeef;
+                                        memory_fill_u32_rect(to, stride, width, height, 0x00c0ffee + (p32)width);
+                                        for (b64 i = -16; i < (b64)span; i++)
+                                                fine = fine && to[i] == (i >= 0 && (positive)i % stride < width ? 0x00c0ffee + (p32)width
+                                                                                                                : 0xdeadbeef);
+                                }
+                check("fill: every word of the rectangle, nothing else", fine);
+#if X64
+        }
+        cpu_has_avx512 = wide_on;
+#endif
+}
+
+/*
+        memory_sweep_coverage against the loop it replaces in font_raster:
+        every count from 0 to 80 and runs of 127 to 1000, cells sparse as an
+        outline leaves them and dense, sums that run past full both ways and
+        to INT_MIN, the cells' last word and the bytes' last against pages
+        that fault, the bytes before and after held to a canary, the cells
+        past the count untouched, every cell in the count cleared, and the
+        sum it answers. On x86_64 with AVX-512, with AVX2 alone and with
+        neither; on riscv64 the first call asks for V itself.
+*/
+static p32 sweep_level(p32 sum)
+{
+        p32 area = (b32)sum < 0 ? -sum : sum;
+
+        area = area > 0x200000 ? 0x200000 : area;
+        return (area * 255 + 0x100000) >> 21;
+}
+
+static fn check_sweep()
+{
+        static const positive long_runs[] = {127, 128, 129, 255, 256, 257, 640, 1000};
+        p8 address_to bytes = memory(2 * 4096);
+        p32 address_to cells = memory(2 * 4096);
+        static p32 want_cells[1100];
+        static p8 want_bytes[1100];
+        p64 state = 0x5d1c3a9e7f20b468ull;
+        bool guarded = bytes && cells &&
+                       system_call_3(syscall(mprotect), (positive)(bytes + 4096), 4096, 0) == 0 &&
+                       system_call_3(syscall(mprotect), (positive)((p8 address_to)cells + 4096), 4096, 0) == 0;
+
+        check("sweep: guard pages", guarded);
+        if (!guarded)
+                return;
+#if RISCV64
+        cpu_has_vector = 0;
+        cells[1020] = 0x100000, cells[1021] = 0x100000, cells[1022] = -0x200000, cells[1023] = 7;
+        p32 first = memory_sweep_coverage(bytes + 4092, cells + 1020, 4, 3);
+        check("sweep: the first call asks for V and keeps its count and sum",
+              first == 10 && bytes[4092] == 128 && bytes[4093] == 255 && bytes[4094] == 0 && bytes[4095] == 0 &&
+                  !cells[1020] && !cells[1023] && cpu_has_vector != 0);
+#endif
+#if X64
+        p8 wide = cpu_has_avx512, two = cpu_has_avx2;
+        for (p32 tier = 0; tier < 3; tier++)
+        {
+                cpu_has_avx512 = tier ? 0 : wide;
+                cpu_has_avx2 = tier == 2 ? 0 : two;
+#endif
+                bool fine = true;
+                for (positive k = 0; k <= 80 + sizeof(long_runs) / sizeof(long_runs[0]) - 1; k++)
+                        for (p32 shape = 0; shape < 4; shape++)
+                        {
+                                //      Even shapes end against the pages that fault,
+                                //      odd ones keep three words and bytes after.
+                                positive count = k <= 80 ? k : long_runs[k - 81], pad = shape & 1 ? 3 : 0;
+                                p32 address_to run = cells + 1024 - count - pad;
+                                p8 address_to into = bytes + 4096 - count - pad;
+                                p32 sum = shape == 3 ? 0x80000000u - 5 : (p32)(state >> 40) - (1u << 23);
+
+                                //      Sparse as an outline's cells, dense, saturating,
+                                //      and wrapping through INT_MIN.
+                                for (positive i = 0; i < count + pad; i++)
+                                {
+                                        XORSHIFT64(state);
+                                        b32 value = (b32)(state >> 32) >> (shape == 0 ? 9 : shape == 1 ? 11 : 6);
+                                        run[i] = shape == 0 && state % 5 ? 0 : shape == 3 && i < count ? (i & 1 ? 3 : 1)
+                                                                                                     : (p32)value;
+                                }
+                                memory_fill(into - 3, 0xa5, count + pad + 3);
+                                p32 expected = sum;
+                                for (positive i = 0; i < count; i++)
+                                {
+                                        expected += run[i];
+                                        want_bytes[i] = (p8)sweep_level(expected);
+                                }
+                                for (positive i = 0; i < count + pad; i++)
+                                        want_cells[i] = i < count ? 0 : run[i];
+
+                                p32 answered = memory_sweep_coverage(into, run, count, sum);
+
+                                fine = fine && answered == expected && !memory_compare(into, want_bytes, count) &&
+                                       !memory_compare(run, want_cells, (count + pad) * 4);
+                                for (positive i = 0; i < 3; i++)
+                                        fine = fine && (into - 3)[i] == 0xa5 && (i >= pad || into[count + i] == 0xa5);
+                        }
+                check("sweep: every byte its running sum's level, the cells cleared, nothing else touched", fine);
+#if X64
+        }
+        cpu_has_avx512 = wide, cpu_has_avx2 = two;
+#endif
+}
+
+/*
+        Hostile fonts. The bytes are copied so that the last one sits against
+        a page that faults, and each cut and each mutation is loaded, every
+        glyph drawn hinted and not at two sizes, every pair of the first
+        sixteen kerned, its metrics taken and a line laid out and drawn.
+        Surviving is the check; what the engine answers is not judged.
+*/
+static p8 address_to guarded;
+static positive hostile_cases;
+
+static fn exercise(const p8 address_to bytes, positive size)
+{
+        p8 address_to at = guarded + 8 * 4096 - size;
+        font_face face;
+
+        memory_copy(at, bytes, size);
+        hostile_cases++;
+        if (font_load(&face, at, size, 0))
+                return;
+
+        const font_face address_to chain[1] = {&face};
+        font_target target = {canvas + 8 * 96 + 8, 96, 80, 80};
+        font_metrics grid = font_metrics_at(&face, 13 * 64);
+        font_bitmap box;
+        p32 glyphs = face.glyphs < 24 ? face.glyphs : 24;
+
+        for (p32 g = 0; g < glyphs; g++)
+        {
+                font_render(&engine, &face, g, 13 * 64, g & 7, g & 1 ? FONT_UNHINTED : FONT_DARKEN,
+                            coverage, 256, sizeof(coverage), &box);
+                font_render(&engine, &face, g, 97 * 64, 3, 0, coverage, 256, sizeof(coverage), &box);
+        }
+        for (p32 left = 0; left < 16; left++)
+                for (p32 right = 0; right < 16; right++)
+                        font_kerning(&face, left, right, 13 * 64);
+        for (p32 code = 0x20; code < 0x80; code += 7)
+                font_glyph(&face, code);
+        font_glyph(&face, 0x1f600);
+        font_draw(&engine, chain, 1, (const p8 address_to)"AB x\xe2\x94\x80", 7, 13 * 64, 0, &target, 0, 20,
+                  0xffffff, 0x101820);
+        font_cell(&engine, chain, 1, 'A', 1, &grid, 13 * 64, 0, &target, 4, 4, 0xffffff, 0x101820);
+}
+
+static p64 hostile_state = 0x2545f4914f6cdd1dull;
+
+static p64 hostile_next(p64 below)
+{
+        XORSHIFT64(hostile_state);
+        return below ? hostile_state % below : 0;
+}
+
+static fn check_hostile(const p8 address_to font, positive size, p32 mutations)
+{
+        static p8 copy[8192];
+        positive before = hostile_cases;
+
+        for (positive cut = 0; cut <= size; cut++)
+                exercise(font, cut);
+
+        static const p32 extremes[] = {0, 1, 0x7fff, 0x8000, 0xffff, 0x7fffffff, 0xffffffff, 0x10000};
+        for (p32 m = 0; m < mutations; m++)
+        {
+                memory_copy(copy, font, size);
+                p32 changes = 1 + (p32)hostile_next(4);
+                for (p32 k = 0; k < changes; k++)
+                {
+                        positive at = hostile_next(size);
+
+                        if (hostile_next(2))
+                                copy[at] = (p8)hostile_next(256);
+                        else
+                        {
+                                //      A field at an even offset set to an extreme.
+                                p32 value = extremes[hostile_next(8)], wide = hostile_next(2) ? 4 : 2;
+
+                                at &= ~(positive)1;
+                                for (p32 b = 0; b < wide && at + b < size; b++)
+                                        copy[at + b] = (p8)(value >> (8 * (wide - 1 - b)));
+                        }
+                }
+                exercise(copy, size);
+        }
+        check("hostile: every cut and mutation survived against a guard page",
+              hostile_cases == before + size + 1 + mutations);
+}
+
+/*
+        Edge cases of the cache's keys. A face id is 16 bits and is issued
+        again 65536 loads on: a glyph cached for the old face must not answer
+        for the new one that has the same id. A size from 16384 px up is no
+        size the engine draws, and is not one the key keeps the bits of, so a
+        huge size must never draw the small glyph whose key it truncates to. A
+        size of zero draws nothing and measures a one-pixel cell.
+*/
+static p8 reissue_atlas[512 * 512], truth_atlas[512 * 512];
+static font_engine reissue_engine, truth_engine;
+static p32 edge_frames[4][48 * 32];
+
+/*
+        One letter at 20 px onto a 48 by 32 frame of background, drawn with
+        the engine given. A truth is drawn by an engine started again for it,
+        so nothing it drew before can answer for it.
+*/
+static fn edge_draw(font_engine address_to e, const font_face address_to const address_to chain, p32 code,
+                    p32 size, p32 frame)
+{
+        font_target target = {edge_frames[frame], 48, 48, 32};
+        p8 text[1] = {(p8)code};
+
+        for (positive i = 0; i < 48 * 32; i++)
+                edge_frames[frame][i] = 0x123456;
+        font_draw(e, chain, 1, text, 1, size, 0, &target, 4 << 16, 24, 0xffffff, 0x123456);
+}
+
+static fn truth_draw(const font_face address_to face, p32 code, p32 frame)
+{
+        const font_face address_to chain[1] = {face};
+
+        font_start(&truth_engine, truth_atlas, 512, 512);
+        edge_draw(&truth_engine, chain, code, 20 * 64, frame);
+}
+
+static fn check_edges(font_face address_to one, font_face address_to two)
+{
+        font_face again;
+        const font_face address_to chain[1] = {one};
+        const font_face address_to other[1] = {&again};
+        static p32 untouched[48 * 32];
+        p32 code = 0;
+        positive loads = 0;
+
+        for (positive i = 0; i < 48 * 32; i++)
+                untouched[i] = 0x123456;
+
+        //      A letter the two faces draw differently, so the test can tell them apart.
+        for (p8 letter = 'A'; letter <= 'D' && !code; letter++)
+        {
+                truth_draw(one, letter, 2);
+                truth_draw(two, letter, 3);
+                if (memory_compare(edge_frames[2], edge_frames[3], sizeof(edge_frames[2])) != 0)
+                        code = letter;
+        }
+        check("reissue: some letter of A to D is drawn differently by the two faces", code != 0);
+
+        //      The engine draws the first face, the second face is loaded until
+        //      its id is the first's, and the engine draws the second face
+        //      with the same letter: it must be the second face's letter.
+        font_start(&reissue_engine, reissue_atlas, 512, 512);
+        edge_draw(&reissue_engine, chain, code, 20 * 64, 0);
+        do
+                font_load(&again, font_two, font_two_size, 0), loads++;
+        while (again.id != one->id && loads < 140000);
+        check("reissue: a later load gets the id of the first face", again.id == one->id && loads > 0);
+
+        edge_draw(&reissue_engine, other, code, 20 * 64, 1);
+        truth_draw(&again, code, 2);
+        check("reissue: a glyph cached for the old face does not answer for the new one",
+              memory_compare(edge_frames[1], edge_frames[2], sizeof(edge_frames[1])) == 0);
+
+        //      A size whose bits wrap in the key, and one past the engine's
+        //      largest, draw nothing; a size of zero draws nothing and measures
+        //      a one-pixel cell.
+        edge_draw(&engine, chain, 'A', 30 * 64, 0);
+        edge_draw(&engine, chain, 'A', 1 << 22 | 30 * 64, 1);
+        check("size: 65536 px, where the key's bits wrap, draws nothing",
+              memory_compare(edge_frames[1], untouched, sizeof(untouched)) == 0);
+        edge_draw(&engine, chain, 'A', 1 << 20, 1);
+        check("size: 16384 px is past what is drawn and draws nothing",
+              memory_compare(edge_frames[1], untouched, sizeof(untouched)) == 0);
+
+        font_metrics zero = font_metrics_at(one, 0);
+        font_target target = {edge_frames[1], 48, 48, 32};
+        p8 pair[2] = {'A', 'B'};
+        p32 pen;
+
+        for (positive i = 0; i < 48 * 32; i++)
+                edge_frames[1][i] = 0x123456;
+        pen = font_draw(&engine, chain, 1, pair, 2, 0, 0, &target, 4 << 16, 24, 0xffffff, 0x123456);
+        check("size: zero draws nothing, advances nothing, and measures a one-pixel cell",
+              pen == 0 && zero.cell_width == 1 && zero.cell_height == 1 &&
+              memory_compare(edge_frames[1], untouched, sizeof(untouched)) == 0);
+}
+
+b32 main()
+{
+        font_face one, two;
+
+        font_make_one();
+        font_make_two();
+        font_start(&engine, atlas, 512, 512);
+        font_start(&small_engine, small_atlas, 128, 32);
+
+        check("load: the proportional font", font_load(&one, font_one, font_one_size, 0) == 0);
+        check("load: the monospace font", font_load(&two, font_two, font_two_size, 0) == 0);
+        check("load: an OpenType CFF font is out of scope",
+              font_load(&(font_face){0}, (const p8 address_to)"OTTO\0\0\0\0\0\0\0\0", 12, 0) == FONT_UNSUPPORTED);
+        check("load: nothing is not a font", font_load(&(font_face){0}, font_one, 0, 0) == FONT_BAD);
+
+        check_tables(&one, &two);
+        check_outlines(&one, &two);
+        check_layout(&one, &two);
+        check_light();
+        check_drawn();
+        check_shapes();
+        check_snap();
+        check_drawing(&one, &two);
+        check_cells(&engine, &two);
+        check_cells(&small_engine, &two);
+        check_translate();
+        check_blend();
+        check_fill_rect();
+        check_sweep();
+        check_edges(&one, &two);
+
+        guarded = memory(9 * 4096);
+        check("hostile: a guard page",
+              guarded && system_call_3(syscall(mprotect), (positive)(guarded + 8 * 4096), 4096, 0) == 0);
+        check_hostile(font_one, font_one_size, 20000);
+        check_hostile(font_two, font_two_size, 20000);
+
+        return test_report(null);
+}
+#endif
+
+#ifdef CHECK_terminal
+#include "../src/lib.util.c"
+#include "../src/moonwater/spark.c"
+#include "../src/canvas/window.c"
+#include "../src/canvas/term.c"
+#include "../src/sh/pty.c"
+#define BOWL_DEFAULT_PATH "/fixture/bin"
+#include "../src/canvas/terminfo.c"
+static fn host_terminal_opening() {}
+// Control-Shift-T asks the machine for a terminal; nothing answers here.
+static bipolar host_bind_request(unsigned int op, unsigned int event, string_address command,
+                                 struct bind_control address_to control)
+{
+        (void)op, (void)event, (void)command, (void)control;
+        return -1;
+}
+static bipolar shell_exec_file(string_address path, string_address address_to arguments, positive count,
+                               string_address address_to environment)
+{
+        (void)path, (void)arguments, (void)count, (void)environment;
+        return -1;
+}
+static fn kill_name(positive number, p8 address_to into) { positive_into_string(into, number); }
+static fn bowl_session_prepare(string_address home, string_address runtime) { (void)home, (void)runtime; }
+static string_address address_to bowl_environment(string_address address_to inherited) { return inherited; }
+#include "../src/canvas/screen.c"
+#include "../src/canvas/font.c"
+#include "../src/canvas/compositor.c"
+#include "../src/canvas/terminal.c"
+
+#define SHARED_counted
+#include "checks.c"
+#undef SHARED_counted
+
+/*
+        The terminal's frames against a full draw.
+
+        A frame draws only the cells that differ from what its buffer holds
+        and names only the rows the compositor has to read again, so the two
+        ways it can be wrong are a cell left as it was and a row left out of
+        the damage. Both show in one comparison: a model of the compositor
+        keeps a screen and copies into it, from each committed buffer, what
+        the damage says, and after every frame the screen and the buffer
+        drawn into have to be the picture that drawing every cell of the
+        grid from nothing makes.
+
+        What goes in is the emulator's own work -- text, colours, wide and
+        drawn characters, erases, scrolls, lines put in and taken out -- with
+        the wheel and resizes between, and the frames come at random with the
+        other buffer released or not, so buffers are drawn a frame behind, two
+        behind, and not at all.
+
+        The fonts are the arguments, the repository's own: the first is what
+        the grid is drawn with and the second its bold, and every one after
+        them, with the second, has to load and have a letter A, which is the
+        four files the image ships.
+*/
+static p64 render_state = 0x9e3779b97f4a7c15ull;
+
+static p32 render_next(p32 below)
+{
+        XORSHIFT64(render_state);
+        return below ? (p32)((render_state >> 11) % below) : 0;
+}
+
+static p32 address_to render_map(positive bytes)
+{
+        long mapped = system_call_6(syscall(mmap), 0, bytes, 3, 0x22, (positive)-1, 0);
+
+        return mapped < 0 && mapped > -4096 ? 0 : (p32 address_to)mapped;
+}
+
+// What the emulator is told next: a piece of everything a terminal is sent.
+static const char address_to render_pieces[] = {
+    "hello world",
+    "The quick brown fox",
+    "\r\n",
+    "\r\n",
+    "\r\n",
+    "\t",
+    "\b",
+    "\x1b[H",
+    "\x1b[2J",
+    "\x1b[K",
+    "\x1b[1K",
+    "\x1b[2K",
+    "\x1b[1;31m",
+    "\x1b[42m",
+    "\x1b[0m",
+    "\x1b[7m",
+    "\x1b[1m",
+    "\x1b[4m",
+    "\x1b[9m",
+    "\x1b[2m",
+    "\x1b[8m",
+    "\x1b[38;5;208m",
+    "\x1b[48;5;24m",
+    "\x1b[3A",
+    "\x1b[2B",
+    "\x1b[5C",
+    "\x1b[4D",
+    "\x1b[5;7H",
+    "\x1b[2L",
+    "\x1b[2M",
+    "\x1b[3P",
+    "\x1b[3@",
+    "\x1b[2S",
+    "\x1b[2T",
+    "\x1b[2;6r",
+    "\x1b[r",
+    "\x1b[?1049h",
+    "\x1b[?1049l",
+    "\x1b[?25l",
+    "\x1b[?25h",
+    "\x1b[5 q",
+    "\x1b[2 q",
+    "\xe4\xb8\xad\xe6\x96\x87",
+    "\xe2\x94\x80\xe2\x94\x82\xe2\x94\x8c",
+    "\xe2\x96\x88\xe2\x96\x91",
+    "caf\xc3\xa9",
+    "0123456789abcdefghijklmnopqrstuvwxyz0123456789",
+    "\x1b[1;1H\x1b[44m\x1b[K",
+};
+#define RENDER_PIECES array_count(render_pieces)
+
+/*
+        The compositor, as far as the terminal can tell: a screen it copies
+        the committed buffer's damage into, as compositor_commit and
+        compositor_scene would.
+*/
+static p32 address_to render_screen;
+
+static fn render_apply(const p32 address_to buffer)
+{
+        struct surface address_to surface = terminal.surface;
+        positive count = surface->damage_count;
+
+        if (!count || count > SURFACE_DAMAGE_MAX)
+        {
+                memory_copy(render_screen, buffer, (positive)terminal.width * terminal.height * 4);
+                return;
+        }
+
+        for (positive at = 0; at < count; at++)
+        {
+                struct surface_damage rectangle = surface->damage[at];
+                long x1 = rectangle.x < 0 ? 0 : rectangle.x, y1 = rectangle.y < 0 ? 0 : rectangle.y;
+                long x2 = (long)rectangle.x + rectangle.width, y2 = (long)rectangle.y + rectangle.height;
+
+                x2 = x2 > (long)terminal.width ? (long)terminal.width : x2;
+                y2 = y2 > (long)terminal.height ? (long)terminal.height : y2;
+                for (long y = y1; y < y2 && x1 < x2; y++)
+                        memory_copy(render_screen + y * terminal.width + x1, buffer + y * terminal.width + x1,
+                                    (positive)(x2 - x1) * 4);
+        }
+}
+
+// The picture of the cells in the frame just drawn, every one of them, from nothing.
+static fn render_reference(p32 address_to into, const struct window_cell address_to cells)
+{
+        unsigned int first, shown, total;
+
+        memory_fill_u32(into, (positive)terminal.width * terminal.height, 0x123456);
+        for (unsigned int row = 0; row < ROWS; row++)
+                terminal_row(into, row, cells + (unsigned long)row * COLUMNS, null, 0, COLUMNS);
+        terminal_extent(&first, &shown, &total);
+        terminal_bar(into, first, shown, total);
+}
+
+// A new surface of the size the grid needs, and nothing on any screen yet. The
+// mappings are made once, for the largest grid the steps below ask for.
+static fn render_surface(void)
+{
+        static unsigned long reserved;
+        static struct surface address_to page;
+        unsigned int pixels_h, pixels_w = terminal_pixels(COLUMNS, ROWS, &pixels_h);
+        unsigned long slot = SURFACE_PAGE_ROUND((unsigned long)pixels_w * pixels_h * 4);
+
+        if (!page)
+        {
+                reserved = SURFACE_PAGE_ROUND((unsigned long)60 * 40 * 16 * 40 * 4);
+                page = (struct surface address_to)system_call_6(syscall(mmap), 0, WINDOW_PIXELS + reserved * 2, 3, 0x22,
+                                                                (positive)-1, 0);
+                render_screen = render_map(reserved);
+        }
+
+        memory_zero(page, WINDOW_PIXELS);
+        terminal.surface = page;
+        // A connection that is not one: the commit's message goes nowhere.
+        terminal.surface->window.handle = 0xffffffffu;
+        terminal.width = pixels_w;
+        terminal.height = pixels_h;
+        terminal.shown = -1;
+        terminal.committed[0] = terminal.committed[1] = 0;
+        terminal_frames();
+        memory_fill_u32(render_screen, (positive)pixels_w * pixels_h, 0xdeadbe);
+        (void)slot;
+}
+
+static b32 render_step(positive address_to compared, positive address_to wrong, positive step)
+{
+        p32 what = render_next(100);
+        p8 bytes[256];
+
+        if (what < 55)
+        {
+                const char address_to piece = render_pieces[render_next(RENDER_PIECES)];
+                positive length = string_length((string_address)piece);
+
+                memory_copy(bytes, piece, length);
+                cursor_hide();
+                term_bytes(bytes, length);
+                to_shell_length = 0;
+                cursor_show();
+                return true;
+        }
+
+        if (what < 65)
+        {
+                terminal_view_scroll((int)render_next(9) - 4);
+                return true;
+        }
+
+        if (what < 68)
+        {
+                // Another size: the emulator regrids, a new surface is made, nothing is on the screen.
+                window->columns = 1 + render_next(50);
+                window->rows = 1 + render_next(14);
+                cursor_hide();
+                regrid(-1);
+                terminal_view_clamp();
+                render_surface();
+                cursor_show();
+                return true;
+        }
+
+        if (what < 71)
+        {
+                // The terminal has been left alone: the buffer that is not on the screen is
+                // given back, and reads as nothing but junk until it is drawn again.
+                int spare = terminal.shown < 0 ? -1 : 1 - terminal.shown;
+
+                if (spare >= 0)
+                {
+                        terminal.surface->release_serial = terminal.committed[spare];
+                        terminal_discard();
+                        if (!terminal.valid[spare])
+                                memory_fill_u32(surface_slot(terminal.surface, (unsigned int)spare, terminal.width,
+                                                             terminal.height),
+                                                (positive)terminal.width * terminal.height, 0xbad000);
+                }
+                return true;
+        }
+
+        {
+                // A frame: the buffer not on the screen is released, or it is not.
+                int slot = terminal.shown < 0 ? 0 : 1 - terminal.shown;
+
+                if (render_next(3))
+                        terminal.surface->release_serial = terminal.committed[slot];
+                else
+                        terminal.surface->release_serial = terminal.committed[slot] - 1;
+
+                if (!terminal_frame())
+                {
+                        // Only a buffer that was not released may be refused.
+                        (void)step;
+                        return terminal.committed[slot] && (int)(terminal.surface->release_serial - terminal.committed[slot]) < 0;
+                }
+
+                {
+                        p32 address_to buffer = surface_slot(terminal.surface, (unsigned int)terminal.shown,
+                                                            terminal.width, terminal.height);
+                        static p32 address_to reference;
+
+                        if (!reference)
+                                reference = render_map((positive)60 * 40 * 16 * 40 * 4);
+
+                        render_apply(buffer);
+                        render_reference(reference, terminal.frame[terminal.shown]);
+                        address_to compared += 1;
+                        if (memory_compare(render_screen, reference, (positive)terminal.width * terminal.height * 4) ||
+                            memory_compare(buffer, reference, (positive)terminal.width * terminal.height * 4))
+                        {
+                                address_to wrong += 1;
+                                if (address_to wrong < 4)
+                                {
+                                        positive pixels = (positive)terminal.width * terminal.height, at = 0;
+
+                                        string_format(log, "  frame %p: the screen or the buffer is not the full draw\n", step);
+                                        while (at < pixels && render_screen[at] == reference[at] && buffer[at] == reference[at])
+                                                at++;
+                                        string_format(log, "    first pixel %p,%p (cell %p,%p of %p by %p): screen %p buffer %p full %p, damage %p, shown %b\n",
+                                                      at % terminal.width, at / terminal.width, at % terminal.width / terminal.cell_w,
+                                                      at / terminal.width / terminal.cell_h, (positive)COLUMNS, (positive)ROWS,
+                                                      (positive)render_screen[at], (positive)buffer[at], (positive)reference[at],
+                                                      (positive)terminal.surface->damage_count, (bipolar)terminal.shown);
+                                }
+                        }
+                }
+        }
+
+        return true;
+}
+
+/*
+        What the keyboard says, turned into what the shell is sent: the
+        compositor's key events with the codes and characters its keymap
+        gives, against the bytes the kernel's window sent for the same
+        keys. A letter with Control is the control code, the key labelled
+        Backspace is DEL, Return is a carriage return, and the keys that are
+        no character are the sequences ANSI names, with what was held written
+        into them.
+*/
+static fn check_keys(void)
+{
+        static const struct
+        {
+                p32 code, character, flags;
+                const char address_to sent;
+                positive length;
+        } keys[] = {
+            {30, 'a', SURFACE_KEY_DOWN, "a", 1},
+            {30, 'A', SURFACE_KEY_DOWN | SURFACE_KEY_SHIFT, "A", 1},
+            {46, 'c', SURFACE_KEY_DOWN | SURFACE_KEY_CONTROL, "\x03", 1},
+            {32, 'd', SURFACE_KEY_DOWN | SURFACE_KEY_CONTROL, "\x04", 1},
+            {38, 'l', SURFACE_KEY_DOWN | SURFACE_KEY_CONTROL | SURFACE_KEY_REPEAT, "\x0c", 1},
+            {28, '\r', SURFACE_KEY_DOWN, "\r", 1},
+            {28, '\n', SURFACE_KEY_DOWN, "\r", 1},
+            {14, '\b', SURFACE_KEY_DOWN, "\x7f", 1},
+            {14, 127, SURFACE_KEY_DOWN, "\x7f", 1},
+            {15, '\t', SURFACE_KEY_DOWN, "\t", 1},
+            {15, '\t', SURFACE_KEY_DOWN | SURFACE_KEY_SHIFT, "\x1b[Z", 3},
+            {1, 27, SURFACE_KEY_DOWN, "\x1b", 1},
+            {103, 0, SURFACE_KEY_DOWN, "\x1b[A", 3},
+            {108, 0, SURFACE_KEY_DOWN, "\x1b[B", 3},
+            {103, 0, SURFACE_KEY_DOWN | SURFACE_KEY_SHIFT, "\x1b[1;2A", 6},
+            {106, 0, SURFACE_KEY_DOWN | SURFACE_KEY_CONTROL, "\x1b[1;5C", 6},
+            {45, 'x', SURFACE_KEY_DOWN | SURFACE_KEY_ALT, "\x1bx", 2},
+            {111, 0, SURFACE_KEY_DOWN, "\x1b[3~", 4},
+            {104, 0, SURFACE_KEY_DOWN, "\x1b[5~", 4},
+            {59, 0, SURFACE_KEY_DOWN, "\x1bOP", 3},
+            {57, ' ', SURFACE_KEY_DOWN | SURFACE_KEY_CONTROL, "\0", 1},
+            {26, '[', SURFACE_KEY_DOWN | SURFACE_KEY_CONTROL, "\x1b", 1},
+            {30, 'a', 0, "", 0},
+            {29, 0, SURFACE_KEY_DOWN | SURFACE_KEY_CONTROL, "", 0},
+        };
+
+        for (positive at = 0; at < array_count(keys); at++)
+        {
+                struct surface_event event = {SURFACE_EVENT_KEY, (unsigned short)keys[at].flags, 0,
+                                              (int)keys[at].code, (int)keys[at].character};
+                b32 dirty = false, closing = false;
+                unsigned int resize[3] = {0, 0, 0};
+
+                to_shell_length = 0;
+                terminal_receive(-1, &event, &dirty, &closing, resize);
+                check("keys: the shell is sent the bytes the kernel's window sent",
+                      to_shell_length == keys[at].length &&
+                          !memory_compare(to_shell, keys[at].sent, keys[at].length));
+        }
+        to_shell_length = 0;
+}
+
+/*
+        The pointer, when a program has asked for it: where it is in cells
+        from where it is in pixels, the button it pressed and let go of, and
+        the wheel as the buttons after the last. Pixels are the surface's, so
+        the cell is whole cells of this font's size.
+*/
+static fn check_pointer(void)
+{
+        unsigned int column = 3, row = 4;
+        int x = (int)((column - 1) * terminal.cell_w + terminal.cell_w / 2);
+        int y = (int)((row - 1) * terminal.cell_h + terminal.cell_h / 2);
+        struct surface_event motion = {SURFACE_EVENT_POINTER_MOTION, 0, 0, x, y};
+        struct surface_event press = {SURFACE_EVENT_POINTER_BUTTON, SURFACE_KEY_DOWN, 0, 0x110, 0};
+        struct surface_event release = {SURFACE_EVENT_POINTER_BUTTON, 0, 0, 0x110, 0};
+        struct surface_event right = {SURFACE_EVENT_POINTER_BUTTON, SURFACE_KEY_DOWN, 0, 0x111, 0};
+        struct surface_event wheel = {SURFACE_EVENT_POINTER_WHEEL, 0, 0, 120, 0};
+        b32 dirty = false, closing = false;
+        unsigned int resize[3] = {0, 0, 0};
+        char expect[16];
+
+        mouse_mode = 1000;
+        mouse_sgr = false;
+        terminal.modifiers = 0;
+        to_shell_length = 0;
+        terminal_receive(-1, &motion, &dirty, &closing, resize);
+        check("pointer: a motion is nothing to a program that asked for clicks", !to_shell_length);
+
+        terminal_receive(-1, &press, &dirty, &closing, resize);
+        expect[0] = 27, expect[1] = '[', expect[2] = 'M', expect[3] = 32, expect[4] = (char)(32 + column),
+        expect[5] = (char)(32 + row);
+        check("pointer: a press is the button and the cell", to_shell_length == 6 && !memory_compare(to_shell, expect, 6));
+
+        to_shell_length = 0;
+        terminal_receive(-1, &release, &dirty, &closing, resize);
+        expect[3] = 32 + 3;
+        check("pointer: a release is button 3", to_shell_length == 6 && !memory_compare(to_shell, expect, 6));
+
+        to_shell_length = 0;
+        terminal_receive(-1, &wheel, &dirty, &closing, resize);
+        expect[3] = 32 + 64;
+        check("pointer: the wheel is button 64", to_shell_length == 6 && !memory_compare(to_shell, expect, 6));
+
+        mouse_sgr = true;
+        to_shell_length = 0;
+        terminal_receive(-1, &press, &dirty, &closing, resize);
+        check("pointer: SGR press", to_shell_length == 9 && !memory_compare(to_shell, "\x1b[<0;3;4M", 9));
+        to_shell_length = 0;
+        terminal_receive(-1, &right, &dirty, &closing, resize);
+        check("pointer: the right button is 2", to_shell_length == 9 && !memory_compare(to_shell, "\x1b[<2;3;4M", 9));
+        to_shell_length = 0;
+        terminal_receive(-1, &release, &dirty, &closing, resize);
+        check("pointer: SGR release", to_shell_length == 9 && !memory_compare(to_shell, "\x1b[<0;3;4m", 9));
+
+        mouse_mode = 0;
+        mouse_sgr = false;
+        to_shell_length = 0;
+}
+
+/*
+        A program that commits twice before the compositor has looked at
+        either has its first buffer back all the same. The compositor reads
+        the page when it gets the message, so it finds the second commit's
+        sequence and slot and has never shown the first buffer: what it owes
+        the program is the release of every commit before this one, or the
+        program waits for one that never comes and draws nothing again.
+*/
+static fn check_release(void)
+{
+        static struct compositor_client client;
+        struct surface address_to page = (struct surface address_to)system_call_6(
+            syscall(mmap), 0, WINDOW_PIXELS + 2 * 4096 * 4, 3, 0x22, (positive)-1, 0);
+
+        memory_zero(&client, sizeof(client));
+        client.handle = -1;
+        client.page = page;
+        client.width = client.height = 16;
+        client.slots = 2;
+        client.role = SURFACE_ROLE_APP;
+        client.lock = SURFACE_LOCK_MOVABLE | SURFACE_LOCK_RESIZABLE;
+        client.active = 1;
+        client.style = WINDOW_FRAME;
+        page->window.sequence = 2;
+        page->buffer_index = 1;
+
+        compositor_commit(&client);
+        check("compositor: a commit that finds two released the first buffer it never showed",
+              page->release_serial == 1 && client.slot == 1);
+
+        // And the ordinary case, a buffer at a time: showing 2 on slot 1, then 3 on slot 0.
+        page->window.sequence = 3;
+        page->buffer_index = 0;
+        compositor_commit(&client);
+        check("compositor: a commit on the other buffer releases the one before it",
+              page->release_serial == 2 && client.slot == 0);
+
+        // The same buffer again releases nothing.
+        page->window.sequence = 4;
+        compositor_commit(&client);
+        check("compositor: a commit on the same buffer releases nothing", page->release_serial == 2);
+}
+
+// A code point as UTF-8, into bytes; the count of bytes it takes.
+static positive render_glyph(p8 address_to bytes, p32 code)
+{
+        if (code < 0x80)
+        {
+                bytes[0] = (p8)code;
+                return 1;
+        }
+        if (code < 0x800)
+        {
+                bytes[0] = (p8)(0xc0 | code >> 6);
+                bytes[1] = (p8)(0x80 | (code & 63));
+                return 2;
+        }
+        bytes[0] = (p8)(0xe0 | code >> 12);
+        bytes[1] = (p8)(0x80 | (code >> 6 & 63));
+        bytes[2] = (p8)(0x80 | (code & 63));
+        return 3;
+}
+
+// Whether a cell of the frame is drawn: some pixel is not the paper, and the cell is not the picture of a missing glyph.
+static bool render_drawn(const p32 address_to pixels, p32 paper, p32 row, p32 column)
+{
+        bool lit = false, missing = true;
+
+        for (p32 y = 0; y < terminal.cell_h; y++)
+                for (p32 x = 0; x < terminal.cell_w; x++)
+                {
+                        p32 at = (row * terminal.cell_h + y) * terminal.width + column * terminal.cell_w + x;
+                        p32 gone = (7 * terminal.cell_h + y) * terminal.width + 20 * terminal.cell_w + x;
+
+                        lit = lit || pixels[at] != paper;
+                        missing = missing && pixels[at] == pixels[gone];
+                }
+        return lit && !missing;
+}
+
+// The frame just drawn, read back: the buffer that is on the screen, or null when it was refused.
+static p32 address_to render_frame(void)
+{
+        int slot = terminal.shown < 0 ? 0 : 1 - terminal.shown;
+
+        terminal.surface->release_serial = terminal.committed[slot];
+        if (!terminal_frame())
+                return null;
+        return surface_slot(terminal.surface, (unsigned int)terminal.shown, terminal.width, terminal.height);
+}
+
+b32 main()
+{
+        string_address paths[1];
+        positive compared = 0, wrong = 0, refused = 0;
+
+        if (program_argument_count() < 2)
+        {
+                string_format(log, "  NOT RUN: the terminal's frames, no font was given\n");
+                return test_report(null);
+        }
+
+        paths[0] = program_argument(1);
+        check("fonts: the face loads", terminal_fonts(paths, 1, program_argument_count() > 2 ? program_argument(2) : null, 16));
+        if (failures)
+                return test_report(null);
+
+        {
+                unsigned int shipped = 0, wanted = 0;
+                bool soft = true;
+
+                for (unsigned int at = 2; at < program_argument_count(); at++)
+                {
+                        font_face other;
+                        positive length = 0;
+                        positive bytes = surface_map_file(program_argument(at), &length);
+
+                        wanted++;
+                        if (bytes && font_load(&other, (const p8 address_to)bytes, length, 0) == 0 && font_glyph(&other, 'A'))
+                                shipped++;
+                        {
+                                //      A soft hyphen a face has not is drawn as nothing, not as the face's notdef.
+                                p32 face = 0, glyph = 0;
+
+                                if (bytes && !font_glyph(&other, 0xad))
+                                {
+                                        font_find(terminal.engine, (const font_face *const[]){&other}, 1, 0xad, &face, &glyph);
+                                        soft = soft && face == FONT_DRAWN;
+                                }
+                        }
+                }
+                check("fonts: every face the image ships loads and has the letter A", wanted && shipped == wanted);
+                check("fonts: a soft hyphen a shipped face lacks is drawn as nothing, not as its notdef", soft);
+        }
+
+        for (unsigned int at = 0; at < 256; at++)
+                terminal_colour[at] = window_cell_colour(at);
+        term_palette = terminal_palette;
+        terminal.bar_grab = -1;
+
+        window = window_grid_open(30, 8, 80, 256);
+        check("grid: a ring in the program's own memory", window != null);
+        if (!window)
+                return test_report(null);
+        grid_take();
+        full_reset();
+        render_surface();
+        cursor_show();
+
+        //      The glyphs a program prints, btop's among them, each in its own cell of a
+        //      30 by 8 grid: every printable ASCII character, the shapes, braille, box
+        //      and block characters and the arrow and cross that btop and its kin draw,
+        //      and a bold row. A frame of the cell is lit where a pixel is not the blank
+        //      paper beside it. Red on the parent where no face and no procedure draws it.
+        {
+                static const p32 glyphs[] = {
+                    0x25a0, 0x25a1, 0x25aa, 0x25ab, 0x25ac, 0x25b2, 0x25b3, 0x25bc, 0x25bd, 0x25b6, 0x25b7, 0x25c0,
+                    0x25c1, 0x25cf, 0x25cb, 0x25c6, 0x25c7, 0x25e6, 0x25b4, 0x25be, 0x25b8, 0x25c2, 0x25ba, 0x25c4,
+                    0x2847, 0x28ff, 0x2880, 0x28c0, 0x28f0, 0x2809, 0x2803, 0x28b8,
+                    0x256d, 0x2500, 0x256e, 0x2502, 0x2570, 0x256f, 0x2550, 0x2551, 0x2554, 0x2557, 0x255a, 0x255d,
+                    0x250c, 0x2510, 0x2514, 0x2518, 0x253c, 0x2581, 0x2586, 0x2588, 0x2591, 0x2592, 0x2593, 0x2590,
+                    0x21b5, 0x2717, 0x2191, 0x2193, 0x2190, 0x2192, 0x00b7, 0x2022, 0x2026};
+                static const p32 bold[] = {0x25a0, 0x25b2, 0x25bc, 0x25cb, 0x25cf, 0x25c6};
+                bool every = true;
+                p32 address_to pixels = null;
+                p32 paper = 0;
+
+                cursor_hide();
+                term_bytes((const p8 address_to) "\x1b[H\x1b[2J", 7);
+                for (p32 c = 0x21; c < 0x7f; c++)
+                {
+                        p8 bytes[4];
+                        positive length = render_glyph(bytes, c);
+
+                        term_bytes(bytes, length);
+                        if ((c - 0x21 + 1) % 30 == 0)
+                                term_bytes((const p8 address_to) "\r\n", 2);
+                }
+                term_bytes((const p8 address_to) "\r\n", 2);
+                for (p32 k = 0; k < sizeof(glyphs) / sizeof(glyphs[0]); k++)
+                {
+                        p8 bytes[4];
+                        positive length = render_glyph(bytes, glyphs[k]);
+
+                        term_bytes(bytes, length);
+                }
+                //      U+E000 is in neither face: its cell is the picture a missing glyph gets.
+                term_bytes((const p8 address_to) "\x1b[8;21H\xee\x80\x80\x1b[8;1H\x1b[1m",
+                           sizeof("\x1b[8;21H\xee\x80\x80\x1b[8;1H\x1b[1m") - 1);
+                for (p32 k = 0; k < sizeof(bold) / sizeof(bold[0]); k++)
+                {
+                        p8 bytes[4];
+                        positive length = render_glyph(bytes, bold[k]);
+
+                        term_bytes(bytes, length);
+                }
+                term_bytes((const p8 address_to) "\x1b[0m", 4);
+                cursor_show();
+                to_shell_length = 0;
+                pixels = render_frame();
+                if (!pixels)
+                        every = false;
+                else
+                {
+                        //      The blank cell at the bottom right is the paper; a cell is lit where a pixel is not it.
+                        paper = pixels[(positive)(8 * terminal.cell_h - 1) * terminal.width + 30 * terminal.cell_w - 1];
+                        for (p32 at = 0; at < 94; at++)
+                                every = every && render_drawn(pixels, paper, at / 30, at % 30);
+                        for (p32 at = 0; at < sizeof(glyphs) / sizeof(glyphs[0]); at++)
+                                every = every && render_drawn(pixels, paper, 4 + at / 30, at % 30);
+                        for (p32 at = 0; at < sizeof(bold) / sizeof(bold[0]); at++)
+                                every = every && render_drawn(pixels, paper, 7, at);
+                }
+                check("glyphs: every printable ASCII character, and each shape, braille, box and block glyph btop draws, lights its cell", every);
+        }
+
+        for (positive step = 0; step < 40000; step++)
+                if (!render_step(&compared, &wrong, step))
+                        refused++;
+
+        check_keys();
+        check_pointer();
+        check_release();
+
+        // What the terminal says its paper and ink are is what it paints them with.
+        {
+                static const char paper[] = "\x1b]11;rgb:1010/2020/3030\x07", ink[] = "\x1b]10;rgb:c0c0/d0d0/e0e0\x1b\\";
+                unsigned int was_paper = terminal_colour[0], was_ink = terminal_colour[7];
+
+                terminal_colour[0] = 0x102030;
+                terminal_colour[7] = 0xc0d0e0;
+                to_shell_length = 0;
+                term_bytes((const p8 address_to)"\x1b]11;?\x07", 7);
+                check("osc: the paper is asked and answered from the table it is painted from",
+                      to_shell_length == sizeof(paper) - 1 && !memory_compare(to_shell, paper, sizeof(paper) - 1));
+                to_shell_length = 0;
+                term_bytes((const p8 address_to)"\x1b]10;?\x1b\\", 8);
+                check("osc: and the ink",
+                      to_shell_length == sizeof(ink) - 1 && !memory_compare(to_shell, ink, sizeof(ink) - 1));
+                to_shell_length = 0;
+                terminal_colour[0] = was_paper;
+                terminal_colour[7] = was_ink;
+        }
+        check("frames: a buffer is refused only while the compositor may still be reading it", !refused);
+        check("frames: some were drawn", compared > 1000);
+        check("frames: the screen and the buffer are always the full draw", !wrong);
+        string_format(log, "  %p frames compared\n", compared);
+        return test_report(null);
+}
+#endif
 
 #ifdef CHECK_probe
 #include "../src/lib.util.c"
@@ -108731,7 +111527,7 @@ static void reference_row(const struct target *t,const struct shape *s,int x,int
 struct pane {unsigned grid_columns,grid_rows,columns,rows,view,head,history,stride,skip;
     unsigned *lengths;struct window_cell *cells;
     int x,y,width,height,edge;unsigned style,state,title_length,pitch;
-    const char *title;u32 *pixels;};
+    const char *title;u32 *pixels;void *shared;};
 static unsigned pane_rows(struct pane *p) {return p->rows;}
 static unsigned pane_view_at(struct pane *p,unsigned view,unsigned *skip) {*skip=p->skip;return view;}
 // Every line of these rings has memory behind it; holding is the kernel's.
@@ -108764,9 +111560,545 @@ static void canvas_thread_wake(void) {}
 // Titles and pixel windows are not exercised by this cell-layout check.
 static void text_draw(const struct target *t,int x,int y,int w,int h,
     const char *text,unsigned length,unsigned align,int scale,u32 color) {assert(0);}
-static void shape_blit(const struct target *t,const struct shape *s,
-    int x,int y,int w,int h,const u32 *source,unsigned pitch) {assert(0);}
 #include "canvas-pane.inc"
+
+/* The golden scene G-S1 (canvas spec 05 section 1.3): a 1024 by 768 output
+   in the desktop ink, and one framed, focused pixel window with a shared page
+   and no title at (80, 80), its 128 by 64 buffer all 0x3a5a7a, at scales 1 to
+   4. The value is the SHA-256 of the buffer as little-endian words with the
+   top byte cleared, which is the byte no compositor agrees on. Recorded from
+   the kernel's compose path at 16ee8ddb, where canvas.c is byte for byte
+   cf9a0bca's; every compositor that draws the classic look must give the
+   same four. */
+#define GOLDEN_GS1_1 "07f0a6e39b44e87cd23667a5be9023f612c63dd21d382d251e4036aaaefc9c44"
+#define GOLDEN_GS1_2 "59ccc584601205c08305c86de93bc83d5678e2238039f2a0e2505675256558fc"
+#define GOLDEN_GS1_3 "d79d41aaf3ebec1983fcd399bf434a078c4984e064a72282f79a408d0caa56ba"
+#define GOLDEN_GS1_4 "55f194ecbb9ad8f55bb264bf0d4e92a89f200d8ace1b0ff080c9eaec564787d6"
+static const char *const golden_gs1[4]={GOLDEN_GS1_1,GOLDEN_GS1_2,GOLDEN_GS1_3,GOLDEN_GS1_4};
+static void golden_sha256(const u32 *pixels,size_t count,char out[65]) {
+    static const uint32_t k[64]={
+        0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+        0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+        0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+        0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+        0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+        0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+        0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+        0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2};
+    uint32_t h[8]={0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19};
+    uint64_t bytes=(uint64_t)count*4,total=(bytes+9+63)/64*64;
+    #define GROR(x,n) (((x)>>(n))|((x)<<(32-(n))))
+    for(uint64_t at=0;at<total;at+=64) {
+        uint8_t block[64];uint32_t w[64];
+        for(unsigned i=0;i<64;i++) {
+            uint64_t b=at+i;
+            block[i]=b<bytes?(uint8_t)((pixels[b/4]&0xffffffu)>>(b%4*8)):
+                b==bytes?0x80:b>=total-8?(uint8_t)(bytes*8>>((total-1-b)*8)):0;
+        }
+        for(unsigned i=0;i<16;i++)w[i]=(uint32_t)block[i*4]<<24|(uint32_t)block[i*4+1]<<16|
+            (uint32_t)block[i*4+2]<<8|block[i*4+3];
+        for(unsigned i=16;i<64;i++)w[i]=w[i-16]+(GROR(w[i-15],7)^GROR(w[i-15],18)^(w[i-15]>>3))+
+            w[i-7]+(GROR(w[i-2],17)^GROR(w[i-2],19)^(w[i-2]>>10));
+        uint32_t a=h[0],b=h[1],c=h[2],d=h[3],e=h[4],f=h[5],g=h[6],hh=h[7];
+        for(unsigned i=0;i<64;i++) {
+            uint32_t t1=hh+(GROR(e,6)^GROR(e,11)^GROR(e,25))+((e&f)^(~e&g))+k[i]+w[i];
+            uint32_t t2=(GROR(a,2)^GROR(a,13)^GROR(a,22))+((a&b)^(a&c)^(b&c));
+            hh=g;g=f;f=e;e=d+t1;d=c;c=b;b=a;a=t1+t2;
+        }
+        h[0]+=a;h[1]+=b;h[2]+=c;h[3]+=d;h[4]+=e;h[5]+=f;h[6]+=g;h[7]+=hh;
+    }
+    #undef GROR
+    for(unsigned i=0;i<8;i++)snprintf(out+i*8,9,"%08x",h[i]);
+}
+static u32 golden_screen[1024*768];
+static void check_golden_gs1(const u32 *ink) {
+    static u32 body[128*64];
+    for(unsigned i=0;i<128*64;i++)body[i]=0x3a5a7a;
+    for(unsigned scale=1;scale<=4;scale++) {
+        desktop.scale=scale;
+        for(unsigned i=0;i<1024*768;i++)golden_screen[i]=ink[INK_DESKTOP];
+        struct pane p={.x=80,.y=80,.width=128,.height=64,.style=WINDOW_FRAME,
+            .state=WINDOW_FOCUSED,.pixels=body,.pitch=128,.shared=body};
+        struct target t={.pixels=golden_screen,.pitch=1024,.width=1024,.height=768,
+            .clip={0,0,1024,768},.ink=ink};
+        compose_pane(&p,&t);
+        char got[65];golden_sha256(golden_screen,1024*768,got);
+        if(strcmp(got,golden_gs1[scale-1]))
+            fprintf(stderr,"G-S1 at scale %u is %s, not the golden %s\n",scale,got,golden_gs1[scale-1]);
+        check(!strcmp(got,golden_gs1[scale-1]));
+    }
+    desktop.scale=1;
+}
+
+/* M1.3: src/canvas/compositor.c's CPU backend draws G-S1 to the kernel's
+   hashes at scale 1, where its close box is the kernel's own bitmap. Above
+   scale 1 the box's X is the same two strokes drawn at the device's size,
+   with exact coverage, where the kernel scales the bitmap by whole pixels:
+   those three differ from the kernel's on purpose (the commit that made the
+   cross resolution independent names it), and are pinned here so a later
+   change to them is as deliberate. */
+static unsigned long compositor_written;
+static void memory_fill_u32_rect(u32 *into,unsigned long stride,unsigned long width,
+                                 unsigned long height,u32 value) {
+    compositor_written+=width*height;
+    for(unsigned long y=0;y<height;y++)for(unsigned long x=0;x<width;x++)into[y*stride+x]=value;
+}
+#include "compositor-backend.inc"
+/* A failed row says which one, not only that one failed. */
+#define cc_check(x) do{if(!(x))fprintf(stderr,"compositor row failed, line %d: %s\n",__LINE__,#x);check(x);}while(0)
+#define COMPOSITOR_GS1_2 "823937fb9eec24b584627e9dc188fb603a4d1634ea00b1855961252f3a633fc9"
+#define COMPOSITOR_GS1_3 "12634bcd9694c007e18898c46767619a6329d5ae52937e382a2d85d85f29228b"
+#define COMPOSITOR_GS1_4 "a739b40c9a925ce33b8a9cfbe5943fa737ef8eaa4f1ba9e22b6c7f968bb8b19a"
+static const char *const compositor_gs1[4]={GOLDEN_GS1_1,COMPOSITOR_GS1_2,COMPOSITOR_GS1_3,COMPOSITOR_GS1_4};
+static void check_compositor_gs1(void) {
+    static u32 body[128*64];
+    for(unsigned i=0;i<128*64;i++)body[i]=0x3a5a7a;
+    for(int scale=1;scale<=4;scale++) {
+        struct compositor_target t={golden_screen,1024,1024,768,0,0,1024,768};
+        struct compositor_frame f={80,80,128,64,scale,1,1,1,body,128};
+        compositor_fill(&t,0,0,1024,768,COMPOSITOR_INK_DESKTOP);
+        compositor_draw(&t,&f);
+        char got[65];golden_sha256(golden_screen,1024*768,got);
+        if(strcmp(got,compositor_gs1[scale-1]))
+            fprintf(stderr,"the compositor's G-S1 at scale %d is %s, not the golden %s\n",scale,got,compositor_gs1[scale-1]);
+        cc_check(!strcmp(got,compositor_gs1[scale-1]));
+        /* Damage is a clip, not a different picture: the same scene drawn
+           in four quarters is the same buffer. */
+        for(int q=0;q<4;q++) {
+            struct compositor_target part={golden_screen,1024,1024,768,
+                q%2?512:0,q/2?384:0,q%2?1024:512,q/2?768:384};
+            compositor_fill(&part,0,0,1024,768,COMPOSITOR_INK_DESKTOP);
+            compositor_draw(&part,&f);
+        }
+        golden_sha256(golden_screen,1024*768,got);
+        if(strcmp(got,compositor_gs1[scale-1]))
+            fprintf(stderr,"the compositor's G-S1 at scale %d drawn in quarters is %s\n",scale,got);
+        cc_check(!strcmp(got,compositor_gs1[scale-1]));
+    }
+}
+
+/* G-S2 (canvas spec 05 section 1.3): G-S1 with the classic panel at its
+   default height, 24 logical pixels, on the bottom edge, and no text. The
+   panel lists the scene's one window, which has the keys. No earlier code
+   drew a panel, so these are recorded from the backend and are the
+   reference for every later build of it. */
+#define COMPOSITOR_GS2_1 "c67e5e629e5e15d969bcccc9960252720acc6698cf1509f7eb2931e2e6c1cd2d"
+#define COMPOSITOR_GS2_2 "4ee7c02c9569fb81f48a9b70674a94712420341abba4fe6b030533174847aafa"
+#define COMPOSITOR_GS2_3 "57dbb9bf0b59e1859af871c6fb99a0a9ed8576a80497ccf9b52092e061290087"
+#define COMPOSITOR_GS2_4 "09540dc4f6a31e4b640596209070266f61e273770fb6ac9ca019d05918a7bfb6"
+static const char *const compositor_gs2[4]={COMPOSITOR_GS2_1,COMPOSITOR_GS2_2,COMPOSITOR_GS2_3,COMPOSITOR_GS2_4};
+static void check_compositor_gs2(void) {
+    static u32 body[128*64];
+    for(unsigned i=0;i<128*64;i++)body[i]=0x3a5a7a;
+    for(int scale=1;scale<=4;scale++) {
+        int bx,by,bw,bh;
+        compositor_band(1024,768,scale,1,&bx,&by,&bw,&bh);
+        cc_check(bx==0&&bw==1024&&bh==24*scale&&by==768-24*scale);
+        static const unsigned char marks[1]={SURFACE_LIST_FOCUSED};
+        struct compositor_frame frames[2]={
+            {80,80,128,64,scale,1,1,1,body,128,0,0,0},
+            {bx,by,bw,bh,scale,0,0,0,0,0,1,marks,1}};
+        struct compositor_target t={golden_screen,1024,1024,768,0,0,1024,768};
+        compositor_scene(&t,frames,2);
+        char got[65];golden_sha256(golden_screen,1024*768,got);
+        if(strcmp(got,compositor_gs2[scale-1]))
+            fprintf(stderr,"G-S2 at scale %d is %s, not the golden %s\n",scale,got,compositor_gs2[scale-1]);
+        cc_check(!strcmp(got,compositor_gs2[scale-1]));
+        /* The band is the panel's ink where no button is, and the desktop's
+           just above it. */
+        cc_check(golden_screen[(unsigned)(by+bh/2)*1024]==COMPOSITOR_INK_PANEL);
+        cc_check(golden_screen[(unsigned)(by-1)*1024+700]==COMPOSITOR_INK_DESKTOP);
+        /* M2.4: the work area is the output less the panel's zone, on
+           either edge. */
+        for(int bottom=0;bottom<2;bottom++) {
+            struct compositor_area work;
+            compositor_work(1024,768,scale,bottom,&work);
+            cc_check(work.x1==0&&work.x2==1024&&work.y2-work.y1==768-24*scale);
+            cc_check(bottom?(work.y1==0&&work.y2==768-24*scale):(work.y1==24*scale&&work.y2==768));
+        }
+    }
+}
+
+/* The roles (canvas spec 02 section 2) as a table: what each is given and what it is
+   not. The panel is the top layer, held to its two sides (the edge is added where it
+   is made), cannot be moved, resized, framed, given focus by a press or given the
+   keys; an application is a framed window that can be moved and resized; the
+   background lies under everything and the menu over it; LOG and LEGACY are the
+   compositor's own and the kernel's, and nobody claims them. */
+static void check_compositor_roles(void) {
+    const struct compositor_role *r=compositor_roles;
+    cc_check(r[SURFACE_ROLE_APP].layer==SURFACE_LAYER_NORMAL&&r[SURFACE_ROLE_APP].lock==35&&
+             r[SURFACE_ROLE_APP].framed&&r[SURFACE_ROLE_APP].held==COMPOSITOR_HELD_ANY);
+    cc_check(r[SURFACE_ROLE_BACKGROUND].layer==SURFACE_LAYER_BACKGROUND&&r[SURFACE_ROLE_BACKGROUND].lock==12&&
+             r[SURFACE_ROLE_BACKGROUND].anchor==15&&r[SURFACE_ROLE_BACKGROUND].fit==COMPOSITOR_FIT_OUTPUT);
+    cc_check(r[SURFACE_ROLE_PANEL].layer==SURFACE_LAYER_TOP&&r[SURFACE_ROLE_PANEL].lock==12&&
+             !r[SURFACE_ROLE_PANEL].framed&&r[SURFACE_ROLE_PANEL].anchor==12&&
+             r[SURFACE_ROLE_PANEL].fit==COMPOSITOR_FIT_BAND&&r[SURFACE_ROLE_PANEL].held==COMPOSITOR_HELD_ONE);
+    cc_check(!(r[SURFACE_ROLE_PANEL].lock&(SURFACE_LOCK_MOVABLE|SURFACE_LOCK_RESIZABLE|SURFACE_LOCK_DECORATED)));
+    cc_check(r[SURFACE_ROLE_LAUNCHER].layer==SURFACE_LAYER_OVERLAY&&r[SURFACE_ROLE_LAUNCHER].lock==0);
+    cc_check(r[SURFACE_ROLE_ICONS].layer==SURFACE_LAYER_BOTTOM&&r[SURFACE_ROLE_ICONS].lock==12&&
+             r[SURFACE_ROLE_ICONS].fit==COMPOSITOR_FIT_WORK);
+    cc_check(r[SURFACE_ROLE_CONTROL].lock==35&&r[SURFACE_ROLE_CONTROL].framed&&
+             r[SURFACE_ROLE_CONTROL].held==COMPOSITOR_HELD_ONE);
+    cc_check(r[SURFACE_ROLE_WINDOW_LIST].held==COMPOSITOR_HELD_NOT_YET&&r[SURFACE_ROLE_TRAY].held==COMPOSITOR_HELD_NOT_YET);
+    cc_check(r[SURFACE_ROLE_LOG].held==COMPOSITOR_HELD_NEVER&&r[SURFACE_ROLE_LEGACY].held==COMPOSITOR_HELD_NEVER);
+    /* The layers lie in the order a stack is kept in. */
+    cc_check(SURFACE_LAYER_BACKGROUND<SURFACE_LAYER_BOTTOM&&SURFACE_LAYER_BOTTOM<SURFACE_LAYER_NORMAL&&
+             SURFACE_LAYER_NORMAL<SURFACE_LAYER_TOP&&SURFACE_LAYER_TOP<SURFACE_LAYER_OVERLAY);
+}
+
+/* The panel's buttons are where they are drawn: every slot is inside the
+   band, none overlaps another, the middle of each is what a press there
+   names, and a point outside every slot names nothing. */
+static void check_compositor_panel_slots(void) {
+    for(int scale=1;scale<=4;scale++)for(unsigned count=0;count<=COMPOSITOR_CLIENTS;count++) {
+        unsigned char marks[COMPOSITOR_CLIENTS]={0};
+        struct compositor_frame f={0,768-24*scale,1024,24*scale,scale,0,0,0,0,0,1,marks,count};
+        int seen[COMPOSITOR_CLIENTS+2][4],n=0;
+        for(int which=-2;which<(int)count;which++) {
+            int x,y,w,h;
+            if(!compositor_panel_slot(&f,which,&x,&y,&w,&h))continue;
+            cc_check(x>=f.x&&x+w<=f.x+f.width&&y>=f.y&&y+h<=f.y+f.height&&w>0&&h>0);
+            for(int other=0;other<n;other++)
+                cc_check(x+w<=seen[other][0]||seen[other][0]+seen[other][2]<=x||
+                      y+h<=seen[other][1]||seen[other][1]+seen[other][3]<=y);
+            seen[n][0]=x;seen[n][1]=y;seen[n][2]=w;seen[n][3]=h;n++;
+            cc_check(compositor_panel_hit(&f,x+w/2,y+h/2)==which);
+        }
+        cc_check(compositor_panel_hit(&f,f.x-1,f.y)==COMPOSITOR_HIT_NONE);
+        cc_check(compositor_panel_hit(&f,f.x,f.y)==COMPOSITOR_HIT_NONE); /* the band's own margin */
+        cc_check(count==0||n==(int)count+2);
+    }
+}
+
+/* The panel writes each pixel of its band once: no fill goes over another,
+   whatever the windows' marks, and the number of pixels written is the
+   band's. */
+static void check_compositor_panel_once(void) {
+    static u32 screen[1024*768];
+    for(int scale=1;scale<=4;scale++)for(unsigned count=0;count<=COMPOSITOR_CLIENTS;count++)
+    for(unsigned pattern=0;pattern<4;pattern++) {
+        unsigned char marks[COMPOSITOR_CLIENTS];
+        for(unsigned i=0;i<count;i++)marks[i]=(unsigned char)((pattern>>(i&1))&1?(i%3==0?2:1):0);
+        struct compositor_frame f={0,768-24*scale,1024,24*scale,scale,0,0,0,0,0,1,marks,count};
+        struct compositor_target t={screen,1024,1024,768,0,0,1024,768};
+        for(unsigned i=0;i<1024*768;i++)screen[i]=0xdeadbeefu;
+        compositor_written=0;
+        compositor_draw(&t,&f);
+        if(compositor_written!=1024ul*24*scale)
+            fprintf(stderr,"panel at scale %d, %u windows, marks %u wrote %lu, not %lu\n",scale,count,pattern,compositor_written,1024ul*24*scale);
+        cc_check(compositor_written==1024ul*24*scale);
+        for(int y=768-24*scale;y<768;y++)for(int x=0;x<1024;x++)
+            if(screen[y*1024+x]==0xdeadbeefu){cc_check(0);y=768;break;}
+    }
+}
+
+/* The close box's X: the classic bitmap at scale 1, and at every scale the
+   same shape, symmetric about both axes, full where the strokes cross and
+   at the corners, empty a long way from them, and made of coverage that
+   grows with the scale's area the way a stroke of fixed logical width must. */
+static void check_compositor_cross(void) {
+    for(int scale=1;scale<=COMPOSITOR_CROSS_SCALES;scale++) {
+        int n=COMPOSITOR_CELL*scale;
+        compositor_cross_scale=0;
+        compositor_cross_make(scale);
+        long total=0;
+        for(int y=0;y<n;y++)for(int x=0;x<n;x++) {
+            unsigned c=compositor_cross_mask[y*n+x];
+            total+=c;
+            cc_check(c==compositor_cross_mask[y*n+(n-1-x)]);
+            cc_check(c==compositor_cross_mask[(n-1-y)*n+x]);
+            cc_check(c==compositor_cross_mask[x*n+y]);
+            if(scale==1)cc_check(c==((compositor_close_bits[y]&(0x80>>x))?255u:0u));
+        }
+        cc_check(compositor_cross_mask[0]==255&&compositor_cross_mask[n*n-1]==255);
+        cc_check(compositor_cross_mask[(n/2)*n+n/2]==255&&compositor_cross_mask[(n/2-1)*n+n/2-1]==255);
+        cc_check(compositor_cross_mask[(n/2)*n]==0&&compositor_cross_mask[n-1+(n/2)*n]==0);
+        /* Area in logical pixels, from the mask: the two strokes' area is
+           what 3 pixels across a row of 8 gives, less where they overlap
+           and are cut by the square: between 24 and 40 of the 64. */
+        long area=total/255/ (scale*scale);
+        cc_check(area>=24&&area<=40);
+    }
+}
+
+/* The keymap is a function of a state and a key, so a layout is typed at
+   with no card: what the Swedish keys make (å ä ö, AltGr levels, the 102nd
+   key), the dead accents and what they make with a letter, Caps Lock, the
+   Control fold, and that the other layouts say what the kernel desktop's
+   tables said. */
+/* cc_check names its argument twice, and these rows have effects: evaluated once. */
+#define ck_ok(x) do{int ok_=!!(x);if(!ok_)fprintf(stderr,"keymap row failed, line %d: %s\n",__LINE__,#x);check(ok_);}while(0)
+#define KEY_ALTGR SURFACE_KEY_ALTGR
+#define KEY_SHIFT SURFACE_KEY_SHIFT
+#define KEY_CTRL SURFACE_KEY_CONTROL
+static int ck_press(struct compositor_keymap *map,unsigned code,unsigned mods,unsigned out[2]) {
+    unsigned scratch[2]={0,0};
+    int n=compositor_keymap_event(map,code,1,mods,out);
+    int up=compositor_keymap_event(map,code,0,mods,scratch);
+    ck_ok(up==(n<0?-1:0));
+    return n;
+}
+static unsigned ck_one(struct compositor_keymap *map,unsigned code,unsigned mods) {
+    unsigned out[2]={0,0};
+    return ck_press(map,code,mods,out)==1?out[0]:0xffffffffu;
+}
+static int ck_layout(struct compositor_keymap *map,const char *name) {
+    int at=compositor_layout_index(name);
+    memset(map,0,sizeof(*map));
+    if(at>=0)map->layout=(unsigned char)at;
+    return at;
+}
+static void check_compositor_keymap(void) {
+    struct compositor_keymap m;
+    unsigned out[2];
+    int n;
+    /* The US base: what the kernel's table said, and a layout that does not exist. */
+    ck_ok(ck_layout(&m,"us")==0&&ck_layout(&m,"xx")<0&&ck_layout(&m,"s")<0&&ck_layout(&m,"sev")<0);
+    ck_ok(ck_one(&m,30,0)=='a'&&ck_one(&m,30,KEY_SHIFT)=='A'&&ck_one(&m,2,KEY_SHIFT)=='!');
+    ck_ok(ck_one(&m,28,0)=='\n'&&ck_one(&m,14,0)==127&&ck_one(&m,1,0)==27&&ck_one(&m,57,0)==' ');
+    ck_ok(ck_one(&m,82,0)=='0'&&ck_one(&m,98,0)=='/'&&ck_one(&m,96,0)=='\n'&&ck_one(&m,55,0)=='*');
+    ck_ok(ck_one(&m,30,KEY_CTRL)==1&&ck_one(&m,46,KEY_CTRL|KEY_SHIFT)==3&&ck_one(&m,2,KEY_CTRL)=='1');
+    ck_ok(ck_one(&m,CK_102ND,0)==0xffffffffu&&ck_one(&m,59,0)==0xffffffffu&&ck_one(&m,103,0)==0xffffffffu);
+    ck_ok(compositor_keymap_event(&m,30,0,0,out)==0&&compositor_keymap_event(&m,200,1,0,out)==0);
+    /* Swedish: the three letters, the AltGr level, the key beside the left shift. */
+    ck_ok(ck_layout(&m,"se")>0);
+    ck_ok(ck_one(&m,26,0)==0xE5&&ck_one(&m,39,0)==0xF6&&ck_one(&m,40,0)==0xE4);
+    ck_ok(ck_one(&m,26,KEY_SHIFT)==0xC5&&ck_one(&m,39,KEY_SHIFT)==0xD6&&ck_one(&m,40,KEY_SHIFT)==0xC4);
+    ck_ok(ck_one(&m,3,KEY_ALTGR)=='@'&&ck_one(&m,3,KEY_SHIFT)=='"'&&ck_one(&m,4,KEY_ALTGR)==0xA3);
+    ck_ok(ck_one(&m,8,KEY_ALTGR)=='{'&&ck_one(&m,9,KEY_ALTGR)=='['&&ck_one(&m,10,KEY_ALTGR)==']'&&ck_one(&m,11,KEY_ALTGR)=='}');
+    ck_ok(ck_one(&m,8,KEY_SHIFT)=='/'&&ck_one(&m,12,KEY_ALTGR)=='\\'&&ck_one(&m,6,KEY_ALTGR)==0x20AC);
+    ck_ok(ck_one(&m,CK_102ND,0)=='<'&&ck_one(&m,CK_102ND,KEY_SHIFT)=='>'&&ck_one(&m,CK_102ND,KEY_ALTGR)=='|');
+    ck_ok(ck_one(&m,53,0)=='-'&&ck_one(&m,53,KEY_SHIFT)=='_'&&ck_one(&m,41,0)==0xA7&&ck_one(&m,41,KEY_SHIFT)==0xBD);
+    /* AltGr with Shift, where the layout has nothing there, is AltGr; Shift where it has nothing is plain. */
+    ck_ok(ck_one(&m,8,KEY_ALTGR|KEY_SHIFT)=='{'&&ck_one(&m,57,KEY_ALTGR)==' ');
+    /* A dead key makes nothing and is taken whole: its release and its repeats. */
+    ck_ok(compositor_keymap_event(&m,13,1,0,out)==-1&&compositor_keymap_event(&m,13,2,0,out)==-1&&
+             compositor_keymap_event(&m,42,1,0,out)==0&&compositor_keymap_event(&m,13,0,0,out)==-1&&
+             compositor_keymap_event(&m,13,0,0,out)==0);
+    ck_ok(m.dead==CK_ACUTE);
+    /* ´ and e is é, ´ and E is É, and nothing is left waiting. */
+    ck_ok(ck_one(&m,18,0)==0xE9&&m.dead==0&&ck_one(&m,18,0)=='e');
+    ck_press(&m,13,0,out);ck_ok(ck_one(&m,18,KEY_SHIFT)==0xC9);
+    /* ` (Shift and the same key) and a is à, ¨ and u is ü, ^ (Shift and ¨) and o is ô. */
+    ck_press(&m,13,KEY_SHIFT,out);ck_ok(ck_one(&m,30,0)==0xE0);
+    ck_press(&m,27,0,out);ck_ok(ck_one(&m,22,0)==0xFC);
+    ck_press(&m,27,KEY_SHIFT,out);ck_ok(ck_one(&m,24,0)==0xF4);
+    /* AltGr and ¨ is a dead tilde, and with n it is ñ, with a ã, with o õ. */
+    ck_press(&m,27,KEY_ALTGR,out);ck_ok(ck_one(&m,49,0)==0xF1);
+    ck_press(&m,27,KEY_ALTGR,out);ck_ok(ck_one(&m,30,KEY_SHIFT)==0xC3);
+    ck_press(&m,27,KEY_ALTGR,out);ck_ok(ck_one(&m,24,0)==0xF5);
+    /* The accent on its own: with a space, or twice, it is the spacing accent. */
+    ck_press(&m,13,0,out);ck_ok(ck_one(&m,57,0)==CK_ACUTE);
+    ck_press(&m,13,0,out);ck_ok(ck_one(&m,13,0)==CK_ACUTE&&m.dead==0);
+    ck_press(&m,27,KEY_ALTGR,out);ck_ok(ck_one(&m,57,0)=='~');
+    /* On a letter it does not go on, the accent is typed and then the letter: nothing is lost. */
+    ck_press(&m,13,0,out);n=ck_press(&m,45,0,out);
+    ck_ok(n==2&&out[0]==CK_ACUTE&&out[1]=='x'&&m.dead==0);
+    /* A second accent over the first types the first and waits with the second. */
+    ck_press(&m,13,0,out);n=ck_press(&m,27,0,out);
+    ck_ok(n==1&&out[0]==CK_ACUTE&&m.dead==CK_DIAERESIS);
+    ck_ok(ck_one(&m,30,0)==0xE4&&m.dead==0);
+    /* A key that is no character leaves it waiting; a control character ends it. */
+    ck_press(&m,13,0,out);ck_ok(compositor_keymap_event(&m,103,1,0,out)==0&&m.dead==CK_ACUTE);
+    ck_ok(ck_one(&m,28,0)=='\n'&&m.dead==0);
+    /* Control over a dead key's letter is a control code and no accent. */
+    ck_press(&m,13,0,out);ck_ok(ck_one(&m,30,KEY_CTRL)==1&&m.dead==0);
+    /* Caps Lock turns a letter over, å and ä with it, and nothing that is not one. */
+    ck_ok(compositor_keymap_event(&m,58,1,0,out)==0&&compositor_keymap_event(&m,58,2,0,out)==0&&m.caps==1);
+    ck_ok(ck_one(&m,30,0)=='A'&&ck_one(&m,26,0)==0xC5&&ck_one(&m,40,0)==0xC4&&ck_one(&m,39,0)==0xD6);
+    ck_ok(ck_one(&m,30,KEY_SHIFT)=='a'&&ck_one(&m,26,KEY_SHIFT)==0xE5&&ck_one(&m,2,0)=='1');
+    ck_ok(ck_one(&m,3,KEY_ALTGR)=='@'&&ck_one(&m,53,0)=='-');
+    ck_press(&m,13,0,out);ck_ok(ck_one(&m,18,0)==0xC9);
+    compositor_keymap_event(&m,58,0,0,out);compositor_keymap_event(&m,58,1,0,out);
+    ck_ok(m.caps==0&&ck_one(&m,30,0)=='a');
+    /* The other layouts are the kernel desktop's, and aliased as the CLI names them. */
+    #define SAME(a,b) (compositor_layouts[ck_layout(&m,a)].patch==compositor_layouts[compositor_layout_index(b)].patch)
+    ck_ok(SAME("sv","se")&&SAME("fi","se")&&SAME("gb","uk")&&SAME("nb","no")&&SAME("dk","no"));
+    #undef SAME
+    ck_ok(ck_layout(&m,"uk")>0&&ck_one(&m,4,KEY_SHIFT)==0xA3&&ck_one(&m,43,0)=='#'&&ck_one(&m,CK_102ND,0)=='\\');
+    ck_ok(ck_layout(&m,"de")>0&&ck_one(&m,21,0)=='z'&&ck_one(&m,44,0)=='y'&&ck_one(&m,12,0)==0xDF&&ck_one(&m,16,KEY_ALTGR)=='@');
+    ck_press(&m,13,0,out);ck_ok(ck_one(&m,18,0)==0xE9);
+    ck_ok(ck_layout(&m,"no")>0&&ck_one(&m,39,0)==0xF8&&ck_one(&m,40,0)==0xE6&&ck_one(&m,26,0)==0xE5&&ck_one(&m,13,0)=='\\');
+    ck_press(&m,27,0,out);ck_ok(ck_one(&m,24,0)==0xF6);
+    ck_ok(ck_layout(&m,"fr")>0&&ck_one(&m,16,0)=='a'&&ck_one(&m,2,0)=='&'&&ck_one(&m,2,KEY_SHIFT)=='1'&&ck_one(&m,3,0)==0xE9);
+    ck_press(&m,26,0,out);ck_ok(ck_one(&m,18,0)==0xEA);
+    compositor_keymap_event(&m,58,1,0,out);ck_ok(ck_one(&m,3,0)==0xC9&&ck_one(&m,3,KEY_SHIFT)=='2');
+    ck_ok(ck_layout(&m,"es")>0&&ck_one(&m,39,0)==0xF1&&ck_one(&m,13,0)==0xA1&&ck_one(&m,43,0)==0xE7);
+    ck_press(&m,40,0,out);ck_ok(ck_one(&m,30,0)==0xE1);
+    ck_ok(ck_layout(&m,"it")>0&&ck_one(&m,26,0)==0xE8&&ck_one(&m,26,KEY_SHIFT)==0xE9&&ck_one(&m,39,0)==0xF2&&ck_one(&m,41,0)=='\\');
+    /* Every layout, every key: a character that is not a letter of Latin-1, an accent, or the euro is a bug. */
+    for(unsigned l=0;l<sizeof(compositor_layouts)/sizeof(compositor_layouts[0]);l++)
+        for(unsigned code=0;code<CK_TABLE;code++)
+            for(unsigned mods=0;mods<4;mods++) {
+                struct compositor_keymap k={0};k.layout=(unsigned char)l;
+                unsigned c=compositor_keymap_character(&k,code,(mods&1?KEY_SHIFT:0)|(mods&2?KEY_ALTGR:0));
+                ck_ok(c<0x100||c==0x20AC||(c&CK_DEAD&&(c&~CK_DEAD)<0x100));
+            }
+    /* What is held is a bit a key, and one keyboard letting go of Shift is not another's. */
+    ck_ok(compositor_held_flags(compositor_held_bit(42)|compositor_held_bit(54))==SURFACE_KEY_SHIFT);
+    ck_ok(compositor_held_flags(compositor_held_bit(97))==SURFACE_KEY_CONTROL&&compositor_held_flags(compositor_held_bit(29))==SURFACE_KEY_CONTROL);
+    ck_ok(compositor_held_flags(compositor_held_bit(100))==SURFACE_KEY_ALTGR&&compositor_held_flags(compositor_held_bit(56))==SURFACE_KEY_ALT);
+    ck_ok(compositor_held_flags(compositor_held_bit(125))==SURFACE_KEY_SUPER&&compositor_held_flags(compositor_held_bit(126))==SURFACE_KEY_SUPER);
+    ck_ok(compositor_held_bit(30)==0&&compositor_held_flags(0)==0);
+}
+
+/* What a hand means: the gain of a mouse's speed (the kernel desktop's curve,
+   one to one below a count a millisecond and two and a half times above
+   eight), a count turned into pixels without losing its fraction, a tablet's
+   report on the output rounded down as the kernel desktop's was, and the
+   square root the speed is made with. */
+static void check_compositor_pointer(void) {
+    ck_ok(compositor_gain(0)==1024&&compositor_gain(1)==1024&&compositor_gain(8)==2560&&compositor_gain(99)==2560);
+    ck_ok(compositor_gain(4)==1024+1536*3/7&&compositor_gain(2)<compositor_gain(3)&&compositor_gain(7)<2560);
+    /* The curve only rises, and is exact at each count. */
+    for(int speed=1;speed<8;speed++)ck_ok(compositor_gain(speed+1)>compositor_gain(speed)&&
+        compositor_gain(speed)==1024+1536*(speed-1)/7);
+    /* The fraction is kept: a hundred steps of one count at a gain that is not whole are what the gain says. */
+    for(int gain=1024;gain<=2560;gain+=137)
+        for(int sign=-1;sign<=1;sign+=2) {
+            int remainder=0;long long pixels=0;
+            for(int step=0;step<100;step++)pixels+=compositor_accel(sign,&remainder,gain);
+            ck_ok(pixels*1024+remainder==(long long)sign*100*gain&&remainder>-1024&&remainder<1024);
+        }
+    { int remainder=0; ck_ok(compositor_accel(0,&remainder,2560)==0&&remainder==0); }
+    { int remainder=0; ck_ok(compositor_accel(-2147483647-1,&remainder,2560)==-2147483647&&compositor_accel(2147483647,&remainder,2560)==2147483647); }
+    /* One movement is the gain of both axes at their speed: 3 and 4 is 5 counts, in the time between reports. */
+    ck_ok(compositor_gain_of(0,0,1000000)==1024&&compositor_gain_of(3,4,1000000)==compositor_gain(5)&&
+          compositor_gain_of(3,4,0)==compositor_gain(5)&&compositor_gain_of(3,4,10000000)==1024);
+    ck_ok(compositor_gain_of(-3,-4,1000000)==compositor_gain(5)&&compositor_gain_of(4,-3,1000000)==compositor_gain(5));
+    ck_ok(compositor_gain_of(1000,0,1000000)==2560&&compositor_gain_of(-2147483647-1,-2147483647-1,1000000)==2560);
+    ck_ok(compositor_gain_of(1,0,~0ull)==1024);
+    /* The square root, which is exact on whole squares and the floor between. */
+    for(unsigned long long v=0;v<70000;v++) {
+        unsigned long long r=compositor_isqrt(v);
+        ck_ok(r*r<=v&&(r+1)*(r+1)>v);
+    }
+    for(unsigned long long v=0x7fffffffffffffffull;v>0x7fffffffffff0000ull;v-=4093) {
+        unsigned long long r=compositor_isqrt(v);
+        ck_ok(r*r<=v&&(r+1)*(r+1)>v);
+    }
+    ck_ok(compositor_isqrt(~0ull)==4294967295ull&&compositor_isqrt(1ull<<62)==1ull<<31);
+    /* A tablet: offset over span times the size, rounded down, held to the range. */
+    ck_ok(compositor_tablet(0,0,32767,2560)==0&&compositor_tablet(32767,0,32767,2560)==2560&&
+          compositor_tablet(16384,0,32767,2560)==1280&&compositor_tablet(-5,0,32767,2560)==0&&
+          compositor_tablet(99999,0,32767,2560)==2560);
+    ck_ok(compositor_tablet(5,0,0,2560)==0&&compositor_tablet(5,9,3,2560)==0&&compositor_tablet(-100,-200,200,1000)==250);
+    /* The lane's tablet says the report of the pixel rounded up and gets the pixel, and the one rounded down is one short. */
+    int short_by_one=0;
+    for(int x=0;x<2560;x++) {
+        int up=(int)((x*32767LL+2559)/2560);
+        ck_ok(compositor_tablet(up,0,32767,2560)==x);
+        short_by_one+=compositor_tablet((int)(x*32767LL/2560),0,32767,2560)==x-1;
+    }
+    ck_ok(short_by_one>0);
+    /* Shake to find it: five reversals of six counts or more inside 700 ms, and no less. */
+    {
+        struct compositor_shake shake={0};
+        unsigned long long now=1000000000ull;
+        int found=0;
+        for(int step=0;step<12;step++){found+=compositor_shake(&shake,step&1?-8:8,now);now+=50000000ull;}
+        ck_ok(found==2); /* the fifth reversal and the tenth */
+        memset(&shake,0,sizeof(shake));found=0;now=1000000000ull;
+        for(int step=0;step<12;step++){found+=compositor_shake(&shake,step&1?-8:8,now);now+=200000000ull;}
+        ck_ok(found==0); /* a wobble that takes too long */
+        memset(&shake,0,sizeof(shake));found=0;now=1000000000ull;
+        for(int step=0;step<12;step++){found+=compositor_shake(&shake,step&1?-5:5,now);now+=10000000ull;}
+        ck_ok(found==0); /* a hand resting on the mouse */
+        memset(&shake,0,sizeof(shake));found=0;now=1000000000ull;
+        for(int step=0;step<12;step++){found+=compositor_shake(&shake,8,now);now+=10000000ull;}
+        ck_ok(found==0); /* a hand going the one way */
+    }
+    /* The cursors: the arrow is 55 white and 46 black pixels, the resize shapes 25 and 40 or 48, each
+       at its scale squared; the hotspot is the corner of the arrow and the middle of the others, and
+       what is drawn stays inside the damage. */
+    {
+        static const int white[CP_SHAPES]={55,25,25,25,25},black[CP_SHAPES]={46,40,40,48,48};
+        static u32 plane[64*64];
+        for(unsigned shape=0;shape<CP_SHAPES;shape++)
+            for(int scale=1;scale<=3;scale++) {
+                struct compositor_target t={plane,64,64,64,0,0,64,64};
+                memset(plane,0,sizeof(plane));
+                compositor_cursor_draw(&t,compositor_cursor_hot[shape]*scale,compositor_cursor_hot[shape]*scale,
+                                       shape,scale,0xffffffffu,0xff000000u);
+                int w=0,b=0,other=0,outside=0;
+                for(int y=0;y<64;y++)for(int x=0;x<64;x++) {
+                    u32 v=plane[y*64+x];
+                    w+=v==0xffffffffu;b+=v==0xff000000u;other+=v&&v!=0xffffffffu&&v!=0xff000000u;
+                    outside+=v&&(x>=CP_CURSOR_W*scale||y>=CP_CURSOR_H*scale);
+                }
+                ck_ok(w==white[shape]*scale*scale&&b==black[shape]*scale*scale&&!other&&!outside);
+            }
+        /* The same into a damaged part of a screen: nothing outside the damage is written. */
+        static u32 screen[200*100];
+        for(unsigned shape=0;shape<CP_SHAPES;shape++) {
+            struct compositor_target t={screen,200,200,100,50,30,90,60};
+            for(unsigned i=0;i<sizeof(screen)/sizeof(screen[0]);i++)screen[i]=7;
+            compositor_cursor_draw(&t,60,40,shape,2,0xffffffu,0);
+            int inside_changed=0,outside_changed=0;
+            for(int y=0;y<100;y++)for(int x=0;x<200;x++) {
+                int inside=x>=50&&x<90&&y>=30&&y<60;
+                if(screen[y*200+x]!=7){if(inside)inside_changed++;else outside_changed++;}
+            }
+            ck_ok(inside_changed>0&&!outside_changed);
+        }
+        int left,top;
+        compositor_cursor_cell(&left,&top,100,50,CP_ARROW,3);ck_ok(left==100&&top==50);
+        compositor_cursor_cell(&left,&top,100,50,CP_RESIZE_H,2);ck_ok(left==86&&top==36);
+        compositor_cursor_cell(&left,&top,100,50,77,2);ck_ok(left==100&&top==50);
+        ck_ok(compositor_cursor_fit(1)==1&&compositor_cursor_fit(2)==2&&compositor_cursor_fit(3)==3&&compositor_cursor_fit(9)==3);
+        ck_ok(compositor_cursor_by_edges[0]==CP_ARROW&&compositor_cursor_by_edges[CP_EDGE_LEFT]==CP_RESIZE_H&&
+              compositor_cursor_by_edges[CP_EDGE_RIGHT]==CP_RESIZE_H&&compositor_cursor_by_edges[CP_EDGE_TOP]==CP_RESIZE_V&&
+              compositor_cursor_by_edges[CP_EDGE_BOTTOM]==CP_RESIZE_V&&
+              compositor_cursor_by_edges[CP_EDGE_TOP|CP_EDGE_LEFT]==CP_RESIZE_NWSE&&
+              compositor_cursor_by_edges[CP_EDGE_BOTTOM|CP_EDGE_RIGHT]==CP_RESIZE_NWSE&&
+              compositor_cursor_by_edges[CP_EDGE_TOP|CP_EDGE_RIGHT]==CP_RESIZE_NESW&&
+              compositor_cursor_by_edges[CP_EDGE_BOTTOM|CP_EDGE_LEFT]==CP_RESIZE_NESW&&
+              compositor_cursor_by_edges[CP_EDGE_LEFT|CP_EDGE_RIGHT]==CP_ARROW);
+    }
+}
+
+/* The scene is the painter's picture: surfaces drawn bottom to top over a
+   desktop, inside the damage, and no pixel outside it. Random surfaces (some
+   off the screen, some framed, some not, some one over another, some the
+   panel), random damage, byte for byte. */
+static void check_compositor_scene(void) {
+    enum { W=200, H=150 };
+    static u32 seen[W*H], want[W*H], body[COMPOSITOR_CLIENTS][96*80];
+    static const unsigned char marks[COMPOSITOR_CLIENTS]={1,0,2,0,1,0,0,2,0,0,1,0};
+    u64 seed=0x9e3779b97f4a7c15ull;
+    #define RND(n) (seed^=seed<<13,seed^=seed>>7,seed^=seed<<17,(int)(seed%(u64)(n)))
+    int equal=1;
+    for(int scene=0;scene<4000;scene++) {
+        struct compositor_frame frames[COMPOSITOR_FRAMES];
+        unsigned count=scene%61==60?COMPOSITOR_CLIENTS:(unsigned)RND(7);
+        for(unsigned i=0;i<count;i++) {
+            int w=1+RND(96),h=1+RND(80);
+            for(int p=0;p<w*h;p++)body[i][p]=0x400000u|(u32)(i<<16)|(u32)p;
+            frames[i]=(struct compositor_frame){RND(W+60)-40,RND(H+60)-40,w,h,1+RND(2),
+                RND(4)!=0,RND(2),1,body[i],(unsigned long)w,0,0,0};
+        }
+        /* The compositor's panel, somewhere among them, as wide as it likes. */
+        if(count<COMPOSITOR_FRAMES&&scene%3==0) {
+            unsigned at=(unsigned)RND(count+1);
+            for(unsigned i=count;i>at;i--)frames[i]=frames[i-1];
+            frames[at]=(struct compositor_frame){RND(W)-20,RND(H)-10,40+RND(W),12+RND(30),1+RND(2),0,0,0,0,0,1,marks,
+                (unsigned)RND(sizeof(marks)+1)};
+            count++;
+        }
+        int x1=RND(W),y1=RND(H),x2=x1+1+RND(W),y2=y1+1+RND(H);
+        if(x2>W)x2=W;
+        if(y2>H)y2=H;
+        for(int p=0;p<W*H;p++)seen[p]=want[p]=0xdeadbeefu;
+        struct compositor_target a={want,W,W,H,x1,y1,x2,y2},b={seen,W,W,H,x1,y1,x2,y2};
+        compositor_fill(&a,0,0,W,H,COMPOSITOR_INK_DESKTOP);
+        for(unsigned i=0;i<count;i++)compositor_draw(&a,&frames[i]);
+        compositor_scene(&b,frames,count);
+        equal&=!memcmp(seen,want,sizeof(seen));
+    }
+    cc_check(equal);
+    #undef RND
+}
 
 static void check_pane_layout(void) {
     static u32 screen[256*256];
@@ -109090,6 +112422,16 @@ int main(void) {
     }
     struct font_desc face={8,16,font_bits};canvas_font=&face;
     check_pane_layout();
+    check_golden_gs1(palette);
+    check_compositor_gs1();
+    check_compositor_gs2();
+    check_compositor_roles();
+    check_compositor_panel_slots();
+    check_compositor_panel_once();
+    check_compositor_cross();
+    check_compositor_keymap();
+    check_compositor_pointer();
+    check_compositor_scene();
     for(unsigned i=0;i<sizeof(font_bits);i++)font_bits[i]=(i*29+i/16*73)&255;
     struct window_cell cells[96];unsigned seed=123;
     for(unsigned trial=0;trial<2400;trial++) {
@@ -114551,6 +117893,405 @@ b32 main(void)
         return 0;
 }
 #endif /* BENCH_hex_decode */
+
+#ifdef BENCH_translate_rect
+/* memory_translate_u32_rect against the loop it replaced in src/canvas/font.c,
+   at the shapes a terminal cell has at 1080p (9 by 19), 4K (16 by 35) and
+   8K (31 by 70), and a strip of 256 by 64; on x86_64 for both bodies. The
+   cells come out of a 4096-byte-wide atlas into a 3840-pixel-wide frame, as
+   the engine's do. */
+#include "../src/lib.util.c"
+#define SHARED_bench_measure
+#include "checks.c"
+#undef SHARED_bench_measure
+
+#define TRIES 9
+
+static p32 table[512];
+static p8 source[4096 * 72];
+static p32 target[3840 * 72];
+
+__attribute__((noinline, noclone)) static fn former_translate(
+    p32 address_to into, positive into_stride, const p8 address_to from,
+    positive from_stride, positive width, positive height, const p32 address_to tones)
+{
+        for (positive r = 0; r < height; r++, into += into_stride, from += from_stride)
+                for (positive i = 0; i < width; i++)
+                        into[i] = tones[from[i]];
+}
+
+//      Sixty four cells side by side a turn, as a terminal row draws them.
+static p64 run(bool assembly, positive width, positive height, positive rounds)
+{
+        p64 start = get_cpu_time();
+
+        for (positive round = 0; round < rounds; round++)
+                for (positive cell = 0; cell < 64; cell++)
+                {
+                        p32 address_to into = target + cell * width % (3840 - width);
+                        const p8 address_to from = source + cell * 61 % (4096 - width);
+
+                        if (assembly)
+                                memory_translate_u32_rect(into, 3840, from, 4096, width, height, table);
+                        else
+                                former_translate(into, 3840, from, 4096, width, height, table);
+                }
+        return get_cpu_time() - start;
+}
+
+b32 main(void)
+{
+        static const positive shapes[][2] = {{9, 19}, {16, 35}, {31, 70}, {256, 64}};
+        p64 seed = 0x9e3779b97f4a7c15ULL;
+
+        for (positive i = 0; i < sizeof(source); i++)
+        {
+                XORSHIFT64(seed);
+                source[i] = (p8)seed;
+        }
+        for (p32 i = 0; i < 256; i++)
+        {
+                table[i] = 0x101820 + i * 0x010101;
+                for (p32 k = 0; k < 4; k++)
+                        ((p8 address_to)(table + 256))[k * 256 + i] = (p8)(table[i] >> (8 * k));
+        }
+#if X64
+        p8 planes = cpu_has_avx512_vbmi;
+        for (p32 tier = 0; tier < (planes ? 2u : 1u); tier++)
+        {
+                cpu_has_avx512_vbmi = tier ? 0 : planes;
+#endif
+                for (positive row = 0; row < sizeof(shapes) / sizeof(shapes[0]); row++)
+                {
+                        positive width = shapes[row][0], height = shapes[row][1];
+                        positive ratios[TRIES];
+                        positive rounds = 4000000 / (width * height * 64) + 1;
+
+                        static p32 former_out[3840 * 72];
+
+                        memory_fill_u32(target, sizeof(target) / 4, 0);
+                        memory_fill_u32(former_out, sizeof(former_out) / 4, 0);
+                        memory_translate_u32_rect(target + 7, 3840, source + 5, 4096, width, height, table);
+                        former_translate(former_out + 7, 3840, source + 5, 4096, width, height, table);
+                        if (memory_compare(target, former_out, sizeof(target)))
+                                return 1;
+                        BENCH_PAIRED_RUNS(ratios, former, assembly, width, height, rounds);
+                        string_format(log, "memory_translate_u32_rect %p by %p%s: paired median ASM/C %p.",
+                                      width, height,
+#if X64
+                                      cpu_has_avx512_vbmi ? (string_address) " planes" : (string_address) " narrow",
+#else
+                                      (string_address) "",
+#endif
+                                      ratios[TRIES / 2] / 100);
+                        positive_to_padded(log, ratios[TRIES / 2] % 100, 2, '0', 0);
+                        log("%\n", 2);
+                }
+#if X64
+        }
+        cpu_has_avx512_vbmi = planes;
+#endif
+        log_flush();
+        return 0;
+}
+#endif /* BENCH_translate_rect */
+
+#ifdef BENCH_blend_rect
+/* memory_blend_u32_rect against the loop it replaced in font_blend: glyphs
+   of UI text at 13, 24 and 48 px (8 by 13, 14 by 24, 28 by 48) and a 4K
+   heading (120 by 200), each row two strokes of ink in air, laid on a
+   ground in a 3840-pixel frame that stays in cache; on x86_64 both bodies.
+   The rows overlap in the glyph array, so each shape has its own strokes. */
+#include "../src/lib.util.c"
+#define SHARED_bench_measure
+#include "checks.c"
+#undef SHARED_bench_measure
+
+#define TRIES 9
+
+static p32 table[513];
+static p8 glyph[256 * 200];
+static p32 frame[3840 * 220], frame_c[3840 * 220];
+
+__attribute__((noinline, noclone)) static positive former_blend(
+    p32 address_to into, positive stride, const p8 address_to from, positive from_stride,
+    positive width, positive height, const p32 address_to tones)
+{
+        for (positive r = 0; r < height; r++)
+                for (positive c = 0; c < width; c++)
+                {
+                        p32 a = from[r * from_stride + c];
+
+                        if (a)
+                        {
+                                if ((into[r * stride + c] & 0xffffff) != tones[512])
+                                        return r * width + c;
+                                into[r * stride + c] = tones[a];
+                        }
+                }
+        return width * height;
+}
+
+//      Sixteen glyphs along a line, each laid on ground the turn before it.
+static p64 run(bool assembly, positive width, positive height, positive rounds)
+{
+        p64 took = 0;
+
+        for (positive round = 0; round < rounds; round++)
+        {
+                for (positive r = 0; r < height; r++)
+                        memory_fill_u32(frame + r * 3840, 16 * width, 0x203040);
+                p64 start = get_cpu_time();
+                for (positive g = 0; g < 16; g++)
+                        if (assembly)
+                                memory_blend_u32_rect(frame + g * width, 3840, glyph, 256, width, height, table);
+                        else
+                                former_blend(frame + g * width, 3840, glyph, 256, width, height, table);
+                took += get_cpu_time() - start;
+        }
+        return took;
+}
+
+b32 main(void)
+{
+        static const positive shapes[][2] = {{8, 13}, {14, 24}, {28, 48}, {120, 200}};
+        p64 seed = 0x9e3779b97f4a7c15ULL;
+
+        //      Each row two strokes, a fifth of the row wide each, at random
+        //      places: runs of ink and air as a glyph's rows have them.
+        for (positive r = 0; r < 200; r++)
+                for (positive k = 0; k < 2; k++)
+                {
+                        XORSHIFT64(seed);
+                        for (positive w = 0; w < 4; w++)
+                        {
+                                positive width = w == 0 ? 8 : w == 1 ? 14 : w == 2 ? 28 : 120;
+                                positive at = (positive)(seed >> (8 * w)) % width, run = width / 5 + 1;
+
+                                for (positive c = at; c < at + run && c < width; c++)
+                                        glyph[r * 256 + c] = (p8)(seed >> 40 | 1);
+                        }
+                }
+        for (p32 i = 0; i < 256; i++)
+        {
+                table[i] = 0x203040 + i * 0x010101;
+                for (p32 k = 0; k < 4; k++)
+                        ((p8 address_to)(table + 256))[k * 256 + i] = (p8)(table[i] >> (8 * k));
+        }
+        table[512] = 0x203040;
+#if X64
+        p8 planes = cpu_has_avx512_vbmi;
+        for (p32 tier = 0; tier < (planes ? 2u : 1u); tier++)
+        {
+                cpu_has_avx512_vbmi = tier ? 0 : planes;
+#endif
+                for (positive row = 0; row < sizeof(shapes) / sizeof(shapes[0]); row++)
+                {
+                        positive width = shapes[row][0], height = shapes[row][1];
+                        positive ratios[TRIES];
+                        positive rounds = 400000 / (width * height * 16) + 1;
+
+                        memory_fill_u32(frame, sizeof(frame) / 4, 0x203040);
+                        memory_fill_u32(frame_c, sizeof(frame_c) / 4, 0x203040);
+                        if (memory_blend_u32_rect(frame, 3840, glyph, 256, width, height, table) !=
+                                former_blend(frame_c, 3840, glyph, 256, width, height, table) ||
+                            memory_compare(frame, frame_c, sizeof(frame)))
+                                return 1;
+                        BENCH_PAIRED_RUNS(ratios, former, assembly, width, height, rounds);
+                        string_format(log, "memory_blend_u32_rect %p by %p%s: paired median ASM/C %p.", width, height,
+#if X64
+                                      cpu_has_avx512_vbmi ? (string_address) " planes" : (string_address) " narrow",
+#else
+                                      (string_address) "",
+#endif
+                                      ratios[TRIES / 2] / 100);
+                        positive_to_padded(log, ratios[TRIES / 2] % 100, 2, '0', 0);
+                        log("%\n", 2);
+                }
+#if X64
+        }
+        cpu_has_avx512_vbmi = planes;
+#endif
+        log_flush();
+        return 0;
+}
+#endif /* BENCH_blend_rect */
+
+#ifdef BENCH_fill_rect
+/* memory_fill_u32_rect against the loop it replaced in font_cell, a
+   memory_fill_u32 a row: blank terminal cells at 1080p and 4K (9 by 19, 16
+   by 35), a sliver (3 by 10), a blank run of a line (240 by 35) and a
+   panel (1000 by 20), in a 3840-pixel frame; on x86_64 with AVX-512 and
+   without. */
+#include "../src/lib.util.c"
+#define SHARED_bench_measure
+#include "checks.c"
+#undef SHARED_bench_measure
+
+#define TRIES 9
+
+static p32 frame[3840 * 40];
+
+__attribute__((noinline, noclone)) static fn former_fill(p32 address_to into, positive stride, positive width,
+                                                         positive height, p32 value)
+{
+        for (positive r = 0; r < height; r++)
+                memory_fill_u32(into + r * stride, width, value);
+}
+
+static p64 run(bool assembly, positive width, positive height, positive rounds)
+{
+        p64 start = get_cpu_time();
+
+        for (positive round = 0; round < rounds; round++)
+                for (positive cell = 0; cell < 16; cell++)
+                {
+                        p32 address_to into = frame + cell * width % (3840 - width);
+
+                        if (assembly)
+                                memory_fill_u32_rect(into, 3840, width, height, 0x101820 + (p32)round);
+                        else
+                                former_fill(into, 3840, width, height, 0x101820 + (p32)round);
+                }
+        return get_cpu_time() - start;
+}
+
+b32 main(void)
+{
+        static const positive shapes[][2] = {{3, 10}, {9, 19}, {16, 35}, {240, 35}, {1000, 20}};
+#if X64
+        p8 wide = cpu_has_avx512;
+        for (p32 tier = 0; tier < (wide ? 2u : 1u); tier++)
+        {
+                cpu_has_avx512 = tier ? 0 : wide;
+#endif
+                for (positive row = 0; row < sizeof(shapes) / sizeof(shapes[0]); row++)
+                {
+                        positive width = shapes[row][0], height = shapes[row][1];
+                        positive ratios[TRIES];
+                        positive rounds = 2000000 / (width * height * 16) + 1;
+
+                        BENCH_PAIRED_RUNS(ratios, former, assembly, width, height, rounds);
+                        string_format(log, "memory_fill_u32_rect %p by %p%s: paired median ASM/C %p.", width, height,
+#if X64
+                                      cpu_has_avx512 ? (string_address) " avx512" : (string_address) " sse2",
+#else
+                                      (string_address) "",
+#endif
+                                      ratios[TRIES / 2] / 100);
+                        positive_to_padded(log, ratios[TRIES / 2] % 100, 2, '0', 0);
+                        log("%\n", 2);
+                }
+#if X64
+        }
+        cpu_has_avx512 = wide;
+#endif
+        log_flush();
+        return 0;
+}
+#endif /* BENCH_fill_rect */
+
+#ifdef BENCH_sweep_coverage
+/* memory_sweep_coverage against the loop it replaced in font_raster, over
+   runs as long as a glyph's touched blocks are at 13, 24, 48, 200 and 400
+   px: 8, 16, 24, 48, 160 and 400 cells, two in five of them an edge's. On
+   x86_64 for each of its three bodies. */
+#include "../src/lib.util.c"
+#define SHARED_bench_measure
+#include "checks.c"
+#undef SHARED_bench_measure
+
+#define TRIES 9
+#define RUNS 256
+
+static p32 pattern[RUNS * 400], cells[RUNS * 400];
+static p8 bytes[RUNS * 400];
+static volatile p32 sink;
+
+__attribute__((noinline, noclone)) static p32 former_sweep(p8 address_to into, p32 address_to row,
+                                                           positive count, p32 sum)
+{
+        for (positive x = 0; x < count; x++)
+        {
+                sum += row[x];
+                row[x] = 0;
+
+                p32 area = (b32)sum < 0 ? -sum : sum;
+                area = area > 0x200000 ? 0x200000 : area;
+                into[x] = (p8)((area * 255 + 0x100000) >> 21);
+        }
+        return sum;
+}
+
+//      Each run starts from the cells the pattern holds, as a band does.
+static p64 run(bool assembly, positive count, positive rounds)
+{
+        p64 took = 0;
+
+        for (positive round = 0; round < rounds; round++)
+        {
+                memory_copy(cells, pattern, RUNS * count * 4);
+                p64 start = get_cpu_time();
+                for (positive r = 0; r < RUNS; r++)
+                        sink += assembly ? memory_sweep_coverage(bytes + r * count, cells + r * count, count, 0)
+                                         : former_sweep(bytes + r * count, cells + r * count, count, 0);
+                took += get_cpu_time() - start;
+        }
+        return took;
+}
+
+b32 main(void)
+{
+        static const positive counts[] = {8, 16, 24, 48, 160, 400};
+        static p8 former_bytes[RUNS * 400];
+        p64 seed = 0x9e3779b97f4a7c15ULL;
+
+        for (positive i = 0; i < RUNS * 400; i++)
+        {
+                XORSHIFT64(seed);
+                pattern[i] = seed % 5 < 2 ? (p32)((b32)(seed >> 32) >> 10) : 0;
+        }
+#if X64
+        p8 wide = cpu_has_avx512, two = cpu_has_avx2;
+        for (p32 tier = 0; tier < 3; tier++)
+        {
+                cpu_has_avx512 = tier ? 0 : wide;
+                cpu_has_avx2 = tier == 2 ? 0 : two;
+#endif
+                for (positive row = 0; row < sizeof(counts) / sizeof(counts[0]); row++)
+                {
+                        positive count = counts[row];
+                        positive ratios[TRIES];
+                        positive rounds = 2000000 / (RUNS * count) + 1;
+
+                        memory_copy(cells, pattern, RUNS * count * 4);
+                        for (positive r = 0; r < RUNS; r++)
+                                memory_sweep_coverage(bytes + r * count, cells + r * count, count, 0);
+                        memory_copy(cells, pattern, RUNS * count * 4);
+                        for (positive r = 0; r < RUNS; r++)
+                                former_sweep(former_bytes + r * count, cells + r * count, count, 0);
+                        if (memory_compare(bytes, former_bytes, RUNS * count))
+                                return 1;
+                        BENCH_PAIRED_RUNS(ratios, former, assembly, count, rounds);
+                        string_format(log, "memory_sweep_coverage %p cells%s: paired median ASM/C %p.", count,
+#if X64
+                                      cpu_has_avx512 ? (string_address) " avx512" :
+                                      cpu_has_avx2 ? (string_address) " avx2" : (string_address) " scalar",
+#else
+                                      (string_address) "",
+#endif
+                                      ratios[TRIES / 2] / 100);
+                        positive_to_padded(log, ratios[TRIES / 2] % 100, 2, '0', 0);
+                        log("%\n", 2);
+                }
+#if X64
+        }
+        cpu_has_avx512 = wide, cpu_has_avx2 = two;
+#endif
+        log_flush();
+        return 0;
+}
+#endif /* BENCH_sweep_coverage */
 
 #ifdef BENCH_escape
 /* Shared escaping versus the former writer loops. Native timings only measure

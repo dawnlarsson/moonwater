@@ -51,7 +51,6 @@ struct moonwater_overlay {
         unsigned short end_line;
         unsigned short star_line;
         unsigned short bind_line[SPARK_BIND_EVENTS];
-        unsigned short spare;
 };
 
 _Static_assert(sizeof(struct moonwater_overlay) == 56, "moonwater overlay");
@@ -778,6 +777,7 @@ static void moonwater_scan(const char *text, unsigned long length,
 #define BIND_DROP 2u
 #define BIND_STATE 4u
 #define BIND_CAD 8u
+#define BIND_RAISED 16u // a program may ask for it (SPARK_BIND_FIRE)
 #define BIND_CODES 768u
 #define BIND_MACHINE_QUEUE 32
 #define BIND_CODES_PER 2
@@ -893,6 +893,7 @@ static const struct {
         { "", 500, BIND_DROP, { 0, 0 } },
         { "", 500, BIND_DROP, { 0, 0 } },
         { "", 0, BIND_DROP, { 0, 0 } },
+        { "", 0, BIND_DROP | BIND_RAISED, { 0, 0 } },
 };
 
 _Static_assert(sizeof(bind_spec) / sizeof(bind_spec[0]) == SPARK_BIND_EVENTS,
@@ -1243,6 +1244,26 @@ static void bind_fire(unsigned int event)
 void moonwater_bind_fire(unsigned int event)
 {
         bind_fire(event);
+}
+
+/*
+        Asks for a row's run, and says whether anyone will make it: the
+        machine script when it owns the row, or the line somebody bound. A
+        caller with another way to do the thing (the kernel's own desktop
+        starting its own terminal) does it when this says nobody will.
+*/
+_Bool moonwater_bind_ask(unsigned int event)
+{
+        struct bind_row *row = bind_row(event);
+
+        if (!row || system_state != SYSTEM_RUNNING || !atomic_read(&bind_alive))
+                return false;
+        if (!row->command[0] &&
+            !(atomic_read(&bind_machine_live) &&
+              (READ_ONCE(machine_script_owned) & (1u << (event - 1)))))
+                return false;
+        bind_fire(event);
+        return true;
 }
 
 /*
@@ -1996,13 +2017,25 @@ static long report_bind(struct bind_control __user *out)
 
         if (copy_from_user(&request, out, sizeof(request)))
                 return -EFAULT;
-        if (request.op > SPARK_BIND_SET || request.reserved[0] ||
+        if (request.op > SPARK_BIND_FIRE || request.reserved[0] ||
             request.reserved[1] || request.reserved[2])
                 return -EINVAL;
 
         row = bind_row(request.event);
         if (!row)
                 return -EINVAL;
+
+        /*
+                A program asking the machine script for something. The line
+                a row runs is root's, so only a root may ask, and only for
+                the rows made to be asked for: poweroff and canvas off are
+                the machine's to see, not a program's to say it saw.
+        */
+        if (request.op == SPARK_BIND_FIRE) {
+                if (!capable(CAP_SYS_ADMIN) || !(row->flags & BIND_RAISED))
+                        return -EPERM;
+                bind_fire(request.event);
+        }
 
         if (request.op == SPARK_BIND_SET) {
                 if (!capable(CAP_SYS_ADMIN) ||

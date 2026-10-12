@@ -770,6 +770,17 @@ module_param_named(simd, canvas_simd, bool, 0644);
 static int canvas_pm_dark;
 module_param_named(pm_dark, canvas_pm_dark, int, 0644);
 
+/*
+        moonwater.desktop=kernel keeps the kernel's own desktop, its log and a
+        terminal, where the machine script would start the compositor. The
+        script reads the word from /proc/cmdline; this is only here so that
+        the kernel knows it and does not warn about a parameter it has never
+        heard of. The canvas lane's older sections drive the kernel desktop
+        and boot with it.
+*/
+static char *canvas_desktop;
+module_param_named(desktop, canvas_desktop, charp, 0444);
+
 struct canvas_simd_hold
 {
         _Bool on;
@@ -8492,6 +8503,8 @@ static void desktop_resume(void)
                 cursor_plane_armed_x = desktop.cursor_x;
                 cursor_plane_armed_y = desktop.cursor_y;
         }
+
+        pr_info("[moonwater canvas] " "the card is Canvas's again, and the desktop is drawn\n");
 }
 
 /*
@@ -9175,6 +9188,34 @@ static void keyboard_reclaim(unsigned int modifiers, unsigned int code, int valu
 }
 
 /*
+        Control-Alt-Shift-Backspace turns Canvas off, to the kernel's text
+        console, whoever holds the card.
+
+        Control-Alt-Backspace ends the program that holds it, and a supervisor
+        starts the next; this is for a desktop that will not stay up. It is
+        heard here, in the input core, and never passes through the compositor
+        or the canvas thread, so a compositor that has stopped answering
+        cannot swallow it. Turning Canvas off stops the thread and waits on
+        locks, so a work item does it, and the key press, its repeat and its
+        release are all taken, so no program sees half of a chord.
+*/
+static void canvas_exit_request(void);
+
+static _Bool keyboard_exit(unsigned int modifiers, unsigned int code, int value)
+{
+        if ((modifiers & (WINDOW_KEY_ALT | WINDOW_KEY_SHIFT |
+                          WINDOW_KEY_CONTROL)) !=
+                (WINDOW_KEY_ALT | WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL) ||
+            code != KEY_BACKSPACE)
+                return false;
+
+        if (value == 1)
+                canvas_exit_request();
+
+        return true;
+}
+
+/*
         Called by the input core, so no lock and no sleeping. Which window has
         focus is decided under desktop.lock and the window can be freed, so
         this records what happened and the thread hands it over.
@@ -9220,6 +9261,11 @@ static void keyboard_event(struct input_handle *handle, unsigned int code, int v
                         return;
                 }
         }
+
+        // Before anything is asked of a program or a window: a compositor that
+        // hangs holds the card and every key, and this is the way out.
+        if (keyboard_exit(modifiers, code, value))
+                return;
 
         // Another program has the display, and what is typed is its: the one
         // chord that is Canvas's is the way to end it, and nothing else is
@@ -9563,7 +9609,18 @@ static int client_restore(struct drm_client_dev *client, _Bool in_atomic)
                 // The last program that held the card has closed it.
                 if (desktop.suspended)
                         desktop_resume();
-                else
+
+                /*
+                        Not suspended: nobody held the card when it was closed,
+                        or the canvas thread had already drawn the desktop
+                        when it noticed the card let go. That commit is the
+                        picture, and a second one here is a modeset under
+                        desktop.lock on the exit of the program that closed the
+                        card -- 49 ms on the parent after a SIGKILL, the
+                        compositor's next start waiting behind it. Drawn again
+                        only where the screen does not show the desktop.
+                */
+                else if (!desktop_lit())
                         desktop_redraw();
         }
         rt_mutex_unlock(&desktop.lock);
@@ -9982,7 +10039,6 @@ static COLD void canvas_probe(struct work_struct *work)
 
 static void __maybe_unused canvas_start_probing(void)
 {
-        INIT_DELAYED_WORK(&canvas_probe_work, canvas_probe);
         schedule_delayed_work(&canvas_probe_work, 0);
 }
 
@@ -11783,6 +11839,49 @@ static void canvas_reclaim(void)
         }
 }
 
+/*
+        The work behind Control-Alt-Shift-Backspace.
+
+        The holder of the card and its session are ended first, as
+        Control-Alt-Backspace ends them: a stopped or hung program holds the
+        card against the text console, which cannot take a screen that has a
+        master. SIGKILL reaches a stopped process. Canvas is turned off once
+        nobody is master, or after CANVAS_EXIT_WAIT_MS if somebody still is,
+        so a holder that cannot die does not keep the machine from at least
+        leaving Canvas; the console takes the card when it lets go.
+*/
+#define CANVAS_EXIT_WAIT_MS 2000
+
+static void canvas_exit_work(struct work_struct *work)
+{
+        unsigned int waited;
+        _Bool taken = false;
+
+        pr_info("[moonwater canvas] " "Control-Alt-Shift-Backspace: Canvas off, to the text console\n");
+        canvas_reclaim();
+
+        for (waited = 0; waited < CANVAS_EXIT_WAIT_MS; waited += 5)
+        {
+                rt_mutex_lock(&desktop.lock);
+                taken = desktop_taken();
+                rt_mutex_unlock(&desktop.lock);
+
+                if (!taken)
+                        break;
+
+                msleep(5);
+        }
+
+        canvas_turn_off();
+}
+
+static DECLARE_WORK(canvas_exit, canvas_exit_work);
+
+static void canvas_exit_request(void)
+{
+        queue_work(system_dfl_long_wq, &canvas_exit);
+}
+
 static _Bool canvas_suspend_check(void)
 {
         _Bool taken;
@@ -11848,7 +11947,8 @@ static _Bool canvas_flush_running(void)
         return rcu_access_pointer(canvas_flusher) != NULL;
 }
 
-// A terminal, for the machine script's request and for the keyboard's.
+// A terminal, for the machine script's request: the verb moonwater canvas terminal, which is how the script
+// starts one on this desktop, and nothing else.
 static void canvas_terminal_start(void)
 {
         int ret = moonwater_spawn_recorded(SPARK_TERMINAL_PROGRAM, &canvas_spawned);
@@ -11927,7 +12027,9 @@ static int canvas_loop(void *unused)
                 if (canvas_suspend_check())
                         continue;
 
-                if (chord)
+                // The chord is a request to the machine script, which starts what a desktop starts; a machine
+                // with no script to answer it starts the terminal itself.
+                if (chord && !moonwater_bind_ask(SPARK_BIND_DESKTOP_TERMINAL))
                         canvas_terminal_start();
 
                 pointer_apply();
@@ -12323,6 +12425,24 @@ void canvas_client_release(struct file *file)
 // The device is registered and the bindings work: look for a card.
 void canvas_boot(void)
 {
+#ifdef CONFIG_MOONWATER_CANVAS_AUTOSTART
+        // Set up whether or not it is scheduled: turning Canvas on cancels it.
+        INIT_DELAYED_WORK(&canvas_probe_work, canvas_probe);
+#endif
+
+        /*
+                The image's settings can say Canvas stays off at boot
+                (moonwater bind init canvas off), and the text console is then
+                what is on the screen. The settings are read before this runs,
+                at the start of the core. moonwater canvas on starts Canvas
+                afterwards as it would after any off.
+        */
+        if (moonwater_settings_flags() & SPARK_SETTINGS_CANVAS_OFF)
+        {
+                pr_info("[moonwater canvas] " "off at boot, as the image's settings say; moonwater canvas on starts it\n");
+                return;
+        }
+
 #ifdef CONFIG_MOONWATER_CANVAS_AUTOSTART
         canvas_start_probing();
 #endif

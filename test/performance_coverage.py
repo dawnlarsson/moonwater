@@ -255,6 +255,18 @@ cover('direct_benchmark', 'test/checks.c#BENCH_words', 'memory_count_words',
       'state/split validation and paired word-transition timing')
 cover('direct_benchmark', 'test/checks.c#BENCH_translate', 'memory_translate',
       'paired former-C/assembly timing over byte-table translation sizes')
+cover('direct_benchmark', 'test/checks.c#BENCH_translate_rect', 'memory_translate_u32_rect',
+      'paired former-C/assembly timing over terminal cells at 1080p, 4K and 8K '
+      'and a wide strip, from atlas rows into frame rows, both x86-64 bodies')
+cover('direct_benchmark', 'test/checks.c#BENCH_blend_rect', 'memory_blend_u32_rect',
+      'paired former-C/assembly timing over glyphs of UI text and a 4K heading '
+      'laid on a known ground, both x86-64 bodies')
+cover('direct_benchmark', 'test/checks.c#BENCH_fill_rect', 'memory_fill_u32_rect',
+      'paired timing against a memory_fill_u32 a row over cells, a sliver, a '
+      'line of blank cells and a panel, with AVX-512 and without')
+cover('direct_benchmark', 'test/checks.c#BENCH_sweep_coverage', 'memory_sweep_coverage',
+      'paired former-C/assembly timing over coverage runs of 8 to 400 cells, '
+      'every x86-64 body')
 cover('direct_benchmark', 'test/checks.c#BENCH_delete', 'memory_delete_bytes',
       'paired former-C/assembly timing over byte deletion by table at three densities')
 cover('direct_benchmark', 'test/checks.c#BENCH_squeeze', 'memory_squeeze_bytes',

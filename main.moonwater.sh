@@ -92,8 +92,223 @@ function moonwater_ctrl_alt_delete {
   reboot
 }
 
+# A terminal, asked for at the keyboard (Control-Shift-T), by the compositor or
+# by the kernel's own desktop: on the compositor when there is one, and on the
+# kernel's desktop when there is not. It has to come back, as moonwater_init does.
+function moonwater_desktop_terminal {
+  if [ -S /run/moonwater/surface ] && [ -s /run/moonwater/compositor.pid ] && kill -0 $(cat /run/moonwater/compositor.pid) 2> /dev/null; then
+    desktop_terminal
+  else
+    moonwater canvas terminal
+  fi
+}
+
+# The desktop Canvas starts with: the compositor, which holds the card and
+# draws windows; the panel, the kernel log and a terminal on it; and, under
+# them, the kernel's own desktop, which has the card whenever the compositor
+# does not.
+#
+# The compositor runs under a supervisor. When it exits or dies it is started
+# again at once, then after half a second, then after two; a compositor that
+# has ended four times without living half a minute is given up, and Canvas
+# opens the kernel's terminal, so there is a shell on a screen. The keyboard
+# does not depend on any of this: Control-Alt-Backspace ends the compositor and
+# everything it started, and the supervisor starts it again; Control-Alt-Shift-
+# Backspace turns Canvas off, to the text console, and the supervisor goes with
+# it. A moonwater canvas on after that starts the desktop again.
+#
+# The panel, the kernel log and the terminal take their text from a font. The
+# image carries two families under /usr/share/fonts (fonts/ in the repository,
+# THIRD-PARTY for what they are): the terminal and the log draw with IBM Plex
+# Mono, Regular and Bold, and the panel with Inter. /root/font, whose first line is a path, takes both
+# instead, with no bold. A build without those files falls back to the first
+# mono face in /usr/share/fonts for both. With none the compositor is
+# not started: the kernel's desktop keeps the screen, with its log and a
+# terminal, and a line in the log names the file that is missing.
+#
+# moonwater.desktop=kernel on the kernel's command line, or /root/desktop
+# naming anything but canvas, leaves the kernel's desktop as it was: its log
+# and a terminal of its own.
+#
+# These helpers are not named moonwater_: a name that is would be an event.
+# The first line of /root/font, which is a path, or nothing.
+function desktop_named {
+  desktop_try=
+  if [ -r /root/font ]; then
+    IFS= read -r desktop_try < /root/font
+  fi
+}
+
+function desktop_font {
+  desktop_face=
+  desktop_bold=
+  desktop_text=
+  desktop_named
+  if [ -n "$desktop_try" ] && [ -r "$desktop_try" ]; then
+    desktop_face=$desktop_try
+    desktop_text=$desktop_try
+    return
+  fi
+  for desktop_try in /usr/share/fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf /usr/share/fonts/*/*Mono*Regular*.ttf /usr/share/fonts/*Mono*.ttf; do
+    if [ -r "$desktop_try" ]; then
+      desktop_face=$desktop_try
+      break
+    fi
+  done
+  if [ -z "$desktop_face" ]; then
+    return
+  fi
+  desktop_text=$desktop_face
+  if [ "$desktop_face" = /usr/share/fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf ] && [ -r /usr/share/fonts/ibm-plex-mono/IBMPlexMono-Bold.ttf ]; then
+    desktop_bold=/usr/share/fonts/ibm-plex-mono/IBMPlexMono-Bold.ttf
+  fi
+  if [ -r /usr/share/fonts/inter/Inter-Regular.ttf ]; then
+    desktop_text=/usr/share/fonts/inter/Inter-Regular.ttf
+  fi
+}
+
+# Everything on the desktop is started here and by nothing else: the compositor
+# holds the card and draws, and forks nothing on a person's behalf. A program it
+# is asked for (Control-Shift-T) is the event moonwater_desktop_terminal, which
+# the compositor raises and the machine answers by this file, as it answers the
+# power button; and the kernel's own desktop raises the same event before it
+# starts a terminal of its own. The pids are kept so that the end of a session
+# ends what it started.
+function desktop_run {
+  "$@" &
+  echo $! >> /run/moonwater/desktop.kids
+}
+
+# The kernel log, as a window on the compositor: started first, so that it sits
+# behind the terminal, and waited for until its first picture is committed (it
+# makes the file named by -w then), because the order in which two windows are
+# made is the order they stack in.
+function desktop_log {
+  desktop_font
+  if [ -z "$desktop_face" ]; then
+    return
+  fi
+  rm -f /run/moonwater/klog.up
+  desktop_run /klog -f "$desktop_face" ${desktop_bold:+-b "$desktop_bold"} -w /run/moonwater/klog.up
+  desktop_wait=0
+  until [ -e /run/moonwater/klog.up ] || ! kill -0 $! 2> /dev/null || [ $desktop_wait -ge 100 ]; do
+    sleep 0.05
+    desktop_wait=$((desktop_wait + 1))
+  done
+}
+
+# A terminal on the compositor.
+function desktop_terminal {
+  desktop_font
+  if [ -n "$desktop_face" ]; then
+    desktop_run /terminal -f "$desktop_face" ${desktop_bold:+-b "$desktop_bold"}
+  else
+    echo "desktop: no font in /root/font or /usr/share/fonts, so no terminal on the compositor" > /dev/kmsg
+  fi
+}
+
+# One compositor and what it carries, until the compositor is over.
+function desktop_session {
+  rm -f /run/moonwater/surface
+  setsid /compositor &
+  desktop_compositor=$!
+  echo $desktop_compositor > /run/moonwater/compositor.pid
+  desktop_wait=0
+  until [ -S /run/moonwater/surface ] || ! kill -0 $desktop_compositor 2> /dev/null || [ $desktop_wait -ge 100 ]; do
+    sleep 0.05
+    desktop_wait=$((desktop_wait + 1))
+  done
+  if [ -S /run/moonwater/surface ]; then
+    echo "desktop: the compositor (pid $desktop_compositor) is up" > /dev/kmsg
+  else
+    echo "desktop: the compositor (pid $desktop_compositor) made no surface" > /dev/kmsg
+  fi
+  desktop_font
+  : > /run/moonwater/desktop.kids
+  if [ -n "$desktop_face" ]; then
+    desktop_run /compositor grant panel /panel -f "$desktop_text"
+  fi
+  desktop_log
+  desktop_terminal
+  wait $desktop_compositor
+  echo "desktop: the compositor (pid $desktop_compositor) ended, status $?" > /dev/kmsg
+  kill $(cat /run/moonwater/desktop.kids) 2> /dev/null
+  rm -f /run/moonwater/compositor.pid /run/moonwater/desktop.kids
+}
+
+# Whether Canvas is on, which is what keeps a supervisor going.
+function desktop_on {
+  case $(moonwater canvas) in
+  *"Canvas is on"*) return 0 ;;
+  esac
+  return 1
+}
+
+function desktop_supervise {
+  desktop_fails=0
+  while desktop_on; do
+    desktop_began=$SECONDS
+    desktop_session
+    if [ $((SECONDS - desktop_began)) -ge 30 ]; then
+      desktop_fails=0
+    fi
+    desktop_fails=$((desktop_fails + 1))
+    # Canvas turned off is why the compositor ended: that is not a failure to count.
+    desktop_on || break
+    if [ $desktop_fails -ge 4 ]; then
+      echo "desktop: the compositor ended $desktop_fails times in a row; Canvas has the card, and a terminal" > /dev/kmsg
+      moonwater canvas terminal
+      break
+    fi
+    case $desktop_fails in
+    2) sleep 0.5 ;;
+    3) sleep 2 ;;
+    esac
+  done
+  rm -f /run/moonwater/supervisor.pid
+}
+
+function desktop_start {
+  case $(moonwater desktop) in
+  *"desktop canvas"*) ;;
+  *) return 1 ;;
+  esac
+  case $(cat /proc/cmdline) in
+  *moonwater.desktop=kernel*) return 1 ;;
+  esac
+  # The text engine has no face of its own, and a compositor without one has
+  # a panel of shapes and no window: the kernel's desktop, which has its log
+  # and a terminal, keeps the screen, and the log says which file was wanted.
+  desktop_font
+  if [ -z "$desktop_face" ]; then
+    desktop_named
+    echo "desktop: no font to draw with: /root/font names ${desktop_try:-no file}, which is not readable, and /usr/share/fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf and every other mono face under /usr/share/fonts are missing; the desktop is the kernel's, with its log and a terminal" > /dev/kmsg
+    return 1
+  fi
+  if [ -s /run/moonwater/supervisor.pid ] && kill -0 $(cat /run/moonwater/supervisor.pid) 2> /dev/null; then
+    return
+  fi
+  (desktop_supervise) > /dev/null 2>&1 &
+  echo $! > /run/moonwater/supervisor.pid
+}
+
+# Off means the compositor has ended and not that it is on its way out: the card
+# is Canvas's again only when its process is gone, so a Canvas turned on straight
+# after this waits for that (up to three seconds, then it has been asked).
+function desktop_stop {
+  kill $(cat /run/moonwater/supervisor.pid) 2> /dev/null
+  desktop_pid=$(cat /run/moonwater/compositor.pid 2> /dev/null)
+  kill $desktop_pid 2> /dev/null
+  desktop_wait=0
+  while [ -n "$desktop_pid" ] && kill -0 $desktop_pid 2> /dev/null && [ $desktop_wait -lt 60 ]; do
+    sleep 0.05
+    desktop_wait=$((desktop_wait + 1))
+  done
+  rm -f /run/moonwater/supervisor.pid /run/moonwater/compositor.pid
+}
+
 # Canvas started or stopped; $1 is on or off. Canvas opens no window by
-# itself: these are the windows a desktop starts with, at boot and after
+# itself: these are what a desktop starts with, at boot and after
 # `moonwater canvas on`. Defining this function owns the canvas rows, so
 # `moonwater bind canvas on|off` is refused while it is here.
 #
@@ -105,8 +320,11 @@ function moonwater_canvas {
   case $1 in
   on)
     moonwater canvas log
-    moonwater canvas terminal
+    desktop_start || moonwater canvas terminal
     moonwater desktop boot
+    ;;
+  off)
+    desktop_stop
     ;;
   esac
 }
@@ -124,6 +342,7 @@ function moonwater_event {
   # rfkill
   # tablet / headphone / dock  ($2 is on or off)
   # resume
+  # desktop terminal  (a request: Control-Shift-T, answered by moonwater_desktop_terminal)
   # recover  (last event did not finish; not a bind row)
 }
 

@@ -91,7 +91,7 @@ export TEST_TALLY
 #       kernel/profile/sec_sanitize.
 asked_lanes="wifi fuzz msan proof mutation ring0 tier scale desktop chrome"
 
-lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep"
+lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors font cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep"
 
 describe()
 {
@@ -160,6 +160,7 @@ describe()
         machine) echo "the machine script: hooks, functions, case arms, overlay lines and file policy" ;;
         snapshot) echo "process records, truncated tails and sentinel bounds on three machines" ;;
         sensors) echo "monitor's clocks, temperatures, fans, power and battery against generated sysfs trees" ;;
+        font) echo "the text engine: exact coverage of fonts written in the check, hostile fonts against a guard page, and FreeType and the exact area when both and a font are here" ;;
         cli)      echo "the moonwater command in a namespace: every verb, every zone it names, what it writes" ;;
         script)   echo "every verb as the machine script runs it, with no terminal and nothing on its input: bounded, asking nothing, and the same twice" ;;
         term)     echo "the emulator driven a byte and a read at a time, and the line being edited" ;;
@@ -387,7 +388,7 @@ coverage_guest()
 qmp_guest_module()
 {
         cat > "$1/qmp_guest.py" <<'PY'
-import json, os, socket, subprocess, time
+import json, os, re, socket, subprocess, time
 
 #       The guest's screen: seventy percent of the preferred mode, so the EDID
 #       has to prefer 3658x1543. QEMU's default EDID gives 640x480, where the
@@ -501,6 +502,56 @@ def load(name):
         vals.append(int(d[i:j]))
         i = j
     return vals[0], vals[1], d[i + 1:]
+
+class Shell:
+    """The guest's own shell on the serial line, which answers while the display is another program's, and the little the lane asks of it."""
+
+    def __init__(self, path):
+        self.sock = socket.socket(socket.AF_UNIX)
+        self.sock.connect(path)
+        self.sock.settimeout(1)
+        self.tag = 0
+        self.heard = b""
+
+    def run(self, command, seconds=30):
+        self.tag += 1
+        mark = self.tag
+        self.sock.sendall(("\necho BEG\"%d\"; %s\necho END\"%d\":$?\n" % (mark, command, mark)).encode())
+        seen = b""
+        stop = time.time() + seconds
+        done = re.compile(rb"BEG%d\r?\n(.*?)END%d:(\d+)" % (mark, mark), re.S)
+        while time.time() < stop:
+            try:
+                chunk = self.sock.recv(65536)
+                seen += chunk
+                self.heard += chunk
+            except socket.timeout:
+                pass
+            found = done.search(seen)
+            if found:
+                text = re.sub(rb"\x1b\[[0-9;?]*[a-zA-Z]", b"", found.group(1))
+                return text.decode("utf8", "replace").replace("\r", "").strip(), int(found.group(2))
+        return seen.decode("utf8", "replace").replace("\r", ""), 124
+
+    def ready(self):
+        # Boot has to have got as far as the shell; the line editor is then told to keep out of the way.
+        for _ in range(40):
+            if self.run("echo up", 5)[1] == 0:
+                break
+        self.run("PS1=; PS2=; stty -echo", 5)
+
+    def number(self, command, seconds=10):
+        found = re.findall(r"^(\d+)\s*$", self.run(command, seconds)[0], re.M)
+        return found[-1] if found else ""
+
+def until(test, seconds):
+    start = time.time()
+    while time.time() - start < seconds:
+        value = test()
+        if value:
+            return value, time.time() - start
+        time.sleep(0.05)
+    return None, time.time() - start
 PY
 }
 
@@ -3012,6 +3063,40 @@ lane_snapshot() { freestanding_checks_lane snapshot snapshot; }
 lane_sensors() { freestanding_checks_lane sensors sensors; }
 
 #
+#       src/canvas/font.c, the text engine the compositor and its clients
+#       include. The check writes its own fonts and knows every byte they
+#       must draw, and cuts and mutates them against a guard page, on three
+#       machines. Then every glyph of each face found (MOONWATER_FONTS, else
+#       the system's) against FreeType and an exact rendering in doubles:
+#       within one level of exact, or the lane is red. NOT RUN, softly, when
+#       FreeType or a font is missing.
+#
+lane_font()
+{
+        freestanding_checks_lane font font
+        font_outcome=$?
+
+        #       memory_translate_u32_rect has a V body: the riscv64 check
+        #       again with no V, and with V at 256 and 512 bits.
+        if target_tools riscv64; then
+                for cpu in rv64 rv64,v=true,vlen=256 rv64,v=true,vlen=512; do
+                        target=riscv64
+                        target_runner="qemu-riscv64 -cpu $cpu"
+                        target_label=riscv64-$(printf '%s' "$cpu" | sed 's/rv64,v=true,vlen=/v/')
+                        freestanding_checks_one font font || font_outcome=1
+                done
+                target_label=
+        fi
+        python3 test/differential.py --harness font_reference
+        case $? in
+        0) ;;
+        2) [ "$font_outcome" != 0 ] || font_outcome=2 ;;
+        *) font_outcome=1 ;;
+        esac
+        return "$font_outcome"
+}
+
+#
 #       The moonwater command, which only the boot lane reached before: run
 #       in a user and mount namespace with no network, chrooted into scratch
 #       directories standing for /root, /etc, /run, /home and two bowls.
@@ -3908,7 +3993,7 @@ freestanding_checks_one()
         #       fetch, and CHECK_bowl does for the Wi-Fi station.
         if { [ "$suite" = reserve ] || [ "$suite" = lock ] ||
              [ "$suite" = net ] || [ "$suite" = storage_io ] ||
-             [ "$suite" = bowl ]; } &&
+             [ "$suite" = bowl ] || [ "$suite" = socket ]; } &&
                 [ -n "$runner" ]; then
                 $runner "$work/$suite.$name" --emulated > "$work/$suite.$name.out" 2>&1
                 status=$?
@@ -7760,6 +7845,8 @@ lane_awk()
 #           wrote RESULT  apply a write result (count, again, intr, fatal)
 #           mode          the modes that are set
 #           resize CxR    the window is now this, through the resize path
+#           ring N        the ring is the program's own, lines N cells apart
+#           stride        how far apart the lines are now
 #           pty           what the seam in screen.c makes of a real one
 #
 lane_term()
@@ -8357,6 +8444,24 @@ b32 main()
                         say_number(wrong);
                         say_byte('\n');
                 }
+                /*
+                        ring N: the ring is the program's own, lines N cells
+                        apart, as a terminal that keeps its grid in its own
+                        memory lays it out; stride says how far apart they are
+                        now, after a resize that needed more columns.
+                */
+                else if (string_compare(verb, (string_address) "ring") == 0)
+                {
+                        window->handle = WINDOW_PRIVATE;
+                        window->stride = number(argument);
+                        COLUMNS = COLUMNS < window->stride ? COLUMNS : window->stride;
+                        i++;
+                }
+                else if (string_compare(verb, (string_address) "stride") == 0)
+                {
+                        say_number(window->stride);
+                        say_byte('\n');
+                }
                 else if (string_compare(verb, (string_address) "resize") == 0)
                 {
                         positive at = 0;
@@ -8789,6 +8894,7 @@ group autowrap
 same 'on by default' '[abcdef]|[ghi]|[]'         6 3 in 'abcdefghi' dump
 same 'off overwrites' '[abcdei]|[]|[]'           6 3 in '\e[?7labcdefghi' dump
 same 'on again'      '[abcdef]|[gh]|[]'          6 3 in '\e[?7l\e[?7habcdefgh' dump
+same 'on after the last column' '[01235]|[6789]|[]' 5 3 in '\e[?7l01234\e[?7h56789' dump
 
 group cursor
 #       DECTCEM says whether there is a block to draw at all.
@@ -8920,6 +9026,7 @@ group string
 same 'osc to bell'   '[XY]'                      20 3 in '\e]0;a title\aXY' row 0
 same 'osc to st'     '[XY]'                      20 3 in '\e]0;a title\e\\XY' row 0
 same 'dcs'           '[XY]'                      20 3 in '\ePq#0;2;0;0;0\e\\XY' row 0
+same 'dcs ignores a bell' '[Z]'                 20 3 in '\ePqqq\aXY\e\\Z' row 0
 same 'apc'           '[XY]'                      20 3 in '\e_Gf=100,a=T\e\\XY' row 0
 same 'privacy message' '[XY]'                    20 3 in '\e^anything\e\\XY' row 0
 #       Only an OSC names the window. DCS, SOS, PM and APC are read the same
@@ -9044,7 +9151,7 @@ same 'mark takes none' '[ex]|0,2'                8 2 in 'e\xcc\x81x' row 0 curso
 same 'wraps whole'    '[abc]|[<6f22>]|1,2'       4 2 in 'abc\xe6\xbc\xa2' dump cursor
 same 'right half hit' '[ x]'                     10 2 in '\xe6\xbc\xa2' in '\e[1;2Hx' row 0
 same 'left half hit'  '[x ]'                     10 2 in '\xe6\xbc\xa2' in '\e[1;1Hx' row 0
-same 'pinned at the edge' '[ab<6f22>]|0,4'       4 2 in '\e[?7l' in 'abc\xe6\xbc\xa2' row 0 cursor
+same 'pinned at the edge' '[ab<6f22>]|0,3'       4 2 in '\e[?7l' in 'abc\xe6\xbc\xa2' row 0 cursor
 #       Erasing half of a double-width character erases the other half too,
 #       so what is written over the pair afterwards stands whole.
 same 'erasing the left half' '[ab]'              8 2 in '\xe6\xbc\xa2\e[1;1H\e[Xab' row 0
@@ -9068,7 +9175,7 @@ group runs
 #       insert mode and the line-drawing set, a character cut between two
 #       reads, and the bytes that are not text at all.
 same 'run wraps rows' '[abcd]|[efgh]|[ij]|2,2'    4 3 in 'abcdefghij' dump cursor
-same 'run pinned'    '[abcg]|0,4'                 4 2 in '\e[?7l' in 'abcdefg' row 0 cursor
+same 'run pinned'    '[abcg]|0,3'                 4 2 in '\e[?7l' in 'abcdefg' row 0 cursor
 same 'run over a pair' '[ xy]|0,3'                8 2 in '\xe6\xbc\xa2' in '\e[1;2Hxy' row 0 cursor
 #       An erase over either half takes the pair, so a run written where
 #       the pair was stands whole even when it arrives in a read of its own.
@@ -9113,9 +9220,9 @@ group malformed
 same 'cut short'      '[a<fffd>z]'               8 2 in 'a\xc3z' row 0
 same 'cut by a lead'  '[<fffd><00e9>]'           8 2 in '\xe2\xc3\xa9' row 0
 same 'stray continuation' '[<fffd>a]'            8 2 in '\x80a' row 0
-same 'overlong'       '[<fffd>]'                 8 2 in '\xc0\xaf' row 0
-same 'a surrogate half' '[<fffd>]'               8 2 in '\xed\xa0\x80' row 0
-same 'past the last character' '[<fffd>]'        8 2 in '\xf7\xbf\xbf\xbf' row 0
+same 'overlong'       '[<fffd><fffd>]'           8 2 in '\xc0\xaf' row 0
+same 'a surrogate half' '[<fffd><fffd><fffd>]'     8 2 in '\xed\xa0\x80' row 0
+same 'past the last character' '[<fffd><fffd><fffd><fffd>]' 8 2 in '\xf7\xbf\xbf\xbf' row 0
 same 'an escape ends one' '[<fffd>]|[]'          8 2 in '\xc3\e[2;1H' dump
 
 #
@@ -9415,6 +9522,18 @@ same 'grown takes back history' '[a]|[b]|[c]|[d]|[e]|4,1' \
                                                  20 3 in 'a\r\nb\r\nc\r\nd\r\ne' resize '20x5' dump cursor
 same 'shrunk and grown back' '[a]|[b]|[c]|[]|[]|2,1' \
                                                  20 5 in 'a\r\nb\r\nc' resize '20x2' resize '20x5' dump cursor
+#       A program that keeps its ring in its own memory lays its lines only as
+#       far apart as the window is wide, and moves them out when the window
+#       grows, a step of 32 columns at a time and never past what the ring was
+#       cut for. What was written is where it was.
+same 'own ring widens in steps' '[0123456789abcdefghij]|[x]|[]|64' \
+                                                 20 3 ring 20 in '0123456789abcdefghij\r\nx' resize '40x3' dump stride
+same 'own ring widens twice' '[0123456789abcdefghij]|[x]|[]|128' \
+                                                 20 3 ring 20 in '0123456789abcdefghij\r\nx' resize '40x3' resize '100x3' dump stride
+same 'own ring stops at its cut' '256' \
+                                                 20 3 ring 20 in 'a' resize '300x3' stride
+same 'own ring keeps the lines above' '[old]|[one]|[two]|[]|128' \
+                                                 20 3 ring 20 in 'old\r\none\r\ntwo' resize '40x4' resize '100x4' dump stride
 #       A window narrower or shorter than one cell is not a grid, and every
 #       wrap and scroll divides by these: no rows at all had put wrapping
 #       forever looking for a row to land on.
@@ -9530,6 +9649,30 @@ if [ -z "${TEST_RUNNER:-}" ] && command -v python3 > /dev/null 2>&1; then
         else
                 lost 'generated streams' "$(grep -v '^term streams' "$work/streams.out" | head -3 | tr '\n' ' ')"
         fi
+fi
+
+#       The terminal that draws its own pixels (src/canvas/terminal.c): a frame
+#       draws only the cells that changed in the buffer it has and tells the
+#       compositor only the rows it has to read again. The check keeps a model
+#       of the compositor's screen, runs the emulator through a stream of
+#       everything a terminal is sent with resizes, the wheel and frames at
+#       random between, and holds the screen and the buffer to a full draw
+#       of the grid after every frame. The fonts are the repository's own
+#       (fonts/, the four files the image ships): IBM Plex Mono and its bold
+#       draw the grid, and all four have to load.
+group render
+render_font=fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf
+render_fonts="fonts/ibm-plex-mono/IBMPlexMono-Bold.ttf fonts/inter/Inter-Regular.ttf fonts/inter/Inter-Bold.ttf"
+if [ -n "${TEST_RUNNER:-}" ]; then
+        :
+elif [ ! -f "$render_font" ]; then
+        note "terminal frames: NOT RUN, the repository's fonts are not here"
+elif ! freestanding_check terminal "$work/terminal-check"; then
+        lost 'terminal frames: the check did not build' ''
+elif "$work/terminal-check" "$render_font" $render_fonts > "$work/terminal-check.out" 2>&1; then
+        won
+else
+        lost 'terminal frames against a full draw' "$(grep 'FAIL\|first pixel' "$work/terminal-check.out" | head -3 | tr '\n' ' ')"
 fi
 
 #       And the same emulator under libFuzzer with ASan/UBSan: what no grammar
@@ -12912,7 +13055,7 @@ timeout 5400 qemu-system-x86_64 -m 1G -smp 2 "$@" -kernel "$image" \
         -device qemu-xhci \
         -drive "if=none,id=stick,format=raw,file=fat:ro:$work/stick,readonly=on" \
         -device usb-storage,drive=stick,removable=on \
-        -append "console=ttyS0 drm_client_lib.active= mac80211_hwsim.radios=0" \
+        -append "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel mac80211_hwsim.radios=0" \
         > "$work/transcript" 2>&1 || true
 [ -n "${MOONWATER_WIFI_TRANSCRIPT:-}" ] && cp "$work/transcript" "$MOONWATER_WIFI_TRANSCRIPT"
 
@@ -13046,7 +13189,7 @@ timeout $((seconds * 30 + 900)) qemu-system-x86_64 -m 3G -smp 4 "$@" -kernel "$i
         -device qemu-xhci \
         -drive "if=none,id=stick,format=raw,file=fat:ro:$work/stick,readonly=on" \
         -device usb-storage,drive=stick,removable=on \
-        -append "console=ttyS0 drm_client_lib.active= mac80211_hwsim.radios=0 panic=-1" \
+        -append "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel mac80211_hwsim.radios=0 panic=-1" \
         < "$work/commands" > "$work/transcript" 2>&1 || true
 [ -n "${MOONWATER_RING0_TRANSCRIPT:-}" ] && cp "$work/transcript" "$MOONWATER_RING0_TRANSCRIPT"
 
@@ -13183,7 +13326,7 @@ set -- -cpu Nehalem
 [ -w /dev/kvm ] && set -- -enable-kvm -cpu host
 timeout 300 qemu-system-x86_64 -m 2G -smp 2 "$@" -kernel "$image" \
         -no-reboot -display none -device VGA,xres=1600,yres=1200 -serial stdio -nic none \
-        -append "console=ttyS0 drm_client_lib.active=" \
+        -append "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel" \
         < "$work/commands" > "$work/transcript" 2>&1 || true
 tr -d '\r' < "$work/transcript" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g' > "$work/said"
 mv "$work/said" "$work/transcript"
@@ -13692,15 +13835,37 @@ if [ "$boot_emulator" = qemu-system-x86_64 ]; then
         timeout 240 "$boot_emulator" -m 2G -smp 2 "$@" \
                 -kernel "$image" -no-reboot -display none -serial stdio \
                 $coverage_serial \
-                -append "console=$boot_console drm_client_lib.active=" \
+                -append "console=$boot_console drm_client_lib.active= moonwater.desktop=kernel" \
                 < "$work/commands" > "$work/transcript" 2>&1 || true
         coverage_guest_collect boot
 else
         { sleep 15; cat "$work/commands"; } |
                 timeout 480 "$boot_emulator" -m 2G -smp 2 "$@" \
                 -kernel "$image" -no-reboot -display none -serial stdio \
-                -append "console=$boot_console drm_client_lib.active=" \
+                -append "console=$boot_console drm_client_lib.active= moonwater.desktop=kernel" \
                 > "$work/transcript" 2>&1 || true
+fi
+
+#
+#       A plain boot is the userspace compositor: with no kernel parameter the
+#       machine script starts it under its supervisor, and keeps its pid. The
+#       guest is the boot guest's own, on its display, asked for the process
+#       and for Canvas, and stopped. The numbers are added to so that the line
+#       typed is not the line looked for.
+#
+if [ "$boot_emulator" = qemu-system-x86_64 ]; then
+        cat > "$work/plain.commands" <<'COMMANDS'
+this line is eaten by the console
+for i in 1 2 3 4 5 6 7 8 9 10; do [ -s /run/moonwater/compositor.pid ] && break; sleep 1; done
+printf 'plain-%s-%s-end\n' "$(( $(ps | grep -c '[c]ompositor') + 40 ))" "$(( $(moonwater canvas | grep -c 'Canvas is on') + 50 ))"
+poweroff
+COMMANDS
+        # shellcheck disable=SC2086
+        timeout 240 "$boot_emulator" -m 2G -smp 2 "$@" \
+                -kernel "$image" -no-reboot -display none -serial stdio \
+                -append "console=$boot_console drm_client_lib.active=" \
+                < "$work/plain.commands" > "$work/plain" 2>&1 || true
+        says plain 'a plain boot starts the userspace compositor, with Canvas on' 'plain-41-51-end'
 fi
 
 #
@@ -13936,7 +14101,7 @@ if [ "$boot_emulator" = qemu-system-riscv64 ]; then
         { sleep 15; cat "$work/commands"; } |
                 timeout 360 qemu-system-riscv64 -m 2G -smp 2 -machine virt -cpu max \
                 -kernel "$image" -no-reboot -display none -serial stdio \
-                -append "console=ttyS0 drm_client_lib.active=" \
+                -append "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel" \
                 > "$work/transcript" 2>&1 || true
 
         says transcript 'init started on the widest'  'Run /init as init process'
@@ -13949,7 +14114,7 @@ elif [ "$boot_emulator" != qemu-system-x86_64 ]; then
 elif [ -r /dev/kvm ]; then
         timeout 180 qemu-system-x86_64 -m 2G -smp 2 -cpu host -enable-kvm \
                 -kernel "$image" -no-reboot -display none -serial stdio \
-                -append "console=ttyS0 drm_client_lib.active=" \
+                -append "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel" \
                 < "$work/commands" > "$work/transcript" 2>&1 || true
 
         says transcript 'init started on this host'   'Run /init as init process'
@@ -14075,7 +14240,7 @@ guest = Guest([
     "-serial", "chardev:console"] +
     (["-serial", "file:" + os.environ["MOONWATER_POWER_COVERAGE"]]
      if os.environ.get("MOONWATER_POWER_COVERAGE") else []) + [
-    "-append", "console=" + tty + " drm_client_lib.active="],
+    "-append", "console=" + tty + " drm_client_lib.active= moonwater.desktop=kernel"],
     qmp, None, work, (console,), 0.1)
 
 serial = socket.socket(socket.AF_UNIX)
@@ -14572,7 +14737,7 @@ install_boot()
         # shellcheck disable=SC2086
         timeout $((240 * install_slow)) "$install_emulator" -m "${install_memory:-2G}" -smp 2 $install_board $install_machine \
                 -kernel "$image" -no-reboot -display none -serial stdio $coverage_serial \
-                -append "console=$install_console drm_client_lib.active=" \
+                -append "console=$install_console drm_client_lib.active= moonwater.desktop=kernel" \
                 -device qemu-xhci,id=xhci \
                 -drive if=none,id=disk,format=raw,file="${install_disk:-$work/disk.img}" \
                 -device nvme,serial=moonwater,drive=disk \
@@ -14937,7 +15102,7 @@ if [ "$install_loader" = BOOTX64.EFI ] && [ -r /dev/kvm ] && [ -w /dev/kvm ] &&
                         "$work/$name.sent" 240 -- \
                         "$install_emulator" -m 2G -smp 2 $install_board $install_machine \
                         -kernel "$image" -no-reboot -display none -serial stdio \
-                        -append "console=$install_console drm_client_lib.active=" \
+                        -append "console=$install_console drm_client_lib.active= moonwater.desktop=kernel" \
                         -device qemu-xhci,id=xhci \
                         -drive if=none,id=disk,format=raw,file="$disk" \
                         -device nvme,serial=moonwater,drive=disk "$@" \
@@ -15391,7 +15556,7 @@ COMMANDS
         # shellcheck disable=SC2086
         timeout $((300 * install_slow)) "$install_emulator" -m 1G -smp 2 $install_board $install_machine \
                 -kernel "$image" -no-reboot -display none -serial stdio \
-                -append "console=$install_console drm_client_lib.active=" \
+                -append "console=$install_console drm_client_lib.active= moonwater.desktop=kernel" \
                 $lan -device virtio-net-pci,netdev=lan,mac=52:54:00:66:00:02 \
                 < "$work/neighbour.in" > "$work/neighbour" 2>&1 &
         neighbour_qemu=$!
@@ -15868,7 +16033,7 @@ PY
                         -drive if=pflash,format=raw,file="$work/$name.vars" \
                         -kernel "$work/$name.efi" -no-reboot -display none \
                         -serial stdio $coverage_serial \
-                        -append "console=$install_console drm_client_lib.active=" \
+                        -append "console=$install_console drm_client_lib.active= moonwater.desktop=kernel" \
                         < "$work/serial.in" > "$work/$name" 2>&1 &
                 booting=$!
                 exec 9> "$work/serial.in"
@@ -16014,6 +16179,300 @@ counted
 #       Input goes in through QMP rather than the human monitor, because
 #       mouse_move there is relative whatever device is selected and a tablet
 #       has no relative axes to move along.
+#
+#       The machine script's desktop functions, the supervisor's give-up and canvas off, the
+#       stop, the font the terminal draws with and the no-surface line, run the way the machine
+#       runs them: the moonwater shell as bash, which is where the function keyword and $SECONDS
+#       are, against stub programs with the paths they name redirected into a directory of the
+#       lane's own. MOONWATER_DESKTOP_MAIN names another script; the parent's shows the rows fail.
+#       Seven of these are red on the commit before the machine script's desktop fixes.
+desktop_script_rows()
+{
+        desktop_main=${MOONWATER_DESKTOP_MAIN:-main.moonwater.sh}
+        desktop_work=$(mktemp -d "${TMPDIR:-/tmp}/dawning-desktop-rows.XXXXXX") || return 0
+
+        if ! unshare -Urpf --mount-proc true 2> /dev/null || ! need_shell > /dev/null 2>&1; then
+                echo "  canvas       desktop script rows NOT RUN -- no unshare -Urpf or no shell"
+                rm -rf "$desktop_work"
+                return 0
+        fi
+
+        ln -sf "$shell_binary" "$desktop_work/bash" || return 0
+        cp "$desktop_main" "$desktop_work/main.sh" || return 0
+        cat > "$desktop_work/runner.sh" <<'RUNNER'
+#!/bin/sh
+# The desktop functions of the machine script, run as the moonwater shell runs them (the bash
+# personality, which has $SECONDS and the function keyword), against stub compositor, klog,
+# terminal, panel and moonwater programs, with the absolute paths they name redirected into a
+# case directory. One row per verdict, tab separated: PASS|FAIL, the row, what it got, what it wants.
+#   runner.sh SHELL ROOT SCRIPT
+SH=$1
+ROOT=$2
+SCRIPT=$3
+
+make_stub()
+{
+        d=$1
+        rm -rf "$d"
+        mkdir -p "$d/bin" "$d/root" "$d/run/moonwater" "$d/fonts"
+        echo on > "$d/canvas"
+        : > "$d/starts"
+        : > "$d/args"
+        : > "$d/kernel"
+        : > "$d/kmsg"
+        echo x > "$d/fonts/A-Mono.ttf"
+        echo x > "$d/fonts/Q-Face.ttf"
+
+        for n in klog terminal panel; do
+                printf '#!/bin/sh\necho "%s $*" >> "$STUB/args"\nexit 0\n' "$n" > "$d/bin/$n"
+        done
+
+        cat > "$d/bin/compositor" <<'EOF'
+#!/bin/sh
+if [ "$1" = grant ]; then
+        echo "grant $*" >> "$STUB/args"
+        exit 0
+fi
+echo "$$" >> "$STUB/starts"
+if [ -e "$STUB/slow" ]; then
+        trap 'sleep 1; echo gone > "$STUB/gone"; exit 0' TERM
+        while :; do sleep 0.05; done
+fi
+if [ ! -s "$STUB/lives" ]; then
+        echo off > "$STUB/canvas"
+        exit 1
+fi
+set -- $(head -n 1 "$STUB/lives")
+tail -n +2 "$STUB/lives" > "$STUB/lives.next"
+mv "$STUB/lives.next" "$STUB/lives"
+if [ "$1" -ge 1 ]; then
+        sleep "$1"
+else
+        sleep 0.3
+fi
+if [ "$2" = off ]; then
+        echo off > "$STUB/canvas"
+fi
+exit 1
+EOF
+
+        cat > "$d/bin/moonwater" <<'EOF'
+#!/bin/sh
+case $1 in
+desktop) echo "desktop canvas" ;;
+canvas)
+        case $2 in
+        "") if [ "$(cat "$STUB/canvas")" = on ]; then echo "Canvas is on"; else echo "Canvas is off"; fi ;;
+        terminal) echo terminal >> "$STUB/kernel" ;;
+        log) echo log >> "$STUB/kernel" ;;
+        esac ;;
+esac
+EOF
+        chmod +x "$d/bin/"*
+}
+
+# The script with its absolute paths pointed into the case directory. The kmsg stub appends, as
+# /dev/kmsg does, and the program paths are matched only where a space follows them.
+redirect()
+{
+        sed -e "s#> /dev/kmsg#>> \$STUB/kmsg#g" \
+            -e "s#/run/moonwater#\$STUB/run/moonwater#g" \
+            -e "s#/root/font#\$STUB/root/font#g" \
+            -e "s#/dev/kmsg#\$STUB/kmsg#g" \
+            -e "s#/usr/share/fonts#\$STUB/fonts#g" \
+            -e "s#/compositor\([ &]\)#\$STUB/bin/compositor\1#g" \
+            -e "s#/klog\([ ]\)#\$STUB/bin/klog\1#g" \
+            -e "s#/terminal\([ ]\)#\$STUB/bin/terminal\1#g" \
+            -e "s#/panel\([ ]\)#\$STUB/bin/panel\1#g" "$1" > "$STUB/main.sed.sh"
+}
+
+# One case: $1 its name. The caller writes lives, root/font, slow and the driver.
+begin()
+{
+        STUB=$ROOT/cases/$1
+        export STUB
+        make_stub "$STUB"
+        redirect "$SCRIPT"
+        PATH=$STUB/bin:/usr/bin:/bin
+        export PATH
+}
+
+# moonwater is a builtin of the shell binary and wins over PATH, so the stub is reached through a
+# function, which is the only thing the drivers see.
+run_driver()
+{
+        printf '%s\n' 'moonwater() { "$STUB/bin/moonwater" "$@"; }' | cat - "$STUB/driver.sh" > "$STUB/driver.run"
+        "$SH" "$STUB/driver.run" > "$STUB/out" 2>&1
+}
+
+# report LABEL GOT WANT
+report()
+{
+        if [ "$2" = "$3" ]; then
+                printf 'PASS\t%s\t%s\t%s\n' "$1" "$2" "$3"
+        else
+                printf 'FAIL\t%s\t%s\t%s\n' "$1" "$2" "$3"
+        fi
+}
+
+rm -rf "$ROOT/cases"
+mkdir -p "$ROOT/cases"
+
+# A: four quick deaths, then a long life (31 s: the count starts again), then a death, then off.
+begin giveup
+printf '0\n0\n0\n31\n0\n0 off\n' > "$STUB/lives"
+cat > "$STUB/driver.sh" <<'EOF'
+. "$STUB/main.sed.sh"
+desktop_start
+sup=$(cat "$STUB/run/moonwater/supervisor.pid")
+wait $sup
+echo "starts=$(wc -l < "$STUB/starts")"
+echo "kernel=$(grep -c terminal "$STUB/kernel")"
+echo "stale=$([ -e "$STUB/run/moonwater/supervisor.pid" ] && echo yes || echo no)"
+EOF
+run_driver
+report "a long life restarts the count of deaths" "$(grep '^starts=' "$STUB/out")" "starts=6"
+report "no give-up terminal after a long life" "$(grep '^kernel=' "$STUB/out")" "kernel=0"
+report "supervisor pid file removed when it ends" "$(grep '^stale=' "$STUB/out")" "stale=no"
+
+# B: four deaths, the fourth with Canvas turned off (the chord): the supervisor ends and is not given up on.
+begin offchord
+printf '0\n0\n0\n0 off\n' > "$STUB/lives"
+cat > "$STUB/driver.sh" <<'EOF'
+. "$STUB/main.sed.sh"
+desktop_start
+sup=$(cat "$STUB/run/moonwater/supervisor.pid")
+wait $sup
+echo "kernel=$(grep -c terminal "$STUB/kernel")"
+echo "stale=$([ -e "$STUB/run/moonwater/supervisor.pid" ] && echo yes || echo no)"
+EOF
+run_driver
+report "canvas off ends a supervisor with no give-up terminal" "$(grep '^kernel=' "$STUB/out")" "kernel=0"
+report "canvas off leaves no supervisor pid file" "$(grep '^stale=' "$STUB/out")" "stale=no"
+
+# C: desktop_stop returns when the compositor has ended, not while it is on its way out.
+begin stop
+touch "$STUB/slow"
+cat > "$STUB/driver.sh" <<'EOF'
+. "$STUB/main.sed.sh"
+desktop_start
+sleep 0.3
+desktop_stop
+echo "gone=$([ -e "$STUB/gone" ] && echo yes || echo no)"
+echo "pidfile=$([ -e "$STUB/run/moonwater/compositor.pid" ] && echo yes || echo no)"
+EOF
+run_driver
+report "canvas off returns once the compositor has ended" "$(grep '^gone=' "$STUB/out")" "gone=yes"
+report "canvas off removes the compositor pid file" "$(grep '^pidfile=' "$STUB/out")" "pidfile=no"
+
+# D: a /root/font whose first line is a path and whose second is not: the first line is the face.
+begin font
+touch "$STUB/slow"
+printf '%s\njunk\n' "$STUB/fonts/Q-Face.ttf" > "$STUB/root/font"
+cat > "$STUB/driver.sh" <<'EOF'
+. "$STUB/main.sed.sh"
+desktop_start
+sleep 7
+desktop_stop
+echo "font=$(grep -c "^terminal -f $STUB/fonts/Q-Face.ttf\$" "$STUB/args")"
+EOF
+run_driver
+report "the first line of /root/font is the face of the terminal" "$(grep '^font=' "$STUB/out")" "font=1"
+
+# E: a compositor that makes no surface is not reported as up, and is seen at once.
+begin surface
+printf '0 off\n' > "$STUB/lives"
+cat > "$STUB/driver.sh" <<'EOF'
+. "$STUB/main.sed.sh"
+t0=$(/usr/bin/date +%s%N)
+desktop_start
+wait $(cat "$STUB/run/moonwater/supervisor.pid") 2> /dev/null
+t1=$(/usr/bin/date +%s%N)
+echo "nosurface=$(grep -c 'made no surface' "$STUB/kmsg")"
+echo "quick=$(( (t1 - t0) < 2000000000 ))"
+EOF
+run_driver
+report "no surface is said, not that the compositor is up" "$(grep '^nosurface=' "$STUB/out")" "nosurface=1"
+report "a compositor that dies at once is seen at once" "$(grep '^quick=' "$STUB/out")" "quick=1"
+
+# F: a second start while a supervisor lives starts nothing.
+begin second
+touch "$STUB/slow"
+cat > "$STUB/driver.sh" <<'EOF'
+. "$STUB/main.sed.sh"
+desktop_start
+s1=$(cat "$STUB/run/moonwater/supervisor.pid")
+sleep 0.2
+desktop_start
+s2=$(cat "$STUB/run/moonwater/supervisor.pid")
+echo "same=$([ "$s1" = "$s2" ] && echo 1 || echo 0)"
+echo "starts=$(wc -l < "$STUB/starts")"
+desktop_stop
+EOF
+run_driver
+report "a second start keeps the one supervisor" "$(grep '^same=' "$STUB/out")" "same=1"
+report "and starts one compositor" "$(grep '^starts=' "$STUB/out")" "starts=1"
+
+# G: a terminal asked for with no compositor is the kernel's, once.
+begin request
+printf '0 off\n' > "$STUB/lives"
+cat > "$STUB/driver.sh" <<'EOF'
+. "$STUB/main.sed.sh"
+desktop_start
+wait $(cat "$STUB/run/moonwater/supervisor.pid") 2> /dev/null
+before=$(grep -c terminal "$STUB/kernel")
+moonwater_desktop_terminal
+after=$(grep -c terminal "$STUB/kernel")
+echo "delta=$((after - before))"
+EOF
+run_driver
+report "one request with no compositor is one kernel terminal" "$(grep '^delta=' "$STUB/out")" "delta=1"
+# H: four quick deaths with Canvas on: the supervisor gives up, one kernel terminal, and no pid file is left.
+begin giveup-quick
+printf '0\n0\n0\n0\n' > "$STUB/lives"
+cat > "$STUB/driver.sh" <<'EOF'
+. "$STUB/main.sed.sh"
+desktop_start
+wait $(cat "$STUB/run/moonwater/supervisor.pid") 2> /dev/null
+echo "kernel=$(grep -c terminal "$STUB/kernel")"
+echo "stale=$([ -e "$STUB/run/moonwater/supervisor.pid" ] && echo yes || echo no)"
+EOF
+run_driver
+report "a give-up opens one kernel terminal" "$(grep '^kernel=' "$STUB/out")" "kernel=1"
+report "a give-up leaves no supervisor pid file" "$(grep '^stale=' "$STUB/out")" "stale=no"
+
+# I: a machine with no font at all keeps the kernel's desktop: no compositor, and the log says so.
+begin nofont
+rm -f "$STUB/fonts/A-Mono.ttf" "$STUB/fonts/Q-Face.ttf"
+cat > "$STUB/driver.sh" <<'EOF'
+. "$STUB/main.sed.sh"
+desktop_start
+echo "rc=$?"
+echo "nofont=$(grep -c 'no font to draw with' "$STUB/kmsg")"
+echo "starts=$(wc -l < "$STUB/starts")"
+EOF
+run_driver
+report "no font: desktop_start refuses" "$(grep '^rc=' "$STUB/out")" "rc=1"
+report "no font: the log names the missing font" "$(grep '^nofont=' "$STUB/out")" "nofont=1"
+report "no font: no compositor is started" "$(grep '^starts=' "$STUB/out")" "starts=0"
+
+RUNNER
+        unshare -Urpf --mount-proc sh "$desktop_work/runner.sh" "$desktop_work/bash" "$desktop_work/cases" \
+                "$desktop_work/main.sh" > "$desktop_work/rows" 2>&1
+
+        [ -s "$desktop_work/rows" ] || lost "desktop rows" "the runner printed nothing"
+        desktop_tab=$(printf '\t')
+        while IFS=$desktop_tab read -r desktop_verdict desktop_label desktop_got desktop_want; do
+                if [ "$desktop_verdict" = PASS ]; then
+                        won
+                else
+                        lost "$desktop_label" "got $desktop_got, want $desktop_want"
+                fi
+        done < "$desktop_work/rows"
+
+        rm -rf "$desktop_work"
+}
+
 lane_canvas()
 (
 image=${MOONWATER_IMAGE:-dist/bootx64.efi}
@@ -16035,6 +16494,8 @@ if [ ! -f "$image" ]; then
         exit 2
 fi
 
+desktop_script_rows
+
 work=$(mktemp -d "${TMPDIR:-/tmp}/dawning-canvas.XXXXXX") || exit 1
 trap 'rm -rf "$work"' EXIT INT TERM
 
@@ -16045,6 +16506,9 @@ MOONWATER_CANVAS_COVERAGE=${coverage_serial#-serial file:}
 export MOONWATER_CANVAS_COVERAGE
 qmp_guest_module "$work"
 
+#       CANVAS_ONLY=m1 (or m5, r1, r2, r4) runs the userspace compositor's boot alone, for a
+#       parent and a fix compared in one sitting; the lane runs all of it.
+if [ -z "${CANVAS_ONLY:-}" ]; then
 PYTHONPATH=$work python3 - "$image" > "$work/answers" 2>"$work/why" <<'PY'
 import os, re, subprocess, sys, time
 from qmp_guest import *
@@ -16065,7 +16529,7 @@ guest = Guest(desktop(image) + [
     # nokaslr so the samples map onto System.map. The cursor plane is off here
     # because QEMU's screendump has no cursor plane in it, and the pixel checks
     # below count the cursor's pixels; the plane boot after this one covers it.
-    "-append", "console=ttyS0 drm_client_lib.active= moonwater.cursor_plane=0 " + os.environ.get("CANVAS_APPEND", "")],
+    "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel moonwater.cursor_plane=0 " + os.environ.get("CANVAS_APPEND", "")],
     work + "/qmp", work + "/mon", work)
 time.sleep(0.5)
 
@@ -17377,7 +17841,7 @@ leak_guest = Guest(desktop(image) + [
     "-no-reboot", "-display", "none", "-serial", "file:" + work + "/leak-serial",
     # The cursor plane is off here too: this guest counts the cursor's pixels in
     # a screendump, and QEMU's screendump has no cursor plane in it.
-    "-append", "drm_client_lib.active= moonwater.cursor_plane=0 " + os.environ.get("CANVAS_APPEND", "")],
+    "-append", "drm_client_lib.active= moonwater.desktop=kernel moonwater.cursor_plane=0 " + os.environ.get("CANVAS_APPEND", "")],
     work + "/leak-qmp", work + "/leak-mon", work)
 
 time.sleep(25)
@@ -17947,7 +18411,7 @@ if ovmf:
         "-no-reboot", "-display", "none", "-serial", "file:" + work + "/fw-serial",
         #   The console on the serial port: what moonwater canvas off finds is a
         #   console that is not a screen, and starts a shell on tty1 for.
-        "-append", "console=ttyS0"],
+        "-append", "console=ttyS0 moonwater.desktop=kernel"],
         work + "/fw-qmp", work + "/fw-mon", work)
     time.sleep(40)
     type_shell("moonwater canvas > /dev/ttyS0 2>&1")
@@ -18025,7 +18489,7 @@ if holder:
             "-drive", "if=none,id=stick,format=raw,file=fat:ro:" + stick + ",readonly=on",
             "-device", "usb-storage,drive=stick,removable=on",
             "-no-reboot", "-display", "none", "-serial", "file:" + lost_work + "/serial",
-            "-append", "console=ttyS0 drm_client_lib.active= moonwater.cursor_plane=0"],
+            "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel moonwater.cursor_plane=0"],
             lost_work + "/qmp", lost_work + "/mon", lost_work)
         time.sleep(25)
         shot("lost-start")
@@ -18108,7 +18572,7 @@ os.makedirs(work, exist_ok=True)
 guest = Guest(desktop(image) + [
     "-device", "usb-mouse,id=xhcimouse",
     "-no-reboot", "-display", "none", "-serial", "file:" + work + "/serial",
-    "-append", "console=ttyS0 drm_client_lib.active= " + os.environ.get("CANVAS_APPEND", "")],
+    "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel " + os.environ.get("CANVAS_APPEND", "")],
     work + "/qmp", work + "/mon", work)
 
 # What the tablet reports for a point, and where pointer.c puts the pointer
@@ -18228,6 +18692,2039 @@ else
                 same "$name" "$want" "$got"
         done < "$work/plane-answers"
 fi
+fi
+
+if [ -z "${CANVAS_ONLY:-}" ] || [ "${CANVAS_ONLY:-}" = m1 ]; then
+#       The compositor in userspace (canvas milestone M1).
+#
+#       A script on a stick, typed into the boot terminal, starts
+#       /compositor, which takes the card from Canvas, and two /surface
+#       windows on it; then the screen is read. Nothing typed reaches a shell
+#       while the compositor holds the card -- Canvas drops every key then --
+#       so the script itself ends the compositor after a fixed time, and the
+#       clicks go in through the tablet in between. The boot terminal is the
+#       one that has the keyboard, so it has it again once the card is back.
+#
+#       The first window is at (40, 40) and 320 by 200: its border starts at
+#       38, its titlebar is rows 40 to 59 and its body rows 60 to 259. The
+#       second, at (240, 140), covers the first's body from (238, 138).
+PYTHONPATH=$work python3 - "$image" > "$work/m1-answers" 2>"$work/m1-why" <<'PY'
+import os, re, sys, time
+from qmp_guest import *
+
+image = sys.argv[1]
+work = os.environ["MOONWATER_CANVAS_WORK"] + "/m1"
+stick = work + "/stick"
+os.makedirs(stick, exist_ok=True)
+out = []
+
+#   The fail states, in the same guest once the first compositor has gone: a
+#   window asked for far off the output, one that never commits, the first
+#   of three destroyed while it has the keyboard, a client that floods
+#   commits while another is made and then dies mid-flood. The windows write
+#   what they are sent to files; the script reports what is in them.
+open(stick + "/m2", "w").write(r"""exec > /dev/ttyS0 2>&1
+/compositor &
+c=$!
+sleep 2
+/surface -x 40 -y 40 -w 300 -h 200 -c 336699 -s 90 > /tmp/a.out &
+a=$!
+sleep 1
+/surface -x 99999 -y 99999 -w 200 -h 100 -c 996633 -s 90 > /tmp/c.out &
+sleep 1
+/surface -n -x 400 -y 400 -w 200 -h 100 -s 90 > /tmp/b.out &
+sleep 1
+echo m2-ready
+sleep 5
+kill -9 $a
+echo m2-killed-a
+sleep 5
+/surface -F 1000000 -W 3 -x 500 -y 300 -w 800 -h 600 -c 663399 -s 90 > /tmp/f.out &
+f=$!
+sleep 1
+/surface -x 1500 -y 100 -w 200 -h 100 -c 339966 -s 20 > /tmp/d.out &
+sleep 3
+n=$(grep -c 'surface: [0-9]* at' /tmp/d.out)
+echo "m2 flood: second client $n"
+kill -9 $f
+wait $f
+sleep 1
+kill -0 $c && echo "m2 alive: yes" || echo "m2 alive: no"
+/surface -x 1700 -y 600 -w 100 -h 100 -s 1 > /tmp/e.out
+n=$(grep -c 'surface: [0-9]* at' /tmp/e.out)
+echo "m2 after: new client $n"
+/surface -O 2147479552 -x 1000 -y 700 -w 64 -h 32 -s 3 > /tmp/o.out &
+sleep 1
+/surface -x 1200 -y 700 -w 64 -h 32 -s 1 > /tmp/o2.out
+n=$(grep -c 'surface: [0-9]* at' /tmp/o2.out)
+kill -0 $c && l=yes || l=no
+echo "m2 offset: alive $l next client $n"
+/surface -2 -x 1300 -y 700 -w 100 -h 100 -s 3 > /tmp/t.out
+t1=$(grep -c 'second create answered -16' /tmp/t.out)
+t2=$(grep -c 'compositor has gone' /tmp/t.out)
+echo "m2 twice: $t1 gone $t2"
+k1=$(grep -c 'surface: event 6' /tmp/b.out)
+k2=$(grep -c 'surface: event 6' /tmp/c.out)
+echo "m2 keys: nothing-shown $k1 visible $k2"
+kill $c
+wait $c
+echo m2-done
+""")
+
+#   The panel, the roles and the grants (canvas milestone M2). Three windows
+#   with the panel the compositor draws itself (the third put away), a claim
+#   for the panel role with no grant, then programs that hold it by grant: a
+#   second claim, the holder killed, a locked surface asked to move, a swap
+#   and a holder that hangs. The lane clicks and types between the markers,
+#   and what the programs were told is counted at the end.
+open(stick + "/m3", "w").write(r"""exec > /dev/ttyS0 2>&1
+/compositor &
+c=$!
+sleep 2
+/surface -x 300 -y 200 -w 300 -h 150 -c 336699 -T alpha -p -s 120 > /tmp/wa.out &
+sleep 1
+/surface -x 700 -y 200 -w 300 -h 150 -c 996633 -T beta -p -s 120 > /tmp/wb.out &
+sleep 1
+/surface -x 1200 -y 300 -w 200 -h 120 -c 55aa55 -T gamma -m -s 120 > /tmp/wc.out &
+sleep 1
+/surface -r 2 -s 1 > /tmp/p0.out
+echo "m3 no grant: $(grep -c 'refused -1' /tmp/p0.out)"
+echo m3-windows
+sleep 26
+echo "m3 keys: alpha $(grep -c 'surface: event 6' /tmp/wa.out) beta $(grep -c 'surface: event 6' /tmp/wb.out)"
+/compositor grant panel /surface -r 2 -c 445566 -p -s 120 > /tmp/p1.out &
+p1=$!
+sleep 2
+echo m3-held
+/compositor grant panel /surface -r 2 -c 778899 -s 5 > /tmp/p2.out &
+sleep 2
+echo "m3 fields: $(grep 'surface: role' /tmp/p1.out)"
+echo "m3 second claim: busy $(grep -c 'event 10 0 3 -16' /tmp/p2.out) closed $(grep -c 'event 9 0 2 0' /tmp/p2.out)"
+kill -9 $p1
+echo m3-killed
+sleep 3
+/compositor grant panel /surface -r 2 -c 445566 -x 50 -y 50 -z 10 -s 4 > /tmp/p3.out
+echo "m3 locked: move $(grep -c 'event 14 0 1 -1' /tmp/p3.out) resize $(grep -c 'event 14 0 2 -1' /tmp/p3.out)"
+/compositor grant panel /surface -r 2 -c aa0000 -s 120 > /tmp/s1.out &
+s1=$!
+sleep 2
+/compositor grant panel:replace /surface -r 2 -c 00aa00 -s 120 > /tmp/s2.out &
+s2=$!
+sleep 2
+echo m3-swapped
+sleep 2
+echo "m3 swap: holder asked $(grep -c 'event 9 0 1 0' /tmp/s1.out) new active $(grep -c 'event 10 0 2 0' /tmp/s2.out)"
+kill -STOP $s2
+/compositor grant panel:replace /surface -r 2 -c 0000aa -s 120 > /tmp/s3.out &
+s3=$!
+sleep 3
+echo m3-hung
+kill -CONT $s2
+sleep 1
+echo "m3 hung: told $(grep -c 'event 10 0 4 -110' /tmp/s2.out)"
+kill -9 $s1 $s2 $s3
+sleep 1
+/compositor grant background /surface -r 1 -c 112233 -s 120 > /tmp/b1.out &
+b1=$!
+sleep 2
+echo m3-background
+sleep 3
+echo m3-background-late
+sleep 2
+kill -9 $b1
+sleep 2
+echo m3-bgkilled
+sleep 1
+for n in 1 2 3 4 5 6; do /surface -N 6 -w 10 -h 10 -s 20 > /tmp/n$n.out & done
+sleep 3
+for n in 7 8 9; do /surface -N 2 -w 10 -h 10 -s 20 > /tmp/n$n.out & done
+sleep 3
+/surface -x 1500 -y 500 -w 150 -h 100 -c aabbcc -T late -s 4 > /tmp/late.out &
+sleep 2
+echo "m3 slots: each made 4: $(cat /tmp/n1.out /tmp/n2.out /tmp/n3.out /tmp/n4.out /tmp/n5.out /tmp/n6.out | grep -c 'made 4$') late window $(grep -c 'surface: [0-9]* at' /tmp/late.out)"
+kill $c
+wait $c
+echo m3-done
+""")
+
+#   The keyboard: what the keys of a Swedish layout make for the window that has
+#   them, and what the layout does when it is changed under a running
+#   compositor. The window writes every event it is sent to a file; the script
+#   gives the file to the serial line between the markers the lane types at.
+open(stick + "/m4", "w").write(r"""exec > /dev/ttyS0 2>&1
+moonwater keyboard se
+/compositor &
+c=$!
+sleep 2
+/surface -x 300 -y 200 -w 300 -h 150 -c 336699 -T keys -s 90 >> /tmp/k.out &
+sleep 1
+echo m4-ready
+sleep 24
+echo m4-se-dump
+cat /tmp/k.out
+echo m4-se-end
+: > /tmp/k.out
+moonwater keyboard de
+sleep 1
+echo m4-de-ready
+sleep 8
+echo m4-de-dump
+cat /tmp/k.out
+echo m4-de-end
+moonwater keyboard us
+kill $c
+wait $c
+echo m4-done
+""")
+
+#   Alt-Tab, Alt-F9 and what the keys do while they are used: three windows side
+#   by side, the lane presses the chords between the markers, and the script
+#   reports how many keys each window was sent.
+open(stick + "/m6", "w").write(r"""exec > /dev/ttyS0 2>&1
+/compositor &
+c=$!
+sleep 2
+/surface -x 100 -y 100 -w 300 -h 200 -c 336699 -T one -s 120 > /tmp/w1.out &
+sleep 1
+/surface -x 500 -y 100 -w 300 -h 200 -c 996633 -T two -s 120 > /tmp/w2.out &
+sleep 1
+/surface -x 900 -y 100 -w 300 -h 200 -c 55aa55 -T three -s 120 > /tmp/w3.out &
+sleep 1
+echo m6-ready
+sleep 40
+echo "m6 keys: one $(grep -c 'surface: event 6' /tmp/w1.out) two $(grep -c 'surface: event 6' /tmp/w2.out) three $(grep -c 'surface: event 6' /tmp/w3.out)"
+kill $c
+wait $c
+echo m6-done
+""")
+
+#   A key held while the keyboard goes to another window: the repeats and the
+#   release of a key whose press went to one window do not reach the one that has
+#   the keys after an Alt-Tab, and the one it went to is let go of at the change.
+#   The keys come from a FIFO the compositor reads as a device (-i): QEMU's keyboard
+#   does not repeat. Each record is a struct input_event: 16 bytes of time, the type,
+#   the code and the value, little-endian.
+open(stick + "/m12", "w").write(r"""exec > /dev/ttyS0 2>&1
+Z='\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000'
+ev() { printf "$Z$1" >&3; }
+mkfifo /tmp/kin
+exec 3<>/tmp/kin
+/compositor -i /tmp/kin &
+c=$!
+sleep 2
+/surface -x 100 -y 100 -w 300 -h 200 -c 336699 -T one -s 120 > /tmp/k1.out &
+sleep 1
+/surface -x 500 -y 100 -w 300 -h 200 -c 996633 -T two -s 120 > /tmp/k2.out &
+sleep 2
+echo m12-ready
+ev '\001\000\036\000\001\000\000\000'
+sleep 1
+ev '\001\000\036\000\002\000\000\000'
+sleep 1
+ev '\001\000\070\000\001\000\000\000'
+ev '\001\000\017\000\001\000\000\000'
+ev '\001\000\017\000\000\000\000\000'
+ev '\001\000\070\000\000\000\000\000'
+sleep 1
+ev '\001\000\036\000\002\000\000\000'
+ev '\001\000\036\000\000\000\000\000'
+sleep 2
+echo "m12 keys: two $(grep -c 'surface: event 6 ' /tmp/k2.out) one $(grep -c 'surface: event 6 ' /tmp/k1.out)"
+kill $c
+wait $c
+echo m12-done
+""")
+
+#   The hand: how far a mouse moves the pointer at a slow pace and at a fast
+#   one (the compositor's acceleration is the kernel desktop's curve), and the
+#   wheel for a window that asked for the wheel alone. The windows write what
+#   they are sent; the script counts it at the end.
+open(stick + "/m7", "w").write(r"""exec > /dev/ttyS0 2>&1
+/compositor &
+c=$!
+sleep 2
+/surface -x 100 -y 100 -w 2300 -h 700 -c 224466 -T hand -p -s 120 > /tmp/h1.out &
+sleep 1
+/surface -x 100 -y 840 -w 600 -h 100 -c 446622 -T wheel -L -s 120 > /tmp/h2.out &
+sleep 1
+echo m7-ready
+sleep 45
+echo m7-reading
+cat /tmp/h1.out
+echo m7-second
+cat /tmp/h2.out
+echo m7-end
+kill $c
+wait $c
+echo m7-done
+""")
+
+#   The pointer: what it wears over a window's edges and corners, that a shake makes
+#   it large and a second later it is its size again, and (m9, in a guest that
+#   has the card's cursor plane, which a screendump does not show) that the plane
+#   is given the shapes and takes them.
+open(stick + "/m8", "w").write(r"""exec > /dev/ttyS0 2>&1
+/compositor &
+c=$!
+sleep 2
+/surface -x 600 -y 300 -w 400 -h 300 -c 336699 -T edge -s 120 > /tmp/e1.out &
+sleep 1
+echo m8-ready
+sleep 50
+kill $c
+wait $c
+echo m8-done
+""")
+open(stick + "/m9", "w").write(r"""exec > /dev/ttyS0 2>&1
+/compositor &
+c=$!
+sleep 2
+/surface -x 600 -y 300 -w 400 -h 300 -c 336699 -T edge -s 40 > /tmp/e2.out &
+sleep 1
+echo m9-ready
+sleep 10
+a=$(grep '^voluntary_ctxt_switches' /proc/$c/status)
+sleep 5
+b=$(grep '^voluntary_ctxt_switches' /proc/$c/status)
+echo "m9 idle: $a -> $b"
+cat /proc/$c/status
+echo "m9 held: $(ls -l /proc/$c/fd | grep -c cpu_dma_latency) $([ -c /dev/cpu_dma_latency ] && echo device || echo missing)"
+kill $c
+wait $c
+echo m9-done
+""")
+
+#   The windows: where a new one goes, the edges and corners they are taken by,
+#   filling the screen and half of it, and moving with Alt held. The windows
+#   (-R) answer the sizes they are asked for with a page of that size and say
+#   what size they are.
+open(stick + "/m10", "w").write(r"""exec > /dev/ttyS0 2>&1
+/compositor &
+c=$!
+sleep 2
+/surface -R -x 300 -y 200 -w 600 -h 300 -c 336699 -T first -s 200 > /tmp/a.out &
+sleep 1
+/surface -R -x 300 -y 200 -w 400 -h 300 -c 996633 -T second -s 200 > /tmp/b.out &
+sleep 1
+echo m10-ready
+sleep 75
+echo m10-sizes
+grep 'surface: size' /tmp/a.out | tr '\n' ' '
+echo
+grep 'surface: size' /tmp/b.out | tr '\n' ' '
+echo
+kill $c
+wait $c
+echo m10-done
+""")
+
+#   Control-Shift-T: a terminal started by the compositor, with the font the machine
+#   names in /root/font (this boot has the kernel's desktop and starts a compositor
+#   by hand, so the stick carries a font from the host).
+font11 = next((path for path in ("/usr/share/fonts/TTF/Hack-Regular.ttf", "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+                                 "/usr/share/fonts/dejavu/DejaVuSansMono.ttf",
+                                 "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+                                 "/usr/share/fonts/noto/NotoSansMono-Regular.ttf") if os.path.exists(path)), None)
+if font11:
+    import shutil
+    shutil.copy(font11, stick + "/font.ttf")
+open(stick + "/m11", "w").write(r"""exec > /dev/ttyS0 2>&1
+echo /mnt/font.ttf > /root/font
+/compositor &
+c=$!
+sleep 2
+echo m11-ready
+sleep 30
+echo "m11 terminals: $(ps | grep -c '[t]erminal')"
+kill $c
+wait $c
+echo m11-done
+""")
+
+open(stick + "/m1", "w").write(r"""exec > /dev/ttyS0 2>&1
+/compositor &
+c=$!
+sleep 2
+/surface -x 40 -y 40 -w 320 -h 200 -c 336699 -p &
+sleep 1
+/surface -x 240 -y 140 -w 320 -h 200 -c 996633 &
+sleep 1
+echo m1-ready
+sleep 10
+kill $c
+wait $c
+echo m1-done
+""")
+
+guest = Guest(desktop(image) + [
+    "-drive", "if=none,id=stick,format=raw,file=fat:ro:" + stick + ",readonly=on",
+    "-device", "usb-storage,drive=stick,removable=on",
+    "-no-reboot", "-display", "none", "-serial", "file:" + work + "/serial",
+    "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel moonwater.cursor_plane=0 " + os.environ.get("CANVAS_APPEND", "")],
+    work + "/qmp", work + "/mon", work)
+time.sleep(25)
+
+def serial():
+    return open(work + "/serial", "rb").read()
+
+def wait_for(marker, seconds):
+    stop = time.time() + seconds
+    while time.time() < stop:
+        if marker in serial():
+            return True
+        time.sleep(0.2)
+    return False
+
+def picture(name):
+    shot(name, 1)
+    width, height, data = load(name)
+    def at(x, y):
+        o = (y * width + x) * 3
+        return "%02x%02x%02x" % (data[o], data[o + 1], data[o + 2])
+    return width, height, at
+
+def windows(width, height, at):
+    # Runs of anything but the desktop across the middle row: the kernel's
+    # log and terminal windows, which nothing of this scenario reaches.
+    runs, start, ground = 0, None, at(4, 4)
+    for x in range(width):
+        lit = at(x, height // 2) != ground
+        if lit and start is None:
+            start = x
+        elif not lit and start is not None:
+            runs += x - start > 40
+            start = None
+    return runs + (start is not None and width - start > 40)
+
+def click(x, y):
+    # The tablet reports 32767 steps across the screen and Canvas, like the
+    # compositor, takes offset * size / span rounded down. A report rounded
+    # up lands the pointer on the pixel asked for; rounded down it lands one
+    # short (100 gives 99), which is the device's quantisation, not the place.
+    send([{"type": "abs", "data": {"axis": "x", "value": -(-x * 32767 // W)}},
+          {"type": "abs", "data": {"axis": "y", "value": -(-y * 32767 // H)}}])
+    time.sleep(0.1)
+    send([{"type": "btn", "data": {"down": True, "button": "left"}}])
+    time.sleep(0.05)
+    send([{"type": "btn", "data": {"down": False, "button": "left"}}])
+    time.sleep(0.5)
+
+width, height, before = picture("m1-before")
+kernel_windows = windows(width, height, before)
+
+type_text("mkdir -p /mnt\n")
+time.sleep(1)
+type_text("mount -r -t vfat /dev/sda1 /mnt\n")
+time.sleep(2)
+type_text("sh /mnt/m1\n")
+ready = wait_for(b"m1-ready", 30)
+time.sleep(0.5)
+
+width, height, two = picture("m1-two")
+out.append(("M1.1 the compositor's desktop is the classic ink and a surface's body its fill",
+            "yes" if two(4, 4) == "1b2733" and two(100, 100) == "336699" and two(1200, 700) == "1b2733"
+            else "(4,4) %s, body %s, (1200,700) %s" % (two(4, 4), two(100, 100), two(1200, 700)), "yes"))
+out.append(("M1.2 the frame is drawn: border 2f3f52, an unfocused titlebar 2b3a4c",
+            "%s %s" % (two(39, 100), two(100, 50)), "2f3f52 2b3a4c"))
+out.append(("the window opened second stacks above the first where they overlap",
+            two(300, 200), "996633"))
+
+click(100, 150)
+width, height, clicked = picture("m1-click")
+out.append(("a click on the first window raises it above the second",
+            clicked(300, 200), "336699"))
+out.append(("M1.2 and focuses it: its titlebar lit 4c6785, the other's 2b3a4c",
+            "%s %s" % (clicked(100, 50), clicked(500, 150)), "4c6785 2b3a4c"))
+said = re.findall(rb"surface: event 3 0 (-?\d+) (-?\d+)\r?\nsurface: event 4 1 272 0", serial())
+out.append(("M1.6 the press reaches the surface as POINTER_BUTTON at buffer pixel (60, 90)",
+            "%s,%s" % (said[-1][0].decode(), said[-1][1].decode()) if said else "no event", "60,90"))
+
+done = wait_for(b"m1-done", 30)
+time.sleep(1)
+width, height, back = picture("m1-back")
+out.append(("M1.12 the compositor's exit leaves the kernel desktop on screen",
+            "yes" if ready and done and two(100, 100) == "336699" and kernel_windows and
+            windows(width, height, back) == kernel_windows and back(100, 100) != "336699"
+            else "kernel windows %d before, %d after; body %s then %s" % (
+                kernel_windows, windows(width, height, back), two(100, 100), back(100, 100)), "yes"))
+handed = re.findall(rb"drawn again, microseconds after the card was let go: (\d+)", serial())
+#   M1.12 records the latency and does not pass on it (canvas spec 05 3.2);
+#   the frame target of 1.4 is what the number is compared against.
+print("m1 hand-back %s us" % (handed[-1].decode() if handed else "unknown"), file=sys.stderr)
+
+type_text("echo m1-typed-")
+chord("shift", "4")
+chord("shift", "4")
+type_text(" ")
+chord("shift", "dot")
+type_text(" /dev/tty")
+chord("shift", "s")
+type_text("0\n")
+out.append(("and the keyboard reaches the terminal again",
+            "yes" if wait_for(b"m1-typed-", 10) else "no", "yes"))
+
+type_text("sh /mnt/m2\n")
+ready2 = wait_for(b"m2-ready", 40)
+time.sleep(0.5)
+width, height, off = picture("m2-off")
+#   200 by 100 with its frame, asked for at (99999, 99999), is put with its
+#   body at (W-202, H-148): the panel's 24 rows are not the window's, so its
+#   border ends where the panel's band begins, and its titlebar is the 20
+#   rows from there down.
+out.append(("M2.1 a window asked for far off the output is put on the work area, its titlebar above the panel",
+            off(W - 100, H - 138), "2b3a4c"))
+#   Not where the first compositor's click went: a tablet that is told the
+#   place it already has reports nothing, and a pointer that starts in the
+#   middle of the output would press there.
+click(120, 160)
+wait_for(b"m2-killed-a", 20)
+time.sleep(1)
+type_text("a")
+done2 = wait_for(b"m2-done", 60)
+text = serial().decode("latin1")
+def said(pattern):
+    found = re.findall(pattern, text)
+    return found[-1] if found else "none"
+keys = re.findall(r"m2 keys: nothing-shown (\d+) visible (\d+)", text)
+out.append(("M2.2 keys go to the topmost window that shows something, not to one that never committed",
+            "%s %s" % (keys[-1][0], "yes" if int(keys[-1][1]) > 0 else "no") if keys else "no end", "0 yes"))
+out.append(("M2.3 a client that floods commits does not starve the creation of another",
+            said(r"m2 flood: second client (\d+)"), "1"))
+out.append(("M2.4 the compositor outlives a client killed mid-flood and serves the next",
+            "%s %s" % (said(r"m2 alive: (\w+)"), said(r"m2 after: new client (\d+)")), "yes 1"))
+
+out.append(("M2.5 a buffer offset written over the page's header does not stop the compositor",
+            "%s %s" % (said(r"m2 offset: alive (\w+)"), said(r"m2 offset: alive \w+ next client (\d+)")), "yes 1"))
+out.append(("M2.6 a second create is answered EBUSY and the surface it came on stays",
+            "%s %s" % (said(r"m2 twice: (\d+)"), said(r"m2 twice: \d+ gone (\d+)")), "1 0"))
+
+#   The panel and its roles. The panel the compositor draws is 24 rows at the
+#   bottom (the guest's scale is 1, which the compositor says in its first
+#   line), the launcher button at its left end and a button for each window
+#   beside it: unit 24, margin 2, so the first button starts at x 54 and each
+#   is 192 wide and 2 apart.
+type_text("sh /mnt/m3\n")
+ready3 = wait_for(b"m3-windows", 60)
+time.sleep(0.5)
+scale3 = [int(v) for v in re.findall(rb"\(scale (\d+)\)", serial())]
+band = 24
+button = lambda i: 54 + i * 194 + 96
+width, height, panel_up = picture("m3-windows")
+out.append(("M2.7 the compositor's own panel: its ink in the band along the bottom, the desktop's above it",
+            "%s %s" % (panel_up(W // 2, H - band // 2), panel_up(W // 2, H - band - 1)), "2f3f52 1b2733"))
+out.append(("M2.8 the launcher button is lit and the windows have a button each, the put-away one outlined",
+            "%s %s %s %s" % (panel_up(8, H - band // 2), panel_up(button(0), H - band // 2),
+                            panel_up(button(1), H - band // 2), panel_up(button(2), H - band + 2)),
+            "4c6785 2b3a4c 2b3a4c 2b3a4c"))
+out.append(("M2.9 a window put away is not on the screen",
+            panel_up(1250, 380), "1b2733"))
+text = serial().decode("latin1")
+out.append(("M2.10 a panel claimed with no grant is refused",
+            said(r"m3 no grant: (\d+)"), "1"))
+
+#   A device plugged in after the compositor started is heard: a mouse added
+#   to the running guest moves the pointer from one window's titlebar to
+#   another's (the tablet put it on the first, and only the new mouse has
+#   relative axes, so only it takes the moves), and a press on the tablet
+#   from there lights the window the pointer is over. A mouse nobody opened
+#   leaves the press on the first window. QEMU takes input-send-event's
+#   device argument for a hot-plugged mouse by dying, so it is not used.
+qcmd({"execute": "device_add", "arguments": {"driver": "usb-mouse", "id": "hot1"}})
+time.sleep(3)
+moveto(450, 210)
+for step in range(8):
+    send([{"type": "rel", "data": {"axis": "x", "value": 50}}])
+    time.sleep(0.1)
+for down in (True, False):
+    send([{"type": "btn", "data": {"down": down, "button": "left"}}])
+    time.sleep(0.1)
+time.sleep(0.4)
+width, height, plugged = picture("m3-plugged")
+out.append(("M2.11 a mouse plugged in after the compositor started presses: the window it pressed on is lit",
+            "%s %s" % (plugged(800, 210), plugged(400, 210)), "4c6785 2b3a4c"))
+click(400, 210)           # alpha's titlebar: it has the keys and is lit
+width, height, lit = picture("m3-focus")
+out.append(("M2.12 the window that was clicked has its button lit, as its titlebar is",
+            "%s %s" % (lit(button(0), H - band // 2), lit(button(1), H - band // 2)), "4c6785 2b3a4c"))
+click(W // 2, H - band // 2)         # the panel, away from every button
+type_text("a")
+width, height, after_panel = picture("m3-panel-click")
+out.append(("M2.13 a click on the panel does not move the keys: the window is still lit",
+            after_panel(400, 210), "4c6785"))
+click(button(1), H - band // 2)      # beta's button
+width, height, raised = picture("m3-button")
+out.append(("M2.14 a window's button brings its window up and gives it the keys",
+            "%s %s" % (raised(800, 210), raised(400, 210)), "4c6785 2b3a4c"))
+click(button(2), H - band // 2)      # gamma's button: put away, and back
+width, height, restored = picture("m3-restore")
+out.append(("M2.15 the button of a window that was put away brings it back",
+            restored(1250, 380), "55aa55"))
+type_text("a")
+
+done3 = wait_for(b"m3-held", 90)
+time.sleep(0.3)
+width, height, held = picture("m3-held")
+out.append(("M2.16 a program given the panel role holds it: its colour in the band, the window buttons gone",
+            "%s %s" % (held(W // 2, H - band // 2), held(button(0), H - band // 2)), "445566 445566"))
+wait_for(b"m3-killed", 40)
+time.sleep(1)
+width, height, fallback = picture("m3-killed")
+out.append(("M2.17 the holder killed, the compositor's panel is back in the band",
+            "%s %s" % (fallback(W // 2, H - band // 2), fallback(button(0), H - band // 2)), "2f3f52 2b3a4c"))
+wait_for(b"m3-swapped", 60)
+time.sleep(0.3)
+width, height, swapped = picture("m3-swapped")
+out.append(("M2.18 a program with the right to replace takes the role when the holder closes",
+            swapped(W // 2, H - band // 2), "00aa00"))
+wait_for(b"m3-hung", 40)
+time.sleep(0.3)
+width, height, hung = picture("m3-hung")
+out.append(("M2.19 a holder that does not close in time loses the role to the replacement",
+            hung(W // 2, H - band // 2), "0000aa"))
+wait_for(b"m3-background", 40)
+time.sleep(0.3)
+width, height, behind = picture("m3-background")
+out.append(("M2.25 a program given the background role fills the output under the windows and the panel",
+            "%s %s %s" % (behind(1500, 600), behind(400, 260), behind(W // 2, H - band // 2)), "112233 336699 2f3f52"))
+wait_for(b"m3-background-late", 40)
+time.sleep(0.3)
+width, height, later = picture("m3-background-late")
+out.append(("M2.25 and still there some seconds on",
+            later(1500, 600), "112233"))
+wait_for(b"m3-bgkilled", 40)
+time.sleep(0.3)
+width, height, bare = picture("m3-bgkilled")
+out.append(("M2.26 the background holder killed, the desktop's own ink is back",
+            "%s %s" % (bare(1500, 600), bare(400, 260)), "1b2733 336699"))
+done4 = wait_for(b"m3-done", 60)
+text = serial().decode("latin1")
+keys3 = re.findall(r"m3 keys: alpha (\d+) beta (\d+)", text)
+out.append(("M2.20 the keys went to the lit window and not to the one the panel's click was beside",
+            "%s %s" % (keys3[-1][0], keys3[-1][1]) if keys3 else "no end", "2 0"))
+out.append(("M2.21 a second claim for a held role is told EBUSY and to close",
+            "%s %s" % (said(r"m3 second claim: busy (\d+)"), said(r"m3 second claim: busy \d+ closed (\d+)")), "1 1"))
+out.append(("M2.22 a panel is told a move or a resize it asked for was refused",
+            "%s %s" % (said(r"m3 locked: move (\d+)"), said(r"m3 locked: move \d+ resize (\d+)")), "1 1"))
+out.append(("M2.23 the holder asked to go is told it was replaced, and the hung one that it lost the role",
+            "%s %s %s" % (said(r"m3 swap: holder asked (\d+)"), said(r"m3 swap: holder asked \d+ new active (\d+)"),
+                          said(r"m3 hung: told (\d+)")), "1 1 1"))
+out.append(("M2.27 a program that shows nothing on its surfaces is given four of them, and a window can still be made after 32 such",
+            "%s %s" % (said(r"m3 slots: each made 4: (\d+)"), said(r"m3 slots: each made 4: \d+ late window (\d+)")), "6 1"))
+out.append(("M2.28 the panel is told what its role gives it: the top layer, held to the bottom and both sides, a zone of its height, locked",
+            said(r"m3 fields: surface: (role \d+ state \d+ layer \d+ anchor \d+ zone \d+ lock \d+)"),
+            "role 2 state 2 layer 3 anchor 14 zone 24 lock 12"))
+out.append(("M2.29 the compositor says what scale it draws at",
+            "%s" % (scale3[-1] if scale3 else "none"), "1"))
+
+#   The keyboard. The window of the m4 script is clicked for the keys and the
+#   keys are typed at it by their US names (QEMU's qcodes are the physical
+#   keys): the key that is the left bracket on a US board is the Swedish å.
+type_text("sh /mnt/m4\n")
+ready4 = wait_for(b"m4-ready", 60)
+time.sleep(0.5)
+click(350, 300)
+key("bracket_left")
+key("semicolon")
+key("apostrophe")
+chord("shift_r", "bracket_left")
+key("less")
+chord("alt_r", "2")
+chord("alt_r", "7")
+key("equal")
+key("e")
+chord("alt_r", "bracket_right")
+key("n")
+key("equal")
+key("spc")
+key("caps_lock")
+key("a")
+key("bracket_left")
+key("caps_lock")
+key("a")
+wait_for(b"m4-se-end", 60)
+wait_for(b"m4-de-ready", 30)
+key("y")
+chord("alt_r", "q")
+key("z")
+done4 = wait_for(b"m4-done", 60)
+text = serial().decode("latin1")
+
+def typed(first, last):
+    # The characters the window was sent, in order, as code:character.
+    found = re.search(first + r"(.*?)" + last, text, re.S)
+    got = []
+    for flags, code, char in re.findall(r"surface: event 6 (\d+) (\d+) (\d+)", found.group(1) if found else ""):
+        if int(flags) & 1 and int(char):
+            got.append("%s:%s" % (code, char))
+    return " ".join(got)
+
+out.append(("K1.1 a Swedish keyboard types å ö ä Å, < and AltGr's @ and {",
+            " ".join(typed("m4-se-dump", "m4-se-end").split()[:7]),
+            "26:229 39:246 40:228 26:197 86:60 3:64 8:123"))
+out.append(("K1.2 a dead acute and e make é, AltGr's dead tilde and n make ñ, and a dead acute and a space an acute",
+            " ".join(typed("m4-se-dump", "m4-se-end").split()[7:10]), "18:233 49:241 57:180"))
+out.append(("K1.3 Caps Lock turns a letter over, å included, and turning it off turns it back",
+            " ".join(typed("m4-se-dump", "m4-se-end").split()[10:]), "30:65 26:197 30:97"))
+out.append(("K1.4 the layout set while the compositor runs is the layout it types with: de has z where y is, and @ on AltGr and q",
+            typed("m4-de-dump", "m4-de-end"), "21:122 16:64 44:121"))
+
+#   Alt-Tab and Alt-F9 on three windows. The titlebar of the window that has the
+#   keys is lit (4c6785) and the others' are not (2b3a4c); a window put away is
+#   not on the screen (the desktop's ink in its place). The windows are at x 100, 500 and 900, y 100.
+type_text("sh /mnt/m6\n")
+ready6 = wait_for(b"m6-ready", 60)
+time.sleep(0.5)
+lit = lambda at, n: "".join("L" if at(100 + 400 * i + 60, 110) == "4c6785" else
+                            "-" if at(100 + 400 * i + 60, 110) == "2b3a4c" else
+                            "." if at(100 + 400 * i + 60, 110) == "1b2733" else "?" for i in range(3))
+click(160, 200)
+width, height, six = picture("m6-one")
+first = lit(six, 0)
+chord("alt", "tab")
+width, height, six = picture("m6-tab")
+second = lit(six, 0)
+chord("alt", "f9")
+width, height, six = picture("m6-f9")
+third = lit(six, 0)
+away = six(1000, 200)
+chord("alt", "tab")
+width, height, six = picture("m6-back")
+fourth = lit(six, 0)
+back = six(1000, 200)
+#   Two steps with Alt held: the keys go down two windows, and Alt letting go raises the one it ended on.
+send([press("alt", True), press("tab", True), press("tab", False), press("tab", True),
+      press("tab", False), press("alt", False)])
+time.sleep(0.5)
+width, height, six = picture("m6-twice")
+fifth = lit(six, 0)
+key("a")
+time.sleep(0.5)
+done6 = wait_for(b"m6-done", 60)
+text = serial().decode("latin1")
+out.append(("M6.1 a click gives the keys to its window: the first window's titlebar lit and the others not",
+            first, "L--"))
+out.append(("M6.2 Alt-Tab goes to the window behind the one on top, which is the third, and Alt letting go raises it",
+            second, "--L"))
+out.append(("M6.3 Alt-F9 puts the window with the keys away and the keys go to the one under it, which is the first",
+            "%s %s" % (third, away), "L-. 1b2733"))
+out.append(("M6.4 Alt-Tab with the top window put away brings it back with the keys",
+            "%s %s" % (fourth, back), "--L 55aa55"))
+out.append(("M6.5 two Alt-Tab steps with Alt held go down two windows: the second has the keys",
+            fifth, "-L-"))
+sent = re.findall(r"m6 keys: one (\d+) two (\d+) three (\d+)", text)
+out.append(("M6.6 Alt and Tab and F9 are the compositor's: of everything typed only the letter, pressed and let go, reached a window: the one with the keys",
+            " ".join(sent[-1]) if sent else "none", "0 2 0"))
+
+#   The FIFO's keys (m12): a press, its repeat, then Alt-Tab with the key still down,
+#   the repeat and the release after the change. The window with the keys at the
+#   press gets the press, the repeat and the release the change sends it (three);
+#   the one Alt-Tab gives the keys to gets none of the key's events.
+type_text("sh /mnt/m12\n")
+wait_for(b"m12-ready", 60)
+wait_for(b"m12-done", 60)
+sent12 = re.findall(r"m12 keys: two (\d+) one (\d+)", serial().decode("latin1"))
+out.append(("M6.7 a key held across an Alt-Tab reaches the window it went to, and the release at the change, and nothing of it reaches the one Alt-Tab gives the keys to",
+            " ".join(sent12[-1]) if sent12 else "none", "3 0"))
+
+#   A mouse, slowly and quickly: the same sixty reports of ten counts, twenty
+#   milliseconds apart and then as fast as they can be sent. The first is
+#   600 pixels (one to one below a count a millisecond) and the second is
+#   farther, never more than two and a half times as far. The pointer is parked
+#   by the tablet first, at another column each time (a tablet that is told the
+#   place it already has reports nothing), and what the window under it says
+#   is where it was.
+qcmd({"execute": "device_add", "arguments": {"driver": "usb-mouse", "id": "hand1"}})
+time.sleep(1)
+type_text("sh /mnt/m7\n")
+ready7 = wait_for(b"m7-ready", 60)
+time.sleep(3)
+def travel(x, y, pause):
+    moveto(x, y)
+    time.sleep(0.3)
+    for step in range(60):
+        send([{"type": "rel", "data": {"axis": "x", "value": 10}}])
+        time.sleep(pause)
+    time.sleep(0.5)
+travel(400, 300, 0.02)
+travel(300, 500, 0)
+send([{"type": "btn", "data": {"down": True, "button": "wheel-up"}},
+      {"type": "btn", "data": {"down": False, "button": "wheel-up"}}])
+time.sleep(0.5)
+moveto(350, 900)
+time.sleep(0.3)
+for step in range(5):
+    send([{"type": "rel", "data": {"axis": "x", "value": 1}}])
+    time.sleep(0.05)
+send([{"type": "btn", "data": {"down": True, "button": "wheel-down"}},
+      {"type": "btn", "data": {"down": False, "button": "wheel-down"}}])
+time.sleep(0.5)
+wait_for(b"m7-done", 90)
+text = serial().decode("latin1")
+moves = [(int(a), int(b)) for a, b in re.findall(r"surface: event 3 0 (-?\d+) (-?\d+)", text.split("m7-reading")[-1])]
+def reach(row):
+    # How far the pointer went along a row of the window, from where the tablet put it.
+    xs = [x for x, y in moves if abs(y - row) <= 2]
+    return max(xs) - min(xs) if xs else -1
+slow7, fast7 = reach(300 - 120), reach(500 - 120)
+out.append(("P1.1 a mouse moved slowly goes one to one: sixty reports of ten counts are 600 pixels",
+            str(slow7), "600"))
+out.append(("P1.2 and quickly goes farther, by no more than the curve's two and a half",
+            "yes" if slow7 > 0 and 600 * 1.4 < fast7 <= 1500 else "slow %s fast %s" % (slow7, fast7), "yes"))
+first7, second7 = text.split("m7-reading")[-1].split("m7-second")[:2] if "m7-second" in text else ("", "")
+wheel7 = re.findall(r"surface: event 5 0 (-?\d+) (\d+)", first7)
+seen7 = re.findall(r"surface: event (\d+) (\d+) (-?\d+) (-?\d+)", first7)
+out.append(("P1.3 one detent of the wheel is 120, once, to the window under the pointer",
+            " ".join("%s:%s" % w for w in wheel7) or "none of %d events, last %s" % (len(seen7), seen7[-3:]), "120:0"))
+#   A window that asked for the wheel alone is sent the wheel and not the pointer's
+#   motion, which is what lets it sleep while the hand moves.
+types7 = re.findall(r"surface: event (\d+) \d+ (-?\d+) (-?\d+)", second7)
+out.append(("P1.4 a window that asked for the wheel alone is sent it (down, -120) and no motion of the pointer",
+            "%s %d" % (" ".join(a + ":" + b for t, a, b in types7 if t == "5"), sum(t in ("1", "3") for t, a, b in types7)),
+            "-120:0 0"))
+
+#   What the pointer wears. The guest's kernel draws no cursor of its own with the
+#   plane off, and the compositor's is drawn into the scanout there, so the screen
+#   holds it: white and black pixels of the cursor's two inks, counted around
+#   where the pointer was put. An arrow is 55 white and 46 black in a box 11 by 18;
+#   a resize shape is 25 white and 40 black (15 by 9 across, 9 by 15 up) or 48 (13
+#   by 13, the corner at the top left of the box black for the one that leans
+#   left and not for the other).
+type_text("sh /mnt/m8\n")
+ready8 = wait_for(b"m8-ready", 60)
+time.sleep(0.5)
+def cursor_at(at, x, y, height, width):
+    white = black = 0
+    xs, ys = [], []
+    for py in range(max(y - 24, 0), min(y + 80, height)):
+        for px in range(max(x - 24, 0), min(x + 64, width)):
+            pixel = at(px, py)
+            white += pixel == "ffffff"
+            if pixel == "000000":
+                black += 1
+                xs.append(px)
+                ys.append(py)
+    if not xs:
+        return "%d %d" % (white, black)
+    return "%d %d %dx%d %s" % (white, black, max(xs) - min(xs) + 1, max(ys) - min(ys) + 1,
+                               "tl" if (min(xs), min(ys)) in zip(xs, ys) else "-")
+def wears(name, x, y):
+    # (the tablet reports an axis only when it changed, and the compositor starts mid-screen)
+    moveto(x, y)
+    time.sleep(0.4)
+    width, height, at = picture(name)
+    return cursor_at(at, x, y, height, width)
+out.append(("C1.1 the pointer over the desktop is the arrow, drawn by the compositor",
+            wears("m8-arrow", 2000, 910), "55 46 11x18 tl"))
+out.append(("C1.2 over a window's right edge it is the arrow across",
+            wears("m8-right", 1000, 460), "25 40 15x9 -"))
+out.append(("C1.3 over its bottom edge it is the arrow up and down",
+            wears("m8-bottom", 800, 621), "25 40 9x15 -"))
+out.append(("C1.4 over its bottom right corner it is the one that leans left",
+            wears("m8-corner", 1000, 621), "25 48 13x13 tl"))
+out.append(("C1.5 over its top right corner it is the one that leans right",
+            wears("m8-other", 1000, 301), "25 48 13x13 -"))
+out.append(("C1.6 and back over the desktop it is the arrow again",
+            wears("m8-back", 1600, 900), "55 46 11x18 tl"))
+for step in range(12):
+    send([{"type": "rel", "data": {"axis": "x", "value": 12 if step % 2 == 0 else -12}}])
+    time.sleep(0.03)
+width, height, at = picture("m8-shaken")
+out.append(("C1.7 shaking the mouse makes the pointer large, three times its size: nine times the pixels",
+            " ".join(cursor_at(at, 1600, 900, height, width).split()[0:2]), "495 414"))
+time.sleep(1.6)
+out.append(("C1.8 and a second after it is its size again",
+            wears("m8-small", 1000, 900), "55 46 11x18 tl"))
+wait_for(b"m8-done", 90)
+
+#   Windows. Two windows were asked to be at the same place: the second is put a
+#   titlebar down and across (20 pixels), and the pixel that tells is one the
+#   second would cover if it were where it asked and does not where it is.
+type_text("sh /mnt/m10\n")
+ready10 = wait_for(b"m10-ready", 60)
+time.sleep(0.5)
+width, height, w0 = picture("m10-cascade")
+out.append(("W1.1 a window put where another is goes a titlebar down and across: the first still shows at its left",
+            "%s %s" % (w0(305, 300), w0(330, 400)), "336699 996633"))
+
+def drag_to(x0, y0, x1, y1, hold=0.3):
+    moveto(x0, y0)
+    time.sleep(0.2)
+    send([{"type": "btn", "data": {"down": True, "button": "left"}}])
+    time.sleep(0.2)
+    moveto((x0 + x1) // 2, (y0 + y1) // 2)
+    moveto(x1, y1)
+    time.sleep(hold)
+    send([{"type": "btn", "data": {"down": False, "button": "left"}}])
+    time.sleep(0.8)
+
+def quick_double(x, y):
+    moveto(x, y)
+    time.sleep(0.3)
+    for press_again in range(2):
+        send([{"type": "btn", "data": {"down": True, "button": "left"}}])
+        time.sleep(0.04)
+        send([{"type": "btn", "data": {"down": False, "button": "left"}}])
+        time.sleep(0.08)
+    time.sleep(1.2)
+
+#   A double click on the second window's titlebar fills the work area; another gives it back.
+quick_double(500, 230)
+width, height, w3 = picture("m10-maximized")
+out.append(("W3.1 a double click on a titlebar fills the work area (the panel's zone left alone)",
+            "%s %s %s" % (w3(2000, 600), w3(2000, 1050), w3(2000, 1058)), "996633 996633 2f3f52"))
+quick_double(1200, 12)
+width, height, w4 = picture("m10-restored")
+out.append(("W3.2 and another puts it back where it was",
+            "%s %s" % (w4(2000, 600), w4(500, 400)), "1b2733 996633"))
+
+#   A window dragged to the top edge fills the work area, and taken from there it is the size it was.
+drag_to(500, 230, 500, 3)
+width, height, w5 = picture("m10-top")
+out.append(("W4.1 a window let go of at the top edge fills the work area",
+            "%s" % w5(2000, 600), "996633"))
+drag_to(1000, 12, 1000, 400)
+width, height, w6 = picture("m10-unsnapped")
+out.append(("W4.2 taken by its titlebar from there it is the size it was, under the hand",
+            "%s %s" % (w6(900, 600), w6(2000, 600)), "996633 1b2733"))
+drag_to(900, 400, 3, 500)
+width, height, w7 = picture("m10-left")
+out.append(("W4.3 let go of at the left edge it fills the left half",
+            "%s %s" % (w7(600, 700), w7(1400, 700)), "996633 1b2733"))
+drag_to(500, 12, 2557, 500)
+width, height, w8 = picture("m10-right")
+out.append(("W4.4 and at the right edge the right half",
+            "%s %s" % (w8(1400, 700), w8(600, 700)), "996633 1b2733"))
+
+#   Dragged by the bottom right corner, the first window grows: it is asked for the
+#   size the hand points at and answers with it. (The corner is where its outline,
+#   two pixels round its contents and the titlebar above them, ends.) Then by the
+#   top left, and the corner that was not held stays where it was.
+drag_to(900, 522, 1100, 700)
+width, height, w1 = picture("m10-grown")
+out.append(("W2.1 a window taken by its bottom right corner and dragged is the size the hand points at",
+            "%s %s %s" % (w1(1000, 600), w1(1000, 720), w1(1150, 600)), "336699 1b2733 1b2733"))
+drag_to(299, 199, 199, 149)
+width, height, w2 = picture("m10-grown2")
+out.append(("W2.2 and by its top left corner grows up and to the left, the corner that was not held where it was",
+            "%s %s %s" % (w2(230, 300), w2(1000, 600), w2(150, 300)), "336699 336699 1b2733"))
+
+#   Alt held, a press anywhere on a window takes hold of it, the body as much as the titlebar.
+send([press("alt", True)])
+time.sleep(0.3)
+drag_to(500, 400, 700, 500)
+send([press("alt", False)])
+time.sleep(0.5)
+width, height, w9 = picture("m10-alt")
+out.append(("W5.1 Alt and a press on a window's body moves the window by the hand",
+            "%s %s" % (w9(1250, 700), w9(250, 300)), "336699 1b2733"))
+wait_for(b"m10-done", 120)
+
+#   Control-Shift-T, twice: a terminal each, which is the compositor starting a program
+#   of its own, and not the one that holds the keys.
+if font11:
+    type_text("sh /mnt/m11\n")
+    ready11 = wait_for(b"m11-ready", 60)
+    time.sleep(0.5)
+    for press_t in range(2):
+        chord("ctrl", "shift", "t")
+        time.sleep(2)
+    wait_for(b"m11-done", 90)
+    text = serial().decode("latin1")
+    terminals = re.findall(r"m11 terminals: (\d+)", text)
+    out.append(("W6.1 Control-Shift-T starts a terminal: pressed twice there are two",
+                terminals[-1] if terminals else "none", "2"))
+
+
+
+
+
+qcmd({"execute": "quit"})
+try:
+    guest.wait(10)
+except Exception:
+    guest.kill()
+
+for kind, count, average, worst in re.findall(r"compositor: (pointer to the plane|pointer to the frame|key to the window): (\d+), on average (\d+) us, worst (\d+) us", serial().decode("latin1")):
+    if int(count):
+        print("m1 compositor latency (drawn pointer), %s: %s events, on average %s us, worst %s us" % (kind, count, average, worst), file=sys.stderr)
+
+#   The cursor plane, in a guest that has it: the compositor says its pointer is on
+#   the plane, hands it a shape for each the pointer wears, and has none refused.
+guest = Guest(desktop(image) + [
+    "-drive", "if=none,id=stick,format=raw,file=fat:ro:" + stick + ",readonly=on",
+    "-device", "usb-storage,drive=stick,removable=on",
+    "-no-reboot", "-display", "none", "-serial", "file:" + work + "/serial-plane",
+    "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel " + os.environ.get("CANVAS_APPEND", "")],
+    work + "/qmp2", work + "/mon2", work)
+time.sleep(25)
+serial_plane = lambda: open(work + "/serial-plane", "rb").read()
+type_text("mkdir -p /mnt\n")
+time.sleep(1)
+type_text("mount -r -t vfat /dev/sda1 /mnt\n")
+time.sleep(2)
+type_text("sh /mnt/m9\n")
+stop = time.time() + 60
+while b"m9-ready" not in serial_plane() and time.time() < stop:
+    time.sleep(0.2)
+time.sleep(0.5)
+for x, y in ((1000, 460), (800, 621), (1000, 621), (1000, 301), (2000, 900)):
+    moveto(x, y)
+    time.sleep(0.3)
+#   A press on the window gives it the keys, and five typed at it say how long the compositor takes with a key.
+moveto(700, 450)
+time.sleep(0.2)
+for down in (True, False):
+    send([{"type": "btn", "data": {"down": down, "button": "left"}}])
+    time.sleep(0.1)
+for letter in "abcde":
+    key(letter)
+    time.sleep(0.1)
+moveto(2000, 900)
+stop = time.time() + 60
+while b"m9-done" not in serial_plane() and time.time() < stop:
+    time.sleep(0.2)
+plane = serial_plane().decode("latin1")
+mode = re.findall(r"pointer (drawn|on the plane|none), listening", plane)
+given = re.findall(r"the plane was given (\d+) shapes and (\d+) moves and refused (\d+) times", plane)
+out.append(("C1.9 on a card with a cursor plane the pointer is on the plane",
+            mode[-1] if mode else "no line", "on the plane"))
+out.append(("C1.10 and the plane is given its shapes (the arrow to begin with and a change of shape five times) and refuses none",
+            "%s %s" % (
+                "yes" if given and int(given[-1][0]) >= 5 else (given[-1] if given else "none"),
+                given[-1][2] if given else "?"), "yes 0"))
+#   Idle: five seconds of nothing to the compositor, a window open and the pointer where it
+#   was left, and it was not woken once (the count of times it blocked and was woken is
+#   the process's voluntary context switches); and what it holds that is its own.
+idle = re.findall(r"m9 idle: voluntary_ctxt_switches:\s+(\d+) -> voluntary_ctxt_switches:\s+(\d+)", plane)
+out.append(("C1.11 a compositor with a window open and nothing happening is woken no time in five seconds",
+            str(int(idle[-1][1]) - int(idle[-1][0])) if idle else "no line", "0"))
+for kind, count, average, worst in re.findall(r"compositor: (pointer to the plane|pointer to the frame|key to the window): (\d+), on average (\d+) us, worst (\d+) us", plane):
+    print("m1 compositor latency, %s: %s events, on average %s us, worst %s us" % (kind, count, average, worst), file=sys.stderr)
+memory = dict((name, int(value)) for name, value in re.findall(r"(VmRSS|RssAnon|RssFile|RssShmem|VmData):\s+(\d+) kB", plane))
+print("m1 compositor memory, kB: %s" % memory, file=sys.stderr)
+held = re.findall(r"m9 held: (\d+) (device|missing)", plane)
+taken = re.findall(r"the processor was held (\d+) times", plane)
+out.append(("C1.12 and what it holds of its own (anonymous memory) is under 1,500 kB",
+            "yes" if memory and memory.get("RssAnon", 99999) < 1500 else str(memory), "yes"))
+out.append(("C1.13 the processor was held out of its idle states while a person was at the machine, and not five seconds after",
+            "%s %s %s" % ("yes" if taken and int(taken[-1]) >= 1 else (taken[-1] if taken else "no line"),
+                          held[-1][0] if held else "?", held[-1][1] if held else "?"),
+            "yes 0 device"))
+
+qcmd({"execute": "quit"})
+try:
+    guest.wait(10)
+except Exception:
+    guest.kill()
+
+for name, got, want in out:
+    if isinstance(got, tuple):
+        got = " ".join(got)
+    if isinstance(want, tuple):
+        want = " ".join(want)
+    print("%s|%s|%s" % (name, got, want))
+PY
+
+if [ ! -s "$work/m1-answers" ]; then
+        same "the compositor boot answered" "yes" "no"
+        sed 's/^/    /' "$work/m1-why" | tail -5
+else
+        while IFS='|' read -r name got want; do
+                same "$name" "$want" "$got"
+        done < "$work/m1-answers"
+        sed -n 's/^m1 hand-back/  canvas       hand-back/p;s/^m1 compositor memory/  canvas       compositor memory/p;s/^m1 compositor latency/  canvas       compositor latency/p' "$work/m1-why"
+fi
+fi
+
+#       No tool is refused memory (stage recover).
+#
+#       Every tool that takes the shell's reserve of address space (the
+#       arena a tool fills as far as its input goes, four gigabytes of it)
+#       used to be refused it by the kernel in a guest of two, then refused
+#       two, with a warning on the serial line each time, in the middle of
+#       whatever else was printing. The reserve is address space and is
+#       mapped as that now. `ps` takes it; the kernel's log is read after.
+if [ -z "${CANVAS_ONLY:-}" ] || [ "${CANVAS_ONLY:-}" = r5 ]; then
+PYTHONPATH=$work python3 - "$image" > "$work/r5-answers" 2>"$work/r5-why" <<'PY'
+import os, re, sys, time
+from qmp_guest import *
+
+image = sys.argv[1]
+work = os.environ["MOONWATER_CANVAS_WORK"] + "/r5"
+os.makedirs(work, exist_ok=True)
+ser = work + "/ser"
+guest = Guest(desktop(image) + [
+    "-chardev", "socket,id=s0,path=" + ser + ",server=on,wait=off", "-serial", "chardev:s0",
+    "-no-reboot", "-display", "none",
+    "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel printk.time=1 moonwater.cursor_plane=0"],
+    work + "/qmp", work + "/mon", work, sockets=(ser,))
+time.sleep(25)
+shell = Shell(ser)
+shell.ready()
+shell.run("ps > /dev/null; ps > /dev/null; ps > /dev/null")
+out = [("R5.1 a tool that takes the shell's reserve is not refused it by the kernel in a guest of 2 GiB",
+        shell.number("dmesg | grep -c __vm_enough_memory"), "0")]
+for name, got, want in out:
+    print("%s|%s|%s" % (name, got, want))
+try:
+    guest.quit()
+    guest.wait(10)
+except Exception:
+    guest.kill()
+PY
+if [ ! -s "$work/r5-answers" ]; then
+        same "the reserve boot answered" "yes" "no"
+        sed 's/^/    /' "$work/r5-why" | tail -5
+else
+        while IFS='|' read -r name got want; do
+                same "$name" "$want" "$got"
+        done < "$work/r5-answers"
+fi
+fi
+
+#       Canvas at boot (stage recover): the image's settings, a bit of which
+#       says Canvas stays off.
+#
+#       The settings are a section of the boot image that the firmware's loader
+#       hands the kernel, so reading one takes a firmware boot. A copy of the
+#       image has the newer slot of its .mwset section written with the bit set
+#       (and its sum, which the kernel checks), and is booted beside the image
+#       as it is. The guest's own serial shell reads what Canvas says.
+if [ -z "${CANVAS_ONLY:-}" ] || [ "${CANVAS_ONLY:-}" = r4 ]; then
+PYTHONPATH=$work python3 - "$image" > "$work/r4-answers" 2>"$work/r4-why" <<'PY'
+import os, re, socket, struct, sys, time, zlib
+from qmp_guest import *
+
+image = sys.argv[1]
+work = os.environ["MOONWATER_CANVAS_WORK"] + "/r4"
+os.makedirs(work, exist_ok=True)
+out = []
+ovmf = next((path for path in ("/usr/share/edk2/x64/OVMF.4m.fd", "/usr/share/OVMF/OVMF_CODE.fd",
+                               "/usr/share/edk2/ovmf/OVMF_CODE.fd") if os.path.exists(path)), "")
+names = ("R4.1 an image whose settings say Canvas stays off boots on the text console: Canvas is off, and says why",
+         "and moonwater canvas on starts it afterwards, with no warning from the kernel",
+         "R4.2 the same image with its settings as built starts Canvas at boot")
+
+def guest_of(name, kernel):
+    directory = work + "/" + name
+    os.makedirs(directory, exist_ok=True)
+    path = directory + "/ser"
+    guest = Guest(["qemu-system-x86_64", "-m", "2G", "-smp", "2"] +
+                  (["-cpu", "host", "-enable-kvm"] if os.access("/dev/kvm", os.R_OK | os.W_OK) else ["-cpu", "Nehalem"]) + [
+        "-kernel", kernel, "-vga", "none", "-device", "ramfb", "-bios", ovmf,
+        "-device", "qemu-xhci", "-device", "usb-tablet", "-device", "usb-kbd",
+        "-chardev", "socket,id=s0,path=" + path + ",server=on,wait=off", "-serial", "chardev:s0",
+        "-no-reboot", "-display", "none",
+        "-append", "console=ttyS0 printk.time=1 moonwater.desktop=kernel"],
+        directory + "/qmp", directory + "/mon", directory, sockets=(path,))
+    time.sleep(35)
+    shell = Shell(path)
+    shell.ready()
+    return guest, shell
+
+def over(guest):
+    try:
+        guest.quit()
+        guest.wait(10)
+    except Exception:
+        guest.kill()
+
+if ovmf:
+    data = bytearray(open(image, "rb").read())
+    pe = struct.unpack_from("<I", data, 0x3c)[0]
+    table = pe + 24 + struct.unpack_from("<H", data, pe + 20)[0]
+    raw = [struct.unpack_from("<I", data, table + 40 * i + 20)[0]
+           for i in range(struct.unpack_from("<H", data, pe + 6)[0])
+           if data[table + 40 * i:table + 40 * i + 8] == b".mwset\0\0"][0]
+    slot = bytearray(16384)
+    struct.pack_into("<QHHIQ", slot, 0, 0x474e54544553574d, 1, 64, 16384, 1)
+    slot[24:40] = bytes(range(16))
+    struct.pack_into("<I", slot, 48, 1)
+    struct.pack_into("<I", slot, 44, zlib.crc32(bytes(slot[:44]) + b"\0\0\0\0" + bytes(slot[48:64])))
+    data[raw:raw + 16384] = slot
+    open(work + "/off.efi", "wb").write(data)
+
+    guest, shell = guest_of("off", work + "/off.efi")
+    state = shell.run("moonwater canvas | head -1")[0]
+    wording = shell.run("moonwater bind init canvas")[0].split("\n")[-1]
+    said = shell.number("dmesg | grep -c 'off at boot, as the image'")
+    shell.run("moonwater canvas on")
+    after = "on" if "Canvas is on" in shell.run("moonwater canvas | head -1")[0] else "off"
+    out.append((names[0], "%s / %s / %s" % ("off" if "Canvas is off" in state else state, wording, said),
+                "off / [Moonwater] init canvas off / 1"))
+    out.append((names[1], "%s %s" % (after, shell.number("dmesg | grep -c 'WARNING:'")), "on 0"))
+    over(guest)
+
+    guest, shell = guest_of("on", image)
+    out.append((names[2], "%s / %s" % ("on" if "Canvas is on" in shell.run("moonwater canvas | head -1")[0] else "off",
+                                       shell.run("moonwater bind init canvas")[0].split("\n")[-1]),
+                "on / [Moonwater] init canvas on"))
+    over(guest)
+else:
+    for name in names:
+        out.append((name, "not run: no OVMF", "yes"))
+
+for name, got, want in out:
+    print("%s|%s|%s" % (name, got, want))
+PY
+if [ ! -s "$work/r4-answers" ]; then
+        same "the firmware boots answered" "yes" "no"
+        sed 's/^/    /' "$work/r4-why" | tail -5
+else
+        while IFS='|' read -r name got want; do
+                same "$name" "$want" "$got"
+        done < "$work/r4-answers"
+fi
+fi
+
+#       The key that always gets out (stage recover).
+#
+#       A compositor that has stopped answering holds the card and every key.
+#       Control-Alt-Shift-Backspace is heard in the kernel's input core, so it
+#       is not the compositor's to swallow: it ends the holder, however it is
+#       stopped, and turns Canvas off, to the text console. The compositor here
+#       is started by hand from the guest's serial shell, and stopped with
+#       SIGSTOP: the recorded pid only.
+if [ -z "${CANVAS_ONLY:-}" ] || [ "${CANVAS_ONLY:-}" = r2 ]; then
+PYTHONPATH=$work python3 - "$image" > "$work/r2-answers" 2>"$work/r2-why" <<'PY'
+import os, re, sys, time
+from qmp_guest import *
+
+image = sys.argv[1]
+work = os.environ["MOONWATER_CANVAS_WORK"] + "/r2"
+os.makedirs(work, exist_ok=True)
+out = []
+ser = work + "/ser"
+
+guest = Guest(desktop(image) + [
+    "-chardev", "socket,id=s0,path=" + ser + ",server=on,wait=off", "-serial", "chardev:s0",
+    "-no-reboot", "-display", "none",
+    "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel printk.time=1 moonwater.cursor_plane=0"],
+    work + "/qmp", work + "/mon", work, sockets=(ser,))
+time.sleep(25)
+shell = Shell(ser)
+shell.ready()
+
+def canvas():
+    text = shell.run("moonwater canvas | head -1", 10)[0]
+    return "off" if "Canvas is off" in text else "on" if "Canvas is on" in text else "?"
+
+def alive(pid):
+    return bool(pid) and "yes" in shell.run("kill -0 %s && echo yes" % pid, 10)[0]
+
+pid = ""
+for round_ in (1, 2):
+    shell.run("moonwater canvas on")
+    until(lambda: canvas() == "on", 10)
+    time.sleep(2)
+    if round_ == 1:
+        #   The compositor holds the card and is stopped.
+        shell.run("/compositor > /dev/null 2>&1 & echo $! > /tmp/r2.pid; sleep 2")
+        pid = shell.number("cat /tmp/r2.pid")
+        held = alive(pid) and "T" in shell.run("kill -STOP %s; sleep 0.3; grep State /proc/%s/status" % (pid, pid))[0]
+    time.sleep(1)
+    chord("ctrl", "alt", "shift", "backspace")
+    state, took = until(lambda: canvas() == "off" and "off", 10)
+    time.sleep(3)
+    log = shell.run("dmesg | tail -30")[0]
+    if round_ == 1:
+        out.append(("R2.1 a stopped compositor does not hold the screen from Control-Alt-Shift-Backspace: Canvas is off, it is gone",
+                    "%s %s %s" % (canvas(), "gone" if not alive(pid) else "still there", "stopped" if held else "not stopped"),
+                    "off gone stopped"))
+        out.append(("and the kernel's console has the screen",
+                    "yes" if "switching to colour frame buffer device" in log else "no", "yes"))
+        print("r2 stopped compositor, Control-Alt-Shift-Backspace to Canvas off: %.2f s" % took, file=sys.stderr)
+    else:
+        out.append(("R2.2 with nobody holding the card the same chord turns Canvas off, and nothing is left running",
+                    "%s %s" % (canvas(), shell.number("ps | grep -c '[c]ompositor'")), "off 0"))
+        print("r2 Control-Alt-Shift-Backspace on the kernel's own desktop to Canvas off: %.2f s" % took, file=sys.stderr)
+
+shell.run("moonwater canvas on")
+until(lambda: canvas() == "on", 10)
+out.append(("and moonwater canvas on brings the desktop back", canvas(), "on"))
+
+for name, got, want in out:
+    print("%s|%s|%s" % (name, got, want))
+try:
+    guest.quit()
+    guest.wait(10)
+except Exception:
+    guest.kill()
+PY
+if [ ! -s "$work/r2-answers" ]; then
+        same "the chord boot answered" "yes" "no"
+        sed 's/^/    /' "$work/r2-why" | tail -5
+else
+        while IFS='|' read -r name got want; do
+                same "$name" "$want" "$got"
+        done < "$work/r2-answers"
+        sed -n 's/^r2 /  canvas       /p' "$work/r2-why"
+fi
+fi
+
+#       The desktop a plain boot starts, and the way back from it (stage
+#       recover).
+#
+#       The image boots with no kernel parameter, so the machine script starts
+#       what it starts by default: the userspace compositor under its
+#       supervisor. The guest is driven over its serial shell, which answers
+#       while the display is the compositor's; the keyboard goes in through
+#       QMP, and the kernel's own timestamps (a /dev/kmsg line written just
+#       before a kill, and the kernel's line when the card is Canvas's again)
+#       give the times. What is said of a stopped compositor is said of the
+#       recorded pid only. The image carries the fonts the machine script finds
+#       (fonts/: IBM Plex Mono for the terminal, Inter for the panel), so the
+#       pixels read include text, on the panel and in the terminal.
+if [ -z "${CANVAS_ONLY:-}" ] || [ "${CANVAS_ONLY:-}" = r1 ]; then
+PYTHONPATH=$work python3 - "$image" > "$work/r1-answers" 2>"$work/r1-why" <<'PY'
+import os, re, sys, time
+from qmp_guest import *
+
+image = sys.argv[1]
+work = os.environ["MOONWATER_CANVAS_WORK"] + "/r1"
+os.makedirs(work, exist_ok=True)
+out = []
+ser = work + "/ser"
+
+guest = Guest(desktop(image) + [
+    "-chardev", "socket,id=s0,path=" + ser + ",server=on,wait=off", "-serial", "chardev:s0",
+    "-no-reboot", "-display", "none",
+    "-append", "console=ttyS0 drm_client_lib.active= printk.time=1 moonwater.cursor_plane=0"],
+    work + "/qmp", work + "/mon", work, sockets=(ser,))
+time.sleep(25)
+shell = Shell(ser)
+shell.ready()
+
+def compositor():
+    return shell.number("cat /run/moonwater/compositor.pid")
+
+def alive(pid):
+    return bool(pid) and "yes" in shell.run("kill -0 %s && echo yes" % pid, 10)[0]
+
+def canvas():
+    text = shell.run("moonwater canvas | head -1", 10)[0]
+    return "off" if "Canvas is off" in text else "on" if "Canvas is on" in text else "?"
+
+def newer(than):
+    pid = compositor()
+    return pid if pid and pid != than and alive(pid) else None
+
+def stamps(text, pattern):
+    return [float(m.group(1)) for m in re.finditer(r"\[\s*(\d+\.\d+)\][^\n]*" + pattern, text, re.M)]
+
+def picture(name):
+    shot(name, 1)
+    width, height, data = load(name)
+    def at(x, y):
+        o = (y * width + x) * 3
+        return "%02x%02x%02x" % (data[o], data[o + 1], data[o + 2])
+    return width, height, at
+
+def said(row):
+    """A row that did not hold says where the guest was: the programs and the log's end."""
+    if out and out[-1][1] != out[-1][2]:
+        print("r1 %s: %s" % (row, shell.run("ps | grep -v kworker | tail -12; dmesg | tail -12", 15)[0].replace("\n", " / ")), file=sys.stderr)
+
+#   A plain boot: the compositor's ground, its own panel in the band along the
+#   bottom, and none of the kernel's windows.
+first = compositor()
+width, height, plain = picture("r1-plain")
+out.append(("R1.1 a plain boot reaches the userspace compositor: its ground, its panel, a process of its own",
+            "%s %s %s" % (plain(4, 4), plain(W // 2, H - 12), "alive" if alive(first) else "gone"),
+            "1b2733 2f3f52 alive"))
+out.append(("and no tool's start was refused memory by the kernel (the shell's reserve is not counted)",
+            shell.number("dmesg | grep -c __vm_enough_memory"), "0"))
+#   The image's fonts start the panel and a terminal with no help: the machine
+#   script finds them under /usr/share/fonts, and says nothing of a missing one.
+#   The terminal loads its font while the guest's two processors do everything else.
+until(lambda: shell.number("ps | grep -c '[t]erminal'", 30) == "1" and shell.number("ps | grep -c '[p]anel'", 30) == "1", 60)
+
+def command_lines(name):
+    return shell.run(r'for p in /proc/[0-9]*; do c=$(tr "\0" " " < $p/cmdline 2>/dev/null); case $c in "/%s "*) echo "$c";; esac; done' % name, 15)[0]
+
+out.append(("R1.1b with no font named, the image's fonts start the panel (Inter) and a terminal (IBM Plex Mono, with its bold), and the log is not missing one",
+            "%s %s %s" % ("panel-inter" if "/panel -f /usr/share/fonts/inter/Inter-Regular.ttf" in command_lines("panel") else "panel-other",
+                          "terminal-plex" if ("/terminal -f /usr/share/fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf -b "
+                                              "/usr/share/fonts/ibm-plex-mono/IBMPlexMono-Bold.ttf") in command_lines("terminal") else "terminal-other",
+                          "none missing" if "desktop: no font" not in shell.run("dmesg | grep 'desktop:'")[0] else "one missing"),
+            "panel-inter terminal-plex none missing"))
+
+#   Text is pixels. The panel's clock is lit in its tray, at the right end of
+#   the band along the bottom, which has nothing else bright in it, and the
+#   terminal's first row has its prompt, which the shell writes once it is up:
+#   the terminal is where its share of the output puts it (the log is behind it).
+def bright(at, x0, y0, x1, y1):
+    n = 0
+    for y in range(y0, y1):
+        for x in range(x0, x1):
+            r, g, b = (int(at(x, y)[i:i + 2], 16) for i in (0, 2, 4))
+            n += r > 0x90 and g > 0x90 and b > 0x90
+    return n
+
+panel_lit = terminal_lit = 0
+body = None
+for _ in range(6):
+    width, height, at = picture("r1-text")
+    panel_lit = bright(at, W - 76, H - 24, W - 2, H)
+    #   Where the terminal is: its share of the output puts its top left at 44 and 14 percent, under its titlebar.
+    body = (width * 44 // 100 + 2, height * 14 // 100 + 24)
+    terminal_lit = bright(at, body[0], body[1], body[0] + 160, body[1] + 24) if body else 0
+    if panel_lit > 20 and terminal_lit > 12:
+        break
+    time.sleep(2)
+print("r1 text pixels: panel %d lit, terminal first row %d lit, terminal at %s" % (panel_lit, terminal_lit, body), file=sys.stderr)
+out.append(("R1.1c a plain boot draws text on the panel: the clock is lit in its tray",
+            "yes" if panel_lit > 20 else "%d lit pixels" % panel_lit, "yes"))
+out.append(("and the terminal on it draws its prompt in the first row of its paper",
+            "yes" if terminal_lit > 12 else "%d lit pixels" % terminal_lit, "yes"))
+def status_of(name):
+    return shell.run(r'for p in /proc/[0-9]*; do c=$(tr "\0" " " < $p/cmdline 2>/dev/null); case $c in "/%s"*) grep -E "^(VmRSS|RssAnon|RssFile|RssShmem):" $p/status; break;; esac; done' % name, 15)[0]
+
+print("r1 memory (kB): " + " | ".join("%s %s" % (name, " ".join(status_of(name).split())) for name in ("compositor", "panel", "terminal")) +
+      " | " + " ".join(shell.run(r'grep -E "^(MemFree|Shmem|Cached):" /proc/meminfo', 10)[0].split()), file=sys.stderr)
+
+#   Killed, the card goes back to Canvas and the supervisor starts it again.
+handback, restart = [], []
+last = first
+for _ in range(2):
+    shell.run("echo r1-mark > /dev/kmsg; kill -9 %s" % last)
+    again, _ = until(lambda: newer(last), 15)
+    time.sleep(1.5)
+    log = shell.run("dmesg")[0]
+    marks = stamps(log, r"r1-mark$")
+    cards = stamps(log, r"the card is Canvas's again")
+    ups = stamps(log, r"the compositor \(pid %s\) is up" % (again or "0"))
+    if marks and cards and cards[-1] >= marks[-1]:
+        handback.append(cards[-1] - marks[-1])
+    if marks and ups:
+        restart.append(ups[-1] - marks[-1])
+    last = again or last
+out.append(("R1.2 a killed compositor is started again, and the card comes back to Canvas first",
+            "%s %s" % ("restarted" if last != first else "not restarted", len(handback)), "restarted 2"))
+print("r1 killed compositor: card back to Canvas %s ms, compositor up again %s ms (printk times from the kill)" % (
+    " ".join("%.0f" % (t * 1000) for t in handback), " ".join("%.0f" % (t * 1000) for t in restart)), file=sys.stderr)
+out.append(("and both inside a second (the first restart is at once, the second after half a second)",
+            "yes" if handback and restart and max(handback) < 1.0 and max(restart) < 2.0 else "%s %s" % (handback, restart),
+            "yes"))
+
+#   A font named in /root/font takes the panel's and the terminal's place, with
+#   no bold, and a restart of the desktop (canvas off and on) brings them back
+#   with it. The image's own bold face is a font that is not the default.
+override = "/usr/share/fonts/ibm-plex-mono/IBMPlexMono-Bold.ttf"
+shell.run("echo %s > /root/font" % override, 20)
+shell.run("moonwater canvas off", 15)
+#   The machine script ends the desktop when it hears of Canvas going off, a
+#   moment after the kernel has; a Canvas turned on before that finds the
+#   compositor still holding the card and stays off, as it does for any program.
+until(lambda: canvas() == "off" and shell.number("ps | grep -c '[c]ompositor'") == "0", 10)
+shell.run("moonwater canvas on", 15)
+until(lambda: newer(""), 15)
+#   The terminal loads its font while the guest's two processors do everything else.
+until(lambda: shell.number("ps | grep -c '[t]erminal'", 30) == "1" and shell.number("ps | grep -c '[p]anel'", 30) == "1", 60)
+kids = "%s %s" % (shell.number("ps | grep -c '[t]erminal'", 30), shell.number("ps | grep -c '[p]anel'", 30))
+out.append(("R1.2b with a font in /root/font the panel and a terminal are started on the compositor, after canvas off and on",
+            kids, "1 1"))
+terminal_line, panel_line = command_lines("terminal"), command_lines("panel")
+out.append(("and both draw with it, the terminal with no bold of its own",
+            "%s %s" % ("terminal-override" if "/terminal -f %s" % override in terminal_line and " -b " not in terminal_line else terminal_line,
+                       "panel-override" if "/panel -f %s" % override in panel_line else panel_line),
+            "terminal-override panel-override"))
+said("R1.2b")
+
+#   Back to the image's own fonts: the same restart without /root/font, and then what a plain boot
+#   with fonts has on its screen.
+shell.run("rm -f /root/font", 20)
+shell.run("moonwater canvas off", 15)
+until(lambda: canvas() == "off" and shell.number("ps | grep -c '[c]ompositor'") == "0", 10)
+shell.run("moonwater canvas on", 15)
+until(lambda: newer(""), 15)
+until(lambda: shell.number("ps | grep -c '[t]erminal'", 30) == "1" and shell.number("ps | grep -c '[p]anel'", 30) == "1", 60)
+
+#   What is on the screen of a boot with the image's fonts: the panel with its text, the kernel log behind
+#   with the boot's messages in it, and the terminal in front with its prompt, each where its share of
+#   the output puts it. Programs are read by what started them: the machine script, not the compositor.
+def pids(name):
+    # A program the desktop ended and nobody has waited for is a zombie with its name still in /proc: not running.
+    listed = shell.run("grep -l '^%s$' /proc/[0-9]*/comm | sed 's#/proc/\\([0-9]*\\)/comm#\\1#'" % name, 20)[0].split()
+    return [pid for pid in listed if shell.run("cut -d' ' -f3 /proc/%s/stat" % pid, 20)[0].strip() != "Z"]
+
+def ppid(pid):
+    return shell.number("cut -d' ' -f4 /proc/%s/stat" % pid, 20) if pid else ""
+
+until(lambda: len(pids("klog")) == 1, 60)
+time.sleep(3)
+
+def light(data, width, x1, y1, x2, y2, floor=0x90):
+    return sum(1 for y in range(y1, y2) for x in range(x1, x2) if data[(y * width + x) * 3] > floor)
+
+log_pids = pids("klog")
+out.append(("R1.2c the kernel log is a program on the compositor, made by the machine script and not by it",
+            "%s %s" % ("yes" if len(log_pids) == 1 else "no",
+                       "script" if log_pids and ppid(log_pids[0]) not in ("", compositor() or "-") else "compositor"), "yes script"))
+shot("r1-desktop", 1)
+width, height, data = load("r1-desktop")
+log_x, log_y = width * 3 // 100, height * 6 // 100
+term_x, term_y = width * 44 // 100, height * 14 // 100
+out.append(("R1.2d the panel carries text: its band holds light pixels where the window buttons and the clock are",
+            "yes" if light(data, width, 0, height - 20, width, height - 4, 0xb0) > 150 else "no", "yes"))
+out.append(("R1.2e the kernel log window shows the boot's messages: light text in the part of it the terminal does not cover",
+            "yes" if light(data, width, log_x + 4, log_y + 30, width * 40 // 100, log_y + 330) > 2000 else "no", "yes"))
+out.append(("R1.2f the terminal shows its prompt, in the share of the output the machine script's start leaves it",
+            "yes" if light(data, width, term_x + 4, term_y + 30, term_x + 300, term_y + 90) > 20 else "no", "yes"))
+out.append(("R1.2g the terminal is in front of the log: its titlebar crosses the log's right part, as the log's body does at its left",
+            "yes" if (data[((term_y + 8) * width + width * 50 // 100) * 3:][:3] !=
+                      data[((term_y + 8) * width + width * 30 // 100) * 3:][:3]) else "no", "yes"))
+out.append(("R1.2h the terminal is as wide as its share of the output: a pixel at 95 percent across is the terminal's body, not the desktop's ground",
+            "yes" if data[((height * 40 // 100) * width + width * 95 // 100) * 3:][:3] != bytes([0x1b, 0x27, 0x33]) else "no", "yes"))
+
+#   A line written to the kernel log is on the screen in a frame, with nothing polled for it.
+shell.run("echo r1-klog-written-here-one > /dev/kmsg; echo r1-klog-written-here-two > /dev/kmsg", 10)
+time.sleep(1)
+shot("r1-desktop2", 1)
+width, height, after = load("r1-desktop2")
+changed = sum(1 for y in range(log_y + 30, log_y + 330) for x in range(log_x + 4, width * 40 // 100)
+              if after[(y * width + x) * 3:][:3] != data[(y * width + x) * 3:][:3])
+out.append(("R1.2i a message written to /dev/kmsg is drawn in the log window", "yes" if changed > 100 else "no (%d)" % changed, "yes"))
+pid = log_pids[0] if log_pids else "0"
+print("r1 klog memory %s" % shell.run("grep -E '^(VmRSS|RssAnon|RssFile|RssShmem):' /proc/%s/status | tr -s '\\t ' ' ' | tr '\\n' ' '" % pid, 20)[0], file=sys.stderr)
+first = shell.number("grep voluntary_ctxt_switches /proc/%s/status | tr -dc '0-9\\n' | head -1" % pid, 20)
+time.sleep(5)
+second = shell.number("grep voluntary_ctxt_switches /proc/%s/status | tr -dc '0-9\\n' | head -1" % pid, 20)
+ended = shell.run("dmesg | awk '/the compositor [(]pid [0-9]+[)] is up/ {bad=\"\"} /(terminal|klog|panel) pid [0-9]+ ended/ {bad=$0} END {print bad}'", 20)[0]
+out.append(("R1.2l nothing the desktop started has ended since the compositor came up, as the machine's log would say", "yes" if not ended else ended[-80:], "yes"))
+out.append(("R1.2j an idle kernel log window wakes no time in five seconds", "yes" if first and first == second else "%s %s" % (first, second), "yes"))
+
+#   The text size. Each terminal logs the size it draws at and the cell it measured, when it starts and when the
+#   size changes. Control-= grows the text one step and Control-- shrinks it, Control-Shift-= grows it too (Shift
+#   is not looked at), Control-0 goes back to the default of 14 pixels, every terminal follows the size the file
+#   /root/terminal/size names, a terminal started later reads it, and a file that names no step is the default.
+def text_size(pid):
+    found = re.findall(r"terminal pid %s text size (\d+) px, cell (\d+) by (\d+) px" % pid, shell.run("dmesg", 20)[0])
+    return found[-1] if found else None
+
+def size_is(pid, want):
+    got = text_size(pid)
+    return got if got and got[0] == want else None
+
+main_terminal = pids("terminal")
+main_terminal = main_terminal[0] if len(main_terminal) == 1 else "0"
+at_start = text_size(main_terminal)
+out.append(("R1.2m the desktop's terminal draws its text at the default size, 14 pixels, one step below 16",
+            at_start[0] if at_start else "none", "14"))
+chord("ctrl", "equal")
+grown, _ = until(lambda: size_is(main_terminal, "16"), 10)
+out.append(("R1.2n Control-= grows the text one step to 16 pixels, and the cell the terminal measures is taller",
+            "%s" % ("taller" if grown and at_start and int(grown[2]) > int(at_start[2]) else "no (%s)" % (grown,)), "taller"))
+chord("ctrl", "minus")
+shrunk, _ = until(lambda: size_is(main_terminal, "14"), 10)
+out.append(("R1.2n Control-- takes it back one step, to the cell it was",
+            "%s" % ("same" if shrunk and at_start and shrunk[1:] == at_start[1:] else "no (%s)" % (shrunk,)), "same"))
+chord("ctrl", "shift", "equal")
+shifted, _ = until(lambda: size_is(main_terminal, "16"), 10)
+chord("ctrl", "0")
+reset, _ = until(lambda: size_is(main_terminal, "14"), 10)
+out.append(("R1.2n Control-Shift-= grows it too, and Control-0 goes back to the default",
+            "%s" % ("yes" if shifted and reset else "no (%s, %s)" % (shifted, reset)), "yes"))
+
+#   A second terminal follows the size the first one set, through the file and with no key of its own; and a
+#   terminal started later reads the file, and a file that names no step falls back to the default.
+before = pids("terminal")
+chord("ctrl", "shift", "t")
+second, _ = until(lambda: [pid for pid in pids("terminal") if pid not in before], 10)
+second = second[0] if second else "0"
+second_start = text_size(second)
+chord("ctrl", "equal")
+both, _ = until(lambda: size_is(main_terminal, "16") and size_is(second, "16"), 10)
+out.append(("R1.2o a second terminal follows Control-= through the size file: it draws at 16 pixels too",
+            "yes" if both and second_start and second_start[0] == "14" else "no (%s, %s)" % (second_start, both), "yes"))
+file_text = shell.run("cat /root/terminal/size", 10)[0].strip()
+out.append(("and the file names the step, 16", file_text, "16"))
+
+chord("ctrl", "shift", "t")
+later, _ = until(lambda: [pid for pid in pids("terminal") if pid not in before and pid != second], 10)
+later = later[0] if later else "0"
+later_start = text_size(later)
+out.append(("R1.2p a terminal started after the change reads the file: it starts at 16 pixels",
+            later_start[0] if later_start else "none", "16"))
+
+shell.run("echo nonsense > /root/terminal/size", 10)
+fell, _ = until(lambda: size_is(main_terminal, "14") and size_is(second, "14") and size_is(later, "14"), 10)
+out.append(("R1.2q a file that names no step is the default: every terminal on the desktop draws at 14 pixels",
+            "yes" if fell else "no (%s, %s, %s)" % (text_size(main_terminal), text_size(second), text_size(later)), "yes"))
+for pid in (second, later):
+    shell.run("kill -9 %s" % pid, 10)
+shell.run("rm -f /root/terminal/size", 10)
+until(lambda: len(pids("terminal")) == 1, 10)
+
+#   Control-Shift-T asks the machine for a terminal and the machine script starts it: one more, whose
+#   parent is not the compositor, that stays up and answers.
+before = pids("terminal")
+chord("ctrl", "shift", "t")
+more, _ = until(lambda: len(pids("terminal")) == len(before) + 1, 20)
+time.sleep(3)
+now = pids("terminal")
+added = [pid for pid in now if pid not in before]
+out.append(("R1.2k Control-Shift-T is a request the machine script answers: one more terminal, not the compositor's child, still there after three seconds",
+            "%s %s" % ("one more" if more and len(now) == len(before) + 1 else "no (%d to %d)" % (len(before), len(now)),
+                       "script" if added and ppid(added[0]) not in ("", compositor() or "-") else "compositor"), "one more script"))
+
+
+#   A compositor that has stopped answering: Control-Alt-Backspace ends it and
+#   a new one is started, with the keyboard heard by the kernel alone.
+stopped = compositor()
+held = alive(stopped) and "T" in shell.run("kill -STOP %s; sleep 0.3; grep State /proc/%s/status" % (stopped, stopped))[0]
+time.sleep(1)
+chord("ctrl", "alt", "backspace")
+again, took = until(lambda: newer(stopped), 15)
+out.append(("R1.3 a stopped compositor is ended by Control-Alt-Backspace and the desktop is started again",
+            "restarted" if held and again and not alive(stopped) else "no: stopped %s, new %s" % (held, again), "restarted"))
+print("r1 stopped compositor, Control-Alt-Backspace to a new compositor: %.2f s (after the keys)" % took, file=sys.stderr)
+said("R1.3")
+
+#   And Control-Alt-Shift-Backspace turns Canvas off, to the text console, and
+#   the supervisor goes with it.
+stopped = again or stopped
+held = alive(stopped) and "T" in shell.run("kill -STOP %s; sleep 0.3; grep State /proc/%s/status" % (stopped, stopped))[0]
+time.sleep(1)
+chord("ctrl", "alt", "shift", "backspace")
+state, took = until(lambda: canvas() == "off" and "off", 10)
+print("r1 stopped compositor, Control-Alt-Shift-Backspace to Canvas off: %.2f s" % took, file=sys.stderr)
+time.sleep(4)
+log = shell.run("dmesg | tail -40")[0]
+out.append(("R1.4 a stopped compositor with a supervisor does not keep Canvas on either: it is off, and the compositor gone",
+            "%s %s %s" % (canvas(), "gone" if not alive(stopped) else "still there", "stopped" if held else "not stopped"),
+            "off gone stopped"))
+out.append(("and nothing starts the compositor again while Canvas is off",
+            "yes" if not compositor() and shell.number("ps | grep -c '[c]ompositor'") == "0" else "no", "yes"))
+shell.run("moonwater canvas on")
+back, took = until(lambda: newer(stopped), 15)
+out.append(("R1.5 moonwater canvas on starts the desktop again",
+            "yes" if back and canvas() == "on" else "no", "yes"))
+
+#   Four deaths in a row and the supervisor stops: the kernel's desktop has the
+#   card, and a terminal of its own, which the keyboard reaches.
+for _ in range(6):
+    pid = compositor()
+    if not (pid and alive(pid)):
+        break
+    shell.run("kill -9 %s" % pid)
+    until(lambda: newer(pid), 6)
+time.sleep(3)
+windows = shell.run("moonwater canvas | head -1")[0]
+out.append(("R1.6 four deaths in a row end the supervisor: no compositor, and the kernel desktop has a terminal beside its log",
+            "%s %s" % ("none" if shell.number("ps | grep -c '[c]ompositor'") == "0" else "running",
+                       "1 window" if "1 window" in windows else windows[-30:]), "none 1 window"))
+type_text("echo r1-typed-")
+chord("shift", "4")
+chord("shift", "4")
+type_text(" ")
+chord("shift", "dot")
+type_text(" /dev/tty")
+chord("shift", "s")
+type_text("0\n")
+until(lambda: shell.run("echo", 2) and re.search(rb"r1-typed-\d+", shell.heard), 10)
+out.append(("and the kernel's terminal answers the keyboard",
+            "yes" if re.search(rb"r1-typed-\d+", shell.heard) else "no", "yes"))
+
+#   Control-Shift-T on the kernel's own desktop is the same request to the machine script, which answers
+#   it with the kernel's terminal where there is no compositor: one more window.
+def windows():
+    found = re.search(r"(\d+) windows?", shell.run("moonwater canvas | head -1", 10)[0])
+    return int(found.group(1)) if found else -1
+
+had = windows()
+chord("ctrl", "shift", "t")
+more, _ = until(lambda: windows() == had + 1, 10)
+out.append(("R1.6b Control-Shift-T on the kernel's desktop is answered by the machine script with a terminal of its own: one more window",
+            "yes" if more else "no (%d to %d)" % (had, windows()), "yes"))
+
+#   No font to draw with: the engine has no face of its own, so the desktop is not started on a screen with
+#   nothing on it. The kernel's desktop has the screen, with its log and a terminal, and the log of the
+#   machine names the file that is missing. The image's own fonts are hidden under a file system with none.
+shell.run("moonwater canvas off", 15)
+until(lambda: canvas() == "off" and shell.number("ps | grep -c '[c]ompositor'") == "0", 10)
+shell.run("mkdir -p /usr/share/fonts; mount -t tmpfs none /usr/share/fonts; echo /nonexistent/font.ttf > /root/font", 20)
+shell.run("moonwater canvas on", 15)
+time.sleep(4)
+said_no_font = shell.run("dmesg | grep 'desktop: no font'")[0]
+out.append(("R1.7 with no font to draw with the machine script starts no compositor, and the log of the machine names the file that is missing",
+            "%s %s" % ("none" if shell.number("ps | grep -c '[c]ompositor'") == "0" else "running",
+                       "named" if "/nonexistent/font.ttf" in said_no_font else "not named"), "none named"))
+out.append(("and Canvas is on with the kernel's desktop, which has a terminal at the keyboard",
+            "%s %s" % ("on" if canvas() == "on" else "off", "terminal" if windows() >= 1 else "no window"), "on terminal"))
+type_text("echo r1-nofont-")
+chord("shift", "4")
+chord("shift", "4")
+type_text(" ")
+chord("shift", "dot")
+type_text(" /dev/tty")
+chord("shift", "s")
+type_text("0\n")
+until(lambda: shell.run("echo", 2) and re.search(rb"r1-nofont-\d+", shell.heard), 10)
+out.append(("and that terminal answers the keyboard", "yes" if re.search(rb"r1-nofont-\d+", shell.heard) else "no", "yes"))
+
+for name, got, want in out:
+    print("%s|%s|%s" % (name, got, want))
+try:
+    guest.quit()
+    guest.wait(10)
+except Exception:
+    guest.kill()
+PY
+if [ ! -s "$work/r1-answers" ]; then
+        same "the plain boot answered" "yes" "no"
+        sed 's/^/    /' "$work/r1-why" | tail -5
+else
+        while IFS='|' read -r name got want; do
+                same "$name" "$want" "$got"
+        done < "$work/r1-answers"
+        sed -n 's/^r1 /  canvas       /p' "$work/r1-why"
+fi
+fi
+
+#       The terminal on the compositor in userspace (canvas milestone M5).
+#
+#       /terminal is a program that makes its own pixels: it runs a shell on
+#       a pty, keeps the cells in its own memory and draws them into a surface
+#       with the text engine. A script on a stick starts the compositor and
+#       one terminal on it, with a font from the host (the repository carries
+#       none), and the rest is read the way a person would: keys and the
+#       pointer through the guest's devices, the screen from a screendump,
+#       and what the shell is told through the serial line, which the typed
+#       line never reaches.
+#
+#       Not run without a monospace font on the host: the terminal refuses to
+#       start without one and there is nothing to read.
+m5_font=
+m5_bold=
+for candidate in /usr/share/fonts/TTF/Hack-Regular.ttf /usr/share/fonts/TTF/DejaVuSansMono.ttf \
+        /usr/share/fonts/dejavu/DejaVuSansMono.ttf /usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf \
+        /usr/share/fonts/noto/NotoSansMono-Regular.ttf; do
+        if [ -f "$candidate" ]; then
+                m5_font=$candidate
+                m5_bold=$(printf '%s' "$candidate" | sed 's/Regular/Bold/;s/Mono\.ttf/Mono-Bold.ttf/')
+                break
+        fi
+done
+#       btop, if the host has it, goes on the stick with the loader and the
+#       libraries it needs, and is started through the loader: nothing of
+#       what it is linked to is in the image.
+m5_btop=
+if [ -x /usr/bin/btop ] && [ -f /usr/lib/libstdc++.so.6 ] && [ -f /usr/lib/libgcc_s.so.1 ] &&
+   [ -f /usr/lib/libm.so.6 ] && [ -f /usr/lib/libc.so.6 ] && [ -f /usr/lib64/ld-linux-x86-64.so.2 ]; then
+        m5_btop=1
+fi
+if [ -n "${CANVAS_ONLY:-}" ] && [ "$CANVAS_ONLY" != m5 ]; then
+        :
+elif [ -z "$m5_font" ]; then
+        note "the terminal on the compositor: NOT RUN, no monospace font in the usual places"
+else
+[ -f "$m5_bold" ] || m5_bold=$m5_font
+PYTHONPATH=$work python3 - "$image" "$m5_font" "$m5_bold" "$m5_btop" > "$work/m5-answers" 2>"$work/m5-why" <<'PY'
+import os, re, shutil, sys, time
+from qmp_guest import *
+
+image, font, bold, btop = sys.argv[1:5]
+work = os.environ["MOONWATER_CANVAS_WORK"] + "/m5"
+stick = work + "/stick"
+os.makedirs(stick, exist_ok=True)
+shutil.copy(font, stick + "/font.ttf")
+shutil.copy(bold, stick + "/bold.ttf")
+if btop:
+    os.makedirs(stick + "/lib", exist_ok=True)
+    shutil.copy("/usr/bin/btop", stick + "/btop")
+    for name in ("libstdc++.so.6", "libgcc_s.so.1", "libm.so.6", "libc.so.6"):
+        shutil.copy("/usr/lib/" + name, stick + "/lib/" + name)
+    shutil.copy("/usr/lib64/ld-linux-x86-64.so.2", stick + "/lib/ld.so")
+out = []
+
+#   The compositor, one terminal, and a count of the terminal's wakeups over
+#   five idle seconds, counted from two seconds after it was up -- it wakes
+#   once, a second after the last thing it did, to give back the buffer it
+#   is not showing -- a terminal with nothing to do is asleep. The script
+#   ends the compositor itself, after the time the rows below take, because
+#   no key typed while the compositor has the card reaches anything else.
+open(stick + "/m5", "w").write(r"""exec > /dev/ttyS0 2>&1
+/compositor &
+c=$!
+sleep 2
+/terminal -f /mnt/font.ttf -b /mnt/bold.ttf -s 16 -g 80x24 &
+t=$!
+sleep 3
+echo m5-ready
+sleep 2
+a=$(sed -n 's/^voluntary_ctxt_switches:[^0-9]*//p' /proc/$t/status)
+sleep 5
+b=$(sed -n 's/^voluntary_ctxt_switches:[^0-9]*//p' /proc/$t/status)
+echo "m5 idle wakeups: $((b - a))"
+echo "m5 memory: $(grep -E '^(VmSize|VmRSS|RssAnon|RssFile|RssShmem)' /proc/$t/status | tr -s ' \t\n' ' ')"
+echo m5-idle-done
+sleep 150
+kill $c
+wait $c
+echo m5-done
+""")
+
+guest = Guest(desktop(image) + [
+    "-drive", "if=none,id=stick,format=raw,file=fat:ro:" + stick + ",readonly=on",
+    "-device", "usb-storage,drive=stick,removable=on",
+    "-no-reboot", "-display", "none", "-serial", "file:" + work + "/serial",
+    "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel moonwater.cursor_plane=0 " + os.environ.get("CANVAS_APPEND", "")],
+    work + "/qmp", work + "/mon", work)
+time.sleep(25)
+
+def serial():
+    return open(work + "/serial", "rb").read()
+
+def wait_for(marker, seconds):
+    stop = time.time() + seconds
+    while time.time() < stop:
+        if marker in serial():
+            return True
+        time.sleep(0.2)
+    return False
+
+def picture(name):
+    shot(name, 1)
+    width, height, data = load(name)
+    def at(x, y):
+        o = (y * width + x) * 3
+        return data[o], data[o + 1], data[o + 2]
+    return width, height, at
+
+DESKTOP = (0x1b, 0x27, 0x33)
+
+def window(width, height, at):
+    """The terminal's body, as (left, top, right, bottom) of its black: the
+    desktop around it is 1b2733 and the body is black where nothing is drawn."""
+    y = height // 2
+    left = next((x for x in range(width) if at(x, y) != DESKTOP), None)
+    right = next((x for x in range(width - 1, -1, -1) if at(x, y) != DESKTOP), None)
+    if left is None:
+        return None
+    x = (left + right) // 2
+    top = next((v for v in range(height) if at(x, v) == (0, 0, 0)), None)
+    bottom = next((v for v in range(height - 1, -1, -1) if at(x, v) == (0, 0, 0)), None)
+    return left, top, right, bottom
+
+def lit(at, x0, y0, x1, y1):
+    n = 0
+    for y in range(y0, y1):
+        for x in range(x0, x1):
+            r, g, b = at(x, y)
+            n += r + g + b > 300
+    return n
+
+def click(x, y):
+    send([{"type": "abs", "data": {"axis": "x", "value": -(-x * 32767 // W)}},
+          {"type": "abs", "data": {"axis": "y", "value": -(-y * 32767 // H)}}])
+    time.sleep(0.1)
+    send([{"type": "btn", "data": {"down": True, "button": "left"}}])
+    time.sleep(0.05)
+    send([{"type": "btn", "data": {"down": False, "button": "left"}}])
+    time.sleep(0.5)
+
+def drag(x0, y0, x1, y1):
+    moveto(x0, y0)
+    send([{"type": "btn", "data": {"down": True, "button": "left"}}])
+    time.sleep(0.1)
+    for i in range(1, 7):
+        moveto(x0 + (x1 - x0) * i // 6, y0 + (y1 - y0) * i // 6)
+        time.sleep(0.15)
+    send([{"type": "btn", "data": {"down": False, "button": "left"}}])
+    time.sleep(1)
+
+def type_shell(line):
+    shifted = {'"': "apostrophe", "$": "4", ">": "dot", "?": "slash", "|": "backslash"}
+    plain = {" ": "spc", ".": "dot", "/": "slash", "-": "minus", ";": "semicolon",
+             "\n": "ret", "'": "apostrophe", "=": "equal"}
+    for character in line:
+        if character in shifted:
+            chord("shift", shifted[character])
+        elif character.isupper():
+            chord("shift", character.lower())
+        else:
+            key(plain.get(character, character))
+
+def sizes():
+    return re.findall(rb"(?<![0-9])(\d+) (\d+)\r?\n", serial()[serial().rfind(b"m5-idle-done"):])
+
+type_text("mkdir -p /mnt\n")
+time.sleep(1)
+type_text("mount -r -t vfat /dev/sda1 /mnt\n")
+time.sleep(2)
+type_text("sh /mnt/m5\n")
+ready = wait_for(b"m5-idle-done", 60)
+time.sleep(0.5)
+idle = re.findall(rb"m5 idle wakeups: (-?\d+)", serial())
+out.append(("M5 idle: a terminal with nothing to do does not wake, in five seconds, after the second it takes to give back its spare buffer",
+            "0" if idle and int(idle[-1]) == 0 else (idle[-1].decode() if idle else "no answer"), "0"))
+
+mem = re.findall(rb"m5 memory: ([^\r\n]*)", serial())
+print("m5 memory: " + (mem[-1].decode() if mem else "not read"), file=sys.stderr)
+
+w, h, at = picture("m5-first")
+box = window(w, h, at)
+if not box or box[1] is None:
+    out.append(("M5 the terminal is on the screen", "no window found", "yes"))
+    box = (w // 2 - 300, h // 2 - 200, w // 2 + 300, h // 2 + 200)
+left, top, right, bottom = box
+first = lit(at, left, top, left + 120, top + 16)
+out.append(("M5.3 the terminal shows text: the prompt is drawn in its first row",
+            "yes" if first > 12 else "%d lit pixels" % first, "yes"))
+out.append(("and its paper is black below it",
+            "yes" if at(left + 20, top + 120) == (0, 0, 0) and at(right - 40, bottom - 10) == (0, 0, 0) else "no", "yes"))
+
+# Keys go to the surface with focus, which a click gives.
+click((left + right) // 2, (top + bottom) // 2)
+before = lit(at, left, top, left + 400, top + 16)
+type_text("echo m5-typed")
+# A slow guest is given a few looks: what is asked is that it gets there, and it is the
+# frames of the compositor that say how soon.
+for _ in range(4):
+    w, h, at = picture("m5-typed")
+    after = lit(at, left, top, left + 400, top + 16)
+    if after > before + 40:
+        break
+out.append(("M5.3 a typed key's echo is on the screen",
+            "yes" if after > before + 40 else "%d then %d lit pixels" % (before, after), "yes"))
+type_shell("\n")
+time.sleep(1)
+
+# The size the shell is told, and the order it is told in.
+type_shell("stty size > /dev/ttyS0\n")
+time.sleep(1.5)
+start = sizes()
+out.append(("M5 the shell is told 24 rows by 80 columns",
+            "%s %s" % (start[-1][0].decode(), start[-1][1].decode()) if start else "no answer", "24 80"))
+
+type_shell("sh -c 'trap \"stty size > /dev/ttyS0\" WINCH; while true; do sleep 1; done'\n")
+time.sleep(1.5)
+w, h, at = picture("m5-before-resize")
+box = window(w, h, at) or box
+left, top, right, bottom = box
+count = len(sizes())
+drag(right - 2, (top + bottom) // 2, right - 202, (top + bottom) // 2)
+time.sleep(1)
+w, h, at = picture("m5-narrow")
+narrow = window(w, h, at)
+told = sizes()[count:]
+out.append(("M5.6 shrinking from the right edge: the window is narrower and its rows are the same",
+            "yes" if narrow and narrow[2] < right - 120 and abs(narrow[3] - bottom) <= 2 else str(narrow), "yes"))
+out.append(("and the shell is told the new size before SIGWINCH reaches it: fewer columns, 24 rows",
+            "%s %s" % (told[-1][0].decode(), told[-1][1].decode()) if told and int(told[-1][1]) < 80 and told[-1][0] == b"24"
+            else (" ".join("%s/%s" % (a.decode(), b.decode()) for a, b in told) or "no answer"), "24 60"
+            if told and int(told[-1][1]) < 80 and told[-1][0] == b"24" else "24 fewer than 80"))
+left, top, right, bottom = narrow or box
+
+count = len(sizes())
+drag((left + right) // 2, bottom + 1, (left + right) // 2, bottom + 151)
+time.sleep(1)
+w, h, at = picture("m5-tall")
+tall = window(w, h, at)
+told = sizes()[count:]
+out.append(("M5.6 growing from the bottom edge: the window is taller and the shell has more rows",
+            "yes" if tall and tall[3] > bottom + 100 and told and int(told[-1][0]) > 24 else
+            "%s %s" % (tall, told[-1] if told else "no answer"), "yes"))
+if tall:
+    left, top, right, bottom = tall
+
+# Control-C reaches the foreground job, through the pty's line discipline.
+# The loop that reports its size is still the foreground job.
+chord("ctrl", "c")
+time.sleep(1)
+type_shell('sh -c "sleep 20; echo stringran-on > /dev/ttyS0"\n')
+time.sleep(2)
+chord("ctrl", "c")
+time.sleep(1)
+type_shell("echo interrupted-$? > /dev/ttyS0\n")
+text = b""
+for _ in range(40):
+    text = serial()
+    if re.search(rb"interrupted-\d+", text):
+        break
+    time.sleep(0.5)
+stopped = re.findall(rb"interrupted-(\d+)", text)
+out.append(("M5 Control-C stops the job running in the terminal",
+            stopped[-1].decode() if stopped else "no answer", "130"))
+out.append(("and the rest of its string never runs", str(text.count(b"stringran-on")), "0"))
+
+# The scrollback: the wheel moves the view and the bar says where it is.
+type_shell("seq 1 300\n")
+time.sleep(1.5)
+w, h, at = picture("m5-seq")
+for _ in range(4):
+    send([{"type": "btn", "data": {"down": True, "button": "wheel-up"}},
+          {"type": "btn", "data": {"down": False, "button": "wheel-up"}}])
+    time.sleep(0.2)
+time.sleep(0.5)
+w, h, again = picture("m5-wheel")
+moved = sum(1 for y in range(top, bottom, 3) for x in range(left, left + 60, 2) if at(x, y) != again(x, y))
+out.append(("M5 the wheel scrolls back through what was said",
+            "yes" if moved > 150 else "%d pixels differ" % moved, "yes"))
+bar = sum(1 for y in range(top, bottom) if again(right - 3, y) == (0x4c, 0x67, 0x85))
+out.append(("and the bar's thumb is in the gutter",
+            "yes" if bar > 8 else "%d thumb pixels" % bar, "yes"))
+
+# And the bar is something to take hold of: the thumb dragged to the top is the oldest of it.
+thumb = [y for y in range(top, bottom) if again(right - 8, y) == (0x4c, 0x67, 0x85)]
+if thumb:
+    # Eight in: the six pixels at the edge of a frame are the edge's, to resize by.
+    drag(right - 8, (thumb[0] + thumb[-1]) // 2, right - 8, top + 2)
+    time.sleep(0.5)
+w, h, dragged = picture("m5-bar")
+moved_to = [y for y in range(top, bottom) if dragged(right - 8, y) == (0x4c, 0x67, 0x85)]
+out.append(("M5 a drag on the bar's thumb moves the view to where the thumb is",
+            "yes" if thumb and moved_to and moved_to[0] <= top + 12 and
+            sum(1 for y in range(top, bottom, 3) for x in range(left, left + 60, 2) if again(x, y) != dragged(x, y)) > 150
+            else "thumb %s then %s" % (thumb[:1], moved_to[:1]), "yes"))
+
+# btop, the redraw that fills a window as large as it is made: at 60 columns it says the
+# terminal is too small, and at once on being made wider it is every panel of it.
+if btop:
+    w, h, at = picture("m5-btop-small")
+    box = window(w, h, at) or (left, top, right, bottom)
+    left, top, right, bottom = box
+    small = lit(at, left, top, right, bottom)
+    type_shell("/mnt/lib/ld.so --library-path /mnt/lib /mnt/btop --force-utf\n")
+    time.sleep(5)
+    w, h, at = picture("m5-btop-narrow")
+    narrow = lit(at, left, top, right, bottom)
+    drag(right - 2, (top + bottom) // 2, right + 398, (top + bottom) // 2)
+    time.sleep(3)
+    w, h, at = picture("m5-btop-wide")
+    wide = window(w, h, at)
+    full = lit(at, wide[0], wide[1], wide[2], wide[3]) if wide else 0
+    strip = lit(at, wide[2] - 120, wide[1], wide[2] - 14, wide[3]) if wide else 0
+    out.append(("M5.6 btop redraws at the new size at once: wider by the drag, every panel of it drawn",
+                "yes" if wide and wide[2] > right + 250 and full > 6 * narrow and strip > 150
+                else "%s lit pixels at %s, %d after, %d in the new strip" % (narrow, (left, right), full, strip), "yes"))
+    type_text("q")
+    time.sleep(1)
+
+done = wait_for(b"m5-done", 170)
+out.append(("M5 the compositor ends and the kernel desktop is back", "yes" if done else "no", "yes"))
+
+try:
+    guest.quit()
+    guest.wait(10)
+except Exception:
+    guest.kill()
+
+for name, got, want in out:
+    print("%s|%s|%s" % (name, got, want))
+PY
+
+if [ ! -s "$work/m5-answers" ]; then
+        same "the terminal boot answered" "yes" "no"
+        sed 's/^/    /' "$work/m5-why" | tail -5
+else
+        while IFS='|' read -r name got want; do
+                same "$name" "$want" "$got"
+        done < "$work/m5-answers"
+        sed -n 's/^m5 memory:/  canvas       terminal memory:/p' "$work/m5-why"
+fi
+fi
 
 counted
 )
@@ -18293,7 +20790,7 @@ guest = Guest(desktop(image) + [
     "-chardev", "socket,id=s0,path=" + work + "/ser,server=on,wait=off",
     "-serial", "chardev:s0",
     "-no-reboot", "-display", "none",
-    "-append", "console=ttyS0 drm_client_lib.active= moonwater.cursor_plane=0"],
+    "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel moonwater.cursor_plane=0"],
     work + "/qmp", work + "/mon", work, sockets=(work + "/ser",))
 
 shell = socket.socket(socket.AF_UNIX)
@@ -18455,7 +20952,7 @@ guest = Guest(machine + [
     "-chardev", "socket,id=s0,path=" + work + "/ser,server=on,wait=off",
     "-serial", "chardev:s0",
     "-no-reboot", "-display", "none",
-    "-append", "console=ttyS0 drm_client_lib.active= moonwater.cursor_plane=0"],
+    "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel moonwater.cursor_plane=0"],
     work + "/qmp", work + "/mon", work, sockets=(work + "/ser",))
 
 shell = socket.socket(socket.AF_UNIX)
@@ -18604,7 +21101,7 @@ export MOONWATER_SLEEP_WORK
 qmp_guest_module "$work"
 
 PYTHONPATH=$work python3 - "$image" > "$work/answers" 2>"$work/why" <<'PY'
-import os, socket, sys, time
+import os, re, socket, sys, time
 from qmp_guest import *
 
 image = sys.argv[1]
@@ -18624,13 +21121,16 @@ def drawn(name):
     return colours >= 5 and share > 0.05
 
 for label, extra in (("plain", ""), ("dark", "moonwater.pm_dark=5"), ("undone", "moonwater.pm_dark=3")):
+    # SLEEP_ONLY=compositor runs the last guest alone, for a parent and a fix compared in one sitting.
+    if os.environ.get("SLEEP_ONLY") and os.environ["SLEEP_ONLY"] != label:
+        continue
     work = base + "/" + label
     os.makedirs(work, exist_ok=True)
     console = work + "/console"
     guest = Guest(["qemu-system-x86_64", "-m", "2G", "-smp", "2", "-cpu", "host", "-enable-kvm",
         "-kernel", image, "-vga", "std", "-no-reboot", "-display", "none", "-nic", "user,model=e1000",
         "-chardev", "socket,id=console,path=" + console + ",server=on,wait=off", "-serial", "chardev:console",
-        "-append", "console=ttyS0 drm_client_lib.active= " + extra],
+        "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel " + extra],
         work + "/qmp", work + "/mon", work, (console,), 0.1)
     serial = socket.socket(socket.AF_UNIX)
     serial.connect(console)
@@ -18723,6 +21223,88 @@ for label, extra in (("plain", ""), ("dark", "moonwater.pm_dark=5"), ("undone", 
     except Exception:
         guest.kill()
 
+#       And with the compositor in userspace holding the card, which nothing
+#       tells that the machine slept: it finds out from the clocks when the
+#       key that wakes it arrives, says so in the machine's log, and draws the
+#       screen again. The plain boot starts it, with its panel and a terminal
+#       the image's fonts draw, and the shell the lane drives is the serial line.
+label = "compositor"
+work = base + "/" + label
+os.makedirs(work, exist_ok=True)
+console = work + "/console"
+guest = Guest(["qemu-system-x86_64", "-m", "2G", "-smp", "2", "-cpu", "host", "-enable-kvm",
+    "-kernel", image, "-vga", "std", "-no-reboot", "-display", "none", "-nic", "user,model=e1000",
+    "-chardev", "socket,id=console,path=" + console + ",server=on,wait=off", "-serial", "chardev:console",
+    "-append", "console=ttyS0 drm_client_lib.active="],
+    work + "/qmp", work + "/mon", work, (console,), 0.1)
+serial = socket.socket(socket.AF_UNIX)
+serial.connect(console)
+serial.settimeout(0.2)
+transcript = bytearray()
+
+def pump(seconds):
+    stop = time.time() + seconds
+    while time.time() < stop:
+        try:
+            chunk = serial.recv(65536)
+        except socket.timeout:
+            continue
+        except OSError:
+            return
+        if not chunk:
+            return
+        transcript.extend(chunk)
+
+def wait_for(marker, seconds):
+    stop = time.time() + seconds
+    while marker.encode() not in transcript and time.time() < stop:
+        pump(0.3)
+    return marker.encode() in transcript
+
+def ink(name):
+    # The desktop's ink at the top left and the panel's at the bottom left: the compositor's own picture.
+    w, h, px = load(name)
+    at = lambda x, y: "%02x%02x%02x" % tuple(px[(y * w + x) * 3:(y * w + x) * 3 + 3])
+    return "%s %s" % (at(10, 10), at(300, h - 10))
+
+def asked(command, marker, seconds=20):
+    serial.sendall(command.encode() + b"; echo " + marker.encode() + b"-END\n")
+    wait_for(marker + "-END\r", seconds)
+    return bytes(transcript)
+
+time.sleep(8)
+serial.sendall(b"echo READY-$((20+1))\n")
+out.append((label + ": the serial shell answers", "yes" if wait_for("READY-21", 30) else "no", "yes"))
+shot("up", 1)
+out.append((label + ": the compositor's desktop and panel are on the screen before the sleep", ink("up"), "1b2733 2f3f52"))
+mark = len(transcript)
+serial.sendall(b"moonwater sleep > /dev/ttyS0 2>&1\n")
+out.append((label + ": the verb is sleeping", "yes" if wait_for("mem_sleep", 20) else "no", "yes"))
+time.sleep(4)
+shot("during", 1)
+out.append((label + ": the screen is off while it sleeps", ink("during") != "1b2733 2f3f52" and "yes" or ink("during"), "yes"))
+key("shift")
+out.append((label + ": a key wakes it", "yes" if wait_for("awake again", 40) else "no", "yes"))
+time.sleep(4)
+asked("dmesg | grep -c 'compositor: the machine slept for'", "SLEPT")
+counted = re.findall(rb"\r?\n(\d+)\r?\nSLEPT-END", bytes(transcript))
+out.append((label + ": the compositor finds it slept and says so in the log, once",
+            counted[-1].decode() if counted else "no answer", "1"))
+time.sleep(3)
+shot("after", 1)
+out.append((label + ": its desktop and panel are on the screen again", ink("after"), "1b2733 2f3f52"))
+pump(1)
+after = bytes(transcript[mark:])
+bad = [word for word in ("WARNING:", "BUG:", "Oops", "Call Trace") if word.encode() in after]
+out.append((label + ": the kernel says nothing is wrong", ",".join(bad) or "yes", "yes"))
+guest.quit()
+time.sleep(1)
+guest.terminate()
+try:
+    guest.wait(10)
+except Exception:
+    guest.kill()
+
 for name, got, want in out:
     print("%s|%s|%s" % (name, got, want))
 PY
@@ -18813,7 +21395,7 @@ python3 test/differential.py --harness scale "$@"
 #       absolute number that is not. A Linux host target runs directly.
 #
 
-benchmarks="floor baseline numbers bases hex hex-decode escape spelled codec fixed table padded input-bases fields human human-nearest hash-33 span-byte utf8-valid net-parsers net-hot cells-ascii fill-u32 fill-u64 paths reverse writer-field writer-text text-hot prefix-known translate delete squeeze offsets record-scans ascii-case ascii-case-fold line-break bounded-fold ascii-convert ascii-search grep-search grep-count last-of words clock scan-literal random allocator lock pool ordered tree reserve storage-read compare-max string-copy stream-get stream-write format-bounds startup montgomery limbs shell tools grep-sets awk find boot-time engines compression compression-floor cksum-crc cksum-digests unicode-width link"
+benchmarks="floor baseline numbers bases hex hex-decode translate-rect blend-rect fill-rect sweep-coverage escape spelled codec fixed table padded input-bases fields human human-nearest hash-33 span-byte utf8-valid net-parsers net-hot cells-ascii fill-u32 fill-u64 paths reverse writer-field writer-text text-hot prefix-known translate delete squeeze offsets record-scans ascii-case ascii-case-fold line-break bounded-fold ascii-convert ascii-search grep-search grep-count last-of words clock scan-literal random allocator lock pool ordered tree reserve storage-read compare-max string-copy stream-get stream-write format-bounds startup montgomery limbs shell tools grep-sets awk find boot-time engines compression compression-floor cksum-crc cksum-digests unicode-width link"
 
 #       One benchmark's section and one line about it. A name with no section
 #       is one of the drivers below, which time a whole binary against the
@@ -18834,6 +21416,14 @@ bench_about()
                  bench_line="bulk hex output against the former checksum loop" ;;
         hex-decode) bench_section=BENCH_hex_decode
                  bench_line="hexadecimal decode at digest lengths against the C loop it replaced" ;;
+        translate-rect) bench_section=BENCH_translate_rect
+                 bench_line="the text engine's cells made pixels through a table, against the C loop it replaced" ;;
+        blend-rect) bench_section=BENCH_blend_rect
+                 bench_line="the text engine's glyphs laid on a known ground, against the C loop it replaced" ;;
+        fill-rect) bench_section=BENCH_fill_rect
+                 bench_line="rectangles of one 32-bit value, a cell's ground, against a fill a row" ;;
+        sweep-coverage) bench_section=BENCH_sweep_coverage
+                 bench_line="the text engine's coverage rows summed into bytes, against the C loop it replaced" ;;
         escape)  bench_section=BENCH_escape
                  bench_line="shared escaping against the former writer loops" ;;
         spelled) bench_section=BENCH_spelled
@@ -20130,7 +22720,7 @@ one()
         qemu-system-x86_64 -m 2G -smp 2 -cpu host -enable-kvm \
                 -kernel "$image" -no-reboot -display none \
                 -serial "file:$log" \
-                -append "console=ttyS0 drm_client_lib.active= printk.time=1 $extra" \
+                -append "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel printk.time=1 $extra" \
                 < /dev/null > /dev/null 2>&1 &
         pid=$!
         n=0

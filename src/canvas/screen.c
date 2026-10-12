@@ -221,6 +221,210 @@ static fn term_linger(void)
         }
 }
 
+/*
+        A shell on a pty of its own, started.
+
+        Answers the shell's pid, with the pty's master in master and the
+        count of processes the kernel had killed for want of memory in
+        oom_kills, or a negative number after saying why not and with nothing
+        left open. The window or surface the caller draws in is its own to
+        close then.
+
+        Waiting for the other end to exist.
+
+        The compositor starts this the moment it has a screen, which
+        is before init has mounted devpts -- there is no ordering
+        between the two and there does not need to be, so long as this
+        is willing to wait a moment for it.
+
+        Two milliseconds a try, for the same four seconds. The first
+        terminal is started as the initcalls finish and init mounts
+        devpts a few milliseconds later, so this always waits, and
+        twenty milliseconds a try left it asleep long after the mount:
+        its first frame came 18 ms later at the median of ten paired
+        boots. A failed open of /dev/ptmx is one system call.
+*/
+static bipolar term_session(b32 address_to master, positive address_to oom_kills)
+{
+        timespec wait = {0, 2000000};
+        b32 slave = -1;
+        bipolar child;
+
+        address_to master = -1;
+
+        for (int tries = 0; tries < 2000 && address_to master < 0; tries++)
+        {
+                if (process_pty_open(master, address_of slave, true) < 0)
+                        address_to master = -1;
+
+                if (address_to master < 0)
+                        system_call_2(syscall(nanosleep), (positive)address_of wait, 0);
+        }
+
+        if (address_to master < 0)
+        {
+                log_direct(str("term: no /dev/ptmx\n"));
+                return -1;
+        }
+
+        grid_tell(address_to master);
+
+        terminal_terminfo_install();
+
+        // Here and not sooner: the kernel mounts /proc before init mounts the
+        // devpts the pty above waited for.
+        term_oom_adjust(TERM_OOM_WINDOW);
+
+        address_to oom_kills = term_oom_kills();
+        child = system_fork();
+
+        if (child < 0)
+        {
+                system_close(slave);
+                system_close(address_to master);
+                log_direct(str("term: cannot fork\n"));
+                return -1;
+        }
+
+        if (child == 0)
+        {
+                string_address argv[] = {SHELL, null};
+                string_address seed[] = {
+                    "TERM=" TERM_NAME,
+                    "TERMINFO=" TERM_INFO_DIRECTORY,
+                    "HOME=/root",
+                    "PATH=" BOWL_DEFAULT_PATH,
+                    "LANG=C.UTF-8",
+                    null};
+
+                if (process_pty_child_setup(address_to master, slave, -1, -1) < 0)
+                        system_call_1(syscall(exit), 126);
+
+                // A fork shares no memory, so this is the shell's alone.
+                term_oom_adjust(TERM_OOM_SHELL);
+
+                // What the shell is asked to do by the keyboard is its own to decide: a
+                // program started in the background by a script ignores these, and the
+                // shell on this pty would inherit that and not be interrupted.
+                process_signal_default(SIGINT);
+                process_signal_default(SIGQUIT);
+                process_signal_default(SIGHUP);
+
+                //      Boot may still be looking for an installed disk, and
+                //      may have a question for whoever is at this window.
+                host_terminal_opening();
+
+                bowl_session_prepare("/root", null);
+                (void)shell_exec_file((string_address)SHELL, argv, 1,
+                                      bowl_environment(seed));
+                system_call_1(syscall(exit), 127);
+        }
+
+        system_close(slave);
+        return child;
+}
+
+/*
+        A key or a pointer report, as the bytes it is for.
+
+        The window's key ring and a surface's events both come through here as
+        a window_key, so what a Return, a Ctrl+C and a click turn into is
+        one rule. False when the pty will take no more.
+*/
+static b32 term_input(b32 master, const struct window_key address_to key)
+{
+        if (key->flags & WINDOW_KEY_POINTER)
+                term_pointer(key->reserved & 0xffff, key->reserved >> 16,
+                             key->character, key->flags);
+        else if (key->flags & WINDOW_KEY_DOWN)
+                term_key_modified(key->character, key->code, key->flags);
+        else
+                return true;
+
+        return term_send(master);
+}
+
+/*
+        Everything the far end has said, taken into the emulator, as much as
+        the far end's line discipline hands over in one read, which is its
+        four kilobyte buffer: a quarter of that was four reads, four wakeups
+        of the writer and four passes of the loop for every one the pty
+        needed. Answers whether anything came, and stops after budget bytes so a
+        far end that never pauses cannot keep the caller from drawing; gone is
+        set when the pty will say no more.
+
+        Nothing waiting is EAGAIN and only EAGAIN. Everything else is the
+        shell gone -- zero, or EIO once the session went with it -- and
+        reading that as nothing waiting left this spinning on a dead pty
+        forever, with a zombie behind it and a window nothing could dismiss.
+*/
+static b32 term_drain(b32 master, b32 address_to gone, positive budget)
+{
+        p8 from_shell[4096];
+        b32 changed = false;
+
+        for (;;)
+        {
+                bipolar got = system_read_once(master, from_shell,
+                                               sizeof(from_shell));
+
+                if (got > 0)
+                {
+                        if (!changed)
+                                cursor_hide();
+
+                        term_bytes(from_shell, (positive)got);
+
+                        changed = true;
+                        budget = budget > (positive)got ? budget - (positive)got : 0;
+
+                        if (!budget)
+                                return changed;
+
+                        continue;
+                }
+
+                if (got != -EAGAIN && got != -EINTR)
+                        address_to gone = true;
+
+                return changed;
+        }
+}
+
+/*
+        The shell is over: reaped, the pty closed, and whether it went by a
+        signal this window did not send. An exit of any status, and the hangup
+        the X sent, close the window as they always have; only a signal from
+        elsewhere keeps it, and what happened is said after whatever was on
+        the screen. Answers whether the window stays.
+*/
+static b32 term_finish(bipolar child, b32 master, b32 hung_up, positive oom_kills)
+{
+        positive status = 0;
+        positive signal;
+
+        system_wait4_retry(child, address_of status, 0, null);
+        system_close(master);
+
+        signal = status & 0x7f;
+
+        if (!hung_up && signal && signal != 0x7f)
+        {
+                p8 name[16];
+                positive kills = term_oom_kills();
+
+                kill_name(signal, name);
+                cursor_hide();
+                term_child_killed(signal, name,
+                                  oom_kills != positive_max &&
+                                      kills != positive_max &&
+                                      kills != oom_kills);
+                return true;
+        }
+
+        return false;
+}
+
 // term ---------------------------------------------------------
 static b32 screen_term()
 {
@@ -242,99 +446,19 @@ static b32 screen_term()
 
         full_reset();
 
-        /*
-                Waiting for the other end to exist.
-
-                The compositor starts this the moment it has a screen, which
-                is before init has mounted devpts -- there is no ordering
-                between the two and there does not need to be, so long as this
-                is willing to wait a moment for it.
-
-                Two milliseconds a try, for the same four seconds. The first
-                terminal is started as the initcalls finish and init mounts
-                devpts a few milliseconds later, so this always waits, and
-                twenty milliseconds a try left it asleep long after the mount:
-                its first frame came 18 ms later at the median of ten paired
-                boots. A failed open of /dev/ptmx is one system call.
-        */
-        timespec wait = {0, 2000000};
-        b32 master = -1;
-        b32 slave = -1;
-
-        for (int tries = 0; tries < 2000 && master < 0; tries++)
-        {
-                if (process_pty_open(address_of master, address_of slave,
-                                     true) < 0)
-                        master = -1;
-
-                if (master < 0)
-                        system_call_2(syscall(nanosleep), (positive)address_of wait, 0);
-        }
-
-        if (master < 0)
-        {
-                log_direct(str("term: no /dev/ptmx\n"));
-                window_close(window);
-                return 1;
-        }
-
-        grid_tell(master);
-
-        terminal_terminfo_install();
-
-        // Here and not sooner: the kernel mounts /proc before init mounts the
-        // devpts the pty above waited for.
-        term_oom_adjust(TERM_OOM_WINDOW);
-
-        positive oom_kills = term_oom_kills();
-        bipolar child = system_fork();
+        b32 master;
+        positive oom_kills;
+        bipolar child = term_session(address_of master, address_of oom_kills);
 
         if (child < 0)
         {
-                system_close(slave);
-                system_close(master);
                 window_close(window);
-                log_direct(str("term: cannot fork\n"));
                 return 1;
         }
-
-        if (child == 0)
-        {
-                string_address argv[] = {SHELL, null};
-                string_address seed[] = {
-                    "TERM=" TERM_NAME,
-                    "TERMINFO=" TERM_INFO_DIRECTORY,
-                    "HOME=/root",
-                    "PATH=" BOWL_DEFAULT_PATH,
-                    "LANG=C.UTF-8",
-                    null};
-
-                if (process_pty_child_setup(master, slave, -1, -1) < 0)
-                        system_call_1(syscall(exit), 126);
-
-                // A fork shares no memory, so this is the shell's alone.
-                term_oom_adjust(TERM_OOM_SHELL);
-
-                //      Boot may still be looking for an installed disk, and
-                //      may have a question for whoever is at this window.
-                host_terminal_opening();
-
-                bowl_session_prepare("/root", null);
-                (void)shell_exec_file((string_address)SHELL, argv, 1,
-                                      bowl_environment(seed));
-                system_call_1(syscall(exit), 127);
-        }
-
-        system_close(slave);
 
         // Centred, and published once below with its cursor already in it.
         window->region = WINDOW_CENTRED;
 
-        // As much as the far end's line discipline hands over in one read,
-        // which is its four kilobyte buffer: a quarter of that was four
-        // reads, four wakeups of the writer and four passes of the loop
-        // below for every one the pty needed.
-        p8 from_shell[4096];
         struct window_key typed[WINDOW_KEYS];
         timespec nap = {0, 4000000};
         unsigned int synchronized_wait = 0;
@@ -383,33 +507,10 @@ static b32 screen_term()
 
                 for (unsigned int i = 0; i < keys; i++)
                 {
-                        if (typed[i].flags & WINDOW_KEY_POINTER)
+                        if (!term_input(master, address_of typed[i]))
                         {
-                                term_pointer(typed[i].reserved & 0xffff,
-                                             typed[i].reserved >> 16,
-                                             typed[i].character,
-                                             typed[i].flags);
-
-                                if (!term_send(master))
-                                {
-                                        gone = true;
-                                        break;
-                                }
-
-                                continue;
-                        }
-
-                        if (typed[i].flags & WINDOW_KEY_DOWN)
-                        {
-                                term_key_modified(typed[i].character,
-                                                  typed[i].code,
-                                                  typed[i].flags);
-
-                                if (!term_send(master))
-                                {
-                                        gone = true;
-                                        break;
-                                }
+                                gone = true;
+                                break;
                         }
                 }
 
@@ -425,36 +526,7 @@ static b32 screen_term()
                         }
                 }
 
-                for (;;)
-                {
-                        bipolar got = system_read_once(master, from_shell,
-                                                       sizeof(from_shell));
-
-                        if (got > 0)
-                        {
-                                if (!changed)
-                                        cursor_hide();
-
-                                term_bytes(from_shell, (positive)got);
-
-                                changed = true;
-                                continue;
-                        }
-
-                        /*
-                                Nothing waiting is EAGAIN and only EAGAIN.
-
-                                Everything else is the shell gone -- zero, or
-                                EIO once the session went with it -- and
-                                reading that as nothing waiting left this
-                                spinning on a dead pty forever, with a zombie
-                                behind it and a window nothing could dismiss.
-                        */
-                        if (got != -EAGAIN && got != -EINTR)
-                                gone = true;
-
-                        break;
-                }
+                changed = term_drain(master, address_of gone, positive_max);
 
                 // A report the far end asked for, which is bytes going the
                 // way keys go.
@@ -541,28 +613,8 @@ static b32 screen_term()
                             synchronized_output ? (long)nap.tv_nsec : -1);
         }
 
-        positive status = 0;
-
-        system_wait4_retry(child, address_of status, 0, null);
-        system_close(master);
-
-        // An exit of any status, and the hangup the X sent, close the window
-        // as they always have. Only a signal from elsewhere keeps it.
-        positive signal = status & 0x7f;
-
-        if (!hung_up && signal && signal != 0x7f)
-        {
-                p8 name[16];
-                positive kills = term_oom_kills();
-
-                kill_name(signal, name);
-                cursor_hide();
-                term_child_killed(signal, name,
-                                  oom_kills != positive_max &&
-                                      kills != positive_max &&
-                                      kills != oom_kills);
+        if (term_finish(child, master, hung_up, oom_kills))
                 term_linger();
-        }
 
         window_close(window);
 
