@@ -227,6 +227,9 @@ _Static_assert(sizeof(struct canvas_control) == 232, "spark canvas control ABI")
 #define SPARK_BIND_CANVAS_OFF 13u
 #define SPARK_BIND_CANVAS_ON_NAME "canvas on"
 #define SPARK_BIND_CANVAS_OFF_NAME "canvas off"
+// What the desktop's chord for a terminal asks the machine script for, and the kernel's own desktop has the
+// event first: spark.c's table, its id.
+#define SPARK_BIND_DESKTOP_TERMINAL 23u
 
 // In the boot settings' flags, whose other bits are spark.c's.
 #define SPARK_SETTINGS_CANVAS_OFF 0x1u // Canvas does not start at boot

@@ -92,6 +92,17 @@ function moonwater_ctrl_alt_delete {
   reboot
 }
 
+# A terminal, asked for at the keyboard (Control-Shift-T), by the compositor or
+# by the kernel's own desktop: on the compositor when there is one, and on the
+# kernel's desktop when there is not. It has to come back, as moonwater_init does.
+function moonwater_desktop_terminal {
+  if [ -S /run/moonwater/surface ] && [ -s /run/moonwater/compositor.pid ] && kill -0 $(cat /run/moonwater/compositor.pid) 2> /dev/null; then
+    desktop_terminal
+  else
+    moonwater canvas terminal
+  fi
+}
+
 # The desktop Canvas starts with: the compositor, which holds the card and
 # draws windows; the panel and a terminal on it; and, under them, the kernel's
 # own desktop, which has the card whenever the compositor does not.
@@ -125,6 +136,28 @@ function desktop_font {
   done
 }
 
+# Everything on the desktop is started here and by nothing else: the compositor
+# holds the card and draws, and forks nothing on a person's behalf. A program it
+# is asked for (Control-Shift-T) is the event moonwater_desktop_terminal, which
+# the compositor raises and the machine answers by this file, as it answers the
+# power button; and the kernel's own desktop raises the same event before it
+# starts a terminal of its own. The pids are kept so that the end of a session
+# ends what it started.
+function desktop_run {
+  "$@" &
+  echo $! >> /run/moonwater/desktop.kids
+}
+
+# A terminal on the compositor.
+function desktop_terminal {
+  desktop_font
+  if [ -n "$desktop_face" ]; then
+    desktop_run /terminal -f "$desktop_face"
+  else
+    echo "desktop: no font in /root/font or /usr/share/fonts, so no terminal on the compositor" > /dev/kmsg
+  fi
+}
+
 # One compositor and what it carries, until the compositor is over.
 function desktop_session {
   rm -f /run/moonwater/surface
@@ -138,19 +171,15 @@ function desktop_session {
   done
   echo "desktop: the compositor (pid $desktop_compositor) is up" > /dev/kmsg
   desktop_font
-  desktop_kids=
+  : > /run/moonwater/desktop.kids
   if [ -n "$desktop_face" ]; then
-    /compositor grant panel /panel -f "$desktop_face" &
-    desktop_kids=$!
-    /terminal -f "$desktop_face" &
-    desktop_kids="$desktop_kids $!"
-  else
-    echo "desktop: no font in /root/font or /usr/share/fonts, so no terminal on the compositor" > /dev/kmsg
+    desktop_run /compositor grant panel /panel -f "$desktop_face"
   fi
+  desktop_terminal
   wait $desktop_compositor
   echo "desktop: the compositor (pid $desktop_compositor) ended, status $?" > /dev/kmsg
-  kill $desktop_kids 2> /dev/null
-  rm -f /run/moonwater/compositor.pid
+  kill $(cat /run/moonwater/desktop.kids) 2> /dev/null
+  rm -f /run/moonwater/compositor.pid /run/moonwater/desktop.kids
 }
 
 function desktop_supervise {
@@ -234,6 +263,7 @@ function moonwater_event {
   # rfkill
   # tablet / headphone / dock  ($2 is on or off)
   # resume
+  # desktop terminal  (a request: Control-Shift-T, answered by moonwater_desktop_terminal)
   # recover  (last event did not finish; not a bind row)
 }
 

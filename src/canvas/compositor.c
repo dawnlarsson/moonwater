@@ -3959,142 +3959,21 @@ static void compositor_hold_drop(positive now)
         compositor.hold = -1;
 }
 
-// Whether text holds a word.
-static int compositor_has(const char *text, const char *word)
-{
-        for (; *text; text++)
-        {
-                unsigned int at = 0;
-
-                while (word[at] && text[at] == word[at])
-                        at++;
-                if (!word[at])
-                        return 1;
-        }
-        return 0;
-}
-
-// Whether a name ends in a suffix.
-static int compositor_ends(const char *name, const char *suffix)
-{
-        positive length = string_length((string_address)name), tail = string_length((string_address)suffix);
-
-        return length >= tail && !string_compare((string_address)name + length - tail, (string_address)suffix);
-}
-
-// A monospaced regular face in a directory of fonts, and one level of directories below it.
-static int compositor_font_in(const char *directory, int depth, char *into, positive room)
-{
-        char records[2048];
-        bipolar handle = system_open_at(AT_FDCWD, (string_address)directory, FILE_READ | O_CLOEXEC | O_DIRECTORY);
-        int found = 0;
-
-        if (handle < 0)
-                return 0;
-
-        for (bipolar got; !found && (got = system_read_directory(handle, records, sizeof(records))) > 0;)
-                for (bipolar at = 0; !found && at < got;)
-                {
-                        const char *name = records + at + 19;
-                        unsigned int length = *(unsigned short *)(records + at + 16), kind = (unsigned char)records[at + 18];
-                        positive base = string_length((string_address)directory);
-
-                        at += (bipolar)length;
-                        if (name[0] == '.' || base + 1 + string_length((string_address)name) + 1 >= room)
-                                continue;
-
-                        string_copy((string_address)into, (string_address)directory);
-                        into[base] = '/';
-                        string_copy((string_address)into + base + 1, (string_address)name);
-
-                        if (kind == 4 && depth == 0)
-                                found = compositor_font_in(into, 1, into, room);
-                        else if (kind != 4 && compositor_has(name, "Mono") && compositor_ends(name, ".ttf") &&
-                                 (depth == 0 || compositor_has(name, "Regular")))
-                                found = 1;
-                }
-
-        system_close(handle);
-        return found;
-}
-
-// The face a terminal draws with, as the machine script finds it: the first line of /root/font, or the
-// first monospaced one in /usr/share/fonts. The image has none, so a machine without one has no terminal.
-static int compositor_font(char *into, positive room)
-{
-        bipolar handle = system_open_at(AT_FDCWD, (string_address) "/root/font", FILE_READ | O_CLOEXEC);
-
-        if (handle >= 0)
-        {
-                bipolar got = system_read_once(handle, into, room - 1);
-                bipolar at = 0;
-
-                system_close(handle);
-                while (got > 0 && at < got && into[at] != '\n')
-                        at++;
-                into[at > 0 ? at : 0] = 0;
-                if (at > 0)
-                {
-                        bipolar probe = system_open_at(AT_FDCWD, (string_address)into, FILE_READ | O_CLOEXEC);
-
-                        if (probe >= 0)
-                        {
-                                system_close(probe);
-                                return 1;
-                        }
-                }
-        }
-
-        return compositor_font_in("/usr/share/fonts", 0, into, room);
-}
-
-// Control-Shift-T: a new terminal, which is a program of its own on the compositor.
+/*
+        Control-Shift-T: a new terminal, which is a request and not a start. Everything on the desktop is
+        started by the machine script and by nothing else, so the compositor raises the event the script
+        answers with moonwater_desktop_terminal (main.moonwater.sh), which finds the font and starts the
+        program; this process forks and executes nothing on a person's behalf. A machine whose script does
+        not answer it starts nothing, and says so.
+*/
 static void compositor_terminal(void)
 {
-        char face[160];
-        string_address arguments[4];
+        struct bind_control control;
+        bipolar failed = host_bind_request(SPARK_BIND_FIRE, SPARK_BIND_DESKTOP_TERMINAL, null, &control);
 
-        if (!compositor_font(face, sizeof(face)))
-        {
-                compositor_kmsg((string_address) "compositor: no font in /root/font or /usr/share/fonts, so no terminal", 0,
+        if (failed < 0)
+                compositor_kmsg((string_address) "compositor: cannot ask the machine for a terminal, error ", (positive)-failed,
                                 (string_address) "");
-                return;
-        }
-
-        {
-                bipolar child = system_fork();
-
-                if (child != 0)
-                {
-                        if (child < 0)
-                                compositor_kmsg((string_address) "compositor: cannot start a terminal, error ", (positive)-child,
-                                                (string_address) "");
-                        return;
-                }
-        }
-
-        {
-                arguments[0] = (string_address) "/terminal";
-                arguments[1] = (string_address) "-f";
-                arguments[2] = (string_address)face;
-                arguments[3] = null;
-                // It stays in this program's session, so that ending the session ends it, and what this
-                // program arranged for itself is not the terminal's: an ignored signal stays
-                // ignored across an exec (a shell that is never told its children ended is a shell
-                // that waits for none), and so does a blocked one.
-                {
-                        unsigned long dfl[4] = {0, 0, 0, 0}, none = 0;
-
-                        compositor_call(syscall(rt_sigaction), 17, (positive)dfl, 0, 8, 0, 0);
-                        compositor_call(syscall(rt_sigprocmask), 2, (positive)&none, 0, 8, 0, 0);
-                }
-                {
-                        bipolar failed = system_execute("/terminal", arguments, program_environment_list());
-
-                        compositor_kmsg((string_address) "compositor: cannot run /terminal, error ", (positive)-failed, (string_address) "");
-                }
-                compositor_call(syscall(exit), 127, 0, 0, 0, 0, 0);
-        }
 }
 
 // What is held on every keyboard, as the flags a key event carries.

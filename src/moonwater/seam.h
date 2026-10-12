@@ -66,6 +66,9 @@ int moonwater_spawn_recorded(const char *program, struct pid **record);
 // Fire one of the machine's events, as a key bound to it would.
 void moonwater_bind_fire(unsigned int event);
 
+// The same, answering whether the machine script or a bound line will run it.
+_Bool moonwater_bind_ask(unsigned int event);
+
 // Whether a key belongs to a binding, which then takes it and not the desktop.
 _Bool moonwater_bind_swallowed(unsigned int code, int value);
 

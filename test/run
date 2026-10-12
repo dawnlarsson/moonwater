@@ -19613,6 +19613,26 @@ if font:
     out.append(("R1.2b with a font in /root/font the panel and a terminal are started on the compositor, after canvas off and on",
                 kids, "1 1"))
     said("R1.2b")
+
+    #   Control-Shift-T asks the machine for a terminal and the machine script starts it: one more, whose
+    #   parent is not the compositor, that stays up and answers. Everything on the desktop is started by
+    #   the script and by nothing else.
+    def pids(name):
+        return shell.run("grep -l '^%s$' /proc/[0-9]*/comm | sed 's#/proc/\\([0-9]*\\)/comm#\\1#'" % name, 20)[0].split()
+
+    def ppid(pid):
+        return shell.number("cut -d' ' -f4 /proc/%s/stat" % pid, 20) if pid else ""
+
+    time.sleep(3)
+    before = pids("terminal")
+    chord("ctrl", "shift", "t")
+    more, _ = until(lambda: len(pids("terminal")) == len(before) + 1, 20)
+    time.sleep(3)
+    now = pids("terminal")
+    added = [pid for pid in now if pid not in before]
+    out.append(("R1.2c Control-Shift-T is a request the machine script answers: one more terminal, not the compositor's child, still there after three seconds",
+                "%s %s" % ("one more" if more and len(now) == len(before) + 1 else "no (%d to %d)" % (len(before), len(now)),
+                           "script" if added and ppid(added[0]) not in ("", compositor() or "-") else "compositor"), "one more script"))
 else:
     out.append(("R1.2b with a font in /root/font the panel and a terminal are started on the compositor, after canvas off and on",
                 "not run: no monospace font on the host", "1 1"))

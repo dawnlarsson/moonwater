@@ -28039,8 +28039,8 @@ static void check_bind(void) {
     request.reserved[0]=request.reserved[1]=request.reserved[2]=0;
     check(report_bind(&request)==-ENAMETOOLONG && !strcmp(power->command,"echo set"),
           "a line with no end inside the request is refused");
-    memset(&request,0,sizeof(request)); request.op=2; request.event=SPARK_BIND_POWEROFF;
-    check(report_bind(&request)==-EINVAL,"an op that is neither get nor set is refused");
+    memset(&request,0,sizeof(request)); request.op=SPARK_BIND_FIRE+1; request.event=SPARK_BIND_POWEROFF;
+    check(report_bind(&request)==-EINVAL,"an op that is neither get, set nor fire is refused");
     memset(&request,0,sizeof(request)); request.reserved[1]=1; request.event=SPARK_BIND_POWEROFF;
     check(report_bind(&request)==-EINVAL,"a reserved field that is not zero is refused");
     memset(&request,0,sizeof(request));
@@ -28168,7 +28168,9 @@ static void check_bind_edges(void) {
     for (op=0; op<4; op++)
     for (event=0; event<SPARK_BIND_EVENTS+3; event++)
     for (reserved=0; reserved<8; reserved++) {
-        _Bool invalid=op>SPARK_BIND_SET || !event || event>SPARK_BIND_EVENTS || reserved;
+        _Bool invalid=op>SPARK_BIND_FIRE || !event || event>SPARK_BIND_EVENTS || reserved;
+        /* FIRE asks for a run, and only the rows made to be asked for take it. */
+        _Bool refused=!invalid && op==SPARK_BIND_FIRE && event!=SPARK_BIND_DESKTOP_TERMINAL;
         memset(&request,0,sizeof(request));
         request.op=op; request.event=event;
         request.reserved[0]=reserved&1u;
@@ -28176,8 +28178,19 @@ static void check_bind_edges(void) {
         request.reserved[2]=(reserved>>2)&1u;
         got=report_bind(&request);
         snprintf(who,sizeof(who),"ioctl op=%u event=%u reserved=%u",op,event,reserved);
-        check(invalid ? got==-EINVAL : got==0, who);
+        check(invalid ? got==-EINVAL : refused ? got==-EPERM : got==0, who);
     }
+    /* A program that is not root may not ask, and a root may ask for nothing but a launch. */
+    power_admin=0;
+    memset(&request,0,sizeof(request));
+    request.op=SPARK_BIND_FIRE; request.event=SPARK_BIND_DESKTOP_TERMINAL;
+    check(report_bind(&request)==-EPERM,"FIRE needs CAP_SYS_ADMIN");
+    power_admin=1;
+    memset(&request,0,sizeof(request));
+    request.op=SPARK_BIND_FIRE; request.event=SPARK_BIND_POWEROFF;
+    check(report_bind(&request)==-EPERM,"FIRE cannot say the power button was pressed");
+    request.event=SPARK_BIND_CANVAS_OFF;
+    check(report_bind(&request)==-EPERM,"FIRE cannot say Canvas went off");
     memset(&request,0,sizeof(request)); request.event=~0u;
     check(report_bind(&request)==-EINVAL,"event UINT_MAX is refused");
     memset(&request,0,sizeof(request)); request.op=~0u; request.event=1;
@@ -29213,7 +29226,7 @@ static void check_machine_owner(void) {
         power_admin=1;
         memset(&request,0,sizeof request);
         request.op=MOONWATER_SCRIPT_GET;
-        check(!report_machine_script(&request) && !request.overlay.pad && !request.overlay.spare &&
+        check(!report_machine_script(&request) && !request.overlay.pad &&
               !request.overlay.hooks,
               "the overlay answers with its padding clear");
         memset(&request,0,sizeof request);

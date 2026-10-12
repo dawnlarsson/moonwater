@@ -95931,7 +95931,11 @@ static fn machine_policy(void)
               MOONWATER_SCRIPT_GET != MOONWATER_SCRIPT_SET);
         check("builtin origin is not disk",
               MOONWATER_ORIGIN_BUILTIN != MOONWATER_ORIGIN_DISK);
-        check("there are twenty-two bind events", SPARK_BIND_EVENTS == 22);
+        check("there are twenty-three bind events", SPARK_BIND_EVENTS == 23);
+        check("the last is the request for a terminal, and no stop",
+              !spark_bind_is_stop(SPARK_BIND_DESKTOP_TERMINAL) &&
+                  string_equals((string_address)spark_bind_event_name[SPARK_BIND_DESKTOP_TERMINAL - 1],
+                                "desktop terminal"));
         check("poweroff, reset and ctrl_alt_delete stop the machine",
               spark_bind_is_stop(SPARK_BIND_POWEROFF) &&
                   spark_bind_is_stop(SPARK_BIND_RESET) &&

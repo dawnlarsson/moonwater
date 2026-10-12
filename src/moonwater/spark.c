@@ -364,6 +364,8 @@ _Static_assert(sizeof(struct snapshot_request) == 32,
 
 #define SPARK_BIND_GET 0u
 #define SPARK_BIND_SET 1u
+// Raises one of the events a program may ask for (SPARK_BIND_RAISED): it runs as if the machine had seen it.
+#define SPARK_BIND_FIRE 2u
 
 #define SPARK_BIND_DEFAULT 0x1u // the line is the event's default
 #define SPARK_BIND_RUNNING 0x2u // a run is in flight
@@ -391,7 +393,10 @@ _Static_assert(sizeof(struct snapshot_request) == 32,
 #define SPARK_BIND_DOCK_ON 20u
 #define SPARK_BIND_DOCK_OFF 21u
 #define SPARK_BIND_RESUME 22u
-#define SPARK_BIND_EVENTS 22u
+// 23, desktop terminal: a request for the machine script and not a thing the machine saw. The desktop's
+// compositor raises it through SPARK_BIND_FIRE, and moonwater_desktop_terminal starts the terminal, so every
+// program on the desktop is started by the script and by nothing else. canvas_abi.h has the id.
+#define SPARK_BIND_EVENTS 23u
 
 /*
         Names in event-id order, the same strings the kernel table uses.
@@ -422,6 +427,7 @@ static const char spark_bind_event_name[SPARK_BIND_EVENTS][SPARK_BIND_NAME_MAX] 
         "dock on",
         "dock off",
         "resume",
+        "desktop terminal",
 };
 
 static const unsigned char spark_bind_stop[SPARK_BIND_EVENTS] = {

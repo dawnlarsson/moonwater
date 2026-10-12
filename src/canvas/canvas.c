@@ -11936,7 +11936,8 @@ static _Bool canvas_flush_running(void)
         return rcu_access_pointer(canvas_flusher) != NULL;
 }
 
-// A terminal, for the machine script's request and for the keyboard's.
+// A terminal, for the machine script's request: the verb moonwater canvas terminal, which is how the script
+// starts one on this desktop, and nothing else.
 static void canvas_terminal_start(void)
 {
         int ret = moonwater_spawn_recorded(SPARK_TERMINAL_PROGRAM, &canvas_spawned);
@@ -12015,7 +12016,9 @@ static int canvas_loop(void *unused)
                 if (canvas_suspend_check())
                         continue;
 
-                if (chord)
+                // The chord is a request to the machine script, which starts what a desktop starts; a machine
+                // with no script to answer it starts the terminal itself.
+                if (chord && !moonwater_bind_ask(SPARK_BIND_DESKTOP_TERMINAL))
                         canvas_terminal_start();
 
                 pointer_apply();

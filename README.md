@@ -401,6 +401,15 @@ compositor runs alone, with its own panel and no terminal, and the log says why
 line, or a `/root/desktop` that names anything but `canvas`, leaves the kernel's
 own desktop as it was: the log and a terminal of its own.
 
+Everything on the desktop is started by the machine script and by nothing else:
+the panel, the terminal, and any program a person asks for. The compositor holds
+the card and draws; it forks and executes nothing. Control-Shift-T, in the
+compositor or in the kernel's own desktop, is the event `desktop terminal`,
+which `moonwater_desktop_terminal` answers by starting `/terminal` on the
+compositor (or `moonwater canvas terminal` where there is none). A machine
+script of one's own that does not name it answers nothing, and `moonwater bind
+desktop terminal COMMAND` binds a line to it.
+
 `moonwater desktop` is what the machine starts as its desktop: Canvas, the
 default; `off`, which turns Canvas off as soon as it has started, for a machine
 that is a text console; or a bowl profile, whose session the machine script's
