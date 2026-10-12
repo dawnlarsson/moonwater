@@ -55130,7 +55130,7 @@ static fn http_decision_edges(void)
                       system_call_3(syscall(fcntl), 0, 1, 0) < 0 && link.handle == -1);
                 if (saved >= 0)
                 {
-                        system_call_2(syscall(dup2), (positive)saved, 0);
+                        system_call_3(syscall(dup3), (positive)saved, 0, 0);
                         system_close((b32)saved);
                 }
         }
@@ -55603,7 +55603,7 @@ static fn netlink_decision_edges(void)
                         socket_close((b32)handle);
                 if (saved >= 0)
                 {
-                        system_call_2(syscall(dup2), (positive)saved, 0);
+                        system_call_3(syscall(dup3), (positive)saved, 0, 0);
                         system_close((b32)saved);
                 }
                 check("a netlink socket numbered 0 is bound like any other",
@@ -57440,7 +57440,7 @@ static bipolar dns_answer_case(positive which, bool edns, bool stdin_closed,
         }
         if (saved >= 0)
         {
-                system_call_2(syscall(dup2), (positive)saved, 0);
+                system_call_3(syscall(dup3), (positive)saved, 0, 0);
                 system_close((b32)saved);
         }
         if (system_wait4_retry((b32)child, address_of raw, 0, null) != child)
@@ -57541,7 +57541,7 @@ static fn resolving_decision_edges(void)
                         socket_close((b32)handle);
                 if (saved >= 0)
                 {
-                        system_call_2(syscall(dup2), (positive)saved, 0);
+                        system_call_3(syscall(dup3), (positive)saved, 0, 0);
                         system_close((b32)saved);
                 }
                 check("a TCP connect whose socket is numbered 0 is kept", handle == 0);
@@ -73545,7 +73545,7 @@ static fn net_apart_edges(void)
                         system_close((b32)quiet);
                 if (saved >= 0)
                 {
-                        system_call_2(syscall(dup2), (positive)saved, 0);
+                        system_call_3(syscall(dup3), (positive)saved, 0, 0);
                         system_close((b32)saved);
                 }
                 check("descriptor 0, kept for the child, is still open in it",
