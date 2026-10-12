@@ -60787,9 +60787,13 @@ def sntp_fuzz_seeds():
 
 def sntp_fuzz_source(host):
     """host.c's SNTP parse, selection and discipline arithmetic, lifted whole
-    by the literal anchors below, behind SNTP_FUZZ_SHIM."""
+    by the literal anchors below, behind SNTP_FUZZ_SHIM. The self-tests the
+    driver runs first (sntp_math_ok and locale_discipline_ok) live in
+    test/checks.c beside the machine check that runs them, and are lifted
+    from there."""
     sec = src_slice
     lib = (HARNESS_ROOT / "src/lib.util.c").read_text()
+    checks = (HARNESS_ROOT / "test/checks.c").read_text()
     parts = (
         sec(lib, "static bipolar clock_floor_divide(", "/*\n        The calendar, closed form"),
         sec(host, "#define SNTP_PORT 123", "static inline INLINE bipolar sntp_now_ns(void)"),
@@ -60801,6 +60805,7 @@ def sntp_fuzz_source(host):
         sec(host, "#define LOCALE_NTP_RETRY_LEAST", "/*\n        A query that runs in a child"),
         sec(host, "#define LOCALE_TIMEX_ESTERROR", "static fn locale_clock_mark_synced("),
         sec(host, "static bool locale_ntp_first;", "static const char locale_ntp_fallback"),
+        sec(checks, "#define SNTP_TEST_NOW \\\n", "static fn machine_sntp(void)\n"),
     )
     #   The window's near edge is the clock's build floor, which net.c holds.
     floor = re.search(r"#define MOONWATER_CLOCK_FLOOR (\d+ll)",
