@@ -25741,6 +25741,7 @@ static b32 string_diagnostic(diagnostic const address_to sink, b32 result,
 { (void)sink; (void)about; (void)reason; fixture_errors++; return result; }
 static void *memory(positive bytes) { (void)bytes; abort(); }
 static void *utility_arena_reserve(positive *room) { (void)room; abort(); }
+static void *utility_arena_map(positive bytes) { (void)bytes; abort(); }
 static bool system_failed(positive value) { return value >= positive_max-4095; }
 static positive positive_into_string(p8 *p,positive n) { return (positive)sprintf((char *)p,"%llu",(unsigned long long)n); }
 static void positive_to_string(writer w,positive n) { p8 b[24]; positive k=positive_into_string(b,n); w(b,k); }

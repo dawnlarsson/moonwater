@@ -386,7 +386,7 @@ coverage_guest()
 qmp_guest_module()
 {
         cat > "$1/qmp_guest.py" <<'PY'
-import json, os, socket, subprocess, time
+import json, os, re, socket, subprocess, time
 
 #       The guest's screen: seventy percent of the preferred mode, so the EDID
 #       has to prefer 3658x1543. QEMU's default EDID gives 640x480, where the
@@ -500,6 +500,56 @@ def load(name):
         vals.append(int(d[i:j]))
         i = j
     return vals[0], vals[1], d[i + 1:]
+
+class Shell:
+    """The guest's own shell on the serial line, which answers while the display is another program's, and the little the lane asks of it."""
+
+    def __init__(self, path):
+        self.sock = socket.socket(socket.AF_UNIX)
+        self.sock.connect(path)
+        self.sock.settimeout(1)
+        self.tag = 0
+        self.heard = b""
+
+    def run(self, command, seconds=30):
+        self.tag += 1
+        mark = self.tag
+        self.sock.sendall(("\necho BEG\"%d\"; %s\necho END\"%d\":$?\n" % (mark, command, mark)).encode())
+        seen = b""
+        stop = time.time() + seconds
+        done = re.compile(rb"BEG%d\r?\n(.*?)END%d:(\d+)" % (mark, mark), re.S)
+        while time.time() < stop:
+            try:
+                chunk = self.sock.recv(65536)
+                seen += chunk
+                self.heard += chunk
+            except socket.timeout:
+                pass
+            found = done.search(seen)
+            if found:
+                text = re.sub(rb"\x1b\[[0-9;?]*[a-zA-Z]", b"", found.group(1))
+                return text.decode("utf8", "replace").replace("\r", "").strip(), int(found.group(2))
+        return seen.decode("utf8", "replace").replace("\r", ""), 124
+
+    def ready(self):
+        # Boot has to have got as far as the shell; the line editor is then told to keep out of the way.
+        for _ in range(40):
+            if self.run("echo up", 5)[1] == 0:
+                break
+        self.run("PS1=; PS2=; stty -echo", 5)
+
+    def number(self, command, seconds=10):
+        found = re.findall(r"^(\d+)\s*$", self.run(command, seconds)[0], re.M)
+        return found[-1] if found else ""
+
+def until(test, seconds):
+    start = time.time()
+    while time.time() - start < seconds:
+        value = test()
+        if value:
+            return value, time.time() - start
+        time.sleep(0.05)
+    return None, time.time() - start
 PY
 }
 
@@ -16002,7 +16052,7 @@ MOONWATER_CANVAS_COVERAGE=${coverage_serial#-serial file:}
 export MOONWATER_CANVAS_COVERAGE
 qmp_guest_module "$work"
 
-#       CANVAS_ONLY=m1 (or m5) runs the userspace compositor's boot alone, for a
+#       CANVAS_ONLY=m1 (or m5, r1, r2, r4) runs the userspace compositor's boot alone, for a
 #       parent and a fix compared in one sitting; the lane runs all of it.
 if [ -z "${CANVAS_ONLY:-}" ]; then
 PYTHONPATH=$work python3 - "$image" > "$work/answers" 2>"$work/why" <<'PY'
@@ -18190,7 +18240,7 @@ else
 fi
 fi
 
-if [ "${CANVAS_ONLY:-}" != m5 ]; then
+if [ -z "${CANVAS_ONLY:-}" ] || [ "${CANVAS_ONLY:-}" = m1 ]; then
 #       The compositor in userspace (canvas milestone M1).
 #
 #       A script on a stick, typed into the boot terminal, starts
@@ -18442,9 +18492,7 @@ guest = Guest(desktop(image) + [
 time.sleep(25)
 
 def serial():
-    # The kernel prints into the console between any two characters of a line;
-    # a warning in the middle of one of the script's lines is taken out of it.
-    return re.sub(rb"\[ *\d+\.\d+\] __vm_enough_memory:[^\n]*\n", b"", open(work + "/serial", "rb").read())
+    return open(work + "/serial", "rb").read()
 
 def wait_for(marker, seconds):
     stop = time.time() + seconds
@@ -18874,6 +18922,52 @@ else
                 same "$name" "$want" "$got"
         done < "$work/m1-answers"
         sed -n 's/^m1 hand-back/  canvas       hand-back/p' "$work/m1-why"
+fi
+fi
+
+#       No tool is refused memory (stage recover).
+#
+#       Every tool that takes the shell's reserve of address space (the
+#       arena a tool fills as far as its input goes, four gigabytes of it)
+#       used to be refused it by the kernel in a guest of two, then refused
+#       two, with a warning on the serial line each time, in the middle of
+#       whatever else was printing. The reserve is address space and is
+#       mapped as that now. `ps` takes it; the kernel's log is read after.
+if [ -z "${CANVAS_ONLY:-}" ] || [ "${CANVAS_ONLY:-}" = r5 ]; then
+PYTHONPATH=$work python3 - "$image" > "$work/r5-answers" 2>"$work/r5-why" <<'PY'
+import os, re, sys, time
+from qmp_guest import *
+
+image = sys.argv[1]
+work = os.environ["MOONWATER_CANVAS_WORK"] + "/r5"
+os.makedirs(work, exist_ok=True)
+ser = work + "/ser"
+guest = Guest(desktop(image) + [
+    "-chardev", "socket,id=s0,path=" + ser + ",server=on,wait=off", "-serial", "chardev:s0",
+    "-no-reboot", "-display", "none",
+    "-append", "console=ttyS0 drm_client_lib.active= printk.time=1 moonwater.cursor_plane=0"],
+    work + "/qmp", work + "/mon", work, sockets=(ser,))
+time.sleep(25)
+shell = Shell(ser)
+shell.ready()
+shell.run("ps > /dev/null; ps > /dev/null; ps > /dev/null")
+out = [("R5.1 a tool that takes the shell's reserve is not refused it by the kernel in a guest of 2 GiB",
+        shell.number("dmesg | grep -c __vm_enough_memory"), "0")]
+for name, got, want in out:
+    print("%s|%s|%s" % (name, got, want))
+try:
+    guest.quit()
+    guest.wait(10)
+except Exception:
+    guest.kill()
+PY
+if [ ! -s "$work/r5-answers" ]; then
+        same "the reserve boot answered" "yes" "no"
+        sed 's/^/    /' "$work/r5-why" | tail -5
+else
+        while IFS='|' read -r name got want; do
+                same "$name" "$want" "$got"
+        done < "$work/r5-answers"
 fi
 fi
 
