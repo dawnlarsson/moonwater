@@ -340,7 +340,7 @@ typedef struct
 {
         p64 key, grid;
         p32 generation;
-        b16 dx, dy;
+        b16 dx, dy, top, bottom;
         font_bitmap box;
 } font_recent;
 
@@ -386,7 +386,7 @@ typedef struct
         //      A run of cells on its way to the target: each cell's bitmap,
         //      then their coverage rows side by side.
         font_bitmap run[FONT_RUN];
-        b16 run_dx[FONT_RUN], run_dy[FONT_RUN];
+        b16 run_dx[FONT_RUN], run_dy[FONT_RUN], run_top[FONT_RUN], run_bottom[FONT_RUN];
         p8 strip[FONT_STRIP];
 } font_engine;
 
@@ -4194,10 +4194,31 @@ font_cell_find(font_engine address_to e, const font_face address_to const addres
                 }
         }
 
+        //      The first and last rows of the cell with any ink, which a run
+        //      draws through the strip, the rows outside every cell's being
+        //      ground (a blank's are none: top past bottom).
+        b32 top = height, bottom = -1;
+        for (b32 r = 0; box.coverage && r < box.height; r++)
+        {
+                b32 row = *dy + r;
+                const p8 address_to bits = box.coverage + (positive)r * box.stride;
+                p8 any = 0;
+
+                if (row < 0 || row >= height)
+                        continue;
+                for (b32 c = 0; c < box.width && !any; c++)
+                        any = bits[c];
+                if (any)
+                {
+                        top = row < top ? row : top;
+                        bottom = row;
+                }
+        }
+
         //      A bitmap drawn into the atlas's scratch is gone with the next
         //      glyph, so it is not kept.
         if (!e->scratched)
-                *recent = (font_recent){key, shape, e->generation, (b16)*dx, (b16)*dy, box};
+                *recent = (font_recent){key, shape, e->generation, (b16)*dx, (b16)*dy, (b16)top, (b16)bottom, box};
         else
                 recent->key = 0;
         return box;
@@ -4214,7 +4235,7 @@ font_cell_find(font_engine address_to e, const font_face address_to const addres
 static inline INLINE font_bitmap font_cell_box(font_engine address_to e, const font_face address_to const address_to faces,
                                                p32 count, p32 code, p32 cells, const font_metrics address_to grid,
                                                p32 size, p32 flags, p64 base, p64 shape, b32 address_to dx,
-                                               b32 address_to dy)
+                                               b32 address_to dy, b16 address_to ink)
 {
         p64 key = base | (p64)(code & 0x1fffff) << 26;
         font_recent address_to recent = &e->recent[(key * 0x9e3779b97f4a7c15ull) >> 56];
@@ -4223,9 +4244,14 @@ static inline INLINE font_bitmap font_cell_box(font_engine address_to e, const f
         {
                 *dx = recent->dx;
                 *dy = recent->dy;
+                ink[0] = recent->top;
+                ink[1] = recent->bottom;
                 return recent->box;
         }
-        return font_cell_find(e, faces, count, code, cells, grid, size, flags, key, shape, recent, dx, dy);
+        font_bitmap box = font_cell_find(e, faces, count, code, cells, grid, size, flags, key, shape, recent, dx, dy);
+        ink[0] = recent->top;
+        ink[1] = recent->bottom;
+        return box;
 }
 
 /*
@@ -4245,11 +4271,12 @@ fn font_cell(font_engine address_to e, const font_face address_to const address_
 {
         b32 width = (b32)(cells ? cells : 1) * grid->cell_width, height = grid->cell_height;
         b32 dx, dy;
+        b16 ink[2];
 
         font_sync(e);
         font_bitmap box = font_cell_box(e, faces, count, code, cells, grid, size, flags,
                                         font_cell_base(faces, count, size, flags, cells), font_cell_shape(grid),
-                                        &dx, &dy);
+                                        &dx, &dy, ink);
         b32 gx = x + dx, gy = y + dy;
 
         if (background & FONT_UNKNOWN)
@@ -4352,10 +4379,14 @@ fn font_cells(font_engine address_to e, const font_face address_to const address
                         {
                                 b32 dx, dy;
 
+                                b16 ink[2];
+
                                 e->run[i] = font_cell_box(e, faces, count, codes[i], 1, grid, size, flags, base, shape,
-                                                          &dx, &dy);
+                                                          &dx, &dy, ink);
                                 e->run_dx[i] = (b16)dx;
                                 e->run_dy[i] = (b16)dy;
+                                e->run_top[i] = ink[0];
+                                e->run_bottom[i] = ink[1];
                                 found = !e->scratched;
                         }
                         found = found && e->generation == generation;
@@ -4368,16 +4399,37 @@ fn font_cells(font_engine address_to e, const font_face address_to const address
                 return;
         }
 
+        //      The rows no cell has ink in -- above the capitals, below the
+        //      descenders, all of a run of blanks -- are the ground, one fill;
+        //      only the rows between go through the strip.
+        b32 lo = height, hi = -1;
+        for (p32 i = 0; i < n; i++)
+        {
+                lo = e->run_top[i] < lo ? e->run_top[i] : lo;
+                hi = e->run_bottom[i] > hi ? e->run_bottom[i] : hi;
+        }
+        lo = lo < 0 ? 0 : lo;
+        hi = hi >= height ? height - 1 : hi;
+        if (lo > hi)
+                lo = height, hi = height - 1;
+        if (lo > 0)
+                memory_fill_u32_rect(target->pixels + (positive)y * target->stride + (positive)x, target->stride, across,
+                                     (positive)lo, background & 0xffffff);
+        if (hi + 1 < height)
+                memory_fill_u32_rect(target->pixels + (positive)(y + hi + 1) * target->stride + (positive)x,
+                                     target->stride, across, (positive)(height - hi - 1), background & 0xffffff);
+
         //      Strip rows are 16 bytes longer than the run, for the last
         //      cell's word.
         const p32 address_to pixel = font_tones(e, colour, background);
         positive stride = across + 16;
         const p8 address_to limit = e->atlas + (positive)e->atlas_width * e->atlas_height;
         b32 band = (b32)(FONT_STRIP / stride);
-        band = band > height ? height : band;
-        for (b32 from = 0; from < height; from += band)
+        band = band > hi - lo + 1 ? hi - lo + 1 : band;
+        band = band < 1 ? 1 : band;
+        for (b32 from = lo; from <= hi; from += band)
         {
-                b32 rows = from + band > height ? height - from : band;
+                b32 rows = from + band > hi + 1 ? hi + 1 - from : band;
 
                 for (p32 i = 0; i < n; i++)
                         font_lay_cell(e->strip + (positive)i * (positive)width, stride, &e->run[i], e->run_dx[i],
