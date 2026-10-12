@@ -67006,8 +67006,10 @@ static bool dhcp_transaction_early(p32 *transaction)
 { if (fail_random) return false; happened('T'); *transaction = 0x01020300u + (p32)++serial; return true; }
 static bipolar system_random_fill(void *into, positive size, int nonblocking)
 { (void)nonblocking; happened('S'); if (fail_spread) return -1; memset(into, spread_byte, size); return 0; }
+/* The client socket's number: 77, or 0 when standard input was shut. */
+static b32 client_handle = 77;
 static bipolar dhcp_open(string_address device, p32 host, bool broadcast)
-{ (void)device; if (fail_open) return -1; happened('U'); opens++; open_host = host; open_broadcast = broadcast; return 77; }
+{ (void)device; if (fail_open) return -1; happened('U'); opens++; open_host = host; open_broadcast = broadcast; return client_handle; }
 static bipolar dhcp_frames_open(string_address device)
 { (void)device; require(dhcp_frames < 0, "no packet socket left open"); if (fail_frames) return -1; happened('F'); frame_opens++; return 88; }
 static void dhcp_frames_close(void)
@@ -67023,7 +67025,7 @@ static bipolar system_write_all(positive handle, const void *data, positive size
 static bipolar socket_send(b32 handle, const void *data, positive size, b32 flags,
                            const socket_address_internet *to, positive tosize)
 {
-    (void)flags; (void)tosize; require(handle == 77, "send on the opened socket");
+    (void)flags; (void)tosize; require(handle == client_handle, "send on the opened socket");
     if (sends == fail_send_at) { sends++; return -1; }
     if (sends < 64) {
         memcpy(sent[sends].bytes, data, size < 300 ? size : 300);
@@ -67033,7 +67035,7 @@ static bipolar socket_send(b32 handle, const void *data, positive size, b32 flag
     sends++;
     return (bipolar)size;
 }
-static void socket_close(b32 handle) { require(handle == 77, "close the opened socket"); happened('u'); closes++; }
+static void socket_close(b32 handle) { require(handle == client_handle, "close the opened socket"); happened('u'); closes++; }
 static bool network_deadline_begin(network_deadline *deadline, positive seconds, positive nanoseconds)
 {
     if (begins == fail_begin_at && fail_begin_at_valid) { begins++; return false; }
@@ -67076,7 +67078,7 @@ static void reset(void)
     fail_begin_at = fail_send_at = -1; spread_byte = 0;
     opens = closes = sends = begins = completes = receives = 0;
     frame_opens = frame_closes = recorded = ordered = 0; order[0] = 0;
-    dhcp_apart = -1; dhcp_frames = -1;
+    dhcp_apart = -1; dhcp_frames = -1; client_handle = 77;
     script_length = script_at = 0; complete_result = DHCP_OK;
     memset(sent, 0, sizeof sent); memset(budget, 0, sizeof budget);
     memset(records, 0, sizeof records);
@@ -67262,6 +67264,18 @@ int main(void)
     check(dhcp_reacquire("x", hardware, &lease, false, 3) == DHCP_NO_SOCKET && completes == 0 && closes == 1, "a refused send");
     reset(); lease = held; fail_begin_at = 0; fail_begin_at_valid = true;
     check(dhcp_reacquire("x", hardware, &lease, false, 3) == DHCP_NO_OFFER && completes == 0 && closes == 1, "no window");
+
+    /* A client socket numbered 0 -- the exchange started with standard
+       input shut -- is a socket like any other, and so is an answer's pipe. */
+    reset(); client_handle = 0; play(1); complete_result = DHCP_OK;
+    check(dhcp_ask("x", hardware, &lease) == DHCP_OK && closes == 1, "an acquisition on socket 0");
+    reset(); lease = held; client_handle = 0; complete_result = DHCP_OK;
+    check(dhcp_reacquire("x", hardware, &lease, false, 7) == DHCP_OK && closes == 1, "a renewal on socket 0");
+    reset(); lease = held; client_handle = 0;
+    check(dhcp_give_back("x", hardware, &lease, DHCP_DECLINE) == DHCP_OK && sends == 1 && closes == 1,
+          "a decline on socket 0");
+    reset(); dhcp_apart = 0; play(1); complete_result = DHCP_OK;
+    check(dhcp_ask("x", hardware, &lease) == DHCP_OK && recorded == 1, "an answer's pipe numbered 0 is said down");
 
     /* Giving an address back. */
     reset(); lease = held; lease.address = 0;
@@ -68946,6 +68960,20 @@ NET_MUTATION_EQUIVALENT = {
         "Past the key's end the walk can only find the key a prefix of a longer entry, which no later entry equals: the lookup answers false either way.",
     ("net_apart", "if (want > most + 1)", ">", 1):
         "At want == most + 1 both arms leave it most + 1.",
+    ("dhcp_read", "if (size < DHCP_HEAD + 4)", "<", 1):
+        "A reply of only its header and cookie carries no message type and is refused either way.",
+    ("dhcp_frame_vouched", "while (byte_reader_left(&messages) >= 16)", ">=", 1):
+        "A last message of exactly sixteen bytes is only its header and holds no status, so it vouches for nothing either way.",
+    ("dhcp_frames_open", "if (!length || length >= sizeof request.name)", "||", 1):
+        "An empty name, opened, names no interface: SIOCGIFINDEX refuses it and the socket is closed with -1, as the refusal answers.",
+    ("dhcp_frames_open", "if (!length || length >= sizeof request.name)", ">=", 1):
+        "A name of sixteen bytes has no room for its end in an ifreq: SIOCGIFINDEX finds no such interface and -1 is answered either way.",
+    ("dhcp_frame_next", "if (ready <= 0)", "<=", 1):
+        "A wait that answers 0 is a deadline gone by; going round again, the loop's own deadline check answers NETWORK_SILENT, as this does.",
+    ("dhcp_frame_next", "if (got < 0)", "<", 1):
+        "A frame of no bytes is no frame: it is answered 0, as the refusal of a frame is.",
+    ("dhcp_ask", "(wait < 250 ? 250 : wait % 1000) * 1000000))", "<", 1):
+        "At wait == 250 both arms are 250.",
     ("tls_parse_key_usage", "if (unused > 7 || at >= stop)", ">=", 1): 'With no bit octet the unused-count octet is read as the final one; for unused 0 it is zero (refused), and for 1 to 7 its trailing-zero count is below its value, so the canonical test refuses it as the original does.',
 }
 

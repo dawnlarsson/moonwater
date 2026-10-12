@@ -17130,7 +17130,13 @@ static b32 dhcp_apart = -1;
    only while dhcp_ask runs. */
 static bipolar dhcp_frames = -1;
 
-static COLD bool dhcp_confine(b32 handle)
+/*
+        The exchange's filter, net_apart's kind (net_filter): the architecture,
+        then the call. The client socket's send and the answer's write are
+        pinned to their descriptors; x32's bit-30 numbers match nothing listed
+        and are killed with the rest.
+*/
+static COLD fn dhcp_filter_build(net_filter address_to filter, b32 handle)
 {
         static const p32 allowed[] = {
             (p32)syscall(recvfrom), (p32)syscall(recvmsg), (p32)syscall(ppoll),
@@ -17140,6 +17146,31 @@ static COLD bool dhcp_confine(b32 handle)
         const p32 pinned[2][2] = {{(p32)syscall(sendto), (p32)handle},
                                   {(p32)syscall(write), (p32)dhcp_apart}};
         positive count = array_count(allowed);
+
+        filter->used = 0;
+        net_filter_put(filter, NET_FILTER_LOAD, 0, 0, NET_FILTER_ARCH);
+        net_filter_put(filter, NET_FILTER_EQUAL, 1, 0, NET_APART_ARCH);
+        net_filter_answer(filter, SECCOMP_RET_KILL_PROCESS);
+        net_filter_put(filter, NET_FILTER_LOAD, 0, 0, NET_FILTER_NUMBER);
+        //      A pinned call, then its descriptor: the low half of its first
+        //      argument, which is all of the int the kernel reads. Another
+        //      call goes on to the next block.
+        for (positive i = 0; i < array_count(pinned); i++)
+        {
+                positive call = net_filter_when(filter, pinned[i][0]);
+
+                net_filter_require(filter, 0, ~(p32)0, pinned[i] + 1, 1);
+                net_filter_answer(filter, SECCOMP_RET_ALLOW);
+                net_filter_past(filter, call);
+        }
+        for (positive i = 0; i < count; i++)
+                net_filter_put(filter, NET_FILTER_EQUAL, (p8)(count - i), 0, allowed[i]);
+        net_filter_answer(filter, SECCOMP_RET_KILL_PROCESS);
+        net_filter_answer(filter, SECCOMP_RET_ALLOW);
+}
+
+static COLD bool dhcp_confine(b32 handle)
+{
         p32 keep[3] = {(p32)handle, (p32)dhcp_apart,
                        dhcp_frames >= 0 ? (p32)dhcp_frames : descriptors_none};
         net_filter filter;
@@ -17157,31 +17188,7 @@ static COLD bool dhcp_confine(b32 handle)
                             NET_APART_NOBODY, NET_APART_NOBODY) < 0)) ||
             system_call_5(syscall(prctl), PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0)
                 return false;
-
-        //      net_apart's kind of filter (net_filter): the architecture, then
-        //      the call. x32's bit-30 numbers match nothing listed and are
-        //      killed with the rest.
-        filter.used = 0;
-        net_filter_put(address_of filter, NET_FILTER_LOAD, 0, 0, NET_FILTER_ARCH);
-        net_filter_put(address_of filter, NET_FILTER_EQUAL, 1, 0, NET_APART_ARCH);
-        net_filter_answer(address_of filter, SECCOMP_RET_KILL_PROCESS);
-        net_filter_put(address_of filter, NET_FILTER_LOAD, 0, 0, NET_FILTER_NUMBER);
-        //      A pinned call, then its descriptor: the low half of its first
-        //      argument, which is all of the int the kernel reads. Another
-        //      call goes on to the next block.
-        for (positive i = 0; i < 2; i++)
-        {
-                positive call = net_filter_when(address_of filter, pinned[i][0]);
-
-                net_filter_require(address_of filter, 0, ~(p32)0, pinned[i] + 1, 1);
-                net_filter_answer(address_of filter, SECCOMP_RET_ALLOW);
-                net_filter_past(address_of filter, call);
-        }
-        for (positive i = 0; i < count; i++)
-                net_filter_put(address_of filter, NET_FILTER_EQUAL, (p8)(count - i),
-                               0, allowed[i]);
-        net_filter_answer(address_of filter, SECCOMP_RET_KILL_PROCESS);
-        net_filter_answer(address_of filter, SECCOMP_RET_ALLOW);
+        dhcp_filter_build(address_of filter, handle);
         return net_filter_install(address_of filter);
 }
 

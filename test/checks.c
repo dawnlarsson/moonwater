@@ -71515,6 +71515,10 @@ static fn http_chain_deadline(void)
 #define DHCP_TEST_WRITE_FRAMES 1
 #define DHCP_TEST_SEND_FRAMES 2
 #define DHCP_TEST_NO_SECCOMP 3
+//      The allowed scenario with the answer's pipe, or the packet socket,
+//      numbered 0, as it is when the exchange starts with standard input shut.
+#define DHCP_TEST_APART_ZERO 4
+#define DHCP_TEST_FRAMES_ZERO 5
 
 static b32 dhcp_confined_child(positive scenario, bipolar spare, p8 address_to said)
 {
@@ -71554,7 +71558,21 @@ static b32 dhcp_confined_child(positive scenario, bipolar spare, p8 address_to s
                         system_call_3(syscall(seccomp), 1, 0,
                                       (positive)address_of filter);
                 }
-                dhcp_apart = ends[1];
+                b32 answer = ends[1];
+
+                if (scenario == DHCP_TEST_APART_ZERO &&
+                    system_call_3(syscall(dup3), (positive)ends[1], 0, 0) == 0)
+                {
+                        system_close(ends[1]);
+                        answer = 0;
+                }
+                if (scenario == DHCP_TEST_FRAMES_ZERO && frames >= 0 &&
+                    system_call_3(syscall(dup3), (positive)frames, 0, 0) == 0)
+                {
+                        system_close((b32)frames);
+                        frames = 0;
+                }
+                dhcp_apart = answer;
                 dhcp_frames = frames;
                 if (handle < 0 || frames < 0 || !dhcp_confine((b32)handle))
                         system_call_1(syscall(exit_group),
@@ -71564,7 +71582,7 @@ static b32 dhcp_confined_child(positive scenario, bipolar spare, p8 address_to s
                 if (system_call_1(syscall(close), (positive)spare) != -EBADF ||
                     system_call_1(syscall(close), (positive)ends[0]) != -EBADF)
                         system_call_1(syscall(exit_group), 4);
-                system_call_3(syscall(write), (positive)ends[1],
+                system_call_3(syscall(write), (positive)answer,
                               (positive)address_of byte, 1);
                 if (scenario == DHCP_TEST_WRITE_FRAMES)
                         system_call_3(syscall(write), (positive)frames,
@@ -71577,7 +71595,7 @@ static b32 dhcp_confined_child(positive scenario, bipolar spare, p8 address_to s
                         byte = 2;
                         socket_send((b32)handle, address_of byte, 1, 0,
                                     address_of discard, sizeof discard);
-                        system_call_3(syscall(write), (positive)ends[1],
+                        system_call_3(syscall(write), (positive)answer,
                                       (positive)address_of byte, 1);
                         //      The packet socket was kept: it closes.
                         if (system_call_1(syscall(close), (positive)frames) != 0)
@@ -71633,7 +71651,168 @@ static fn dhcp_confinement(void)
         status = dhcp_confined_child(DHCP_TEST_SEND_FRAMES, spare, address_of said);
         check("a send on the packet socket kills the confined exchange",
               said == 1 && (status & 0x7f) == 31);
+        {
+                //      The head (architecture, then the call), two pinned
+                //      blocks of five, the nine calls allowed and the two
+                //      answers: twenty-five steps, the pinned descriptors
+                //      where the blocks put them.
+                static net_filter filter;
+                b32 kept = dhcp_apart;
+
+                dhcp_apart = 6;
+                dhcp_filter_build(address_of filter, 5);
+                dhcp_apart = kept;
+                check("the exchange's filter is its head, two pinned calls, nine others and its answers",
+                      filter.used == 4 + 2 * 5 + 9 + 2 &&
+                          filter.steps[4].value == (p32)syscall(sendto) &&
+                          filter.steps[6].value == 5 &&
+                          filter.steps[9].value == (p32)syscall(write) &&
+                          filter.steps[11].value == 6);
+        }
+        status = dhcp_confined_child(DHCP_TEST_APART_ZERO, spare, address_of said);
+        check("an exchange whose answer's pipe is descriptor 0 is confined all the same",
+              said == 2 && (status & 0x7f) == 31);
+        status = dhcp_confined_child(DHCP_TEST_FRAMES_ZERO, spare, address_of said);
+        check("an exchange whose packet socket is descriptor 0 keeps it",
+              said == 2 && (status & 0x7f) == 31);
         system_close(spare);
+}
+
+/*
+        The exchange's own sockets, made for real in a user and network
+        namespace of the check's own, where it is root over a loopback of its
+        own: with standard input shut, so the first socket each opens is
+        numbered 0 -- a packet socket that is opened and closed, and a client
+        socket bound to port 68 that is no broadcast socket unless asked --
+        and a frame of exactly the room a frame has, sent over loopback from
+        port 67 to 68 and read off the packet socket. The child says what
+        held as bits down a pipe; 0x80 is a namespace it could not make.
+*/
+static fn dhcp_sockets_in_namespace(void)
+{
+        b32 ends[2];
+        bipolar child;
+        p8 bits = 0;
+        positive raw = 0;
+
+        if (net_as_emulated() ||
+            system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC) != 0)
+                return;
+        child = system_fork();
+        if (!child)
+        {
+                p8 map[48];
+                positive uid = (positive)system_call(syscall(getuid));
+                positive gid = (positive)system_call(syscall(getgid));
+                p8 said = 0;
+                bipolar route;
+
+                if (system_call_1(syscall(unshare), CLONE_NEWUSER | CLONE_NEWNET) < 0 ||
+                    net_test_write("/proc/self/setgroups", "deny") < 0)
+                {
+                        said = 0x80;
+                        system_write_all((positive)ends[1], address_of said, 1);
+                        system_call_1(syscall(exit_group), 0);
+                }
+                net_test_map(map, uid);
+                (void)net_test_write("/proc/self/uid_map", (string_address)map);
+                net_test_map(map, gid);
+                (void)net_test_write("/proc/self/gid_map", (string_address)map);
+                route = netlink_open_groups(0);
+                if (route >= 0)
+                {
+                        (void)netlink_link_up((b32)route, 1);
+                        socket_close((b32)route);
+                }
+                system_close(0);
+                {
+                        bipolar frames = dhcp_frames_open("lo");
+
+                        said |= frames == 0 ? 1 : 0;
+                        dhcp_frames = frames;
+                        dhcp_frames_close();
+                        said |= system_call_3(syscall(fcntl), 0, 1, 0) < 0 ? 2 : 0;
+                }
+                {
+                        bipolar handle = dhcp_open("lo", HOST_ANY, false);
+                        socket_address_internet bound = {0};
+                        p32 length = sizeof bound;
+                        b32 broadcast = 1;
+                        p32 size = sizeof broadcast;
+
+                        if (handle == 0 &&
+                            socket_name(0, address_of bound, address_of length) == 0 &&
+                            bound.port == network_order_16(DHCP_CLIENT_PORT))
+                                said |= 4;
+                        if (handle >= 0 &&
+                            socket_option_get((b32)handle, SOL_SOCKET, SO_BROADCAST,
+                                              address_of broadcast, address_of size) == 0 &&
+                            !broadcast)
+                                said |= 8;
+                        if (handle >= 0)
+                                socket_close((b32)handle);
+                }
+                {
+                        static p8 payload[DHCP_FRAME_ROOM - 28];
+                        static p8 into[DHCP_FRAME_ROOM];
+                        bipolar frames = dhcp_frames_open("lo");
+                        bipolar sender = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+                        socket_address_internet from = {.family = AF_INET,
+                            .port = network_order_16(DHCP_SERVER_PORT),
+                            .host = network_order_32(HOST_LOOPBACK)};
+                        socket_address_internet to = {.family = AF_INET,
+                            .port = network_order_16(DHCP_CLIENT_PORT),
+                            .host = network_order_32(HOST_LOOPBACK)};
+                        network_deadline deadline;
+
+                        memory_fill(payload, 0x5a, sizeof payload);
+                        if (frames >= 0 && sender >= 0 &&
+                            socket_bind((b32)sender, address_of from, sizeof from) == 0 &&
+                            socket_send((b32)sender, payload, sizeof payload, 0, address_of to,
+                                        sizeof to) == (bipolar)sizeof payload &&
+                            network_deadline_begin(address_of deadline, 2, 0))
+                        {
+                                //      Loopback shows the frame leaving and
+                                //      arriving; only the arrival is read.
+                                for (positive tries = 0; tries < 4; tries++)
+                                {
+                                        socket_address_internet peer;
+                                        p32 peer_size = sizeof peer;
+                                        p32 destination = 0;
+                                        bipolar got = dhcp_frame_next(
+                                            frames, into, sizeof into, address_of peer,
+                                            address_of peer_size, address_of destination,
+                                            address_of deadline);
+
+                                        if (got == (bipolar)sizeof payload)
+                                        {
+                                                said |= 16;
+                                                break;
+                                        }
+                                        if (got < 0)
+                                                break;
+                                }
+                        }
+                }
+                system_write_all((positive)ends[1], address_of said, 1);
+                system_call_1(syscall(exit_group), 0);
+        }
+        system_close(ends[1]);
+        if (child > 0)
+        {
+                (void)system_read_retry((positive)ends[0], address_of bits, 1);
+                (void)system_wait4_retry(child, address_of raw, 0, null);
+        }
+        system_close(ends[0]);
+        if (child <= 0 || bits == 0x80)
+        {
+                log_direct(str("net: DHCP sockets in a namespace NOT RUN -- no user namespace\n"));
+                return;
+        }
+        check("a packet socket numbered 0 is opened, and closed", (bits & 3) == 3);
+        check("a client socket numbered 0 is bound to port 68", (bits & 4) != 0);
+        check("a client socket not asked to broadcast does not", (bits & 8) != 0);
+        check("a frame of exactly the room a frame has is read", (bits & 16) != 0);
 }
 
 /*
@@ -72038,6 +72217,12 @@ static fn dhcp_frames_judged(void)
         for (positive at = 0; at < sizeof message; at++)
                 message[at] = (p8)(at * 7 + 3);
         size = dhcp_test_frame(frame, message, sizeof message, 0);
+        {
+                positive empty = dhcp_test_frame(copy, message, 0, 0);
+
+                check("a reply frame of an empty datagram is a frame of nothing",
+                      dhcp_unframe(copy, empty, false, address_of got) && got.length == 0);
+        }
         check("a reply frame with its headers right is taken",
               dhcp_unframe(frame, size, false, address_of got) &&
                   got.source == 0x0a000202 && got.destination == 0xffffffff &&
@@ -72157,6 +72342,28 @@ static fn dhcp_frames_judged(void)
                       !dhcp_frame_vouched(control, 40));
                 control[0] = 0;
                 check("a message length under its own header ends the walk",
+                      !dhcp_frame_vouched(control, 40));
+                //      A message of only its header, then PACKET_AUXDATA.
+                memory_zero(control, sizeof control);
+                control[0] = 16;
+                control[16] = 36;
+                network_store_16(control + 24, 0x0701);
+                control[28] = 8;
+                control[32] = 8;
+                check("a control message of only its header is stepped over",
+                      dhcp_frame_vouched(control, 56));
+                //      SOL_PACKET with another type, and type 8 at another level.
+                memory_zero(control, sizeof control);
+                control[0] = 36;
+                network_store_16(control + 8, 0x0701);
+                control[12] = 99;
+                control[16] = 0x80;
+                check("another SOL_PACKET message is no word on the checksum",
+                      !dhcp_frame_vouched(control, 40));
+                control[8] = 1;
+                control[9] = 0;
+                control[12] = 8;
+                check("type 8 at another level is no word on the checksum",
                       !dhcp_frame_vouched(control, 40));
                 memory_zero(control, sizeof control);
                 control[0] = 20;
@@ -76106,6 +76313,7 @@ b32 main(void)
         net_group(http_chain_deadline);
         net_group(leasing);
         net_group(dhcp_confinement);
+        net_group(dhcp_sockets_in_namespace);
         net_group(dhcp_frames_judged);
         net_group(tls_ct_real);
         net_group(dhcp_frames_on_loopback);
