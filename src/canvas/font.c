@@ -232,6 +232,7 @@
 #define FONT_SHELVES 512
 #define FONT_LOOKUPS 16
 #define FONT_PAIRS 64
+#define FONT_WAYS 4
 #define FONT_MEMO 512
 #define FONT_GROUP 6144
 #define FONT_NEAR 512
@@ -342,7 +343,7 @@ typedef struct
         p8 address_to atlas;
         p32 atlas_width, atlas_height, shelf_count, shelf_bottom, slot_count;
         bool started, scratched, clip, gather, overflow, track, mark, direct, ramp_ready;
-        p32 epoch;
+        p32 epoch, pair_turns;
         p32 point_count, contour_count, components;
         b32 left_side;
         b32 band, rows, stride, width, grain, cross, wound, x, y;
@@ -3104,20 +3105,29 @@ static const p32 address_to font_tones(font_engine address_to e, p32 colour, p32
 {
         p64 key = (p64)1 << 63 | (p64)e->contrast << 48 | (p64)e->linear << 56 |
                   (p64)(colour & 0xffffff) << 24 | (background & 0xffffff);
-        font_pairing address_to pair = &e->pairs[(key * 0x9e3779b97f4a7c15ull) >> 58];
+        //      Four ways to a set of pairs, and a set picked by the key's hash:
+        //      a terminal's colours of a screen are a few dozen pairs, and one
+        //      way to a set made every cell of two colours that hashed alike
+        //      a fresh 256-pixel table (17 times the cost of a cell at 64 pairs).
+        //      The ways of a set are taken round-robin, two bits a set.
+        p32 set = (p32)((key * 0x9e3779b97f4a7c15ull) >> 60), turn = (e->pair_turns >> (2 * set)) & 3;
+        font_pairing address_to pair = &e->pairs[set * FONT_WAYS];
 
-        if (pair->key != key)
+        for (p32 w = 0; w < FONT_WAYS; w++)
+                if (pair[w].key == key)
+                        return pair[w].pixel;
+
+        e->pair_turns = (e->pair_turns & ~(3u << 2 * set)) | (((turn + 1) & 3) << 2 * set);
+        pair += turn;
+        font_ramp(e, colour);
+        for (p32 c = 0; c < 256; c++)
         {
-                font_ramp(e, colour);
-                for (p32 c = 0; c < 256; c++)
-                {
-                        pair->pixel[c] = font_mix(e, background, colour, e->ramp[c]);
-                        for (p32 k = 0; k < 4; k++)
-                                pair->planes[k][c] = (p8)(pair->pixel[c] >> (8 * k));
-                }
-                pair->ground = background & 0xffffff;
-                pair->key = key;
+                pair->pixel[c] = font_mix(e, background, colour, e->ramp[c]);
+                for (p32 k = 0; k < 4; k++)
+                        pair->planes[k][c] = (p8)(pair->pixel[c] >> (8 * k));
         }
+        pair->ground = background & 0xffffff;
+        pair->key = key;
         return pair->pixel;
 }
 
