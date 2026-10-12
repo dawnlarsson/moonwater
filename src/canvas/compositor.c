@@ -1002,6 +1002,89 @@ static int compositor_keymap_event(struct compositor_keymap *map, unsigned int c
 
 /* ---- end of the keymap ---- */
 
+/* ---- pointer: what a hand means ---- */
+
+/*
+        Acceleration, the way a desktop does it: a mouse reports counts, not
+        pixels, and the same count means aiming when the hand is slow and
+        crossing the screen when it is fast, so the gain is a curve on speed.
+        Below the floor it is exactly one to one, which is what makes careful
+        movement land where it is aimed; above the ceiling it is flat. Fixed
+        point, speed in counts a millisecond: the kernel desktop's curve.
+*/
+#define CP_ACCEL_ONE 1024
+#define CP_ACCEL_FLOOR 1
+#define CP_ACCEL_CEILING 8
+#define CP_ACCEL_MAX (CP_ACCEL_ONE * 5 / 2)
+
+static int compositor_gain(int speed)
+{
+        if (speed <= CP_ACCEL_FLOOR)
+                return CP_ACCEL_ONE;
+        if (speed >= CP_ACCEL_CEILING)
+                return CP_ACCEL_MAX;
+        return CP_ACCEL_ONE + (CP_ACCEL_MAX - CP_ACCEL_ONE) * (speed - CP_ACCEL_FLOOR) /
+                                  (CP_ACCEL_CEILING - CP_ACCEL_FLOOR);
+}
+
+static unsigned long long compositor_isqrt(unsigned long long value)
+{
+        unsigned long long root = 0, bit = 1ull << 62;
+
+        while (bit > value)
+                bit >>= 2;
+        for (; bit; bit >>= 2)
+                if (value >= root + bit)
+                {
+                        value -= root + bit;
+                        root = (root >> 1) + bit;
+                }
+                else
+                        root >>= 1;
+        return root;
+}
+
+// The gain of one movement of the hand, dx and dy together, in the time since the last.
+static int compositor_gain_of(int dx, int dy, unsigned long long interval)
+{
+        unsigned long long distance, speed;
+
+        if (interval < 1000000)
+                interval = 1000000;
+        distance = compositor_isqrt((unsigned long long)((long long)dx * dx) +
+                                    (unsigned long long)((long long)dy * dy));
+        speed = distance * 1000000 / interval;
+        return compositor_gain((int)(speed < CP_ACCEL_CEILING ? speed : CP_ACCEL_CEILING));
+}
+
+// A count turned into pixels. The remainder is what stops a gain that is not
+// whole from dropping the fraction of every movement: a slow drag would come
+// up short of where it was aimed.
+static int compositor_accel(int delta, int *remainder, int gain)
+{
+        long long scaled = (long long)delta * gain + *remainder;
+
+        if (!delta)
+                return 0;
+        *remainder = (int)(scaled % CP_ACCEL_ONE);
+        scaled /= CP_ACCEL_ONE;
+        return (int)(scaled < -2147483647 ? -2147483647 : scaled > 2147483647 ? 2147483647 : scaled);
+}
+
+// Where a tablet's report is on a size: the report held to its range, then
+// the offset in it times the size over the range, rounded down.
+static int compositor_tablet(int value, int minimum, int maximum, int size)
+{
+        long long span = (long long)maximum - minimum, offset;
+
+        if (span <= 0)
+                return 0;
+        offset = (long long)(value < minimum ? minimum : value > maximum ? maximum : value) - minimum;
+        return (int)(offset * size / span);
+}
+
+/* ---- end of the pointer ---- */
+
 /*
         The DRM and evdev interface this needs, as the kernel's uapi lays it
         out. The ioctl numbers are _IOWR('d', n, size) with the size in bits
@@ -1117,6 +1200,11 @@ struct compositor_absinfo
 #define COMPOSITOR_REL_Y 1u
 #define COMPOSITOR_REL_WHEEL 8u
 #define COMPOSITOR_REL_HWHEEL 6u
+#define COMPOSITOR_REL_WHEEL_HI 11u
+#define COMPOSITOR_REL_HWHEEL_HI 12u
+#define COMPOSITOR_EV_SYN 0u
+#define COMPOSITOR_BTN_TOUCH 0x14au
+#define COMPOSITOR_EVIOCSCLOCKID 0x400445a0u
 #define COMPOSITOR_BTN_LEFT 0x110u
 #define COMPOSITOR_BTN_TASK 0x117u
 #define COMPOSITOR_KEY_A 30u
@@ -1243,6 +1331,11 @@ static struct
         int pointer_x, pointer_y;
         struct compositor_keymap keymap;
         int cycle;           // an Alt-Tab is under way: the z of the window it is on, from 1
+        int raw_x, raw_y;    // what the mouse has said since its last report
+        int accel_x, accel_y; // the fraction of a pixel the gain has not yet paid out
+        int tablet_x, tablet_y, tablet_have; // what a tablet has said since its last report
+        positive stamp;      // when the last movement was
+        unsigned char hires[COMPOSITOR_INPUTS]; // the device reports its wheel in 120ths
         unsigned char held[COMPOSITOR_INPUTS]; // the modifiers each keyboard holds down
         int layout_given; // -l named one, and the settings are not looked at
         unsigned int next_id, placed, connections;
@@ -1752,6 +1845,14 @@ static void compositor_input_add(unsigned int number)
         compositor.absolute_x[at][0] = compositor.absolute_x[at][1] = 0;
         compositor.absolute_y[at][0] = compositor.absolute_y[at][1] = 0;
         compositor.held[at] = 0;
+        // A wheel that reports in 120ths says so, and its detents are then not counted twice.
+        compositor.hires[at] = (unsigned char)(relative >> COMPOSITOR_REL_WHEEL_HI & 1);
+        // The events are stamped by the clock the speed of the hand is measured on.
+        {
+                int monotonic = 1;
+
+                system_control(handle, COMPOSITOR_EVIOCSCLOCKID, address_of monotonic);
+        }
 
         if (tablet)
         {
@@ -1880,6 +1981,13 @@ static int compositor_wants_pointer(const struct compositor_client *client)
 {
         return client && (__atomic_load_n(&client->page->window.want, __ATOMIC_RELAXED) &
                           WINDOW_WANT_POINTER);
+}
+
+// The wheel is wanted by what wants the pointer, and by what wants it alone.
+static int compositor_wants_wheel(const struct compositor_client *client)
+{
+        return client && (__atomic_load_n(&client->page->window.want, __ATOMIC_RELAXED) &
+                          (WINDOW_WANT_POINTER | WINDOW_WANT_WHEEL));
 }
 
 // Where the surfaces are in the stack is what their z says, bottom up.
@@ -3385,6 +3493,53 @@ static void compositor_button(unsigned int code, int down)
         }
 }
 
+/*
+        One report of a device is over: a mouse's counts since the last one are
+        one movement of the hand, with the gain of its speed, and a tablet's
+        place is where the report says on the output. Both axes of either are
+        one movement: taken one at a time the cursor moved twice for it, the
+        second time with the other axis a report out of date, and two axes
+        timed each against the last gave left and right one speed and up and
+        down another.
+*/
+static int compositor_report(positive now)
+{
+        int moved = 0;
+
+        if (compositor.tablet_have)
+        {
+                if (compositor.tablet_have & 1)
+                        compositor.pointer_x = compositor.tablet_x;
+                if (compositor.tablet_have & 2)
+                        compositor.pointer_y = compositor.tablet_y;
+                compositor.tablet_have = 0;
+                moved = 1;
+        }
+
+        if (compositor.raw_x || compositor.raw_y)
+        {
+                int dx = compositor.raw_x, dy = compositor.raw_y, gain;
+
+                compositor.raw_x = compositor.raw_y = 0;
+                gain = compositor_gain_of(dx, dy, now - compositor.stamp);
+                compositor.stamp = now;
+                compositor.pointer_x += compositor_accel(dx, &compositor.accel_x, gain);
+                compositor.pointer_y += compositor_accel(dy, &compositor.accel_y, gain);
+                moved = 1;
+        }
+
+        return moved;
+}
+
+// The wheel goes to what is under the pointer, or what holds it.
+static void compositor_wheel(int v120, int horizontal)
+{
+        struct compositor_client *under = compositor.grab ? compositor.grab : compositor.hover;
+
+        if (compositor_wants_wheel(under))
+                compositor_post(under, SURFACE_EVENT_POINTER_WHEEL, 0, 0, v120, horizontal);
+}
+
 static void compositor_input_read(unsigned int at)
 {
         struct compositor_input_event events[64];
@@ -3413,41 +3568,42 @@ static void compositor_input_read(unsigned int at)
                 for (unsigned int i = 0; i < (unsigned int)got / sizeof(events[0]); i++)
                 {
                         struct compositor_input_event *event = &events[i];
+                        positive now = (positive)event->seconds * 1000000000ull + (positive)event->microseconds * 1000ull;
 
                         if (event->type == COMPOSITOR_EV_REL && event->code == COMPOSITOR_REL_X)
-                                compositor.pointer_x += event->value, moved = 1;
+                                compositor.raw_x += event->value;
                         else if (event->type == COMPOSITOR_EV_REL && event->code == COMPOSITOR_REL_Y)
-                                compositor.pointer_y += event->value, moved = 1;
+                                compositor.raw_y += event->value;
                         else if (event->type == COMPOSITOR_EV_REL &&
+                                 (event->code == COMPOSITOR_REL_WHEEL_HI || event->code == COMPOSITOR_REL_HWHEEL_HI))
+                                compositor_wheel(event->value, event->code == COMPOSITOR_REL_HWHEEL_HI);
+                        else if (event->type == COMPOSITOR_EV_REL && !compositor.hires[at] &&
                                  (event->code == COMPOSITOR_REL_WHEEL || event->code == COMPOSITOR_REL_HWHEEL))
-                        {
-                                struct compositor_client *under = compositor.grab ? compositor.grab : compositor.hover;
-
-                                if (compositor_wants_pointer(under))
-                                        compositor_post(under, SURFACE_EVENT_POINTER_WHEEL, 0, 0,
-                                                        event->value * 120,
-                                                        event->code == COMPOSITOR_REL_HWHEEL);
-                        }
+                                compositor_wheel(event->value * 120, event->code == COMPOSITOR_REL_HWHEEL);
                         else if (event->type == COMPOSITOR_EV_ABS && event->code < 2)
                         {
                                 int *range = event->code ? compositor.absolute_y[at] : compositor.absolute_x[at];
-                                long span = (long)range[1] - range[0];
-                                long size = event->code ? compositor.height : compositor.width;
-                                // As Canvas maps a tablet: offset times size over span.
-                                long place = span > 0 ? ((long)event->value - range[0]) * size / span : 0;
+                                int place = compositor_tablet(event->value, range[0], range[1],
+                                                              event->code ? compositor.height : compositor.width);
 
                                 if (event->code)
-                                        compositor.pointer_y = (int)place;
+                                        compositor.tablet_y = place;
                                 else
-                                        compositor.pointer_x = (int)place;
-                                moved = 1;
+                                        compositor.tablet_x = place;
+                                compositor.tablet_have |= event->code ? 2 : 1;
                         }
-                        else if (event->type == COMPOSITOR_EV_KEY && event->code >= COMPOSITOR_BTN_LEFT &&
-                                 event->code <= COMPOSITOR_BTN_TASK)
+                        else if (event->type == COMPOSITOR_EV_SYN && event->code == 0)
+                                moved |= compositor_report(now);
+                        else if (event->type == COMPOSITOR_EV_KEY &&
+                                 ((event->code >= COMPOSITOR_BTN_LEFT && event->code <= COMPOSITOR_BTN_TASK) ||
+                                  event->code == COMPOSITOR_BTN_TOUCH))
                         {
+                                // A touch is the left button; the others are where they are.
+                                moved |= compositor_report(now);
                                 if (moved)
                                         compositor_motion(), moved = 0;
-                                compositor_button(event->code, event->value != 0);
+                                compositor_button(event->code == COMPOSITOR_BTN_TOUCH ? COMPOSITOR_BTN_LEFT : event->code,
+                                                  event->value != 0);
                         }
                         else if (event->type == COMPOSITOR_EV_KEY && event->code < 256)
                                 compositor_key(at, event->code, event->value);
@@ -3944,11 +4100,12 @@ static b32 compositor_main()
 // surface ----------------------------------------------------------
 /*
         A test client: surface [-x X] [-y Y] [-w WIDTH] [-h HEIGHT]
-        [-c RRGGBB] [-r ROLE] [-p] [-n] [-m] [-2] [-F COMMITS] [-W WRITERS]
+        [-c RRGGBB] [-r ROLE] [-p] [-L] [-n] [-m] [-2] [-F COMMITS] [-W WRITERS]
         [-O OFFSET] [-z WIDTH] [-T TITLE] [-N COUNT] [-X COUNT] [-f FONT.ttf] [-t TEXT] [-s SECONDS].
 
         A window of one colour at X, Y, a line of TEXT drawn with font.c on
-        it when FONT is given, pointer events asked for with -p, and every
+        it when FONT is given, pointer events asked for with -p (or the wheel
+        alone with -L), and every
         event it is sent written to standard output, one line each. It lives
         until its close box is pressed, the compositor goes, or SECONDS. -n
         never commits, and -F commits COMMITS times in a row, whole window
@@ -4079,7 +4236,7 @@ static b32 surface_main()
 {
         bipolar x = -1, y = -1, width = 320, height = 200, colour = 0x3366aa, role = SURFACE_ROLE_APP;
         bipolar seconds = -1;
-        b32 pointer = 0, never = 0, twice = 0, away = 0;
+        b32 pointer = 0, wheel = 0, never = 0, twice = 0, away = 0;
         bipolar flood = 0, offset = -1, writers = 1, wider = -1, many = 0, again = 0;
         string_address title = null;
         b32 child = 0;
@@ -4096,9 +4253,10 @@ static b32 surface_main()
 
                 if (option[0] != '-' || !option[1] || option[2])
                         continue;
-                if (option[1] == 'p' || option[1] == 'n' || option[1] == '2' || option[1] == 'm')
+                if (option[1] == 'p' || option[1] == 'L' || option[1] == 'n' || option[1] == '2' || option[1] == 'm')
                 {
                         pointer |= option[1] == 'p';
+                        wheel |= option[1] == 'L';
                         never |= option[1] == 'n';
                         twice |= option[1] == '2';
                         away |= option[1] == 'm';
@@ -4187,8 +4345,8 @@ static b32 surface_main()
                 surface->window.x = (int)x;
         if (y >= 0)
                 surface->window.y = (int)y;
-        if (pointer)
-                surface->window.want = WINDOW_WANT_POINTER;
+        if (pointer || wheel)
+                surface->window.want = pointer ? WINDOW_WANT_POINTER : WINDOW_WANT_WHEEL;
         if (away)
                 surface->window.style |= WINDOW_MINIMIZED;
         if (wider >= 0)

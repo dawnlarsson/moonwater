@@ -102766,6 +102766,57 @@ static void check_compositor_keymap(void) {
     ck_ok(compositor_held_bit(30)==0&&compositor_held_flags(0)==0);
 }
 
+/* What a hand means: the gain of a mouse's speed (the kernel desktop's curve,
+   one to one below a count a millisecond and two and a half times above
+   eight), a count turned into pixels without losing its fraction, a tablet's
+   report on the output rounded down as the kernel desktop's was, and the
+   square root the speed is made with. */
+static void check_compositor_pointer(void) {
+    ck_ok(compositor_gain(0)==1024&&compositor_gain(1)==1024&&compositor_gain(8)==2560&&compositor_gain(99)==2560);
+    ck_ok(compositor_gain(4)==1024+1536*3/7&&compositor_gain(2)<compositor_gain(3)&&compositor_gain(7)<2560);
+    /* The curve only rises, and is exact at each count. */
+    for(int speed=1;speed<8;speed++)ck_ok(compositor_gain(speed+1)>compositor_gain(speed)&&
+        compositor_gain(speed)==1024+1536*(speed-1)/7);
+    /* The fraction is kept: a hundred steps of one count at a gain that is not whole are what the gain says. */
+    for(int gain=1024;gain<=2560;gain+=137)
+        for(int sign=-1;sign<=1;sign+=2) {
+            int remainder=0;long long pixels=0;
+            for(int step=0;step<100;step++)pixels+=compositor_accel(sign,&remainder,gain);
+            ck_ok(pixels*1024+remainder==(long long)sign*100*gain&&remainder>-1024&&remainder<1024);
+        }
+    { int remainder=0; ck_ok(compositor_accel(0,&remainder,2560)==0&&remainder==0); }
+    { int remainder=0; ck_ok(compositor_accel(-2147483647-1,&remainder,2560)==-2147483647&&compositor_accel(2147483647,&remainder,2560)==2147483647); }
+    /* One movement is the gain of both axes at their speed: 3 and 4 is 5 counts, in the time between reports. */
+    ck_ok(compositor_gain_of(0,0,1000000)==1024&&compositor_gain_of(3,4,1000000)==compositor_gain(5)&&
+          compositor_gain_of(3,4,0)==compositor_gain(5)&&compositor_gain_of(3,4,10000000)==1024);
+    ck_ok(compositor_gain_of(-3,-4,1000000)==compositor_gain(5)&&compositor_gain_of(4,-3,1000000)==compositor_gain(5));
+    ck_ok(compositor_gain_of(1000,0,1000000)==2560&&compositor_gain_of(-2147483647-1,-2147483647-1,1000000)==2560);
+    ck_ok(compositor_gain_of(1,0,~0ull)==1024);
+    /* The square root, which is exact on whole squares and the floor between. */
+    for(unsigned long long v=0;v<70000;v++) {
+        unsigned long long r=compositor_isqrt(v);
+        ck_ok(r*r<=v&&(r+1)*(r+1)>v);
+    }
+    for(unsigned long long v=0x7fffffffffffffffull;v>0x7fffffffffff0000ull;v-=4093) {
+        unsigned long long r=compositor_isqrt(v);
+        ck_ok(r*r<=v&&(r+1)*(r+1)>v);
+    }
+    ck_ok(compositor_isqrt(~0ull)==4294967295ull&&compositor_isqrt(1ull<<62)==1ull<<31);
+    /* A tablet: offset over span times the size, rounded down, held to the range. */
+    ck_ok(compositor_tablet(0,0,32767,2560)==0&&compositor_tablet(32767,0,32767,2560)==2560&&
+          compositor_tablet(16384,0,32767,2560)==1280&&compositor_tablet(-5,0,32767,2560)==0&&
+          compositor_tablet(99999,0,32767,2560)==2560);
+    ck_ok(compositor_tablet(5,0,0,2560)==0&&compositor_tablet(5,9,3,2560)==0&&compositor_tablet(-100,-200,200,1000)==250);
+    /* The lane's tablet says the report of the pixel rounded up and gets the pixel, and the one rounded down is one short. */
+    int short_by_one=0;
+    for(int x=0;x<2560;x++) {
+        int up=(int)((x*32767LL+2559)/2560);
+        ck_ok(compositor_tablet(up,0,32767,2560)==x);
+        short_by_one+=compositor_tablet((int)(x*32767LL/2560),0,32767,2560)==x-1;
+    }
+    ck_ok(short_by_one>0);
+}
+
 /* The scene is the painter's picture: surfaces drawn bottom to top over a
    desktop, inside the damage, and no pixel outside it. Random surfaces (some
    off the screen, some framed, some not, some one over another, some the
@@ -103138,6 +103189,7 @@ int main(void) {
     check_compositor_panel_once();
     check_compositor_cross();
     check_compositor_keymap();
+    check_compositor_pointer();
     check_compositor_scene();
     for(unsigned i=0;i<sizeof(font_bits);i++)font_bits[i]=(i*29+i/16*73)&255;
     struct window_cell cells[96];unsigned seed=123;

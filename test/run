@@ -18394,6 +18394,30 @@ wait $c
 echo m6-done
 """)
 
+#   The hand: how far a mouse moves the pointer at a slow pace and at a fast
+#   one (the compositor's acceleration is the kernel desktop's curve), and the
+#   wheel for a window that asked for the wheel alone. The windows write what
+#   they are sent; the script counts it at the end.
+open(stick + "/m7", "w").write(r"""exec > /dev/ttyS0 2>&1
+/compositor &
+c=$!
+sleep 2
+/surface -x 100 -y 100 -w 2300 -h 700 -c 224466 -T hand -p -s 120 > /tmp/h1.out &
+sleep 1
+/surface -x 100 -y 840 -w 600 -h 100 -c 446622 -T wheel -L -s 120 > /tmp/h2.out &
+sleep 1
+echo m7-ready
+sleep 45
+echo m7-reading
+cat /tmp/h1.out
+echo m7-second
+cat /tmp/h2.out
+echo m7-end
+kill $c
+wait $c
+echo m7-done
+""")
+
 open(stick + "/m1", "w").write(r"""exec > /dev/ttyS0 2>&1
 /compositor &
 c=$!
@@ -18769,6 +18793,63 @@ out.append(("M6.5 two Alt-Tab steps with Alt held go down two windows: the secon
 sent = re.findall(r"m6 keys: one (\d+) two (\d+) three (\d+)", text)
 out.append(("M6.6 Alt and Tab and F9 are the compositor's: of everything typed only the letter, pressed and let go, reached a window: the one with the keys",
             " ".join(sent[-1]) if sent else "none", "0 2 0"))
+
+#   A mouse, slowly and quickly: the same sixty reports of ten counts, twenty
+#   milliseconds apart and then as fast as they can be sent. The first is
+#   600 pixels (one to one below a count a millisecond) and the second is
+#   farther, never more than two and a half times as far. The pointer is parked
+#   by the tablet first, at another column each time (a tablet that is told the
+#   place it already has reports nothing), and what the window under it says
+#   is where it was.
+qcmd({"execute": "device_add", "arguments": {"driver": "usb-mouse", "id": "hand1"}})
+time.sleep(1)
+type_text("sh /mnt/m7\n")
+ready7 = wait_for(b"m7-ready", 60)
+time.sleep(3)
+def travel(x, y, pause):
+    moveto(x, y)
+    time.sleep(0.3)
+    for step in range(60):
+        send([{"type": "rel", "data": {"axis": "x", "value": 10}}])
+        time.sleep(pause)
+    time.sleep(0.5)
+travel(400, 300, 0.02)
+travel(300, 500, 0)
+send([{"type": "btn", "data": {"down": True, "button": "wheel-up"}},
+      {"type": "btn", "data": {"down": False, "button": "wheel-up"}}])
+time.sleep(0.5)
+moveto(350, 900)
+time.sleep(0.3)
+for step in range(5):
+    send([{"type": "rel", "data": {"axis": "x", "value": 1}}])
+    time.sleep(0.05)
+send([{"type": "btn", "data": {"down": True, "button": "wheel-down"}},
+      {"type": "btn", "data": {"down": False, "button": "wheel-down"}}])
+time.sleep(0.5)
+wait_for(b"m7-done", 90)
+text = serial().decode("latin1")
+moves = [(int(a), int(b)) for a, b in re.findall(r"surface: event 3 0 (-?\d+) (-?\d+)", text.split("m7-reading")[-1])]
+def reach(row):
+    # How far the pointer went along a row of the window, from where the tablet put it.
+    xs = [x for x, y in moves if abs(y - row) <= 2]
+    return max(xs) - min(xs) if xs else -1
+slow7, fast7 = reach(300 - 120), reach(500 - 120)
+out.append(("P1.1 a mouse moved slowly goes one to one: sixty reports of ten counts are 600 pixels",
+            str(slow7), "600"))
+out.append(("P1.2 and quickly goes farther, by no more than the curve's two and a half",
+            "yes" if slow7 > 0 and 600 * 1.4 < fast7 <= 1500 else "slow %s fast %s" % (slow7, fast7), "yes"))
+first7, second7 = text.split("m7-reading")[-1].split("m7-second")[:2] if "m7-second" in text else ("", "")
+wheel7 = re.findall(r"surface: event 5 0 (-?\d+) (\d+)", first7)
+seen7 = re.findall(r"surface: event (\d+) (\d+) (-?\d+) (-?\d+)", first7)
+out.append(("P1.3 one detent of the wheel is 120, once, to the window under the pointer",
+            " ".join("%s:%s" % w for w in wheel7) or "none of %d events, last %s" % (len(seen7), seen7[-3:]), "120:0"))
+#   A window that asked for the wheel alone is sent the wheel and not the pointer's
+#   motion, which is what lets it sleep while the hand moves.
+types7 = re.findall(r"surface: event (\d+) \d+ (-?\d+) (-?\d+)", second7)
+out.append(("P1.4 a window that asked for the wheel alone is sent it (down, -120) and no motion of the pointer",
+            "%s %d" % (" ".join(a + ":" + b for t, a, b in types7 if t == "5"), sum(t in ("1", "3") for t, a, b in types7)),
+            "-120:0 0"))
+
 
 
 qcmd({"execute": "quit"})

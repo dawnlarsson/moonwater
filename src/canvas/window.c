@@ -379,6 +379,9 @@ static inline unsigned int window_cell_colour(unsigned int index)
    asked for mouse tracking sets WINDOW_WANT_POINTER so clicks, drags and
    the wheel reach its key ring instead of only moving the desktop. */
 #define WINDOW_WANT_POINTER 1u
+// The wheel alone, for a program that scrolls itself and has no use for the
+// pointer's motion: it is sent the wheel and nothing else, and wakes for nothing else.
+#define WINDOW_WANT_WHEEL 2u
 
 #define WINDOW_CELL_W 8
 #define WINDOW_CELL_H 16
