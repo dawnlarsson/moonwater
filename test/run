@@ -20002,7 +20002,9 @@ until(lambda: shell.number("ps | grep -c '[t]erminal'", 30) == "1" and shell.num
 #   with the boot's messages in it, and the terminal in front with its prompt, each where its share of
 #   the output puts it. Programs are read by what started them: the machine script, not the compositor.
 def pids(name):
-    return shell.run("grep -l '^%s$' /proc/[0-9]*/comm | sed 's#/proc/\\([0-9]*\\)/comm#\\1#'" % name, 20)[0].split()
+    # A program the desktop ended and nobody has waited for is a zombie with its name still in /proc: not running.
+    listed = shell.run("grep -l '^%s$' /proc/[0-9]*/comm | sed 's#/proc/\\([0-9]*\\)/comm#\\1#'" % name, 20)[0].split()
+    return [pid for pid in listed if shell.run("cut -d' ' -f3 /proc/%s/stat" % pid, 20)[0].strip() != "Z"]
 
 def ppid(pid):
     return shell.number("cut -d' ' -f4 /proc/%s/stat" % pid, 20) if pid else ""
@@ -20050,6 +20052,68 @@ ended = shell.run("dmesg | awk '/the compositor [(]pid [0-9]+[)] is up/ {bad=\"\
 out.append(("R1.2l nothing the desktop started has ended since the compositor came up, as the machine's log would say", "yes" if not ended else ended[-80:], "yes"))
 out.append(("R1.2j an idle kernel log window wakes no time in five seconds", "yes" if first and first == second else "%s %s" % (first, second), "yes"))
 
+#   The text size. Each terminal logs the size it draws at and the cell it measured, when it starts and when the
+#   size changes. Control-= grows the text one step and Control-- shrinks it, Control-Shift-= grows it too (Shift
+#   is not looked at), Control-0 goes back to the default of 14 pixels, every terminal follows the size the file
+#   /root/terminal/size names, a terminal started later reads it, and a file that names no step is the default.
+def text_size(pid):
+    found = re.findall(r"terminal pid %s text size (\d+) px, cell (\d+) by (\d+) px" % pid, shell.run("dmesg", 20)[0])
+    return found[-1] if found else None
+
+def size_is(pid, want):
+    got = text_size(pid)
+    return got if got and got[0] == want else None
+
+main_terminal = pids("terminal")
+main_terminal = main_terminal[0] if len(main_terminal) == 1 else "0"
+at_start = text_size(main_terminal)
+out.append(("R1.2m the desktop's terminal draws its text at the default size, 14 pixels, one step below 16",
+            at_start[0] if at_start else "none", "14"))
+chord("ctrl", "equal")
+grown, _ = until(lambda: size_is(main_terminal, "16"), 10)
+out.append(("R1.2n Control-= grows the text one step to 16 pixels, and the cell the terminal measures is taller",
+            "%s" % ("taller" if grown and at_start and int(grown[2]) > int(at_start[2]) else "no (%s)" % (grown,)), "taller"))
+chord("ctrl", "minus")
+shrunk, _ = until(lambda: size_is(main_terminal, "14"), 10)
+out.append(("R1.2n Control-- takes it back one step, to the cell it was",
+            "%s" % ("same" if shrunk and at_start and shrunk[1:] == at_start[1:] else "no (%s)" % (shrunk,)), "same"))
+chord("ctrl", "shift", "equal")
+shifted, _ = until(lambda: size_is(main_terminal, "16"), 10)
+chord("ctrl", "0")
+reset, _ = until(lambda: size_is(main_terminal, "14"), 10)
+out.append(("R1.2n Control-Shift-= grows it too, and Control-0 goes back to the default",
+            "%s" % ("yes" if shifted and reset else "no (%s, %s)" % (shifted, reset)), "yes"))
+
+#   A second terminal follows the size the first one set, through the file and with no key of its own; and a
+#   terminal started later reads the file, and a file that names no step falls back to the default.
+before = pids("terminal")
+chord("ctrl", "shift", "t")
+second, _ = until(lambda: [pid for pid in pids("terminal") if pid not in before], 10)
+second = second[0] if second else "0"
+second_start = text_size(second)
+chord("ctrl", "equal")
+both, _ = until(lambda: size_is(main_terminal, "16") and size_is(second, "16"), 10)
+out.append(("R1.2o a second terminal follows Control-= through the size file: it draws at 16 pixels too",
+            "yes" if both and second_start and second_start[0] == "14" else "no (%s, %s)" % (second_start, both), "yes"))
+file_text = shell.run("cat /root/terminal/size", 10)[0].strip()
+out.append(("and the file names the step, 16", file_text, "16"))
+
+chord("ctrl", "shift", "t")
+later, _ = until(lambda: [pid for pid in pids("terminal") if pid not in before and pid != second], 10)
+later = later[0] if later else "0"
+later_start = text_size(later)
+out.append(("R1.2p a terminal started after the change reads the file: it starts at 16 pixels",
+            later_start[0] if later_start else "none", "16"))
+
+shell.run("echo nonsense > /root/terminal/size", 10)
+fell, _ = until(lambda: size_is(main_terminal, "14") and size_is(second, "14") and size_is(later, "14"), 10)
+out.append(("R1.2q a file that names no step is the default: every terminal on the desktop draws at 14 pixels",
+            "yes" if fell else "no (%s, %s, %s)" % (text_size(main_terminal), text_size(second), text_size(later)), "yes"))
+for pid in (second, later):
+    shell.run("kill -9 %s" % pid, 10)
+shell.run("rm -f /root/terminal/size", 10)
+until(lambda: len(pids("terminal")) == 1, 10)
+
 #   Control-Shift-T asks the machine for a terminal and the machine script starts it: one more, whose
 #   parent is not the compositor, that stays up and answers.
 before = pids("terminal")
@@ -20061,6 +20125,7 @@ added = [pid for pid in now if pid not in before]
 out.append(("R1.2k Control-Shift-T is a request the machine script answers: one more terminal, not the compositor's child, still there after three seconds",
             "%s %s" % ("one more" if more and len(now) == len(before) + 1 else "no (%d to %d)" % (len(before), len(now)),
                        "script" if added and ppid(added[0]) not in ("", compositor() or "-") else "compositor"), "one more script"))
+
 
 #   A compositor that has stopped answering: Control-Alt-Backspace ends it and
 #   a new one is started, with the keyboard heard by the kernel alone.

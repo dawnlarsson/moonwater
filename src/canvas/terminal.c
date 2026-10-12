@@ -60,7 +60,21 @@
 #define TERMINAL_LOG_TOP 6
 // Lines the log keeps: the kernel's own ring is 128 KiB of text and is what this follows from the start.
 #define TERMINAL_LOG_HISTORY 1024
-#define TERMINAL_SIZE 16
+// The text sizes a terminal zooms through, in pixels: one step a press, the same on every terminal. The
+// default is one step below the 16 this program drew at before there was a ladder.
+#define TERMINAL_STEPS 14
+static const unsigned int terminal_steps[TERMINAL_STEPS] = {12, 14, 16, 18, 20, 22, 24, 28, 32, 36, 40, 48, 56, 64};
+#define TERMINAL_SIZE 14
+// The step every terminal follows, in one file: written to a temporary name and renamed over it, and read by
+// every terminal when its directory changes. A missing or corrupt file is the default.
+#define TERMINAL_SIZE_DIR "/root/terminal"
+#define TERMINAL_SIZE_FILE "/root/terminal/size"
+#define TERMINAL_SIZE_TEMP "/root/terminal/size.tmp"
+#define TERMINAL_IN_CLOSE_WRITE 0x8u
+#define TERMINAL_IN_MOVED_TO 0x80u
+#define TERMINAL_IN_DELETE 0x200u
+#define TERMINAL_IN_NONBLOCK 0x800
+#define TERMINAL_IN_CLOEXEC 0x80000
 #define TERMINAL_ATLAS 512
 // A ring is cut for the widest display there is, or this, as the kernel's was.
 #define TERMINAL_CEILING 3840
@@ -905,8 +919,10 @@ static void terminal_configure(b32 master, unsigned int width, unsigned int heig
         rows = rows ? rows : 1;
         pixels_w = terminal_pixels(columns, rows, &pixels_h);
 
-        // The same size: nothing to draw, and the answer is a commit with no damage in it.
-        if (pixels_w == terminal.width && pixels_h == terminal.height)
+        // The same size: nothing to draw, and the answer is a commit with no damage in it. The cells have to be the
+        // same too: a new text size can keep the pixels and cut the grid another way.
+        if (pixels_w == terminal.width && pixels_h == terminal.height && columns == window->columns &&
+            rows == window->rows)
         {
                 terminal_acknowledge(serial);
                 return;
@@ -935,6 +951,221 @@ static void terminal_configure(b32 master, unsigned int width, unsigned int heig
 
         // The first picture in the new page says which ask it answers.
         terminal.surface->acked_serial = serial;
+}
+
+/*
+        The text size. The step is kept in one file that every terminal on the desktop follows: a decimal number of
+        pixels and a newline, nothing else. A missing file, or one that does not say a step of the ladder, is the
+        default; and the file is replaced by a rename, so a reader sees the old size or the new one, never a part.
+*/
+static void terminal_said(b32 reading, string_address what);
+
+static unsigned int terminal_size_read(void)
+{
+        p8 text[8] = {0};
+        bipolar handle = system_open_at(AT_FDCWD, (string_address)TERMINAL_SIZE_FILE, FILE_READ | O_CLOEXEC);
+        bipolar got;
+        unsigned int value = 0;
+
+        if (handle < 0)
+                return 0;
+
+        got = system_read_once(handle, text, sizeof(text));
+        system_close(handle);
+
+        for (bipolar at = 0; at < got; at++)
+        {
+                if (text[at] >= '0' && text[at] <= '9')
+                        value = value * 10 + (unsigned int)(text[at] - '0');
+                else if (text[at] != '\n' || at + 1 != got)
+                        return 0;
+        }
+
+        for (unsigned int at = 0; at < TERMINAL_STEPS; at++)
+                if (terminal_steps[at] == value)
+                        return value;
+        return 0;
+}
+
+static unsigned int terminal_step_index(unsigned int size)
+{
+        unsigned int at = 0;
+
+        // The largest step that is not above size, which is the step a size of the desktop's sits on.
+        while (at + 1 < TERMINAL_STEPS && terminal_steps[at + 1] <= size)
+                at++;
+        return at;
+}
+
+static b32 terminal_size_write(unsigned int size)
+{
+        p8 text[4];
+        unsigned int digits[3], count = 0, length = 0;
+        bipolar handle;
+        b32 wrote;
+
+        for (unsigned int value = size; value || !count; value /= 10)
+                digits[count++] = value % 10;
+        while (count)
+                text[length++] = (p8)('0' + digits[--count]);
+        text[length++] = '\n';
+
+        // The directory is made if it is not there; a directory that is there is the answer it should be.
+        compositor_call(syscall(mkdirat), (positive)AT_FDCWD, (positive)TERMINAL_SIZE_DIR, 0755, 0, 0, 0);
+        handle = system_open_at(AT_FDCWD, (string_address)TERMINAL_SIZE_TEMP, FILE_WRITE | O_CLOEXEC);
+        if (handle < 0)
+                return false;
+
+        wrote = system_write_all((positive)handle, text, length) == length;
+        system_close(handle);
+
+        return wrote && compositor_call(syscall(renameat), (positive)AT_FDCWD, (positive)TERMINAL_SIZE_TEMP,
+                                        (positive)AT_FDCWD, (positive)TERMINAL_SIZE_FILE, 0, 0) >= 0;
+}
+
+/*
+        The text is drawn at a new size: the metrics are taken again, and the cells are cut again to the window
+        they are in, so the window keeps its pixels and holds fewer cells as the text grows (and more as it
+        shrinks). The pty is told the new size, as for any resize.
+*/
+static void terminal_text_set(b32 master, unsigned int size)
+{
+        terminal.size = size << 6;
+        terminal.grid = font_metrics_at(terminal.plain[0], terminal.size);
+        terminal.cell_w = (unsigned int)terminal.grid.cell_width;
+        terminal.cell_h = (unsigned int)terminal.grid.cell_height;
+        terminal.bar = terminal.cell_h * 5 / 8;
+        term_cell_w = terminal.cell_w;
+        term_cell_h = terminal.cell_h;
+        terminal_configure(master, terminal.width, terminal.height, terminal.serial);
+}
+
+static positive terminal_decimal(p8 address_to text, unsigned int value)
+{
+        p8 digits[10];
+        positive count = 0, length = 0;
+
+        do
+                digits[count++] = (p8)('0' + value % 10);
+        while ((value /= 10) && count < sizeof(digits));
+        while (count)
+                text[length++] = digits[--count];
+        return length;
+}
+
+static void terminal_text_said(b32 reading)
+{
+        p8 text[64];
+        positive length = 0;
+        const p8 address_to piece[4] = {" text size ", " px, cell ", " by ", " px"};
+        unsigned int values[3] = {terminal.size >> 6, terminal.cell_w, terminal.cell_h};
+
+        for (unsigned int at = 0; at < 3; at++)
+        {
+                for (const p8 address_to from = piece[at]; *from; from++)
+                        text[length++] = *from;
+                length += terminal_decimal(text + length, values[at]);
+        }
+        for (const p8 address_to from = piece[3]; *from; from++)
+                text[length++] = *from;
+        text[length] = 0;
+        terminal_said(reading, (string_address)text);
+}
+
+/*
+        Ctrl with the character a layout gives one of the zoom keys: = and + grow the text, - and _ shrink it,
+        0 goes back to the default. Shift is not looked at, because it is what makes + and _ on the keys that
+        carry them, and a layout that puts the sign on other keys sends its own characters.
+*/
+static int terminal_zoom_key(const struct surface_event address_to event)
+{
+        if (event->type != SURFACE_EVENT_KEY || !(event->flags & SURFACE_KEY_DOWN) ||
+            !(event->flags & SURFACE_KEY_CONTROL))
+                return 0;
+
+        switch ((unsigned int)event->b)
+        {
+        case '=':
+        case '+':
+                return 1;
+        case '-':
+        case '_':
+                return -1;
+        case '0':
+                return 2;
+        }
+        return 0;
+}
+
+static void terminal_zoom(b32 master, b32 reading, int by)
+{
+        unsigned int at = terminal_step_index(terminal.size >> 6), next = at;
+
+        if (by == 2)
+                next = terminal_step_index(TERMINAL_SIZE);
+        else if (by > 0)
+                next = at + 1 < TERMINAL_STEPS ? at + 1 : at;
+        else
+                next = at > 0 ? at - 1 : 0;
+
+        if (terminal_steps[next] == terminal.size >> 6)
+                return;
+
+        // Written first, so the other terminals are told what this one is about to be; this one is told the
+        // same by its own watch, and finds nothing to change.
+        terminal_size_write(terminal_steps[next]);
+        terminal_text_set(master, terminal_steps[next]);
+        terminal_text_said(reading);
+}
+
+// The file changed: the size it names is the one every terminal draws at, the default when it names none.
+static b32 terminal_size_follow(b32 master, b32 reading)
+{
+        unsigned int size = terminal_size_read();
+
+        size = size ? size : TERMINAL_SIZE;
+        if (size == terminal.size >> 6)
+                return false;
+
+        terminal_text_set(master, size);
+        terminal_text_said(reading);
+        return true;
+}
+
+static void terminal_size_drain(long watch)
+{
+        p8 events[512];
+
+        // Read until the watch is empty, so that the next wait sleeps until the next change and not before.
+        while (compositor_call(syscall(read), (positive)watch, (positive)events, sizeof(events), 0, 0, 0) > 0)
+                ;
+}
+
+/*
+        surface_wait with the size directory's watch in it: the compositor's events, the far end and the watch
+        in one sleep, and nothing else, so an idle terminal wakes for none of them. A readable watch is drained
+        here and the change it names made at the top of the loop.
+*/
+static long terminal_wait(long other, long watch, long nanoseconds, b32 address_to moved)
+{
+        struct window_poll wanted[3] = {{(int)terminal.surface->window.handle, 1, 0}, {(int)other, 1, 0},
+                                        {(int)watch, 1, 0}};
+        long timeout[2] = {nanoseconds / 1000000000, nanoseconds % 1000000000};
+        long ready = window_call(WINDOW_SYS_PPOLL, (long)wanted, 3, nanoseconds < 0 ? 0 : (long)timeout, 0, 0, 0);
+
+        if (ready == -4) // EINTR
+                return 0;
+
+        if (ready > 0 && wanted[0].returned &&
+            surface_wakes(terminal.surface->window.handle, SURFACE_MSG_DONTWAIT) < 0)
+                return -1;
+
+        if (ready > 0 && wanted[2].returned)
+        {
+                terminal_size_drain(watch);
+                address_to moved = true;
+        }
+        return ready;
 }
 
 // The key a surface event is, as the window's key ring would have had it.
@@ -1128,9 +1359,10 @@ static b32 terminal_run(b32 reading)
         string_address paths[TERMINAL_FACES];
         string_address bold = null, ready_file = null;
         unsigned int cells[2] = {0, 0};
-        unsigned int count = 0, size = TERMINAL_SIZE, columns, rows, resize[3] = {0, 0, 0};
+        unsigned int count = 0, size = 0, columns, rows, resize[3] = {0, 0, 0};
         unsigned int max_columns, hung = reading;
-        b32 master, gone = false, dirty = true, closing = false, held = false, paced;
+        b32 master, gone = false, dirty = true, closing = false, held = false, paced, moved = false;
+        long watch = -1;
         positive oom_kills = 0, sync_since = 0, stalled_since = 0, last_frame = 0;
         bipolar child = 0;
         b32 lost = false;
@@ -1164,6 +1396,9 @@ static b32 terminal_run(b32 reading)
                 }
         }
 
+        // -s is the size asked for here; without it, the step the desktop's file names, and the default.
+        size = size ? size : terminal_size_read();
+        size = size ? size : TERMINAL_SIZE;
         size = size < 6 ? 6 : size > 200 ? 200 : size;
 
         if (!terminal_fonts(paths, count, bold, size))
@@ -1178,6 +1413,20 @@ static b32 terminal_run(b32 reading)
 
         term_cell_w = terminal.cell_w;
         term_cell_h = terminal.cell_h;
+
+        // The watch on the size directory: made here so that a change while this one starts is one it reads.
+        // Without the directory (it cannot be made) there is no watch, and the terminal keeps the size it has.
+        compositor_call(syscall(mkdirat), (positive)AT_FDCWD, (positive)TERMINAL_SIZE_DIR, 0755, 0, 0, 0);
+        watch = compositor_call(syscall(inotify_init1), TERMINAL_IN_NONBLOCK | TERMINAL_IN_CLOEXEC, 0, 0, 0, 0, 0);
+        if (watch >= 0 &&
+            compositor_call(syscall(inotify_add_watch), (positive)watch, (positive)TERMINAL_SIZE_DIR,
+                            TERMINAL_IN_CLOSE_WRITE | TERMINAL_IN_MOVED_TO | TERMINAL_IN_DELETE, 0, 0, 0) < 0)
+        {
+                system_close((bipolar)watch);
+                watch = -1;
+        }
+        // Read once more when the loop starts: a change between the read above and the watch is not missed.
+        moved = watch >= 0;
 
         // Shares of the output, in percent: the log at the left and the terminal across from it, over the
         // log's right edge, so that the log's lines can be read and the terminal is the one in front.
@@ -1198,13 +1447,16 @@ static b32 terminal_run(b32 reading)
         string_copy((string_address)surface->window.title, (string_address)(reading ? "kernel log" : "shell"));
         surface->window.want = WINDOW_WANT_POINTER;
 
+        // The ring is cut for the smallest text a zoom reaches, so that every size after this one has room in it.
+        font_metrics least = font_metrics_at(terminal.plain[0], terminal_steps[0] << 6);
+
         max_columns = (surface->window.display_width > TERMINAL_CEILING ? surface->window.display_width
                                                                        : TERMINAL_CEILING) /
-                      terminal.cell_w;
+                      (unsigned int)least.cell_width;
         {
                 unsigned int tallest = (surface->window.display_height > TERMINAL_CEILING * 9 / 16
                                             ? surface->window.display_height
-                                            : TERMINAL_CEILING * 9 / 16) / terminal.cell_h;
+                                            : TERMINAL_CEILING * 9 / 16) / (unsigned int)least.cell_height;
 
                 unsigned int history = reading ? TERMINAL_LOG_HISTORY : TERMINAL_HISTORY;
 
@@ -1246,6 +1498,7 @@ static b32 terminal_run(b32 reading)
         last_frame = clock_monotonic_nanoseconds();
 
         terminal_said(reading, " is on the screen");
+        terminal_text_said(reading);
 
         // The first picture is committed: whoever is starting windows in an order may start the next.
         if (ready_file)
@@ -1268,10 +1521,28 @@ static b32 terminal_run(b32 reading)
                 if (!reading)
                         term_follow_modes(master);
 
+                // The size file changed: the text is drawn at the size it names.
+                if (moved)
+                {
+                        moved = false;
+                        dirty |= terminal_size_follow(master, reading);
+                }
+
+                // The zoom keys are the terminal's, whichever window it is: the kernel's log follows them too.
                 while (surface_event(terminal.surface, &event))
+                {
+                        int zoom = terminal_zoom_key(&event);
+
+                        if (zoom)
+                        {
+                                terminal_zoom(master, reading, zoom);
+                                dirty = true;
+                                continue;
+                        }
                         if (!(reading ? klog_receive(&event, &dirty, &closing, resize)
                                       : terminal_receive(master, &event, &dirty, &closing, resize)))
                                 gone = true;
+                }
 
                 if (resize[2] && resize[2] != terminal.serial)
                 {
@@ -1384,10 +1655,10 @@ static b32 terminal_run(b32 reading)
                         b32 spare = !dirty && !synchronized_output && terminal.shown >= 0 &&
                                     terminal.valid[1 - terminal.shown];
                         b32 stalled = dirty && !synchronized_output && terminal.shown >= 0;
-                        long ready = surface_wait(terminal.surface, master,
-                                                  spare && timeout < 0     ? TERMINAL_IDLE_NANOSECONDS
-                                                  : stalled && timeout < 0 ? TERMINAL_STALL_NANOSECONDS
-                                                                           : timeout);
+                        long ready = terminal_wait(master, watch,
+                                                   spare && timeout < 0     ? TERMINAL_IDLE_NANOSECONDS
+                                                   : stalled && timeout < 0 ? TERMINAL_STALL_NANOSECONDS
+                                                                            : timeout, &moved);
 
                         if (ready < 0)
                         {
