@@ -1174,12 +1174,16 @@ static void terminal_zoom(b32 master, b32 reading, int by)
         terminal_text_said(reading);
 }
 
-// The file changed: the size it names is the one every terminal draws at, the default when it names none.
+// The size -s asked for, or none.
+static unsigned int terminal_asked;
+
+// The file changed: the size it names is the one every terminal draws at; when it names none, the size this one
+// was started at (-s, or the default).
 static b32 terminal_size_follow(b32 master, b32 reading)
 {
         unsigned int size = terminal_size_read();
 
-        size = size ? size : TERMINAL_SIZE;
+        size = size ? size : terminal_asked ? terminal_asked : TERMINAL_SIZE;
         if (size == terminal.size >> 6)
                 return false;
 
@@ -1453,6 +1457,7 @@ static b32 terminal_run(b32 reading)
         }
 
         // -s is the size asked for here; without it, the step the desktop's file names, and the default.
+        terminal_asked = size < 6 ? (size ? 6 : 0) : size > 200 ? 200 : size;
         size = size ? size : terminal_size_read();
         size = size ? size : TERMINAL_SIZE;
         size = size < 6 ? 6 : size > 200 ? 200 : size;
@@ -1482,7 +1487,10 @@ static b32 terminal_run(b32 reading)
                 watch = -1;
         }
         // Read once more when the loop starts: a change between the read above and the watch is not missed.
-        moved = watch >= 0;
+        // A size asked for with -s was not read, and is kept until the file changes (it was 16 px on a
+        // terminal started -s 16 -g 80x24, and this read, finding no file, made it the 14 px default in
+        // the window cut for 16: 100 columns by 26 rows).
+        moved = watch >= 0 && !terminal_asked;
 
         // Shares of the output, in percent: the log at the left and the terminal across from it, over the
         // log's right edge, so that the log's lines can be read and the terminal is the one in front.
