@@ -98731,6 +98731,103 @@ static fn check_hostile(const p8 address_to font, positive size, p32 mutations)
               hostile_cases == before + size + 1 + mutations);
 }
 
+/*
+        Edge cases of the cache's keys. A face id is 16 bits and is issued
+        again 65536 loads on: a glyph cached for the old face must not answer
+        for the new one that has the same id. A size from 16384 px up is no
+        size the engine draws, and is not one the key keeps the bits of, so a
+        huge size must never draw the small glyph whose key it truncates to. A
+        size of zero draws nothing and measures a one-pixel cell.
+*/
+static p8 reissue_atlas[512 * 512], truth_atlas[512 * 512];
+static font_engine reissue_engine, truth_engine;
+static p32 edge_frames[4][48 * 32];
+
+/*
+        One letter at 20 px onto a 48 by 32 frame of background, drawn with
+        the engine given. A truth is drawn by an engine started again for it,
+        so nothing it drew before can answer for it.
+*/
+static fn edge_draw(font_engine address_to e, const font_face address_to const address_to chain, p32 code,
+                    p32 size, p32 frame)
+{
+        font_target target = {edge_frames[frame], 48, 48, 32};
+        p8 text[1] = {(p8)code};
+
+        for (positive i = 0; i < 48 * 32; i++)
+                edge_frames[frame][i] = 0x123456;
+        font_draw(e, chain, 1, text, 1, size, 0, &target, 4 << 16, 24, 0xffffff, 0x123456);
+}
+
+static fn truth_draw(const font_face address_to face, p32 code, p32 frame)
+{
+        const font_face address_to chain[1] = {face};
+
+        font_start(&truth_engine, truth_atlas, 512, 512);
+        edge_draw(&truth_engine, chain, code, 20 * 64, frame);
+}
+
+static fn check_edges(font_face address_to one, font_face address_to two)
+{
+        font_face again;
+        const font_face address_to chain[1] = {one};
+        const font_face address_to other[1] = {&again};
+        static p32 untouched[48 * 32];
+        p32 code = 0;
+        positive loads = 0;
+
+        for (positive i = 0; i < 48 * 32; i++)
+                untouched[i] = 0x123456;
+
+        //      A letter the two faces draw differently, so the test can tell them apart.
+        for (p8 letter = 'A'; letter <= 'D' && !code; letter++)
+        {
+                truth_draw(one, letter, 2);
+                truth_draw(two, letter, 3);
+                if (memory_compare(edge_frames[2], edge_frames[3], sizeof(edge_frames[2])) != 0)
+                        code = letter;
+        }
+        check("reissue: some letter of A to D is drawn differently by the two faces", code != 0);
+
+        //      The engine draws the first face, the second face is loaded until
+        //      its id is the first's, and the engine draws the second face
+        //      with the same letter: it must be the second face's letter.
+        font_start(&reissue_engine, reissue_atlas, 512, 512);
+        edge_draw(&reissue_engine, chain, code, 20 * 64, 0);
+        do
+                font_load(&again, font_two, font_two_size, 0), loads++;
+        while (again.id != one->id && loads < 140000);
+        check("reissue: a later load gets the id of the first face", again.id == one->id && loads > 0);
+
+        edge_draw(&reissue_engine, other, code, 20 * 64, 1);
+        truth_draw(&again, code, 2);
+        check("reissue: a glyph cached for the old face does not answer for the new one",
+              memory_compare(edge_frames[1], edge_frames[2], sizeof(edge_frames[1])) == 0);
+
+        //      A size whose bits wrap in the key, and one past the engine's
+        //      largest, draw nothing; a size of zero draws nothing and measures
+        //      a one-pixel cell.
+        edge_draw(&engine, chain, 'A', 30 * 64, 0);
+        edge_draw(&engine, chain, 'A', 1 << 22 | 30 * 64, 1);
+        check("size: 65536 px, where the key's bits wrap, draws nothing",
+              memory_compare(edge_frames[1], untouched, sizeof(untouched)) == 0);
+        edge_draw(&engine, chain, 'A', 1 << 20, 1);
+        check("size: 16384 px is past what is drawn and draws nothing",
+              memory_compare(edge_frames[1], untouched, sizeof(untouched)) == 0);
+
+        font_metrics zero = font_metrics_at(one, 0);
+        font_target target = {edge_frames[1], 48, 48, 32};
+        p8 pair[2] = {'A', 'B'};
+        p32 pen;
+
+        for (positive i = 0; i < 48 * 32; i++)
+                edge_frames[1][i] = 0x123456;
+        pen = font_draw(&engine, chain, 1, pair, 2, 0, 0, &target, 4 << 16, 24, 0xffffff, 0x123456);
+        check("size: zero draws nothing, advances nothing, and measures a one-pixel cell",
+              pen == 0 && zero.cell_width == 1 && zero.cell_height == 1 &&
+              memory_compare(edge_frames[1], untouched, sizeof(untouched)) == 0);
+}
+
 b32 main()
 {
         font_face one, two;
@@ -98756,6 +98853,7 @@ b32 main()
         check_blend();
         check_fill_rect();
         check_sweep();
+        check_edges(&one, &two);
 
         guarded = memory(9 * 4096);
         check("hostile: a guard page",

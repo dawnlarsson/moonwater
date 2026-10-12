@@ -223,6 +223,9 @@
 #define FONT_COMPONENTS 512
 #define FONT_SUBTABLES 256
 #define FONT_EDGE 8192
+//      The largest size drawn, 16384 px in 26.6: a glyph at it is past FONT_EDGE
+//      and the cache's key keeps 22 bits of size, so no two sizes share a key.
+#define FONT_SIZE_LIMIT (1 << 20)
 #define FONT_BAND (1 << 16)
 #define FONT_ROWS 1024
 #define FONT_SLOTS 4096
@@ -339,6 +342,7 @@ typedef struct
         p8 address_to atlas;
         p32 atlas_width, atlas_height, shelf_count, shelf_bottom, slot_count;
         bool started, scratched, clip, gather, overflow, track, mark, direct, ramp_ready;
+        p32 epoch;
         p32 point_count, contour_count, components;
         b32 left_side;
         b32 band, rows, stride, width, grain, cross, wound, x, y;
@@ -511,6 +515,11 @@ static b32 font_height_of(const font_face address_to face, p32 glyph)
 
 p32 font_glyph(const font_face address_to face, p32 code);
 
+//      Bumped each time a face id is issued again: 65536 loads on, the 16-bit
+//      id of an old face is a new face's, and every engine's cache and memos
+//      keyed by it must be emptied before they answer for the new one.
+static p32 font_epoch;
+
 b32 font_load(font_face address_to face, const p8 address_to bytes, positive size,
               p32 index)
 {
@@ -594,9 +603,13 @@ b32 font_load(font_face address_to face, const p8 address_to bytes, positive siz
         face->kern = at[KERN];
         //      The id keys every cache, and engines on several threads may load
         //      faces at once: it is taken atomically, and never zero.
+        p32 serial;
         do
-                face->id = __atomic_add_fetch(&faces_loaded, 1, __ATOMIC_RELAXED) & 0xffff;
-        while (!face->id);
+                serial = __atomic_add_fetch(&faces_loaded, 1, __ATOMIC_RELAXED);
+        while (!(serial & 0xffff));
+        face->id = serial & 0xffff;
+        if (serial > 0xffff)
+                __atomic_add_fetch(&font_epoch, 1, __ATOMIC_RELAXED);
 
         face->ascent = (b16)font_i16(face, at[HHEA] + 4);
         face->descent = (b16)font_i16(face, at[HHEA] + 6);
@@ -2332,6 +2345,8 @@ static b32 font_shape(font_engine address_to e, const font_face address_to face,
         e->point_count = e->contour_count = e->components = 0;
         e->clip = false;
         *box = (font_bitmap){0};
+        if (size >= FONT_SIZE_LIMIT)
+                return FONT_TOO_LARGE;
 
         b32 refused = font_outline(e, face, glyph, 0);
         if (refused < 0 || !e->point_count)
@@ -2750,6 +2765,20 @@ static fn font_reset(font_engine address_to e)
         e->scratched = false;
 }
 
+//      Every cache and memo is emptied when a face id has been issued again.
+static fn font_sync(font_engine address_to e)
+{
+        p32 epoch = __atomic_load_n(&font_epoch, __ATOMIC_RELAXED);
+
+        if (e->epoch != epoch)
+        {
+                font_reset(e);
+                memory_zero(e->glyph_memo, sizeof(e->glyph_memo));
+                memory_zero(e->kern_memo, sizeof(e->kern_memo));
+                e->epoch = epoch;
+        }
+}
+
 //      A slot made, at the place in the index the lookup ended at.
 static fn font_enter(font_engine address_to e, p32 home, font_slot slot)
 {
@@ -2799,6 +2828,9 @@ static font_bitmap font_cached(font_engine address_to e, const font_face address
                   (p64)(phase & 7) << 6 | (p64)(style & 3) << 4;
         font_bitmap box = {0};
 
+        if (face && size >= FONT_SIZE_LIMIT)
+                return box;
+        font_sync(e);
         if (e->scratched || e->slot_count >= FONT_SLOTS * 3 / 4)
                 font_reset(e);
 
@@ -3194,6 +3226,7 @@ static font_memo address_to font_recall(font_memo address_to memo, p64 key)
 static fn font_find(font_engine address_to e, const font_face address_to const address_to faces,
                     p32 count, p32 code, p32 address_to face, p32 address_to glyph)
 {
+        font_sync(e);
         for (p32 i = 0; i < count; i++)
         {
                 p64 key = (p64)1 << 63 | (p64)faces[i]->id << 32 | code;
@@ -3213,6 +3246,7 @@ static fn font_find(font_engine address_to e, const font_face address_to const a
 
 static b32 font_kern(font_engine address_to e, const font_face address_to face, p32 left, p32 right, p32 size)
 {
+        font_sync(e);
         p64 key = (p64)1 << 63 | (p64)face->id << 32 | left << 16 | right;
         font_memo address_to memo = font_recall(e->kern_memo, key);
 
