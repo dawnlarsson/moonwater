@@ -19566,8 +19566,7 @@ out.append(("R1.1b with no font named, the image's fonts start the panel (Inter)
 #   Text is pixels. The panel's clock is lit in its tray, at the right end of
 #   the band along the bottom, which has nothing else bright in it, and the
 #   terminal's first row has its prompt, which the shell writes once it is up:
-#   the terminal is found as the black paper along the middle row (the desktop
-#   around it is 1b2733, and a pointer is not three hundred pixels wide).
+#   the terminal is where its share of the output puts it (the log is behind it).
 def bright(at, x0, y0, x1, y1):
     n = 0
     for y in range(y0, y1):
@@ -19576,30 +19575,13 @@ def bright(at, x0, y0, x1, y1):
             n += r > 0x90 and g > 0x90 and b > 0x90
     return n
 
-def terminal_body(width, height, at):
-    """The left and top of a run of black paper at least 300 pixels wide, or None."""
-    y = height // 2
-    best, start = (0, 0), None
-    for x in range(width + 1):
-        black = x < width and at(x, y) == "000000"
-        if black and start is None:
-            start = x
-        elif not black and start is not None:
-            best = max(best, (x - start, start))
-            start = None
-    if best[0] < 300:
-        return None
-    top = y
-    while top > 0 and at(best[1] + 8, top - 1) == "000000":
-        top -= 1
-    return best[1], top
-
 panel_lit = terminal_lit = 0
 body = None
 for _ in range(6):
     width, height, at = picture("r1-text")
     panel_lit = bright(at, W - 76, H - 24, W - 2, H)
-    body = terminal_body(width, height, at)
+    #   Where the terminal is: its share of the output puts its top left at 44 and 14 percent, under its titlebar.
+    body = (width * 44 // 100 + 2, height * 14 // 100 + 24)
     terminal_lit = bright(at, body[0], body[1], body[0] + 160, body[1] + 24) if body else 0
     if panel_lit > 20 and terminal_lit > 12:
         break
@@ -19720,6 +19702,8 @@ print("r1 klog memory %s" % shell.run("grep -E '^(VmRSS|RssAnon|RssFile|RssShmem
 first = shell.number("grep voluntary_ctxt_switches /proc/%s/status | tr -dc '0-9\\n' | head -1" % pid, 20)
 time.sleep(5)
 second = shell.number("grep voluntary_ctxt_switches /proc/%s/status | tr -dc '0-9\\n' | head -1" % pid, 20)
+ended = shell.run("dmesg | awk '/the compositor [(]pid [0-9]+[)] is up/ {bad=\"\"} /(terminal|klog|panel) pid [0-9]+ ended/ {bad=$0} END {print bad}'", 20)[0]
+out.append(("R1.2l nothing the desktop started has ended since the compositor came up, as the machine's log would say", "yes" if not ended else ended[-80:], "yes"))
 out.append(("R1.2j an idle kernel log window wakes no time in five seconds", "yes" if first and first == second else "%s %s" % (first, second), "yes"))
 
 #   Control-Shift-T asks the machine for a terminal and the machine script starts it: one more, whose
@@ -19876,7 +19860,7 @@ open(stick + "/m5", "w").write(r"""exec > /dev/ttyS0 2>&1
 /compositor &
 c=$!
 sleep 2
-/terminal -f /mnt/font.ttf -b /mnt/bold.ttf -s 16 &
+/terminal -f /mnt/font.ttf -b /mnt/bold.ttf -s 16 -g 80x24 &
 t=$!
 sleep 3
 echo m5-ready

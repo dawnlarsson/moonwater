@@ -35,7 +35,7 @@
         The font is a path: the image carries IBM Plex Mono under
         /usr/share/fonts, and the machine script names it.
 
-            terminal [-s PIXELS] [-f FONT.ttf]... [-b BOLD.ttf]
+            terminal [-s PIXELS] [-f FONT.ttf]... [-b BOLD.ttf] [-g COLUMNSxROWS]
 
         Dawn Larsson - Apache-2.0 license
         github.com/dawnlarsson/moonwater
@@ -828,7 +828,8 @@ static unsigned int terminal_pixels(unsigned int columns, unsigned int rows, uns
         where left and top (percents of the output) put it and the compositor keeps it on the work area.
 */
 static struct surface *terminal_open(unsigned int wide, unsigned int high, unsigned int left, unsigned int top,
-                                     unsigned int address_to columns, unsigned int address_to rows)
+                                     unsigned int address_to columns, unsigned int address_to rows,
+                                     const unsigned int address_to cells)
 {
         unsigned int pixels_h, pixels_w = terminal_pixels(1, 1, &pixels_h);
         struct surface *surface = surface_open(pixels_w, pixels_h, SURFACE_ROLE_APP), *made;
@@ -844,6 +845,14 @@ static struct surface *terminal_open(unsigned int wide, unsigned int high, unsig
         address_to rows = display_h * high / 100 / terminal.cell_h;
         address_to columns = address_to columns < 20 ? COLUMNS_WANTED : address_to columns;
         address_to rows = address_to rows < 4 ? ROWS_WANTED : address_to rows;
+
+        // A grid asked for (-g) is that many cells in the middle of the output, and not a share of it.
+        if (cells[0] && cells[1])
+        {
+                address_to columns = cells[0];
+                address_to rows = cells[1];
+        }
+
         pixels_w = terminal_pixels(address_to columns, address_to rows, &pixels_h);
         made = surface_resize(surface, pixels_w, pixels_h);
 
@@ -857,8 +866,8 @@ static struct surface *terminal_open(unsigned int wide, unsigned int high, unsig
         surface = made;
         terminal.width = pixels_w;
         terminal.height = pixels_h;
-        surface->window.x = (int)(display_w * left / 100);
-        surface->window.y = (int)(display_h * top / 100);
+        surface->window.x = cells[0] && cells[1] ? ((int)display_w - (int)pixels_w) / 2 : (int)(display_w * left / 100);
+        surface->window.y = cells[0] && cells[1] ? ((int)display_h - (int)pixels_h) / 2 : (int)(display_h * top / 100);
         return surface;
 }
 
@@ -1094,6 +1103,18 @@ static b32 terminal_receive(b32 master, const struct surface_event address_to ev
         return true;
 }
 
+// A line in the machine's log about this program, at its start and its end: its own standard output is nowhere.
+static void terminal_said(b32 reading, string_address what)
+{
+        p8 line[96];
+        positive length = 0;
+
+        for (string_address name = (string_address)(reading ? "klog pid " : "terminal pid "); *name; name++)
+                line[length++] = *name;
+        line[length] = 0;
+        compositor_kmsg(line, (positive)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0), what);
+}
+
 static b32 klog_drain(b32 far, b32 address_to gone, positive budget);
 static b32 klog_receive(const struct surface_event address_to event, b32 address_to dirty, b32 address_to closing,
                         unsigned int address_to resize);
@@ -1106,11 +1127,13 @@ static b32 terminal_run(b32 reading)
 {
         string_address paths[TERMINAL_FACES];
         string_address bold = null, ready_file = null;
+        unsigned int cells[2] = {0, 0};
         unsigned int count = 0, size = TERMINAL_SIZE, columns, rows, resize[3] = {0, 0, 0};
         unsigned int max_columns, hung = reading;
         b32 master, gone = false, dirty = true, closing = false, held = false, paced;
         positive oom_kills = 0, sync_since = 0, stalled_since = 0, last_frame = 0;
         bipolar child = 0;
+        b32 lost = false;
         struct surface address_to surface;
 
         claim_standard_descriptors();
@@ -1131,16 +1154,21 @@ static b32 terminal_run(b32 reading)
                         size = (unsigned int)surface_number(value, 0);
                 else if (option[1] == 'w')
                         ready_file = value;
+                else if (option[1] == 'g')
+                {
+                        // COLUMNSxROWS
+                        cells[0] = (unsigned int)surface_number(value, 0);
+                        for (positive at_x = 0; value[at_x]; at_x++)
+                                if (value[at_x] == 'x')
+                                        cells[1] = (unsigned int)surface_number(value + at_x + 1, 0);
+                }
         }
 
         size = size < 6 ? 6 : size > 200 ? 200 : size;
 
         if (!terminal_fonts(paths, count, bold, size))
         {
-                if (reading)
-                        log_direct(str("klog: no font; give one with -f FONT.ttf\n"));
-                else
-                        log_direct(str("terminal: no font; give one with -f FONT.ttf\n"));
+                terminal_said(reading, " has no font to draw with (-f FONT.ttf)");
                 return 1;
         }
 
@@ -1153,13 +1181,12 @@ static b32 terminal_run(b32 reading)
 
         // Shares of the output, in percent: the log at the left and the terminal across from it, over the
         // log's right edge, so that the log's lines can be read and the terminal is the one in front.
-        surface = reading ? terminal_open(TERMINAL_LOG_WIDE, TERMINAL_LOG_HIGH, TERMINAL_LOG_LEFT, TERMINAL_LOG_TOP, &columns, &rows)
-                      : terminal_open(TERMINAL_WIDE, TERMINAL_HIGH, TERMINAL_LEFT, TERMINAL_TOP, &columns, &rows);
+        surface = reading ? terminal_open(TERMINAL_LOG_WIDE, TERMINAL_LOG_HIGH, TERMINAL_LOG_LEFT, TERMINAL_LOG_TOP, &columns, &rows, cells)
+                      : terminal_open(TERMINAL_WIDE, TERMINAL_HIGH, TERMINAL_LEFT, TERMINAL_TOP, &columns, &rows, cells);
 
         if (!surface)
         {
-                string_format(log, "terminal: no compositor (%b)\n", (bipolar)surface_refused);
-                log_flush();
+                terminal_said(reading, " cannot make its surface: the compositor refused it");
                 return 1;
         }
 
@@ -1189,7 +1216,7 @@ static b32 terminal_run(b32 reading)
 
         if (!window || !terminal_frames())
         {
-                log_direct(str("terminal: no memory\n"));
+                terminal_said(reading, " has no memory for its cells");
                 surface_close(surface);
                 return 1;
         }
@@ -1209,8 +1236,7 @@ static b32 terminal_run(b32 reading)
 
         if (child < 0)
         {
-                string_format(log, "%s: cannot open its far end (%b)\n", reading ? "klog" : "terminal", child);
-                log_flush();
+                terminal_said(reading, " cannot open its far end");
                 surface_close(surface);
                 return 1;
         }
@@ -1218,6 +1244,8 @@ static b32 terminal_run(b32 reading)
         cursor_show();
         terminal_frame();
         last_frame = clock_monotonic_nanoseconds();
+
+        terminal_said(reading, " is on the screen");
 
         // The first picture is committed: whoever is starting windows in an order may start the next.
         if (ready_file)
@@ -1369,6 +1397,7 @@ static b32 terminal_run(b32 reading)
                                         hung = 1;
                                 }
                                 closing = true;
+                                lost = true;
                                 break;
                         }
 
@@ -1378,6 +1407,11 @@ static b32 terminal_run(b32 reading)
 
                 }
         }
+
+        // Said where the machine's log is, because nothing else is: this program's own output goes to
+        // wherever the machine script put it, which is nowhere.
+        terminal_said(reading, lost ? " ended: the compositor went away" : closing ? " ended: its window was closed"
+                                                                         : " ended: its far end is over");
 
         if (reading)
                 system_close(master);
