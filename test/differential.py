@@ -69009,8 +69009,6 @@ NET_MUTATION_EQUIVALENT = {
         "A server of 0.0.0.0 is this machine, where nothing answers DNS: the query is refused at once and neither budget is waited out.",
     ("net_resolve_v4_apart", "if (numeric < 0 && http_host_loopback(name))", "<", 1):
         "string_to_host answers 0 only for 0.0.0.0, which is no loopback name.",
-    ("http_lookup_apart", "if (string_to_host(host) < 0 && http_host_loopback(host))", "<", 1):
-        "string_to_host answers 0 only for 0.0.0.0, which is no loopback name.",
     ("dns_resolve_wanted", "for (positive at = 0; at < have; at++)", "<", 1): "Past the walk's end the mutant reads one slot past what was filled -- uninitialized, or past the array -- and asks whatever server those bytes name; no input sets them, so no check can tell it apart but by luck. Which servers the walk does ask is held by dns_tls.",
     ("dns_resolve_wanted", "for (; count < array_count(dns_tls_public); count++)", "<", 1): "Past the walk's end the mutant reads one slot past what was filled -- uninitialized, or past the array -- and asks whatever server those bytes name; no input sets them, so no check can tell it apart but by luck. Which servers the walk does ask is held by dns_tls.",
     ("dns_resolve_wanted", "for (positive at = 0; at < count; at++)", "<", 1): "Past the walk's end the mutant reads one slot past what was filled -- uninitialized, or past the array -- and asks whatever server those bytes name; no input sets them, so no check can tell it apart but by luck. Which servers the walk does ask is held by dns_tls.",
@@ -69040,6 +69038,8 @@ NET_MUTATION_EQUIVALENT = {
     #
     # ---- fold apart: entries below this line
     #
+    ("nts_ke_apart", "else if (!(status = (bipolar)said.status))", "!", 1):
+        "nts_ke zeroes its state whenever it fails (its own memory_fill on the way out), so a failed answer copies zeros over the zeros the caller filled: the copy changes nothing for any child that is nts_ke, and only a child that was not would differ.",
     ("network_deadline_begin_within", "if (deadline->budget > enclosing.budget - elapsed)", ">", 1):
         "At budget == enclosing.budget - elapsed both arms leave it that.",
     ("network_receive_until", "if (ready <= 0)", "<=", 1):

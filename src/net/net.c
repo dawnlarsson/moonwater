@@ -15882,14 +15882,12 @@ static b32 net_apart_signal;
         much or ended otherwise, NET_APART_NO_CHILD when there was no child.
         clock is a time query's filter (net_filter_build).
 
-        The parent reads to the end of the pipe before it waits, so an answer
-        larger than a pipe holds cannot stall the child. A child that dies of
-        SIGPIPE or SIGXFSZ died writing into keep, which in the caller's own
-        process would have killed the caller: the caller dies of it too, so
-        wget -O - | head still ends the way it did. A caller started with
-        SIGCHLD ignored would have its child reaped by the kernel before it
-        could ask how the child ended, so the disposition is the default for
-        as long as the child runs, and put back after.
+        The parent reads to the end of the pipe before it waits, so a large
+        answer cannot stall the child. A child that dies of SIGPIPE or SIGXFSZ
+        died writing into keep, which would have killed the caller; the caller
+        dies of it too, so wget -O - | head ends as it did. With SIGCHLD
+        ignored the kernel would reap the child unasked, so the default holds
+        while the child runs and is put back after.
 */
 static COLD bipolar net_apart(net_apart_task task, address_any context,
                               bipolar keep, byte_store address_to answer,
@@ -16228,11 +16226,7 @@ static COLD bipolar nts_ke_apart(string_address host, p16 port, bool bootstrap,
         if (!nts_ke_believed(address_of said))
                 status = HTTP_APART;
         else if (!(status = (bipolar)said.status))
-        {
                 memory_copy(state, address_of said.state, sizeof(*state));
-                state->origin[0] = end;
-                state->origin_port = 0;
-        }
         crypto_forget(address_of said, sizeof said);
         return status;
 }
@@ -16343,8 +16337,6 @@ static COLD p32 http_lookup_apart(string_address host)
 {
         p32 ip = 0;
 
-        if (string_to_host(host) < 0 && http_host_loopback(host))
-                return HOST_LOOPBACK;
         return net_resolve_v4_apart(host, address_of ip, 3) == DNS_OK ? ip : 0;
 }
 

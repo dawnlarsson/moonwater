@@ -73967,6 +73967,79 @@ static fn net_apart_fetching(void)
 }
 
 /*
+        nts_ke_apart, which is the key establishment asked of a child. A
+        refused connection is the answer the same call gives in this process,
+        with the state left empty; and a child that cannot be forked is no
+        answer at all: HTTP_APART, never the unconfined status, which is for a
+        child that could not confine itself. Root's fork is not refused by
+        the process limit, so that half is NOT RUN as root.
+*/
+#define NET_APART_NPROC 6
+
+static bool net_apart_nts_empty(const nts_state address_to state)
+{
+        const p8 *bytes = (const p8 *)state;
+
+        for (positive at = 0; at < sizeof *state; at++)
+                if (bytes[at])
+                        return false;
+        return true;
+}
+
+static fn net_apart_nts(void)
+{
+        bool emulated = net_as_emulated();
+        nts_state apart;
+        nts_state direct;
+        bipolar expect;
+        bipolar status;
+        struct
+        {
+                positive current;
+                positive maximum;
+        } limit, lowered;
+
+        memory_fill(address_of apart, 0xa5, sizeof apart);
+        status = nts_ke_apart((string_address) "127.0.0.1", 1, false,
+                              address_of apart);
+        if (emulated)
+                expect = HTTP_CONFINE;
+        else
+        {
+                memory_fill(address_of direct, 0xa5, sizeof direct);
+                expect = nts_ke((string_address) "127.0.0.1", 1, false,
+                                address_of direct);
+        }
+        check("a refused key establishment is the same answer through the confinement, and leaves no state",
+              status == expect && net_apart_nts_empty(address_of apart));
+
+        if (emulated)
+                return;
+        if (system_call(syscall(getuid)) == 0)
+        {
+                log_direct(str("net: nts_ke_apart without a child NOT RUN -- root's fork is not limited\n"));
+                return;
+        }
+        if (system_call_4(syscall(prlimit64), 0, NET_APART_NPROC, 0,
+                          (positive)address_of limit) != 0)
+        {
+                log_direct(str("net: nts_ke_apart without a child NOT RUN -- no prlimit64\n"));
+                return;
+        }
+        lowered = limit;
+        lowered.current = 0;
+        system_call_4(syscall(prlimit64), 0, NET_APART_NPROC,
+                      (positive)address_of lowered, 0);
+        memory_fill(address_of apart, 0xa5, sizeof apart);
+        status = nts_ke_apart((string_address) "127.0.0.1", 1, false,
+                              address_of apart);
+        system_call_4(syscall(prlimit64), 0, NET_APART_NPROC,
+                      (positive)address_of limit, 0);
+        check("with no child to be had, the key establishment is HTTP_APART and leaves no state",
+              status == HTTP_APART && net_apart_nts_empty(address_of apart));
+}
+
+/*
         The lease, built and read, without a server.
 
         The socket dance -- broadcast from an address we do not have yet, out
@@ -76886,6 +76959,7 @@ b32 main(void)
         //      fold nts: new groups below this line
         //
         //      fold apart: new groups below this line
+        net_group(net_apart_nts);
         //
         //      fold dhcp: new groups below this line
         //
