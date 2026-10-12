@@ -57598,7 +57598,7 @@ def harness_tls_hs_fuzz(argv):
     """Coverage-guided libFuzzer over the whole TLS 1.3 client protocol.
 
     Lifts src/net/net.c's record layer (tls_forget through the transcript)
-    and its handshake and application half (tls_hello_append through
+    and its handshake and application half (tls_share_length through
     tls_read_until) verbatim, with the crypto, the socket and the certificate
     verdict stubbed in BoringSSL's fuzzer-mode shape: the AEAD is the
     identity and opens when the tag's first byte is zero, the Finished MAC is
@@ -57638,7 +57638,7 @@ def harness_tls_hs_fuzz(argv):
         "// A TLS handshake length: three bytes, most significant first.\n"
         "static PURE positive tls_load_24",
         "static COLD bool tls_certificate_body_open")
-    protocol = sec(net, "static COLD bool tls_hello_append(",
+    protocol = sec(net, "static COLD positive tls_share_length(",
                    "#endif\n\n/*\n        Enough HTTP to fetch a file")
 
     shim = r"""
@@ -58406,7 +58406,7 @@ typedef struct
             "        (void)staple; (void)staple_length; (void)now;\n"
             "        return true;\n}\n" +
             src_slice(net, "static COLD bool tls_verify_chain(p8 address_to body",
-                         "static COLD bool tls_hello_append("))
+                         "static COLD positive tls_share_length("))
 
 
 #       The Public Suffix List file suffixes.inc was generated from, fetched

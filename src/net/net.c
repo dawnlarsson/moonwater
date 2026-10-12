@@ -9841,18 +9841,6 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
         }
 }
 
-static COLD bool tls_hello_append(p8 address_to out, positive room,
-                             positive address_to at,
-                             const p8 address_to bytes, positive length)
-{
-        if (address_to at > room || length > room - address_to at)
-                return false;
-
-        memory_copy(out + address_to at, bytes, length);
-        address_to at += length;
-        return true;
-}
-
 /* A key share on one of the groups supported_groups names, as its group
    id: the scalar in tls->scalar, the public value's length, and the shared
    secret's. X25519 is the one share a first ClientHello carries, as curl's
@@ -9952,9 +9940,9 @@ static COLD bipolar tls_client_hello(tls_conn address_to tls, p8 address_to out,
         p8 share[10 + 97];
         positive share_length;
         positive host_length = string_length(tls->host);
+        byte_store hello = {out, room, 0};
         bool letter = false;
         bool colon = false;
-        positive at = 0;
         positive ext_len_at;
         bipolar status = TLS_FAIL;
 
@@ -9972,13 +9960,13 @@ static COLD bipolar tls_client_hello(tls_conn address_to tls, p8 address_to out,
         network_store_16(share + 6, tls->group);
         network_store_16(share + 8, (p16)share_length);
 
-        if (!tls_hello_append(out, room, address_of at, prefix, sizeof prefix) ||
-            !tls_hello_append(out, room, address_of at, tls->client_random, 32) ||
-            !tls_hello_append(out, room, address_of at, parameters,
-                              sizeof parameters))
+        if (!byte_store_append_exact(address_of hello, prefix, sizeof prefix) ||
+            !byte_store_append_exact(address_of hello, tls->client_random, 32) ||
+            !byte_store_append_exact(address_of hello, parameters,
+                                     sizeof parameters))
                 goto done;
 
-        ext_len_at = at - 2;
+        ext_len_at = hello.used - 2;
 
         /* server_name names a DNS host (RFC 6066 3): an absolute name
            without its trailing dot, and never an address -- nothing with a
@@ -10001,11 +9989,10 @@ static COLD bipolar tls_client_hello(tls_conn address_to tls, p8 address_to out,
                     (p8)((n - 2) >> 8), (p8)(n - 2), 0,
                     (p8)(host_length >> 8), (p8)host_length};
 
-                if (!tls_hello_append(out, room, address_of at, sni,
-                                      sizeof sni) ||
-                    !tls_hello_append(out, room, address_of at,
-                                      (const p8 address_to)tls->host,
-                                      host_length))
+                if (!byte_store_append_exact(address_of hello, sni,
+                                             sizeof sni) ||
+                    !byte_store_append_exact(address_of hello, tls->host,
+                                             host_length))
                         goto done;
         }
 
@@ -10015,10 +10002,10 @@ static COLD bipolar tls_client_hello(tls_conn address_to tls, p8 address_to out,
                               (p8)cookie_length};
 
                 if (cookie_length > 0xffff ||
-                    !tls_hello_append(out, room, address_of at, head,
-                                      sizeof head) ||
-                    !tls_hello_append(out, room, address_of at, cookie,
-                                      cookie_length))
+                    !byte_store_append_exact(address_of hello, head,
+                                             sizeof head) ||
+                    !byte_store_append_exact(address_of hello, cookie,
+                                             cookie_length))
                         goto done;
         }
 
@@ -10032,41 +10019,41 @@ static COLD bipolar tls_client_hello(tls_conn address_to tls, p8 address_to out,
                              (p8)tls->alpn_length};
 
                 if (tls->alpn_length > 32 ||
-                    !tls_hello_append(out, room, address_of at, head,
-                                      sizeof head) ||
-                    !tls_hello_append(out, room, address_of at, tls->alpn,
-                                      tls->alpn_length))
+                    !byte_store_append_exact(address_of hello, head,
+                                             sizeof head) ||
+                    !byte_store_append_exact(address_of hello, tls->alpn,
+                                             tls->alpn_length))
                         goto done;
         }
 
-        if (!tls_hello_append(out, room, address_of at, groups, sizeof groups) ||
-            !tls_hello_append(out, room, address_of at, share,
-                              10 + share_length) ||
+        if (!byte_store_append_exact(address_of hello, groups, sizeof groups) ||
+            !byte_store_append_exact(address_of hello, share,
+                                     10 + share_length) ||
             (tls->alpn_length
-                 ? !tls_hello_append(out, room, address_of at, only_thirteen,
-                                     sizeof only_thirteen) ||
-                       !tls_hello_append(out, room, address_of at, tail + 9,
-                                         sizeof tail - 9)
-                 : !tls_hello_append(out, room, address_of at, tail,
-                                     sizeof tail)) ||
+                 ? !byte_store_append_exact(address_of hello, only_thirteen,
+                                            sizeof only_thirteen) ||
+                       !byte_store_append_exact(address_of hello, tail + 9,
+                                                sizeof tail - 9)
+                 : !byte_store_append_exact(address_of hello, tail,
+                                            sizeof tail)) ||
             (tls->check_cert &&
-             !tls_hello_append(out, room, address_of at, status_request,
-                              sizeof status_request)))
+             !byte_store_append_exact(address_of hello, status_request,
+                                      sizeof status_request)))
                 goto done;
         tls->status_requested = tls->check_cert;
 
         {
-                positive ext_length = at - ext_len_at - 2;
+                positive ext_length = hello.used - ext_len_at - 2;
                 network_store_16(out + ext_len_at, (p16)ext_length);
         }
         {
-                positive body = at - 4;
+                positive body = hello.used - 4;
                 out[1] = (p8)(body >> 16);
                 out[2] = (p8)(body >> 8);
                 out[3] = (p8)body;
         }
 
-        address_to used = at;
+        address_to used = hello.used;
         status = TLS_OK;
 
 done:
