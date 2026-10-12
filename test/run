@@ -16043,7 +16043,7 @@ counted
 #       runs them: the moonwater shell as bash, which is where the function keyword and $SECONDS
 #       are, against stub programs with the paths they name redirected into a directory of the
 #       lane's own. MOONWATER_DESKTOP_MAIN names another script; the parent's shows the rows fail.
-#       Six of these are red on the commit before the machine script's desktop fixes.
+#       Seven of these are red on the commit before the machine script's desktop fixes.
 desktop_script_rows()
 {
         desktop_main=${MOONWATER_DESKTOP_MAIN:-main.moonwater.sh}
@@ -16285,6 +16285,35 @@ echo "delta=$((after - before))"
 EOF
 run_driver
 report "one request with no compositor is one kernel terminal" "$(grep '^delta=' "$STUB/out")" "delta=1"
+# H: four quick deaths with Canvas on: the supervisor gives up, one kernel terminal, and no pid file is left.
+begin giveup-quick
+printf '0\n0\n0\n0\n' > "$STUB/lives"
+cat > "$STUB/driver.sh" <<'EOF'
+. "$STUB/main.sed.sh"
+desktop_start
+wait $(cat "$STUB/run/moonwater/supervisor.pid") 2> /dev/null
+echo "kernel=$(grep -c terminal "$STUB/kernel")"
+echo "stale=$([ -e "$STUB/run/moonwater/supervisor.pid" ] && echo yes || echo no)"
+EOF
+run_driver
+report "a give-up opens one kernel terminal" "$(grep '^kernel=' "$STUB/out")" "kernel=1"
+report "a give-up leaves no supervisor pid file" "$(grep '^stale=' "$STUB/out")" "stale=no"
+
+# I: a machine with no font at all keeps the kernel's desktop: no compositor, and the log says so.
+begin nofont
+rm -f "$STUB/fonts/A-Mono.ttf" "$STUB/fonts/Q-Face.ttf"
+cat > "$STUB/driver.sh" <<'EOF'
+. "$STUB/main.sed.sh"
+desktop_start
+echo "rc=$?"
+echo "nofont=$(grep -c 'no font to draw with' "$STUB/kmsg")"
+echo "starts=$(wc -l < "$STUB/starts")"
+EOF
+run_driver
+report "no font: desktop_start refuses" "$(grep '^rc=' "$STUB/out")" "rc=1"
+report "no font: the log names the missing font" "$(grep '^nofont=' "$STUB/out")" "nofont=1"
+report "no font: no compositor is started" "$(grep '^starts=' "$STUB/out")" "starts=0"
+
 RUNNER
         unshare -Urpf --mount-proc sh "$desktop_work/runner.sh" "$desktop_work/bash" "$desktop_work/cases" \
                 "$desktop_work/main.sh" > "$desktop_work/rows" 2>&1
