@@ -13655,34 +13655,6 @@ static COLD const tls_ct_log address_to tls_ct_log_find(const p8 address_to id)
         return null;
 }
 
-//      A DER length's octets for length, written at out; their count.
-static COLD positive tls_der_length_put(p8 address_to out, positive length)
-{
-        if (length < 0x80)
-        {
-                out[0] = (p8)length;
-                return 1;
-        }
-        if (length < 0x100)
-        {
-                out[0] = 0x81;
-                out[1] = (p8)length;
-                return 2;
-        }
-        if (length < 0x10000)
-        {
-                out[0] = 0x82;
-                out[1] = (p8)(length >> 8);
-                out[2] = (p8)length;
-                return 3;
-        }
-        out[0] = 0x83;
-        out[1] = (p8)(length >> 16);
-        out[2] = (p8)(length >> 8);
-        out[3] = (p8)length;
-        return 4;
-}
-
 /*
         The precertificate's TBSCertificate an embedded SCT signed: the leaf's,
         with the SCT list extension taken out and the lengths of the
@@ -13707,7 +13679,6 @@ static COLD positive tls_ct_precert(const tls_cert address_to leaf, p8 address_t
         positive list_header;
         positive wrap_header;
         positive used;
-        p8 head[5];
 
         if (!leaf->scts || !leaf->extensions || leaf->extensions < tbs ||
             leaf->sct_extension < leaf->extensions ||
@@ -13729,21 +13700,18 @@ static COLD positive tls_ct_precert(const tls_cert address_to leaf, p8 address_t
         kept = list_stop - list_at - cut_length;
         if (!kept)
                 return 0;
-        list_header = 1 + tls_der_length_put(head, kept);
-        wrap_header = 1 + tls_der_length_put(head, list_header + kept);
+        list_header = tls_der_header_size(kept);
+        wrap_header = tls_der_header_size(list_header + kept);
         used = prefix + wrap_header + list_header + kept;
-        at = 1 + tls_der_length_put(head, used);
+        at = tls_der_header_size(used);
         if (at + used > room)
                 return 0;
-        out[0] = 0x30;
-        tls_der_length_put(out + 1, used);
+        tls_der_header(out, 0x30, used);
         //      Everything before the extensions, as it was.
         memory_copy(out + at, tbs + (positive)(leaf->extensions - tbs) - prefix, prefix);
         at += prefix;
-        out[at++] = 0xa3;
-        at += tls_der_length_put(out + at, list_header + kept);
-        out[at++] = 0x30;
-        at += tls_der_length_put(out + at, kept);
+        at += tls_der_header(out + at, 0xa3, list_header + kept);
+        at += tls_der_header(out + at, 0x30, kept);
         memory_copy(out + at, tbs + list_at, cut - list_at);
         at += cut - list_at;
         memory_copy(out + at, tbs + cut + cut_length, list_stop - cut - cut_length);

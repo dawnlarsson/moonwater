@@ -72609,16 +72609,16 @@ static fn tls_ct_real(void)
                 }
         }
         {
-                p8 out[4];
+                p8 out[5];
 
                 check("DER lengths at their edges take the next form",
-                      tls_der_length_put(out, 0x7f) == 1 && out[0] == 0x7f &&
-                          tls_der_length_put(out, 0x80) == 2 && out[0] == 0x81 &&
-                          out[1] == 0x80 && tls_der_length_put(out, 0xff) == 2 &&
-                          tls_der_length_put(out, 0x100) == 3 && out[0] == 0x82 &&
-                          tls_der_length_put(out, 0xffff) == 3 &&
-                          tls_der_length_put(out, 0x10000) == 4 && out[0] == 0x83 &&
-                          out[1] == 1 && !out[2] && !out[3]);
+                      tls_der_header(out, 0x30, 0x7f) == 2 && out[1] == 0x7f &&
+                          tls_der_header(out, 0x30, 0x80) == 3 && out[1] == 0x81 &&
+                          out[2] == 0x80 && tls_der_header(out, 0x30, 0xff) == 3 &&
+                          tls_der_header(out, 0x30, 0x100) == 4 && out[1] == 0x82 &&
+                          tls_der_header(out, 0x30, 0xffff) == 4 &&
+                          tls_der_header(out, 0x30, 0x10000) == 5 && out[1] == 0x83 &&
+                          out[2] == 1 && !out[3] && !out[4] && out[0] == 0x30);
         }
         {
                 tls_ct_log ct = {0};
