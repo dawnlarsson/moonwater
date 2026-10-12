@@ -68408,8 +68408,10 @@ int main(void)
         if (accepted) assert(cert.digital_signature == sign && cert.key_cert_sign == cert_sign);
         return 0;
 }
-''', ["tls_asn1_length", "tls_asn1_enter", "tls_parse_key_usage"],
- "#define TLS_OK 0\n#define TLS_FAIL (-1)\n#define CRYPTO_RSA_BYTES 1024\n"),
+''', ["tls_asn1_length", "tls_asn1_enter", "tls_der_value", "tls_der_named_bits",
+      "tls_parse_key_usage"],
+ "#define TLS_OK 0\n#define TLS_FAIL (-1)\n#define CRYPTO_RSA_BYTES 1024\n"
+ "#define positive_max (~(positive)0)\n"),
 ("dhcp_frame", 22, r'''
 /* PRODUCTION */
 /* 32 bytes: an IPv4 header with one option word, or without one and four

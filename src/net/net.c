@@ -7759,45 +7759,36 @@ static COLD bipolar tls_parse_basic_constraints(p8 address_to value, positive le
 static COLD bipolar tls_parse_key_usage(p8 address_to value, positive length,
                                    tls_cert address_to cert)
 {
-        positive at = 0;
-        positive stop = 0;
-        p8 unused;
-        p8 canonical_unused = 0;
-        p8 final;
+        byte_reader reader = byte_reader_open(value, length);
+        byte_reader bits = tls_der_value(&reader, 0x03);
+        positive size;
+        p8 first;
+        p8 second = 0;
 
-        if (tls_asn1_enter(value, length, 0x03, address_of at, address_of stop) ||
-            stop != length || at >= stop)
+        /* KeyUsage is a named bit list, held to DER's one spelling by
+           tls_der_named_bits: the unused-bit count is exactly the trailing-zero
+           count in the final nonzero octet, and one or two octets. Merely
+           checking that declared unused bits are zero accepts alternate signed
+           encodings and trailing zero octets which stricter certificate
+           validators reject. */
+        if (!byte_reader_end(&reader) || byte_reader_left(&bits) < 2 ||
+            !tls_der_named_bits(bits))
                 return TLS_FAIL;
-        unused = value[at++];
-        if (unused > 7 || at >= stop)
-                return TLS_FAIL;
-        final = value[stop - 1];
-        if (!final)
-                return TLS_FAIL;
-        while (!(final & 1))
-        {
-                canonical_unused++;
-                final >>= 1;
-        }
-        /* KeyUsage is a named bit list. DER removes every trailing zero bit,
-           so the unused-bit count must be exactly the trailing-zero count in
-           the final nonzero octet. Merely checking that declared unused bits
-           are zero accepts alternate signed encodings and trailing zero
-           octets which stricter certificate validators reject. */
-        if (unused != canonical_unused)
-                return TLS_FAIL;
+        (void)byte_reader_u8(&bits);
+        size = byte_reader_left(&bits);
+        first = byte_reader_u8(&bits);
+        if (size == 2)
+                second = byte_reader_u8(&bits);
         /* RFC 5280 defines exactly nine KeyUsage bits. The ninth is
            decipherOnly and is permitted only with keyAgreement. Rejecting
            further set bits matters even though this client does not act on
            them: silently ignoring undefined authorization bits creates a
            profile differential with validators that enforce the schema. */
-        if (stop - at > 2 ||
-            (stop - at == 2 &&
-             (value[at + 1] != 0x80 || !(value[at] & 0x08))))
+        if (size > 2 || (size == 2 && (second != 0x80 || !(first & 0x08))))
                 return TLS_FAIL;
-        cert->digital_signature = (value[at] & 0x80) != 0;
-        cert->key_cert_sign = (value[at] & 0x04) != 0;
-        cert->crl_sign = (value[at] & 0x02) != 0;
+        cert->digital_signature = (first & 0x80) != 0;
+        cert->key_cert_sign = (first & 0x04) != 0;
+        cert->crl_sign = (first & 0x02) != 0;
         return TLS_OK;
 }
 
