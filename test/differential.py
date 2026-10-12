@@ -58511,6 +58511,15 @@ def public_suffix_probes(tables):
             if near and rest and all(c.isalnum() or c == "-" for c in near):
                 names.add(near + "." + rest)
     names.update(("example.com", "example.foo", "co.uk.example", "github.io", "appspot.com"))
+    #   And every whole-label tail of each rule and every cut of it under its
+    #   top-level label: the keys that share the most with an entry and stop
+    #   short of it, where the walk steps over entries it has passed.
+    for entry in plain + wildcards + exceptions:
+        name = ".".join(reversed(entry.split(".")))
+        for cut in range(1, len(name)):
+            for near in (name[cut:], name[:cut] + "." + name.split(".")[-1]):
+                if not near.startswith(".") and ".." not in near and not near.endswith("."):
+                    names.add(near)
     return sorted(n for n in names if n.count(".") >= 1)
 
 
@@ -68919,6 +68928,22 @@ NET_MUTATION_EQUIVALENT = {
         "A precertificate of 2^24 bytes cannot be named in the three length bytes a log signed, so no signature verifies over what the mutant would sign either.",
     ("tls_ct_holds", "if (!length || !byte_reader_ok(address_of list) || !byte_reader_end(address_of list))", "||", 1):
         "With no precertificate no SCT's signature verifies, so the leaf is not held either way.",
+    ("tls_public_suffix", "if (length >= sizeof key)", ">=", 1):
+        "A name of 256 bytes fills key exactly and is no rule, the longest of which is far shorter: false either way.",
+    ("tls_public_suffix", "b32 order = memory_compare(run, key, run_top < top ? run_top : top);", "<", 1):
+        "At run_top == top both arms are the same length.",
+    ("tls_public_suffix", "if (order < 0 || (!order && run_top < top))", "<", 2):
+        "!order with run_top == top has already ended the search a line above.",
+    ("tls_public_suffix", "while (*table && (*table < 'A' || *table > 'Z'))", "||", 1): "The line is the skip over entries already behind the key, and also the copy of an entry's text, whose mutants public_suffixes kills. In the skip, stepping a byte at a time or through a 'Z' header lands on the same next entry that can matter: over every rule, the names beside each and every prefix and tail of each (93,228 names) the lookup answers as the original does.",
+    ("tls_public_suffix", "while (*table && (*table < 'A' || *table > 'Z'))", ">", 1): "The line is the skip over entries already behind the key, and also the copy of an entry's text, whose mutants public_suffixes kills. In the skip, stepping a byte at a time or through a 'Z' header lands on the same next entry that can matter: over every rule, the names beside each and every prefix and tail of each (93,228 names) the lookup answers as the original does.",
+    ("tls_public_suffix", "entry_length = shared < entry_length ? shared : entry_length;", "<", 1):
+        "At shared == entry_length both arms are the same value.",
+    ("tls_public_suffix", "matched = shared < matched ? shared : matched;", "<", 1):
+        "At shared == matched both arms are the same value.",
+    ("tls_public_suffix", "if (entry_length < sizeof entry)", "<", 1):
+        "No entry of the table is 256 bytes long, so entry_length never reaches the size of entry.",
+    ("tls_public_suffix", "while (matched < key_length && matched < entry_length &&", "<", 1):
+        "Past the key's end the walk can only find the key a prefix of a longer entry, which no later entry equals: the lookup answers false either way.",
     ("tls_parse_key_usage", "if (unused > 7 || at >= stop)", ">=", 1): 'With no bit octet the unused-count octet is read as the final one; for unused 0 it is zero (refused), and for 1 to 7 its trailing-zero count is below its value, so the canonical test refuses it as the original does.',
 }
 
@@ -69032,6 +69057,7 @@ def harness_net_mutation(argv):
                               "dns_fuzz"]),
         (r"^dns_(reply_result|reply_identity|records_end|answer_address|message_at)$",
          ["dns_oracle --count 4000", "dns_fuzz"]),
+        (r"^dns_(query_tls|resolve_wanted|tls_mode|apart_|resolve_apart)", ["dns_tls", "dns_fuzz"]),
         (r"^dns_", ["dns_fuzz"]),
         (r"^tls_asn1_", ["net_bounded_proof tls_asn1", "net_exhaustive_proof --slices 4 der",
                          "tls_der_fuzz"]),

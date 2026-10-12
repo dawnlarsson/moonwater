@@ -54310,6 +54310,19 @@ static bipolar net_test_random_fill(address_any into, positive length, positive 
         return system_random_fill(into, length, flags);
 }
 
+static bipolar net_test_slurp_regular_at(bipolar directory, string_address path,
+                                         p8 address_to into, positive capacity, positive flags)
+{
+        if (net_slurp_text)
+        {
+                positive length = min(string_length(net_slurp_text), capacity);
+
+                memory_copy(into, net_slurp_text, length);
+                return (bipolar)length;
+        }
+        return file_slurp_regular_at(directory, path, into, capacity, flags);
+}
+
 static bipolar net_test_file_slurp(string_address path, p8 address_to into,
                                    positive capacity)
 {
@@ -54338,6 +54351,7 @@ static address_any net_test_memory_search(address_any block, positive size,
 #define socket_connect(...) net_test_socket_connect(__VA_ARGS__)
 #define socket_bind(...) net_test_socket_bind(__VA_ARGS__)
 #define time(...) net_test_time(__VA_ARGS__)
+#define file_slurp_regular_at(...) net_test_slurp_regular_at(__VA_ARGS__)
 #define system_random_fill(...) net_test_random_fill(__VA_ARGS__)
 #define system_poll_wait net_test_poll_wait
 #define system_call_3(...) http_net_call3(__VA_ARGS__)
@@ -54354,6 +54368,7 @@ static address_any net_test_memory_search(address_any block, positive size,
 #undef socket_connect
 #undef socket_bind
 #undef time
+#undef file_slurp_regular_at
 #undef system_random_fill
 #undef system_poll_wait
 #undef memory_reserve
@@ -55130,6 +55145,23 @@ static fn http_decision_edges(void)
                               HTTP_OK &&
                           code == 200);
         }
+        {
+                static const struct
+                {
+                        const char address_to text;
+                        positive mode;
+                } words[] = {{"on\n", DNS_TLS_ON}, {"on \n", DNS_TLS_ON}, {"only", DNS_TLS_ONLY},
+                             {"on", DNS_TLS_ON},    {"off\n\n", DNS_TLS_OFF}};
+                positive wrong = 0;
+
+                for (positive at = 0; at < array_count(words); at++)
+                {
+                        net_slurp_text = (string_address)words[at].text;
+                        wrong += dns_tls_mode() != words[at].mode;
+                }
+                net_slurp_text = null;
+                check("the DNS over TLS word is read without its newline and blanks", wrong == 0);
+        }
         net_slurp_text = (string_address)"nameserver 127.0.0.1\n";
         net_random_refuse = 1000;
         check("a name that is not the machine's is not looked up as loopback",
@@ -55179,7 +55211,7 @@ static fn tls_decision_edges(void)
         check("a wildcard over a name ending in a dot leaves no label beneath it",
               !tls_host_match("x.a.", (p8 address_to)"*.a..", 5));
         check("an excluded wildcard of no labels is not taken into a base it differs from",
-              !tls_dns_within((p8 address_to)"*.", 2, (p8 address_to)"x..", 3, true));
+              !tls_dns_within((p8 address_to)"*..", 3, (p8 address_to)"x..", 3, true));
         {
                 p64 now = 0, floor = 0;
 

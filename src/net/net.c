@@ -15037,7 +15037,7 @@ static COLD positive dns_tls_mode(void)
                                     text, sizeof(text), O_NOFOLLOW);
         if (got < 0)
                 got = 0;
-        while (got > 0 && (text[got - 1] == '\n' || text[got - 1] == ' '))
+        while (got && (text[got - 1] == '\n' || text[got - 1] == ' '))
                 got--;
         text[got] = end;
         return dns_tls_mode_of((string_address)text);
