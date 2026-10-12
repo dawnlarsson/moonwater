@@ -19012,9 +19012,8 @@ static bool name_valid(string_address name)
 {
         positive length = string_length(name);
 
-        return length && string_span_of_set(name, NAME_LETTERS) == length &&
-               name[0] != '-' && name[length - 1] != '-' &&
-               !string_equals(name, "random") && link_name_good(name);
+        return link_name_good(name) && string_span_of_set(name, NAME_LETTERS) == length &&
+               name[length - 1] != '-' && !string_equals(name, "random");
 }
 
 static bipolar name_apply(string_address name)
@@ -19027,13 +19026,6 @@ static bipolar name_apply(string_address name)
         return applied;
 }
 
-/* The name /root keeps, when what it keeps is one. */
-static bool name_saved(p8 address_to into, positive room)
-{
-        host_read_word(NAME_PATH, into, room);
-        return name_valid(into);
-}
-
 //      A roll that could not be saved, kept so that the next ask in this
 //      process is the same name and not another roll.
 static p8 name_unsaved[NAME_ROOM];
@@ -19043,7 +19035,8 @@ static p8 name_unsaved[NAME_ROOM];
    saved at the end: false when /root would not take it. */
 static bool name_ensure(p8 address_to into, positive room, bool address_to rolled)
 {
-        address_to rolled = !name_saved(into, room);
+        host_read_word(NAME_PATH, into, room);
+        address_to rolled = !name_valid(into);
 
         if (!address_to rolled)
                 return true;
@@ -19079,6 +19072,7 @@ static b32 host_name(string_address address_to arguments, positive count)
 {
         p8 name[NAME_ROOM];
         bool rolled;
+        bipolar applied;
 
         return_if(count > 3, host_usage());
 
@@ -19130,16 +19124,13 @@ static b32 host_name(string_address address_to arguments, positive count)
         //      has it at the next boot, and says so when it does not.
         if (host_save(NAME_PATH, NAME_PATH, name))
                 return 1;
+        applied = name_apply(name);
+        if (applied < 0)
         {
-                bipolar done = name_apply(name);
-
-                if (done < 0)
-                {
-                        host_say(log_error, host_label "%s is saved, but the "
-                                            "kernel did not take it: %s\n",
-                                 name, file_reason(done));
-                        return 1;
-                }
+                host_say(log_error, host_label "%s is saved, but the "
+                                    "kernel did not take it: %s\n",
+                         name, file_reason(applied));
+                return 1;
         }
 
         host_say(log, "%s\n", name);
