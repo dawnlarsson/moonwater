@@ -13558,11 +13558,10 @@ static bool http_name_rebound(string_address host, p32 ip)
 #define TLS_CRL_HELD_BYTES ((positive)32 << 20)
 #define TLS_CRL_RETRY 300
 
-/* The CRL a distribution point names, fetched over the HTTP client (defined
-   there, beside tls_aia_fetch) into a store that grows to TLS_CRL_MAX. */
-static COLD bool tls_crl_fetch(const p8 address_to url, positive length,
-                               byte_store address_to into,
-                               const network_deadline address_to deadline);
+/* The plain HTTP fetch, defined beside tls_aia_fetch below. */
+static COLD positive tls_plain_get(const p8 address_to url, positive length,
+                                   byte_store address_to into, positive seconds,
+                                   const network_deadline address_to outer);
 
 /* SHA-1 (kind 1, 20 bytes) or SHA-256 (kind 2, 32), the two an OCSP CertID
    names its issuer by. */
@@ -14076,7 +14075,8 @@ static COLD tls_crl_held address_to tls_crl_get(const p8 address_to url,
         if (!deadline || !network_deadline_left(deadline, address_of seconds,
                                                 address_of nanoseconds))
                 return null;
-        got = tls_crl_fetch(url, length, address_of fetched, deadline);
+        got = tls_plain_get(url, length, address_of fetched, TLS_REVOCATION_SECONDS,
+                            deadline) != 0;
         if (!got)
                 byte_store_release(address_of fetched);
         for (;;)
@@ -14268,16 +14268,17 @@ unchecked:
         connection and the reply together -- inside outer, when there is one
         -- a 200, and a body of at most most bytes, which the caller parses
         and verifies -- DER only, so a PKCS#7 bundle or PEM text is refused
-        there. The store holds what it was given (caIssuers' room on the
-        stack) or, when grow says so, grows on the heap to hold the head and
-        most bytes of body (a CRL's). Returns the body's length at the front
-        of the store, or 0.
+        there. A store given room holds what it was given (caIssuers' room on
+        the stack), at most that many bytes; one given none grows on the heap
+        to hold the head and TLS_CRL_MAX bytes of body (a CRL's). Returns the
+        body's length at the front of the store, or 0.
 */
 static COLD positive tls_plain_get(const p8 address_to url, positive length,
-                                   byte_store address_to into, positive most,
-                                   bool grow, positive seconds,
+                                   byte_store address_to into, positive seconds,
                                    const network_deadline address_to outer)
 {
+        positive most = into->room ? into->room : TLS_CRL_MAX;
+        bool grow = !into->room;
         p8 text[HTTP_URL_MAX];
         p8 host[256];
         p8 request[HTTP_URL_MAX + 256];
@@ -14373,16 +14374,7 @@ static COLD positive tls_aia_fetch(const p8 address_to url, positive length,
 {
         byte_store store = {into, room, 0};
 
-        return tls_plain_get(url, length, address_of store, room, false,
-                             TLS_AIA_SECONDS, null);
-}
-
-static COLD bool tls_crl_fetch(const p8 address_to url, positive length,
-                               byte_store address_to into,
-                               const network_deadline address_to deadline)
-{
-        return tls_plain_get(url, length, into, TLS_CRL_MAX, true,
-                             TLS_REVOCATION_SECONDS, deadline) != 0;
+        return tls_plain_get(url, length, address_of store, TLS_AIA_SECONDS, null);
 }
 
 /*
