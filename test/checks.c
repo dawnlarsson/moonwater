@@ -76113,6 +76113,27 @@ static fn tls_revocation_answers(void)
         revocation_forget();
 }
 
+/* A CRL reached with the revocation budget already spent is not tried: no
+   fetch, and no slot left failed for TLS_CRL_RETRY seconds, which would
+   answer none for five minutes to a CRL nothing ever asked of. */
+static fn tls_crl_spent_budget(void)
+{
+        network_deadline spent;
+        positive used = 0;
+        bool held;
+
+        revocation_forget();
+        spent.began = 1;
+        spent.budget = 1;
+        held = tls_crl_get((const p8 address_to)"http://8.8.8.8/ca.crl", 22, REVOCATION_NOW,
+                           address_of spent) != null;
+        for (positive k = 0; k < TLS_CRL_HELD; k++)
+                used += tls_crl_cache[k].used;
+        check("a CRL reached with its budget spent is not tried, nor held as failed",
+              !held && !used);
+        revocation_forget();
+}
+
 /* The tiers: tls_revocation_holds over the leaf and its CA, the staple and
    the CRL each made to answer one way. */
 static bool revocation_tier(revocation_held_cert address_to leaf,
@@ -76800,6 +76821,7 @@ b32 main(void)
         //      fold x509: new groups below this line
         //
         //      fold revoke-ct: new groups below this line
+        net_group(tls_crl_spent_budget);
         //
         //      fold http: new groups below this line
         //

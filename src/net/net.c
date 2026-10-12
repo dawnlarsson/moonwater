@@ -14050,6 +14050,8 @@ static COLD tls_crl_held address_to tls_crl_get(const p8 address_to url,
         p64 at = tls_date_seconds(now);
         byte_store fetched = {null, 0, 0};
         tls_crl_held address_to slot = null;
+        positive seconds;
+        positive nanoseconds;
         bool got;
 
         crypto_sha256_of((p8 address_to)url, length, name);
@@ -14069,7 +14071,10 @@ static COLD tls_crl_held address_to tls_crl_get(const p8 address_to url,
                 }
                 tls_crl_drop(held);
         }
-        if (!deadline)
+        //      A budget spent by an earlier URL is no attempt: nothing is
+        //      looked up, and nothing is held as failed for TLS_CRL_RETRY.
+        if (!deadline || !network_deadline_left(deadline, address_of seconds,
+                                                address_of nanoseconds))
                 return null;
         got = tls_crl_fetch(url, length, address_of fetched, deadline);
         if (!got)
