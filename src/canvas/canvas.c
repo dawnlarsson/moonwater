@@ -770,6 +770,17 @@ module_param_named(simd, canvas_simd, bool, 0644);
 static int canvas_pm_dark;
 module_param_named(pm_dark, canvas_pm_dark, int, 0644);
 
+/*
+        moonwater.desktop=kernel keeps the kernel's own desktop, its log and a
+        terminal, where the machine script would start the compositor. The
+        script reads the word from /proc/cmdline; this is only here so that
+        the kernel knows it and does not warn about a parameter it has never
+        heard of. The canvas lane's older sections drive the kernel desktop
+        and boot with it.
+*/
+static char *canvas_desktop;
+module_param_named(desktop, canvas_desktop, charp, 0444);
+
 struct canvas_simd_hold
 {
         _Bool on;

@@ -386,6 +386,21 @@ the screen back within a second; `moonwater canvas on` starts the desktop again.
 The press, its repeat and its release are all taken, so no program sees half of
 the chord.
 
+The desktop the machine script starts is the userspace compositor, under a
+supervisor: `/compositor`, and with a font its panel and a terminal on it. The
+compositor runs in a session of its own; when it ends or dies it is started
+again at once, then after half a second, then after two, and one that has ended
+four times without living half a minute is given up: Canvas, which has the card
+the moment the compositor lets go, opens the kernel's terminal, so there is a
+shell on a screen. Control-Alt-Backspace on a compositor that hangs is therefore
+a restart of the desktop, not the end of it. The panel and the terminal take
+their text from a font and the image carries none: the path is the first line of
+`/root/font`, or the first mono face in `/usr/share/fonts`. With none the
+compositor runs alone, with its own panel and no terminal, and the log says why
+(`desktop: no font ...`). `moonwater.desktop=kernel` on the kernel's command
+line, or a `/root/desktop` that names anything but `canvas`, leaves the kernel's
+own desktop as it was: the log and a terminal of its own.
+
 `moonwater desktop` is what the machine starts as its desktop: Canvas, the
 default; `off`, which turns Canvas off as soon as it has started, for a machine
 that is a text console; or a bowl profile, whose session the machine script's
@@ -423,9 +438,10 @@ mouse and a keyboard are asked for a report at, which is 1 ms here and not the
 usbhid.kbpoll=1`; `#> cmdline -usbhid.mousepoll=1` in a profile takes one out).
 
 Canvas opens no window by itself. The machine script's `moonwater_canvas`
-function opens the kernel log and a terminal when Canvas starts, at boot and
-after `moonwater canvas on`; change it to start a desktop with something
-else, or nothing. Control-Shift-T opens another terminal. The terminal
+function opens the kernel log and starts the desktop when Canvas starts, at boot
+and after `moonwater canvas on`, and stops it when Canvas stops; change it to
+start a desktop with something else, or nothing. Control-Shift-T opens another
+kernel terminal. The terminal
 answers as `xterm-256color`, so nano, vim, less, htop, btop and other ncurses
 programs draw as they do in xterm or tmux:
 
@@ -461,6 +477,11 @@ directory names without the wide routine, for timing one against the other or
 for a machine where either misbehaves; `moonwater.pm_dark=N` is the guest
 lane's power-management switch (see the `canvas` lane in `test/run`), and no
 machine needs it.
+
+`moonwater.desktop=kernel` is a word the machine script reads from the command
+line, not a setting: with it the script leaves the kernel's own desktop, its log
+and a terminal, where it would start the compositor. The `canvas` lane boots
+every guest that drives that desktop with it.
 
 ## Bowl
 

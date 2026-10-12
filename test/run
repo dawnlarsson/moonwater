@@ -12934,7 +12934,7 @@ timeout 5400 qemu-system-x86_64 -m 1G -smp 2 "$@" -kernel "$image" \
         -device qemu-xhci \
         -drive "if=none,id=stick,format=raw,file=fat:ro:$work/stick,readonly=on" \
         -device usb-storage,drive=stick,removable=on \
-        -append "console=ttyS0 drm_client_lib.active= mac80211_hwsim.radios=0" \
+        -append "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel mac80211_hwsim.radios=0" \
         > "$work/transcript" 2>&1 || true
 [ -n "${MOONWATER_WIFI_TRANSCRIPT:-}" ] && cp "$work/transcript" "$MOONWATER_WIFI_TRANSCRIPT"
 
@@ -13068,7 +13068,7 @@ timeout $((seconds * 30 + 900)) qemu-system-x86_64 -m 3G -smp 4 "$@" -kernel "$i
         -device qemu-xhci \
         -drive "if=none,id=stick,format=raw,file=fat:ro:$work/stick,readonly=on" \
         -device usb-storage,drive=stick,removable=on \
-        -append "console=ttyS0 drm_client_lib.active= mac80211_hwsim.radios=0 panic=-1" \
+        -append "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel mac80211_hwsim.radios=0 panic=-1" \
         < "$work/commands" > "$work/transcript" 2>&1 || true
 [ -n "${MOONWATER_RING0_TRANSCRIPT:-}" ] && cp "$work/transcript" "$MOONWATER_RING0_TRANSCRIPT"
 
@@ -13205,7 +13205,7 @@ set -- -cpu Nehalem
 [ -w /dev/kvm ] && set -- -enable-kvm -cpu host
 timeout 300 qemu-system-x86_64 -m 2G -smp 2 "$@" -kernel "$image" \
         -no-reboot -display none -device VGA,xres=1600,yres=1200 -serial stdio -nic none \
-        -append "console=ttyS0 drm_client_lib.active=" \
+        -append "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel" \
         < "$work/commands" > "$work/transcript" 2>&1 || true
 tr -d '\r' < "$work/transcript" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g' > "$work/said"
 mv "$work/said" "$work/transcript"
@@ -13707,15 +13707,37 @@ if [ "$boot_emulator" = qemu-system-x86_64 ]; then
         timeout 240 "$boot_emulator" -m 2G -smp 2 "$@" \
                 -kernel "$image" -no-reboot -display none -serial stdio \
                 $coverage_serial \
-                -append "console=$boot_console drm_client_lib.active=" \
+                -append "console=$boot_console drm_client_lib.active= moonwater.desktop=kernel" \
                 < "$work/commands" > "$work/transcript" 2>&1 || true
         coverage_guest_collect boot
 else
         { sleep 15; cat "$work/commands"; } |
                 timeout 480 "$boot_emulator" -m 2G -smp 2 "$@" \
                 -kernel "$image" -no-reboot -display none -serial stdio \
-                -append "console=$boot_console drm_client_lib.active=" \
+                -append "console=$boot_console drm_client_lib.active= moonwater.desktop=kernel" \
                 > "$work/transcript" 2>&1 || true
+fi
+
+#
+#       A plain boot is the userspace compositor: with no kernel parameter the
+#       machine script starts it under its supervisor, and keeps its pid. The
+#       guest is the boot guest's own, on its display, asked for the process
+#       and for Canvas, and stopped. The numbers are added to so that the line
+#       typed is not the line looked for.
+#
+if [ "$boot_emulator" = qemu-system-x86_64 ]; then
+        cat > "$work/plain.commands" <<'COMMANDS'
+this line is eaten by the console
+for i in 1 2 3 4 5 6 7 8 9 10; do [ -s /run/moonwater/compositor.pid ] && break; sleep 1; done
+printf 'plain-%s-%s-end\n' "$(( $(ps | grep -c '[c]ompositor') + 40 ))" "$(( $(moonwater canvas | grep -c 'Canvas is on') + 50 ))"
+poweroff
+COMMANDS
+        # shellcheck disable=SC2086
+        timeout 240 "$boot_emulator" -m 2G -smp 2 "$@" \
+                -kernel "$image" -no-reboot -display none -serial stdio \
+                -append "console=$boot_console drm_client_lib.active=" \
+                < "$work/plain.commands" > "$work/plain" 2>&1 || true
+        says plain 'a plain boot starts the userspace compositor, with Canvas on' 'plain-41-51-end'
 fi
 
 #
@@ -13943,7 +13965,7 @@ if [ "$boot_emulator" = qemu-system-riscv64 ]; then
         { sleep 15; cat "$work/commands"; } |
                 timeout 360 qemu-system-riscv64 -m 2G -smp 2 -machine virt -cpu max \
                 -kernel "$image" -no-reboot -display none -serial stdio \
-                -append "console=ttyS0 drm_client_lib.active=" \
+                -append "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel" \
                 > "$work/transcript" 2>&1 || true
 
         says transcript 'init started on the widest'  'Run /init as init process'
@@ -13956,7 +13978,7 @@ elif [ "$boot_emulator" != qemu-system-x86_64 ]; then
 elif [ -r /dev/kvm ]; then
         timeout 180 qemu-system-x86_64 -m 2G -smp 2 -cpu host -enable-kvm \
                 -kernel "$image" -no-reboot -display none -serial stdio \
-                -append "console=ttyS0 drm_client_lib.active=" \
+                -append "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel" \
                 < "$work/commands" > "$work/transcript" 2>&1 || true
 
         says transcript 'init started on this host'   'Run /init as init process'
@@ -14082,7 +14104,7 @@ guest = Guest([
     "-serial", "chardev:console"] +
     (["-serial", "file:" + os.environ["MOONWATER_POWER_COVERAGE"]]
      if os.environ.get("MOONWATER_POWER_COVERAGE") else []) + [
-    "-append", "console=" + tty + " drm_client_lib.active="],
+    "-append", "console=" + tty + " drm_client_lib.active= moonwater.desktop=kernel"],
     qmp, None, work, (console,), 0.1)
 
 serial = socket.socket(socket.AF_UNIX)
@@ -14579,7 +14601,7 @@ install_boot()
         # shellcheck disable=SC2086
         timeout $((240 * install_slow)) "$install_emulator" -m "${install_memory:-2G}" -smp 2 $install_board $install_machine \
                 -kernel "$image" -no-reboot -display none -serial stdio $coverage_serial \
-                -append "console=$install_console drm_client_lib.active=" \
+                -append "console=$install_console drm_client_lib.active= moonwater.desktop=kernel" \
                 -device qemu-xhci,id=xhci \
                 -drive if=none,id=disk,format=raw,file="${install_disk:-$work/disk.img}" \
                 -device nvme,serial=moonwater,drive=disk \
@@ -14944,7 +14966,7 @@ if [ "$install_loader" = BOOTX64.EFI ] && [ -r /dev/kvm ] && [ -w /dev/kvm ] &&
                         "$work/$name.sent" 240 -- \
                         "$install_emulator" -m 2G -smp 2 $install_board $install_machine \
                         -kernel "$image" -no-reboot -display none -serial stdio \
-                        -append "console=$install_console drm_client_lib.active=" \
+                        -append "console=$install_console drm_client_lib.active= moonwater.desktop=kernel" \
                         -device qemu-xhci,id=xhci \
                         -drive if=none,id=disk,format=raw,file="$disk" \
                         -device nvme,serial=moonwater,drive=disk "$@" \
@@ -15398,7 +15420,7 @@ COMMANDS
         # shellcheck disable=SC2086
         timeout $((300 * install_slow)) "$install_emulator" -m 1G -smp 2 $install_board $install_machine \
                 -kernel "$image" -no-reboot -display none -serial stdio \
-                -append "console=$install_console drm_client_lib.active=" \
+                -append "console=$install_console drm_client_lib.active= moonwater.desktop=kernel" \
                 $lan -device virtio-net-pci,netdev=lan,mac=52:54:00:66:00:02 \
                 < "$work/neighbour.in" > "$work/neighbour" 2>&1 &
         neighbour_qemu=$!
@@ -15875,7 +15897,7 @@ PY
                         -drive if=pflash,format=raw,file="$work/$name.vars" \
                         -kernel "$work/$name.efi" -no-reboot -display none \
                         -serial stdio $coverage_serial \
-                        -append "console=$install_console drm_client_lib.active=" \
+                        -append "console=$install_console drm_client_lib.active= moonwater.desktop=kernel" \
                         < "$work/serial.in" > "$work/$name" 2>&1 &
                 booting=$!
                 exec 9> "$work/serial.in"
@@ -16075,7 +16097,7 @@ guest = Guest(desktop(image) + [
     # nokaslr so the samples map onto System.map. The cursor plane is off here
     # because QEMU's screendump has no cursor plane in it, and the pixel checks
     # below count the cursor's pixels; the plane boot after this one covers it.
-    "-append", "console=ttyS0 drm_client_lib.active= moonwater.cursor_plane=0 " + os.environ.get("CANVAS_APPEND", "")],
+    "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel moonwater.cursor_plane=0 " + os.environ.get("CANVAS_APPEND", "")],
     work + "/qmp", work + "/mon", work)
 time.sleep(0.5)
 
@@ -17387,7 +17409,7 @@ leak_guest = Guest(desktop(image) + [
     "-no-reboot", "-display", "none", "-serial", "file:" + work + "/leak-serial",
     # The cursor plane is off here too: this guest counts the cursor's pixels in
     # a screendump, and QEMU's screendump has no cursor plane in it.
-    "-append", "drm_client_lib.active= moonwater.cursor_plane=0 " + os.environ.get("CANVAS_APPEND", "")],
+    "-append", "drm_client_lib.active= moonwater.desktop=kernel moonwater.cursor_plane=0 " + os.environ.get("CANVAS_APPEND", "")],
     work + "/leak-qmp", work + "/leak-mon", work)
 
 time.sleep(25)
@@ -17957,7 +17979,7 @@ if ovmf:
         "-no-reboot", "-display", "none", "-serial", "file:" + work + "/fw-serial",
         #   The console on the serial port: what moonwater canvas off finds is a
         #   console that is not a screen, and starts a shell on tty1 for.
-        "-append", "console=ttyS0"],
+        "-append", "console=ttyS0 moonwater.desktop=kernel"],
         work + "/fw-qmp", work + "/fw-mon", work)
     time.sleep(40)
     type_shell("moonwater canvas > /dev/ttyS0 2>&1")
@@ -18035,7 +18057,7 @@ if holder:
             "-drive", "if=none,id=stick,format=raw,file=fat:ro:" + stick + ",readonly=on",
             "-device", "usb-storage,drive=stick,removable=on",
             "-no-reboot", "-display", "none", "-serial", "file:" + lost_work + "/serial",
-            "-append", "console=ttyS0 drm_client_lib.active= moonwater.cursor_plane=0"],
+            "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel moonwater.cursor_plane=0"],
             lost_work + "/qmp", lost_work + "/mon", lost_work)
         time.sleep(25)
         shot("lost-start")
@@ -18118,7 +18140,7 @@ os.makedirs(work, exist_ok=True)
 guest = Guest(desktop(image) + [
     "-device", "usb-mouse,id=xhcimouse",
     "-no-reboot", "-display", "none", "-serial", "file:" + work + "/serial",
-    "-append", "console=ttyS0 drm_client_lib.active= " + os.environ.get("CANVAS_APPEND", "")],
+    "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel " + os.environ.get("CANVAS_APPEND", "")],
     work + "/qmp", work + "/mon", work)
 
 # What the tablet reports for a point, and where pointer.c puts the pointer
@@ -18487,7 +18509,7 @@ guest = Guest(desktop(image) + [
     "-drive", "if=none,id=stick,format=raw,file=fat:ro:" + stick + ",readonly=on",
     "-device", "usb-storage,drive=stick,removable=on",
     "-no-reboot", "-display", "none", "-serial", "file:" + work + "/serial",
-    "-append", "console=ttyS0 drm_client_lib.active= moonwater.cursor_plane=0 " + os.environ.get("CANVAS_APPEND", "")],
+    "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel moonwater.cursor_plane=0 " + os.environ.get("CANVAS_APPEND", "")],
     work + "/qmp", work + "/mon", work)
 time.sleep(25)
 
@@ -18945,7 +18967,7 @@ ser = work + "/ser"
 guest = Guest(desktop(image) + [
     "-chardev", "socket,id=s0,path=" + ser + ",server=on,wait=off", "-serial", "chardev:s0",
     "-no-reboot", "-display", "none",
-    "-append", "console=ttyS0 drm_client_lib.active= printk.time=1 moonwater.cursor_plane=0"],
+    "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel printk.time=1 moonwater.cursor_plane=0"],
     work + "/qmp", work + "/mon", work, sockets=(ser,))
 time.sleep(25)
 shell = Shell(ser)
@@ -19004,7 +19026,7 @@ def guest_of(name, kernel):
         "-device", "qemu-xhci", "-device", "usb-tablet", "-device", "usb-kbd",
         "-chardev", "socket,id=s0,path=" + path + ",server=on,wait=off", "-serial", "chardev:s0",
         "-no-reboot", "-display", "none",
-        "-append", "console=ttyS0 printk.time=1"],
+        "-append", "console=ttyS0 printk.time=1 moonwater.desktop=kernel"],
         directory + "/qmp", directory + "/mon", directory, sockets=(path,))
     time.sleep(35)
     shell = Shell(path)
@@ -19088,7 +19110,7 @@ ser = work + "/ser"
 guest = Guest(desktop(image) + [
     "-chardev", "socket,id=s0,path=" + ser + ",server=on,wait=off", "-serial", "chardev:s0",
     "-no-reboot", "-display", "none",
-    "-append", "console=ttyS0 drm_client_lib.active= printk.time=1 moonwater.cursor_plane=0"],
+    "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel printk.time=1 moonwater.cursor_plane=0"],
     work + "/qmp", work + "/mon", work, sockets=(ser,))
 time.sleep(25)
 shell = Shell(ser)
@@ -19148,6 +19170,218 @@ else
                 same "$name" "$want" "$got"
         done < "$work/r2-answers"
         sed -n 's/^r2 /  canvas       /p' "$work/r2-why"
+fi
+fi
+
+#       The desktop a plain boot starts, and the way back from it (stage
+#       recover).
+#
+#       The image boots with no kernel parameter, so the machine script starts
+#       what it starts by default: the userspace compositor under its
+#       supervisor. The guest is driven over its serial shell, which answers
+#       while the display is the compositor's; the keyboard goes in through
+#       QMP, and the kernel's own timestamps (a /dev/kmsg line written just
+#       before a kill, and the kernel's line when the card is Canvas's again)
+#       give the times. What is said of a stopped compositor is said of the
+#       recorded pid only. No font is in the image, so the pixels read are the
+#       compositor's ground and its own panel, not text.
+if [ -z "${CANVAS_ONLY:-}" ] || [ "${CANVAS_ONLY:-}" = r1 ]; then
+r1_font=
+for candidate in /usr/share/fonts/TTF/Hack-Regular.ttf /usr/share/fonts/TTF/DejaVuSansMono.ttf \
+        /usr/share/fonts/dejavu/DejaVuSansMono.ttf /usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf \
+        /usr/share/fonts/noto/NotoSansMono-Regular.ttf; do
+        if [ -f "$candidate" ]; then
+                r1_font=$candidate
+                break
+        fi
+done
+PYTHONPATH=$work python3 - "$image" "$r1_font" > "$work/r1-answers" 2>"$work/r1-why" <<'PY'
+import os, re, shutil, sys, time
+from qmp_guest import *
+
+image, font = sys.argv[1:3]
+work = os.environ["MOONWATER_CANVAS_WORK"] + "/r1"
+stick = work + "/stick"
+os.makedirs(stick, exist_ok=True)
+if font:
+    shutil.copy(font, stick + "/font.ttf")
+else:
+    open(stick + "/none", "w").write("no font on this host\n")
+out = []
+ser = work + "/ser"
+
+guest = Guest(desktop(image) + [
+    "-drive", "if=none,id=stick,format=raw,file=fat:ro:" + stick + ",readonly=on",
+    "-device", "usb-storage,drive=stick,removable=on",
+    "-chardev", "socket,id=s0,path=" + ser + ",server=on,wait=off", "-serial", "chardev:s0",
+    "-no-reboot", "-display", "none",
+    "-append", "console=ttyS0 drm_client_lib.active= printk.time=1 moonwater.cursor_plane=0"],
+    work + "/qmp", work + "/mon", work, sockets=(ser,))
+time.sleep(25)
+shell = Shell(ser)
+shell.ready()
+
+def compositor():
+    return shell.number("cat /run/moonwater/compositor.pid")
+
+def alive(pid):
+    return bool(pid) and "yes" in shell.run("kill -0 %s && echo yes" % pid, 10)[0]
+
+def canvas():
+    text = shell.run("moonwater canvas | head -1", 10)[0]
+    return "off" if "Canvas is off" in text else "on" if "Canvas is on" in text else "?"
+
+def newer(than):
+    pid = compositor()
+    return pid if pid and pid != than and alive(pid) else None
+
+def stamps(text, pattern):
+    return [float(m.group(1)) for m in re.finditer(r"\[\s*(\d+\.\d+)\][^\n]*" + pattern, text, re.M)]
+
+def picture(name):
+    shot(name, 1)
+    width, height, data = load(name)
+    def at(x, y):
+        o = (y * width + x) * 3
+        return "%02x%02x%02x" % (data[o], data[o + 1], data[o + 2])
+    return width, height, at
+
+def said(row):
+    """A row that did not hold says where the guest was: the programs and the log's end."""
+    if out and out[-1][1] != out[-1][2]:
+        print("r1 %s: %s" % (row, shell.run("ps | grep -v kworker | tail -12; dmesg | tail -12", 15)[0].replace("\n", " / ")), file=sys.stderr)
+
+#   A plain boot: the compositor's ground, its own panel in the band along the
+#   bottom, and none of the kernel's windows.
+first = compositor()
+width, height, plain = picture("r1-plain")
+out.append(("R1.1 a plain boot reaches the userspace compositor: its ground, its panel, a process of its own",
+            "%s %s %s" % (plain(4, 4), plain(W // 2, H - 12), "alive" if alive(first) else "gone"),
+            "1b2733 2f3f52 alive"))
+out.append(("and no tool's start was refused memory by the kernel (the shell's reserve is not counted)",
+            shell.number("dmesg | grep -c __vm_enough_memory"), "0"))
+out.append(("and with no font in the image the log says why there is no terminal on it",
+            "yes" if "desktop: no font" in shell.run("dmesg | grep 'desktop:'")[0] else "no", "yes"))
+
+#   Killed, the card goes back to Canvas and the supervisor starts it again.
+handback, restart = [], []
+last = first
+for _ in range(2):
+    shell.run("echo r1-mark > /dev/kmsg; kill -9 %s" % last)
+    again, _ = until(lambda: newer(last), 15)
+    time.sleep(1.5)
+    log = shell.run("dmesg")[0]
+    marks = stamps(log, r"r1-mark$")
+    cards = stamps(log, r"the card is Canvas's again")
+    ups = stamps(log, r"the compositor \(pid %s\) is up" % (again or "0"))
+    if marks and cards and cards[-1] >= marks[-1]:
+        handback.append(cards[-1] - marks[-1])
+    if marks and ups:
+        restart.append(ups[-1] - marks[-1])
+    last = again or last
+out.append(("R1.2 a killed compositor is started again, and the card comes back to Canvas first",
+            "%s %s" % ("restarted" if last != first else "not restarted", len(handback)), "restarted 2"))
+print("r1 killed compositor: card back to Canvas %s ms, compositor up again %s ms (printk times from the kill)" % (
+    " ".join("%.0f" % (t * 1000) for t in handback), " ".join("%.0f" % (t * 1000) for t in restart)), file=sys.stderr)
+out.append(("and both inside a second (the first restart is at once, the second after half a second)",
+            "yes" if handback and restart and max(handback) < 1.0 and max(restart) < 2.0 else "%s %s" % (handback, restart),
+            "yes"))
+
+#   With a font (the host's, on the stick: the image has none) the panel and a
+#   terminal are started on the compositor too, and a restart of the desktop
+#   brings them back.
+if font:
+    shell.run("mkdir -p /mnt; mount -r -t vfat /dev/sda1 /mnt; echo /mnt/font.ttf > /root/font", 20)
+    shell.run("moonwater canvas off", 15)
+    #   The machine script ends the desktop when it hears of Canvas going off, a
+    #   moment after the kernel has; a Canvas turned on before that finds the
+    #   compositor still holding the card and stays off, as it does for any program.
+    until(lambda: canvas() == "off" and shell.number("ps | grep -c '[c]ompositor'") == "0", 10)
+    shell.run("moonwater canvas on", 15)
+    until(lambda: newer(""), 15)
+    #   The terminal loads its font while the guest's two processors do everything else.
+    until(lambda: shell.number("ps | grep -c '[t]erminal'", 30) == "1" and shell.number("ps | grep -c '[p]anel'", 30) == "1", 60)
+    kids = "%s %s" % (shell.number("ps | grep -c '[t]erminal'", 30), shell.number("ps | grep -c '[p]anel'", 30))
+    out.append(("R1.2b with a font in /root/font the panel and a terminal are started on the compositor, after canvas off and on",
+                kids, "1 1"))
+    said("R1.2b")
+else:
+    out.append(("R1.2b with a font in /root/font the panel and a terminal are started on the compositor, after canvas off and on",
+                "not run: no monospace font on the host", "1 1"))
+
+#   A compositor that has stopped answering: Control-Alt-Backspace ends it and
+#   a new one is started, with the keyboard heard by the kernel alone.
+stopped = compositor()
+held = alive(stopped) and "T" in shell.run("kill -STOP %s; sleep 0.3; grep State /proc/%s/status" % (stopped, stopped))[0]
+time.sleep(1)
+chord("ctrl", "alt", "backspace")
+again, took = until(lambda: newer(stopped), 15)
+out.append(("R1.3 a stopped compositor is ended by Control-Alt-Backspace and the desktop is started again",
+            "restarted" if held and again and not alive(stopped) else "no: stopped %s, new %s" % (held, again), "restarted"))
+print("r1 stopped compositor, Control-Alt-Backspace to a new compositor: %.2f s (after the keys)" % took, file=sys.stderr)
+said("R1.3")
+
+#   And Control-Alt-Shift-Backspace turns Canvas off, to the text console, and
+#   the supervisor goes with it.
+stopped = again or stopped
+held = alive(stopped) and "T" in shell.run("kill -STOP %s; sleep 0.3; grep State /proc/%s/status" % (stopped, stopped))[0]
+time.sleep(1)
+chord("ctrl", "alt", "shift", "backspace")
+state, took = until(lambda: canvas() == "off" and "off", 10)
+print("r1 stopped compositor, Control-Alt-Shift-Backspace to Canvas off: %.2f s" % took, file=sys.stderr)
+time.sleep(4)
+log = shell.run("dmesg | tail -40")[0]
+out.append(("R1.4 a stopped compositor with a supervisor does not keep Canvas on either: it is off, and the compositor gone",
+            "%s %s %s" % (canvas(), "gone" if not alive(stopped) else "still there", "stopped" if held else "not stopped"),
+            "off gone stopped"))
+out.append(("and nothing starts the compositor again while Canvas is off",
+            "yes" if not compositor() and shell.number("ps | grep -c '[c]ompositor'") == "0" else "no", "yes"))
+shell.run("moonwater canvas on")
+back, took = until(lambda: newer(stopped), 15)
+out.append(("R1.5 moonwater canvas on starts the desktop again",
+            "yes" if back and canvas() == "on" else "no", "yes"))
+
+#   Four deaths in a row and the supervisor stops: the kernel's desktop has the
+#   card, and a terminal of its own, which the keyboard reaches.
+for _ in range(6):
+    pid = compositor()
+    if not (pid and alive(pid)):
+        break
+    shell.run("kill -9 %s" % pid)
+    until(lambda: newer(pid), 6)
+time.sleep(3)
+windows = shell.run("moonwater canvas | head -1")[0]
+out.append(("R1.6 four deaths in a row end the supervisor: no compositor, and the kernel desktop has a terminal beside its log",
+            "%s %s" % ("none" if shell.number("ps | grep -c '[c]ompositor'") == "0" else "running",
+                       "1 window" if "1 window" in windows else windows[-30:]), "none 1 window"))
+type_text("echo r1-typed-")
+chord("shift", "4")
+chord("shift", "4")
+type_text(" ")
+chord("shift", "dot")
+type_text(" /dev/tty")
+chord("shift", "s")
+type_text("0\n")
+until(lambda: shell.run("echo", 2) and re.search(rb"r1-typed-\d+", shell.heard), 10)
+out.append(("and the kernel's terminal answers the keyboard",
+            "yes" if re.search(rb"r1-typed-\d+", shell.heard) else "no", "yes"))
+
+for name, got, want in out:
+    print("%s|%s|%s" % (name, got, want))
+try:
+    guest.quit()
+    guest.wait(10)
+except Exception:
+    guest.kill()
+PY
+if [ ! -s "$work/r1-answers" ]; then
+        same "the plain boot answered" "yes" "no"
+        sed 's/^/    /' "$work/r1-why" | tail -5
+else
+        while IFS='|' read -r name got want; do
+                same "$name" "$want" "$got"
+        done < "$work/r1-answers"
+        sed -n 's/^r1 /  canvas       /p' "$work/r1-why"
 fi
 fi
 
@@ -19238,7 +19472,7 @@ guest = Guest(desktop(image) + [
     "-drive", "if=none,id=stick,format=raw,file=fat:ro:" + stick + ",readonly=on",
     "-device", "usb-storage,drive=stick,removable=on",
     "-no-reboot", "-display", "none", "-serial", "file:" + work + "/serial",
-    "-append", "console=ttyS0 drm_client_lib.active= moonwater.cursor_plane=0 " + os.environ.get("CANVAS_APPEND", "")],
+    "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel moonwater.cursor_plane=0 " + os.environ.get("CANVAS_APPEND", "")],
     work + "/qmp", work + "/mon", work)
 time.sleep(25)
 
@@ -19559,7 +19793,7 @@ guest = Guest(desktop(image) + [
     "-chardev", "socket,id=s0,path=" + work + "/ser,server=on,wait=off",
     "-serial", "chardev:s0",
     "-no-reboot", "-display", "none",
-    "-append", "console=ttyS0 drm_client_lib.active= moonwater.cursor_plane=0"],
+    "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel moonwater.cursor_plane=0"],
     work + "/qmp", work + "/mon", work, sockets=(work + "/ser",))
 
 shell = socket.socket(socket.AF_UNIX)
@@ -19721,7 +19955,7 @@ guest = Guest(machine + [
     "-chardev", "socket,id=s0,path=" + work + "/ser,server=on,wait=off",
     "-serial", "chardev:s0",
     "-no-reboot", "-display", "none",
-    "-append", "console=ttyS0 drm_client_lib.active= moonwater.cursor_plane=0"],
+    "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel moonwater.cursor_plane=0"],
     work + "/qmp", work + "/mon", work, sockets=(work + "/ser",))
 
 shell = socket.socket(socket.AF_UNIX)
@@ -19896,7 +20130,7 @@ for label, extra in (("plain", ""), ("dark", "moonwater.pm_dark=5"), ("undone", 
     guest = Guest(["qemu-system-x86_64", "-m", "2G", "-smp", "2", "-cpu", "host", "-enable-kvm",
         "-kernel", image, "-vga", "std", "-no-reboot", "-display", "none", "-nic", "user,model=e1000",
         "-chardev", "socket,id=console,path=" + console + ",server=on,wait=off", "-serial", "chardev:console",
-        "-append", "console=ttyS0 drm_client_lib.active= " + extra],
+        "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel " + extra],
         work + "/qmp", work + "/mon", work, (console,), 0.1)
     serial = socket.socket(socket.AF_UNIX)
     serial.connect(console)
@@ -21404,7 +21638,7 @@ one()
         qemu-system-x86_64 -m 2G -smp 2 -cpu host -enable-kvm \
                 -kernel "$image" -no-reboot -display none \
                 -serial "file:$log" \
-                -append "console=ttyS0 drm_client_lib.active= printk.time=1 $extra" \
+                -append "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel printk.time=1 $extra" \
                 < /dev/null > /dev/null 2>&1 &
         pid=$!
         n=0

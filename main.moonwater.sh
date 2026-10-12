@@ -92,8 +92,115 @@ function moonwater_ctrl_alt_delete {
   reboot
 }
 
+# The desktop Canvas starts with: the compositor, which holds the card and
+# draws windows; the panel and a terminal on it; and, under them, the kernel's
+# own desktop, which has the card whenever the compositor does not.
+#
+# The compositor runs under a supervisor. When it exits or dies it is started
+# again at once, then after half a second, then after two; a compositor that
+# has ended four times without living half a minute is given up, and Canvas
+# opens the kernel's terminal, so there is a shell on a screen. The keyboard
+# does not depend on any of this: Control-Alt-Backspace ends the compositor and
+# everything it started, and the supervisor starts it again; Control-Alt-Shift-
+# Backspace turns Canvas off, to the text console, and the supervisor goes with
+# it. A moonwater canvas on after that starts the desktop again.
+#
+# The panel and the terminal take their text from a font, and nothing in the
+# image is one. The path is the first line of /root/font, or the first mono
+# face in /usr/share/fonts. With none the compositor runs alone: its own panel,
+# no terminal, and a line in the log saying why.
+#
+# moonwater.desktop=kernel on the kernel's command line, or /root/desktop
+# naming anything but canvas, leaves the kernel's desktop as it was: its log
+# and a terminal of its own.
+#
+# These helpers are not named moonwater_: a name that is would be an event.
+function desktop_font {
+  desktop_face=
+  for desktop_try in "$(cat /root/font 2>/dev/null)" /usr/share/fonts/*/*Mono*Regular*.ttf /usr/share/fonts/*Mono*.ttf; do
+    if [ -r "$desktop_try" ]; then
+      desktop_face=$desktop_try
+      return
+    fi
+  done
+}
+
+# One compositor and what it carries, until the compositor is over.
+function desktop_session {
+  rm -f /run/moonwater/surface
+  setsid /compositor &
+  desktop_compositor=$!
+  echo $desktop_compositor > /run/moonwater/compositor.pid
+  desktop_wait=0
+  until [ -S /run/moonwater/surface ] || ! kill -0 $desktop_compositor 2> /dev/null || [ $desktop_wait -ge 100 ]; do
+    sleep 0.05
+    desktop_wait=$((desktop_wait + 1))
+  done
+  echo "desktop: the compositor (pid $desktop_compositor) is up" > /dev/kmsg
+  desktop_font
+  desktop_kids=
+  if [ -n "$desktop_face" ]; then
+    /compositor grant panel /panel -f "$desktop_face" &
+    desktop_kids=$!
+    /terminal -f "$desktop_face" &
+    desktop_kids="$desktop_kids $!"
+  else
+    echo "desktop: no font in /root/font or /usr/share/fonts, so no terminal on the compositor" > /dev/kmsg
+  fi
+  wait $desktop_compositor
+  echo "desktop: the compositor (pid $desktop_compositor) ended, status $?" > /dev/kmsg
+  kill $desktop_kids 2> /dev/null
+  rm -f /run/moonwater/compositor.pid
+}
+
+function desktop_supervise {
+  desktop_fails=0
+  while :; do
+    case $(moonwater canvas) in
+    *"Canvas is on"*) ;;
+    *) return ;;
+    esac
+    desktop_began=$SECONDS
+    desktop_session
+    if [ $((SECONDS - desktop_began)) -ge 30 ]; then
+      desktop_fails=0
+    fi
+    desktop_fails=$((desktop_fails + 1))
+    if [ $desktop_fails -ge 4 ]; then
+      echo "desktop: the compositor ended $desktop_fails times in a row; Canvas has the card, and a terminal" > /dev/kmsg
+      moonwater canvas terminal
+      return
+    fi
+    case $desktop_fails in
+    2) sleep 0.5 ;;
+    3) sleep 2 ;;
+    esac
+  done
+}
+
+function desktop_start {
+  case $(moonwater desktop) in
+  *"desktop canvas"*) ;;
+  *) return 1 ;;
+  esac
+  case $(cat /proc/cmdline) in
+  *moonwater.desktop=kernel*) return 1 ;;
+  esac
+  if [ -s /run/moonwater/supervisor.pid ] && kill -0 $(cat /run/moonwater/supervisor.pid) 2> /dev/null; then
+    return
+  fi
+  (desktop_supervise) > /dev/null 2>&1 &
+  echo $! > /run/moonwater/supervisor.pid
+}
+
+function desktop_stop {
+  kill $(cat /run/moonwater/supervisor.pid) 2> /dev/null
+  kill $(cat /run/moonwater/compositor.pid) 2> /dev/null
+  rm -f /run/moonwater/supervisor.pid /run/moonwater/compositor.pid
+}
+
 # Canvas started or stopped; $1 is on or off. Canvas opens no window by
-# itself: these are the windows a desktop starts with, at boot and after
+# itself: these are what a desktop starts with, at boot and after
 # `moonwater canvas on`. Defining this function owns the canvas rows, so
 # `moonwater bind canvas on|off` is refused while it is here.
 #
@@ -105,8 +212,11 @@ function moonwater_canvas {
   case $1 in
   on)
     moonwater canvas log
-    moonwater canvas terminal
+    desktop_start || moonwater canvas terminal
     moonwater desktop boot
+    ;;
+  off)
+    desktop_stop
     ;;
   esac
 }
