@@ -98317,6 +98317,82 @@ static fn check_drawn()
 }
 
 /*
+        The shapes the terminal draws with no face: each one lights something at
+        every size, and a hollow one less than its filled twin; the up and right
+        triangles are the down and left ones turned over and mirrored; a full
+        block covers its cell edge to edge; the cross and the arrow light their
+        strokes. Red on the parent, where none of these is drawn.
+*/
+static positive cell_ink(const p8 address_to bits, b32 width, b32 height)
+{
+        positive total = 0;
+
+        for (b32 r = 0; r < height; r++)
+                for (b32 c = 0; c < width; c++)
+                        total += bits[r * 128 + c];
+        return total;
+}
+
+static fn check_shapes(void)
+{
+        static const b32 sizes[4][2] = {{8, 16}, {10, 21}, {17, 37}, {32, 70}};
+        static const p32 pairs[][2] = {{0x25a0, 0x25a1}, {0x25aa, 0x25ab}, {0x25b2, 0x25b3}, {0x25b4, 0x25b5},
+                                       {0x25b6, 0x25b7}, {0x25b8, 0x25b9}, {0x25bc, 0x25bd}, {0x25be, 0x25bf},
+                                       {0x25c0, 0x25c1}, {0x25c2, 0x25c3}, {0x25c6, 0x25c7}, {0x25cf, 0x25cb}};
+        static const p32 alone[] = {0x25e6, 0x25ac, 0x25ca, 0x25c4, 0x25ba, 0x2717, 0x21b5};
+        bool lit = true, lighter = true, mirrors = true, edges = true;
+
+        for (p32 s = 0; s < 4; s++)
+        {
+                b32 width = sizes[s][0], height = sizes[s][1];
+
+                for (p32 k = 0; k < sizeof(pairs) / sizeof(pairs[0]); k++)
+                {
+                        draw_cell(pairs[k][0], width, height, plain[0]);
+                        positive filled = cell_ink(plain[0], width, height);
+                        draw_cell(pairs[k][1], width, height, drawn);
+                        positive hole = cell_ink(drawn, width, height);
+
+                        lit = lit && filled > 0 && hole > 0;
+                        lighter = lighter && hole < filled;
+                        //      A hollow one lies inside its filled twin, pixel by pixel (a rounding pixel either way).
+                        for (b32 r = 0; r < height; r++)
+                                for (b32 c = 0; c < width; c++)
+                                        lighter = lighter && drawn[r * 128 + c] <= plain[0][r * 128 + c] + 1;
+                }
+                for (p32 k = 0; k < sizeof(alone) / sizeof(alone[0]); k++)
+                {
+                        draw_cell(alone[k], width, height, drawn);
+                        lit = lit && cell_ink(drawn, width, height) > 0;
+                }
+
+                draw_cell(0x25b2, width, height, drawn);
+                draw_cell(0x25bc, width, height, plain[0]);
+                draw_cell(0x25b6, width, height, plain[1]);
+                draw_cell(0x25c0, width, height, plain[2]);
+                for (b32 r = 0; r < height; r++)
+                        for (b32 c = 0; c < width; c++)
+                        {
+                                p32 up = drawn[r * 128 + c], down = plain[0][(height - 1 - r) * 128 + c];
+                                p32 right = plain[1][r * 128 + c], left = plain[2][r * 128 + width - 1 - c];
+
+                                mirrors = mirrors && (up > down ? up - down : down - up) <= 2 &&
+                                          (right > left ? right - left : left - right) <= 2;
+                        }
+
+                draw_cell(0x2588, width, height, drawn);
+                for (b32 i = 0; i < width; i++)
+                        edges = edges && drawn[i] == 255 && drawn[(height - 1) * 128 + i] == 255;
+                for (b32 i = 0; i < height; i++)
+                        edges = edges && drawn[i * 128] == 255 && drawn[i * 128 + width - 1] == 255;
+        }
+        check("shapes: every filled and hollow shape lights its cell, and a hollow one lights less than its filled twin",
+              lit && lighter);
+        check("shapes: the down triangle is the up one turned over, and the left the right one mirrored", mirrors);
+        check("blocks: a full block covers its cell edge to edge at every size", edges);
+}
+
+/*
         Drawing into a target: what a known background draws is what an
         unknown one blends to over the same ground, a cell writes all of its
         rectangle and nothing else, clipping at every edge writes nothing
@@ -98934,6 +99010,7 @@ b32 main()
         check_layout(&one, &two);
         check_light();
         check_drawn();
+        check_shapes();
         check_drawing(&one, &two);
         check_translate();
         check_blend();
@@ -99416,6 +99493,54 @@ static fn check_release(void)
         check("compositor: a commit on the same buffer releases nothing", page->release_serial == 2);
 }
 
+// A code point as UTF-8, into bytes; the count of bytes it takes.
+static positive render_glyph(p8 address_to bytes, p32 code)
+{
+        if (code < 0x80)
+        {
+                bytes[0] = (p8)code;
+                return 1;
+        }
+        if (code < 0x800)
+        {
+                bytes[0] = (p8)(0xc0 | code >> 6);
+                bytes[1] = (p8)(0x80 | (code & 63));
+                return 2;
+        }
+        bytes[0] = (p8)(0xe0 | code >> 12);
+        bytes[1] = (p8)(0x80 | (code >> 6 & 63));
+        bytes[2] = (p8)(0x80 | (code & 63));
+        return 3;
+}
+
+// Whether a cell of the frame is drawn: some pixel is not the paper, and the cell is not the picture of a missing glyph.
+static bool render_drawn(const p32 address_to pixels, p32 paper, p32 row, p32 column)
+{
+        bool lit = false, missing = true;
+
+        for (p32 y = 0; y < terminal.cell_h; y++)
+                for (p32 x = 0; x < terminal.cell_w; x++)
+                {
+                        p32 at = (row * terminal.cell_h + y) * terminal.width + column * terminal.cell_w + x;
+                        p32 gone = (7 * terminal.cell_h + y) * terminal.width + 20 * terminal.cell_w + x;
+
+                        lit = lit || pixels[at] != paper;
+                        missing = missing && pixels[at] == pixels[gone];
+                }
+        return lit && !missing;
+}
+
+// The frame just drawn, read back: the buffer that is on the screen, or null when it was refused.
+static p32 address_to render_frame(void)
+{
+        int slot = terminal.shown < 0 ? 0 : 1 - terminal.shown;
+
+        terminal.surface->release_serial = terminal.committed[slot];
+        if (!terminal_frame())
+                return null;
+        return surface_slot(terminal.surface, (unsigned int)terminal.shown, terminal.width, terminal.height);
+}
+
 b32 main()
 {
         string_address paths[1];
@@ -99434,6 +99559,7 @@ b32 main()
 
         {
                 unsigned int shipped = 0, wanted = 0;
+                bool soft = true;
 
                 for (unsigned int at = 2; at < program_argument_count(); at++)
                 {
@@ -99444,8 +99570,19 @@ b32 main()
                         wanted++;
                         if (bytes && font_load(&other, (const p8 address_to)bytes, length, 0) == 0 && font_glyph(&other, 'A'))
                                 shipped++;
+                        {
+                                //      A soft hyphen a face has not is drawn as nothing, not as the face's notdef.
+                                p32 face = 0, glyph = 0;
+
+                                if (bytes && !font_glyph(&other, 0xad))
+                                {
+                                        font_find(terminal.engine, (const font_face *const[]){&other}, 1, 0xad, &face, &glyph);
+                                        soft = soft && face == FONT_DRAWN;
+                                }
+                        }
                 }
                 check("fonts: every face the image ships loads and has the letter A", wanted && shipped == wanted);
+                check("fonts: a soft hyphen a shipped face lacks is drawn as nothing, not as its notdef", soft);
         }
 
         for (unsigned int at = 0; at < 256; at++)
@@ -99461,6 +99598,73 @@ b32 main()
         full_reset();
         render_surface();
         cursor_show();
+
+        //      The glyphs a program prints, btop's among them, each in its own cell of a
+        //      30 by 8 grid: every printable ASCII character, the shapes, braille, box
+        //      and block characters and the arrow and cross that btop and its kin draw,
+        //      and a bold row. A frame of the cell is lit where a pixel is not the blank
+        //      paper beside it. Red on the parent where no face and no procedure draws it.
+        {
+                static const p32 glyphs[] = {
+                    0x25a0, 0x25a1, 0x25aa, 0x25ab, 0x25ac, 0x25b2, 0x25b3, 0x25bc, 0x25bd, 0x25b6, 0x25b7, 0x25c0,
+                    0x25c1, 0x25cf, 0x25cb, 0x25c6, 0x25c7, 0x25e6, 0x25b4, 0x25be, 0x25b8, 0x25c2, 0x25ba, 0x25c4,
+                    0x2847, 0x28ff, 0x2880, 0x28c0, 0x28f0, 0x2809, 0x2803, 0x28b8,
+                    0x256d, 0x2500, 0x256e, 0x2502, 0x2570, 0x256f, 0x2550, 0x2551, 0x2554, 0x2557, 0x255a, 0x255d,
+                    0x250c, 0x2510, 0x2514, 0x2518, 0x253c, 0x2581, 0x2586, 0x2588, 0x2591, 0x2592, 0x2593, 0x2590,
+                    0x21b5, 0x2717, 0x2191, 0x2193, 0x2190, 0x2192, 0x00b7, 0x2022, 0x2026};
+                static const p32 bold[] = {0x25a0, 0x25b2, 0x25bc, 0x25cb, 0x25cf, 0x25c6};
+                bool every = true;
+                p32 address_to pixels = null;
+                p32 paper = 0;
+
+                cursor_hide();
+                term_bytes((const p8 address_to) "\x1b[H\x1b[2J", 7);
+                for (p32 c = 0x21; c < 0x7f; c++)
+                {
+                        p8 bytes[4];
+                        positive length = render_glyph(bytes, c);
+
+                        term_bytes(bytes, length);
+                        if ((c - 0x21 + 1) % 30 == 0)
+                                term_bytes((const p8 address_to) "\r\n", 2);
+                }
+                term_bytes((const p8 address_to) "\r\n", 2);
+                for (p32 k = 0; k < sizeof(glyphs) / sizeof(glyphs[0]); k++)
+                {
+                        p8 bytes[4];
+                        positive length = render_glyph(bytes, glyphs[k]);
+
+                        term_bytes(bytes, length);
+                }
+                //      U+E000 is in neither face: its cell is the picture a missing glyph gets.
+                term_bytes((const p8 address_to) "\x1b[8;21H\xee\x80\x80\x1b[8;1H\x1b[1m",
+                           sizeof("\x1b[8;21H\xee\x80\x80\x1b[8;1H\x1b[1m") - 1);
+                for (p32 k = 0; k < sizeof(bold) / sizeof(bold[0]); k++)
+                {
+                        p8 bytes[4];
+                        positive length = render_glyph(bytes, bold[k]);
+
+                        term_bytes(bytes, length);
+                }
+                term_bytes((const p8 address_to) "\x1b[0m", 4);
+                cursor_show();
+                to_shell_length = 0;
+                pixels = render_frame();
+                if (!pixels)
+                        every = false;
+                else
+                {
+                        //      The blank cell at the bottom right is the paper; a cell is lit where a pixel is not it.
+                        paper = pixels[(positive)(8 * terminal.cell_h - 1) * terminal.width + 30 * terminal.cell_w - 1];
+                        for (p32 at = 0; at < 94; at++)
+                                every = every && render_drawn(pixels, paper, at / 30, at % 30);
+                        for (p32 at = 0; at < sizeof(glyphs) / sizeof(glyphs[0]); at++)
+                                every = every && render_drawn(pixels, paper, 4 + at / 30, at % 30);
+                        for (p32 at = 0; at < sizeof(bold) / sizeof(bold[0]); at++)
+                                every = every && render_drawn(pixels, paper, 7, at);
+                }
+                check("glyphs: every printable ASCII character, and each shape, braille, box and block glyph btop draws, lights its cell", every);
+        }
 
         for (positive step = 0; step < 40000; step++)
                 if (!render_step(&compared, &wrong, step))

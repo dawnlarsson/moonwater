@@ -36,8 +36,10 @@
                         extension lookups, from the kern feature of the
                         default script; the kern table when GPOS has none
             cells       box drawing (U+2500-257F), block elements
-                        (U+2580-259F) and braille (U+2800-28FF) drawn to the
-                        cell, so neighbours join at every size
+                        (U+2580-259F), braille (U+2800-28FF) and the shapes
+                        of U+25A0-25FF that programs draw, with U+21B5 and
+                        U+2717, drawn to the cell, so neighbours join at every
+                        size
             cache       one 8-bit coverage atlas, shelf packed, keyed by face,
                         glyph, size, phase and style, emptied whole when full
             layout      UTF-8 through lib.util.c's decoder, advances,
@@ -2441,8 +2443,9 @@ b32 font_render(font_engine address_to e, const font_face address_to face, p32 g
 }
 
 /*
-        Cells drawn rather than read from a font: box drawing, block elements
-        and braille, sized to the cell so that each joins its neighbours.
+        Cells drawn rather than read from a font: box drawing, block elements,
+        braille and the shapes below, sized to the cell so that each joins its
+        neighbours.
 
         A box drawing character is up to four arms from the middle of the
         cell to its edges, each none, light, heavy or double; the table below
@@ -2550,6 +2553,172 @@ static fn font_quarter(font_engine address_to e, f32 cx, f32 cy, f32 radius,
         }
 }
 
+/*
+        Shapes that no face the terminal draws with has: the squares, triangles,
+        diamonds and circles of U+25A0-25FF that programs draw (btop's meters
+        and sort marks among them), and U+21B5 and U+2717. Each is outlined
+        about the middle of the cell with a half size of a third of the width
+        or a fifth of the height, whichever is less, and a small one half of
+        that; a hollow one has a light line's stroke inside its outline. Every
+        contour of a shape is wound the same way, so the parts of one shape add
+        and a hollow one is a hole. Entries are the shape, HOLLOW or SMALL.
+*/
+#define SHAPE_SQUARE 1
+#define SHAPE_RECT 2
+#define SHAPE_UP 3
+#define SHAPE_DOWN 4
+#define SHAPE_RIGHT 5
+#define SHAPE_LEFT 6
+#define SHAPE_DIAMOND 7
+#define SHAPE_CIRCLE 8
+#define SHAPE_HOLLOW 0x10
+#define SHAPE_SMALL 0x20
+#define SHAPE_ARROW 0x40
+#define SHAPE_CROSS 0x80
+
+static const p8 font_drawn_kind[96] = {
+        [0x00] = SHAPE_SQUARE,                 [0x01] = SHAPE_SQUARE | SHAPE_HOLLOW,        // ■ □
+        [0x0a] = SHAPE_SQUARE | SHAPE_SMALL,   [0x0b] = SHAPE_SQUARE | SHAPE_SMALL | SHAPE_HOLLOW, // ▪ ▫
+        [0x0c] = SHAPE_RECT,                                                              // ▬
+        [0x12] = SHAPE_UP,                     [0x13] = SHAPE_UP | SHAPE_HOLLOW,            // ▲ △
+        [0x14] = SHAPE_UP | SHAPE_SMALL,       [0x15] = SHAPE_UP | SHAPE_SMALL | SHAPE_HOLLOW, // ▴ ▵
+        [0x16] = SHAPE_RIGHT,                  [0x17] = SHAPE_RIGHT | SHAPE_HOLLOW,         // ▶ ▷
+        [0x18] = SHAPE_RIGHT | SHAPE_SMALL,    [0x19] = SHAPE_RIGHT | SHAPE_SMALL | SHAPE_HOLLOW, // ▸ ▹
+        [0x1a] = SHAPE_RIGHT,                                                             // ►
+        [0x1c] = SHAPE_DOWN,                   [0x1d] = SHAPE_DOWN | SHAPE_HOLLOW,          // ▼ ▽
+        [0x1e] = SHAPE_DOWN | SHAPE_SMALL,     [0x1f] = SHAPE_DOWN | SHAPE_SMALL | SHAPE_HOLLOW, // ▾ ▿
+        [0x20] = SHAPE_LEFT,                   [0x21] = SHAPE_LEFT | SHAPE_HOLLOW,          // ◀ ◁
+        [0x22] = SHAPE_LEFT | SHAPE_SMALL,     [0x23] = SHAPE_LEFT | SHAPE_SMALL | SHAPE_HOLLOW, // ◂ ◃
+        [0x24] = SHAPE_LEFT,                                                              // ◄
+        [0x26] = SHAPE_DIAMOND,                [0x27] = SHAPE_DIAMOND | SHAPE_HOLLOW,       // ◆ ◇
+        [0x2a] = SHAPE_DIAMOND | SHAPE_HOLLOW,                                            // ◊
+        [0x2b] = SHAPE_CIRCLE | SHAPE_HOLLOW,  [0x2f] = SHAPE_CIRCLE,                       // ○ ●
+        [0x46] = SHAPE_CIRCLE | SHAPE_SMALL | SHAPE_HOLLOW,                               // ◦
+};
+
+//      The outline of each polygon, wound the same way, and its incentre and
+//      inradius (for a hollow one's stroke): the triangles have an incentre a
+//      0.382 of a half size from their middle, toward the base.
+static const f32 font_drawn_vertex[8][4][2] = {
+        {{0, 0}, {0, 0}, {0, 0}, {0, 0}},
+        {{-1, -1}, {1, -1}, {1, 1}, {-1, 1}},
+        {{-1, -0.5f}, {1, -0.5f}, {1, 0.5f}, {-1, 0.5f}},
+        {{0, -1}, {1, 1}, {-1, 1}, {0, 0}},
+        {{0, 1}, {-1, -1}, {1, -1}, {0, 0}},
+        {{1, 0}, {-1, 1}, {-1, -1}, {0, 0}},
+        {{-1, 0}, {1, -1}, {1, 1}, {0, 0}},
+        {{0, -1}, {1, 0}, {0, 1}, {-1, 0}},
+};
+static const f32 font_drawn_centre[8][3] = {
+        {0, 0, 0},
+        {0, 0, 1},
+        {0, 0, 0.5f},
+        {0, 0.381966f, 0.618034f},
+        {0, -0.381966f, 0.618034f},
+        {-0.381966f, 0, 0.618034f},
+        {0.381966f, 0, 0.618034f},
+        {0, 0, 0.707107f},
+};
+
+//      A straight stroke of width t from a to b: four points, wound the same
+//      way whatever the direction, so strokes that cross add.
+static fn font_stroke(font_engine address_to e, f32 ax, f32 ay, f32 bx, f32 by, f32 t, b32 height)
+{
+        f32 dx = bx - ax, dy = by - ay, length = __builtin_sqrtf(dx * dx + dy * dy);
+        f32 nx = -dy / length * t / 2, ny = dx / length * t / 2;
+
+        font_put(e, ax - nx, ay - ny, height, true);
+        font_put(e, bx - nx, by - ny, height, true);
+        font_put(e, bx + nx, by + ny, height, true);
+        font_put(e, ax + nx, ay + ny, height, true);
+        font_close(e);
+}
+
+static p8 font_drawn_shape(p32 code)
+{
+        if (code >= 0x25a0 && code <= 0x25ff)
+                return font_drawn_kind[code - 0x25a0];
+        return code == 0x21b5 ? SHAPE_ARROW : code == 0x2717 ? SHAPE_CROSS : 0;
+}
+
+static bool font_draw_shape(font_engine address_to e, p32 code, b32 width, b32 height, b32 light,
+                            p8 address_to out, positive stride)
+{
+        p32 kind = font_drawn_shape(code);
+        f32 cx = (f32)width / 2, cy = (f32)height / 2, t = (f32)light;
+        f32 half = (f32)width * 0.36f < (f32)height * 0.2f ? (f32)width * 0.36f : (f32)height * 0.2f;
+
+        if (!kind)
+                return false;
+        if (kind == SHAPE_ARROW)
+        {
+                //      A stem down from the top right, a bar to the left and a head.
+                f32 w = (f32)width, h = (f32)height, right = w * 0.72f, left = w * 0.22f, mid = h * 0.6f;
+                f32 wing = w * 0.2f;
+
+                font_stroke(e, right, h * 0.28f, right, mid + t / 2, t, height);
+                font_stroke(e, right, mid, left, mid, t, height);
+                font_stroke(e, left, mid, left + wing, mid - wing, t, height);
+                font_stroke(e, left, mid, left + wing, mid + wing, t, height);
+        }
+        else if (kind == SHAPE_CROSS)
+        {
+                font_stroke(e, cx - half, cy - half, cx + half, cy + half, t, height);
+                font_stroke(e, cx + half, cy - half, cx - half, cy + half, t, height);
+        }
+        else
+        {
+                p32 shape = kind & 15;
+                f32 size = kind & SHAPE_SMALL ? half / 2 : half;
+                bool hollow = kind & SHAPE_HOLLOW;
+
+                if (shape == SHAPE_CIRCLE)
+                {
+                        //      Quarters, the first from each direction to the next; a hollow one's
+                        //      inner ring runs back the other way, the quarters in reverse order.
+                        static const f32 quarter[4][4] = {{1, 0, 0, 1}, {0, 1, -1, 0}, {-1, 0, 0, -1}, {0, -1, 1, 0}};
+
+                        for (p32 q = 0; q < 4; q++)
+                                font_quarter(e, cx, cy, size, quarter[q][0], quarter[q][1], quarter[q][2], quarter[q][3],
+                                             height);
+                        font_close(e);
+                        if (hollow)
+                        {
+                                //      The stroke is at most half the inside, so a small one stays hollow.
+                                f32 inner = size - (t < size / 2 ? t : size / 2);
+
+                                for (p32 q = 4; q-- > 0;)
+                                        font_quarter(e, cx, cy, inner, quarter[q][2], quarter[q][3], quarter[q][0],
+                                                     quarter[q][1], height);
+                                font_close(e);
+                        }
+                }
+                else
+                {
+                        p32 n = shape == SHAPE_UP || shape == SHAPE_DOWN || shape == SHAPE_RIGHT || shape == SHAPE_LEFT ? 3 : 4;
+                        const f32 (*v)[2] = font_drawn_vertex[shape];
+                        const f32 *c = font_drawn_centre[shape];
+
+                        for (p32 k = 0; k < n; k++)
+                                font_put(e, cx + size * v[k][0], cy + size * v[k][1], height, true);
+                        font_close(e);
+                        if (hollow)
+                        {
+                                //      Each vertex moved toward the incentre until the edges are t inside.
+                                f32 stroke = t < size * c[2] / 2 ? t : size * c[2] / 2;
+                                f32 scale = 1 - stroke / (size * c[2]);
+
+                                for (p32 k = n; k-- > 0;)
+                                        font_put(e, cx + size * (c[0] + (v[k][0] - c[0]) * scale),
+                                                 cy + size * (c[1] + (v[k][1] - c[1]) * scale), height, true);
+                                font_close(e);
+                        }
+                }
+        }
+        font_raster(e, width, height, out, stride);
+        return true;
+}
+
 static bool font_drawn(font_engine address_to e, p32 code, b32 width, b32 height,
                        p8 address_to out, positive stride)
 {
@@ -2558,6 +2727,12 @@ static bool font_drawn(font_engine address_to e, p32 code, b32 width, b32 height
         e->point_count = e->contour_count = 0;
         e->clip = true;
 
+        if (font_drawn_shape(code))
+                return font_draw_shape(e, code, width, height, light, out, stride);
+        //      A soft hyphen is nothing: the cell is left as it was cleared, which is what
+        //      the faces that have one draw (Plex's is empty), and what a face without one must too.
+        if (code == 0xad)
+                return true;
         if (code >= 0x2800 && code <= 0x28ff)
         {
                 f32 radius = (width < height / 2 ? width : height / 2) * 0.15f;
@@ -3225,7 +3400,10 @@ static positive font_decode(const p8 address_to text, positive length, positive 
 
 static bool font_is_drawn(p32 code)
 {
-        return (code >= 0x2500 && code <= 0x259f) || (code >= 0x2800 && code <= 0x28ff);
+        //      The cell of an ASCII or Latin-1 character, the common case, is one compare.
+        if (code < 0x2190)
+                return code == 0xad;
+        return (code >= 0x2500 && code <= 0x259f) || (code >= 0x2800 && code <= 0x28ff) || font_drawn_shape(code);
 }
 
 static font_memo address_to font_recall(font_memo address_to memo, p64 key)
