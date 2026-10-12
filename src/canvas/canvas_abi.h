@@ -221,6 +221,19 @@ _Static_assert(sizeof(struct canvas_control) == 232, "spark canvas control ABI")
 // _IOWR('s', 10, struct canvas_control)
 #define SPARK_IOCTL_CANVAS 0xc0e8730au
 
+/* Each request's size field is the size of its struct, or the kernel copies
+   the wrong number of bytes and answers as if it had not. */
+_Static_assert(sizeof(struct input_stats) == 112, "spark input stats ABI");
+_Static_assert(sizeof(struct cursor_stats) == 64, "spark cursor stats ABI");
+_Static_assert(sizeof(struct input_device_stats) == 72, "spark input device ABI");
+_Static_assert(sizeof(struct input_devices) == 584, "spark input devices ABI");
+#define SPARK_IOCTL_SIZE(request) (((request) >> 16) & 0x3fffu)
+_Static_assert(SPARK_IOCTL_SIZE(SPARK_IOCTL_INPUT_STATS) == sizeof(struct input_stats), "spark ioctl size");
+_Static_assert(SPARK_IOCTL_SIZE(SPARK_IOCTL_CURSOR_STATS) == sizeof(struct cursor_stats), "spark ioctl size");
+_Static_assert(SPARK_IOCTL_SIZE(SPARK_IOCTL_INPUT_DEVICES) == sizeof(struct input_devices), "spark ioctl size");
+_Static_assert(SPARK_IOCTL_SIZE(SPARK_IOCTL_LATENCY) == sizeof(struct latency_stats), "spark ioctl size");
+_Static_assert(SPARK_IOCTL_SIZE(SPARK_IOCTL_CANVAS) == sizeof(struct canvas_control), "spark ioctl size");
+
 // Bindings, which are spark.c's table: the events a desktop fires when it
 // starts and when it stops, in the table's order and under its names.
 #define SPARK_BIND_CANVAS_ON 12u
