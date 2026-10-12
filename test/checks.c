@@ -54009,9 +54009,42 @@ typedef struct
 //      The next writev answers that it wrote nothing.
 static bool http_writev_zero;
 
+/* Syscalls by number that answer as set instead of being made: the ids a
+   confined child gives up, the seccomp it installs. */
+#define NET_FAKE_CALLS 512
+static bool net_faked[NET_FAKE_CALLS];
+static bipolar net_fake[NET_FAKE_CALLS];
+
+static fn net_fake_set(positive number, bipolar result)
+{
+        net_faked[number] = true;
+        net_fake[number] = result;
+}
+
+static fn net_fakes_clear(void)
+{
+        memory_fill(net_faked, 0, sizeof net_faked);
+}
+
+static bipolar net_call1(positive number, positive one)
+{
+        if (number < NET_FAKE_CALLS && net_faked[number])
+                return net_fake[number];
+        return (system_call_1)(number, one);
+}
+
+static bipolar net_call2(positive number, positive one, positive two)
+{
+        if (number < NET_FAKE_CALLS && net_faked[number])
+                return net_fake[number];
+        return (system_call_2)(number, one, two);
+}
+
 static bipolar http_net_call3(positive number, positive one, positive two,
                               positive three)
 {
+        if (number < NET_FAKE_CALLS && net_faked[number])
+                return net_fake[number];
         if (number == syscall(writev) && http_writev_zero)
         {
                 http_writev_zero = false;
@@ -54355,6 +54388,8 @@ static address_any net_test_memory_search(address_any block, positive size,
 #define system_random_fill(...) net_test_random_fill(__VA_ARGS__)
 #define system_poll_wait net_test_poll_wait
 #define system_call_3(...) http_net_call3(__VA_ARGS__)
+#define system_call_1(...) net_call1(__VA_ARGS__)
+#define system_call_2(...) net_call2(__VA_ARGS__)
 #define socket_send(...) net_test_socket_send(__VA_ARGS__)
 #define socket_receive(...) net_test_socket_receive(__VA_ARGS__)
 #define memory_reserve(...) net_test_memory_reserve(__VA_ARGS__)
@@ -54375,6 +54410,8 @@ static address_any net_test_memory_search(address_any block, positive size,
 #undef socket_receive
 #undef socket_send
 #undef system_call_3
+#undef system_call_1
+#undef system_call_2
 
 /* qemu-user arches get --emulated from test/run; native host arch does not. */
 static bool net_as_emulated(void)
@@ -72629,6 +72666,227 @@ static fn net_apart_confinement(void)
         system_close(spare);
 }
 
+/* What the edge tasks do in the confined child, which may only write: say
+   `bytes` bytes, then write a byte into keep (blocking when its pipe is
+   full, dying when nobody reads it), or say whether keep takes a write. */
+typedef struct
+{
+        positive bytes;
+        bool spill;
+        bool probe_keep;
+        bipolar keep;
+} net_apart_edge;
+
+static bool net_apart_edge_task(address_any context, bipolar answer)
+{
+        net_apart_edge address_to edge = (net_apart_edge address_to)context;
+        p8 bytes[160];
+
+        memory_fill(bytes, 'x', sizeof bytes);
+        if (edge->probe_keep)
+        {
+                p8 one = system_write_all((positive)edge->keep, bytes, 1) == 1;
+
+                return system_write_all((positive)answer, address_of one, 1) == 1;
+        }
+        if (edge->bytes &&
+            system_write_all((positive)answer, bytes, edge->bytes) != (bipolar)edge->bytes)
+                return false;
+        if (edge->spill)
+                (void)system_write_all((positive)edge->keep, bytes, 1);
+        return true;
+}
+
+/*
+        The edges of the confined child's own decisions: who it becomes, as
+        root and not, whatever setgroups, setresgid and setresuid answer; a
+        filter one step too long, and one of exactly the most steps; an
+        answer of exactly the most, of nothing, and of too much from a child
+        still running; a child that could not confine itself; one that died
+        writing into a pipe nobody reads; and descriptor 0 kept.
+*/
+static fn net_apart_edges(void)
+{
+        {
+                static const struct
+                {
+                        bipolar uid, euid, groups, gid, uid_set;
+                        bool want;
+                } rows[] = {
+                    {1000, 1000, -EIO, -EIO, -EIO, true}, // not root: nothing to give up
+                    {0, 0, 0, 0, 0, true},
+                    {0, 0, -EPERM, -EINVAL, -EINVAL, true},
+                    {0, 0, -EIO, 0, 0, false},
+                    {0, 0, 0, -EIO, 0, false},
+                    {0, 0, 0, 0, -EIO, false},
+                    {0, 1000, -EIO, 0, 0, false}, // root by one id is root
+                };
+                positive wrong = 0;
+
+                for (positive at = 0; at < array_count(rows); at++)
+                {
+                        net_fake_set(syscall(getuid), rows[at].uid);
+                        net_fake_set(syscall(geteuid), rows[at].euid);
+                        net_fake_set(syscall(setgroups), rows[at].groups);
+                        net_fake_set(syscall(setresgid), rows[at].gid);
+                        net_fake_set(syscall(setresuid), rows[at].uid_set);
+                        wrong += net_apart_nobody() != rows[at].want;
+                        net_fakes_clear();
+                }
+                check("the confined child gives up its ids as each answer says", wrong == 0);
+        }
+        {
+                static net_filter filter;
+
+                filter.used = 0;
+                for (positive at = 0; at <= NET_FILTER_STEPS; at++)
+                        net_filter_put(address_of filter, 0x20, 0, 0, 0);
+                check("a filter one step too long is counted, not written past its end, and refused",
+                      filter.used == NET_FILTER_STEPS + 1 && !net_filter_install(address_of filter));
+                filter.used = NET_FILTER_STEPS;
+                net_filter_past(address_of filter, NET_FILTER_STEPS);
+                check("a jump past a filter that is full writes nothing past its end",
+                      filter.used == NET_FILTER_STEPS);
+        }
+        {
+                bipolar child = system_fork();
+
+                if (!child)
+                {
+                        static net_filter filter;
+
+                        filter.used = 0;
+                        for (positive at = 1; at < NET_FILTER_STEPS; at++)
+                                net_filter_put(address_of filter, 0x20, 0, 0, 0);
+                        net_filter_put(address_of filter, 0x06, 0, 0, 0x7fff0000);
+                        system_call_1(syscall(exit_group),
+                                      system_call_5(syscall(prctl), PR_SET_NO_NEW_PRIVS, 1, 0,
+                                                    0, 0) == 0 &&
+                                              net_filter_install(address_of filter)
+                                          ? 0 : 1);
+                }
+                positive raw = 1;
+
+                if (child > 0)
+                        (void)system_wait4_retry(child, address_of raw, 0, null);
+                check("a filter of exactly the most steps is installed",
+                      child > 0 && (raw == 0 || net_as_emulated()));
+        }
+        if (net_as_emulated())
+                return;
+        {
+                net_apart_edge edge = {.bytes = 8, .keep = -1};
+                byte_store answer = {0};
+
+                check("an answer of exactly the most is whole",
+                      net_apart(net_apart_edge_task, address_of edge, -1, address_of answer, 8,
+                                false) == NET_APART_OK &&
+                          answer.used == 8);
+                byte_store_release(address_of answer);
+                edge.bytes = 0;
+                check("an answer of nothing is an answer",
+                      net_apart(net_apart_edge_task, address_of edge, -1, address_of answer, 8,
+                                false) == NET_APART_OK &&
+                          !answer.used);
+                byte_store_release(address_of answer);
+                net_fake_set(syscall(seccomp), -EACCES);
+                check("a child that cannot install its filter does nothing and says so",
+                      net_apart(net_apart_edge_task, address_of edge, -1, address_of answer, 8,
+                                false) == NET_APART_UNCONFINED &&
+                          !answer.used);
+                net_fakes_clear();
+                byte_store_release(address_of answer);
+        }
+        {
+                b32 hold[2];
+
+                if (system_call_2(syscall(pipe2), (positive)hold, O_CLOEXEC) == 0)
+                {
+                        //      keep's pipe full, so the child's byte into it
+                        //      waits for a reader that never comes.
+                        static p8 fill[65536];
+                        net_apart_edge edge = {.bytes = 16, .spill = true, .keep = hold[1]};
+                        byte_store answer = {0};
+                        bool full = system_write_all((positive)hold[1], fill, sizeof fill) ==
+                                    (bipolar)sizeof fill;
+
+                        check("a child still running when it says too much is killed for it",
+                              full &&
+                                  net_apart(net_apart_edge_task, address_of edge, hold[1],
+                                            address_of answer, 8, false) == NET_APART_DIED &&
+                                  net_apart_signal == SIGKILL);
+                        byte_store_release(address_of answer);
+                        system_close(hold[0]);
+                        system_close(hold[1]);
+                }
+        }
+        {
+                positive died = 0;
+
+                for (positive round = 0; round < 8; round++)
+                {
+                        net_apart_edge edge = {.keep = -1};
+                        byte_store answer = {0};
+
+                        net_memory_reserve_fail = true;
+                        died += net_apart(net_apart_edge_task, address_of edge, -1,
+                                          address_of answer, 8, false) == NET_APART_DIED;
+                        net_memory_reserve_fail = false;
+                        byte_store_release(address_of answer);
+                }
+                check("an answer that could not be held is no answer, however the child ended",
+                      died == 8);
+        }
+        {
+                bipolar child = system_fork();
+
+                if (!child)
+                {
+                        b32 hold[2];
+                        net_apart_edge edge = {.spill = true};
+                        byte_store answer = {0};
+
+                        system_signal_install(SIGPIPE, (positive)SIG_DFL, 0, 0, null);
+                        if (system_call_2(syscall(pipe2), (positive)hold, O_CLOEXEC))
+                                system_call_1(syscall(exit_group), 2);
+                        system_close(hold[0]);
+                        edge.keep = hold[1];
+                        (void)net_apart(net_apart_edge_task, address_of edge, hold[1],
+                                        address_of answer, 8, false);
+                        system_call_1(syscall(exit_group), 0);
+                }
+                positive raw = 0;
+
+                if (child > 0)
+                        (void)system_wait4_retry(child, address_of raw, 0, null);
+                check("a child that dies writing into a pipe nobody reads takes its caller with it",
+                      child > 0 && (raw & 0x7f) == SIGPIPE);
+        }
+        {
+                bipolar saved = system_call_1(syscall(dup), 0);
+                bipolar quiet;
+                net_apart_edge edge = {.probe_keep = true, .keep = 0};
+                byte_store answer = {0};
+                bipolar ran;
+
+                if (saved >= 0)
+                        system_close(0);
+                quiet = system_open_at(AT_FDCWD, "/dev/null", 1 | O_CLOEXEC);
+                ran = net_apart(net_apart_edge_task, address_of edge, 0, address_of answer, 8,
+                                false);
+                if (quiet >= 0)
+                        system_close((b32)quiet);
+                if (saved >= 0)
+                {
+                        system_call_2(syscall(dup2), (positive)saved, 0);
+                        system_close((b32)saved);
+                }
+                check("descriptor 0, kept for the child, is still open in it",
+                      quiet == 0 && ran == NET_APART_OK && answer.used == 1 && answer.bytes[0] == 1);
+                byte_store_release(address_of answer);
+        }
+}
+
 /*
         A fetch through the confinement, end to end, from a server on
         loopback that also looks at the client while it waits for the
@@ -75853,6 +76111,7 @@ b32 main(void)
         net_group(dhcp_frames_on_loopback);
         net_group(net_apart_filter_decisions);
         net_group(net_apart_confinement);
+        net_group(net_apart_edges);
         net_group(net_apart_fetching);
         net_group(dhcp_reacquisition_state_matrix);
         net_group(dhcp_ack_lease_integrity);

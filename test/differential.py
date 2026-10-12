@@ -68944,6 +68944,8 @@ NET_MUTATION_EQUIVALENT = {
         "No entry of the table is 256 bytes long, so entry_length never reaches the size of entry.",
     ("tls_public_suffix", "while (matched < key_length && matched < entry_length &&", "<", 1):
         "Past the key's end the walk can only find the key a prefix of a longer entry, which no later entry equals: the lookup answers false either way.",
+    ("net_apart", "if (want > most + 1)", ">", 1):
+        "At want == most + 1 both arms leave it most + 1.",
     ("tls_parse_key_usage", "if (unused > 7 || at >= stop)", ">=", 1): 'With no bit octet the unused-count octet is read as the final one; for unused 0 it is zero (refused), and for 1 to 7 its trailing-zero count is below its value, so the canonical test refuses it as the original does.',
 }
 
