@@ -1648,7 +1648,14 @@ static fn font_snap_axis(font_engine address_to e, b64 normal, b64 least, b64 wi
         //      or 2 is a third lighter or heavier. Past that each stem keeps
         //      its width and puts its nearer edge on the grid, one sharp
         //      edge and the weight unchanged.
-        bool whole = 5 * (rounded - normal) <= normal && 5 * (normal - rounded) <= normal;
+        //      A standard from three quarters of a pixel up to one is a
+        //      pixel: a stroke thinner than a pixel can only ever be grey,
+        //      and at 10 or 11 px it is most of what a letter is. Under three
+        //      quarters (Plex Mono at 8 and 9 px) the stems would grow by
+        //      half and more, and a diagonal between two black stems, N's,
+        //      fades to nothing: those keep their width.
+        bool whole = (normal >= FONT_ONE * 3 / 4 && normal < FONT_ONE) ||
+                     (5 * (rounded - normal) <= normal && 5 * (normal - rounded) <= normal);
         for (p32 s = 0; s < stems; s++)
         {
                 b64 left = stem[2 * s], right = stem[2 * s + 1], width = right - left;

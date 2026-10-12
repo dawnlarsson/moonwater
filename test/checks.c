@@ -98494,6 +98494,24 @@ static fn check_snap()
                       engine.points[4].x == 3072 && engine.points[6].x == 4096 && engine.points[2].x < 3072 &&
                           engine.points[0].x < engine.points[2].x);
         }
+
+        //      Under a pixel: 0.8 px becomes a whole one, 0.6 px keeps its
+        //      width and puts its nearer edge on the grid.
+        {
+                const b32 stem[] = {1331, 0, 1331, 10240, 2150, 10240, 2150, 0};
+
+                snap_load(stem, 4, false);
+                font_snap(&engine, &face, size, snap_standard(819));
+                check("snap: a 0.8 px stem is a whole pixel", engine.points[0].x == 1024 && engine.points[2].x == 2048);
+        }
+        {
+                const b32 stem[] = {1331, 0, 1331, 10240, 1945, 10240, 1945, 0};
+
+                snap_load(stem, 4, false);
+                font_snap(&engine, &face, size, snap_standard(614));
+                check("snap: a 0.6 px stem keeps its width with an edge on a pixel",
+                      engine.points[0].x == 1434 && engine.points[2].x == 2048);
+        }
 }
 
 /*
