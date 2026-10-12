@@ -19775,6 +19775,43 @@ until(lambda: shell.run("echo", 2) and re.search(rb"r1-typed-\d+", shell.heard),
 out.append(("and the kernel's terminal answers the keyboard",
             "yes" if re.search(rb"r1-typed-\d+", shell.heard) else "no", "yes"))
 
+#   Control-Shift-T on the kernel's own desktop is the same request to the machine script, which answers
+#   it with the kernel's terminal where there is no compositor: one more window.
+def windows():
+    found = re.search(r"(\d+) windows?", shell.run("moonwater canvas | head -1", 10)[0])
+    return int(found.group(1)) if found else -1
+
+had = windows()
+chord("ctrl", "shift", "t")
+more, _ = until(lambda: windows() == had + 1, 10)
+out.append(("R1.6b Control-Shift-T on the kernel's desktop is answered by the machine script with a terminal of its own: one more window",
+            "yes" if more else "no (%d to %d)" % (had, windows()), "yes"))
+
+#   No font to draw with: the engine has no face of its own, so the desktop is not started on a screen with
+#   nothing on it. The kernel's desktop has the screen, with its log and a terminal, and the log of the
+#   machine names the file that is missing. The image's own fonts are hidden under a file system with none.
+shell.run("moonwater canvas off", 15)
+until(lambda: canvas() == "off" and shell.number("ps | grep -c '[c]ompositor'") == "0", 10)
+shell.run("mkdir -p /usr/share/fonts; mount -t tmpfs none /usr/share/fonts; echo /nonexistent/font.ttf > /root/font", 20)
+shell.run("moonwater canvas on", 15)
+time.sleep(4)
+said_no_font = shell.run("dmesg | grep 'desktop: no font'")[0]
+out.append(("R1.7 with no font to draw with the machine script starts no compositor, and the log of the machine names the file that is missing",
+            "%s %s" % ("none" if shell.number("ps | grep -c '[c]ompositor'") == "0" else "running",
+                       "named" if "/nonexistent/font.ttf" in said_no_font else "not named"), "none named"))
+out.append(("and Canvas is on with the kernel's desktop, which has a terminal at the keyboard",
+            "%s %s" % ("on" if canvas() == "on" else "off", "terminal" if windows() >= 1 else "no window"), "on terminal"))
+type_text("echo r1-nofont-")
+chord("shift", "4")
+chord("shift", "4")
+type_text(" ")
+chord("shift", "dot")
+type_text(" /dev/tty")
+chord("shift", "s")
+type_text("0\n")
+until(lambda: shell.run("echo", 2) and re.search(rb"r1-nofont-\d+", shell.heard), 10)
+out.append(("and that terminal answers the keyboard", "yes" if re.search(rb"r1-nofont-\d+", shell.heard) else "no", "yes"))
+
 for name, got, want in out:
     print("%s|%s|%s" % (name, got, want))
 try:

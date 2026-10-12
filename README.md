@@ -402,8 +402,10 @@ Font License; `THIRD-PARTY` says which and where from): the terminal draws with
 IBM Plex Mono, Regular and Bold, and the panel with Inter. The first line of
 `/root/font` is a path that takes both instead, with no bold. A build without
 those files falls back to the first mono face in `/usr/share/fonts`; with none
-the compositor runs alone, with its own panel and no terminal, and the log says
-why (`desktop: no font ...`). `moonwater.desktop=kernel` on the kernel's command
+the compositor is not started, because the text engine has no face of its own and
+a screen of shapes is a screen with nothing on it: the kernel's desktop keeps the
+screen with its log and a terminal, and the machine's log names the file that is
+missing (`desktop: no font to draw with ...`). `moonwater.desktop=kernel` on the kernel's command
 line, or a `/root/desktop` that names anything but `canvas`, leaves the kernel's
 own desktop as it was: the log and a terminal of its own.
 

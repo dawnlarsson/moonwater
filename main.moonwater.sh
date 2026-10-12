@@ -122,8 +122,9 @@ function moonwater_desktop_terminal {
 # THIRD-PARTY for what they are): the terminal and the log draw with IBM Plex
 # Mono, Regular and Bold, and the panel with Inter. /root/font, whose first line is a path, takes both
 # instead, with no bold. A build without those files falls back to the first
-# mono face in /usr/share/fonts for both. With none the compositor runs alone:
-# its own panel, no terminal, and a line in the log saying why.
+# mono face in /usr/share/fonts for both. With none the compositor is
+# not started: the kernel's desktop keeps the screen, with its log and a
+# terminal, and a line in the log names the file that is missing.
 #
 # moonwater.desktop=kernel on the kernel's command line, or /root/desktop
 # naming anything but canvas, leaves the kernel's desktop as it was: its log
@@ -256,6 +257,15 @@ function desktop_start {
   case $(cat /proc/cmdline) in
   *moonwater.desktop=kernel*) return 1 ;;
   esac
+  # The text engine has no face of its own, and a compositor without one has
+  # a panel of shapes and no window: the kernel's desktop, which has its log
+  # and a terminal, keeps the screen, and the log says which file was wanted.
+  desktop_font
+  if [ -z "$desktop_face" ]; then
+    desktop_try=$(cat /root/font 2>/dev/null)
+    echo "desktop: no font to draw with: /root/font names ${desktop_try:-no file}, which is not readable, and /usr/share/fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf and every other mono face under /usr/share/fonts are missing; the desktop is the kernel's, with its log and a terminal" > /dev/kmsg
+    return 1
+  fi
   if [ -s /run/moonwater/supervisor.pid ] && kill -0 $(cat /run/moonwater/supervisor.pid) 2> /dev/null; then
     return
   fi
