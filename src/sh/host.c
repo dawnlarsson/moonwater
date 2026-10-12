@@ -14964,22 +14964,6 @@ static COLD bipolar sntp_query_apart(string_address name, p16 port, bool filter,
         return status;
 }
 
-static COLD bipolar sntp_query(string_address name, bool filter, bipolar most,
-                               sntp_sample address_to answer)
-{
-        return sntp_query_apart(name, SNTP_PORT, filter, most, null, answer);
-}
-
-//      A time server an NTS key establishment named, asked with its keys:
-//      an authenticated answer is believed wherever the window puts it.
-static COLD bipolar sntp_query_nts(string_address name, p16 port, bool filter,
-                                   nts_exchange address_to nts,
-                                   sntp_sample address_to answer)
-{
-        return sntp_query_apart(name, port, filter, SNTP_OFFSET_ANY_NS, nts,
-                                answer);
-}
-
 #endif
 
 
@@ -16764,7 +16748,7 @@ static bipolar locale_ntp_ask(string_address server, bool filter, bipolar most,
         if (!server || !server[0] ||
             !radio_text_plain(server, string_length(server)))
                 return SNTP_NO_SERVER;
-        return sntp_query(server, filter, most, answer);
+        return sntp_query_apart(server, SNTP_PORT, filter, most, null, answer);
 }
 
 /*
@@ -17133,8 +17117,10 @@ static COLD bipolar locale_nts_ask(string_address entry, bool filter,
                         break;
                 }
                 nts_exchange_open(&exchange, &state);
-                status = sntp_query_nts(server, state.port, filter, &exchange,
-                                        answer);
+                //      An authenticated answer is believed wherever the window
+                //      puts it.
+                status = sntp_query_apart(server, state.port, filter,
+                                          SNTP_OFFSET_ANY_NS, &exchange, answer);
                 nts_exchange_close(&exchange);
                 locale_nts_save(&state);
                 if (status != SNTP_NTS_NAK)
