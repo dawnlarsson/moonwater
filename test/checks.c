@@ -54072,6 +54072,92 @@ static fn surfaces(void)
                 system_call_4(syscall(wait4), (positive)child, 0, 0, 0);
         }
 
+        //      A message is one whole struct: a short one and a cut one are not answers.
+        {
+                struct surface_message whole = {SURFACE_CREATED, 0, {0}};
+                char shorty[16] = {0}, long_one[128] = {0};
+
+                system_call_6(syscall(sendto), (positive)pair[1], (positive)shorty, 16,
+                              SURFACE_MSG_NOSIGNAL, 0, 0);
+                check("a short message is refused", surface_receive(pair[0], &taken, 0) == -71);
+                system_call_6(syscall(sendto), (positive)pair[1], (positive)long_one, 128,
+                              SURFACE_MSG_NOSIGNAL, 0, 0);
+                check("an oversized one is refused, not cut to fit", surface_receive(pair[0], &taken, 0) == -71);
+                surface_send(pair[1], &whole, -1);
+                check("a whole one is taken", surface_receive(pair[0], &taken, 0) == (long)sizeof(taken));
+        }
+
+        //      The answer to a create or a resize: wakes ahead of it are skipped,
+        //      and it is refused unless it is CREATED with protocol 2, the size
+        //      the program asked for, and a page the compositor wrote.
+        {
+                static struct surface answered;
+                struct surface_message answer = {SURFACE_CREATED, 0, {0}}, wake = {SURFACE_WAKE, 0, {0}};
+                unsigned long bytes = WINDOW_PIXELS + SURFACE_PAGE_ROUND(64u * 32 * 4) * 2;
+
+                answer.request.protocol = SURFACE_PROTOCOL;
+                answer.request.bytes = (unsigned int)bytes;
+                answered.magic = SURFACE_MAGIC;
+                answered.protocol = SURFACE_PROTOCOL;
+
+                surface_send(pair[1], &wake, -1);
+                surface_send(pair[1], &answer, -1);
+                check("a wake ahead of the answer is skipped", surface_answer(pair[0], &taken, SURFACE_CREATED, &answered, bytes) == 0);
+
+                answer.request.protocol = 0;
+                surface_send(pair[1], &answer, -1);
+                check("an answer that is not protocol 2 is refused", surface_answer(pair[0], &taken, SURFACE_CREATED, &answered, bytes) == -93);
+
+                answer.request.protocol = SURFACE_PROTOCOL;
+                answer.request.bytes = (unsigned int)bytes + 4096;
+                surface_send(pair[1], &answer, -1);
+                check("an answer for another size is refused", surface_answer(pair[0], &taken, SURFACE_CREATED, &answered, bytes) == -93);
+
+                answer.request.bytes = (unsigned int)bytes;
+                answered.magic = 0;
+                surface_send(pair[1], &answer, -1);
+                check("a page the compositor did not write is refused", surface_answer(pair[0], &taken, SURFACE_CREATED, &answered, bytes) == -93);
+                answered.magic = SURFACE_MAGIC;
+
+                answer.kind = SURFACE_RESIZED;
+                surface_send(pair[1], &answer, -1);
+                check("the wrong kind is refused", surface_answer(pair[0], &taken, SURFACE_CREATED, &answered, bytes) == -71);
+
+                answer.kind = SURFACE_CREATED;
+                answer.status = SURFACE_ESIZE;
+                surface_send(pair[1], &answer, -1);
+                check("a refusal's status is the answer", surface_answer(pair[0], &taken, SURFACE_CREATED, &answered, bytes) == SURFACE_ESIZE);
+        }
+
+        //      Slots other than one or two, and a grid with no history or a mapping past 4 GiB, are refused.
+        {
+                struct window *grid;
+                static struct surface one_slot;
+
+                surface_open_slots(64, 32, SURFACE_ROLE_APP, 0);
+                check("zero slots is EINVAL before anything is made", surface_refused == -22);
+                surface_open_slots(64, 32, SURFACE_ROLE_APP, 3);
+                check("three slots is EINVAL before anything is made", surface_refused == -22);
+
+                grid = window_grid_open(80, 24, 80, 0);
+                check("a grid with no history is refused", grid == 0);
+                if (grid)
+                        window_close(grid);
+                grid = window_grid_open(80, 24, 4096, 131073);
+                check("a grid whose mapping is past 4 GiB is refused", grid == 0);
+                if (grid)
+                        window_close(grid);
+                grid = window_grid_open(80, 24, 40, 100);
+                check("a grid is cut no wider than its ring", grid && grid->columns == 40 && grid->stride == 40);
+                if (grid)
+                        window_close(grid);
+
+                one_slot.buffer_slots = 1;
+                one_slot.buffer_offset[0] = WINDOW_PIXELS;
+                one_slot.buffer_offset[1] = WINDOW_PIXELS + 8192;
+                check("a one-slot page draws slot 1 in slot 0", (char *)surface_buffer(&one_slot, 1) == (char *)&one_slot + WINDOW_PIXELS);
+        }
+
         //      The far end closing is the one thing that is -1, whichever way the sleep goes.
         socket_close(pair[1]);
         check("a closed connection ends the sleep with -1", surface_wait(&page, -1, -1) == -1);

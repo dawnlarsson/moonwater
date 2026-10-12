@@ -67,6 +67,10 @@
 // The titlebar the compositor draws above the contents.
 #define WINDOW_TITLE 20
 
+// The handle of a window of cells the program holds itself (window_grid_open):
+// no file, so no call is made to it.
+#define WINDOW_PRIVATE 0xffffffffu
+
 // region
 #define WINDOW_FREE 0
 #define WINDOW_CENTRED 1
@@ -305,6 +309,9 @@ struct window_request
         unsigned int columns; // non-zero asks for cells rather than pixels,
         unsigned int rows;    // and decides the size
 };
+
+_Static_assert(((WINDOW_IOCTL_CREATE >> 16) & 0x3fffu) == sizeof(struct window_request),
+               "window create ioctl size");
 
 /*
         A cell, for a window made of text.
@@ -558,6 +565,61 @@ _Static_assert(sizeof(struct window) == 1288, "window page ABI");
 _Static_assert(sizeof(struct surface_event) == 16, "surface event ABI");
 _Static_assert(sizeof(struct surface_damage) == 16, "surface ABI");
 _Static_assert(sizeof(struct surface_style) == 8, "surface ABI");
+_Static_assert(sizeof(struct window_key) == 16, "window key ABI");
+_Static_assert(sizeof(struct window_cell) == 8, "window cell ABI");
+_Static_assert(sizeof(struct window_request) == 16, "window request ABI");
+
+/* Every field of the version 1 page, where the version 1 program and the
+   version 2 compositor both expect it. */
+#define WINDOW_AT(field, offset)                                               \
+        _Static_assert(__builtin_offsetof(struct window, field) == (offset), "window page ABI " #field)
+WINDOW_AT(x, 0);
+WINDOW_AT(y, 4);
+WINDOW_AT(z, 8);
+WINDOW_AT(width, 12);
+WINDOW_AT(height, 16);
+WINDOW_AT(region, 20);
+WINDOW_AT(display, 24);
+WINDOW_AT(style, 28);
+WINDOW_AT(edge, 32);
+WINDOW_AT(sequence, 36);
+WINDOW_AT(title, 40);
+WINDOW_AT(state, 168);
+WINDOW_AT(pitch, 172);
+WINDOW_AT(max_width, 176);
+WINDOW_AT(max_height, 180);
+WINDOW_AT(display_width, 184);
+WINDOW_AT(display_height, 188);
+WINDOW_AT(awake, 192);
+WINDOW_AT(handle, 196);
+WINDOW_AT(stride, 200);
+WINDOW_AT(history, 204);
+WINDOW_AT(head, 208);
+WINDOW_AT(lines, 212);
+WINDOW_AT(key_head, 216);
+WINDOW_AT(key_tail, 220);
+WINDOW_AT(keys, 224);
+WINDOW_AT(columns, 1248);
+WINDOW_AT(rows, 1252);
+WINDOW_AT(damage_row, 1256);
+WINDOW_AT(damage_rows, 1260);
+WINDOW_AT(grid_columns, 1264);
+WINDOW_AT(grid_rows, 1268);
+WINDOW_AT(max_columns, 1272);
+WINDOW_AT(max_rows, 1276);
+WINDOW_AT(mapping, 1280);
+WINDOW_AT(want, 1284);
+_Static_assert(__builtin_offsetof(struct window_key, character) == 4, "window key ABI");
+_Static_assert(__builtin_offsetof(struct window_cell, ink) == 4, "window cell ABI");
+_Static_assert(__builtin_offsetof(struct window_cell, paper) == 5, "window cell ABI");
+_Static_assert(__builtin_offsetof(struct window_cell, flags) == 6, "window cell ABI");
+_Static_assert(__builtin_offsetof(struct window_request, columns) == 8, "window request ABI");
+_Static_assert(__builtin_offsetof(struct surface_event, flags) == 2, "surface event ABI");
+_Static_assert(__builtin_offsetof(struct surface_event, serial) == 4, "surface event ABI");
+_Static_assert(__builtin_offsetof(struct surface_event, a) == 8, "surface event ABI");
+_Static_assert(__builtin_offsetof(struct surface_event, b) == 12, "surface event ABI");
+_Static_assert(__builtin_offsetof(struct surface_damage, height) == 12, "surface damage ABI");
+_Static_assert(__builtin_offsetof(struct surface_style, value) == 4, "surface style ABI");
 
 /* Every field of canvas spec 01 section 4.1, at its number: a field that
    moves is a version that is not 2. */
@@ -638,6 +700,9 @@ struct surface_listing
 };
 
 _Static_assert(sizeof(struct surface_entry) == 36, "surface listing ABI");
+_Static_assert(__builtin_offsetof(struct surface_entry, title) == 8, "surface listing ABI");
+_Static_assert(__builtin_offsetof(struct surface_listing, entry) == 8, "surface listing ABI");
+_Static_assert(sizeof(struct surface_listing) == 1160, "surface listing ABI");
 _Static_assert(SURFACE_HEADER + sizeof(struct surface_listing) <= WINDOW_PIXELS,
                "the window list ends before the first buffer");
 
@@ -651,8 +716,11 @@ _Static_assert(SURFACE_HEADER + sizeof(struct surface_listing) <= WINDOW_PIXELS,
    0x7ffff000 at byte 1388 is a segfault. The compositor finds a slot from
    the size it checked itself: surface_slot. */
 #define SURFACE_PAGE_ROUND(bytes) (((bytes) + 4095u) & ~4095u)
+/* A page of one slot has no second buffer to draw in: the offset the compositor
+   wrote for slot 1 is past the end of the file, so slot 1 is slot 0 there. */
 #define surface_buffer(surface, slot)                                          \
-        window_at((surface), unsigned int, (surface)->buffer_offset[(slot) & 1])
+        window_at((surface), unsigned int,                                     \
+                  (surface)->buffer_offset[(slot) & 1u & ((surface)->buffer_slots - 1u)])
 #define surface_slot(surface, slot, width, height)                             \
         window_at((surface), unsigned int,                                     \
                   WINDOW_PIXELS + ((slot) & 1u) *                              \
@@ -858,6 +926,10 @@ static void window_commit(struct window *window)
         // cells or damage rows it is the announcement of.
         __atomic_store_n(&window->sequence, window->sequence + 1, __ATOMIC_RELEASE);
 
+        // A window of cells the program holds itself has no compositor to tell.
+        if (window->handle == WINDOW_PRIVATE)
+                return;
+
         /*
                 The compositor clears awake and then looks at sequence one more
                 time. This store has to be visible before that load for the
@@ -881,7 +953,8 @@ static void window_commit(struct window *window)
 static void window_flush(struct window *window)
 {
         __atomic_store_n(&window->sequence, window->sequence + 1, __ATOMIC_RELEASE);
-        window_call(WINDOW_SYS_IOCTL, window->handle, WINDOW_IOCTL_COMMIT, 0, 0, 0, 0);
+        if (window->handle != WINDOW_PRIVATE)
+                window_call(WINDOW_SYS_IOCTL, window->handle, WINDOW_IOCTL_COMMIT, 0, 0, 0, 0);
 }
 
 /*
@@ -895,7 +968,6 @@ static void window_flush(struct window *window)
         Lines already written keep their text; nothing narrower is ever
         asked for, so nothing is ever cut.
 */
-#define WINDOW_PRIVATE 0xffffffffu
 #define WINDOW_STRIDE_STEP 32u
 
 /*
@@ -911,14 +983,31 @@ static void window_flush(struct window *window)
 static struct window *window_grid_open(unsigned int columns, unsigned int rows,
                                        unsigned int max_columns, unsigned int history)
 {
-        unsigned long lines = WINDOW_PIXELS + (unsigned long)history * max_columns *
-                                                  sizeof(struct window_cell);
-        unsigned long bytes = (lines + (unsigned long)history * sizeof(unsigned int) + 4095) &
-                              ~4095ul;
-        unsigned int cut = (columns + WINDOW_STRIDE_STEP - 1) / WINDOW_STRIDE_STEP * WINDOW_STRIDE_STEP;
+        // A ring with no lines has no line to name, and the offsets in the header and
+        // the mapping's length are 32 bits: a grid that needs more is refused here, not
+        // truncated into a mapping the window cannot find its lines in. A line is never
+        // wider than the ring was cut for, and there are never more rows than lines.
+        unsigned long cells, lines, bytes;
+        unsigned int cut;
         // PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS
-        long mapped = window_call(WINDOW_SYS_MMAP, 0, (long)bytes, 3, 0x22, -1, 0);
+        long mapped;
         struct window *window;
+
+        if (!history || !max_columns || !columns)
+                return 0;
+        columns = columns < max_columns ? columns : max_columns;
+        rows = rows < history ? rows : history;
+
+        cells = (unsigned long)history * max_columns;
+        if (cells > 0xffffffffu / sizeof(struct window_cell))
+                return 0;
+        lines = WINDOW_PIXELS + cells * sizeof(struct window_cell);
+        bytes = (lines + (unsigned long)history * sizeof(unsigned int) + 4095) & ~4095ul;
+        if (bytes > 0xffffffffu)
+                return 0;
+
+        cut = (columns + WINDOW_STRIDE_STEP - 1) / WINDOW_STRIDE_STEP * WINDOW_STRIDE_STEP;
+        mapped = window_call(WINDOW_SYS_MMAP, 0, (long)bytes, 3, 0x22, -1, 0);
 
         if (mapped < 0 && mapped > -4096)
                 return 0;
@@ -1025,6 +1114,7 @@ struct surface_rights
 #define SURFACE_SOCK_CLOEXEC 0x80000
 #define SURFACE_MSG_DONTWAIT 0x40
 #define SURFACE_MSG_NOSIGNAL 0x4000
+#define SURFACE_MSG_TRUNC 0x20
 #define SURFACE_MFD_CLOEXEC 1u
 #define SURFACE_MFD_ALLOW_SEALING 2u
 #define SURFACE_F_ADD_SEALS 1033
@@ -1058,6 +1148,13 @@ static long surface_send(long handle, struct surface_message *message, int file)
         return sent;
 }
 
+/*
+        One message is one whole struct, or it is not a message from this
+        protocol: a short one was not written in full, and an oversized one was
+        cut to fit and says so in msg_flags. Answers the bytes received, zero
+        when the compositor has closed the connection, or -EPROTO for either
+        of those.
+*/
 static long surface_receive(long handle, struct surface_message *message, int flags)
 {
         struct surface_iovec part = {message, sizeof(*message)};
@@ -1069,7 +1166,43 @@ static long surface_receive(long handle, struct surface_message *message, int fl
                 got = window_call(WINDOW_SYS_RECVMSG, handle, (long)&header, flags, 0, 0, 0);
         while (got == -4);
 
+        if (got > 0 && (got != (long)sizeof(*message) || (header.flags & SURFACE_MSG_TRUNC)))
+                return -71; // EPROTO
+
         return got;
+}
+
+/*
+        The compositor's answer to a create or a resize: the first message
+        that is not a wake (a wake may be ahead of it, and says nothing the
+        ring will not), read whole and checked. Answers the status the
+        compositor gave, or a negative errno when the answer is not one a
+        protocol 2 compositor gives. The page is the one the program made, and
+        bytes is the size it was made to be.
+*/
+static long surface_answer(long handle, struct surface_message *message, unsigned int kind,
+                           const struct surface *page, unsigned long bytes)
+{
+        long got;
+
+        do
+                got = surface_receive(handle, message, 0);
+        while (got > 0 && message->kind == SURFACE_WAKE);
+
+        if (got < 0)
+                return got;
+        if (!got)
+                return -32; // EPIPE: the compositor closed the connection
+        if (message->kind != kind)
+                return -71; // EPROTO
+        if (message->status < 0)
+                return message->status;
+        if (message->request.protocol != SURFACE_PROTOCOL || message->request.bytes != bytes ||
+            __atomic_load_n(&page->magic, __ATOMIC_ACQUIRE) != SURFACE_MAGIC ||
+            page->protocol != SURFACE_PROTOCOL)
+                return -93; // EPROTONOSUPPORT
+
+        return 0;
 }
 
 /*
@@ -1118,7 +1251,7 @@ static struct surface *surface_open_slots(unsigned int width, unsigned int heigh
 
         surface_refused = -22; // EINVAL
         surface_wanted_width = surface_wanted_height = 0;
-        if (!width || !height || width > 16384 || height > 16384)
+        if (!width || !height || width > 16384 || height > 16384 || !slots || slots > 2)
                 return 0;
 
         handle = window_call(WINDOW_SYS_SOCKET, SURFACE_AF_UNIX,
@@ -1149,11 +1282,8 @@ static struct surface *surface_open_slots(unsigned int width, unsigned int heigh
         window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
 
         if (surface_refused >= 0)
-                surface_refused = surface_receive(handle, &message, 0);
-
-        if (surface_refused >= 0)
-                surface_refused = message.kind != SURFACE_CREATED ? -71 // EPROTO
-                                  : message.status;
+                surface_refused = surface_answer(handle, &message, SURFACE_CREATED,
+                                                 (struct surface *)mapped, bytes);
 
         if (surface_refused == SURFACE_ESIZE)
         {
@@ -1169,6 +1299,7 @@ static struct surface *surface_open_slots(unsigned int width, unsigned int heigh
         }
 
         ((struct surface *)mapped)->window.handle = (unsigned int)handle;
+        ((struct surface *)mapped)->window.mapping = (unsigned int)bytes;
         return (struct surface *)mapped;
 }
 
@@ -1215,14 +1346,9 @@ static struct surface *surface_resize(struct surface *surface, unsigned int widt
         surface_refused = surface_send(handle, &message, (int)file);
         window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
 
-        // Wakes may be ahead of the answer; they say nothing the ring will not.
-        while (surface_refused >= 0 &&
-               (surface_refused = surface_receive(handle, &message, 0)) > 0 &&
-               message.kind != SURFACE_RESIZED)
-                ;
-
         if (surface_refused >= 0)
-                surface_refused = message.kind != SURFACE_RESIZED ? -71 : message.status;
+                surface_refused = surface_answer(handle, &message, SURFACE_RESIZED,
+                                                 (struct surface *)mapped, bytes);
 
         if (surface_refused < 0)
         {
@@ -1231,6 +1357,7 @@ static struct surface *surface_resize(struct surface *surface, unsigned int widt
         }
 
         ((struct surface *)mapped)->window.handle = (unsigned int)handle;
+        ((struct surface *)mapped)->window.mapping = (unsigned int)bytes;
         window_call(WINDOW_SYS_MUNMAP, (long)surface, surface->window.mapping, 0, 0, 0, 0);
         return (struct surface *)mapped;
 }
@@ -1269,18 +1396,39 @@ static void surface_activate(struct surface *surface, unsigned int id)
         wrote while the copy was being made. Answers the generation, which is how a program knows it
         has changed.
 */
+#define SURFACE_LISTING_TRIES 1024
+
 static unsigned int surface_listing_read(struct surface *surface, struct surface_listing *into)
 {
         struct surface_listing *listing = window_at(surface, struct surface_listing, SURFACE_HEADER);
-        unsigned int generation;
+        unsigned int generation, tries = 0;
 
-        do
+        for (;;)
         {
                 generation = __atomic_load_n(&listing->generation, __ATOMIC_ACQUIRE);
-                for (unsigned int at = 0; at < sizeof(*into) / 4; at++)
-                        ((unsigned int *)into)[at] = ((volatile unsigned int *)listing)[at];
-                __atomic_thread_fence(__ATOMIC_ACQUIRE);
-        } while ((generation & 1) || generation != __atomic_load_n(&listing->generation, __ATOMIC_RELAXED));
+                if (!(generation & 1))
+                {
+                        for (unsigned int at = 0; at < sizeof(*into) / 4; at++)
+                                ((unsigned int *)into)[at] = ((volatile unsigned int *)listing)[at];
+                        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+                        if (generation == __atomic_load_n(&listing->generation, __ATOMIC_RELAXED))
+                                break;
+                }
+
+                /*
+                        A compositor that died between its two stores leaves the
+                        generation odd for good, and a reader that waited for an even
+                        one would spin and never get back to see the socket close.
+                        After SURFACE_LISTING_TRIES it has no list: an empty one, under
+                        an odd generation, which reads as a change to anyone holding an
+                        older one.
+                */
+                if (++tries == SURFACE_LISTING_TRIES)
+                {
+                        into->count = 0;
+                        return generation | 1;
+                }
+        }
 
         into->count = into->count > SURFACE_LISTING_MAX ? SURFACE_LISTING_MAX : into->count;
         for (unsigned int at = 0; at < into->count; at++)
@@ -1308,6 +1456,14 @@ struct surface_mmsghdr
         struct surface_msghdr header;
         unsigned int length;
 };
+
+/* The kernel's layouts, on the 64-bit machines this builds for: a size that is
+   wrong here is a call that reads or writes the wrong bytes, and no error. */
+_Static_assert(sizeof(struct surface_msghdr) == 56, "msghdr ABI");
+_Static_assert(sizeof(struct surface_iovec) == 16, "iovec ABI");
+_Static_assert(sizeof(struct surface_mmsghdr) == 64, "mmsghdr ABI");
+_Static_assert(sizeof(struct surface_rights) == 24, "SCM_RIGHTS ABI");
+_Static_assert(sizeof(struct window_poll) == 8, "pollfd ABI");
 
 #define SURFACE_MSG_WAITFORONE 0x10000
 #define SURFACE_WAKES 2
