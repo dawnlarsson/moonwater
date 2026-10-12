@@ -10709,11 +10709,6 @@ static COLD bipolar tls_key_update_until(
         return TLS_OK;
 }
 
-static COLD bipolar tls_key_update(tls_conn address_to tls, bool ask)
-{
-        return tls_key_update_until(tls, ask, null);
-}
-
 /* This client does not resume sessions, but servers commonly send tickets:
    complete, well-framed NewSessionTickets are ignored. A KeyUpdate rekeys
    the read side and, when the peer asks, answers with one of its own; it
@@ -11310,7 +11305,7 @@ static bipolar tls_write(tls_conn address_to tls, p8 address_to data,
                 positive take = min(length, (positive)TLS_PLAINTEXT_MAX);
 
                 if ((tls->seq_write >= TLS_KEY_UPDATE_AT && !tls->tls12 &&
-                     tls_key_update(tls, false)) ||
+                     tls_key_update_until(tls, false, null)) ||
                     tls_send_enc(tls, TLS_CT_APP, data, take))
                         return TLS_FAIL;
                 data += take;
