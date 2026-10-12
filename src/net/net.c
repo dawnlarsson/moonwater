@@ -11228,6 +11228,11 @@ done:
         return status;
 }
 
+/* What each TLS_FAULT_* answers, in its number's order: none, EARLY, ... */
+static const bipolar tls_fault_answer[8] = {
+    TLS_UNTRUSTED, TLS_NOT_YET, TLS_EXPIRED, TLS_MISMATCH,
+    TLS_REVOKED, TLS_UNCHECKED, TLS_CLOCK, TLS_UNLOGGED};
+
 /* A connection over the caller's deadline (null when it could not be had),
    and for Network Time Security's key establishment an application
    protocol named in the hello and back (TLS 1.3 only), the exporter secret
@@ -11252,14 +11257,8 @@ static COLD bipolar tls_connect_until(tls_conn address_to tls, bipolar handle,
         if (status)
         {
                 status = !tls->untrusted ? TLS_FAIL
-                         : tls->fault == TLS_FAULT_EARLY ? TLS_NOT_YET
-                         : tls->fault == TLS_FAULT_LATE ? TLS_EXPIRED
-                         : tls->fault == TLS_FAULT_NAME ? TLS_MISMATCH
-                         : tls->fault == TLS_FAULT_REVOKED ? TLS_REVOKED
-                         : tls->fault == TLS_FAULT_UNCHECKED ? TLS_UNCHECKED
-                         : tls->fault == TLS_FAULT_CLOCK ? TLS_CLOCK
-                         : tls->fault == TLS_FAULT_UNLOGGED ? TLS_UNLOGGED
-                                                             : TLS_UNTRUSTED;
+                         : tls->fault < 8 ? tls_fault_answer[tls->fault]
+                                          : TLS_UNTRUSTED;
                 tls_forget(tls);
         }
         return status;
