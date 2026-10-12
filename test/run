@@ -18702,7 +18702,9 @@ if btop:
 out = []
 
 #   The compositor, one terminal, and a count of the terminal's wakeups over
-#   five idle seconds: a terminal with nothing to do is asleep. The script
+#   five idle seconds, counted from two seconds after it was up -- it wakes
+#   once, a second after the last thing it did, to give back the buffer it
+#   is not showing -- a terminal with nothing to do is asleep. The script
 #   ends the compositor itself, after the time the rows below take, because
 #   no key typed while the compositor has the card reaches anything else.
 open(stick + "/m5", "w").write(r"""exec > /dev/ttyS0 2>&1
@@ -18713,6 +18715,7 @@ sleep 2
 t=$!
 sleep 3
 echo m5-ready
+sleep 2
 a=$(sed -n 's/^voluntary_ctxt_switches:[^0-9]*//p' /proc/$t/status)
 sleep 5
 b=$(sed -n 's/^voluntary_ctxt_switches:[^0-9]*//p' /proc/$t/status)
@@ -18817,8 +18820,8 @@ type_text("sh /mnt/m5\n")
 ready = wait_for(b"m5-idle-done", 60)
 time.sleep(0.5)
 idle = re.findall(rb"m5 idle wakeups: (-?\d+)", serial())
-out.append(("M5 idle: a terminal with nothing to do wakes no more than once in five seconds",
-            "0 or 1" if idle and int(idle[-1]) <= 1 else (idle[-1].decode() if idle else "no answer"), "0 or 1"))
+out.append(("M5 idle: a terminal with nothing to do does not wake, in five seconds, after the second it takes to give back its spare buffer",
+            "0" if idle and int(idle[-1]) == 0 else (idle[-1].decode() if idle else "no answer"), "0"))
 
 mem = re.findall(rb"m5 memory: ([^\r\n]*)", serial())
 print("m5 memory: " + (mem[-1].decode() if mem else "not read"), file=sys.stderr)
