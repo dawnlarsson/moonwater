@@ -16873,6 +16873,7 @@ static bool locale_ntp_heard(const sntp_sample address_to heard, positive count,
 #define LOCALE_NTS_BACKOFF_NS ((p64)120 * SNTP_NANOSECONDS)
 #define LOCALE_NTS_SERVERS_MOST 4
 #define LOCALE_NTS_ENTRY_ROOM 80
+#define LOCALE_NTS_SERVERS_ROOM 1024
 
 static const char locale_nts_default[][24] = {
         "time.cloudflare.com",
@@ -16934,35 +16935,63 @@ static bool locale_nts_entry(string_address entry, p8 address_to host,
         return true;
 }
 
-//      The settings' servers, else the defaults: each line that is a valid
-//      entry, to LOCALE_NTS_SERVERS_MOST. Returns the count.
-static positive locale_nts_servers(p8 address_to into, positive stride)
+//      The lines of the servers' file that are servers: each a valid entry,
+//      of fewer than stride bytes once its trailing blanks are gone. A line
+//      is never cut to fit, so one too long is no server rather than its
+//      first stride bytes; and when the file was longer than the buffer the
+//      last line, cut where the buffer ends, is not one either. At most
+//      LOCALE_NTS_SERVERS_MOST are taken; returns the count.
+static positive locale_nts_lines(const p8 address_to text, positive length,
+                                 bool complete, p8 address_to into,
+                                 positive stride)
 {
-        p8 text[LOCALE_NTS_SERVERS_MOST * LOCALE_NTS_ENTRY_ROOM];
-        bipolar got = host_read_state(LOCALE_NTS_SERVERS_PATH, text, sizeof(text));
         positive count = 0;
         positive at = 0;
 
-        while (got > 0 && at < (positive)got && count < LOCALE_NTS_SERVERS_MOST)
+        if (!complete)
         {
+                while (length && text[length - 1] != '\n')
+                        length--;
+        }
+        while (at < length && count < LOCALE_NTS_SERVERS_MOST)
+        {
+                positive stop = at;
+                positive size;
                 p8 line[LOCALE_NTS_ENTRY_ROOM];
                 p8 host[NTS_SERVER_MAX];
                 p16 port;
-                positive size = 0;
 
-                while (at < (positive)got && text[at] != '\n' && size + 1 < sizeof(line))
-                        line[size++] = text[at++];
-                while (at < (positive)got && text[at] != '\n')
-                        at++;
-                at++;
-                while (size && (line[size - 1] == '\r' || line[size - 1] == ' '))
+                while (stop < length && text[stop] != '\n')
+                        stop++;
+                size = stop - at;
+                while (size && (text[at + size - 1] == '\r' || text[at + size - 1] == ' '))
                         size--;
-                line[size] = end;
-                if (size < stride &&
-                    locale_nts_entry((string_address)line, host, address_of port))
-                        string_copy_bounded(into + count++ * stride,
-                                            (string_address)line, stride);
+                if (size < stride)
+                {
+                        memory_copy(line, text + at, size);
+                        line[size] = end;
+                        if (locale_nts_entry((string_address)line, host, address_of port))
+                                string_copy_bounded(into + count++ * stride,
+                                                    (string_address)line, stride);
+                }
+                at = stop + 1;
         }
+        return count;
+}
+
+//      The settings' servers, else the defaults: the lines of the file that
+//      are valid entries (locale_nts_lines), to LOCALE_NTS_SERVERS_MOST.
+//      Returns the count.
+static positive locale_nts_servers(p8 address_to into, positive stride)
+{
+        p8 text[LOCALE_NTS_SERVERS_ROOM];
+        bipolar got = host_read_state(LOCALE_NTS_SERVERS_PATH, text, sizeof(text));
+        positive count = 0;
+
+        if (got > 0)
+                count = locale_nts_lines(text, (positive)got,
+                                         got < (bipolar)sizeof(text) - 1,
+                                         into, stride);
         if (count)
                 return count;
         for (count = 0; count < array_count(locale_nts_default); count++)

@@ -104542,6 +104542,49 @@ static COLD bool locale_discipline_ok(void)
                    LOCALE_NTP_ERROR_MOST_US;
 }
 
+/*
+        The NTS servers file, line by line: a line is a server when it is a
+        valid entry once its trailing blanks are gone and it is shorter than
+        the room a server gets, never cut to fit; and a file that filled the
+        buffer it was read into has no last line, since that one may be cut.
+*/
+static fn machine_nts_lines(void)
+{
+        static const char two[] = "time.example.org\r\nnts.example.net:4460  \n";
+        static const char five[] = "a.example\nb.example\nc.example\nd.example\ne.example\n";
+        static const char tail[] = "a.example\nb.example.org";
+        p8 into[LOCALE_NTS_SERVERS_MOST * LOCALE_NTS_ENTRY_ROOM];
+        p8 long_line[80];
+        positive count;
+
+        memory_zero(into, sizeof(into));
+        count = locale_nts_lines((const p8 address_to)two, sizeof(two) - 1, true,
+                                 into, LOCALE_NTS_ENTRY_ROOM);
+        check("two servers are read from a file, CRLF and blanks trimmed",
+              count == 2 && string_equals(into, "time.example.org") &&
+                  string_equals(into + LOCALE_NTS_ENTRY_ROOM, "nts.example.net:4460"));
+        count = locale_nts_lines((const p8 address_to)five, sizeof(five) - 1, true,
+                                 into, LOCALE_NTS_ENTRY_ROOM);
+        check("four servers at most are taken from a file",
+              count == LOCALE_NTS_SERVERS_MOST);
+        /* a name, then blanks and an x: 80 bytes, of which the first 79 are
+           the name and blanks. A line too long for its room is refused, not
+           taken by its first bytes */
+        memory_fill(long_line, ' ', sizeof(long_line));
+        memory_copy(long_line, "a.b", 3);
+        long_line[79] = 'x';
+        count = locale_nts_lines((const p8 address_to)long_line, sizeof(long_line),
+                                 true, into, LOCALE_NTS_ENTRY_ROOM);
+        check("a line too long for its room is no server, not its first bytes",
+              count == 0);
+        count = locale_nts_lines((const p8 address_to)tail, sizeof(tail) - 1, false,
+                                 into, LOCALE_NTS_ENTRY_ROOM);
+        check("a last line the buffer cut short is no server", count == 1);
+        count = locale_nts_lines((const p8 address_to)tail, sizeof(tail) - 1, true,
+                                 into, LOCALE_NTS_ENTRY_ROOM);
+        check("a last line that ends the file is a server", count == 2);
+}
+
 static fn machine_sntp(void)
 {
         check("RFC 5905 offset, min-delay pick and poison guards hold",
@@ -104553,6 +104596,7 @@ static fn machine_sntp(void)
         machine_ntp_child();
         machine_ntp_no_child();
         machine_ntp_heard();
+        machine_nts_lines();
 
         /* Case 0 refuses blocking getrandom: the stamp fails untouched and
            the exchange returns before any send. Case 1 refuses only

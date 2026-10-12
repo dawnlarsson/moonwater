@@ -60805,7 +60805,7 @@ def sntp_fuzz_source(host):
         sec(host, "#define LOCALE_NTP_RETRY_LEAST", "/*\n        A query that runs in a child"),
         sec(host, "#define LOCALE_TIMEX_ESTERROR", "static fn locale_clock_mark_synced("),
         sec(host, "static bool locale_ntp_first;", "static const char locale_ntp_fallback"),
-        sec(checks, "#define SNTP_TEST_NOW \\\n", "static fn machine_sntp(void)\n"),
+        sec(checks, "#define SNTP_TEST_NOW \\\n", "/*\n        The NTS servers file, line by line"),
     )
     #   The window's near edge is the clock's build floor, which net.c holds.
     floor = re.search(r"#define MOONWATER_CLOCK_FLOOR (\d+ll)",
