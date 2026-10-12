@@ -4308,12 +4308,15 @@ lane_msan() { MOONWATER_MSAN=1 python3 test/differential.py --harness msan_net; 
 #       CHECK_net and the harnesses of its family; a survivor that is not listed
 #       in NET_MUTATION_EQUIVALENT with its reason fails. Hours, not minutes:
 #       MOONWATER_MUTATION_JOBS sets the parallelism (default a quarter of the
-#       CPUs), MOONWATER_MUTATION_FUNCTIONS a regular expression of functions.
+#       CPUs), MOONWATER_MUTATION_FUNCTIONS a regular expression of functions,
+#       MOONWATER_MUTATION_JOURNAL a file each verdict is kept in, so a run that
+#       dies is taken up where it stopped.
 lane_mutation()
 {
         python3 test/differential.py --harness net_mutation --oracle full \
                 --jobs "${MOONWATER_MUTATION_JOBS:-$(( $(nproc) / 4 + 1 ))}" \
-                ${MOONWATER_MUTATION_FUNCTIONS:+--functions "$MOONWATER_MUTATION_FUNCTIONS"}
+                ${MOONWATER_MUTATION_FUNCTIONS:+--functions "$MOONWATER_MUTATION_FUNCTIONS"} \
+                ${MOONWATER_MUTATION_JOURNAL:+--journal "$MOONWATER_MUTATION_JOURNAL"}
 }
 
 lane_proof()

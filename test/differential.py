@@ -68841,11 +68841,15 @@ def harness_net_mutation(argv):
     can tell it apart, do not count. Linux x86-64 only.
 
         python3 test/differential.py --harness net_mutation [--functions REGEX]
-            [--jobs N] [--oracle checks|full] [--limit N] [--list]
+            [--jobs N] [--oracle checks|full] [--limit N] [--list] [--journal FILE]
+
+    With --journal each verdict is appended to FILE as it is reached, and the
+    mutants FILE already judges are not run again: a run of seven hours that
+    dies is taken up where it stopped.
     """
     import concurrent.futures
     options = {"--functions": None, "--jobs": str(max(1, (os.cpu_count() or 2) // 4)),
-               "--oracle": "checks", "--limit": "0"}
+               "--oracle": "checks", "--limit": "0", "--journal": None}
     listing = "--list" in argv
     argv = [word for word in argv if word != "--list"]
     while argv:
@@ -68964,13 +68968,40 @@ def harness_net_mutation(argv):
     outcomes = collections.Counter()
     survivors = []
     started = time.monotonic()
+    judged = {}
+    journal = None
+    if options["--journal"]:
+        if os.path.exists(options["--journal"]):
+            with open(options["--journal"]) as kept:
+                for row in kept:
+                    try:
+                        entry = json.loads(row)
+                    except ValueError:
+                        continue
+                    judged[json.dumps(entry["key"])] = entry["outcome"]
+        journal = open(options["--journal"], "a")
+    pending = []
+    for index, mutant in enumerate(mutants):
+        spelled = json.dumps(mutant["key"])
+        if spelled in judged:
+            outcomes[judged[spelled]] += 1
+            if judged[spelled] == "survived":
+                survivors.append(mutant)
+        else:
+            pending.append((index, mutant))
     try:
         with concurrent.futures.ThreadPoolExecutor(int(options["--jobs"])) as pool:
-            for index, outcome, by in pool.map(judge, enumerate(mutants)):
+            for index, outcome, by in pool.map(judge, pending):
                 outcomes[outcome] += 1
                 if outcome == "survived":
                     survivors.append(mutants[index])
+                if journal:
+                    journal.write(json.dumps({"key": mutants[index]["key"], "outcome": outcome,
+                                              "by": by}) + "\n")
+                    journal.flush()
     finally:
+        if journal:
+            journal.close()
         shutil.rmtree(workspace, ignore_errors=True)
     explained = [m for m in survivors if m["key"] in NET_MUTATION_EQUIVALENT]
     unexplained = [m for m in survivors if m["key"] not in NET_MUTATION_EQUIVALENT]
