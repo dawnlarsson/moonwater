@@ -98439,7 +98439,7 @@ static fn check_snap()
                 const b32 stem[] = {1331, 0, 1331, 10240, 2560, 10240, 2560, 0};
 
                 snap_load(stem, 4, turned);
-                font_snap(&engine, &face, size, snap_standard(1229));
+                font_snap(&engine, &face, size, snap_standard(1229), 0);
                 bool snapped = true;
                 for (p32 i = 0; i < 4; i++)
                         snapped = snapped && engine.points[i].x == (stem[2 * (turned ? 3 - i : i)] == 1331 ? 1024 : 2048);
@@ -98459,7 +98459,7 @@ static fn check_snap()
                 const b32 stem[] = {1331, 0, 1331, 10240, 2816, 10240, 2816, 0};
 
                 snap_load(stem, 4, false);
-                font_snap(&engine, &face, size, snap_standard(1485));
+                font_snap(&engine, &face, size, snap_standard(1485), 0);
                 check("snap: a 1.45 px stem keeps its width and puts its nearer edge on a pixel",
                       engine.points[0].x == 1587 && engine.points[2].x == 3072);
         }
@@ -98471,7 +98471,7 @@ static fn check_snap()
                                        2560, 9216, 2560, 1024, 4000, 1024, 4000, 0};
 
                 snap_load(bracket, 8, false);
-                font_snap(&engine, &face, size, snap_standard(1229));
+                font_snap(&engine, &face, size, snap_standard(1229), 0);
                 check("snap: a bracket's stem snaps and its arms' ends stay",
                       engine.points[0].x == 1024 && engine.points[4].x == 2048 && engine.points[2].x == 4000 &&
                           engine.points[7].x == 4000);
@@ -98489,7 +98489,7 @@ static fn check_snap()
                 engine.contour[1].last = 7;
                 for (p32 i = 0; i < 8; i++)
                         engine.points[i] = (font_point){two[2 * i], two[2 * i + 1], 1};
-                font_snap(&engine, &face, size, snap_standard(1229));
+                font_snap(&engine, &face, size, snap_standard(1229), 0);
                 check("snap: a counter half a pixel wide is not shut",
                       engine.points[4].x == 3072 && engine.points[6].x == 4096 && engine.points[2].x < 3072 &&
                           engine.points[0].x < engine.points[2].x);
@@ -98501,14 +98501,14 @@ static fn check_snap()
                 const b32 stem[] = {1331, 0, 1331, 10240, 2150, 10240, 2150, 0};
 
                 snap_load(stem, 4, false);
-                font_snap(&engine, &face, size, snap_standard(819));
+                font_snap(&engine, &face, size, snap_standard(819), 0);
                 check("snap: a 0.8 px stem is a whole pixel", engine.points[0].x == 1024 && engine.points[2].x == 2048);
         }
         {
                 const b32 stem[] = {1331, 0, 1331, 10240, 1945, 10240, 1945, 0};
 
                 snap_load(stem, 4, false);
-                font_snap(&engine, &face, size, snap_standard(614));
+                font_snap(&engine, &face, size, snap_standard(614), 0);
                 check("snap: a 0.6 px stem keeps its width with an edge on a pixel",
                       engine.points[0].x == 1434 && engine.points[2].x == 2048);
         }
@@ -98566,7 +98566,7 @@ static fn check_bars()
                 const b32 bar[] = {0, 3379, 0, 4608, 10240, 4608, 10240, 3379};
 
                 snap_load(bar, 4, false);
-                font_bars(&engine, &face, size, snap_standard(1229), lines, 2);
+                font_bars(&engine, &face, size, snap_standard(1229), lines, 2, 0);
                 check("bars: a 1.2 px bar at 3.3 px is the row from 3 to 4",
                       engine.points[0].y == 3072 && engine.points[1].y == 4096 && engine.points[2].y == 4096 &&
                           engine.points[3].y == 3072);
@@ -98575,7 +98575,7 @@ static fn check_bars()
                 const b32 bar[] = {0, 5939, 0, 7168, 10240, 7168, 10240, 5939};
 
                 snap_load(bar, 4, false);
-                font_bars(&engine, &face, size, snap_standard(1229), lines, 2);
+                font_bars(&engine, &face, size, snap_standard(1229), lines, 2, 0);
                 check("bars: a bar on the x-height keeps it and takes a whole pixel below",
                       engine.points[1].y == 7168 && engine.points[0].y == 6144);
         }
@@ -98596,6 +98596,60 @@ static fn check_bars()
         font_fit(&engine, &face, 48 * 64, zones, fitted);
         check("fit: an overshoot over half a pixel is a whole pixel over the x-height",
               engine.points[0].y == fitted[1] + 1024 && engine.points[1].y == fitted[1]);
+}
+
+/*
+        Synthetic italic and bold. Glyph 0 of the first font is a bar from
+        y 0 to 700 units, 300 wide: slanted, its top moves right of its
+        bottom by its height times tan 12 degrees, about half the x-height
+        (500 units) staying where it was; made heavy, it has more ink. A
+        cell drawn upright, slanted and upright again is the same pixels the
+        first and third time: the cache keeps the two apart.
+*/
+static p32 synthetic_one[64 * 400], synthetic_two[64 * 400], synthetic_three[64 * 400];
+
+static fn check_synthetic(const font_face address_to one, const font_face address_to two)
+{
+        font_bitmap box;
+        p32 size = 16 * 64;
+
+        font_shape(&engine, one, 0, size, 0, 8, &box);
+        b64 bottom_x = (b64)1 << 62, top_x = -bottom_x, low = bottom_x, high = -bottom_x;
+        for (p32 i = 0; i < engine.point_count; i++)
+        {
+                low = engine.points[i].y < low ? engine.points[i].y : low;
+                high = engine.points[i].y > high ? engine.points[i].y : high;
+        }
+        for (p32 i = 0; i < engine.point_count; i++)
+        {
+                if (engine.points[i].y == low)
+                        bottom_x = engine.points[i].x < bottom_x ? engine.points[i].x : bottom_x;
+                if (engine.points[i].y == high)
+                        top_x = engine.points[i].x > top_x ? engine.points[i].x : top_x;
+        }
+        f64 want = (f64)(high - low) * 0.21255656167002213 + 300.0 * 16384 / 1024;
+        check("synthetic: a slant of 12 degrees moves the top right by the height times tan 12",
+              (f64)(top_x - bottom_x) > want - 3 && (f64)(top_x - bottom_x) < want + 3);
+
+        positive plain = 0, heavy = 0;
+        render(one, 0, size, 0, FONT_UNHINTED, &box);
+        for (positive i = 0; i < sizeof(coverage); i++)
+                plain += coverage[i];
+        render(one, 0, size, 0, FONT_UNHINTED | FONT_EMBOLDEN, &box);
+        for (positive i = 0; i < sizeof(coverage); i++)
+                heavy += coverage[i];
+        check("synthetic: a bold made of a plain face has more ink", heavy > plain + plain / 10);
+
+        const font_face address_to chain[1] = {two};
+        font_metrics grid = font_metrics_at(two, size);
+        font_target first = {synthetic_one, 400, 400, 64}, second = {synthetic_two, 400, 400, 64},
+                    third = {synthetic_three, 400, 400, 64};
+        font_cell(&engine, chain, 1, 'A', 1, &grid, size, 0, &first, 4, 4, 0xdfe7ef, 0x303030);
+        font_cell(&engine, chain, 1, 'A', 1, &grid, size, FONT_OBLIQUE, &second, 4, 4, 0xdfe7ef, 0x303030);
+        font_cell(&engine, chain, 1, 'A', 1, &grid, size, 0, &third, 4, 4, 0xdfe7ef, 0x303030);
+        check("synthetic: upright, slanted and upright again keep their own pixels",
+              !memory_compare(synthetic_one, synthetic_three, sizeof(synthetic_one)) &&
+                  memory_compare(synthetic_one, synthetic_two, sizeof(synthetic_one)));
 }
 
 static fn ground(p32 address_to pixels)
@@ -99212,6 +99266,7 @@ b32 main()
         check_bars();
         check_drawing(&one, &two);
         check_cells(&engine, &two);
+        check_synthetic(&one, &two);
         check_cells(&small_engine, &two);
         check_translate();
         check_blend();

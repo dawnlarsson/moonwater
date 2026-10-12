@@ -184,7 +184,9 @@
 
         flags: FONT_UNHINTED draws the outline as the font gives it,
         FONT_DARKEN asks for stem darkening, FONT_UNKERNED leaves pairs
-        alone.
+        alone, FONT_OBLIQUE slants the face 12 degrees for an italic it does
+        not have, FONT_EMBOLDEN thickens it by a 24th of the size for a bold
+        it does not have.
 
         Dawn Larsson - Apache-2.0 license
         github.com/dawnlarsson/moonwater
@@ -204,6 +206,8 @@
 #define FONT_UNHINTED 1
 #define FONT_DARKEN 2
 #define FONT_UNKERNED 4
+#define FONT_OBLIQUE 8
+#define FONT_EMBOLDEN 16
 
 #define FONT_DRAWN 0xffff
 #define FONT_UNKNOWN 0xff000000u
@@ -1803,11 +1807,12 @@ static fn font_snap_axis(font_engine address_to e, b64 normal, b64 least, b64 wi
         }
 }
 
-//      Vertical stems, for a cell's whole-pixel pen.
-static fn font_snap(font_engine address_to e, const font_face address_to face, p32 size, b32 standard)
+//      Vertical stems, for a cell's whole-pixel pen. heavier is what a
+//      synthetic bold added to every stem, so the standard grows with it.
+static fn font_snap(font_engine address_to e, const font_face address_to face, p32 size, b32 standard, b64 heavier)
 {
         b64 scale = (b64)size * (FONT_ONE / 64);
-        b64 normal = font_divide((b64)standard * scale, (b64)face->units << FONT_EXACT);
+        b64 normal = font_divide((b64)standard * scale, (b64)face->units << FONT_EXACT) + heavier;
         b64 x_height = font_divide((b64)(face->x_height > 0 ? face->x_height : face->units / 2) * scale, face->units);
 
         font_snap_axis(e, normal, x_height / 3, scale / 4, null, 0);
@@ -1817,10 +1822,10 @@ static fn font_snap(font_engine address_to e, const font_face address_to face, p
 //      The axes are swapped so the bars are the stems above, and the
 //      fitted lines are kept where the fit put them.
 static fn font_bars(font_engine address_to e, const font_face address_to face, p32 size, b32 standard,
-                    const b64 address_to fixed, p32 fixes)
+                    const b64 address_to fixed, p32 fixes, b64 heavier)
 {
         b64 scale = (b64)size * (FONT_ONE / 64);
-        b64 normal = font_divide((b64)standard * scale, (b64)face->units << FONT_EXACT);
+        b64 normal = font_divide((b64)standard * scale, (b64)face->units << FONT_EXACT) + heavier;
         b64 x_height = font_divide((b64)(face->x_height > 0 ? face->x_height : face->units / 2) * scale, face->units);
 
         font_swap_axes(e);
@@ -2995,10 +3000,31 @@ static b32 font_shape(font_engine address_to e, const font_face address_to face,
                 if (amount > 0)
                         font_embolden(e, (f32)(FONT_ONE / 64) * amount);
         }
-        if (standard)
-                font_snap(e, face, size, standard);
+        b64 heavier = style & 16 ? (b64)size * (FONT_ONE / 64) / 24 : 0;
+        if (heavier)
+                //      Synthetic bold, for a face that has no bold: a 24th of
+                //      the size, half each side, the weight a bold face adds.
+                font_embolden(e, (f32)heavier);
+        if (style & 8)
+        {
+                //      Synthetic italic: a 12 degree slant about half the
+                //      x-height, so a lowercase letter leans out of its cell
+                //      by as little at the top as at the bottom. Its stems are
+                //      no longer upright, so they are not snapped; its bars
+                //      still are.
+                b64 mid = font_divide((b64)(face->x_height > 0 ? face->x_height : face->units / 2) * size *
+                                          (FONT_ONE / 64),
+                                      2 * (b64)face->units);
+                for (p32 i = 0; i < e->point_count; i++)
+                {
+                        f64 lean = (f64)(e->points[i].y - mid) * 0.21255656167002213;
+                        e->points[i].x += (b64)(lean < 0 ? lean - 0.5 : lean + 0.5);
+                }
+        }
+        if (standard && !(style & 8))
+                font_snap(e, face, size, standard, heavier);
         if (fixes && zones[3])
-                font_bars(e, face, size, zones[3], lines, fixes);
+                font_bars(e, face, size, zones[3], lines, fixes, heavier);
 
         b64 left = (b64)1 << 62, bottom = left, right = -left, top = -left;
         for (p32 i = 0; i < e->point_count; i++)
@@ -3030,7 +3056,8 @@ static b32 font_shape(font_engine address_to e, const font_face address_to face,
 static p32 font_style(const font_engine address_to e, p32 size, p32 flags)
 {
         return (!(flags & FONT_UNHINTED) && size <= e->hint_until * 64 ? 1 : 0) |
-               ((flags & FONT_DARKEN) && e->darken && size < e->darken_until * 64 ? 2 : 0);
+               ((flags & FONT_DARKEN) && e->darken && size < e->darken_until * 64 ? 2 : 0) |
+               (flags & FONT_OBLIQUE ? 8 : 0) | (flags & FONT_EMBOLDEN ? 16 : 0);
 }
 
 b32 font_render(font_engine address_to e, const font_face address_to face, p32 glyph,
@@ -3617,7 +3644,7 @@ static font_bitmap font_cached(font_engine address_to e, const font_face address
 {
         p64 key = (p64)1 << 63 | (p64)(face ? face->id : 0) << 47 | (p64)(code & 0xffff) << 31 |
                   (p64)(face ? size & 0x3fffff : (size >> 16 & 0x7ff) << 11 | (size & 0x7ff)) << 9 |
-                  (p64)(phase & 7) << 6 | (p64)(style & 7) << 3;
+                  (p64)(phase & 7) << 6 | (p64)(style & 7) << 3 | (p64)(style >> 3 & 3);
         font_bitmap box = {0};
 
         if (face && size >= FONT_SIZE_LIMIT)
@@ -4146,15 +4173,17 @@ static fn font_ground(const font_target address_to target, b32 left, b32 top, b3
 //      What a cell is, less its code: one 64-bit key a run shares, and the
 //      grid it lies on.
 static inline INLINE p64 font_cell_base(const font_face address_to const address_to faces, p32 count, p32 size,
-                                        p32 flags, p32 cells)
+                                        p32 flags)
 {
         return (p64)1 << 63 | (p64)(count ? faces[0]->id & 0xffff : 0) << 47 | (p64)(size & 0xfffff) << 6 |
-               (p64)(flags & 7) << 3 | (p64)(cells > 1) << 2 | (p64)((count - 1) & 3);
+               (p64)(flags & 31) << 1;
 }
 
-static inline INLINE p64 font_cell_shape(const font_metrics address_to grid)
+//      The grid it lies on, and how many cells and faces.
+static inline INLINE p64 font_cell_shape(const font_metrics address_to grid, p32 count, p32 cells)
 {
-        return (p64)(p16)grid->cell_width << 32 | (p64)(p16)grid->cell_height << 16 | (p16)grid->baseline;
+        return (p64)(p16)grid->cell_width << 32 | (p64)(p16)grid->cell_height << 16 | (p16)grid->baseline |
+               (p64)(cells > 1) << 48 | (p64)((count - 1) & 3) << 49;
 }
 
 //      A cell not drawn lately: its glyph found, drawn into the atlas, and
@@ -4275,7 +4304,7 @@ fn font_cell(font_engine address_to e, const font_face address_to const address_
 
         font_sync(e);
         font_bitmap box = font_cell_box(e, faces, count, code, cells, grid, size, flags,
-                                        font_cell_base(faces, count, size, flags, cells), font_cell_shape(grid),
+                                        font_cell_base(faces, count, size, flags), font_cell_shape(grid, count, cells),
                                         &dx, &dy, ink);
         b32 gx = x + dx, gy = y + dy;
 
@@ -4372,7 +4401,7 @@ fn font_cells(font_engine address_to e, const font_face address_to const address
                 for (p32 attempt = 0; attempt < 2 && !found; attempt++)
                 {
                         p32 generation = (font_sync(e), e->generation);
-                        p64 base = font_cell_base(faces, count, size, flags, 1), shape = font_cell_shape(grid);
+                        p64 base = font_cell_base(faces, count, size, flags), shape = font_cell_shape(grid, count, 1);
 
                         found = true;
                         for (p32 i = 0; i < n && found; i++)

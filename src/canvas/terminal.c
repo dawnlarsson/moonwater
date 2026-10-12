@@ -463,6 +463,14 @@ static void terminal_decorate(unsigned int address_to pixels, const struct windo
         on one ground is one fill.
 */
 static p32 terminal_codes[FONT_RUN];
+
+//      Italic is a slant of the plain face, and bold without a bold face is
+//      the plain face made heavier: neither has a face of its own here.
+static p32 terminal_style(const struct window_cell address_to cell)
+{
+        return (cell->flags & WINDOW_CELL_ITALIC ? FONT_OBLIQUE : 0) |
+               ((cell->flags & WINDOW_CELL_BOLD) && !terminal.bold_count ? FONT_EMBOLDEN : 0);
+}
 static void terminal_row(unsigned int address_to pixels, unsigned int row,
                          const struct window_cell address_to now,
                          const struct window_cell address_to old, unsigned int first,
@@ -473,6 +481,7 @@ static void terminal_row(unsigned int address_to pixels, unsigned int row,
         unsigned int run = 0, run_from = 0, run_colour = 0;
         unsigned int glyphs = 0, glyphs_from = 0, glyphs_ink = 0, glyphs_paper = 0;
         b32 glyphs_heavy = 0;
+        p32 glyphs_flags = 0;
 
 #define TERMINAL_GLYPHS()                                                                              \
         do                                                                                             \
@@ -480,7 +489,8 @@ static void terminal_row(unsigned int address_to pixels, unsigned int row,
                 if (glyphs)                                                                            \
                         font_cells(terminal.engine, glyphs_heavy ? terminal.bold : terminal.plain,     \
                                    glyphs_heavy ? terminal.bold_count : terminal.plain_count,          \
-                                   terminal_codes, glyphs, &terminal.grid, terminal.size, 0, &target,  \
+                                   terminal_codes, glyphs, &terminal.grid, terminal.size, glyphs_flags,\
+                                   &target,                                                            \
                                    (b32)(glyphs_from * terminal.cell_w), y, glyphs_ink, glyphs_paper); \
                 glyphs = 0;                                                                            \
         } while (0)
@@ -511,6 +521,7 @@ static void terminal_row(unsigned int address_to pixels, unsigned int row,
                 if (glyph && cells == 1 && !decor)
                 {
                         b32 heavy = (cell->flags & WINDOW_CELL_BOLD) && terminal.bold_count;
+                        p32 style = terminal_style(cell);
 
                         if (run)
                                 terminal_fill(pixels, (int)(run_from * terminal.cell_w), y, run * terminal.cell_w,
@@ -519,7 +530,7 @@ static void terminal_row(unsigned int address_to pixels, unsigned int row,
                         if (cell->flags & WINDOW_CELL_DIM)
                                 ink = terminal_mix(ink, paper);
                         if (glyphs && (glyphs_from + glyphs != at || glyphs_ink != ink || glyphs_paper != paper ||
-                                       glyphs_heavy != heavy || glyphs == FONT_RUN))
+                                       glyphs_heavy != heavy || glyphs_flags != style || glyphs == FONT_RUN))
                                 TERMINAL_GLYPHS();
                         if (!glyphs)
                         {
@@ -527,6 +538,7 @@ static void terminal_row(unsigned int address_to pixels, unsigned int row,
                                 glyphs_ink = ink;
                                 glyphs_paper = paper;
                                 glyphs_heavy = heavy;
+                                glyphs_flags = style;
                         }
                         terminal_codes[glyphs++] = cell->character;
                         continue;
@@ -567,7 +579,7 @@ static void terminal_row(unsigned int address_to pixels, unsigned int row,
 
                         font_cell(terminal.engine, heavy ? terminal.bold : terminal.plain,
                                   heavy ? terminal.bold_count : terminal.plain_count, cell->character,
-                                  cells, &terminal.grid, terminal.size, 0, &target,
+                                  cells, &terminal.grid, terminal.size, terminal_style(cell), &target,
                                   (b32)(at * terminal.cell_w), y, ink, paper);
                 }
                 else
