@@ -23,9 +23,10 @@
         may still be reading is not drawn into: the cells go into the emulator
         the moment they arrive, and a frame is made only when the compositor
         has taken the last picture, so the buffer that is not on the screen
-        is free. A burst of output is therefore
-        one frame, not one a read, and a key's echo is on the screen in the
-        first frame there is room for.
+        is free (a frame that has waited out the compositor is the one
+        exception, and draws into the picture it has not taken). A burst of
+        output is therefore one frame, not one a read, and a key's echo is on
+        the screen in the first frame there is room for.
 
         Each buffer's picture is remembered as the cells that made it, so a
         frame draws only the cells that differ from what that buffer holds,
