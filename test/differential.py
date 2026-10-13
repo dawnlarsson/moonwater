@@ -86021,10 +86021,14 @@ def harness_kernel_ports(argv):
     version = re.search(r'\{"kernel_version", "([^"]+)"\}', (root / "src/build/build.c").read_text()).group(1)
     tarball = root / "artifacts" / ("linux-%s.tar.xz" % version)
 
+    # The oracle is the kernel's own C: a tree the build has put the asm into
+    # (its files say "/* Moonwater") no longer has it, so the tarball is read.
     def kernel_file(relative):
         for candidate in (os.environ.get("KERNEL_SRC"), str(root / "linux")):
             if candidate and (Path(candidate) / relative).is_file():
-                return (Path(candidate) / relative).read_text()
+                text = (Path(candidate) / relative).read_text()
+                if "/* Moonwater" not in text:
+                    return text
         if tarball.is_file():
             with tarfile.open(tarball) as archive:
                 return archive.extractfile("linux-%s/%s" % (version, relative)).read().decode()
@@ -86032,7 +86036,7 @@ def harness_kernel_ports(argv):
 
     sources = {name: kernel_file(name) for name in ("fs/ext4/namei.c", "fs/ext4/dir.c", "fs/ext4/hash.c", "fs/crypto/fname.c", "fs/libfs.c", "fs/fs_dirent.c", "fs/readdir.c", "fs/ext4/dir.c", "fs/ext4/ext4.h")}
     if not all(sources.values()):
-        print("kernel ports: NOT RUN -- no kernel source (linux/, KERNEL_SRC or artifacts/linux-%s.tar.xz)" % version)
+        print("kernel ports: NOT RUN -- no unpatched kernel source (linux/, KERNEL_SRC or artifacts/linux-%s.tar.xz)" % version)
         return 0
 
     def cut(text, head, tail, inclusive=False):
