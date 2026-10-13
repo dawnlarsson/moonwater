@@ -203,13 +203,12 @@ b32 shell_is_interactive HOT_STATE;
    retain Moonwater's existing dash-compatible defaults. */
 KEEP __attribute__((externally_visible)) bool shell_bash_compat HOT_STATE;
 bool shell_dash_compat HOT_STATE;
+/* Set by the reader of a -c string while it runs a line that more source
+   follows, ignoring trailing newlines; the last line is the one that may
+   take the shell's own exit. */
+bool shell_line_has_more;
 // Takes bash's additions out of the language for the names dash and sh.
 fn shell_dash_begin();
-/* Set by the reader when more source remains after this physical line,
-   ignoring trailing newlines. Dash's runtime "Bad fd number" names that
-   next line rather than the command's own. */
-bool shell_line_has_more;
-
 /*
         rbash: a shell started as rbash, or with -r / --restricted, or
         that later ran set -r.
@@ -2620,19 +2619,11 @@ fn run_lines(string_address text)
                 else
                         lex_physical_newline(false);
 
-                {
-                        positive left = (positive)(copy + length - stop);
-
-                        shell_line_has_more =
-                            memory_span_byte(stop, '\n', left) < left;
-                }
-
                 // An empty line is a line: it is a body line of a
                 // here-document, and it ends a command a backslash held open.
                 if (shell_verbose_eval_lines)
                         shell_verbose_line(at);
                 run_line(at);
-                shell_line_has_more = false;
                 if (shell_syntax_generation != syntax)
                         break;
                 at = stop;

@@ -406,7 +406,7 @@ static positive shell_start_long_options(string_address address_to arguments,
                         */
                         string_format(log,
                                       "Moonwater shell, bash %s compatible (%s)\n",
-                                      "5.3.15(1)-release", MOONWATER_MACHTYPE);
+                                      "5.3.20(1)-release", MOONWATER_MACHTYPE);
                         invocation->status = 0;
                         invocation->finished = true;
                         return at;

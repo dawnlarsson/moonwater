@@ -8052,28 +8052,13 @@ static COLD string_address expand_unset_reason(bool colon)
 }
 
 /*
-        Bytes dash quotes with CTLESC inside ${@%pat}. _rmescapes then copies
-        only $1 (it stops at the NUL join), so the suffix/prefix scan walks
-        that copy -- and into the pattern sitting in front of it -- while the
-        cut is applied to the full NUL-joined "$@". That is why "${@%*.}" with
-        a*c b c is one field a*, and with /usr/local/bin b c is /u.
+        dash's cut of ${@%pat} and ${@#pat}: the arguments joined with NULs,
+        and each place in the join matched against the text up to the next NUL,
+        so a cut can land in any argument and the arguments after it go with
+        it. (0.5.12 also scanned a copy of $1 with CTLESC in front of bytes
+        like * and /, which put the cut in the wrong place for them; 0.5.13
+        does not.)
 */
-static PURE bool expand_dash_quoted_ctl(string_address text)
-{
-        p8 value;
-
-        while ((value = *text++))
-        {
-                if (value == '!' || value == '*' || value == '-' ||
-                    value == '/' || value == ':' || value == '=' ||
-                    value == '?' || value == '[' || value == '\\' ||
-                    value == ']' || value == '~')
-                        return true;
-        }
-
-        return false;
-}
-
 static COLD p8 address_to expand_dash_scanleft(p8 address_to startp,
                                                p8 address_to rmesc,
                                                string_address pattern,
@@ -8207,9 +8192,7 @@ static COLD fn expand_dash_at_trim(string_address pattern, bool prefix,
 {
         positive joined = 1;
         positive at;
-        positive first_length = 0;
         positive pattern_length;
-        bool copy;
         p8 address_to block;
         p8 address_to startp;
         p8 address_to endp;
@@ -8239,19 +8222,15 @@ static COLD fn expand_dash_at_trim(string_address pattern, bool prefix,
                 joined += run + (at ? 1 : 0);
         }
 
-        first_length = string_length(shell_parameter[0]);
         pattern_length = string_length(pattern);
-        copy = quoted && expand_dash_quoted_ctl(shell_parameter[0]);
-        if (joined > (positive)-1 - pattern_length - 1 -
-                         (copy ? first_length + 1 : 0))
+        if (joined > (positive)-1 - pattern_length - 1)
         {
                 expand_fail_state();
                 return;
         }
 
         block = shell_store_take(address_of expand_store,
-                                 joined + pattern_length + 1 +
-                                     (copy ? first_length + 1 : 0));
+                                 joined + pattern_length + 1);
         if (!block)
         {
                 expand_fail_state();
@@ -8272,20 +8251,8 @@ static COLD fn expand_dash_at_trim(string_address pattern, bool prefix,
         memory_copy_apart(used, pattern, pattern_length + 1);
         startp = block;
         endp = block + joined - 1;
-        if (copy)
-        {
-                p8 address_to into = used + pattern_length + 1;
-
-                memory_copy_apart(into, shell_parameter[0], first_length);
-                into[first_length] = end;
-                rmesc = into;
-                rmescend = into + first_length;
-        }
-        else
-        {
-                rmesc = startp;
-                rmescend = endp;
-        }
+        rmesc = startp;
+        rmescend = endp;
 
         loc = left ? expand_dash_scanleft(startp, rmesc, pattern, zero)
                    : expand_dash_scanright(startp, endp, rmesc, rmescend,
@@ -8427,7 +8394,7 @@ static fn expand_modifier(expand_reference reference, p8 operation, bool doubled
                         expand_bash_positional_trim(string_get(name), pattern,
                                                     operation == '#', doubled,
                                                     quoted);
-                else if (all && quoted && string_is(name, '@'))
+                else if (all && (!quoted || string_is(name, '@')))
                         expand_dash_at_trim(pattern, operation == '#', doubled,
                                             quoted);
                 else

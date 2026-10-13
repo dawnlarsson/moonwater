@@ -93,7 +93,6 @@ static b32 exec_child_status(bipolar child);
 static b32 job_wait_foreground(positive number);
 static fn exec_pipe_status_publish(bipolar address_to values, positive count);
 static fn exec_coproc_child();
-static fn exec_coproc_reaped(bipolar pid);
 static fn exec_coproc_drop_finished();
 static fn exec_unknown_children_reap();
 static fn exec_parent_supervision_relax();
@@ -689,7 +688,7 @@ static p8 exec_nothing[1];
 // 27 is what bash 5.3.15 on the box writes, in the plain listing and
 // under -l alike; this used to be 24.
 #define JOB_STATUS_WIDTH 27
-#define JOB_SIGNAL_DESC_WIDTH 24
+#define JOB_SIGNAL_DESC_WIDTH 27
 
 typedef struct
 {
@@ -1298,6 +1297,31 @@ static positive job_text_node(p8 address_to address_to into,
         {
                 bool braces = kind == NODE_GROUP;
 
+                //      dash writes a subshell's text closed up against its
+                //      parentheses and a brace group's with no braces.
+                if (!shell_bash_compat)
+                {
+                        if (!braces)
+                                used = job_text_add(into, room, used,
+                                                    (string_address) "(", 1);
+
+                        for (child = parse_nodes[node].left; child;
+                             child = parse_nodes[child].next)
+                        {
+                                used = job_text_node(into, room, used, child,
+                                                     depth + 1);
+
+                                if (parse_nodes[child].next)
+                                        used = job_text_add(
+                                            into, room, used,
+                                            (string_address) "; ", 2);
+                        }
+
+                        return braces ? used
+                                      : job_text_add(into, room, used,
+                                                     (string_address) ")", 1);
+                }
+
                 used = job_text_add(into, room, used,
                                     braces ? (string_address) "{ "
                                            : (string_address) "( ",
@@ -1715,8 +1739,6 @@ static fn job_child_changed(bipolar pid, positive status)
         bipolar owner = shell_background_reaped(pid, status);
         positive reaped_row = shell_wait_reaped_row;
 
-        exec_coproc_reaped(pid);
-
         at = job_find(pid, true);
 
         if (at < job_count)
@@ -1757,19 +1779,6 @@ static fn job_child_changed(bipolar pid, positive status)
                 entry->state = JOB_FINISHED;
                 entry->reported = false;
                 job_front_settle();
-
-                /* Bash with a monitor writes a SIGKILL death on stderr
-                   and forgets the row, so `jobs` after `kill -KILL %1`
-                   is empty. Terminated jobs stay in the table for the
-                   next `jobs`. The wait table stays either way. */
-                if (shell_bash_compat && !shell_posix_on() && job_monitor() &&
-                    (entry->status & 0x7f) == 9)
-                {
-                        shell_child_death(entry->last, entry->status, false);
-                        job_drop_at(at);
-                        last_job--;
-                        continue;
-                }
 
                 at++;
         }
@@ -2059,6 +2068,11 @@ static fn shell_child_death_flush()
 fn shell_child_death(bipolar child, positive raw, bool foreground)
 {
         positive number;
+
+        //      Every wait for a foreground child comes through here, and it is
+        //      what makes the reference forget the coprocesses that ended.
+        if (foreground)
+                exec_coproc_waited = true;
 
         if (child <= 0 || !(raw & 0x7f) || (raw & 0xff) == 0x7f)
                 return;
@@ -2444,7 +2458,8 @@ static positive job_specified(string_address word, positive address_to found)
         {
                 /* One job is both current and previous: lima bash `fg %-`
                    with only `%1` still finds it. */
-                positive number = job_previous ? job_previous : job_current;
+                positive number = job_previous || !shell_bash_compat
+                                      ? job_previous : job_current;
 
                 address_to found = job_find(number, false);
                 return number && address_to found < job_count
@@ -2534,6 +2549,27 @@ static b32 job_spec_refused(string_address builtin, string_address word,
                 shell_told("%s: warning: %s: job specification "
                     "requires leading `%s'\n", builtin, word,
                     (string_address) "%");
+        }
+
+        //      dash names the job after the colon, calls a spec that matches
+        //      two of them ambiguous, and answers 2 to both.
+        if (!shell_bash_compat)
+        {
+                if (told == JOB_SPEC_AMBIGUOUS)
+                        return shell_reported(2, "%s: %s: ambiguous\n", builtin,
+                                              word);
+
+                if (word && string_is(word, '%') && string_is(word + 1, '-') &&
+                    !string_get(word + 2))
+                        return shell_reported(2, "%s: No previous job\n", builtin);
+
+                if (!word || !string_get(word) ||
+                    (string_is(word, '%') &&
+                     (!string_get(word + 1) || string_is(word + 1, '%') ||
+                      string_is(word + 1, '+')) && !string_get(word + 2)))
+                        return shell_reported(2, "%s: No current job\n", builtin);
+
+                return shell_reported(2, "%s: No such job: %s\n", builtin, word);
         }
 
         return shell_reported(
@@ -2703,6 +2739,8 @@ fn shell_jobs(writer write, string_address input)
                 {
                         if (!shell_bash_compat)
                                 shell_wait_drop(entry->last);
+                        else
+                                shell_wait_told_of(entry->last);
                         job_drop_at(at);
                         if (!newest)
                                 continue;
@@ -3502,7 +3540,8 @@ static fn job_prune()
         not a wait for anybody in particular but for whoever ends first.
 */
 static b32 job_wait_job(positive found, string_address into,
-                        bool address_to interrupted, bool forget, bool drop)
+                        bool address_to interrupted, bool forget, bool drop,
+                        bool force)
 {
         bipolar last = job_table[found].last;
         positive number = job_table[found].number;
@@ -3512,7 +3551,8 @@ static b32 job_wait_job(positive found, string_address into,
         /* Under job control a stop is an answer too, in bash: wait %1 on a
            job that stops says so and gives 128 and the signal. This waited
            for an exit that a stopped job never makes. */
-        if (shell_bash_compat && job_monitor())
+        //      -f waits for the end of the job, a stop or not.
+        if (shell_bash_compat && job_monitor() && !force)
         {
                 address_to interrupted = false;
                 while (true)
@@ -3631,7 +3671,7 @@ static b32 job_wait_next(bool force, string_address into, positive first)
                             job_wait_named(at, first))
                                 return job_wait_job(at, into,
                                                     address_of interrupted,
-                                                    true, true);
+                                                    true, true, force);
 
                 if (!force)
                         for (positive at = 0; at < job_count; at++)
@@ -3680,6 +3720,8 @@ fn job_wait(writer write, string_address input)
         positive first = 1;
         b32 answer = 0;
         bool interrupted = false;
+
+        exec_coproc_waited = true;
 
         while (first < shell_argc)
         {
@@ -3783,7 +3825,7 @@ fn job_wait(writer write, string_address input)
                         waited_running = true;
                         answer = job_wait_job(at, into,
                                               address_of interrupted, true,
-                                              shell_bash_compat);
+                                              shell_bash_compat, force);
 
                         return_if(interrupted, shell_answer(answer));
                 }
@@ -3807,7 +3849,7 @@ fn job_wait(writer write, string_address input)
 
                                 answer = job_wait_job(at, into,
                                                       address_of interrupted,
-                                                      true, true);
+                                                      true, true, force);
 
                                 return_if(interrupted, shell_answer(answer));
                         }
@@ -3881,14 +3923,18 @@ fn job_wait(writer write, string_address input)
 
                 if (string_get(word) == '%')
                 {
-                        if (job_specified(word, address_of found) !=
-                            JOB_SPEC_FOUND)
+                        positive told = job_specified(word, address_of found);
+
+                        if (told != JOB_SPEC_FOUND)
                         {
                                 shell_diagnostic_where();
 
                                 if (!shell_bash_compat)
                                         return shell_answered(2,
-                                            "wait: No such job: %s\n", word);
+                                            told == JOB_SPEC_AMBIGUOUS
+                                                ? "wait: %s: ambiguous\n"
+                                                : "wait: No such job: %s\n",
+                                            word);
 
                                 return shell_answered(127, "wait: %s: no such job\n", word);
                         }
@@ -3961,7 +4007,7 @@ fn job_wait(writer write, string_address input)
                 }
 
                 answer = job_wait_job(found, into, address_of interrupted,
-                                      shell_posix_on(), true);
+                                      shell_posix_on(), true, force);
 
                 if (interrupted)
                         break;
@@ -7303,6 +7349,12 @@ static COLD b32 exec_redirect_refused(p8 op, string_address target,
 
         refuse_if(shell_bash_compat, false, "%w: %s\n", writer_terminal_name, target, why);
 
+        //      A descriptor that was to be duplicated and is not open is named
+        //      as it is, with no file in the sentence.
+        if (op == OP_GREATAND || op == OP_LESSAND)
+                return string_report(log_error, false, "%w: %s\n",
+                                     writer_terminal_name, target, why);
+
         if (code == ERROR_NO_ENTRY)
                 why = reading ? (string_address) "No such file"
                               : (string_address) "Directory nonexistent";
@@ -7516,8 +7568,9 @@ static HOT bool exec_redirect_apply(b32 index)
                 }
 
                 /* Dash dups only a single digit 0-9. `>&99` and `>&$n` with
-                   n=10 are a syntax error and end the process, the way lima
-                   0.5.x does. A closed 0-9 is an ordinary runtime failure. */
+                   n=10 name no descriptor it will duplicate: 0.5.13 says so
+                   at the command's own line and ends the process. A closed
+                   0-9 is an ordinary runtime failure. */
                 if (!shell_bash_compat &&
                     (want->op == OP_GREATAND || want->op == OP_LESSAND) &&
                     !(string_is(target, '-') && string_is(target + 1, end)))
@@ -7526,16 +7579,9 @@ static HOT bool exec_redirect_apply(b32 index)
 
                         if (!byte_is_digit(first) || string_get(target + 1))
                         {
-                                /* lima dash 0.5.x has already consumed this
-                                   line's newline, so the diagnostic names
-                                   the following line when one exists. */
-                                b32 saved_line = exec_line;
-
-                                if (shell_line_has_more && exec_line)
-                                        exec_line++;
-                                shell_syntax_where();
-                                log_error(str("Syntax error: Bad fd number\n"));
-                                exec_line = saved_line;
+                                shell_diagnostic_where();
+                                string_format(log_error,
+                                              "Bad fd number: %s\n", target);
                                 exec_redirect_status = 2;
                                 expand_fatal_status(2);
                                 return false;
@@ -8896,17 +8942,18 @@ static b32 exec_define(b32 index)
         positive name_length = named.y;
 
         //      Dash already refused a non-identifier in the grammar. Bash
-        //      --posix reaches here: lima 5.2.32 reports an invalid
-        //      identifier and ends the process, including under command
-        //      eval, so this is not an eval syntax error.
-        if ((shell_posix_on() || !shell_bash_compat) &&
-            !shell_valid_name(name, name_length))
+        //      --posix reaches here, and 5.3 takes any name but a special
+        //      builtin's, which it reports and ends the process over,
+        //      including under command eval, so this is not an eval syntax
+        //      error.
+        if (shell_bash_compat ? shell_posix_on() && exec_special_builtin(name)
+                              : !shell_valid_name(name, name_length))
         {
                 shell_diagnostic_where();
                 if (shell_bash_compat)
                 {
                         string_format(log_error,
-                                      "`%s': not a valid identifier\n", name);
+                                      "`%s': is a special builtin\n", name);
                         expand_fatal_status(2);
                         return (shell_status = 2);
                 }
@@ -13303,8 +13350,6 @@ static b32 exec_for(b32 index, bool selecting)
         string_address name = parse_words[node->word];
         shell_mark mark = shell_store_mark(address_of exec_store);
         positive base = exec_items_used;
-        positive substitutions =
-            expand_substitutions_ever ? expand_substitutions_count : 0;
         b32 count;
         b32 status = 0;
 
@@ -13435,13 +13480,6 @@ static b32 exec_for(b32 index, bool selecting)
                 exec_loop_depth++;
                 status = exec_node(node->right);
                 exec_loop_depth--;
-
-                /* lima bash 5.2 unlinks the process-substitution fifo list
-                   after each execute_command of a for action, so a second
-                   `<( )` path in the word list is gone once the first body
-                   has run. */
-                if (expand_substitutions_ever)
-                        shell_substitutions_close(substitutions);
 
                 if (!exec_loop_again())
                         break;
@@ -16012,19 +16050,15 @@ static fn exec_coproc_unset(exec_coproc_slot address_to slot)
         env_unset(pid_name);
 }
 
-static fn exec_coproc_reaped(bipolar pid)
-{
-        for (positive at = 0; at < exec_coproc_count; at++)
-                if (exec_coprocs[at].pid == pid)
-                        exec_coproc_unset(exec_coprocs + at);
-}
-
 static fn exec_coproc_drop_finished()
 {
         positive into = 0;
 
         if (!exec_coproc_count)
+        {
+                exec_coproc_waited = false;
                 return;
+        }
 
         /* Wait only these children. wait4(-1) here would collect a lastpipe
            stage the pipeline still has to wait for. */
@@ -16054,6 +16088,17 @@ static fn exec_coproc_drop_finished()
                         continue;
                 }
 
+                //      An ended coprocess keeps its variables until the shell
+                //      next waits for something: Bash lets go of them then,
+                //      and not when the child dies.
+                if (!exec_coproc_waited)
+                {
+                        exec_coprocs[into++] = exec_coprocs[at];
+                        continue;
+                }
+
+                exec_coproc_unset(exec_coprocs + at);
+
                 /*      The row stays. A coprocess that has finished is still
                         a job wait can be told about: the reference answers
                         `wait "$C_PID"` with the status it ended on and says
@@ -16065,6 +16110,7 @@ static fn exec_coproc_drop_finished()
         }
 
         exec_coproc_count = into;
+        exec_coproc_waited = false;
 }
 
 static fn exec_coproc_remember(string_address name, positive name_length,
@@ -16483,15 +16529,10 @@ static b32 exec_pipe(b32 first, positive count, bool background,
                                 background && !monitor && upstream < 0))
                                 system_call_1(syscall(exit_group), 126);
                         exec_child_began();
-                        /* A pipeline stage is a child, and dash's jobs
-                           listing is this shell's table, not the parent's.
-                           Fork already copied the rows; drop them here
-                           rather than walking them on every command. Bash
-                           keeps the copy, which is why `jobs | wc` still
-                           counts. Command substitution is not a pipeline
-                           and still keeps the table: `$(jobs -p)`. */
-                        if (!shell_bash_compat)
-                                job_forget();
+                        /* A pipeline stage keeps the table fork copied, in
+                           bash and since 0.5.13 in dash, which is why
+                           `jobs | wc` counts what the shell runs. A
+                           subshell, below, starts again at one. */
                         if (exec_pipe_omits_exit(parse_nodes[child].kind))
                                 trap_omit_exit_set();
                         if (parse_nodes[child].kind == NODE_SUBSHELL)

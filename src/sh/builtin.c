@@ -5048,7 +5048,7 @@ string_address address_to shell_dirstack_entries(positive address_to count);
 static COLD fn shell_dynamic_versinfo()
 {
         static string_address parts[] = {"5",       "3",
-                                         "15",      "1",
+                                         "20",      "1",
                                          "release", MOONWATER_MACHTYPE};
 
         shell_array_replace("BASH_VERSINFO", 13, parts,
@@ -5398,7 +5398,7 @@ static COLD string_address shell_dynamic_compute(const_string name, positive len
 
                 if (shell_bash_compat &&
                     !memory_compare((address_any)text, "BASH_VERSION", 12))
-                        return shell_dynamic_said("5.3.15(1)-release",
+                        return shell_dynamic_said("5.3.20(1)-release",
                                                   value_length);
 
                 if (!memory_compare((address_any)text, "EPOCHSECONDS", 12))
@@ -6154,6 +6154,11 @@ COLD fn shell_cd(writer write, string_address input)
         {
                 return shell_refuse(2, "cd: too many arguments\n");
         }
+
+        //      An operand with nothing in it is no directory to Bash, which
+        //      says so; an empty HOME, below, is still the one it stays in.
+        return_if(name && !string_get(name) && shell_bash_compat,
+                  shell_refuse(1, "cd: null directory\n"));
 
         if (!name)
         {
@@ -7273,6 +7278,9 @@ STORAGE_ADAPTER(findfs, storage_findfs_run)
 
 #undef STORAGE_ADAPTER
 
+//      Whether the last pwd could not find the directory it is in.
+static bool shell_pwd_failed;
+
 COLD fn shell_pwd(writer write, string_address input)
 {
         p8 out_buffer[4096];
@@ -7292,7 +7300,11 @@ COLD fn shell_pwd(writer write, string_address input)
                         return shell_letter_refuse("pwd", letter, "pwd [-LP]");
         }
 
-        if (!physical && shell_directory_holds())
+        //      Bash in posix mode asks the system where it is whichever form
+        //      was asked for, so a directory that has gone fails them all.
+        bool asks = shell_bash_compat && shell_posix_on();
+
+        if (!physical && !asks && shell_directory_holds())
         {
                 string_format(write, "%s\n", shell_directory);
                 return shell_answer(0);
@@ -7304,14 +7316,28 @@ COLD fn shell_pwd(writer write, string_address input)
                 //      references still answer with the one they last
                 //      knew, as long as the logical form was asked for
                 //      and bash is not in posix mode, where it refuses.
-                if (!physical && string_is(shell_directory, '/') &&
-                    !shell_posix_on())
+                if (!physical && string_is(shell_directory, '/') && !asks)
                 {
                         string_format(write, "%s\n", shell_directory);
                         return shell_answer(0);
                 }
 
-                log_error("pwd: cannot determine current directory\n", 0);
+                if (shell_bash_compat)
+                {
+                        //      Posix mode says it twice once it has failed
+                        //      before, having lost the directory it kept.
+                        for (positive said = asks && shell_pwd_failed ? 2 : 1; said; said--)
+                                log_error("pwd: error retrieving current directory: getcwd: "
+                                          "cannot access parent directories: "
+                                          "No such file or directory\n", 0);
+                }
+                else
+                {
+                        shell_diagnostic_where();
+                        log_error("pwd: getcwd() failed: No such file or directory\n", 0);
+                }
+
+                shell_pwd_failed = true;
 
                 return_if(shell_bash_compat, shell_answer(1));
 
@@ -7321,7 +7347,12 @@ COLD fn shell_pwd(writer write, string_address input)
                 return shell_answer(0);
         }
 
-        string_format(write, "%s\n", out_buffer);
+        shell_pwd_failed = false;
+
+        //      -L when the directory is there is the name the shell came by.
+        string_format(write, "%s\n", !physical && shell_directory_holds()
+                                         ? (string_address)shell_directory
+                                         : (string_address)out_buffer);
         shell_answer(0);
 }
 
@@ -7994,6 +8025,22 @@ fn shell_option_told(positive index, bool on)
 /* Startup and set use the same option table and side effects. */
 static bool shell_option_letter_told(p8 letter, bool on)
 {
+        //      dash's -E and -V are the two line editors, and turning either
+        //      on turns the other off, which the long names do not do.
+        if (!shell_bash_compat && (letter == 'E' || letter == 'V'))
+        {
+                positive mine = letter == 'E' ? SHELL_OPTION_EMACS
+                                              : SHELL_OPTION_VI;
+                positive other = letter == 'E' ? SHELL_OPTION_VI
+                                               : SHELL_OPTION_EMACS;
+
+                shell_option_told(mine, on);
+                if (on)
+                        shell_option_told(other, false);
+
+                return true;
+        }
+
         for (positive option = 0; option < SHELL_OPTION_NAMES; option++)
                 if (shell_option_names[option].value == letter)
                 {
@@ -8041,7 +8088,7 @@ RETURNS_NONNULL string_address shell_flags_current()
 
         string_address order = shell_bash_compat
                                    ? (string_address) "abefhiklmnprtuvxBCEHPT"
-                                   : (string_address) "ubaCvxsiImfne";
+                                   : (string_address) "ubaCEVvxsnmiIfe";
         positive into = 0;
 
         for (positive at = 0; string_get(order + at); at++)
@@ -8062,6 +8109,11 @@ RETURNS_NONNULL string_address shell_flags_current()
                 for (index = 0; index < SHELL_OPTION_NAMES; index++)
                         if (shell_option_names[index].value == letter)
                                 break;
+
+                //      dash's -E and -V stand for the two editors.
+                if (!shell_bash_compat && (letter == 'E' || letter == 'V'))
+                        index = letter == 'E' ? SHELL_OPTION_EMACS
+                                              : SHELL_OPTION_VI;
 
                 if (index < SHELL_OPTION_NAMES && shell_option_on(index))
                         flags[into++] = letter;
@@ -8902,7 +8954,9 @@ static PURE bool shell_option_letter_known(p8 letter)
                 return string_first_of(SHELL_SET_LETTERS, letter) ||
                        letter == 'r';
 
-        return array_any(option, SHELL_OPTION_NAMES, shell_option_names[option].value == letter);
+        //      -E and -V are dash's letters for emacs and vi.
+        return letter == 'E' || letter == 'V' ||
+               array_any(option, SHELL_OPTION_NAMES, shell_option_names[option].value == letter);
 }
 
 COLD fn shell_set(writer write, string_address input)
@@ -8931,7 +8985,9 @@ COLD fn shell_set(writer write, string_address input)
                 -o name is not asked about here, because the reference does
                 not ask either -- `set -f -o bogus` keeps the -f.
         */
-        for (positive look = 1; look < shell_argc; look++)
+        //      dash reads them as it goes, so a bad -o name in front of a bad
+        //      letter is the one it complains of.
+        for (positive look = 1; shell_bash_compat && look < shell_argc; look++)
         {
                 string_address word = shell_argv[look];
 
@@ -9050,6 +9106,19 @@ COLD fn shell_set(writer write, string_address input)
                                                 continue;
                                         }
 
+                                        //      A name with nothing in it is
+                                        //      no name to bash, which lists
+                                        //      and takes that word and all
+                                        //      after it for the parameters.
+                                        if (shell_bash_compat &&
+                                            !string_get(shell_argv[index + 1]))
+                                        {
+                                                shell_options_listed(write, !on);
+                                                index++;
+                                                operands = true;
+                                                goto set_parameters;
+                                        }
+
                                         // A name nobody has ends the script
                                         // the same as a letter nobody has:
                                         // set is a special builtin, and the
@@ -9091,6 +9160,7 @@ COLD fn shell_set(writer write, string_address input)
                 break;
         }
 
+set_parameters:
         //      argv is already a contiguous table of the right shape and
         //      shell_parameters_set copies what it is given, so the operands
         //      go straight in rather than through a middleman with a size.
@@ -9133,6 +9203,11 @@ fn shell_shift(writer write, string_address input)
                 {
                         if (shell_bash_compat)
                         {
+                                //      A word that is no number is the usage
+                                //      error posix mode leaves the shell for.
+                                if (!good)
+                                        exec_special_error_note();
+
                                 return shell_refuse(
                                     good ? 1 : 2, "shift: %s: %s\n",
                                     shell_argv[first],
@@ -15628,7 +15703,7 @@ bool umask_symbolic(string_address step, positive address_to mask)
                 return false;
 
         if (!file_mode_adjust(step, 0777 & ~(address_to mask), false, 07777,
-                              true, address_of allowed))
+                              true, address_of allowed, true))
                 return false;
 
         address_to mask = 0777 & ~allowed;
@@ -20166,9 +20241,18 @@ static b32 shell_tool_meta(positive which, string_address address_to arguments,
         return tools_meta(name, arguments, count);
 }
 
+//      Set when a foreground child has been waited for, a tool run in its
+//      stead, or `wait` was asked: which is when the reference forgets the
+//      coprocesses that ended.
+static bool exec_coproc_waited HOT_STATE;
+
 static HOT b32 shell_tool_call_in(positive which, bool own_process)
 {
         string_address address_to arguments = program_argument_list();
+
+        if (!own_process)
+                exec_coproc_waited = true;
+
         positive count = (positive)program_argument_count();
         b32 answered;
 
@@ -20426,6 +20510,7 @@ static bool shell_tool_run_hashed(string_address name, positive2 named)
 
         exec_wait_background(child);
         system_wait4_retry(child, address_of status, 0, null);
+        exec_coproc_waited = true;
         shell_answer(wait_status_code(status));
 
         return true;
@@ -21225,6 +21310,17 @@ static fn shell_wait_drop(bipolar job)
                 shell_wait_rows_changed = true;
         }
         shell_wait_count = into;
+}
+
+//      What `jobs` has said of a job a later wait must not say again.
+static fn shell_wait_told_of(bipolar job)
+{
+        if (job > shell_wait_pid_high)
+                return;
+
+        for (positive at = 0; at < shell_wait_count; at++)
+                if (shell_wait_table[at].job == job)
+                        shell_wait_table[at].flags |= SHELL_WAIT_TOLD;
 }
 
 bool shell_background_started(bipolar address_to children, positive count,
@@ -23866,10 +23962,14 @@ bool shell_tool_only_here(string_address name, positive2 named)
    frames, but command/type must report the same builtin namespace. */
 static bool shell_command_builtin_here(string_address name, positive2 named)
 {
+        //      A builtin switched off with enable -n is a command found on
+        //      the path again, though the tool that stands in for it is here.
+        if (shell_builtin_disabled(name))
+                return false;
+
         return shell_command_named_hashed(name, named) ||
                shell_tool_find_hashed(name, named) != SHELL_TOOLS ||
-               (!shell_builtin_disabled(name) &&
-                exec_control_builtin(name, false));
+               exec_control_builtin(name, false);
 }
 
 /* A restricted shell may still inspect a slash-bearing name through
@@ -26927,7 +27027,7 @@ COLD fn shell_prompt_written(writer write, string_address text)
                         break;
                 }
                 case 'v': write("5.3", 3); break;
-                case 'V': write("5.3.15", 6); break;
+                case 'V': write("5.3.20", 6); break;
                 case '\\': write("\\", 1); break;
 
                 //      A run that occupies no columns. Nothing here counts
