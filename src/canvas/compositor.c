@@ -286,22 +286,10 @@ static unsigned int compositor_tab_ink(int slot, unsigned int mark)
 }
 
 static void compositor_panel_tab(const struct compositor_target *t, int slot, unsigned int mark, int x, int y,
-                                 int width, int height, int top)
+                                 int width, int height)
 {
-        (void)top;
         compositor_fill(t, x, y, width, height, compositor_tab_ink(slot, mark));
 }
-
-// Every tab of a band, into the band's own pixels.
-static void compositor_panel(const struct compositor_target *t, const struct compositor_frame *frame)
-{
-        int x, y, width, height;
-
-        for (int slot = -2; slot < (int)frame->mark_count; slot++)
-                if (compositor_panel_slot(frame, slot, &x, &y, &width, &height))
-                        compositor_panel_tab(t, slot, slot >= 0 ? frame->marks[slot] : 0, x, y, width, height, frame->top);
-}
-
 
 /*
         A window's corners are quarters of a circle: the line's outside at
@@ -465,7 +453,7 @@ static void compositor_contents(const struct compositor_target *t, const struct 
         if (frame->builtin)
                 compositor_panel_tab(t, frame->slot,
                                      frame->slot >= 0 && frame->slot < (int)frame->mark_count ? frame->marks[frame->slot] : 0,
-                                     frame->x, frame->y, frame->width, frame->height, frame->top);
+                                     frame->x, frame->y, frame->width, frame->height);
         else
                 compositor_blit(t, frame->x, frame->y, frame->width, frame->height, frame->pixels, frame->pitch);
 }
@@ -2162,12 +2150,6 @@ static int compositor_glass_reach(int logical)
         each a pass of the library's vector bodies.
 */
 
-// Down to a multiple of the block, or by a power of two, for any sign.
-static int compositor_floor_to(int x, int block)
-{
-        return x >= 0 ? x / block * block : -((-x + block - 1) / block * block);
-}
-
 static int compositor_floor_shift(int x, int shift)
 {
         return x >> shift; // arithmetic: the floor for any sign
@@ -2478,14 +2460,13 @@ static unsigned int compositor_vivid(unsigned int pixel)
         tinted toward its own side of lightness. Answers what it came to in its middle,
         which its title stands out from.
 */
-static unsigned int compositor_glass_tab(int pitch, int gw, int x0, int x, int y, int width, int height, int top,
-                                         int slot, unsigned int mark)
+static unsigned int compositor_glass_tab(int pitch, int gw, int x0, int x, int y, int width, int height, int slot,
+                                         unsigned int mark)
 {
         unsigned int middle = compositor_vivid(compositor.glass[(long)(y + height / 2) * gw + x - x0 + width / 2]);
         unsigned int target = window_light(middle) ? 0xffffffu : 0x000000u;
         unsigned int amount = slot >= 0 && (mark & COMPOSITOR_TAB_LIT) ? 140 : 179;
 
-        (void)top;
         for (int row = y; row < y + height; row++)
         {
                 const unsigned int *from = compositor.glass + (long)row * gw + (x - x0);
@@ -2550,7 +2531,7 @@ static void compositor_band_draw(const struct compositor_frame *windows, unsigne
                 if (compositor_panel_slot(&band, (int)at, &x, &y, &width, &height))
                 {
                         unsigned int ground = compositor_glass_tab(band.width, glass_width, glass_left, x, y, width, height,
-                                                                   band.top, (int)at, band.marks[at]);
+                                                                   (int)at, band.marks[at]);
                         unsigned int ink = window_contrast(ground);
 
                         compositor_band_text(band.width, x, y, width, height, compositor.title[compositor.listed[at]],
@@ -2567,8 +2548,7 @@ static void compositor_band_draw(const struct compositor_frame *windows, unsigne
         {
                 char clock[6] = {(char)('0' + broken.tm_hour / 10), (char)('0' + broken.tm_hour % 10), ':',
                                  (char)('0' + broken.tm_min / 10), (char)('0' + broken.tm_min % 10), 0};
-                unsigned int ground = compositor_glass_tab(band.width, glass_width, glass_left, x, y, width, height,
-                                                           band.top, -2, 0);
+                unsigned int ground = compositor_glass_tab(band.width, glass_width, glass_left, x, y, width, height, -2, 0);
 
                 compositor_band_text(band.width, x, y, width, height, clock, window_contrast(ground), ground);
         }

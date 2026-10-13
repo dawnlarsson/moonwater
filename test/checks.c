@@ -112936,37 +112936,6 @@ static void check_compositor_panel_slots(void) {
     }
 }
 
-/* The panel writes each pixel of its tabs once and nothing between them:
-   no fill goes over another, whatever the windows' marks, the number of
-   pixels written is the tabs', and the band beside and between them is not
-   touched. */
-static void check_compositor_panel_once(void) {
-    static u32 screen[1024*768];
-    for(int scale=1;scale<=4;scale++)for(unsigned count=0;count<=WINDOWS;count++)
-    for(unsigned pattern=0;pattern<4;pattern++) {
-        unsigned char marks[WINDOWS];
-        for(unsigned i=0;i<count;i++)marks[i]=(unsigned char)((pattern>>(i&1))&1?(i%3==0?2:1):0);
-        struct compositor_frame f={0,768-24*scale,1024,24*scale,scale,0,0,1,marks,count};
-        struct compositor_target t={screen,1024,1024,768,0,0,1024,768};
-        unsigned long area=0;
-        int x,y,w,h;
-        for(unsigned i=0;i<1024*768;i++)screen[i]=0xdeadbeefu;
-        compositor_written=0;
-        compositor_panel(&t,&f);
-        for(int which=-2;which<(int)count;which++)
-            if(compositor_panel_slot(&f,which,&x,&y,&w,&h))area+=(unsigned long)w*h;
-        if(compositor_written!=area)
-            fprintf(stderr,"panel at scale %d, %u windows, marks %u wrote %lu, not %lu\n",scale,count,pattern,compositor_written,area);
-        cc_check(compositor_written==area);
-        for(int yy=768-24*scale;yy<768;yy++)for(int xx=0;xx<1024;xx++) {
-            int on=0;
-            for(int which=-2;which<(int)count&&!on;which++)
-                on=compositor_panel_slot(&f,which,&x,&y,&w,&h)&&xx>=x&&xx<x+w&&yy>=y&&yy<y+h;
-            if((screen[yy*1024+xx]==0xdeadbeefu)==on){cc_check(0);yy=768;break;}
-        }
-    }
-}
-
 /* The keymap is a function of a state and a key, so a layout is typed at
    with no card: what the Swedish keys make (å ä ö, AltGr levels, the 102nd
    key), the dead accents and what they make with a letter, Caps Lock, the
@@ -113574,7 +113543,6 @@ int main(void) {
     check_compositor_gs2();
     check_compositor_panel_slots();
     check_compositor_panel_fit();
-    check_compositor_panel_once();
     check_compositor_keymap();
     check_compositor_pointer();
     check_compositor_scene();
