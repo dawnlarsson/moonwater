@@ -8834,6 +8834,21 @@ then
 fi
 coverage_keep "$work/term"
 
+#       The same harness with the kernel's queue: TERM_FIXED_QUEUE gives
+#       term.c the fixed 2048-byte buffer ring 0 has, so what ring 0 does
+#       past that size is run here too.
+# shellcheck disable=SC2086
+if ! $compiler -O2 -static -nostdlib -nostartfiles -fno-stack-protector \
+        -fno-builtin -Wall -Wextra -Werror=unused-variable \
+        -Werror=unused-but-set-variable -I "$root" -T src/build/spark.ld -Wl,-e,_start \
+        -Wl,--build-id=none -Wl,--no-warn-rwx-segments -DTERM_FIXED_QUEUE $coverage_args \
+        -o "$work/term-fixed" "$work/harness.c" 2> "$work/err-fixed"
+then
+        echo "  term         fixed-queue harness build failed"
+        sed 's/^/    /' "$work/err-fixed"
+        exit 1
+fi
+
 #       Rows arrive one to a line and are joined by a bar, so a case that
 #       asks for several of them is still one string to compare.
 term() { ${TEST_RUNNER:-} "$work/term" "$@" 2>&1 | tr '\n' '|' | sed 's/|$//'; }
@@ -9042,6 +9057,37 @@ for question in '\e[6n' '\e[?6n' '\e[5n' '\e[c' '\e[>c' '\e[=c' '\e[?7$p' \
                 lost "answers held for $question" "want at most 4160 then 120|alive|$once, got $got"
         fi
 done
+
+#       The kernel's queue is 2048 bytes and does not grow. Asked past that
+#       by a far end that never reads, the last thing waiting is a whole
+#       answer, ending in the byte that ends the answer it is: an answer cut
+#       where the queue is full would leave the far end a start of a sequence
+#       that the next thing it is sent completes.
+fixedq() { ${TEST_RUNNER:-} "$work/term-fixed" "$@" 2>&1 | tr '\n' '|' | sed 's/|$//'; }
+for pair in '\e[6n:82' '\e[c:99' '\e[5n:110' '\e[18t:116' '\e]11;?\x07:7' '\e[?7$p:121'; do
+        question=${pair%:*}
+        last=${pair##*:}
+        got=$(fixedq 20 5 ask 200000 "$question" queued)
+        held=${got%%,*}
+        end=${got#*,}
+        if [ "$held" -le 2048 ] && [ "$end" = "$last" ]; then
+                won
+        else
+                lost "fixed queue ends whole for $question" "want at most 2048 ending in $last, got $got"
+        fi
+done
+#       A key sent into that queue is whole or not sent: an arrow waits as
+#       all three bytes, which ends in A, or is dropped, which leaves the
+#       answer it was behind ending in R. Ending in the [ of its own start is
+#       the cut that a far end would read as the start of something else.
+got=$(fixedq 20 5 ask 200000 '\e[6n' keys '<up>' queued)
+held=${got%%,*}
+end=${got#*,}
+if [ "$held" -le 2048 ] && { [ "$end" = 82 ] || [ "$end" = 65 ]; }; then
+        won
+else
+        lost "fixed queue keeps a key whole" "want at most 2048 ending in R or A, got $got"
+fi
 
 #
 #       Erasing.

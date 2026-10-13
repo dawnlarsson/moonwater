@@ -688,8 +688,13 @@ static _Bool term_simd;
 #define TERM_PICK(name) name
 #endif
 
-#ifdef KERNEL_MODE
+/*
+        The queue's fixed buffer. TERM_FIXED_QUEUE gives a userspace build the
+        same buffer, so the test harness runs ring 0's limits too.
+*/
+#if defined(KERNEL_MODE) || defined(TERM_FIXED_QUEUE)
 #define TO_SHELL_MAX 2048
+#define TO_SHELL_FIXED
 static p8 to_shell[TO_SHELL_MAX];
 #else
 static p8 address_to to_shell;
@@ -697,16 +702,38 @@ static positive to_shell_room;
 #endif
 static positive to_shell_length;
 
+/*
+        The longest message the emulator sends by itself, a report or an
+        answer, and a key or pointer report: each is written in several
+        calls, so it is refused whole or not begun.
+*/
+#define TERM_MESSAGE_MAX 64
+
+/*
+        Whether length more bytes fit whole. The userspace queue grows, so
+        always; the fixed one is full, and then nothing is started that would
+        end in a part of itself.
+*/
+static b32 to_shell_fits(positive length)
+{
+#ifdef TO_SHELL_FIXED
+        return length <= TO_SHELL_MAX - to_shell_length;
+#else
+        (void)length;
+        return true;
+#endif
+}
+
 static fn emit_bytes(address_any data, positive length)
 {
-#ifdef KERNEL_MODE
-        positive room = TO_SHELL_MAX - to_shell_length;
-        positive take = length < room ? length : room;
+#ifdef TO_SHELL_FIXED
+        // A piece is taken whole or not at all: a prefix of a sequence sent
+        // alone is what the far end reads as the start of the next thing.
+        if (!length || !to_shell_fits(length))
+                return;
 
-        if (take)
-                memory_copy_apart(to_shell + to_shell_length, data, take);
-
-        to_shell_length += take;
+        memory_copy_apart(to_shell + to_shell_length, data, length);
+        to_shell_length += length;
 #else
         if (!length ||
             !array_store_reserve(to_shell, to_shell_room, to_shell_length,
@@ -730,12 +757,19 @@ static fn emit_bytes(address_any data, positive length)
         than this waits, which is more than any program that reads its
         answers leaves unread; keys are never refused here. The console's
         queue is smaller and caps keys and answers alike.
+
+        In the fixed queue the bound is the buffer: an answer is given while
+        a whole one fits, so the 4096 ceiling could never close there.
 */
 #define TERM_ANSWERS_HELD 4096
 
 static b32 answering(void)
 {
+#ifdef TO_SHELL_FIXED
+        return to_shell_fits(TERM_MESSAGE_MAX);
+#else
         return to_shell_length < TERM_ANSWERS_HELD;
+#endif
 }
 
 static fn emit(unsigned int byte)
@@ -3238,9 +3272,13 @@ static fn line_accept()
 {
         line_remember();
 
-        emit_bytes(line, line_length);
-
-        emit('\n');
+        // The line and its newline go whole or the line is dropped whole: a
+        // newline with no line in front of it is an empty command.
+        if (to_shell_fits(line_length + 1))
+        {
+                emit_bytes(line, line_length);
+                emit('\n');
+        }
         line_done();
 }
 
@@ -3493,6 +3531,11 @@ static fn SPARE term_key_modified(unsigned int character, unsigned int code,
         unsigned int held = modifiers &
             (WINDOW_KEY_SHIFT | WINDOW_KEY_ALT | WINDOW_KEY_CONTROL);
 
+        // A key that does not fit whole is dropped, as an answer is refused:
+        // the far end reads the start of a sequence as the start of its keys.
+        if (!to_shell_fits(TERM_MESSAGE_MAX))
+                return;
+
         /*
                 Return is a carriage return.
 
@@ -3655,6 +3698,8 @@ static fn term_pointer(unsigned int col, unsigned int row,
         b32 down = (flags & WINDOW_KEY_DOWN) != 0;
         b32 move = (flags & WINDOW_KEY_POINTER_MOVE) != 0;
 
+        if (!to_shell_fits(TERM_MESSAGE_MAX))
+                return;
         if (!mouse_mode)
                 return;
         if (move && mouse_mode == 1000)
