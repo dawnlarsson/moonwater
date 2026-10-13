@@ -1953,14 +1953,14 @@ static unsigned int compositor_minute(void)
         that, is a little light: each pass rounds up.
 
         A tab is then its glass made more vivid (each colour half as far
-        again from its grey), taken further to the side of lightness it is on
-        -- a dark ground darker, a light one lighter -- so the tab is its
-        ground's own and still stands off it, with a line of light along the
-        edge that faces into the output; the tab of the window with the keys
-        goes a little the other way, and one put away not as far. Its title
-        is the ink that stands out on what the tab came to (window_contrast),
-        dimmer on a tab put away. Over the desktop's grey that is a tab of
-        090909, 393939 with the keys and 131313 put away.
+        again from its grey) and taken further to the side of lightness it is
+        on -- a dark ground darker, a light one lighter -- so the row of tabs
+        is its ground's own and still stands off it, all of a piece: the tab
+        of the window with the keys goes not quite as far, and is told by its
+        title, the ink that stands out on what the tab came to
+        (window_contrast) at full strength where the others' are two thirds
+        of the way to it and a tab put away's under half. Over the desktop's
+        grey that is a tab of 090909, and 0e0e0e with the keys.
 */
 #define COMPOSITOR_GLASS_ACROSS 8 // half the blur's width, in logical pixels
 #define COMPOSITOR_GLASS_DOWN 4   // and half its height
@@ -2041,18 +2041,10 @@ static unsigned int compositor_glass_tab(int pitch, int gw, int x0, int x, int y
                                          int slot, unsigned int mark)
 {
         unsigned int middle = compositor_vivid(compositor.glass[(long)(y + height / 2) * gw + x - x0 + width / 2]);
-        int light = window_light(middle), rim = top ? y + height - 1 : y;
-        unsigned int target = light ? 0xffffffu : 0x000000u, amount = slot >= 0 && (mark & COMPOSITOR_TAB_AWAY) ? 90 : 179;
-        unsigned int edge;
+        unsigned int target = window_light(middle) ? 0xffffffu : 0x000000u;
+        unsigned int amount = slot >= 0 && (mark & COMPOSITOR_TAB_LIT) ? 140 : 179;
 
-        if (slot >= 0 && (mark & COMPOSITOR_TAB_LIT))
-        {
-                target = light ? 0x000000u : 0xffffffu;
-                amount = 31;
-        }
-        middle = window_mix(middle, target, amount);
-        edge = window_contrast(middle);
-
+        (void)top;
         for (int row = y; row < y + height; row++)
         {
                 const unsigned int *from = compositor.glass + (long)row * gw + (x - x0);
@@ -2060,11 +2052,8 @@ static unsigned int compositor_glass_tab(int pitch, int gw, int x0, int x, int y
 
                 for (int column = 0; column < width; column++)
                         into[column] = window_mix(compositor_vivid(from[column]), target, amount);
-                if (row == rim)
-                        for (int column = 0; column < width; column++)
-                                into[column] = window_mix(into[column], edge, 40);
         }
-        return middle;
+        return window_mix(middle, target, amount);
 }
 
 /*
@@ -2110,7 +2099,9 @@ static void compositor_band_draw(const struct compositor_frame *windows, unsigne
                         unsigned int ink = window_contrast(ground);
 
                         compositor_band_text(band.width, x, y, width, height, compositor.title[compositor.listed[at]],
-                                             band.marks[at] & COMPOSITOR_TAB_AWAY ? window_mix(ground, ink, 170) : ink,
+                                             band.marks[at] & COMPOSITOR_TAB_LIT    ? ink
+                                             : band.marks[at] & COMPOSITOR_TAB_AWAY ? window_mix(ground, ink, 110)
+                                                                                    : window_mix(ground, ink, 170),
                                              ground);
                 }
 
