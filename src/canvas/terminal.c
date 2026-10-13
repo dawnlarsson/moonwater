@@ -808,10 +808,14 @@ static b32 terminal_frames(void)
         if (terminal.frames)
                 window_call(WINDOW_SYS_MUNMAP, (long)terminal.frames, 3 * (long)terminal.frame_bytes, 0, 0, 0, 0);
 
+        // Until a mapping is made there are no pictures: the pointers are none, so nothing is drawn through them.
+        terminal.frames = 0;
+        terminal.frame[0] = terminal.frame[1] = terminal.frame[2] = null;
+        terminal.valid[0] = terminal.valid[1] = 0;
+
         bytes = (bytes + 4095) & ~4095ul;
         // PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS
         mapped = window_call(WINDOW_SYS_MMAP, 0, 3 * (long)bytes, 3, 0x22, -1, 0);
-        terminal.frames = 0;
 
         if (mapped < 0 && mapped > -4096)
                 return false;
@@ -820,7 +824,6 @@ static b32 terminal_frames(void)
         terminal.frame_bytes = bytes;
         for (unsigned int at = 0; at < 3; at++)
                 terminal.frame[at] = (struct window_cell *)(mapped + (long)bytes * at);
-        terminal.valid[0] = terminal.valid[1] = 0;
         return true;
 }
 
@@ -863,6 +866,11 @@ static b32 terminal_frame(void)
         b32 bar, bar_told, any, right = false;
 
         if (slot < 0)
+                return false;
+
+        // A mapping the last grid's pictures were cut for is made again first, and a frame that cannot be
+        // drawn into its pictures is refused.
+        if (!terminal.frames && !terminal_frames())
                 return false;
 
         // The picture the compositor shows is the one it took last: the one drawn last once it has taken

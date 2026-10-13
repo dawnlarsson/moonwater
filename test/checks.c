@@ -109048,6 +109048,49 @@ static fn check_forced(void)
         terminal.forced = false;
 }
 
+/*
+        The frames' mapping cannot be made: the address space is at a limit
+        the frames' old mapping does not make room under. The frame is then
+        refused, and nothing is drawn through the pointers the mapping left
+        behind; when the limit is lifted the frames are made again and the
+        next frame is drawn.
+*/
+static fn check_frames_refused(void)
+{
+        struct { unsigned long current, maximum; } was, limit;
+        p8 statm[64] = {0};
+        positive pages = 0;
+        bipolar got = file_slurp_once_at(AT_FDCWD, (string_address)"/proc/self/statm", statm, sizeof(statm) - 1);
+        positive mapped = 3 * (positive)terminal.frame_bytes;
+        b32 refused;
+
+        for (bipolar at = 0; at < got && statm[at] >= '0' && statm[at] <= '9'; at++)
+                pages = pages * 10 + (positive)(statm[at] - '0');
+        if (got <= 0 || !mapped || pages * 4096 < mapped + 4096)
+        {
+                check("frames: the address space to test with is read", false);
+                return;
+        }
+
+        system_call_4(syscall(prlimit64), 0, 9, 0, (positive)&was);
+        limit.current = pages * 4096 - mapped - 4096;
+        limit.maximum = was.maximum;
+        system_call_4(syscall(prlimit64), 0, 9, (positive)&limit, 0);
+
+        // The old mapping goes, and the new one cannot be made.
+        refused = !terminal_frames();
+        cursor_hide();
+        term_bytes((const p8 address_to)"\x1b[H\x1b[2Krefused", 16);
+        cursor_show();
+        refused = refused && !terminal_frame();
+
+        system_call_4(syscall(prlimit64), 0, 9, (positive)&was, 0);
+        check("frames: a frame whose pictures cannot be mapped is refused, not drawn through a lost mapping",
+              refused && !terminal.frames && !terminal.frame[2]);
+        check("frames: and the next frame, with the address space back, is drawn", terminal_frames() && terminal_frame());
+        terminal.forced = false;
+}
+
 // The frame just drawn, read back: the buffer that is on the screen, or null when it was refused.
 static p32 address_to render_frame(void)
 {
@@ -109193,6 +109236,7 @@ b32 main()
                         refused++;
 
         check_forced();
+        check_frames_refused();
         check_keys();
         check_pointer();
         check_take();
