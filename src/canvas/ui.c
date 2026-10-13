@@ -276,7 +276,7 @@ static int ui_run(struct ui address_to ui, int x, int baseline, string_address t
         return width;
 }
 
-// A run of text, whole: its width in pixels when into is null, and otherwise drawn as ui_run draws it.
+// A run of text, whole, drawn as ui_run draws it: its width is answered, and a run of alpha 0 draws nothing.
 static int ui_text(struct ui address_to ui, int x, int baseline, string_address text, int size, b32 bold,
                    unsigned int colour, unsigned int alpha)
 {

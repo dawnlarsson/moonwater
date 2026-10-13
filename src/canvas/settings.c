@@ -287,9 +287,10 @@ static b32 settings_word(const char address_to words, positive index, char addre
 
 /*
         What a switch, a choice or a step goes to from value, one way (1) or
-        the other (-1): a switch to the other of on and off, a choice to the
-        next or the last of its words (from a value that is none of them, to
-        the first or the last), a step to its word for that way.
+        the other (-1): a switch to the other of on and off (2 throws it on
+        and -2 off, whatever it said), a choice to the next or the last of
+        its words (from a value that is none of them, to the first or the
+        last), a step to its word for that way.
 */
 static fn settings_next(const struct settings_row address_to row, const char address_to value, int way, char address_to into,
                         positive room)
@@ -604,7 +605,7 @@ static fn settings_finished(b32 killed)
 
         settings_next_job();
 
-        // The first reading of every row, said once where the machine's log is: how many said nothing.
+        // The first reading of every row, said once where the machine's log is: how many were unread or not understood.
         if (!settings.told && !settings.unread && settings.child <= 0 && !settings.queued)
         {
                 positive failed = 0;
@@ -697,10 +698,11 @@ static fn settings_type(const struct window_event address_to event)
         {
         case SETTINGS_KEY_ENTER:
         case SETTINGS_KEY_ENTER_PAD:
-                if (length)
-                        settings_change(settings.editing, settings.typed);
-                else
+                // Kept as it was, or typed to what it is, is no change and sends nothing.
+                if (!length)
                         settings_say((string_address) "nothing typed: the value is kept");
+                else if (!string_equals((string_address)settings.typed, (string_address)settings.value[settings.editing]))
+                        settings_change(settings.editing, settings.typed);
                 settings.editing = -1;
                 break;
         case SETTINGS_KEY_ESCAPE:

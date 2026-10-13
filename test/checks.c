@@ -109048,6 +109048,23 @@ static fn check_settings(string_address regular, string_address bold)
                 check("settings: backspace takes a whole character of several bytes",
                       string_equals((string_address)settings.typed, (string_address) "\xc3\xa9"));
                 settings.typed[0] = 0;
+                // A field kept as it is, or typed to what it is, sends nothing; a change does.
+                settings.child = 1;
+                settings.queued = 0;
+                settings.editing = zone;
+                settings.state[zone] = SETTINGS_READ;
+                string_copy_bounded((string_address)settings.value[zone], (string_address) "Europe/Stockholm", SETTINGS_VALUE);
+                string_copy_bounded((string_address)settings.typed, (string_address) "Europe/Stockholm", sizeof(settings.typed));
+                settings_press(SETTINGS_KEY_ENTER);
+                check("settings: a field typed to what it is sends nothing", settings.queued == 0 && settings.editing < 0);
+                settings.editing = zone;
+                string_copy_bounded((string_address)settings.typed, (string_address) "Europe/Berlin", sizeof(settings.typed));
+                settings_press(SETTINGS_KEY_ENTER);
+                check("settings: and a field typed to another is a change to it", settings.queued == 1 && settings.queue[0].row == zone &&
+                          string_equals((string_address)settings.queue[0].value, (string_address) "Europe/Berlin"));
+                settings.child = 0;
+                settings.queued = 0;
+                settings.typed[0] = 0;
                 settings.editing = -1;
                 settings.dirty = false;
 
