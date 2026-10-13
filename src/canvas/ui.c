@@ -120,8 +120,7 @@ static fn ui_dot(struct ui address_to ui, int x, int y, unsigned int tone)
 // The whole picture clear: the glass alone.
 static fn ui_clear(struct ui address_to ui)
 {
-        for (int y = 0; y < ui->height; y++)
-                memory_fill_u32(ui->pixels + (unsigned long)y * ui->pitch, (positive)ui->width, 0);
+        memory_fill_u32_rect(ui->pixels, (positive)ui->pitch, (positive)ui->width, (positive)ui->height, 0);
 }
 
 static fn ui_fill(struct ui address_to ui, int x, int y, int width, int height, unsigned int tone)
@@ -132,6 +131,14 @@ static fn ui_fill(struct ui address_to ui, int x, int y, int width, int height, 
         y = y < ui->top ? ui->top : y;
         x2 = x2 > ui->width ? ui->width : x2;
         y2 = y2 > ui->bottom ? ui->bottom : y2;
+        // An opaque tone over a pixel is that tone: the rectangle is one fill.
+        if (tone >> 24 == 255)
+        {
+                if (x2 > x && y2 > y)
+                        memory_fill_u32_rect(ui->pixels + (unsigned long)y * ui->pitch + (unsigned long)x, (positive)ui->pitch,
+                                             (positive)(x2 - x), (positive)(y2 - y), tone);
+                return;
+        }
         for (int row = y; row < y2; row++)
                 for (int column = x; column < x2; column++)
                 {
@@ -247,8 +254,7 @@ static int ui_run(struct ui address_to ui, int x, int baseline, string_address t
         wide = wide > ui->scratch_width ? ui->scratch_width : wide;
         rows = rows > UI_SCRATCH_ROWS * ui->scale ? UI_SCRATCH_ROWS * ui->scale : rows;
 
-        for (int row = 0; row < rows; row++)
-                memory_fill_u32(ui->scratch + (unsigned long)row * (unsigned long)wide, (positive)wide, paper);
+        memory_fill_u32_rect(ui->scratch, (positive)wide, (positive)wide, (positive)rows, paper);
         {
                 font_target line = {ui->scratch, (positive)wide, wide, rows};
 
