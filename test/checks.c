@@ -106977,7 +106977,7 @@ static fn check_bars()
         //      x-height 500 of 1024 at 16 px is 7.81 px, fitted to 8; o reaches
         //      15 units over it (0.23 px) and 15 under the baseline: both are
         //      flattened. At 48 px the 0.70 px reach is a whole pixel.
-        static const b32 zones[4] = {15, 15, 0, 0};
+        static const b32 zones[6] = {15, 15, 0, 0, 0, 0};
         b64 fitted[3];
         const b32 round16[] = {0, 8240, 0, -240, 100, 0, 100, 8000};
         snap_load(round16, 4, false);

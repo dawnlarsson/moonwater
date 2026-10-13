@@ -1215,10 +1215,17 @@ static p32 font_fit(font_engine address_to e, const font_face address_to face, p
         b64 over = font_divide((b64)zones[0] * scale, face->units);
         b64 under = font_divide((b64)zones[1] * scale, face->units);
         b64 cover = font_divide((b64)zones[2] * scale, face->units);
+        b64 ascender = font_divide((b64)zones[4] * scale, face->units);
+        b64 descender = font_divide((b64)zones[5] * scale, face->units);
 
-        //      The knots of the map, from the outline as it was to as fitted.
-        b64 was[6], now[6];
+        //      The knots of the map, from the outline as it was to as fitted:
+        //      the descender's bottom and the ascender's top are whole pixels
+        //      too, where they took the fractions of the lines next to them,
+        //      grey rows under p and q and over b, d, h, k and l.
+        b64 was[8], now[8];
         p32 knots = 0;
+        if (descender > under + FONT_ONE / 2 && descender > FONT_ONE)
+                was[knots] = -descender, now[knots++] = -font_round(descender);
         if (under > 0)
                 was[knots] = -under, now[knots++] = -font_overshoot(under);
         was[knots] = 0, now[knots++] = 0;
@@ -1231,6 +1238,8 @@ static p32 font_fit(font_engine address_to e, const font_face address_to face, p
                 if (cover > 0)
                         was[knots] = high + cover, now[knots++] = capped + font_overshoot(cover);
         }
+        if (ascender > was[knots - 1] + FONT_ONE / 2 && font_round(ascender) > now[knots - 1])
+                was[knots] = ascender, now[knots++] = font_round(ascender);
 
         for (p32 i = 0; i < e->point_count; i++)
         {
@@ -1542,29 +1551,49 @@ static fn font_swap_axes(font_engine address_to e)
 /*
         What a face's round letters and bars measure, once a face, kept in
         the glyph memo: how far o reaches over the x-height and under the
-        baseline and O over the cap height, in font units, and the standard
+        baseline and O over the cap height, in font units, the standard
         bar, the median horizontal stem of H E F T L e in font units times
-        2^14, found as the vertical stems are with the axes swapped.
+        2^14, found as the vertical stems are with the axes swapped, and the
+        top of d's ascender and the bottom of p's descender, in font units
+        (the descender as a depth).
 */
+#define FONT_ZONES 6
+
 static fn font_face_measure(font_engine address_to e, const font_face address_to face, b32 address_to out)
 {
         p64 base = (p64)1 << 63 | (p64)face->id << 32;
-        font_memo address_to memo[4];
+        font_memo address_to memo[FONT_ZONES];
         bool known = true;
 
-        for (p32 k = 0; k < 4; k++)
+        for (p32 k = 0; k < FONT_ZONES; k++)
         {
                 memo[k] = font_recall(e->glyph_memo, base | (0xfffffffeu - k));
                 known = known && memo[k]->key == (base | (0xfffffffeu - k));
         }
         if (known)
         {
-                for (p32 k = 0; k < 4; k++)
+                for (p32 k = 0; k < FONT_ZONES; k++)
                         out[k] = memo[k]->value;
                 return;
         }
 
-        out[0] = out[1] = out[2] = out[3] = 0;
+        for (p32 k = 0; k < FONT_ZONES; k++)
+                out[k] = 0;
+        for (p32 tall = 0; tall < 2; tall++)
+        {
+                p32 glyph = font_glyph(face, tall ? 'p' : 'd');
+
+                e->point_count = e->contour_count = e->components = 0;
+                if (!glyph || font_outline(e, face, glyph, 0) < 0 || !e->point_count)
+                        continue;
+
+                b64 reach = 0;
+                for (p32 i = 0; i < e->point_count; i++)
+                        if (e->points[i].on)
+                                reach = tall ? (-e->points[i].y > reach ? -e->points[i].y : reach)
+                                             : (e->points[i].y > reach ? e->points[i].y : reach);
+                out[4 + tall] = (b32)(reach >> FONT_EXACT);
+        }
         for (p32 round = 0; round < 2; round++)
         {
                 p32 glyph = font_glyph(face, round ? 'O' : 'o');
@@ -1624,7 +1653,7 @@ static fn font_face_measure(font_engine address_to e, const font_face address_to
                         width[j] = width[j - 1], width[j - 1] = t;
                 }
         out[3] = found ? (b32)width[found / 2] : 0;
-        for (p32 k = 0; k < 4; k++)
+        for (p32 k = 0; k < FONT_ZONES; k++)
                 *memo[k] = (font_memo){base | (0xfffffffeu - k), out[k]};
 }
 
@@ -2976,7 +3005,7 @@ static b32 font_shape(font_engine address_to e, const font_face address_to face,
                 return FONT_TOO_LARGE;
 
         b32 standard = style & 4 ? font_stem_standard(e, face) : 0;
-        b32 zones[4] = {0};
+        b32 zones[FONT_ZONES] = {0};
         if (style & 1)
                 font_face_measure(e, face, zones);
         b32 refused = font_outline(e, face, glyph, 0);
