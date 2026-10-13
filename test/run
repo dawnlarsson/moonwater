@@ -20247,7 +20247,7 @@ def said(row):
 first = compositor()
 width, height, plain = picture("r1-plain")
 out.append(("R1.1 a plain boot reaches the userspace compositor: its ground, its panel, a process of its own",
-            "%s %s %s" % (plain(4, 4), "tabs" if any(plain(x, H - 6) in ("000000", "38383c", "090909", "0e0e0e") for x in range(0, W, 4)) else "no tabs",
+            "%s %s %s" % (plain(4, 4), "tabs" if any(plain(x, H - 6) == "38383c" or (plain(x, H - 6)[0:2] * 3 == plain(x, H - 6) and int(plain(x, H - 6)[0:2], 16) in (0, 1, 2, 3, 9, 10, 11, 12, 14, 15, 16, 17)) for x in range(0, W, 4)) else "no tabs",
                           "alive" if alive(first) else "gone"),
             "1e1e1e tabs alive"))
 out.append(("and no tool's start was refused memory by the kernel (the shell's reserve is not counted)",
@@ -21670,7 +21670,10 @@ def ink(name):
     # The desktop's ink at the top left and the panel's tabs along the bottom: the compositor's own picture.
     w, h, px = load(name)
     at = lambda x, y: "%02x%02x%02x" % tuple(px[(y * w + x) * 3:(y * w + x) * 3 + 3])
-    tabs = any(at(x, h - 6) in ("000000", "38383c", "090909", "0e0e0e") for x in range(0, w, 4))
+    # The tabs' glass greys, with the frost's grain of up to three levels over them.
+    tabs = any(at(x, h - 6) == "38383c" or (at(x, h - 6)[0:2] * 3 == at(x, h - 6) and
+                                            int(at(x, h - 6)[0:2], 16) in (0, 1, 2, 3, 9, 10, 11, 12, 14, 15, 16, 17))
+               for x in range(0, w, 4))
     return "%s %s" % (at(10, 10), "tabs" if tabs else at(w // 2, h - 6))
 
 def asked(command, marker, seconds=20):

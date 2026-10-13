@@ -2137,13 +2137,15 @@ static int compositor_ceil_shift(int x, int shift)
         return -((-x) >> shift);
 }
 
-// A scratch mapping at least bytes long, grown when it is not.
+// A scratch mapping at least bytes long, grown when it is not -- to twice what it was at least, so a window
+// grown a little each frame makes it again a few times and not every frame.
 static unsigned int *compositor_scratch(unsigned int **at, unsigned long *had, unsigned long bytes)
 {
         long mapped;
 
         if (bytes <= *had)
                 return *at;
+        bytes = bytes < *had * 2 ? *had * 2 : bytes;
         bytes = (bytes + 65535) & ~65535ul;
         if (*at)
                 compositor_call(syscall(munmap), (positive)*at, *had, 0, 0, 0, 0);
@@ -2649,11 +2651,20 @@ static int compositor_glass_side(int row)
         return compositor.glass_side[row] != was;
 }
 
-// A glass window's blocks and picture given back, and it is none.
+// A glass window's blocks and picture given back, and it is none; with no glass window left the scratch's pages
+// go back too (MADV_DONTNEED), which the tabs' glass takes again a band's worth at a time.
 static void compositor_glass_drop(int row)
 {
+        int left = 0;
+
         if (compositor.backdrop[row])
                 compositor_call(syscall(munmap), (positive)compositor.backdrop[row], compositor.glass_cut[row], 0, 0, 0, 0);
+        for (int other = 0; other < WINDOWS; other++)
+                left |= other != row && compositor.glassy[other];
+        if (!left && compositor.frost)
+                compositor_call(syscall(madvise), (positive)compositor.frost, compositor.frost_bytes, 4, 0, 0, 0);
+        if (!left && compositor.rise)
+                compositor_call(syscall(madvise), (positive)compositor.rise, compositor.rise_bytes, 4, 0, 0, 0);
         compositor.backdrop[row] = compositor.tinted[row] = compositor.composed[row] = null;
         compositor.glass_cut[row] = 0;
         compositor.glassy[row] = 0;
@@ -2663,13 +2674,18 @@ static void compositor_glass_drop(int row)
         memory_zero(compositor.dirty[row], sizeof(compositor.dirty[row]));
 }
 
-// Room for the blocks, as blurred and as tinted, and the picture, at the window's size and place.
+/*
+        Room for the blocks, as blurred and as tinted, and the picture, at the
+        window's size and place: one mapping as large as the output could
+        make them, taken once, so a window resized every frame is never
+        mapped again, and only the pages its size touches are ever there.
+*/
 static int compositor_glass_room(int row)
 {
         int shift = COMPOSITOR_GLASS_LEVELS, margin = COMPOSITOR_GLASS_MARGIN;
         int x = compositor.x[row], y = compositor.y[row], w = (int)compositor.w[row], h = (int)compositor.h[row];
         int *blocks = compositor.glass_blocks[row];
-        unsigned long pixels = (unsigned long)w * (unsigned long)h, cells, need;
+        unsigned long pixels = (unsigned long)w * (unsigned long)h, cells, need, most;
         long mapped;
 
         blocks[0] = compositor_floor_shift(x, shift) - margin;
@@ -2678,6 +2694,10 @@ static int compositor_glass_room(int row)
         blocks[3] = compositor_ceil_shift(y + h, shift) + margin - blocks[1];
         cells = (unsigned long)blocks[2] * (unsigned long)blocks[3];
         need = ((cells * 2 + pixels) * 4 + 4095) & ~4095ul;
+        most = ((unsigned long)((compositor.width >> shift) + 2 * margin + 2) * (unsigned long)((compositor.height >> shift) + 2 * margin + 2) * 2 +
+                (unsigned long)compositor.width * (unsigned long)compositor.height) * 4;
+        most = (most + 4095) & ~4095ul;
+        need = need > most ? need : most;
 
         if (need > compositor.glass_cut[row])
         {
