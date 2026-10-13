@@ -108671,6 +108671,55 @@ static void check_compositor_partial(void)
     check("partial: every change presented alone is the screen the whole output makes", mismatched == 0 && steps == 300);
 }
 
+/*
+        Alt-Tab, ended by a window leaving. A window that goes while an Alt-Tab
+        is under way ends it, since the stack is one shorter; the window it
+        stopped on has the keys, and what letting go of Alt does to it (bring it
+        back if it was put away) has to happen then too. Otherwise the keys sit
+        on a window that is not on the screen and nothing brings it back.
+*/
+static void check_compositor_cycle(void)
+{
+    static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+    struct windows address_to table;
+
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+    compositor.width = compositor.height = GLASS_SIDE;
+    compositor.scale = 1;
+    compositor.card = -1;
+    compositor.scanout = screen;
+    compositor.scanout_pitch = GLASS_SIDE * 4;
+    if (!glass_table_map())
+    {
+        check("cycle: the table is mapped", false);
+        return;
+    }
+    table = compositor.table;
+    for (int row = 1; row <= 3; row++)
+    {
+        table->x[row] = 10 + 40 * row;
+        table->y[row] = 10 + 20 * row;
+        table->width[row] = 120;
+        table->height[row] = 80;
+        glass_paint(row, 0, 0, 120, 80, 0x404040u * (unsigned)row, true);
+    }
+    compositor_present();
+
+    /* Alt-Tab twice: from 3 to 2, then to 1, which is put away. */
+    compositor_focus_step();
+    compositor_focus_step();
+    compositor.state[1] |= WINDOW_MINIMIZED;
+    table->state[1] = compositor.state[1];
+    check("cycle: an Alt-Tab stopped on a put-away window has the keys", compositor.focus == 1 && compositor.cycle == 1);
+
+    /* Window 3 goes while the Alt-Tab is under way. */
+    compositor_leave(3);
+    check("cycle: the Alt-Tab is over, and the window it stopped on is back on the screen with the keys",
+          compositor.cycle == 0 && compositor.focus == 1 && !(compositor.state[1] & WINDOW_MINIMIZED) && compositor.showing[1]);
+}
+
 static fn check_glass(void)
 {
         static unsigned int screen[GLASS_SIDE * GLASS_SIDE], made[160 * 160], shown[160 * 160];
@@ -109440,6 +109489,7 @@ b32 main()
         check_take();
         check_glass();
         check_compositor_partial();
+        check_compositor_cycle();
         check_settings(program_argument_count() > 3 ? program_argument(3) : program_argument(1),
                        program_argument_count() > 4 ? program_argument(4) : null);
 

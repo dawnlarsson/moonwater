@@ -4141,8 +4141,14 @@ static void compositor_leave(int row)
         compositor.drag = compositor.drag == row ? COMPOSITOR_NONE : compositor.drag;
         compositor.press = compositor.press == row ? COMPOSITOR_NONE : compositor.press;
         compositor.resize = compositor.resize == row ? COMPOSITOR_NONE : compositor.resize;
-        // The stack is one shorter: an Alt-Tab under way would count past its end.
-        compositor.cycle = 0;
+        // The stack is one shorter, so an Alt-Tab under way ends here, on the window it stopped on, as letting go of
+        // Alt would have ended it: that window is brought back if it was put away, and has the keys.
+        if (compositor.cycle)
+        {
+                compositor.cycle = 0;
+                if (compositor.focus >= 0 && compositor.focus != row)
+                        compositor_reveal(compositor.focus);
+        }
 
         compositor.showing[row] = compositor.seen[row] = compositor.state[row] = 0;
         compositor.w[row] = compositor.h[row] = compositor.edges[row] = 0;
