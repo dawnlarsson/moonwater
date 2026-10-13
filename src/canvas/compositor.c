@@ -1608,7 +1608,9 @@ static struct
         unsigned int showing[WINDOWS];  // it has shown a picture: it is on the screen and has a tab
         unsigned int made[WINDOWS];     // the order the windows first showed in, which their tabs are in
         int x[WINDOWS], y[WINDOWS];
-        unsigned int w[WINDOWS], h[WINDOWS], front[WINDOWS], state[WINDOWS];
+        unsigned int w[WINDOWS], h[WINDOWS], front[WINDOWS], state[WINDOWS]; // w and h as it is shown
+        unsigned int picture_w[WINDOWS], picture_h[WINDOWS]; // as its program drew it
+        unsigned int asking[WINDOWS];   // shown at a size asked of it, until a picture of that size comes
         unsigned int arranged[WINDOWS]; // COMPOSITOR_FLOATING, or what it fills: all, the left half, the right
         unsigned int edges[WINDOWS];    // the edges the hand holds, until the window is the size asked for
         int far_x[WINDOWS], far_y[WINDOWS]; // where the edges it does not hold are
@@ -1622,6 +1624,8 @@ static struct
         unsigned char listed[WINDOWS], marks[WINDOWS], lengths[WINDOWS];
         unsigned int listing;
         unsigned int *band;  // the band's pixels, or none: no font, and the tabs are shapes
+        unsigned int *glass; // what is under the tabs, blurred: as wide as the band and its margins, as high
+        unsigned long glass_bytes;
         int band_stale;
         unsigned int minute;
         font_face face;
@@ -1769,10 +1773,39 @@ static int compositor_line(int row)
 }
 
 // The buffer a window's picture is in, where the compositor made it: every row of it the output's width.
-static const unsigned int *compositor_pixels(int row)
+static unsigned int *compositor_pixels(int row)
 {
-        return (const unsigned int *)((const char *)compositor.table + compositor.pixels +
-                                      ((unsigned long)row * 2 + compositor.front[row]) * compositor.buffer);
+        return (unsigned int *)((char *)compositor.table + compositor.pixels +
+                                ((unsigned long)row * 2 + compositor.front[row]) * compositor.buffer);
+}
+
+/*
+        A picture shown at a size it was not drawn at: past what its program
+        drew, its last column again to the right and its last row again
+        below, and short of it, cut. A size the compositor asked for is shown
+        the moment it is asked -- the edge under the hand, a window filling
+        the output -- and the program's picture at that size takes its place
+        when it comes; for a terminal its last column and row are its paper,
+        so what fills the gap is what will be there. Written into the buffer
+        the window shows, which its program does not draw into: it draws into
+        the other until this one is let go, and every buffer is the output's
+        size, so there is room.
+*/
+static void compositor_stretch(int row)
+{
+        unsigned int *pixels = compositor_pixels(row);
+        unsigned int drawn_w = compositor.picture_w[row], drawn_h = compositor.picture_h[row];
+        unsigned int width = compositor.w[row], height = compositor.h[row];
+        unsigned long stride = (unsigned long)compositor.width;
+
+        if (!drawn_w || !drawn_h)
+                return;
+
+        if (width > drawn_w)
+                for (unsigned int line = 0; line < drawn_h && line < height; line++)
+                        memory_fill_u32(pixels + line * stride + drawn_w, width - drawn_w, pixels[line * stride + drawn_w - 1]);
+        for (unsigned int line = drawn_h; line < height; line++)
+                memory_copy(pixels + line * stride, pixels + (drawn_h - 1) * stride, (positive)width * 4);
 }
 
 static void compositor_frame_of(int row, struct compositor_frame *frame)
@@ -1886,77 +1919,132 @@ static unsigned int compositor_minute(void)
 }
 
 /*
-        The tabs are frosted glass: what is under them, composed as the scene
-        has it, blurred, and taken further to the side of lightness it is on
-        -- a dark ground darker, a light one lighter -- so a tab is its
-        ground's own and still stands off it; the tab of the window with the
-        keys goes a little the other way, and one put away not as far. Its
-        title is the ink that stands out on what the tab came to
-        (window_contrast), dimmer on a tab put away. Over the desktop's grey
-        that is a tab of 090909, 393939 with the keys and 131313 put away.
+        The tabs are frosted glass. Under them is composed as the scene has
+        it -- from the first tab to the last and the blur's reach each side,
+        from the reach above the band to its far edge, the output's last row
+        and column repeated past it -- and blurred by memory_average_ahead,
+        a pass of the rounded mean of each byte and the byte ahead at a
+        pixel, two, four and so to eight pixels a step across and four rows
+        down (so many more at a larger scale): a box of sixteen by eight,
+        which each tab reads from back where it reaches, eight pixels left
+        and four up. Every pass is one call over the whole of it, nothing is
+        read that a pass has written, and the work is the hardware's
+        averaging instruction a register at a time. What it costs, besides
+        that, is a little light: each pass rounds up.
+
+        A tab is then its glass made more vivid (each colour half as far
+        again from its grey), taken further to the side of lightness it is on
+        -- a dark ground darker, a light one lighter -- so the tab is its
+        ground's own and still stands off it, with a line of light along the
+        edge that faces into the output; the tab of the window with the keys
+        goes a little the other way, and one put away not as far. Its title
+        is the ink that stands out on what the tab came to (window_contrast),
+        dimmer on a tab put away. Over the desktop's grey that is a tab of
+        090909, 393939 with the keys and 131313 put away.
 */
-#define COMPOSITOR_GLASS_ACROSS 10 // the blur, in logical pixels each way along the band
-#define COMPOSITOR_GLASS_DOWN 4    // and up and down it
+#define COMPOSITOR_GLASS_ACROSS 8 // half the blur's width, in logical pixels
+#define COMPOSITOR_GLASS_DOWN 4   // and half its height
 
-static unsigned int compositor_glass_copy[16384];
-
-// A box blur of count pixels step apart, radius each way, the ends held: a running sum of each ink.
-static void compositor_box(unsigned int *line, long step, int count, int radius)
+// How far the blur reaches, at the scale: a power of two, which the passes' steps add up to less one.
+static int compositor_glass_reach(int logical)
 {
-        unsigned int *copy = compositor_glass_copy, sum[3] = {0, 0, 0}, span = 2 * (unsigned int)radius + 1;
+        int reach = 1;
 
-        if (count < 2 || radius < 1 || count > 16384)
-                return;
-
-        for (int at = 0; at < count; at++)
-                copy[at] = line[at * step];
-        for (int at = -radius; at <= radius; at++)
-                for (unsigned int ink = 0; ink < 3; ink++)
-                        sum[ink] += copy[at < 0 ? 0 : at >= count ? count - 1 : at] >> (16 - 8 * ink) & 255;
-
-        for (int at = 0; at < count; at++)
-        {
-                unsigned int in = copy[at + radius + 1 < count ? at + radius + 1 : count - 1];
-                unsigned int out = copy[at - radius > 0 ? at - radius : 0];
-
-                line[at * step] = (sum[0] / span) << 16 | (sum[1] / span) << 8 | sum[2] / span;
-                for (unsigned int ink = 0; ink < 3; ink++)
-                        sum[ink] += (in >> (16 - 8 * ink) & 255) - (out >> (16 - 8 * ink) & 255);
-        }
+        while (reach * 2 <= logical * compositor.scale)
+                reach *= 2;
+        return reach;
 }
 
-// One tab of glass, its rectangle in the band; answers the colour it came to on average.
-static unsigned int compositor_glass(int pitch, int x, int y, int width, int height, int slot, unsigned int mark)
+// The glass: the scene under the span x0 to x1 of the band composed into it and blurred. Answers its width.
+static int compositor_glass_make(const struct compositor_frame *windows, unsigned int count, int x0, int x1,
+                                 const struct compositor_frame *band)
 {
-        unsigned long sum[3] = {0, 0, 0}, count = (unsigned long)width * (unsigned long)height;
-        unsigned int mean, target, amount;
-        int light;
+        int across = compositor_glass_reach(COMPOSITOR_GLASS_ACROSS), down = compositor_glass_reach(COMPOSITOR_GLASS_DOWN);
+        int gx = x0 - across, gy = band->y - down, gw = x1 - x0 + 2 * across, gh = band->height + 2 * down;
+        int cx0 = gx < 0 ? 0 : gx, cx1 = gx + gw > compositor.width ? compositor.width : gx + gw;
+        int cy0 = gy < 0 ? 0 : gy, cy1 = gy + gh > compositor.height ? compositor.height : gy + gh;
+        unsigned long need = (unsigned long)gw * (unsigned long)gh * 4, bytes;
+        struct compositor_target under;
 
-        for (int row = y; row < y + height; row++)
-                for (int column = x; column < x + width; column++)
-                {
-                        unsigned int pixel = compositor.band[(long)row * pitch + column];
+        if (need > compositor.glass_bytes || cx1 <= cx0 || cy1 <= cy0)
+                return 0;
 
-                        sum[0] += pixel >> 16 & 255;
-                        sum[1] += pixel >> 8 & 255;
-                        sum[2] += pixel & 255;
-                }
+        under = (struct compositor_target){compositor.glass, (unsigned long)gw, compositor.width, compositor.height,
+                                           cx0, cy0, cx1, cy1, gx, gy};
+        compositor_scene(&under, windows, count);
 
-        mean = count ? (unsigned int)(sum[0] / count << 16 | sum[1] / count << 8 | sum[2] / count) : 0;
-        light = window_light(mean);
-        target = light ? 0xffffffu : 0x000000u;
-        amount = slot >= 0 && (mark & COMPOSITOR_TAB_AWAY) ? 90 : 179;
+        // Past the output's edges, its last row and column again.
+        for (int row = 0; row < gh; row++)
+        {
+                unsigned int *line = compositor.glass + (long)row * gw;
+                int from = gy + row < cy0 ? cy0 - gy : gy + row >= cy1 ? cy1 - 1 - gy : row;
+
+                if (from != row)
+                        memory_copy(line, compositor.glass + (long)from * gw, (positive)gw * 4);
+                for (int column = 0; column < cx0 - gx; column++)
+                        line[column] = line[cx0 - gx];
+                for (int column = cx1 - gx; column < gw; column++)
+                        line[column] = line[cx1 - gx - 1];
+        }
+
+        bytes = (unsigned long)gw * (unsigned long)gh * 4;
+        for (int step = 1; step <= across; step *= 2)
+                memory_average_ahead((p8 address_to)compositor.glass, bytes - (unsigned long)step * 4, (positive)step * 4);
+        for (int step = 1; step <= down; step *= 2)
+                memory_average_ahead((p8 address_to)compositor.glass, bytes - (unsigned long)step * gw * 4,
+                                     (positive)step * gw * 4);
+        return gw;
+}
+
+// A colour half as far again from its grey, kept in a byte.
+static unsigned int compositor_vivid(unsigned int pixel)
+{
+        int r = (int)(pixel >> 16 & 255), g = (int)(pixel >> 8 & 255), b = (int)(pixel & 255);
+        int grey = (r * 77 + g * 150 + b * 29) >> 8;
+
+        r += (r - grey) >> 1;
+        g += (g - grey) >> 1;
+        b += (b - grey) >> 1;
+        r = r < 0 ? 0 : r > 255 ? 255 : r;
+        g = g < 0 ? 0 : g > 255 ? 255 : g;
+        b = b < 0 ? 0 : b > 255 ? 255 : b;
+        return (unsigned int)(r << 16 | g << 8 | b);
+}
+
+/*
+        One tab of glass, its rectangle x, y, width, height in the band, from
+        the glass gw wide whose column 0 is the band's x0: made vivid, tinted
+        and lit along its inner edge. Answers what it came to in its middle,
+        which its title stands out from.
+*/
+static unsigned int compositor_glass_tab(int pitch, int gw, int x0, int x, int y, int width, int height, int top,
+                                         int slot, unsigned int mark)
+{
+        unsigned int middle = compositor_vivid(compositor.glass[(long)(y + height / 2) * gw + x - x0 + width / 2]);
+        int light = window_light(middle), rim = top ? y + height - 1 : y;
+        unsigned int target = light ? 0xffffffu : 0x000000u, amount = slot >= 0 && (mark & COMPOSITOR_TAB_AWAY) ? 90 : 179;
+        unsigned int edge;
+
         if (slot >= 0 && (mark & COMPOSITOR_TAB_LIT))
         {
                 target = light ? 0x000000u : 0xffffffu;
                 amount = 31;
         }
+        middle = window_mix(middle, target, amount);
+        edge = window_contrast(middle);
 
         for (int row = y; row < y + height; row++)
-                for (int column = x; column < x + width; column++)
-                        compositor.band[(long)row * pitch + column] =
-                            window_mix(compositor.band[(long)row * pitch + column], target, amount);
-        return window_mix(mean, target, amount);
+        {
+                const unsigned int *from = compositor.glass + (long)row * gw + (x - x0);
+                unsigned int *into = compositor.band + (long)row * pitch + x;
+
+                for (int column = 0; column < width; column++)
+                        into[column] = window_mix(compositor_vivid(from[column]), target, amount);
+                if (row == rim)
+                        for (int column = 0; column < width; column++)
+                                into[column] = window_mix(into[column], edge, 40);
+        }
+        return middle;
 }
 
 /*
@@ -1967,8 +2055,7 @@ static unsigned int compositor_glass(int pitch, int x, int y, int width, int hei
 static void compositor_band_draw(const struct compositor_frame *windows, unsigned int count)
 {
         struct compositor_frame band;
-        struct compositor_target under;
-        int x, y, width, height;
+        int x, y, width, height, glass_width = 0, glass_left = 0;
         timespec now = {0, 0};
         time_t seconds;
         tm broken;
@@ -1978,20 +2065,28 @@ static void compositor_band_draw(const struct compositor_frame *windows, unsigne
                 return;
 
         compositor_band_frame(&band);
-        under = (struct compositor_target){compositor.band, (unsigned long)band.width, compositor.width, compositor.height,
-                                           band.x, band.y, band.x + band.width, band.y + band.height, band.x, band.y};
-        compositor_scene(&under, windows, count);
-        for (int row = 0; row < band.height; row++)
-                compositor_box(compositor.band + (long)row * band.width, 1, band.width,
-                               COMPOSITOR_GLASS_ACROSS * compositor.scale);
-        for (int column = 0; column < band.width; column++)
-                compositor_box(compositor.band + column, band.width, band.height, COMPOSITOR_GLASS_DOWN * compositor.scale);
-
         band.x = band.y = 0;
+        {
+                int first, last, x, y, width, height;
+
+                // The span of the tabs, which is all the glass is made under.
+                if (!compositor_panel_slot(&band, -2, &x, &y, &width, &height))
+                        return;
+                last = x + width;
+                first = band.mark_count && compositor_panel_slot(&band, 0, &x, &y, &width, &height) ? x : last - width;
+                compositor_band_frame(&band);
+                glass_width = compositor_glass_make(windows, count, first, last, &band);
+                glass_left = first;
+                band.x = band.y = 0;
+        }
+        if (!glass_width)
+                return;
+
         for (unsigned int at = 0; at < band.mark_count; at++)
                 if (compositor_panel_slot(&band, (int)at, &x, &y, &width, &height))
                 {
-                        unsigned int ground = compositor_glass(band.width, x, y, width, height, (int)at, band.marks[at]);
+                        unsigned int ground = compositor_glass_tab(band.width, glass_width, glass_left, x, y, width, height,
+                                                                   band.top, (int)at, band.marks[at]);
                         unsigned int ink = window_contrast(ground);
 
                         compositor_band_text(band.width, x, y, width, height, compositor.title[compositor.listed[at]],
@@ -2006,7 +2101,8 @@ static void compositor_band_draw(const struct compositor_frame *windows, unsigne
         {
                 char clock[6] = {(char)('0' + broken.tm_hour / 10), (char)('0' + broken.tm_hour % 10), ':',
                                  (char)('0' + broken.tm_min / 10), (char)('0' + broken.tm_min % 10), 0};
-                unsigned int ground = compositor_glass(band.width, x, y, width, height, -2, 0);
+                unsigned int ground = compositor_glass_tab(band.width, glass_width, glass_left, x, y, width, height,
+                                                           band.top, -2, 0);
 
                 compositor_band_text(band.width, x, y, width, height, clock, window_contrast(ground), ground);
         }
@@ -2894,9 +2990,28 @@ static void compositor_place(int row, int x, int y)
 */
 static void compositor_want(int row, int width, int height)
 {
-        compositor.table->want_width[row] = (unsigned int)(width < WINDOW_MIN_WIDTH ? WINDOW_MIN_WIDTH : width);
-        compositor.table->want_height[row] = (unsigned int)(height < WINDOW_MIN_HEIGHT ? WINDOW_MIN_HEIGHT : height);
+        int x = compositor.x[row], y = compositor.y[row];
+
+        width = width < WINDOW_MIN_WIDTH ? WINDOW_MIN_WIDTH : width > compositor.width ? compositor.width : width;
+        height = height < WINDOW_MIN_HEIGHT ? WINDOW_MIN_HEIGHT : height > compositor.height ? compositor.height : height;
+        compositor.table->want_width[row] = (unsigned int)width;
+        compositor.table->want_height[row] = (unsigned int)height;
         compositor.woken |= 1u << row;
+        if (!compositor.showing[row])
+                return;
+
+        // Shown at it now, its picture stretched or cut to it, and the edges the hand does not hold where they were.
+        compositor_damage_row(row);
+        compositor.asking[row] = 1;
+        compositor.w[row] = (unsigned int)width;
+        compositor.h[row] = (unsigned int)height;
+        if (compositor.edges[row] & COMPOSITOR_EDGE_LEFT)
+                x = compositor.far_x[row] - width;
+        if (compositor.edges[row] & COMPOSITOR_EDGE_TOP)
+                y = compositor.far_y[row] - height;
+        compositor_place(row, x, y);
+        compositor_stretch(row);
+        compositor_damage_row(row);
 }
 
 static void compositor_resize_begin(int row, unsigned int edges)
@@ -3082,8 +3197,9 @@ static void compositor_take(int row)
         {
                 int x = table->x[row], y = table->y[row];
 
-                compositor.w[row] = width;
-                compositor.h[row] = height;
+                compositor.w[row] = compositor.picture_w[row] = width;
+                compositor.h[row] = compositor.picture_h[row] = height;
+                compositor.asking[row] = 0;
                 compositor.front[row] = front;
                 compositor.state[row] = table->state[row] & WINDOW_MINIMIZED;
                 table->state[row] = compositor.state[row];
@@ -3100,7 +3216,19 @@ static void compositor_take(int row)
                 return;
         }
 
-        if (width != compositor.w[row] || height != compositor.h[row])
+        compositor.picture_w[row] = width;
+        compositor.picture_h[row] = height;
+        compositor.front[row] = front;
+
+        // The picture of the size asked for: shown as it is from here on, and, the hand let go, the edges are the
+        // window's own again. One of another size while an ask is out is shown at the size asked, stretched.
+        if (compositor.asking[row] && width == table->want_width[row] && height == table->want_height[row])
+        {
+                compositor.asking[row] = 0;
+                if (compositor.resize != row)
+                        compositor.edges[row] = 0;
+        }
+        if (!compositor.asking[row] && (width != compositor.w[row] || height != compositor.h[row]))
         {
                 int x = compositor.x[row], y = compositor.y[row];
 
@@ -3112,14 +3240,14 @@ static void compositor_take(int row)
                 if (compositor.edges[row] & COMPOSITOR_EDGE_TOP)
                         y = compositor.far_y[row] - (int)height;
                 compositor_place(row, x, y);
-
-                // The size asked for, and the hand let go: the edges are the window's own again.
-                if (compositor.resize != row && width == table->want_width[row] && height == table->want_height[row])
-                        compositor.edges[row] = 0;
+                damage[2] = 0;
+        }
+        if (width != compositor.w[row] || height != compositor.h[row])
+        {
+                compositor_stretch(row);
                 damage[2] = 0;
         }
 
-        compositor.front[row] = front;
         if (!compositor_visible(row))
                 return;
 
@@ -3167,6 +3295,7 @@ static void compositor_leave(int row)
 
         compositor.showing[row] = compositor.seen[row] = compositor.state[row] = 0;
         compositor.w[row] = compositor.h[row] = compositor.edges[row] = 0;
+        compositor.picture_w[row] = compositor.picture_h[row] = compositor.asking[row] = 0;
         compositor.arranged[row] = COMPOSITOR_FLOATING;
         compositor.title[row][0] = 0;
         table->state[row] = 0;
@@ -4074,7 +4203,7 @@ static void compositor_font(string_address path)
         static p8 atlas[128 * 128];
         positive size = 0, bytes = path ? compositor_map_file(path, address_of size) : 0;
         int x, y, width, height;
-        long engine, band;
+        long engine, band, glass;
 
         if (!bytes)
                 return;
@@ -4083,7 +4212,11 @@ static void compositor_font(string_address path)
                         &height);
         engine = compositor_call(syscall(mmap), 0, sizeof(font_engine), 3, 0x22, (positive)-1, 0);
         band = compositor_call(syscall(mmap), 0, (positive)width * (positive)height * 4, 3, 0x22, (positive)-1, 0);
-        if ((engine < 0 && engine > -4096) || (band < 0 && band > -4096) ||
+        // The glass: the band and the blur's reach on every side.
+        compositor.glass_bytes = (unsigned long)(width + 2 * COMPOSITOR_GLASS_ACROSS * compositor.scale) *
+                                 (unsigned long)(height + 2 * COMPOSITOR_GLASS_DOWN * compositor.scale) * 4;
+        glass = compositor_call(syscall(mmap), 0, compositor.glass_bytes, 3, 0x22, (positive)-1, 0);
+        if ((engine < 0 && engine > -4096) || (band < 0 && band > -4096) || (glass < 0 && glass > -4096) ||
             font_load(&compositor.face, (const p8 address_to)bytes, size, 0) != 0)
         {
                 compositor_say("no font for the tabs, error", -COMPOSITOR_EINVAL);
@@ -4093,6 +4226,7 @@ static void compositor_font(string_address path)
         compositor.engine = (font_engine address_to)engine;
         font_start(compositor.engine, atlas, 128, 128);
         compositor.band = (unsigned int *)band;
+        compositor.glass = (unsigned int *)glass;
         compositor.band_stale = 1;
 }
 
