@@ -19987,8 +19987,9 @@ out.append(("R1.2j an idle kernel log window wakes no time in five seconds", "ye
 
 #   The text size. Each terminal logs the size it draws at and the cell it measured, when it starts and when the
 #   size changes. Control-= grows the text one step and Control-- shrinks it, Control-Shift-= grows it too (Shift
-#   is not looked at), Control-0 goes back to the default of 14 pixels, every terminal follows the size the file
-#   /root/terminal/size names, a terminal started later reads it, and a file that names no step is the default.
+#   is not looked at), Control-0 goes back to the default of 14 pixels, each terminal is its own size, the file
+#   /root/terminal/size keeps the step the last zoom left, a terminal started later reads it, and a file that
+#   names no step is the default.
 def text_size(pid):
     found = re.findall(r"terminal pid %s text size (\d+) px, cell (\d+) by (\d+) px" % pid, shell.run("dmesg", 20)[0])
     return found[-1] if found else None
@@ -20017,17 +20018,20 @@ reset, _ = until(lambda: size_is(main_terminal, "14"), 10)
 out.append(("R1.2n Control-Shift-= grows it too, and Control-0 goes back to the default",
             "%s" % ("yes" if shifted and reset else "no (%s, %s)" % (shifted, reset)), "yes"))
 
-#   A second terminal follows the size the first one set, through the file and with no key of its own; and a
-#   terminal started later reads the file, and a file that names no step falls back to the default.
+#   Each terminal is its own size: a second terminal, which has the keys as a new window does, grows with
+#   Control-= and the first stays as it was; the file keeps the step the zoom left, and a terminal started
+#   after reads it, and one started after a file that names no step is the default.
 before = pids("terminal")
 chord("ctrl", "shift", "t")
 second, _ = until(lambda: [pid for pid in pids("terminal") if pid not in before], 10)
 second = second[0] if second else "0"
 second_start = text_size(second)
 chord("ctrl", "equal")
-both, _ = until(lambda: size_is(main_terminal, "16") and size_is(second, "16"), 10)
-out.append(("R1.2o a second terminal follows Control-= through the size file: it draws at 16 pixels too",
-            "yes" if both and second_start and second_start[0] == "14" else "no (%s, %s)" % (second_start, both), "yes"))
+alone, _ = until(lambda: size_is(second, "16"), 10)
+time.sleep(1)
+out.append(("R1.2o Control-= grows the terminal with the keys and no other: the new one at 16 pixels, the first still 14",
+            "yes" if alone and second_start and second_start[0] == "14" and size_is(main_terminal, "14")
+            else "no (%s, %s, %s)" % (second_start, text_size(second), text_size(main_terminal)), "yes"))
 file_text = shell.run("cat /root/terminal/size", 10)[0].strip()
 out.append(("and the file names the step, 16", file_text, "16"))
 
@@ -20039,10 +20043,14 @@ out.append(("R1.2p a terminal started after the change reads the file: it starts
             later_start[0] if later_start else "none", "16"))
 
 shell.run("echo nonsense > /root/terminal/size", 10)
-fell, _ = until(lambda: size_is(main_terminal, "14") and size_is(second, "14") and size_is(later, "14"), 10)
-out.append(("R1.2q a file that names no step is the default: every terminal on the desktop draws at 14 pixels",
-            "yes" if fell else "no (%s, %s, %s)" % (text_size(main_terminal), text_size(second), text_size(later)), "yes"))
-for pid in (second, later):
+chord("ctrl", "shift", "t")
+fallen, _ = until(lambda: [pid for pid in pids("terminal") if pid not in before and pid not in (second, later)], 10)
+fallen = fallen[0] if fallen else "0"
+fallen_start = text_size(fallen)
+out.append(("R1.2q a file that names no step is the default: a terminal started then draws at 14 pixels, and the others keep theirs",
+            "yes" if fallen_start and fallen_start[0] == "14" and size_is(second, "16") and size_is(main_terminal, "14")
+            else "no (%s, %s, %s)" % (fallen_start, text_size(second), text_size(main_terminal)), "yes"))
+for pid in (second, later, fallen):
     shell.run("kill -9 %s" % pid, 10)
 shell.run("rm -f /root/terminal/size", 10)
 until(lambda: len(pids("terminal")) == 1, 10)

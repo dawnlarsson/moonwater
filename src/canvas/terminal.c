@@ -61,21 +61,17 @@
 #define TERMINAL_LOG_TOP 6
 // Lines the log keeps: the kernel's own ring is 128 KiB of text and is what this follows from the start.
 #define TERMINAL_LOG_HISTORY 1024
-// The text sizes a terminal zooms through, in pixels: one step a press, the same on every terminal. The
-// default is one step below the 16 this program drew at before there was a ladder.
-#define TERMINAL_STEPS 14
-static const unsigned int terminal_steps[TERMINAL_STEPS] = {12, 14, 16, 18, 20, 22, 24, 28, 32, 36, 40, 48, 56, 64};
+// The text sizes a terminal zooms through, in pixels: one step a press, each terminal its own. The default
+// is one step below the 16 this program drew at before there was a ladder, and four steps below it the
+// floor is the reader's eyes.
+#define TERMINAL_STEPS 16
+static const unsigned int terminal_steps[TERMINAL_STEPS] = {8, 10, 12, 14, 16, 18, 20, 22, 24, 28, 32, 36, 40, 48, 56, 64};
 #define TERMINAL_SIZE 14
-// The step every terminal follows, in one file: written to a temporary name and renamed over it, and read by
-// every terminal when its directory changes. A missing or corrupt file is the default.
+// The step the last zoom left, in one file: written to a temporary name and renamed over it, and read by a
+// terminal when it starts, which is where a new one begins. A missing or corrupt file is the default.
 #define TERMINAL_SIZE_DIR "/root/terminal"
 #define TERMINAL_SIZE_FILE "/root/terminal/size"
 #define TERMINAL_SIZE_TEMP "/root/terminal/size.tmp"
-#define TERMINAL_IN_CLOSE_WRITE 0x8u
-#define TERMINAL_IN_MOVED_TO 0x80u
-#define TERMINAL_IN_DELETE 0x200u
-#define TERMINAL_IN_NONBLOCK 0x800
-#define TERMINAL_IN_CLOEXEC 0x80000
 #define TERMINAL_ATLAS 512
 // A ring is cut for the widest display there is, or this, as the kernel's was.
 #define TERMINAL_CEILING 3840
@@ -1116,9 +1112,10 @@ static void terminal_configure(b32 master, unsigned int width, unsigned int heig
 }
 
 /*
-        The text size. The step is kept in one file that every terminal on the desktop follows: a decimal number of
-        pixels and a newline, nothing else. A missing file, or one that does not say a step of the ladder, is the
-        default; and the file is replaced by a rename, so a reader sees the old size or the new one, never a part.
+        The text size. Each terminal zooms on its own, and the step the last zoom left is kept in one file that a
+        terminal starts at: a decimal number of pixels and a newline, nothing else. A missing file, or one that
+        does not say a step of the ladder, is the default; and the file is replaced by a rename, so a reader sees
+        the old size or the new one, never a part.
 */
 static void terminal_said(b32 reading, string_address what);
 
@@ -1273,50 +1270,21 @@ static void terminal_zoom(b32 master, b32 reading, int by)
         if (terminal_steps[next] == terminal.size >> 6)
                 return;
 
-        // Written first, so the other terminals are told what this one is about to be; this one is told the
-        // same by its own watch, and finds nothing to change.
+        // This terminal only; the file is where the next one starts.
         terminal_size_write(terminal_steps[next]);
         terminal_text_set(master, terminal_steps[next]);
         terminal_text_said(reading);
 }
 
-// The size -s asked for, or none.
-static unsigned int terminal_asked;
-
-// The file changed: the size it names is the one every terminal draws at; when it names none, the size this one
-// was started at (-s, or the default).
-static b32 terminal_size_follow(b32 master, b32 reading)
-{
-        unsigned int size = terminal_size_read();
-
-        size = size ? size : terminal_asked ? terminal_asked : TERMINAL_SIZE;
-        if (size == terminal.size >> 6)
-                return false;
-
-        terminal_text_set(master, size);
-        terminal_text_said(reading);
-        return true;
-}
-
-static void terminal_size_drain(long watch)
-{
-        p8 events[512];
-
-        // Read until the watch is empty, so that the next wait sleeps until the next change and not before.
-        while (compositor_call(syscall(read), (positive)watch, (positive)events, sizeof(events), 0, 0, 0) > 0)
-                ;
-}
-
 /*
-        windows_wait with the size directory's watch in it: the compositor's knock, the far end and the watch
-        in one sleep, and nothing else, so an idle terminal wakes for none of them. A readable watch is drained
-        here and the change it names made at the top of the loop. -1 once the compositor has gone.
+        windows_wait with the far end in it: the compositor's knock and the far end in one sleep, and nothing
+        else, so an idle terminal wakes for neither. -1 once the compositor has gone.
 */
-static long terminal_wait(long other, long watch, long nanoseconds, b32 address_to moved)
+static long terminal_wait(long other, long nanoseconds)
 {
-        struct window_poll wanted[3] = {{(int)terminal.own.wake, 1, 0}, {(int)other, 1, 0}, {(int)watch, 1, 0}};
+        struct window_poll wanted[2] = {{(int)terminal.own.wake, 1, 0}, {(int)other, 1, 0}};
         long timeout[2] = {nanoseconds / 1000000000, nanoseconds % 1000000000};
-        long ready = window_call(WINDOW_SYS_PPOLL, (long)wanted, 3, nanoseconds < 0 ? 0 : (long)timeout, 0, 0, 0);
+        long ready = window_call(WINDOW_SYS_PPOLL, (long)wanted, 2, nanoseconds < 0 ? 0 : (long)timeout, 0, 0, 0);
 
         if (ready == -4) // EINTR
                 return 0;
@@ -1326,12 +1294,6 @@ static long terminal_wait(long other, long watch, long nanoseconds, b32 address_
                 windows_drain(terminal.own.wake);
                 if (wanted[0].returned & 16) // POLLHUP
                         return -1;
-        }
-
-        if (ready > 0 && wanted[2].returned)
-        {
-                terminal_size_drain(watch);
-                address_to moved = true;
         }
         return ready;
 }
@@ -1557,8 +1519,7 @@ static b32 terminal_run(b32 reading)
         unsigned int cells[2] = {0, 0};
         unsigned int count = 0, size = 0, columns, rows;
         unsigned int max_columns, hung = reading;
-        b32 master, gone = false, dirty = true, closing = false, held = false, paced, moved = false;
-        long watch = -1;
+        b32 master, gone = false, dirty = true, closing = false, held = false, paced;
         positive oom_kills = 0, sync_since = 0, stalled_since = 0, last_frame = 0, settle_since = 0;
         bipolar child = 0;
         b32 lost = false;
@@ -1593,8 +1554,7 @@ static b32 terminal_run(b32 reading)
                 }
         }
 
-        // -s is the size asked for here; without it, the step the desktop's file names, and the default.
-        terminal_asked = size < 6 ? (size ? 6 : 0) : size > 200 ? 200 : size;
+        // -s is the size asked for here; without it, the step the last zoom left, and the default.
         size = size ? size : terminal_size_read();
         size = size ? size : TERMINAL_SIZE;
         size = size < 6 ? 6 : size > 200 ? 200 : size;
@@ -1611,23 +1571,6 @@ static b32 terminal_run(b32 reading)
 
         term_cell_w = terminal.cell_w;
         term_cell_h = terminal.cell_h;
-
-        // The watch on the size directory: made here so that a change while this one starts is one it reads.
-        // Without the directory (it cannot be made) there is no watch, and the terminal keeps the size it has.
-        compositor_call(syscall(mkdirat), (positive)AT_FDCWD, (positive)TERMINAL_SIZE_DIR, 0755, 0, 0, 0);
-        watch = compositor_call(syscall(inotify_init1), TERMINAL_IN_NONBLOCK | TERMINAL_IN_CLOEXEC, 0, 0, 0, 0, 0);
-        if (watch >= 0 &&
-            compositor_call(syscall(inotify_add_watch), (positive)watch, (positive)TERMINAL_SIZE_DIR,
-                            TERMINAL_IN_CLOSE_WRITE | TERMINAL_IN_MOVED_TO | TERMINAL_IN_DELETE, 0, 0, 0) < 0)
-        {
-                system_close((bipolar)watch);
-                watch = -1;
-        }
-        // Read once more when the loop starts: a change between the read above and the watch is not missed.
-        // A size asked for with -s was not read, and is kept until the file changes (it was 16 px on a
-        // terminal started -s 16 -g 80x24, and this read, finding no file, made it the 14 px default in
-        // the window cut for 16: 100 columns by 26 rows).
-        moved = watch >= 0 && !terminal_asked;
 
         // Shares of the output, in percent: the log at the left and the terminal across from it, over the
         // log's right edge, so that the log's lines can be read and the terminal is the one in front.
@@ -1718,13 +1661,6 @@ static b32 terminal_run(b32 reading)
 
                 if (!reading)
                         term_follow_modes(master);
-
-                // The size file changed: the text is drawn at the size it names.
-                if (moved)
-                {
-                        moved = false;
-                        dirty |= terminal_size_follow(master, reading);
-                }
 
                 // The zoom keys are the terminal's, whichever window it is: the kernel's log follows them too.
                 while (windows_event(&terminal.own, &event))
@@ -1888,10 +1824,9 @@ static b32 terminal_run(b32 reading)
                         b32 spare = !dirty && !synchronized_output && terminal.shown >= 0 &&
                                     terminal.valid[1 - terminal.shown];
                         b32 stalled = dirty && !synchronized_output && terminal.shown >= 0 && !windows_ready(&terminal.own);
-                        long ready = terminal_wait(master, watch,
-                                                   spare && timeout < 0     ? TERMINAL_IDLE_NANOSECONDS
-                                                   : stalled && timeout < 0 ? TERMINAL_STALL_NANOSECONDS
-                                                                            : timeout, &moved);
+                        long ready = terminal_wait(master, spare && timeout < 0     ? TERMINAL_IDLE_NANOSECONDS
+                                                          : stalled && timeout < 0 ? TERMINAL_STALL_NANOSECONDS
+                                                                                   : timeout);
 
                         if (ready < 0)
                         {
