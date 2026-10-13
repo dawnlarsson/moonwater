@@ -152,21 +152,17 @@ static b32 klog_drain(b32 far, b32 address_to gone, positive budget)
 }
 
 /*
-        One event from the compositor. The keys scroll; focus is nothing to a window that is read; the rest are the
-        terminal's (the size, the bar and the wheel), which write nothing to a far end that is a log.
+        One event from the compositor. The keys scroll; the rest are the terminal's (the bar and the wheel), which
+        write nothing to a far end that is a log.
 */
-static b32 klog_receive(const struct surface_event address_to event, b32 address_to dirty, b32 address_to closing,
-                        unsigned int address_to resize)
+static b32 klog_receive(const struct window_event address_to event, b32 address_to dirty)
 {
         int lines = 0;
 
-        if (event->type == SURFACE_EVENT_FOCUS)
-                return true;
+        if (event->type != WINDOW_EVENT_KEY)
+                return terminal_receive(-1, event, dirty);
 
-        if (event->type != SURFACE_EVENT_KEY)
-                return terminal_receive(-1, event, dirty, closing, resize);
-
-        if (!(event->flags & SURFACE_KEY_DOWN))
+        if (!(event->flags & WINDOW_KEY_DOWN))
                 return true;
 
         switch (event->a)

@@ -26621,13 +26621,17 @@ def harness_core_state(argv):
         geometry += "#undef compose_cells\n"
         geometry += section(drag, "static void bar_move", "/*\n        Filling the screen")
         (work / "canvas-pane.inc").write_text(geometry)
-        # The userspace compositor's CPU backend, which has to draw G-S1 to
-        # the same hash as the kernel's compose path above.
-        # canvas_abi.h's SURFACE_* numbers are what the roles are keyed by.
+        # The userspace compositor's CPU backend, its scene held to the
+        # painter's picture and its golden scenes to their own hashes, with
+        # what of window.c it reads: the keys' flags, the table's rows and
+        # the contrast the close button's X is drawn in.
         (work / "compositor-backend.inc").write_text(
-            (root / "src/canvas/canvas_abi.h").read_text() + section(
+            (root / "src/canvas/canvas_abi.h").read_text()
+            + section(window, "#define WINDOW_KEYS 64", "struct window_key\n")
+            + section(window, "#define WINDOWS_TABLE", "// Row row's buffer")
+            + section(window, "// from, moved amount 256ths", "#define window_at(") + section(
             (root / "src/canvas/compositor.c").read_text(),
-            "/* ---- backend: the classic look on the CPU ---- */",
+            "/* ---- backend: the look on the CPU ---- */",
             "/* ---- end of the backend ---- */") + section(
             (root / "src/canvas/compositor.c").read_text(),
             "/* ---- keymap: what a key means ---- */",

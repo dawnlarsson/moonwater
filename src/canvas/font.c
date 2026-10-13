@@ -183,8 +183,11 @@
         reads every pixel under the glyph and blends with it instead.
 
         flags: FONT_UNHINTED draws the outline as the font gives it,
-        FONT_DARKEN asks for stem darkening, FONT_UNKERNED leaves pairs
-        alone.
+        FONT_DARKEN asks for stem darkening, which font_draw and font_cell
+        give dark text on a lighter ground unasked and FONT_UNDARKENED takes
+        away, FONT_UNKERNED leaves pairs alone, FONT_OBLIQUE slants the face
+        12 degrees for an italic it does not have, FONT_EMBOLDEN thickens it
+        by a 24th of the size for a bold it does not have.
 
         Dawn Larsson - Apache-2.0 license
         github.com/dawnlarsson/moonwater
@@ -204,6 +207,9 @@
 #define FONT_UNHINTED 1
 #define FONT_DARKEN 2
 #define FONT_UNKERNED 4
+#define FONT_OBLIQUE 8
+#define FONT_EMBOLDEN 16
+#define FONT_UNDARKENED 32
 
 #define FONT_DRAWN 0xffff
 #define FONT_UNKNOWN 0xff000000u
@@ -340,7 +346,7 @@ typedef struct
 {
         p64 key, grid;
         p32 generation;
-        b16 dx, dy;
+        b16 dx, dy, top, bottom;
         font_bitmap box;
 } font_recent;
 
@@ -368,7 +374,7 @@ typedef struct
         p32 cover, area, gathered, used[5];
         b32 floor_y, height_y, wide_x;
         p8 ramp[256];
-        p32 ramp_colour, ramp_contrast, plain;
+        p32 ramp_colour, ramp_ground, ramp_contrast, plain;
         p64 shared[FONT_EDGE / 64 + 1];
         font_shelf shelves[FONT_SHELVES];
 
@@ -386,7 +392,7 @@ typedef struct
         //      A run of cells on its way to the target: each cell's bitmap,
         //      then their coverage rows side by side.
         font_bitmap run[FONT_RUN];
-        b16 run_dx[FONT_RUN], run_dy[FONT_RUN];
+        b16 run_dx[FONT_RUN], run_dy[FONT_RUN], run_top[FONT_RUN], run_bottom[FONT_RUN];
         p8 strip[FONT_STRIP];
 } font_engine;
 
@@ -1152,6 +1158,18 @@ static b32 font_outline(font_engine address_to e, const font_face address_to fac
         return 0;
 }
 
+//      Whole pixels, and whether a place is on one (within 1/64).
+static inline bool font_on_grid(b64 v)
+{
+        b64 r = v & (FONT_ONE - 1);
+        return r <= FONT_ONE / 64 || r >= FONT_ONE - FONT_ONE / 64;
+}
+
+static inline b64 font_round(b64 v)
+{
+        return (v + FONT_ONE / 2) & ~(b64)(FONT_ONE - 1);
+}
+
 /*
         Grid fitting, in 1024ths of a pixel. Below hint_until pixels the
         outline's heights move so that the baseline, the x-height and the cap
@@ -1160,33 +1178,85 @@ static b32 font_outline(font_engine address_to e, const font_face address_to fac
         height is stretched to meet both, and everything above moves with
         the cap height. An x-height rounds up from four tenths of a pixel,
         because at these sizes the larger x-height is the more legible one.
-        Horizontal positions are not touched: phases and advances stay exact.
+
+        Round letters reach past those lines a little (the top of o over the
+        x-height, its bottom under the baseline, the top of O over the cap
+        height), so that they look as tall as the flat ones. Under half a
+        pixel that overshoot is one grey row on top of every round letter
+        and nothing else, so each overshoot is a zone of its own: flattened
+        onto its line while it is under half a pixel, a whole pixel or more
+        when it is not. The overshoots are measured once a face, from o and
+        O, in font units.
+
+        Horizontal positions are not touched here: phases and advances stay
+        exact. lines answers where the fitted baseline, x-height and cap
+        height are, for the bars to keep.
 */
-static fn font_fit(font_engine address_to e, const font_face address_to face, p32 size)
+static inline b64 font_overshoot(b64 pixels)
 {
-        b64 low = font_divide((b64)face->x_height * size * (FONT_ONE / 64), face->units);
-        b64 high = font_divide((b64)face->cap_height * size * (FONT_ONE / 64), face->units);
+        return pixels < FONT_ONE / 2 ? 0 : font_round(pixels);
+}
+
+static p32 font_fit(font_engine address_to e, const font_face address_to face, p32 size, const b32 address_to zones,
+                    b64 address_to lines)
+{
+        b64 scale = (b64)size * (FONT_ONE / 64);
+        b64 low = font_divide((b64)face->x_height * scale, face->units);
+        b64 high = font_divide((b64)face->cap_height * scale, face->units);
         b64 snapped = (low + FONT_ONE * 6 / 10) & ~(b64)(FONT_ONE - 1);
         b64 capped = (high + FONT_ONE / 2) & ~(b64)(FONT_ONE - 1);
 
         if (low < FONT_ONE / 2)
-                return;
+                return 0;
         snapped = snapped < FONT_ONE ? FONT_ONE : snapped;
         if (high <= low + FONT_ONE / 2 || capped <= snapped)
                 high = 0;
+
+        b64 over = font_divide((b64)zones[0] * scale, face->units);
+        b64 under = font_divide((b64)zones[1] * scale, face->units);
+        b64 cover = font_divide((b64)zones[2] * scale, face->units);
+
+        //      The knots of the map, from the outline as it was to as fitted.
+        b64 was[6], now[6];
+        p32 knots = 0;
+        if (under > 0)
+                was[knots] = -under, now[knots++] = -font_overshoot(under);
+        was[knots] = 0, now[knots++] = 0;
+        was[knots] = low, now[knots++] = snapped;
+        if (over > 0 && (!high || low + over < high))
+                was[knots] = low + over, now[knots++] = snapped + font_overshoot(over);
+        if (high)
+        {
+                was[knots] = high, now[knots++] = capped;
+                if (cover > 0)
+                        was[knots] = high + cover, now[knots++] = capped + font_overshoot(cover);
+        }
 
         for (p32 i = 0; i < e->point_count; i++)
         {
                 b64 y = e->points[i].y;
 
-                if (y <= low)
-                        y = font_divide(y * snapped, low);
-                else if (high && y <= high)
-                        y = snapped + font_divide((y - low) * (capped - snapped), high - low);
+                if (y < was[0])
+                        //      Below the lowest knot the descenders keep the
+                        //      x-height zone's scale.
+                        y = now[0] + font_divide((y - was[0]) * snapped, low);
+                else if (y >= was[knots - 1])
+                        y += now[knots - 1] - was[knots - 1];
                 else
-                        y += high ? capped - high : snapped - low;
+                {
+                        p32 k = 1;
+                        while (was[k] <= y)
+                                k++;
+                        y = now[k - 1] + font_divide((y - was[k - 1]) * (now[k] - now[k - 1]), was[k] - was[k - 1]);
+                }
                 e->points[i].y = y;
         }
+
+        lines[0] = 0;
+        lines[1] = snapped;
+        if (high)
+                lines[2] = capped;
+        return high ? 3 : 2;
 }
 
 /*
@@ -1457,21 +1527,125 @@ static b32 font_stem_standard(font_engine address_to e, const font_face address_
         return standard;
 }
 
-static fn font_snap(font_engine address_to e, const font_face address_to face, p32 size, b32 standard)
+static fn font_swap_axes(font_engine address_to e)
 {
-        b64 scale = (b64)size * (FONT_ONE / 64);
-        b64 normal = font_divide((b64)standard * scale, (b64)face->units << FONT_EXACT);
+        for (p32 i = 0; i < e->point_count; i++)
+        {
+                b64 t = e->points[i].x;
+                e->points[i].x = e->points[i].y;
+                e->points[i].y = t;
+        }
+}
 
+/*
+        What a face's round letters and bars measure, once a face, kept in
+        the glyph memo: how far o reaches over the x-height and under the
+        baseline and O over the cap height, in font units, and the standard
+        bar, the median horizontal stem of H E F T L e in font units times
+        2^14, found as the vertical stems are with the axes swapped.
+*/
+static fn font_face_measure(font_engine address_to e, const font_face address_to face, b32 address_to out)
+{
+        p64 base = (p64)1 << 63 | (p64)face->id << 32;
+        font_memo address_to memo[4];
+        bool known = true;
+
+        for (p32 k = 0; k < 4; k++)
+        {
+                memo[k] = font_recall(e->glyph_memo, base | (0xfffffffeu - k));
+                known = known && memo[k]->key == (base | (0xfffffffeu - k));
+        }
+        if (known)
+        {
+                for (p32 k = 0; k < 4; k++)
+                        out[k] = memo[k]->value;
+                return;
+        }
+
+        out[0] = out[1] = out[2] = out[3] = 0;
+        for (p32 round = 0; round < 2; round++)
+        {
+                p32 glyph = font_glyph(face, round ? 'O' : 'o');
+
+                e->point_count = e->contour_count = e->components = 0;
+                if (!glyph || font_outline(e, face, glyph, 0) < 0 || !e->point_count)
+                        continue;
+
+                b64 top = -((b64)1 << 62), bottom = (b64)1 << 62;
+                for (p32 i = 0; i < e->point_count; i++)
+                        if (e->points[i].on)
+                        {
+                                top = e->points[i].y > top ? e->points[i].y : top;
+                                bottom = e->points[i].y < bottom ? e->points[i].y : bottom;
+                        }
+                top >>= FONT_EXACT;
+                bottom >>= FONT_EXACT;
+                if (!round)
+                {
+                        out[0] = face->x_height > 0 && top > face->x_height ? (b32)(top - face->x_height) : 0;
+                        out[1] = bottom < 0 ? (b32)-bottom : 0;
+                }
+                else
+                        out[2] = face->cap_height > 0 && top > face->cap_height ? (b32)(top - face->cap_height) : 0;
+        }
+
+        //      Overshoots are small: one past an eighth of the em is not an
+        //      overshoot, and is left alone.
+        for (p32 k = 0; k < 3; k++)
+                out[k] = out[k] > (b32)face->units / 8 ? 0 : out[k];
+
+        static const char bars[] = "HEFTLe";
+        b64 width[FONT_STEMS], stem[2 * FONT_STEMS];
+        font_run run[2 * FONT_STEMS];
+        p32 found = 0;
+        b64 one = (b64)face->units << FONT_EXACT;
+        b64 least = ((b64)(face->x_height > 0 ? face->x_height : face->units / 2) << FONT_EXACT) / 3;
+        for (p32 r = 0; bars[r] && found < FONT_STEMS; r++)
+        {
+                p32 glyph = font_glyph(face, (p32)bars[r]);
+
+                e->point_count = e->contour_count = e->components = 0;
+                if (!glyph || font_outline(e, face, glyph, 0) < 0)
+                        continue;
+                font_swap_axes(e);
+
+                p32 runs = font_runs(e, one / 512, least, run);
+                p32 stems = font_stems(run, runs, one / 4, stem);
+                for (p32 i = 0; i < stems && found < FONT_STEMS; i++)
+                        width[found++] = stem[2 * i + 1] - stem[2 * i];
+        }
+        e->point_count = e->contour_count = e->components = 0;
+        for (p32 i = 1; i < found; i++)
+                for (p32 j = i; j > 0 && width[j] < width[j - 1]; j--)
+                {
+                        b64 t = width[j];
+                        width[j] = width[j - 1], width[j - 1] = t;
+                }
+        out[3] = found ? (b32)width[found / 2] : 0;
+        for (p32 k = 0; k < 4; k++)
+                *memo[k] = (font_memo){base | (0xfffffffeu - k), out[k]};
+}
+
+/*
+        One axis's stems snapped, on x as the points stand. normal is the
+        standard stem in 1024ths of a pixel and least the shortest run that is
+        an edge; fixed are lines that must not move (the fitted baseline,
+        x-height and cap height when the axis is y), and a stem edge already on
+        one of them, or on any whole pixel, keeps its place while the other
+        edge takes the width.
+*/
+static fn font_snap_axis(font_engine address_to e, b64 normal, b64 least, b64 widest,
+                         const b64 address_to fixed, p32 fixes)
+{
         if (normal <= 0 || normal >= (b64)e->snap_widest * (FONT_ONE / 64))
                 return;
 
-        b64 x_height = font_divide((b64)(face->x_height > 0 ? face->x_height : face->units / 2) * scale, face->units);
         font_run run[2 * FONT_STEMS];
         b64 stem[2 * FONT_STEMS], to[2 * FONT_STEMS];
-        p32 runs = font_runs(e, FONT_ONE / 32, x_height / 3, run);
-        p32 stems = font_stems(run, runs, scale / 4, stem);
+        p32 runs = font_runs(e, FONT_ONE / 32, least, run);
+        p32 stems = font_stems(run, runs, widest, stem);
         bool dropped[FONT_STEMS] = {0};
-        b64 rounded = (normal + FONT_ONE / 2) & ~(b64)(FONT_ONE - 1);
+        b64 rounded = font_round(normal);
 
         rounded = rounded < FONT_ONE ? FONT_ONE : rounded;
 
@@ -1480,36 +1654,61 @@ static fn font_snap(font_engine address_to e, const font_face address_to face, p
         //      or 2 is a third lighter or heavier. Past that each stem keeps
         //      its width and puts its nearer edge on the grid, one sharp
         //      edge and the weight unchanged.
-        bool whole = 5 * (rounded - normal) <= normal && 5 * (normal - rounded) <= normal;
+        //      A standard from three quarters of a pixel up to one is a
+        //      pixel: a stroke thinner than a pixel can only ever be grey,
+        //      and at 10 or 11 px it is most of what a letter is. Under three
+        //      quarters (Plex Mono at 8 and 9 px) the stems would grow by
+        //      half and more, and a diagonal between two black stems, N's,
+        //      fades to nothing: those keep their width.
+        bool whole = (normal >= FONT_ONE * 3 / 4 && normal < FONT_ONE) ||
+                     (5 * (rounded - normal) <= normal && 5 * (normal - rounded) <= normal);
         for (p32 s = 0; s < stems; s++)
         {
-                b64 width = stem[2 * s + 1] - stem[2 * s];
+                b64 left = stem[2 * s], right = stem[2 * s + 1], width = right - left;
+                bool low = font_on_grid(left), high = font_on_grid(right);
 
                 if (!whole)
                 {
-                        b64 left = stem[2 * s], right = stem[2 * s + 1];
-                        b64 l = ((left + FONT_ONE / 2) & ~(b64)(FONT_ONE - 1)) - left;
-                        b64 r = ((right + FONT_ONE / 2) & ~(b64)(FONT_ONE - 1)) - right;
-                        b64 move = (l < 0 ? -l : l) <= (r < 0 ? -r : r) ? l : r;
+                        b64 l = font_round(left) - left, r = font_round(right) - right;
+                        b64 move = low || high ? 0 : (l < 0 ? -l : l) <= (r < 0 ? -r : r) ? l : r;
 
                         to[2 * s] = left + move;
                         to[2 * s + 1] = right + move;
                         continue;
                 }
 
-                b64 snapped = 4 * (width - normal) <= normal && 4 * (normal - width) <= normal
-                                  ? rounded
-                                  : (width + FONT_ONE / 2) & ~(b64)(FONT_ONE - 1);
-
+                b64 snapped = 4 * (width - normal) <= normal && 4 * (normal - width) <= normal ? rounded
+                                                                                                : font_round(width);
                 snapped = snapped < FONT_ONE ? FONT_ONE : snapped;
 
-                //      The whole pixels nearest the stem's centre: the left
-                //      edge rounds where the centre less half the new width is.
-                b64 left = 2 * stem[2 * s] + width - snapped;
-                left = ((left + FONT_ONE) >> (FONT_SHIFT + 1)) << FONT_SHIFT;
-                to[2 * s] = left;
-                to[2 * s + 1] = left + snapped;
+                //      An edge already on the grid stays and the other takes
+                //      the width; otherwise the whole pixels nearest the
+                //      stem's centre: the left edge rounds where the centre
+                //      less half the new width is.
+                if (low)
+                        to[2 * s] = font_round(left), to[2 * s + 1] = font_round(left) + snapped;
+                else if (high)
+                        to[2 * s + 1] = font_round(right), to[2 * s] = font_round(right) - snapped;
+                else
+                {
+                        b64 from = 2 * left + width - snapped;
+                        from = ((from + FONT_ONE) >> (FONT_SHIFT + 1)) << FONT_SHIFT;
+                        to[2 * s] = from;
+                        to[2 * s + 1] = from + snapped;
+                }
         }
+
+        //      A stem that would cross a fixed line, or straddles one, is let
+        //      go: the line wins.
+        for (p32 s = 0; s < stems; s++)
+                for (p32 f = 0; f < fixes && !dropped[s]; f++)
+                {
+                        b64 k = fixed[f];
+
+                        if ((stem[2 * s] < k && k < stem[2 * s + 1]) || (stem[2 * s + 1] <= k && to[2 * s + 1] > k) ||
+                            (stem[2 * s] >= k && to[2 * s] < k))
+                                dropped[s] = true;
+                }
 
         //      Drop snaps that reorder stems or shut a counter, the stem that
         //      moved most first, until none does.
@@ -1541,31 +1740,50 @@ static fn font_snap(font_engine address_to e, const font_face address_to face, p
                 }
         }
 
-        //      The edges that stay, as one map, left to right, between the
-        //      glyph's own left and right ends, which stay where they are: an
-        //      arm reaching out from a stem stretches or shrinks rather than
-        //      riding the stem's move into the next cell (the arms of [ and ]
-        //      would otherwise meet across the cell boundary).
-        b64 from[2 * FONT_STEMS + 2], onto[2 * FONT_STEMS + 2];
-        b64 least = (b64)1 << 62, most = -least;
+        //      The map: the edges that stay, the fixed lines, and the glyph's
+        //      own two ends, which stay where they are, so an arm reaching out
+        //      from a stem stretches or shrinks rather than riding the stem's
+        //      move into the next cell (the arms of [ and ] would otherwise
+        //      meet across the cell boundary).
+        b64 from[2 * FONT_STEMS + 16], onto[2 * FONT_STEMS + 16];
+        b64 lowest = (b64)1 << 62, highest = -lowest;
         p32 edges = 0;
         for (p32 i = 0; i < e->point_count; i++)
         {
-                least = e->points[i].x < least ? e->points[i].x : least;
-                most = e->points[i].x > most ? e->points[i].x : most;
+                lowest = e->points[i].x < lowest ? e->points[i].x : lowest;
+                highest = e->points[i].x > highest ? e->points[i].x : highest;
         }
         for (p32 s = 0; s < stems; s++)
                 if (!dropped[s])
                 {
-                        if (!edges && least < stem[2 * s] && least < to[2 * s])
-                                from[edges] = onto[edges] = least, edges++;
                         from[edges] = stem[2 * s], onto[edges++] = to[2 * s];
                         from[edges] = stem[2 * s + 1], onto[edges++] = to[2 * s + 1];
                 }
         if (!edges)
                 return;
-        if (most > from[edges - 1] && most > onto[edges - 1])
-                from[edges] = onto[edges] = most, edges++;
+        //      The stems' edges are in order already; the lines and the ends
+        //      go in between them where they keep the map in order, and are
+        //      left out where a stem's move would fold it.
+        b64 extra[18];
+        p32 more = 0;
+        for (p32 f = 0; f < fixes && more < 16; f++)
+                extra[more++] = fixed[f];
+        extra[more++] = lowest;
+        extra[more++] = highest;
+        for (p32 x = 0; x < more; x++)
+        {
+                b64 k = extra[x];
+                p32 at = 0;
+
+                while (at < edges && from[at] < k)
+                        at++;
+                if ((at < edges && from[at] == k) || (at > 0 && onto[at - 1] > k) || (at < edges && onto[at] < k))
+                        continue;
+                for (p32 j = edges; j > at; j--)
+                        from[j] = from[j - 1], onto[j] = onto[j - 1];
+                from[at] = onto[at] = k;
+                edges++;
+        }
 
         for (p32 i = 0; i < e->point_count; i++)
         {
@@ -1589,6 +1807,32 @@ static fn font_snap(font_engine address_to e, const font_face address_to face, p
                 }
                 e->points[i].x = x;
         }
+}
+
+//      Vertical stems, for a cell's whole-pixel pen. heavier is what a
+//      synthetic bold added to every stem, so the standard grows with it.
+static fn font_snap(font_engine address_to e, const font_face address_to face, p32 size, b32 standard, b64 heavier)
+{
+        b64 scale = (b64)size * (FONT_ONE / 64);
+        b64 normal = font_divide((b64)standard * scale, (b64)face->units << FONT_EXACT) + heavier;
+        b64 x_height = font_divide((b64)(face->x_height > 0 ? face->x_height : face->units / 2) * scale, face->units);
+
+        font_snap_axis(e, normal, x_height / 3, scale / 4, null, 0);
+}
+
+//      Horizontal bars, for any fitted text: its baseline is a whole pixel.
+//      The axes are swapped so the bars are the stems above, and the
+//      fitted lines are kept where the fit put them.
+static fn font_bars(font_engine address_to e, const font_face address_to face, p32 size, b32 standard,
+                    const b64 address_to fixed, p32 fixes, b64 heavier)
+{
+        b64 scale = (b64)size * (FONT_ONE / 64);
+        b64 normal = font_divide((b64)standard * scale, (b64)face->units << FONT_EXACT) + heavier;
+        b64 x_height = font_divide((b64)(face->x_height > 0 ? face->x_height : face->units / 2) * scale, face->units);
+
+        font_swap_axes(e);
+        font_snap_axis(e, normal, x_height / 3, scale / 4, fixed, fixes);
+        font_swap_axes(e);
 }
 
 /*
@@ -2715,6 +2959,9 @@ static b32 font_shape(font_engine address_to e, const font_face address_to face,
                 return FONT_TOO_LARGE;
 
         b32 standard = style & 4 ? font_stem_standard(e, face) : 0;
+        b32 zones[4] = {0};
+        if (style & 1)
+                font_face_measure(e, face, zones);
         b32 refused = font_outline(e, face, glyph, 0);
         if (refused < 0 || !e->point_count)
                 return refused;
@@ -2744,8 +2991,8 @@ static b32 font_shape(font_engine address_to e, const font_face address_to face,
                 e->points[i].x = (x < 0 ? -qx : qx) + nudge;
                 e->points[i].y = y < 0 ? -qy : qy;
         }
-        if (style & 1)
-                font_fit(e, face, size);
+        b64 lines[3];
+        p32 fixes = style & 1 ? font_fit(e, face, size, zones, lines) : 0;
         if (style & 2)
         {
                 b32 pixels = (b32)(size >> 6), until = (b32)e->darken_until;
@@ -2755,8 +3002,31 @@ static b32 font_shape(font_engine address_to e, const font_face address_to face,
                 if (amount > 0)
                         font_embolden(e, (f32)(FONT_ONE / 64) * amount);
         }
-        if (standard)
-                font_snap(e, face, size, standard);
+        b64 heavier = style & 16 ? (b64)size * (FONT_ONE / 64) / 24 : 0;
+        if (heavier)
+                //      Synthetic bold, for a face that has no bold: a 24th of
+                //      the size, half each side, the weight a bold face adds.
+                font_embolden(e, (f32)heavier);
+        if (style & 8)
+        {
+                //      Synthetic italic: a 12 degree slant about half the
+                //      x-height, so a lowercase letter leans out of its cell
+                //      by as little at the top as at the bottom. Its stems are
+                //      no longer upright, so they are not snapped; its bars
+                //      still are.
+                b64 mid = font_divide((b64)(face->x_height > 0 ? face->x_height : face->units / 2) * size *
+                                          (FONT_ONE / 64),
+                                      2 * (b64)face->units);
+                for (p32 i = 0; i < e->point_count; i++)
+                {
+                        f64 lean = (f64)(e->points[i].y - mid) * 0.21255656167002213;
+                        e->points[i].x += (b64)(lean < 0 ? lean - 0.5 : lean + 0.5);
+                }
+        }
+        if (standard && !(style & 8))
+                font_snap(e, face, size, standard, heavier);
+        if (fixes && zones[3])
+                font_bars(e, face, size, zones[3], lines, fixes, heavier);
 
         b64 left = (b64)1 << 62, bottom = left, right = -left, top = -left;
         for (p32 i = 0; i < e->point_count; i++)
@@ -2788,7 +3058,49 @@ static b32 font_shape(font_engine address_to e, const font_face address_to face,
 static p32 font_style(const font_engine address_to e, p32 size, p32 flags)
 {
         return (!(flags & FONT_UNHINTED) && size <= e->hint_until * 64 ? 1 : 0) |
-               ((flags & FONT_DARKEN) && e->darken && size < e->darken_until * 64 ? 2 : 0);
+               ((flags & FONT_DARKEN) && e->darken && size < e->darken_until * 64 ? 2 : 0) |
+               (flags & FONT_OBLIQUE ? 8 : 0) | (flags & FONT_EMBOLDEN ? 16 : 0);
+}
+
+//      Lightness of a colour as 0.30 red, 0.59 green and 0.11 blue, of 65280.
+static inline p32 font_luma(p32 colour)
+{
+        return 77 * (colour >> 16 & 255) + 150 * (colour >> 8 & 255) + 29 * (colour & 255);
+}
+
+//      Text darker than its ground by three quarters of the way from black
+//      to white or more -- black or near it on a light ground -- is
+//      darkened unasked, unless the caller says FONT_UNDARKENED. Lighter
+//      ink is not: its edge pixels are already fuller of it in linear light
+//      (darkened, 909090 on white read 1.21 times its ink at 48 px at 8 px,
+//      and white on black 1.23 to 1.39 at 8 to 11). On a ground not known,
+//      text under half light is taken for dark on white.
+static inline p32 font_polarity(p32 flags, p32 colour, p32 background)
+{
+        p32 ink = font_luma(colour);
+        p32 ground = background & FONT_UNKNOWN ? (ink < 32640 ? 65280 : 0) : font_luma(background);
+
+        if (flags & FONT_UNDARKENED)
+                return flags & ~(p32)(FONT_DARKEN | FONT_UNDARKENED);
+        return ink + 48960 <= ground ? flags | FONT_DARKEN : flags;
+}
+
+/*
+        How strong dark text's contrast curve is at a size, in 64ths of k:
+        e->contrast where the text is not darkened, and where it is, a
+        quarter of that at 12 px and under, back to all of it at the size
+        darkening has faded out by, as darkening fades. Darkening gives
+        small text the weight the curve was giving it, and both at once was
+        1.13 to 1.25 times the ink at 48 px at 8 to 12 px.
+*/
+static p32 font_strength(const font_engine address_to e, p32 size, p32 flags)
+{
+        b32 pixels = (b32)(size >> 6), until = (b32)e->darken_until;
+
+        if (!(font_style(e, size, flags) & 2) || until <= 12)
+                return e->contrast;
+        b32 faded = pixels <= 12 ? 0 : pixels >= until ? 64 : 64 * (pixels - 12) / (until - 12);
+        return (p32)((b64)e->contrast * (16 + 48 * faded / 64) / 64);
 }
 
 b32 font_render(font_engine address_to e, const font_face address_to face, p32 glyph,
@@ -3375,7 +3687,7 @@ static font_bitmap font_cached(font_engine address_to e, const font_face address
 {
         p64 key = (p64)1 << 63 | (p64)(face ? face->id : 0) << 47 | (p64)(code & 0xffff) << 31 |
                   (p64)(face ? size & 0x3fffff : (size >> 16 & 0x7ff) << 11 | (size & 0x7ff)) << 9 |
-                  (p64)(phase & 7) << 6 | (p64)(style & 7) << 3;
+                  (p64)(phase & 7) << 6 | (p64)(style & 7) << 3 | (p64)(style >> 3 & 3);
         font_bitmap box = {0};
 
         if (face && size >= FONT_SIZE_LIMIT)
@@ -3584,15 +3896,26 @@ fn font_start(font_engine address_to e, p8 address_to atlas, p32 width, p32 heig
         font_tables();
 }
 
-static fn font_ramp(font_engine address_to e, p32 colour)
+//      The coverage curve and the share of the plain mix for text of one
+//      colour on another, at a strength from font_strength. Which way the
+//      text is, is the ink's lightness against the ground's. Darker ink
+//      takes the curve by the square of how much darker, all of it at nine
+//      tenths (black on white) and about half at two thirds, where blue
+//      2050c0 and 606060 on white read 1.09 to 1.18 times their ink at 48 px
+//      at 8 to 12 px with all of it, and 0.94 to 1.10 with half. Lighter ink
+//      takes the plain mix, all of it at half lighter. Keyed on the ink's
+//      lightness alone, green 4ec94e on black took two thirds of the curve
+//      meant for dark text and read 1.23 to 1.41 at 8 to 11 px.
+static fn font_ramp(font_engine address_to e, p32 colour, p32 background, p32 strength)
 {
-        if (e->ramp_ready && e->ramp_colour == colour && e->ramp_contrast == e->contrast)
+        if (e->ramp_ready && e->ramp_colour == colour && e->ramp_ground == background && e->ramp_contrast == strength)
                 return;
 
-        f32 light = (0.30f * (colour >> 16 & 255) + 0.59f * (colour >> 8 & 255) + 0.11f * (colour & 255)) / 255;
-        f32 weight = 4 * (0.75f - light);
-        f32 k = e->contrast / 64.0f * (weight < 0 ? 0 : weight > 1 ? 1 : weight);
-        f32 bright = 4 * (light - 0.5f);
+        f32 light = font_luma(colour) / 65280.0f;
+        f32 ground = background & FONT_UNKNOWN ? (light < 0.5f ? 1 : 0) : font_luma(background) / 65280.0f;
+        f32 dark = ground - light, bright = 2 * (light - ground);
+        f32 share = dark <= 0 ? 0 : dark * dark / 0.81f;
+        f32 k = strength / 64.0f * (share > 1 ? 1 : share);
 
         e->plain = (p32)(64 * (bright < 0 ? 0 : bright > 1 ? 1 : bright) + 0.5f);
         for (p32 a = 0; a < 256; a++)
@@ -3602,7 +3925,8 @@ static fn font_ramp(font_engine address_to e, p32 colour)
                 e->ramp[a] = (p8)(255 * x * (k + 1) / (x * k + 1) + 0.5f);
         }
         e->ramp_colour = colour;
-        e->ramp_contrast = e->contrast;
+        e->ramp_ground = background;
+        e->ramp_contrast = strength;
         e->ramp_ready = true;
 }
 
@@ -3651,9 +3975,10 @@ static p32 font_mix(const font_engine address_to e, p32 back, p32 fore, p32 a)
         as four planes of bytes, which is the table memory_translate_u32_rect
         takes. The engine keeps 64 pairs.
 */
-static const p32 address_to font_tones(font_engine address_to e, p32 colour, p32 background)
+static const p32 address_to font_tones(font_engine address_to e, p32 colour, p32 background, p32 strength)
 {
-        p64 key = (p64)1 << 63 | (p64)e->contrast << 48 | (p64)e->linear << 56 |
+        strength = strength > 255 ? 255 : strength;
+        p64 key = (p64)1 << 63 | (p64)strength << 48 | (p64)e->linear << 56 |
                   (p64)(colour & 0xffffff) << 24 | (background & 0xffffff);
         //      Four ways to a set of pairs, and a set picked by the key's hash:
         //      a terminal's colours of a screen are a few dozen pairs, and one
@@ -3669,7 +3994,7 @@ static const p32 address_to font_tones(font_engine address_to e, p32 colour, p32
 
         e->pair_turns = (e->pair_turns & ~(3u << 2 * set)) | (((turn + 1) & 3) << 2 * set);
         pair += turn;
-        font_ramp(e, colour);
+        font_ramp(e, colour, background, strength);
         for (p32 c = 0; c < 256; c++)
         {
                 pair->pixel[c] = font_mix(e, background, colour, e->ramp[c]);
@@ -3687,17 +4012,17 @@ static const p32 address_to font_tones(font_engine address_to e, p32 colour, p32
 //      On a known ground the library lays the tones and stops at a pixel
 //      that is not the ground; that one is mixed here and the rest resumed.
 static fn font_blend(font_engine address_to e, const font_target address_to target,
-                     b32 x, b32 y, font_bitmap glyph, p32 colour, p32 background)
+                     b32 x, b32 y, font_bitmap glyph, p32 colour, p32 background, p32 strength)
 {
         b32 x0 = x < 0 ? -x : 0, y0 = y < 0 ? -y : 0;
         b32 x1 = x + glyph.width > target->width ? target->width - x : glyph.width;
         b32 y1 = y + glyph.height > target->height ? target->height - y : glyph.height;
         bool known = !(background & FONT_UNKNOWN);
-        const p32 address_to pixel = known ? font_tones(e, colour, background) : null;
+        const p32 address_to pixel = known ? font_tones(e, colour, background, strength) : null;
 
         if (x0 >= x1 || y0 >= y1)
                 return;
-        font_ramp(e, colour);
+        font_ramp(e, colour, background, strength > 255 ? 255 : strength);
         colour &= 0xffffff;
 
         positive width = (positive)(x1 - x0), height = (positive)(y1 - y0), stride = target->stride;
@@ -3859,7 +4184,9 @@ b32 font_draw(font_engine address_to e, const font_face address_to const address
         b32 pen = 0;
         font_place last = {0, FONT_DRAWN, 0, 0};
         font_metrics cell = count ? font_metrics_at(faces[0], size) : (font_metrics){0};
-        p32 style = font_style(e, size, flags);
+
+        flags = font_polarity(flags, colour, background);
+        p32 style = font_style(e, size, flags), strength = font_strength(e, size, flags);
 
         while (at < length && count)
         {
@@ -3876,7 +4203,8 @@ b32 font_draw(font_engine address_to e, const font_face address_to const address
                         font_bitmap box = font_cached(e, null, place.glyph,
                                                       (p32)cell.cell_width << 16 | (p32)cell.cell_height, 0, 0, 0);
                         place.advance = cell.cell_width << 16;
-                        font_blend(e, target, eighth >> 3, baseline - cell.baseline, box, colour, background);
+                        font_blend(e, target, eighth >> 3, baseline - cell.baseline, box, colour, background,
+                                   strength);
                 }
                 else
                 {
@@ -3884,7 +4212,7 @@ b32 font_draw(font_engine address_to e, const font_face address_to const address
                                                       (p32)eighth & 7, style, 0);
                         place.advance = font_advance(faces[place.face], place.glyph, size);
                         font_blend(e, target, (eighth >> 3) + box.left, baseline - box.top, box, colour,
-                                   background);
+                                   background, strength);
                 }
                 pen += place.advance;
                 last = place;
@@ -3904,15 +4232,17 @@ static fn font_ground(const font_target address_to target, b32 left, b32 top, b3
 //      What a cell is, less its code: one 64-bit key a run shares, and the
 //      grid it lies on.
 static inline INLINE p64 font_cell_base(const font_face address_to const address_to faces, p32 count, p32 size,
-                                        p32 flags, p32 cells)
+                                        p32 flags)
 {
         return (p64)1 << 63 | (p64)(count ? faces[0]->id & 0xffff : 0) << 47 | (p64)(size & 0xfffff) << 6 |
-               (p64)(flags & 7) << 3 | (p64)(cells > 1) << 2 | (p64)((count - 1) & 3);
+               (p64)(flags & 31) << 1;
 }
 
-static inline INLINE p64 font_cell_shape(const font_metrics address_to grid)
+//      The grid it lies on, and how many cells and faces.
+static inline INLINE p64 font_cell_shape(const font_metrics address_to grid, p32 count, p32 cells)
 {
-        return (p64)(p16)grid->cell_width << 32 | (p64)(p16)grid->cell_height << 16 | (p16)grid->baseline;
+        return (p64)(p16)grid->cell_width << 32 | (p64)(p16)grid->cell_height << 16 | (p16)grid->baseline |
+               (p64)(cells > 1) << 48 | (p64)((count - 1) & 3) << 49;
 }
 
 //      A cell not drawn lately: its glyph found, drawn into the atlas, and
@@ -3952,10 +4282,31 @@ font_cell_find(font_engine address_to e, const font_face address_to const addres
                 }
         }
 
+        //      The first and last rows of the cell with any ink, which a run
+        //      draws through the strip, the rows outside every cell's being
+        //      ground (a blank's are none: top past bottom).
+        b32 top = height, bottom = -1;
+        for (b32 r = 0; box.coverage && r < box.height; r++)
+        {
+                b32 row = *dy + r;
+                const p8 address_to bits = box.coverage + (positive)r * box.stride;
+                p8 any = 0;
+
+                if (row < 0 || row >= height)
+                        continue;
+                for (b32 c = 0; c < box.width && !any; c++)
+                        any = bits[c];
+                if (any)
+                {
+                        top = row < top ? row : top;
+                        bottom = row;
+                }
+        }
+
         //      A bitmap drawn into the atlas's scratch is gone with the next
         //      glyph, so it is not kept.
         if (!e->scratched)
-                *recent = (font_recent){key, shape, e->generation, (b16)*dx, (b16)*dy, box};
+                *recent = (font_recent){key, shape, e->generation, (b16)*dx, (b16)*dy, (b16)top, (b16)bottom, box};
         else
                 recent->key = 0;
         return box;
@@ -3972,7 +4323,7 @@ font_cell_find(font_engine address_to e, const font_face address_to const addres
 static inline INLINE font_bitmap font_cell_box(font_engine address_to e, const font_face address_to const address_to faces,
                                                p32 count, p32 code, p32 cells, const font_metrics address_to grid,
                                                p32 size, p32 flags, p64 base, p64 shape, b32 address_to dx,
-                                               b32 address_to dy)
+                                               b32 address_to dy, b16 address_to ink)
 {
         p64 key = base | (p64)(code & 0x1fffff) << 26;
         font_recent address_to recent = &e->recent[(key * 0x9e3779b97f4a7c15ull) >> 56];
@@ -3981,9 +4332,14 @@ static inline INLINE font_bitmap font_cell_box(font_engine address_to e, const f
         {
                 *dx = recent->dx;
                 *dy = recent->dy;
+                ink[0] = recent->top;
+                ink[1] = recent->bottom;
                 return recent->box;
         }
-        return font_cell_find(e, faces, count, code, cells, grid, size, flags, key, shape, recent, dx, dy);
+        font_bitmap box = font_cell_find(e, faces, count, code, cells, grid, size, flags, key, shape, recent, dx, dy);
+        ink[0] = recent->top;
+        ink[1] = recent->bottom;
+        return box;
 }
 
 /*
@@ -4003,16 +4359,18 @@ fn font_cell(font_engine address_to e, const font_face address_to const address_
 {
         b32 width = (b32)(cells ? cells : 1) * grid->cell_width, height = grid->cell_height;
         b32 dx, dy;
+        b16 ink[2];
 
+        flags = font_polarity(flags, colour, background);
         font_sync(e);
         font_bitmap box = font_cell_box(e, faces, count, code, cells, grid, size, flags,
-                                        font_cell_base(faces, count, size, flags, cells), font_cell_shape(grid),
-                                        &dx, &dy);
+                                        font_cell_base(faces, count, size, flags), font_cell_shape(grid, count, cells),
+                                        &dx, &dy, ink);
         b32 gx = x + dx, gy = y + dy;
 
         if (background & FONT_UNKNOWN)
         {
-                font_blend(e, target, gx, gy, box, colour, background);
+                font_blend(e, target, gx, gy, box, colour, background, font_strength(e, size, flags));
                 return;
         }
 
@@ -4021,7 +4379,7 @@ fn font_cell(font_engine address_to e, const font_face address_to const address_
         b32 top = y < 0 ? 0 : y, bottom = y + height > target->height ? target->height : y + height;
         b32 from = gx > left ? gx : left, to = gx + box.width < right ? gx + box.width : right;
         b32 above = gy > top ? gy : top, below = gy + box.height < bottom ? gy + box.height : bottom;
-        const p32 address_to pixel = font_tones(e, colour, background);
+        const p32 address_to pixel = font_tones(e, colour, background, font_strength(e, size, flags));
 
         if (left >= right || top >= bottom)
                 return;
@@ -4097,23 +4455,29 @@ fn font_cells(font_engine address_to e, const font_face address_to const address
         b32 width = grid->cell_width, height = grid->cell_height;
         positive across = (positive)n * (positive)(width > 0 ? width : 0);
         bool found = false;
+        p32 asked = flags;
 
+        flags = font_polarity(flags, colour, background);
         if (!(background & FONT_UNKNOWN) && n && n <= FONT_RUN && width > 0 && height > 0 && x >= 0 && y >= 0 &&
             x + (b64)across <= target->width && y + height <= target->height && across + 16 <= FONT_STRIP)
                 for (p32 attempt = 0; attempt < 2 && !found; attempt++)
                 {
                         p32 generation = (font_sync(e), e->generation);
-                        p64 base = font_cell_base(faces, count, size, flags, 1), shape = font_cell_shape(grid);
+                        p64 base = font_cell_base(faces, count, size, flags), shape = font_cell_shape(grid, count, 1);
 
                         found = true;
                         for (p32 i = 0; i < n && found; i++)
                         {
                                 b32 dx, dy;
 
+                                b16 ink[2];
+
                                 e->run[i] = font_cell_box(e, faces, count, codes[i], 1, grid, size, flags, base, shape,
-                                                          &dx, &dy);
+                                                          &dx, &dy, ink);
                                 e->run_dx[i] = (b16)dx;
                                 e->run_dy[i] = (b16)dy;
+                                e->run_top[i] = ink[0];
+                                e->run_bottom[i] = ink[1];
                                 found = !e->scratched;
                         }
                         found = found && e->generation == generation;
@@ -4121,21 +4485,42 @@ fn font_cells(font_engine address_to e, const font_face address_to const address
         if (!found)
         {
                 for (p32 i = 0; i < n; i++)
-                        font_cell(e, faces, count, codes[i], 1, grid, size, flags, target, x + (b32)i * width, y,
+                        font_cell(e, faces, count, codes[i], 1, grid, size, asked, target, x + (b32)i * width, y,
                                   colour, background);
                 return;
         }
 
+        //      The rows no cell has ink in -- above the capitals, below the
+        //      descenders, all of a run of blanks -- are the ground, one fill;
+        //      only the rows between go through the strip.
+        b32 lo = height, hi = -1;
+        for (p32 i = 0; i < n; i++)
+        {
+                lo = e->run_top[i] < lo ? e->run_top[i] : lo;
+                hi = e->run_bottom[i] > hi ? e->run_bottom[i] : hi;
+        }
+        lo = lo < 0 ? 0 : lo;
+        hi = hi >= height ? height - 1 : hi;
+        if (lo > hi)
+                lo = height, hi = height - 1;
+        if (lo > 0)
+                memory_fill_u32_rect(target->pixels + (positive)y * target->stride + (positive)x, target->stride, across,
+                                     (positive)lo, background & 0xffffff);
+        if (hi + 1 < height)
+                memory_fill_u32_rect(target->pixels + (positive)(y + hi + 1) * target->stride + (positive)x,
+                                     target->stride, across, (positive)(height - hi - 1), background & 0xffffff);
+
         //      Strip rows are 16 bytes longer than the run, for the last
         //      cell's word.
-        const p32 address_to pixel = font_tones(e, colour, background);
+        const p32 address_to pixel = font_tones(e, colour, background, font_strength(e, size, flags));
         positive stride = across + 16;
         const p8 address_to limit = e->atlas + (positive)e->atlas_width * e->atlas_height;
         b32 band = (b32)(FONT_STRIP / stride);
-        band = band > height ? height : band;
-        for (b32 from = 0; from < height; from += band)
+        band = band > hi - lo + 1 ? hi - lo + 1 : band;
+        band = band < 1 ? 1 : band;
+        for (b32 from = lo; from <= hi; from += band)
         {
-                b32 rows = from + band > height ? height - from : band;
+                b32 rows = from + band > hi + 1 ? hi + 1 - from : band;
 
                 for (p32 i = 0; i < n; i++)
                         font_lay_cell(e->strip + (positive)i * (positive)width, stride, &e->run[i], e->run_dx[i],

@@ -2769,6 +2769,19 @@ fn shell_input_end()
         }
 }
 
+// Whether a command has been run from the prompt last written, whose status the
+// next prompt shows when it was not 0.
+static bool shell_prompt_ran;
+
+// A failed command's status is written at the right of the next prompt's line
+// in the Moonwater terminal, which says so in TERM_PROGRAM; nowhere else.
+static bool shell_prompt_marks()
+{
+        string_address program = env_get("TERM_PROGRAM");
+
+        return program && string_equals(program, "moonwater");
+}
+
 // A prompt is for somebody watching. Asking the terminal about itself is the
 // only way to know whether anybody is: a script piped in gets none, which is
 // also what keeps its output free of them.

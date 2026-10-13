@@ -291,6 +291,8 @@ static bipolar term_session(b32 address_to master, positive address_to oom_kills
                 string_address argv[] = {SHELL, null};
                 string_address seed[] = {
                     "TERM=" TERM_NAME,
+                    // What the shell looks for before it writes a failed command's status at the right of its prompt.
+                    "TERM_PROGRAM=moonwater",
                     "TERMINFO=" TERM_INFO_DIRECTORY,
                     "HOME=/root",
                     "PATH=" BOWL_DEFAULT_PATH,

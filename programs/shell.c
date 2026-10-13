@@ -1183,8 +1183,28 @@ b32 main()
                 //      the next line was written over it.
                 if (interactive && terminal_input)
                 {
+                        //      In the Moonwater terminal, a command run from the
+                        //      last prompt that ended badly has its status
+                        //      written in red at the far right of this prompt's
+                        //      line, as zsh's right prompt and fish do, and the
+                        //      cursor goes back to the line's start for the
+                        //      prompt itself.
+                        winsize size = {0, 0, 0, 0};
+                        positive status = (positive)(p8)shell_status;
+                        positive digits = status < 10 ? 1 : status < 100 ? 2 : 3;
+
                         log_direct(str(TERM_MAIN_BUFFER_ONLY TERM_RESET
                                            TERM_SHOW_CURSOR));
+                        if (shell_prompt_ran && status && !shell_reading_more() && shell_prompt_marks() &&
+                            system_control(1, TIOCGWINSZ, address_of size) >= 0 && size.columns > digits + 8)
+                        {
+                                log_direct(str("\r\x1b["));
+                                positive_to_string(log_direct, size.columns - digits);
+                                log_direct(str("G\x1b[31m"));
+                                positive_to_string(log_direct, status);
+                                log_direct(str("\x1b[0m\r"));
+                        }
+                        shell_prompt_ran = false;
                         shell_prompt_write(log_direct, shell_reading_more());
                 }
                 //      -i with no terminal on standard input: the prompt
@@ -1281,6 +1301,19 @@ b32 main()
                                 total = line_end;
                         }
                 }
+
+                //      A line with something on it is a command run from the prompt.
+                if (interactive && terminal_input && !shell_prompt_ran)
+                        for (positive at_byte = 0; at_byte < (positive)got; at_byte++)
+                        {
+                                p8 byte = shell_buffer[held + at_byte];
+
+                                if (byte != ' ' && byte != '\t' && byte != '\n')
+                                {
+                                        shell_prompt_ran = true;
+                                        break;
+                                }
+                        }
 
                 at = shell_run_complete_lines(shell_buffer, total, false);
 
