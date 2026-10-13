@@ -12,9 +12,9 @@
         size is crisp, and nothing in the kernel knows what a cell is.
 
         What it draws is what the kernel's cells draw: the same palette, the
-        same folding of a stored line at the width it is drawn in, the same
-        bar down the right that is the scrollback, and the wheel and a drag on
-        the bar to move over it. It owes the shell what the kernel's window
+        same folding of a stored line at the width it is drawn in, a bar down
+        the right that is the scrollback, seen while the view is scrolled
+        back, and the wheel and a drag on the bar to move over it. It owes the shell what the kernel's window
         owed it -- keys, the pointer when a program has asked for it, a
         window size on the pty before SIGWINCH, the hangup when the X is
         pressed -- and those come through the same functions in screen.c.
@@ -143,10 +143,12 @@ static struct
         unsigned int modifiers; // from the keys, which are the only events that say
         b32 pressed;
         int wheel_remainder;
+        int wheel_notches; // the wheel in 120ths of a notch, while a program has the pointer
         unsigned int asked_w, asked_h; // the newest size the compositor asked for
         b32 focused;
         int group;                      // the pty's foreground process group the title was taken from
         char named[WINDOW_TITLE_MAX];   // the last title a program set (OSC 0 or 2)
+        unsigned int title_seen;        // how many titles programs had set when it was taken
 } terminal = {.shown = -1, .view = TERMINAL_LIVE};
 
 static unsigned int terminal_colour[256];
@@ -1093,8 +1095,10 @@ static b32 terminal_open(unsigned int wide, unsigned int high, unsigned int left
         terminal.pitch = table->stride;
         address_to columns = terminal_columns(display_w * wide / 100);
         address_to rows = terminal_rows(display_h * high / 100);
-        address_to columns = address_to columns < 20 ? COLUMNS_WANTED : address_to columns;
-        address_to rows = address_to rows < 4 ? ROWS_WANTED : address_to rows;
+        // A share too small for a usable grid is twenty columns and four rows, or what the output holds: at a
+        // large text size the 80 by 24 this once fell back to was the whole output.
+        address_to columns = address_to columns >= 20 ? address_to columns : min(20u, terminal_columns(display_w));
+        address_to rows = address_to rows >= 4 ? address_to rows : min(4u, terminal_rows(display_h));
 
         // A grid asked for (-g) is that many cells in the middle of the output, and not a share of it.
         if (cells[0] && cells[1])
@@ -1480,6 +1484,25 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
         case WINDOW_EVENT_WHEEL:
         {
                 int steps = event->b ? 0 : event->a;
+
+                // A program that asked for the pointer is owed the wheel as buttons 64 and 65, one a notch:
+                // a wheel that reports in fifteenths of a notch is the same notches as one that reports whole.
+                if (mouse_mode)
+                {
+                        b32 sent = true;
+
+                        terminal.wheel_notches += steps;
+                        terminal.wheel_remainder = 0;
+                        while (sent && (terminal.wheel_notches >= 120 || terminal.wheel_notches <= -120))
+                        {
+                                terminal_pointer_key(terminal.wheel_notches < 0 ? 65u : 64u, WINDOW_KEY_DOWN, &key);
+                                terminal.wheel_notches += terminal.wheel_notches < 0 ? 120 : -120;
+                                sent = term_input(master, &key);
+                        }
+                        return sent;
+                }
+                terminal.wheel_notches = 0;
+
                 long scaled = (long)steps * TERMINAL_WHEEL_LINES + terminal.wheel_remainder;
                 int lines = (int)(scaled / 120);
 
@@ -1487,13 +1510,6 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
 
                 if (!lines)
                         return true;
-
-                // A program that asked for the pointer is owed the wheel as buttons 64 and 65.
-                if (mouse_mode)
-                {
-                        terminal_pointer_key(lines < 0 ? 65u : 64u, WINDOW_KEY_DOWN, &key);
-                        return term_input(master, &key);
-                }
 
                 // A pager or an editor on the alternate screen has no scrollback here: the wheel is its
                 // arrows, a line a step, as the cursor keys' mode spells them.
@@ -1530,6 +1546,10 @@ static void terminal_title_set(const char address_to title)
 
         for (; title[at] && title[at] != '\n' && at < WINDOWS_TITLE - 1; at++)
                 table->title[terminal.own.row][at] = title[at];
+        // Cut on a character, not inside one: back over the continuation bytes of the one that did not fit.
+        if (at == WINDOWS_TITLE - 1 && ((unsigned char)title[at] & 0xc0) == 0x80)
+                while (at > 0 && ((unsigned char)title[at] & 0xc0) == 0x80)
+                        at--;
         table->title[terminal.own.row][at] = 0;
         windows_knock(&terminal.own);
 }
@@ -1556,10 +1576,19 @@ static void terminal_title(b32 master, bipolar shell)
                 terminal_title_set(name[0] ? (const char address_to)name : "shell");
         }
 
-        if (window->title[0] && memory_compare(window->title, terminal.named, WINDOW_TITLE_MAX))
+        // A title a program set, each time it sets one: the same again after the program's name took the tab
+        // is the program's again, and an empty one gives the tab back to the program's name.
+        if (title_said != terminal.title_seen)
         {
+                terminal.title_seen = title_said;
                 memory_copy(terminal.named, window->title, WINDOW_TITLE_MAX);
-                terminal_title_set(terminal.named);
+                if (terminal.named[0])
+                        terminal_title_set(terminal.named);
+                else
+                {
+                        terminal.group = -1;
+                        terminal_title(master, shell);
+                }
         }
 }
 
@@ -1776,7 +1805,7 @@ static b32 terminal_run(b32 reading)
                 if (!gone && !term_send(master))
                         gone = true;
 
-                // Being asked to go (Alt-F4, or the X of the kernel desktop's titlebar) is the line hanging up, once, to the group.
+                // Being asked to go (the close button, Alt-F4 or a middle press on the tab) is the line hanging up, once, to the group.
                 if (!gone && !hung && closing)
                 {
                         system_call_2(syscall(kill), (positive)(-child), SIGHUP);
@@ -1937,29 +1966,47 @@ static b32 terminal_run(b32 reading)
 
                         if (!ready && spare && timeout < 0)
                                 terminal_discard();
-
-
                 }
         }
-
 
         if (reading)
                 system_close(master);
 
         if (!reading && term_finish(child, master, hung, oom_kills))
         {
-                // What is left of a window whose shell is gone: its cells, until the X.
+                // What is left of a window whose shell is gone: its cells, and what said how it ended, until
+                // the X. Drawn again until the compositor has taken it, and at a new size or text size.
                 cursor_show();
-                terminal_frame();
+                b32 owed = !terminal_frame();
 
                 while (!(table->state[own] & WINDOW_CLOSING))
                 {
                         struct window_event event;
+                        long ready = windows_wait(&terminal.own, -1, owed ? TERMINAL_STALL_NANOSECONDS : -1);
 
-                        if (windows_wait(&terminal.own, -1, -1) < 0)
+                        if (ready < 0)
                                 break;
+                        terminal.forced |= owed && !ready;
                         while (windows_event(&terminal.own, &event))
-                                ;
+                        {
+                                int zoom = terminal_zoom_key(&event);
+
+                                if (zoom)
+                                {
+                                        terminal_zoom(master, zoom);
+                                        owed = true;
+                                }
+                        }
+                        if (table->want_width[own] && table->want_height[own] &&
+                            (table->want_width[own] != terminal.asked_w || table->want_height[own] != terminal.asked_h))
+                        {
+                                terminal.asked_w = table->want_width[own];
+                                terminal.asked_h = table->want_height[own];
+                                terminal_configure(master, terminal.asked_w, terminal.asked_h);
+                                owed = true;
+                        }
+                        if (owed)
+                                owed = !terminal_frame();
                 }
         }
 

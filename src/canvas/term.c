@@ -914,6 +914,9 @@ static unsigned int osc_number(unsigned int address_to at)
         return value;
 }
 
+// Counted up each time a program names the window, so the same name said again, or an empty one, is news too.
+static unsigned int title_said;
+
 static fn osc_finish(b32 bell)
 {
         unsigned int i = 0;
@@ -937,6 +940,7 @@ static fn osc_finish(b32 bell)
                         n = WINDOW_TITLE_MAX - 1;
                 memory_copy(window->title, osc_bytes + i, n);
                 window->title[n] = 0;
+                title_said++;
         }
 
         /*

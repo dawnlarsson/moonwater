@@ -227,7 +227,7 @@ static fn term_linger(void)
         Answers the shell's pid, with the pty's master in master and the
         count of processes the kernel had killed for want of memory in
         oom_kills, or a negative number after saying why not and with nothing
-        left open. The window or surface the caller draws in is its own to
+        left open. The window the caller draws in, the kernel's or a compositor's, is its own to
         close then.
 
         Waiting for the other end to exist.
@@ -329,7 +329,7 @@ static bipolar term_session(b32 address_to master, positive address_to oom_kills
 /*
         A key or a pointer report, as the bytes it is for.
 
-        The window's key ring and a surface's events both come through here as
+        The kernel window's key ring and a compositor window's events both come through here as
         a window_key, so what a Return, a Ctrl+C and a click turn into is
         one rule. False when the pty will take no more.
 */
