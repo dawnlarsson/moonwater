@@ -192,6 +192,20 @@ static fn term_child_killed(positive signal, string_address name,
 }
 
 /*
+        The X in the titlebar, once: a window closing is its line hanging up, and SIGHUP to the shell's group is
+        what that has always been. Not sent again, though the request stays set for as long as the window
+        exists. Hung is set when it is sent.
+*/
+static void term_hang_up(bipolar child, b32 address_to hung)
+{
+        if (*hung)
+                return;
+
+        system_call_2(syscall(kill), (positive)(-child), SIGHUP);
+        *hung = 1;
+}
+
+/*
         What is left of a window whose shell is gone: its cells, until the X.
         Keys and the pointer are taken and dropped, since nothing is there to
         send them to, and a resize is still drawn. It sleeps in between: the
@@ -551,11 +565,8 @@ static b32 screen_term()
                         request set for as long as the window exists, and a
                         signal every four milliseconds is not asking twice.
                 */
-                if (!gone && !hung_up && window_closing(window))
-                {
-                        system_call_2(syscall(kill), (positive)(-child), SIGHUP);
-                        hung_up = true;
-                }
+                if (!gone && window_closing(window))
+                        term_hang_up(child, &hung_up);
 
                 // The line editor draws where the shell would have echoed, so
                 // what it touched is what says the screen changed.

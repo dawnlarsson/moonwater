@@ -522,6 +522,13 @@ static p32 terminal_style(const struct window_cell address_to cell)
         return (cell->flags & WINDOW_CELL_ITALIC ? FONT_OBLIQUE : 0) |
                ((cell->flags & WINDOW_CELL_BOLD) && !terminal.bold_count ? FONT_EMBOLDEN : 0);
 }
+// A run of blank cells on one ground, from the first cell of the run for its length.
+static void terminal_blanks(unsigned int address_to pixels, unsigned int from, unsigned int count, int y,
+                            unsigned int colour)
+{
+        terminal_fill(pixels, (int)(from * terminal.cell_w), y, count * terminal.cell_w, terminal.cell_h, colour);
+}
+
 static void terminal_row(unsigned int address_to pixels, unsigned int row,
                          const struct window_cell address_to now,
                          const struct window_cell address_to old, unsigned int first,
@@ -575,8 +582,7 @@ static void terminal_row(unsigned int address_to pixels, unsigned int row,
                         p32 style = terminal_style(cell);
 
                         if (run)
-                                terminal_fill(pixels, (int)(run_from * terminal.cell_w), y, run * terminal.cell_w,
-                                              terminal.cell_h, run_colour);
+                                terminal_blanks(pixels, run_from, run, y, run_colour);
                         run = 0;
                         if (cell->flags & WINDOW_CELL_DIM)
                                 ink = terminal_mix(ink, paper);
@@ -604,8 +610,7 @@ static void terminal_row(unsigned int address_to pixels, unsigned int row,
                         else
                         {
                                 if (run)
-                                        terminal_fill(pixels, (int)(run_from * terminal.cell_w), y,
-                                                      run * terminal.cell_w, terminal.cell_h, run_colour);
+                                        terminal_blanks(pixels, run_from, run, y, run_colour);
                                 run = 1;
                                 run_from = at;
                                 run_colour = paper;
@@ -614,8 +619,7 @@ static void terminal_row(unsigned int address_to pixels, unsigned int row,
                 }
 
                 if (run)
-                        terminal_fill(pixels, (int)(run_from * terminal.cell_w), y, run * terminal.cell_w,
-                                      terminal.cell_h, run_colour);
+                        terminal_blanks(pixels, run_from, run, y, run_colour);
                 run = 0;
 
                 if (!cells)
@@ -645,8 +649,7 @@ static void terminal_row(unsigned int address_to pixels, unsigned int row,
 
         TERMINAL_GLYPHS();
         if (run)
-                terminal_fill(pixels, (int)(run_from * terminal.cell_w), y, run * terminal.cell_w,
-                              terminal.cell_h, run_colour);
+                terminal_blanks(pixels, run_from, run, y, run_colour);
 #undef TERMINAL_GLYPHS
 }
 
@@ -1184,6 +1187,25 @@ static void terminal_configure(b32 master, unsigned int width, unsigned int heig
 }
 
 /*
+        The window was asked for another size and has not been given it: the grid is cut to it, the pty told
+        and the picture drawn again. Answers whether it was asked for.
+*/
+static b32 terminal_asked(b32 master)
+{
+        struct windows address_to table = terminal.own.table;
+        unsigned int own = terminal.own.row;
+
+        if (!table->want_width[own] || !table->want_height[own] ||
+            (table->want_width[own] == terminal.asked_w && table->want_height[own] == terminal.asked_h))
+                return false;
+
+        terminal.asked_w = table->want_width[own];
+        terminal.asked_h = table->want_height[own];
+        terminal_configure(master, terminal.asked_w, terminal.asked_h);
+        return true;
+}
+
+/*
         The text size. Each terminal zooms on its own, and the step the last zoom left is kept in one file that a
         terminal starts at: a decimal number of pixels and a newline, nothing else. A missing file, or one that
         does not say a step of the ladder, is the default; and the file is replaced by a rename, so a reader sees
@@ -1293,12 +1315,12 @@ static void terminal_text_said(b32 reading)
 
         for (unsigned int at = 0; at < 3; at++)
         {
-                for (const p8 address_to from = piece[at]; *from; from++)
-                        text[length++] = *from;
+                memory_copy(text + length, piece[at], string_length((string_address)piece[at]));
+                length += string_length((string_address)piece[at]);
                 length += terminal_decimal(text + length, values[at]);
         }
-        for (const p8 address_to from = piece[3]; *from; from++)
-                text[length++] = *from;
+        memory_copy(text + length, piece[3], string_length((string_address)piece[3]));
+        length += string_length((string_address)piece[3]);
         text[length] = 0;
         terminal_said(reading, (string_address)text);
 }
@@ -1611,11 +1633,8 @@ static void terminal_title(b32 master, bipolar shell)
 static void terminal_said(b32 reading, string_address what)
 {
         p8 line[96];
-        positive length = 0;
 
-        for (string_address name = (string_address)(reading ? "klog pid " : "terminal pid "); *name; name++)
-                line[length++] = *name;
-        line[length] = 0;
+        string_copy((string_address)line, (string_address)(reading ? "klog pid " : "terminal pid "));
         compositor_kmsg(line, (positive)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0), what);
 }
 
@@ -1632,7 +1651,8 @@ static b32 terminal_run(b32 reading)
         string_address bold = null, ready_file = null;
         unsigned int cells[2] = {0, 0};
         unsigned int count = 0, size = 0, columns, rows;
-        unsigned int max_columns, hung = reading;
+        unsigned int max_columns;
+        b32 hung = reading;
         b32 master, gone = false, dirty = true, closing = false, held = false, paced;
         positive oom_kills = 0, sync_since = 0, stalled_since = 0, last_frame = 0, settle_since = 0;
         bipolar child = 0;
@@ -1798,14 +1818,8 @@ static b32 terminal_run(b32 reading)
                                 gone = true;
                 }
 
-                if (table->want_width[own] && table->want_height[own] &&
-                    (table->want_width[own] != terminal.asked_w || table->want_height[own] != terminal.asked_h))
-                {
-                        terminal.asked_w = table->want_width[own];
-                        terminal.asked_h = table->want_height[own];
-                        terminal_configure(master, terminal.asked_w, terminal.asked_h);
+                if (terminal_asked(master))
                         dirty = true;
-                }
 
                 closing |= (table->state[own] & WINDOW_CLOSING) != 0;
 
@@ -1821,11 +1835,8 @@ static b32 terminal_run(b32 reading)
                         gone = true;
 
                 // Being asked to go (the close button, Alt-F4 or a middle press on the tab) is the line hanging up, once, to the group.
-                if (!gone && !hung && closing)
-                {
-                        system_call_2(syscall(kill), (positive)(-child), SIGHUP);
-                        hung = 1;
-                }
+                if (!gone && closing)
+                        term_hang_up(child, &hung);
 
                 if (touched_bottom > touched_top)
                         changed = true;
@@ -1970,11 +1981,8 @@ static b32 terminal_run(b32 reading)
 
                         if (ready < 0)
                         {
-                                if (!gone && !hung)
-                                {
-                                        system_call_2(syscall(kill), (positive)(-child), SIGHUP);
-                                        hung = 1;
-                                }
+                                if (!gone)
+                                        term_hang_up(child, &hung);
                                 closing = true;
                                 break;
                         }
@@ -2012,14 +2020,8 @@ static b32 terminal_run(b32 reading)
                                         owed = true;
                                 }
                         }
-                        if (table->want_width[own] && table->want_height[own] &&
-                            (table->want_width[own] != terminal.asked_w || table->want_height[own] != terminal.asked_h))
-                        {
-                                terminal.asked_w = table->want_width[own];
-                                terminal.asked_h = table->want_height[own];
-                                terminal_configure(master, terminal.asked_w, terminal.asked_h);
+                        if (terminal_asked(master))
                                 owed = true;
-                        }
                         if (owed)
                                 owed = !terminal_frame();
                 }
