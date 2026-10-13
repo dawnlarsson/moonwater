@@ -20385,7 +20385,7 @@ width, height, data = load("r1-desktop")
 log_x, log_y = width * 3 // 100, height * 6 // 100
 term_x, term_y = width * 44 // 100, height * 14 // 100
 out.append(("R1.2d the panel carries text: its band holds light pixels where the window buttons and the clock are",
-            "yes" if light(data, width, 0, height - 20, width, height - 4, 0xb0) > 60 else "no", "yes"))
+            "yes" if light(data, width, 0, height - 20, width, height - 4, 0x90) > 60 else "no", "yes"))
 out.append(("R1.2e the kernel log window shows the boot's messages: light text in the part of it the terminal does not cover",
             "yes" if light(data, width, log_x + 4, log_y + 30, width * 40 // 100, log_y + 330) > 2000 else "no", "yes"))
 out.append(("R1.2f the terminal shows its prompt, in the share of the output the machine script's start leaves it",
@@ -20418,38 +20418,51 @@ ended = shell.run("dmesg | awk '/the compositor [(]pid [0-9]+[)] is up/ {bad=\"\
 out.append(("R1.2l nothing the desktop started has ended since the compositor came up, as the machine's log would say", "yes" if not ended else ended[-80:], "yes"))
 out.append(("R1.2j an idle kernel log window wakes no time in five seconds", "yes" if first and first == second else "%s %s" % (first, second), "yes"))
 
-#   The text size. Each terminal logs the size it draws at and the cell it measured, when it starts and when the
-#   size changes. Control-= grows the text one step and Control-- shrinks it, Control-Shift-= grows it too (Shift
-#   is not looked at), Control-0 goes back to the default of 14 pixels, each terminal is its own size, the file
-#   /root/terminal/size keeps the step the last zoom left, a terminal started later reads it, and a file that
-#   names no step is the default.
+#   The text size. Each terminal logs the size it draws at and the cell it measured when it starts, and says
+#   nothing when the size changes: a zoom is read from the grid its pty is told, which in the same window is
+#   fewer rows for bigger text. Control-= grows the text one step and Control-- shrinks it, Control-Shift-=
+#   grows it too (Shift is not looked at), Control-0 goes back to the default of 14 pixels, each terminal is
+#   its own size, the file /root/terminal/size keeps the step the last zoom left, a terminal started later
+#   reads it, and a file that names no step is the default.
 def text_size(pid):
     found = re.findall(r"terminal pid %s text size (\d+) px, cell (\d+) by (\d+) px" % pid, shell.run("dmesg", 20)[0])
     return found[-1] if found else None
 
-def size_is(pid, want):
-    got = text_size(pid)
-    return got if got and got[0] == want else None
+# Rows and columns of the pty the terminal's shell is on.
+def grid(pid):
+    child = [c for c in shell.run("grep -l '^PPid:[[:space:]]*%s$' /proc/[0-9]*/status | cut -d/ -f3" % pid, 20)[0].split()]
+    if not child:
+        return None
+    tty = shell.run("readlink /proc/%s/fd/0" % child[0], 20)[0].strip()
+    got = shell.run("stty -F %s size" % tty, 20)[0].split() if tty.startswith("/dev/pts/") else []
+    return (int(got[0]), int(got[1])) if len(got) == 2 and got[0].isdigit() and got[1].isdigit() else None
+
+def grid_is(pid, test):
+    got = grid(pid)
+    return got if got and test(got) else None
 
 main_terminal = pids("terminal")
 main_terminal = main_terminal[0] if len(main_terminal) == 1 else "0"
 at_start = text_size(main_terminal)
+start_grid = grid(main_terminal)
 out.append(("R1.2m the desktop's terminal draws its text at the default size, 14 pixels, one step below 16",
             at_start[0] if at_start else "none", "14"))
 chord("ctrl", "equal")
-grown, _ = until(lambda: size_is(main_terminal, "16"), 10)
-out.append(("R1.2n Control-= grows the text one step to 16 pixels, and the cell the terminal measures is taller",
-            "%s" % ("taller" if grown and at_start and int(grown[2]) > int(at_start[2]) else "no (%s)" % (grown,)), "taller"))
+grown, _ = until(lambda: grid_is(main_terminal, lambda g: start_grid and g[0] < start_grid[0]), 10)
+out.append(("R1.2n Control-= grows the text one step: the same window holds fewer rows",
+            "fewer" if grown else "no (%s, %s)" % (start_grid, grid(main_terminal)), "fewer"))
 chord("ctrl", "minus")
-shrunk, _ = until(lambda: size_is(main_terminal, "14"), 10)
-out.append(("R1.2n Control-- takes it back one step, to the cell it was",
-            "%s" % ("same" if shrunk and at_start and shrunk[1:] == at_start[1:] else "no (%s)" % (shrunk,)), "same"))
+shrunk, _ = until(lambda: grid_is(main_terminal, lambda g: g == start_grid), 10)
+out.append(("R1.2n Control-- takes it back one step, to the grid it was",
+            "same" if shrunk else "no (%s, %s)" % (start_grid, grid(main_terminal)), "same"))
 chord("ctrl", "shift", "equal")
-shifted, _ = until(lambda: size_is(main_terminal, "16"), 10)
+shifted, _ = until(lambda: grid_is(main_terminal, lambda g: grown and g == grown), 10)
 chord("ctrl", "0")
-reset, _ = until(lambda: size_is(main_terminal, "14"), 10)
+reset, _ = until(lambda: grid_is(main_terminal, lambda g: g == start_grid), 10)
 out.append(("R1.2n Control-Shift-= grows it too, and Control-0 goes back to the default",
             "%s" % ("yes" if shifted and reset else "no (%s, %s)" % (shifted, reset)), "yes"))
+out.append(("and a zoom writes nothing to the machine's log", "nothing" if text_size(main_terminal) == at_start and
+            len(re.findall(r"terminal pid %s text size" % main_terminal, shell.run("dmesg", 20)[0])) == 1 else "said", "nothing"))
 
 #   Each terminal is its own size: a second terminal, which has the keys as a new window does, grows with
 #   Control-= and the first stays as it was; the file keeps the step the zoom left, and a terminal started
@@ -20459,12 +20472,14 @@ chord("ctrl", "shift", "t")
 second, _ = until(lambda: [pid for pid in pids("terminal") if pid not in before], 10)
 second = second[0] if second else "0"
 second_start = text_size(second)
+until(lambda: grid(second), 10)
+second_grid = grid(second)
 chord("ctrl", "equal")
-alone, _ = until(lambda: size_is(second, "16"), 10)
+alone, _ = until(lambda: grid_is(second, lambda g: second_grid and g[0] < second_grid[0]), 10)
 time.sleep(1)
-out.append(("R1.2o Control-= grows the terminal with the keys and no other: the new one at 16 pixels, the first still 14",
-            "yes" if alone and second_start and second_start[0] == "14" and size_is(main_terminal, "14")
-            else "no (%s, %s, %s)" % (second_start, text_size(second), text_size(main_terminal)), "yes"))
+out.append(("R1.2o Control-= grows the terminal with the keys and no other: the new one fewer rows, the first as it was",
+            "yes" if alone and second_start and second_start[0] == "14" and grid(main_terminal) == start_grid
+            else "no (%s, %s, %s, %s)" % (second_start, second_grid, grid(second), grid(main_terminal)), "yes"))
 file_text = shell.run("cat /root/terminal/size", 10)[0].strip()
 out.append(("and the file names the step, 16", file_text, "16"))
 
@@ -20481,8 +20496,8 @@ fallen, _ = until(lambda: [pid for pid in pids("terminal") if pid not in before 
 fallen = fallen[0] if fallen else "0"
 fallen_start = text_size(fallen)
 out.append(("R1.2q a file that names no step is the default: a terminal started then draws at 14 pixels, and the others keep theirs",
-            "yes" if fallen_start and fallen_start[0] == "14" and size_is(second, "16") and size_is(main_terminal, "14")
-            else "no (%s, %s, %s)" % (fallen_start, text_size(second), text_size(main_terminal)), "yes"))
+            "yes" if fallen_start and fallen_start[0] == "14" and alone and grid(second) == alone and grid(main_terminal) == start_grid
+            else "no (%s, %s, %s)" % (fallen_start, grid(second), grid(main_terminal)), "yes"))
 for pid in (second, later, fallen):
     shell.run("kill -9 %s" % pid, 10)
 shell.run("rm -f /root/terminal/size", 10)

@@ -89,6 +89,8 @@ static const unsigned int terminal_steps[TERMINAL_STEPS] = {8, 10, 12, 14, 16, 1
 #define TERMINAL_IDLE_NANOSECONDS 1000000000ll
 // The longest a frame of the output lasts, when the compositor does not say.
 #define TERMINAL_FRAME_NANOSECONDS 16666667ll
+// How long the scroll bar takes to fade once the view is back at the live end.
+#define TERMINAL_FADE_NANOSECONDS 250000000ll
 // A frame that has waited this long for a buffer to be released draws into it regardless: the
 // compositor not on the screen is not reading it, and a terminal that never draws again is worse.
 #define TERMINAL_STALL_NANOSECONDS 250000000ll
@@ -123,7 +125,11 @@ static struct
         int shown;                 // the buffer on the screen, -1 before the first picture
         unsigned int cursor_at;    // the frame's cell a block cursor turned round, or ~0
         b32 forced;                // a frame waited too long for the compositor: the buffer is taken
-        unsigned int bar_first[2], bar_shown[2], bar_total[2];
+        unsigned int bar_first[2], bar_shown[2], bar_total[2], bar_drawn[2];
+        // How much of the bar is seen, in 256ths: all of it while the view is off the live end or the bar is held,
+        // and fading to none from when the view is back at the end.
+        unsigned int bar_level;
+        unsigned long bar_fading;
 
         // Where the view sits in the ring: a line and how many of its rows are above.
         unsigned int view, view_skip;
@@ -669,7 +675,8 @@ static void terminal_margin(unsigned int address_to whole, const struct window_c
         so it is seen on any ground a program paints. Where a pixel is part of
         a round end it is the share of its sixteen points inside the pill,
         mixed with that ground, which is known: nothing is read back. No
-        track, and no pill when everything fits.
+        track, and no pill when everything fits or the view is at the live end
+        and the bar has faded: it is seen only while the view is scrolled back.
 */
 static void terminal_bar(unsigned int address_to whole, const struct window_cell address_to frame, unsigned int first,
                          unsigned int shown, unsigned int total)
@@ -684,7 +691,7 @@ static void terminal_bar(unsigned int address_to whole, const struct window_cell
                               terminal_ground(frame, row, COLUMNS - 1));
         }
 
-        if (!gutter || x + gutter > terminal.width || total <= shown)
+        if (!gutter || x + gutter > terminal.width || total <= shown || !terminal.bar_level)
                 return;
 
         thumb = (unsigned int)((unsigned long)track * shown / total);
@@ -707,7 +714,7 @@ static void terminal_bar(unsigned int address_to whole, const struct window_cell
                 unsigned int y = pill + (unsigned int)row, cell_row = (y - terminal.pad_y) / terminal.cell_h;
                 unsigned int address_to line = whole + (unsigned long)y * terminal.pitch + left;
                 unsigned int ground = terminal_ground(frame, cell_row < ROWS ? cell_row : ROWS - 1, COLUMNS - 1);
-                unsigned int ink = window_mix(ground, window_contrast(ground), 160);
+                unsigned int ink = window_mix(ground, window_contrast(ground), 160 * terminal.bar_level / 256);
 
                 for (int column = 0; column < across / 4; column++)
                 {
@@ -836,10 +843,11 @@ static b32 terminal_frame(void)
 
         // The bar is drawn where the buffer's own was not the same, and the compositor is
         // told where the one on the screen was not.
-        bar = !terminal.valid[slot] || terminal.bar_first[slot] != first ||
-              terminal.bar_shown[slot] != shown || terminal.bar_total[slot] != total;
+        bar = !terminal.valid[slot] || terminal.bar_first[slot] != first || terminal.bar_shown[slot] != shown ||
+              terminal.bar_total[slot] != total || terminal.bar_drawn[slot] != terminal.bar_level;
         bar_told = !screen || terminal.bar_first[terminal.shown] != first ||
-                   terminal.bar_shown[terminal.shown] != shown || terminal.bar_total[terminal.shown] != total;
+                   terminal.bar_shown[terminal.shown] != shown || terminal.bar_total[terminal.shown] != total ||
+                   terminal.bar_drawn[terminal.shown] != terminal.bar_level;
 
         any = bar || bar_told;
 
@@ -879,6 +887,7 @@ static b32 terminal_frame(void)
                 terminal.bar_first[slot] = first;
                 terminal.bar_shown[slot] = shown;
                 terminal.bar_total[slot] = total;
+                terminal.bar_drawn[slot] = terminal.bar_level;
         }
 
         // What the compositor reads again: one rectangle round the rows and the bar that differ from what
@@ -1256,7 +1265,7 @@ static int terminal_zoom_key(const struct window_event address_to event)
         return 0;
 }
 
-static void terminal_zoom(b32 master, b32 reading, int by)
+static void terminal_zoom(b32 master, int by)
 {
         unsigned int at = terminal_step_index(terminal.size >> 6), next = at;
 
@@ -1273,7 +1282,6 @@ static void terminal_zoom(b32 master, b32 reading, int by)
         // This terminal only; the file is where the next one starts.
         terminal_size_write(terminal_steps[next]);
         terminal_text_set(master, terminal_steps[next]);
-        terminal_text_said(reading);
 }
 
 /*
@@ -1392,8 +1400,8 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
                         return true;
 
                 // The gutter is the bar's, not the program's.
-                if (event->a == 0x110 && down && terminal.pointer_x >= (int)(COLUMNS * terminal.cell_w) &&
-                    terminal_extent(&first, &shown, &total))
+                if (event->a == 0x110 && down && terminal.bar_level &&
+                    terminal.pointer_x >= (int)(COLUMNS * terminal.cell_w) && terminal_extent(&first, &shown, &total))
                 {
                         unsigned int thumb = (unsigned int)((unsigned long)terminal_track() * shown / total);
                         unsigned int top = (unsigned int)((unsigned long)terminal_track() * first / total);
@@ -1669,7 +1677,7 @@ static b32 terminal_run(b32 reading)
 
                         if (zoom)
                         {
-                                terminal_zoom(master, reading, zoom);
+                                terminal_zoom(master, zoom);
                                 dirty = true;
                                 continue;
                         }
@@ -1736,6 +1744,34 @@ static b32 terminal_run(b32 reading)
                         held = false;
 
                 dirty |= changed;
+
+                // The bar: seen while the view is scrolled back or the bar is held, and faded out over a
+                // quarter of a second once the view is back at the live end, a frame a step.
+                {
+                        unsigned int level = 256;
+
+                        if (terminal.view != TERMINAL_LIVE || terminal.bar_grab >= 0)
+                                terminal.bar_fading = 0;
+                        else if (!terminal.bar_level)
+                                level = 0;
+                        else
+                        {
+                                now = clock_monotonic_nanoseconds();
+                                terminal.bar_fading = terminal.bar_fading ? terminal.bar_fading : now;
+                                level = now - terminal.bar_fading >= (positive)TERMINAL_FADE_NANOSECONDS
+                                            ? 0
+                                            : (unsigned int)(256 - 256 * (now - terminal.bar_fading) / TERMINAL_FADE_NANOSECONDS);
+                                terminal.bar_fading = level ? terminal.bar_fading : 0;
+                        }
+                        if (level != terminal.bar_level)
+                        {
+                                terminal.bar_level = level;
+                                dirty = true;
+                        }
+                        if (terminal.bar_fading)
+                                timeout = timeout < 0 || timeout > (long)TERMINAL_FRAME_NANOSECONDS ? (long)TERMINAL_FRAME_NANOSECONDS
+                                                                                                   : timeout;
+                }
 
                 /*
                         A frame is made at most once an output frame: more are made over

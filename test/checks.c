@@ -108351,6 +108351,8 @@ b32 main()
                 terminal_colour[at] = window_cell_colour(at);
         term_palette = terminal_palette;
         terminal.bar_grab = -1;
+        // The bar as it is while the view is scrolled back, so the frames are held to it too.
+        terminal.bar_level = 256;
 
         window = window_grid_open(30, 8, 80, 256);
         check("grid: a ring in the program's own memory", window != null);
