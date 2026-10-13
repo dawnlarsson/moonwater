@@ -16732,7 +16732,7 @@ if len(runs) >= 2:
 
     def resize_cursor_pixels(data, width, height, x, y):
         # CURSOR_RESIZE_H has exactly 25 fill pixels at scale one. No
-        # compositor ink uses pure white (terminal white is dfe7ef), so this
+        # compositor ink uses pure white (terminal white is e4e4e4), so this
         # identifies the visible cursor rather than text or the frame below it.
         return sum(1 for py in range(max(y - 7, 0), min(y + 13, height))
                    for px in range(max(x - 7, 0), min(x + 9, width))

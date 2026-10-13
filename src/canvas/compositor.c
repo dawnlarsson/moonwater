@@ -12,13 +12,15 @@
         closes and Canvas's restore hook redraws the kernel desktop at once.
 
         What it draws is the desktop ink and each surface's own pixels inside
-        a black line of one pixel, round at the corners: a window has no
-        titlebar and no close box. Surfaces are protocol version 2 (canvas_abi.h, window.c): a program connects to
+        a black line of one pixel, round at the corners: a window's titlebar
+        is its top, drawn as nothing, with a close button over its top right.
+        Surfaces are protocol version 2 (canvas_abi.h, window.c): a program connects to
         SURFACE_SOCKET, hands over a sealed page, and commits buffers into
         it. A surface has a role (canvas spec 02). An application window
-        stacks, the press of a button raises and focuses it, Alt and a press
-        anywhere on it drags it, a press just outside its edges resizes it,
-        Alt-F4 or a middle press on its button in the panel asks it to go,
+        stacks, the press of a button raises and focuses it, a press on its
+        top, whatever is drawn there, or with Alt anywhere on it drags it, a
+        press just outside its edges resizes it, its close button, Alt-F4 or
+        a middle press on its tab in the panel asks it to go,
         keys reach it while it has focus and the pointer reaches it when it
         asks for the pointer, and it is kept on the output, which a window
         filling it fills whole, the panel's tabs lying over it.
@@ -78,6 +80,11 @@
 #define COMPOSITOR_PANEL 24
 #define COMPOSITOR_RADIUS 8
 #define COMPOSITOR_LINE 1
+// The top of a window that is a titlebar with nothing drawn -- a press there takes the window whatever is
+// under it -- and its close button, a disc that far in from the window's top right, in logical pixels.
+#define COMPOSITOR_GRAB 24
+#define COMPOSITOR_CLOSE 14
+#define COMPOSITOR_CLOSE_IN 5
 #define COMPOSITOR_RADIUS_MOST 64
 
 struct compositor_target
@@ -113,7 +120,25 @@ struct compositor_frame
         int slot;            // the compositor's panel: the tab this frame is (-2 tray, 0 up windows)
         int top;             // the panel is along the top of the output, its tabs hanging down
         const unsigned char *lengths; // the panel: each window's title in characters, which its tab fits
+        int close;           // a window with a close button over its top right
 };
+
+/*
+        The close button: a disc at the window's top right, inset from both
+        edges, and none on a window too small to hold it beside its corner.
+        For drawing and for the press alike.
+*/
+static int compositor_close_box(const struct compositor_frame *frame, int *x, int *y, int *side)
+{
+        int box = COMPOSITOR_CLOSE * frame->scale, in = COMPOSITOR_CLOSE_IN * frame->scale;
+
+        if (!frame->close || frame->builtin || frame->width < box + 2 * in + 4 * box || frame->height < box + 2 * in)
+                return 0;
+        *side = box;
+        *x = frame->x + frame->width - box - in;
+        *y = frame->y + in;
+        return 1;
+}
 
 static void compositor_fill(const struct compositor_target *t, int x, int y, int width,
                             int height, unsigned int colour)
@@ -156,8 +181,10 @@ static void compositor_blit(const struct compositor_target *t, int x, int y, int
         of a note whose rest is off the edge of the output: its title and its
         round corners show, three pixels in from the band's inner side, and
         it runs to the outer one. A window's tab is as wide as its title
-        needs at a fixed width a character, and never wider than the row has
-        room for each nor eight bands, which the compositor and a panel
+        needs at a fixed width a character with an even margin all round,
+        and never wider than the row has room for each nor eight bands, and
+        the tray is as wide as the time's five characters; which the
+        compositor and a panel
         program both work out from the title alone, without a font, so they
         agree. The same tabs are drawn by the compositor's own panel and by a
         panel program, and pressed on in both, so a window's tab is where it
@@ -176,15 +203,30 @@ static unsigned char compositor_title_length(const char *title, unsigned int mos
         return (unsigned char)(count > 255 ? 255 : count);
 }
 
-// A window's tab's width: its title at a width a character, with room each side, up to the most it may be.
+/*
+        A tab's width for a run of characters: the run at the width a
+        character of the panel's text has (its size is 11/20 of the tab's
+        height and a character a little over half of that), and either side
+        of it as much room as there is above and below a capital, so the
+        title sits in the tab with the same margin all round. Never narrower
+        than the tab is high.
+*/
+static int compositor_tab_text(const struct compositor_frame *frame, int characters)
+{
+        int high = frame->height - 3 * frame->scale;
+        int wanted = (characters * high * 308 + high * 604) / 1000;
+
+        return wanted < high ? high : wanted;
+}
+
+// A window's tab's width: its title's, up to the most it may be.
 static int compositor_tab_width(const struct compositor_frame *frame, int which, int most)
 {
-        int unit = frame->height, wanted;
+        int wanted;
 
         if (!frame->lengths)
                 return most;
-        wanted = frame->lengths[which] * unit * 13 / 40 + unit;
-        wanted = wanted < 2 * unit ? 2 * unit : wanted;
+        wanted = compositor_tab_text(frame, frame->lengths[which]);
         return wanted < most ? wanted : most;
 }
 
@@ -192,7 +234,7 @@ static int compositor_panel_slot(const struct compositor_frame *frame, int which
                                  int *width, int *height)
 {
         int gap = 4 * frame->scale, inset = 3 * frame->scale, unit = frame->height;
-        int tray = 3 * unit, count = (int)frame->mark_count;
+        int tray = compositor_tab_text(frame, 5), count = (int)frame->mark_count;
         int room = frame->width - tray - (count + 2) * gap;
         int most = count && room > 0 ? room / count : 0, windows = 0, start;
 
@@ -359,6 +401,55 @@ static struct compositor_target compositor_clipped(const struct compositor_targe
         return part;
 }
 
+/*
+        The close button over a window's pixels: a dark disc, the window's
+        own pixel darkened by most of the way to black, and an X across it
+        in the text's ink, each pixel the share of its sixteen sample points
+        inside the disc and inside the X's two strokes. What is under it is
+        read from the window's buffer, which is known, and not from the
+        target. Drawn last, after the round corners, through the target's
+        clip, so the scene's pieces and its corners' scratch both have it.
+*/
+static void compositor_close_draw(const struct compositor_target *t, const struct compositor_frame *frame)
+{
+        int bx, by, side;
+
+        if (!compositor_close_box(frame, &bx, &by, &side))
+                return;
+
+        int x1 = bx > t->x1 ? bx : t->x1, y1 = by > t->y1 ? by : t->y1;
+        int x2 = bx + side < t->x2 ? bx + side : t->x2, y2 = by + side < t->y2 ? by + side : t->y2;
+        int arm = side * 2 / 7, half = frame->scale; // the X's reach from the middle, and half its stroke
+
+        for (int py = y1; py < y2; py++)
+                for (int px = x1; px < x2; px++)
+                {
+                        unsigned int disc = 0, cross = 0;
+
+                        // In eighths of a pixel from the button's middle, sample centres odd.
+                        for (int sy = 0; sy < 4; sy++)
+                                for (int sx = 0; sx < 4; sx++)
+                                {
+                                        int dx = 8 * (px - bx) + 2 * sx + 1 - 4 * side, dy = 8 * (py - by) + 2 * sy + 1 - 4 * side;
+                                        int ax = dx < 0 ? -dx : dx, ay = dy < 0 ? -dy : dy;
+                                        int d1 = dx - dy, d2 = dx + dy;
+
+                                        disc += dx * dx + dy * dy <= 16 * side * side;
+                                        cross += ax <= 8 * arm && ay <= 8 * arm &&
+                                                 ((d1 < 0 ? -d1 : d1) <= 11 * half || (d2 < 0 ? -d2 : d2) <= 11 * half);
+                                }
+                        if (!disc)
+                                continue;
+
+                        unsigned int under = frame->pixels[(unsigned long)(py - frame->y) * frame->pitch + (unsigned long)(px - frame->x)];
+                        unsigned int pixel = compositor_mix(under, compositor_mix(under, 0x000000, 170), disc * 255 / 16);
+
+                        if (cross)
+                                pixel = compositor_mix(pixel, COMPOSITOR_INK_TEXT, cross * 255 / 16);
+                        t->pixels[(unsigned long)(py - t->oy) * t->pitch + (unsigned long)(px - t->ox)] = pixel;
+                }
+}
+
 // What is inside a frame's line, through the target's clip: a window's pixels, or one of the panel's tabs.
 static void compositor_contents(const struct compositor_target *t, const struct compositor_frame *frame)
 {
@@ -406,6 +497,7 @@ static void compositor_draw(const struct compositor_target *t,
         if (!r)
         {
                 compositor_contents(t, frame);
+                compositor_close_draw(t, frame);
                 return;
         }
         part = compositor_clipped(t, x + ri, y, w - 2 * ri, h);
@@ -466,6 +558,7 @@ static void compositor_draw(const struct compositor_target *t,
                                 *at = pixel;
                         }
         }
+        compositor_close_draw(t, frame);
 }
 
 /*
@@ -1822,6 +1915,7 @@ static void compositor_frame_of(const struct compositor_client *client,
                                            compositor_line(client) ? COMPOSITOR_RADIUS * compositor.scale : 0,
                                            compositor_line(client),
                                            COMPOSITOR_INK_LINE};
+        frame->close = compositor_framed(client) && (client->lock & SURFACE_LOCK_MOVABLE);
 }
 
 // The windows a panel lists, in the order they were made, and what shows of each.
@@ -4535,7 +4629,36 @@ static void compositor_button(unsigned int code, int down)
                         return;
                 }
 
-                if (alt)
+                /*
+                        The top of a window is its titlebar, drawn as nothing:
+                        a press there is the window's whatever is under it --
+                        on the close button it asks the window to go, twice
+                        quickly it fills the output or gives it back, and
+                        otherwise it takes hold of the window to move it.
+                        With Alt, anywhere on the window is the same.
+                */
+                int top = !alt && compositor_framed(under) && (under->lock & SURFACE_LOCK_MOVABLE) &&
+                          code == COMPOSITOR_BTN_LEFT && compositor.pointer_x >= under->x &&
+                          compositor.pointer_x < under->x + (int)under->width && compositor.pointer_y >= under->y &&
+                          compositor.pointer_y < under->y + COMPOSITOR_GRAB * compositor.scale;
+
+                if (top)
+                {
+                        struct compositor_frame frame;
+                        int bx, by, side;
+
+                        compositor_frame_of(under, &frame);
+                        if (compositor_close_box(&frame, &bx, &by, &side) && compositor.pointer_x >= bx &&
+                            compositor.pointer_x < bx + side && compositor.pointer_y >= by && compositor.pointer_y < by + side)
+                        {
+                                // Not one of a pair, or a second click would fill the screen on its way out.
+                                compositor.press = null;
+                                compositor_close(under);
+                                return;
+                        }
+                }
+
+                if (alt || top)
                 {
                         int again = under == compositor.press && now - compositor.press_ns <= COMPOSITOR_AGAIN_NS;
 

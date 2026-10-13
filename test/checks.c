@@ -99517,10 +99517,7 @@ static fn render_reference(p32 address_to into, const struct window_cell address
         memory_fill_u32(into, (positive)terminal.width * terminal.height, 0x123456);
         terminal_paper_round(into);
         for (unsigned int row = 0; row < ROWS; row++)
-        {
                 terminal_row(terminal_grid(into), row, cells + (unsigned long)row * COLUMNS, null, 0, COLUMNS);
-                terminal_mark(into, row, (cells[(unsigned long)row * COLUMNS].flags & WINDOW_CELL_FAILED) != 0);
-        }
         terminal_extent(&first, &shown, &total);
         terminal_bar(terminal_grid(into), first, shown, total);
 }
@@ -103350,7 +103347,7 @@ static void check_compositor_roles(void) {
    point outside every tab names nothing, and the row is in the middle. */
 static void check_compositor_panel_fit(void) {
     /* A window's tab is as wide as its title: a short one narrower than a long
-       one, none narrower than two bands or wider than eight, the title's length
+       one, none narrower than it is high or wider than eight bands, the title's length
        in characters (a byte that continues one is not one), and the row still
        in the middle. */
     static const unsigned char marks[3]={0,0,0};
@@ -103361,7 +103358,7 @@ static void check_compositor_panel_fit(void) {
         f.lengths=lengths;
         for(int i=0;i<3;i++)cc_check(compositor_panel_slot(&f,i,&x[i],&y,&w[i],&h));
         cc_check(compositor_panel_slot(&f,-2,&x[3],&y,&w[3],&h));
-        cc_check(w[0]>=2*unit&&w[0]<w[1]&&w[2]==8*unit&&w[1]<=8*unit);
+        cc_check(w[0]>=unit-3*scale&&w[0]<w[1]&&w[2]==8*unit&&w[1]<=8*unit);
         cc_check(x[1]==x[0]+w[0]+4*scale&&x[3]==x[2]+w[2]+4*scale);
         {int left=x[0],right=4096-(x[3]+w[3]);cc_check(left-right<=1&&right-left<=1);}
     }

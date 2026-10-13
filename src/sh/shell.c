@@ -2769,12 +2769,12 @@ fn shell_input_end()
         }
 }
 
-// Whether a command has been run from the prompt last written, which the next
-// prompt says the status of to the terminal (OSC 133 ; D).
+// Whether a command has been run from the prompt last written, whose status the
+// next prompt shows when it was not 0.
 static bool shell_prompt_ran;
 
-// The terminal marks prompts and the commands run from them when it is the
-// Moonwater terminal, which says so in TERM_PROGRAM; nothing else is sent them.
+// A failed command's status is written at the right of the next prompt's line
+// in the Moonwater terminal, which says so in TERM_PROGRAM; nowhere else.
 static bool shell_prompt_marks()
 {
         string_address program = env_get("TERM_PROGRAM");

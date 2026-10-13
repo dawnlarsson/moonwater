@@ -106,8 +106,8 @@ static struct
         font_engine *engine;
         font_metrics grid;
         unsigned int size; // in 26.6, which is what font.c takes
-        // The paper round the grid, the same on every side: at the left (pad), where a command that failed is
-        // marked, at the right (bar), where the scroll bar is, and above and below (pad_y).
+        // The paper round the grid, the same on every side: at the left (pad), at the right (bar), where the
+        // scroll bar is, and above and below (pad_y).
         unsigned int cell_w, cell_h, bar, pad, pad_y;
         unsigned int width, height; // the surface, in pixels
 
@@ -679,47 +679,6 @@ static void terminal_bar(unsigned int address_to pixels, unsigned int first, uns
         }
 }
 
-/*
-        The margin at the left of a row: the paper, and where the line holds a
-        prompt whose command ended badly (WINDOW_CELL_FAILED on its first
-        cell, which the shell's OSC 133 put there), a dot in the theme's red
-        in the middle of the margin, two thirds of it across, each pixel the share of
-        its sixteen sample points inside it mixed with the paper. Drawn
-        through the buffer's own top left: the margin is outside the grid.
-*/
-static void terminal_mark(unsigned int address_to whole, unsigned int row, b32 failed)
-{
-        unsigned int paper = terminal_colour[0], ink = terminal_colour[1];
-        unsigned int top = terminal.pad_y + row * terminal.cell_h, side = terminal.pad;
-        int across = (int)(side < terminal.cell_h ? side : terminal.cell_h) * 2 / 3;
-
-        terminal_fill(whole, 0, (int)top, side, terminal.cell_h, paper);
-        if (!failed || across < 2)
-                return;
-
-        // In eighths of a pixel from the dot's box, sample centres odd.
-        int left = (int)(side - (unsigned int)across) / 2, high = (int)top + (int)(terminal.cell_h - (unsigned int)across) / 2;
-
-        for (int y = 0; y < across; y++)
-                for (int x = 0; x < across; x++)
-                {
-                        unsigned int inside = 0, mixed = 0;
-
-                        for (int sy = 0; sy < 4; sy++)
-                                for (int sx = 0; sx < 4; sx++)
-                                {
-                                        int dx = 8 * x + 2 * sx + 1 - 4 * across, dy = 8 * y + 2 * sy + 1 - 4 * across;
-
-                                        inside += dx * dx + dy * dy <= 16 * across * across;
-                                }
-                        if (!inside)
-                                continue;
-                        for (unsigned int shift = 0; shift < 24; shift += 8)
-                                mixed |= (((paper >> shift & 255) * (16 - inside) + (ink >> shift & 255) * inside + 8) / 16) << shift;
-                        whole[(unsigned long)(high + y) * terminal.width + (unsigned long)(left + x)] = mixed;
-                }
-}
-
 // The paper round the grid, in a buffer drawn whole: above and below it, and either side.
 static void terminal_paper_round(unsigned int address_to whole)
 {
@@ -843,7 +802,7 @@ static b32 terminal_frame(void)
         drawn = terminal.valid[slot] ? terminal.frame[slot] : null;
 
         // A buffer drawn whole has its paper round the grid painted too; then everything below is drawn
-        // through the grid's own top left, but the marks in the margin at the left.
+        // through the grid's own top left.
         whole = pixels;
         if (!drawn)
                 terminal_paper_round(whole);
@@ -871,8 +830,6 @@ static b32 terminal_frame(void)
 
                 if (a1 > a0)
                         terminal_row(pixels, row, line, drawn ? drawn + (unsigned long)row * COLUMNS : null, a0, a1);
-                if (a1 > a0 && !a0)
-                        terminal_mark(whole, row, (line[0].flags & WINDOW_CELL_FAILED) != 0);
                 any |= a1 > a0 || b1 > b0;
 
                 // What the compositor reads again is what differs from what it shows: a cell

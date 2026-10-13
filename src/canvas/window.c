@@ -386,11 +386,6 @@ static inline unsigned int window_cell_colour(unsigned int index)
    has asked for a bar rather than a block. */
 #define WINDOW_CELL_BAR 512u
 
-/* On the first cell of a prompt's line: the command typed there ended with a
-   status that was not 0, as the shell said in OSC 133 ; D. The terminal marks
-   the line in the margin; nothing draws the cell differently. */
-#define WINDOW_CELL_FAILED 1024u
-
 /* The program writes this; the compositor reads it. A terminal that has
    asked for mouse tracking sets WINDOW_WANT_POINTER so clicks, drags and
    the wheel reach its key ring instead of only moving the desktop. */

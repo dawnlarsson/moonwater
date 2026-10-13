@@ -1031,13 +1031,15 @@ static PURE u32 canvas_plane_pick_format(struct drm_plane *plane, u32 first, u32
         be read without the DRM stack in your head.
 */
 
+// Neutral greys, as the compositor's: the desktop the kernel shows at boot, before the compositor takes the
+// screen, is the same ground and not a flash of another colour.
 static const u32 canvas_ink[INK_COUNT] = {
-    [INK_DESKTOP] = 0x1b2733,
-    [INK_FRAME] = 0x2f3f52,
-    [INK_TITLE] = 0x2b3a4c,
-    [INK_TITLE_LIT] = 0x4c6785,
-    [INK_BODY] = 0x101820,
-    [INK_TEXT] = 0xdfe7ef,
+    [INK_DESKTOP] = 0x1e1e1e,
+    [INK_FRAME] = 0x262628,
+    [INK_TITLE] = 0x2f2f33,
+    [INK_TITLE_LIT] = 0x4a4a50,
+    [INK_BODY] = 0x121212,
+    [INK_TEXT] = 0xe4e4e4,
     [INK_CURSOR] = 0xffffff,
     [INK_CURSOR_EDGE] = 0x000000,
 };
