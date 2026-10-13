@@ -20416,9 +20416,9 @@ first = shell.number("grep voluntary_ctxt_switches /proc/%s/status | tr -dc '0-9
 time.sleep(5)
 second = shell.number("grep voluntary_ctxt_switches /proc/%s/status | tr -dc '0-9\\n' | head -1" % pid, 20)
 # Nothing says a program ended in the log any more: the ones the desktop started are asked for by pid.
-alive = log_pids and pids("klog") == log_pids and len(pids("terminal")) >= 1
+still_up = log_pids and pids("klog") == log_pids and len(pids("terminal")) >= 1
 out.append(("R1.2l nothing the desktop started has ended: the kernel log is the same program, and a terminal is up",
-            "yes" if alive else "klog %s, terminals %s" % (pids("klog"), pids("terminal")), "yes"))
+            "yes" if still_up else "klog %s, terminals %s" % (pids("klog"), pids("terminal")), "yes"))
 out.append(("R1.2j an idle kernel log window wakes no time in five seconds", "yes" if first and first == second else "%s %s" % (first, second), "yes"))
 
 #   The text size. Each terminal logs the size it draws at and the cell it measured when it starts, and says
