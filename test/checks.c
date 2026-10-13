@@ -103203,8 +103203,8 @@ static void check_golden_gs1(const u32 *ink) {
 
 /* M1.3: src/canvas/compositor.c's CPU backend draws G-S1 its own way: the
    window is its pixels and nothing around them (no border, titlebar or close
-   box, which the kernel desktop still draws), a line of one logical pixel
-   round them and corners round at 4, so its four hashes are its own,
+   box, which the kernel desktop still draws), a black line of one logical
+   pixel round them and corners round at 8, so its four hashes are its own,
    recorded from the backend
    that made them and pinned so a later change to the look is as
    deliberate. */
@@ -103217,10 +103217,10 @@ static void memory_fill_u32_rect(u32 *into,unsigned long stride,unsigned long wi
 #include "compositor-backend.inc"
 /* A failed row says which one, not only that one failed. */
 #define cc_check(x) do{if(!(x))fprintf(stderr,"compositor row failed, line %d: %s\n",__LINE__,#x);check(x);}while(0)
-#define COMPOSITOR_GS1_1 "e721b4eafe58ff7e23dfa0615633b9e468852920a7595054b110da341af42250"
-#define COMPOSITOR_GS1_2 "aa88e2622468feff912317ee4fd94fc989ffab289a8c059cabb549a8ca533e61"
-#define COMPOSITOR_GS1_3 "875013a46cecb9c601eabf0b7b8b6baa1bde1f0ba844c6773b7050bfc410135f"
-#define COMPOSITOR_GS1_4 "58ec2fedd65033f52aa690311d2690fddb8534d79efa5218dcd6b0c7d1017132"
+#define COMPOSITOR_GS1_1 "c03fc7b82739b497cd5eff57c85b696a8d52772cf69a0a0ff9cacf0b9f1170e3"
+#define COMPOSITOR_GS1_2 "f706d5e07f45ec0927174174cada49401fbbabae9125302c19ed1f1f41aa192a"
+#define COMPOSITOR_GS1_3 "08b1e123cede390d1692f8385aed42fe7b5dadec6643ce01119dcfbe6debe6af"
+#define COMPOSITOR_GS1_4 "b548675f8ed4ac92ea1a8d08a32b52b2fd8d7c5d76d0acc0f9aedfe1e9adf207"
 static const char *const compositor_gs1[4]={COMPOSITOR_GS1_1,COMPOSITOR_GS1_2,COMPOSITOR_GS1_3,COMPOSITOR_GS1_4};
 static void check_compositor_gs1(void) {
     static u32 body[128*64];
@@ -103228,7 +103228,7 @@ static void check_compositor_gs1(void) {
     for(int scale=1;scale<=4;scale++) {
         struct compositor_target t={golden_screen,1024,1024,768,0,0,1024,768};
         struct compositor_frame f={80,80,128,64,scale,body,128,0,0,0,COMPOSITOR_RADIUS*scale,COMPOSITOR_LINE*scale,
-            COMPOSITOR_INK_BUTTON_LIT};
+            COMPOSITOR_INK_LINE};
         compositor_fill(&t,0,0,1024,768,COMPOSITOR_INK_DESKTOP);
         compositor_draw(&t,&f);
         char got[65];golden_sha256(golden_screen,1024*768,got);
@@ -103242,7 +103242,7 @@ static void check_compositor_gs1(void) {
            just outside the line the desktop, and where the arc leaves the
            line's top row a pixel is between the desktop and the line. */
         int line=COMPOSITOR_LINE*scale,top=80-line,between=0;
-        u32 edge=COMPOSITOR_INK_BUTTON_LIT;
+        u32 edge=COMPOSITOR_INK_LINE;
         cc_check(golden_screen[top*1024+top]==COMPOSITOR_INK_DESKTOP);
         cc_check(golden_screen[top*1024+80+64]==edge&&golden_screen[(80+32)*1024+top]==edge);
         cc_check(golden_screen[80*1024+80+64]==0x3a5a7a&&golden_screen[(80+32)*1024+80]==0x3a5a7a);
@@ -103265,14 +103265,14 @@ static void check_compositor_gs1(void) {
 }
 
 /* G-S2 (canvas spec 05 section 1.3): G-S1 with the compositor's panel at its
-   default height, 24 logical pixels, on the bottom edge, and no text. The
-   panel lists the scene's one window, which has the keys. Recorded from the
-   backend with the window's round corners, and the reference for every
-   later build of it. */
-#define COMPOSITOR_GS2_1 "c74313265fe701919797137ee89875745805c41a56e1861ca873200d1a1a6f1e"
-#define COMPOSITOR_GS2_2 "6e201188e583c23304d9ad0953943e1d5662fd45fc147f1ff97562cf4affb922"
-#define COMPOSITOR_GS2_3 "299080c584a3a44b8e11e3347266e771a42da9dc168c076a4b0df7474c3b2301"
-#define COMPOSITOR_GS2_4 "a5c2e799dac1bf55d388ddbfd798fe28aa0e468f198054646f64c7d3b4ebebdc"
+   default height, 24 logical pixels, on the bottom edge, and no text: its
+   tabs in the middle, the scene's one window's, which has the keys, and the
+   tray, round at their tops and nothing between them.
+   Recorded from the backend, and the reference for every later build. */
+#define COMPOSITOR_GS2_1 "a50cd08cf51c65efc3eb6086b8b29d04e7de2dfbd0244934a7b18e88d91df18d"
+#define COMPOSITOR_GS2_2 "8e79fee2e19d76dfbd8d78558502688f90aef52ae8cb3f580c0c13066f2b58a7"
+#define COMPOSITOR_GS2_3 "5ec03134ffab5dffeb5a26e0f88ebda9e9404595dec482ddc07ee3fc2362dce8"
+#define COMPOSITOR_GS2_4 "872e4147873a5fc67380fc464a1a1ff9c1ddaf64e51dd3d619a95958cf94536a"
 static const char *const compositor_gs2[4]={COMPOSITOR_GS2_1,COMPOSITOR_GS2_2,COMPOSITOR_GS2_3,COMPOSITOR_GS2_4};
 static void check_compositor_gs2(void) {
     static u32 body[128*64];
@@ -103282,26 +103282,37 @@ static void check_compositor_gs2(void) {
         compositor_band(1024,768,scale,1,&bx,&by,&bw,&bh);
         cc_check(bx==0&&bw==1024&&bh==24*scale&&by==768-24*scale);
         static const unsigned char marks[1]={SURFACE_LIST_FOCUSED};
-        struct compositor_frame frames[2]={
-            {80,80,128,64,scale,body,128,0,0,0,COMPOSITOR_RADIUS*scale,COMPOSITOR_LINE*scale,COMPOSITOR_INK_BUTTON_LIT},
-            {bx,by,bw,bh,scale,0,0,1,marks,1}};
+        struct compositor_frame frames[4]={
+            {80,80,128,64,scale,body,128,0,0,0,COMPOSITOR_RADIUS*scale,COMPOSITOR_LINE*scale,COMPOSITOR_INK_LINE}};
+        struct compositor_frame band={bx,by,bw,bh,scale,0,0,1,marks,1};
+        unsigned tabs=compositor_panel_tabs(&band,&frames[1]);
+        cc_check(tabs==2&&frames[1].slot==0&&frames[2].slot==-2);
         struct compositor_target t={golden_screen,1024,1024,768,0,0,1024,768};
-        compositor_scene(&t,frames,2);
+        compositor_scene(&t,frames,1+tabs);
         char got[65];golden_sha256(golden_screen,1024*768,got);
         if(strcmp(got,compositor_gs2[scale-1]))
             fprintf(stderr,"G-S2 at scale %d is %s, not the golden %s\n",scale,got,compositor_gs2[scale-1]);
         cc_check(!strcmp(got,compositor_gs2[scale-1]));
-        /* The band is the panel's ink where no button is, and the desktop's
-           just above it. */
-        cc_check(golden_screen[(unsigned)(by+bh/2)*1024]==COMPOSITOR_INK_PANEL);
+        /* The band is the desktop beside and between the tabs; the window's
+           tab is lit, the tray's not; the row is in the middle of the band,
+           its first tab as far from the left as its last from the right;
+           and a tab's top corner is round, its bottom one square on the
+           output's edge. */
+        struct compositor_frame *window=&frames[1],*tray=&frames[2];
+        cc_check(golden_screen[(unsigned)(by+bh/2)*1024]==COMPOSITOR_INK_DESKTOP);
+        cc_check(golden_screen[(unsigned)(window->x-1)+(unsigned)(by+bh/2)*1024]==COMPOSITOR_INK_DESKTOP);
+        cc_check(golden_screen[(unsigned)(window->x+window->width/2)+(unsigned)(by+bh/2)*1024]==COMPOSITOR_INK_BUTTON_LIT);
+        cc_check(golden_screen[(unsigned)(tray->x+2)+(unsigned)(by+bh/2)*1024]==COMPOSITOR_INK_BUTTON);
+        {int left=window->x-bx,right=bx+bw-(tray->x+tray->width);cc_check(left-right<=1&&right-left<=1);}
+        cc_check(golden_screen[(unsigned)window->x+(unsigned)window->y*1024]==COMPOSITOR_INK_DESKTOP);
+        cc_check(golden_screen[(unsigned)window->x+767u*1024]==COMPOSITOR_INK_BUTTON_LIT);
         cc_check(golden_screen[(unsigned)(by-1)*1024+700]==COMPOSITOR_INK_DESKTOP);
-        /* M2.4: the work area is the output less the panel's zone, on
-           either edge. */
+        /* M2.4: the work area is the whole output, on either edge: a window
+           that fills it lies under the tabs. */
         for(int bottom=0;bottom<2;bottom++) {
             struct compositor_area work;
             compositor_work(1024,768,scale,bottom,&work);
-            cc_check(work.x1==0&&work.x2==1024&&work.y2-work.y1==768-24*scale);
-            cc_check(bottom?(work.y1==0&&work.y2==768-24*scale):(work.y1==24*scale&&work.y2==768));
+            cc_check(work.x1==0&&work.x2==1024&&work.y1==0&&work.y2==768);
         }
     }
 }
@@ -103334,9 +103345,30 @@ static void check_compositor_roles(void) {
              SURFACE_LAYER_NORMAL<SURFACE_LAYER_TOP&&SURFACE_LAYER_TOP<SURFACE_LAYER_OVERLAY);
 }
 
-/* The panel's buttons are where they are drawn: every slot is inside the
-   band, none overlaps another, the middle of each is what a press there
-   names, and a point outside every slot names nothing. */
+/* The panel's tabs are where they are drawn: every tab is inside the band,
+   none overlaps another, the middle of each is what a press there names, a
+   point outside every tab names nothing, and the row is in the middle. */
+static void check_compositor_panel_fit(void) {
+    /* A window's tab is as wide as its title: a short one narrower than a long
+       one, none narrower than two bands or wider than eight, the title's length
+       in characters (a byte that continues one is not one), and the row still
+       in the middle. */
+    static const unsigned char marks[3]={0,0,0};
+    static const unsigned char lengths[3]={3,40,200};
+    for(int scale=1;scale<=4;scale++) {
+        struct compositor_frame f={0,768-24*scale,4096,24*scale,scale,0,0,1,marks,3};
+        int x[4],y,w[4],h,unit=24*scale;
+        f.lengths=lengths;
+        for(int i=0;i<3;i++)cc_check(compositor_panel_slot(&f,i,&x[i],&y,&w[i],&h));
+        cc_check(compositor_panel_slot(&f,-2,&x[3],&y,&w[3],&h));
+        cc_check(w[0]>=2*unit&&w[0]<w[1]&&w[2]==8*unit&&w[1]<=8*unit);
+        cc_check(x[1]==x[0]+w[0]+4*scale&&x[3]==x[2]+w[2]+4*scale);
+        {int left=x[0],right=4096-(x[3]+w[3]);cc_check(left-right<=1&&right-left<=1);}
+    }
+    cc_check(compositor_title_length("shell",28)==5&&compositor_title_length("\xc3\xa5\xc3\xa4",28)==2&&
+             compositor_title_length("abc",2)==2&&compositor_title_length("",28)==0);
+}
+
 static void check_compositor_panel_slots(void) {
     for(int scale=1;scale<=4;scale++)for(unsigned count=0;count<=COMPOSITOR_CLIENTS;count++) {
         unsigned char marks[COMPOSITOR_CLIENTS]={0};
@@ -103353,14 +103385,20 @@ static void check_compositor_panel_slots(void) {
             cc_check(compositor_panel_hit(&f,x+w/2,y+h/2)==which);
         }
         cc_check(compositor_panel_hit(&f,f.x-1,f.y)==COMPOSITOR_HIT_NONE);
-        cc_check(compositor_panel_hit(&f,f.x,f.y)==COMPOSITOR_HIT_NONE); /* the band's own margin */
-        cc_check(count==0||n==(int)count+2);
+        cc_check(compositor_panel_hit(&f,f.x,f.y)==COMPOSITOR_HIT_NONE); /* beside the row */
+        cc_check(n==(int)count+1);
+        {
+            int first=f.x+f.width,last=f.x;
+            for(int i=0;i<n;i++){first=seen[i][0]<first?seen[i][0]:first;last=seen[i][0]+seen[i][2]>last?seen[i][0]+seen[i][2]:last;}
+            cc_check(n==0||((first-f.x)-(f.x+f.width-last)<=1&&(f.x+f.width-last)-(first-f.x)<=1));
+        }
     }
 }
 
-/* The panel writes each pixel of its band once: no fill goes over another,
-   whatever the windows' marks, and the number of pixels written is the
-   band's. */
+/* The panel writes each pixel of its tabs once and nothing between them:
+   no fill goes over another, whatever the windows' marks, the number of
+   pixels written is the tabs', and the band beside and between them is not
+   touched. */
 static void check_compositor_panel_once(void) {
     static u32 screen[1024*768];
     for(int scale=1;scale<=4;scale++)for(unsigned count=0;count<=COMPOSITOR_CLIENTS;count++)
@@ -103369,14 +103407,22 @@ static void check_compositor_panel_once(void) {
         for(unsigned i=0;i<count;i++)marks[i]=(unsigned char)((pattern>>(i&1))&1?(i%3==0?2:1):0);
         struct compositor_frame f={0,768-24*scale,1024,24*scale,scale,0,0,1,marks,count};
         struct compositor_target t={screen,1024,1024,768,0,0,1024,768};
+        unsigned long area=0;
+        int x,y,w,h;
         for(unsigned i=0;i<1024*768;i++)screen[i]=0xdeadbeefu;
         compositor_written=0;
-        compositor_draw(&t,&f);
-        if(compositor_written!=1024ul*24*scale)
-            fprintf(stderr,"panel at scale %d, %u windows, marks %u wrote %lu, not %lu\n",scale,count,pattern,compositor_written,1024ul*24*scale);
-        cc_check(compositor_written==1024ul*24*scale);
-        for(int y=768-24*scale;y<768;y++)for(int x=0;x<1024;x++)
-            if(screen[y*1024+x]==0xdeadbeefu){cc_check(0);y=768;break;}
+        compositor_panel(&t,&f);
+        for(int which=-2;which<(int)count;which++)
+            if(compositor_panel_slot(&f,which,&x,&y,&w,&h))area+=(unsigned long)w*h;
+        if(compositor_written!=area)
+            fprintf(stderr,"panel at scale %d, %u windows, marks %u wrote %lu, not %lu\n",scale,count,pattern,compositor_written,area);
+        cc_check(compositor_written==area);
+        for(int yy=768-24*scale;yy<768;yy++)for(int xx=0;xx<1024;xx++) {
+            int on=0;
+            for(int which=-2;which<(int)count&&!on;which++)
+                on=compositor_panel_slot(&f,which,&x,&y,&w,&h)&&xx>=x&&xx<x+w&&yy>=y&&yy<y+h;
+            if((screen[yy*1024+xx]==0xdeadbeefu)==on){cc_check(0);yy=768;break;}
+        }
     }
 }
 
@@ -103636,7 +103682,7 @@ static void check_compositor_scene(void) {
             int w=1+RND(96),h=1+RND(80);
             for(int p=0;p<w*h;p++)body[i][p]=0x400000u|(u32)(i<<16)|(u32)p;
             frames[i]=(struct compositor_frame){RND(W+60)-40,RND(H+60)-40,w,h,1+RND(2),
-                body[i],(unsigned long)w,0,0,0,RND(3)?RND(60):0,RND(3)?RND(4):0,0x203040u+(u32)i};
+                body[i],(unsigned long)w,0,0,0,RND(3)?RND(60):0,RND(3)?RND(4):0,0x203040u+(u32)i,RND(4)?0:RND(16)};
         }
         /* The compositor's panel, somewhere among them, as wide as it likes. */
         if(count<COMPOSITOR_FRAMES&&scene%3==0) {
@@ -103987,6 +104033,7 @@ int main(void) {
     check_compositor_gs2();
     check_compositor_roles();
     check_compositor_panel_slots();
+    check_compositor_panel_fit();
     check_compositor_panel_once();
     check_compositor_keymap();
     check_compositor_pointer();

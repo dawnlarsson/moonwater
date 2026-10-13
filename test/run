@@ -18569,7 +18569,7 @@ if [ -z "${CANVAS_ONLY:-}" ] || [ "${CANVAS_ONLY:-}" = m1 ]; then
 #       239 and nothing around it; the second, at (240, 140), covers the
 #       first's body from there. A window's corners are round, so the points
 #       read are away from them. Which window has the keys is the panel's to
-#       show: its button is lit (4c6785) and the others' are not (2b3a4c).
+#       show: its button is lit (38383c) and the others' are not (000000).
 PYTHONPATH=$work python3 - "$image" > "$work/m1-answers" 2>"$work/m1-why" <<'PY'
 import os, re, sys, time
 from qmp_guest import *
@@ -18972,7 +18972,23 @@ def click(x, y):
     time.sleep(0.5)
 
 band = 24
-button = lambda i: 54 + i * 194 + 96
+TAB_INKS = ("000000", "38383c", "141416")
+def tabs_of(at):
+    # The middles of the panel's tabs, left to right, read off the screen: runs of a tab's ink along a
+    # row near the bottom edge. A tab is as wide as its window's title, so where it is is read, not worked
+    # out. The last is the tray.
+    found, start = [], None
+    for x in range(W + 1):
+        on = x < W and at(x, H - 6) in TAB_INKS
+        if on and start is None:
+            start = x
+        elif not on and start is not None:
+            if x - start > 8:
+                found.append((start + x - 1) // 2)
+            start = None
+    return found
+def tab_at(found, i):
+    return found[i] if -len(found) <= i < len(found) else 0
 
 width, height, before = picture("m1-before")
 kernel_windows = windows(width, height, before)
@@ -18987,10 +19003,10 @@ time.sleep(0.5)
 
 width, height, two = picture("m1-two")
 out.append(("M1.1 the compositor's desktop is the classic ink and a surface's body its fill",
-            "yes" if two(4, 4) == "1b2733" and two(100, 100) == "336699" and two(1200, 700) == "1b2733"
+            "yes" if two(4, 4) == "1e1e1e" and two(100, 100) == "336699" and two(1200, 700) == "1e1e1e"
             else "(4,4) %s, body %s, (1200,700) %s" % (two(4, 4), two(100, 100), two(1200, 700)), "yes"))
-out.append(("M1.2 there is no frame: a line of one pixel just outside the body, unlit, the desktop past it, and the body's own top row",
-            "%s %s %s" % (two(38, 100), two(39, 100), two(100, 40)), "1b2733 2f3f52 336699"))
+out.append(("M1.2 there is no frame: a black line of one pixel just outside the body, the desktop past it, and the body's own top row",
+            "%s %s %s" % (two(38, 100), two(39, 100), two(100, 40)), "1e1e1e 000000 336699"))
 out.append(("the window opened second stacks above the first where they overlap",
             two(300, 200), "996633"))
 
@@ -18998,8 +19014,9 @@ click(100, 150)
 width, height, clicked = picture("m1-click")
 out.append(("a click on the first window raises it above the second",
             clicked(300, 200), "336699"))
-out.append(("M1.2 and focuses it: its button in the panel lit 4c6785, the other's 2b3a4c",
-            "%s %s" % (clicked(button(0), H - band // 2), clicked(button(1), H - band // 2)), "4c6785 2b3a4c"))
+out.append(("M1.2 and focuses it: its button in the panel lit 38383c, the other's 000000",
+            "%s %s" % (clicked(tab_at(tabs_of(clicked), 0), H - band // 2), clicked(tab_at(tabs_of(clicked), 1), H - band // 2)),
+            "38383c 000000"))
 said = re.findall(rb"surface: event 3 0 (-?\d+) (-?\d+)\r?\nsurface: event 4 1 272 0", serial())
 out.append(("M1.6 the press reaches the surface as POINTER_BUTTON at buffer pixel (60, 110)",
             "%s,%s" % (said[-1][0].decode(), said[-1][1].decode()) if said else "no event", "60,110"))
@@ -19033,10 +19050,10 @@ ready2 = wait_for(b"m2-ready", 40)
 time.sleep(0.5)
 width, height, off = picture("m2-off")
 #   200 by 100, asked for at (99999, 99999), is put with its body at
-#   (W-201, H-125): the panel's 24 rows are not the window's, so its line
-#   of one pixel ends where the panel's band begins.
-out.append(("M2.1 a window asked for far off the output is put on the work area, just above the panel",
-            "%s %s %s" % (off(W - 100, H - 74), off(W - 100, H - 126), off(W - 100, H - 127)), "996633 2f3f52 1b2733"))
+#   (W-201, H-101): the work area is the whole output, the panel's tabs over
+#   it, so its line of one pixel ends on the output's last row.
+out.append(("M2.1 a window asked for far off the output is put on it, its bottom on the output's edge",
+            "%s %s %s" % (off(W - 100, H - 50), off(W - 100, H - 102), off(W - 100, H - 103)), "996633 000000 1e1e1e"))
 #   Not where the first compositor's click went: a tablet that is told the
 #   place it already has reports nothing, and a pointer that starts in the
 #   middle of the output would press there.
@@ -19062,24 +19079,29 @@ out.append(("M2.5 a buffer offset written over the page's header does not stop t
 out.append(("M2.6 a second create is answered EBUSY and the surface it came on stays",
             "%s %s" % (said(r"m2 twice: (\d+)"), said(r"m2 twice: \d+ gone (\d+)")), "1 0"))
 
-#   The panel and its roles. The panel the compositor draws is 24 rows at the
-#   bottom (the guest's scale is 1, which the compositor says in its first
-#   line), the launcher button at its left end and a button for each window
-#   beside it: unit 24, margin 2, so the first button starts at x 54 and each
-#   is 192 wide and 2 apart.
+#   The panel and its roles. The panel the compositor draws is a row of tabs
+#   in the middle of the bottom 24 rows (the guest's scale is 1, which the
+#   compositor says in its first line) with nothing between them: a tab for
+#   each window, as wide as its title, and the tray, read off the screen by
+#   tabs_of() above.
 type_text("sh /mnt/m3\n")
 ready3 = wait_for(b"m3-windows", 60)
 time.sleep(0.5)
 scale3 = [int(v) for v in re.findall(rb"\(scale (\d+)\)", serial())]
 width, height, panel_up = picture("m3-windows")
-out.append(("M2.7 the compositor's own panel: its ink in the band along the bottom, the desktop's above it",
-            "%s %s" % (panel_up(W // 2, H - band // 2), panel_up(W // 2, H - band - 1)), "2f3f52 1b2733"))
-out.append(("M2.8 the launcher button is lit and the windows have a button each, the put-away one outlined",
-            "%s %s %s %s" % (panel_up(8, H - band // 2), panel_up(button(0), H - band // 2),
-                            panel_up(button(1), H - band // 2), panel_up(button(2), H - band + 2)),
-            "4c6785 2b3a4c 2b3a4c 2b3a4c"))
+tabs3 = tabs_of(panel_up)
+button = lambda i: tab_at(tabs3, i)
+out.append(("M2.7 the compositor's own panel: tabs in the middle of the bottom edge, the desktop beside them and above",
+            "%s %d %s %s" % (panel_up(4, H - band // 2), len(tabs3), panel_up(button(-1), H - band // 2),
+                             panel_up(W // 2, H - band - 1)),
+            "1e1e1e 4 000000 1e1e1e"))
+out.append(("M2.8 the windows have a tab each, the put-away one dim, and the row is in the middle",
+            "%s %s %s %s" % (panel_up(button(0), H - band // 2), panel_up(button(1), H - band // 2),
+                             panel_up(button(2), H - band // 2),
+                             "middle" if tabs3 and abs((tabs3[0] + tabs3[-1]) // 2 - W // 2) < 40 else "off"),
+            "000000 000000 141416 middle"))
 out.append(("M2.9 a window put away is not on the screen",
-            panel_up(1250, 380), "1b2733"))
+            panel_up(1250, 380), "1e1e1e"))
 text = serial().decode("latin1")
 out.append(("M2.10 a panel claimed with no grant is refused",
             said(r"m3 no grant: (\d+)"), "1"))
@@ -19103,21 +19125,23 @@ for down in (True, False):
 time.sleep(0.4)
 width, height, plugged = picture("m3-plugged")
 out.append(("M2.11 a mouse plugged in after the compositor started presses: the window it pressed on is lit",
-            "%s %s" % (plugged(button(1), H - band // 2), plugged(button(0), H - band // 2)), "4c6785 2b3a4c"))
+            "%s %s" % (plugged(button(1), H - band // 2), plugged(button(0), H - band // 2)), "38383c 000000"))
 click(400, 210)           # alpha: it has the keys and its button is lit
 width, height, lit = picture("m3-focus")
 out.append(("M2.12 the window that was clicked has its button lit",
-            "%s %s" % (lit(button(0), H - band // 2), lit(button(1), H - band // 2)), "4c6785 2b3a4c"))
-click(W // 2, H - band // 2)         # the panel, away from every button
+            "%s %s" % (lit(button(0), H - band // 2), lit(button(1), H - band // 2)), "38383c 000000"))
+click(button(-1), H - band // 2)     # the panel's tray, which no window is
 type_text("a")
 width, height, after_panel = picture("m3-panel-click")
 out.append(("M2.13 a click on the panel does not move the keys: the window is still lit",
-            after_panel(button(0), H - band // 2), "4c6785"))
+            after_panel(button(0), H - band // 2), "38383c"))
 click(button(1), H - band // 2)      # beta's button
 width, height, raised = picture("m3-button")
-#   A window with the keys has its line lit: beta's left line is at x 699, alpha's right at 600.
-out.append(("M2.14 a window's button brings its window up and gives it the keys: its line lit, the other's not",
-            "%s %s %s" % (raised(699, 260), raised(600, 260), raised(750, 210)), "4c6785 2f3f52 996633"))
+#   A window with the keys has its tab lit, and its black line is round it: beta's left line is at x 699.
+#   The tab is read beside where it was pressed, which is where the pointer is drawn.
+out.append(("M2.14 a window's tab brings its window up and gives it the keys: its tab lit, the other's not",
+            "%s %s %s %s" % (raised(button(1) - 8, H - band // 2), raised(button(0), H - band // 2), raised(699, 260),
+                             raised(750, 210)), "38383c 000000 000000 996633"))
 click(button(2), H - band // 2)      # gamma's button: put away, and back
 width, height, restored = picture("m3-restore")
 out.append(("M2.15 the button of a window that was put away brings it back",
@@ -19128,27 +19152,28 @@ done3 = wait_for(b"m3-held", 90)
 time.sleep(0.3)
 width, height, held = picture("m3-held")
 out.append(("M2.16 a program given the panel role holds it: its colour in the band, the window buttons gone",
-            "%s %s" % (held(W // 2, H - band // 2), held(button(0), H - band // 2)), "445566 445566"))
+            "%s %s" % (held(button(1), H - band // 2), held(button(0), H - band // 2)), "445566 445566"))
 wait_for(b"m3-killed", 40)
 time.sleep(1)
 width, height, fallback = picture("m3-killed")
-out.append(("M2.17 the holder killed, the compositor's panel is back in the band",
-            "%s %s" % (fallback(W // 2, H - band // 2), fallback(button(0), H - band // 2)), "2f3f52 2b3a4c"))
+out.append(("M2.17 the holder killed, the compositor's panel is back: its tray, and nothing beside its tabs",
+            "%s %s" % (fallback(button(-1), H - band // 2), fallback(4, H - band // 2)), "000000 1e1e1e"))
 wait_for(b"m3-swapped", 60)
 time.sleep(0.3)
 width, height, swapped = picture("m3-swapped")
 out.append(("M2.18 a program with the right to replace takes the role when the holder closes",
-            swapped(W // 2, H - band // 2), "00aa00"))
+            swapped(button(0), H - band // 2), "00aa00"))
 wait_for(b"m3-hung", 40)
 time.sleep(0.3)
 width, height, hung = picture("m3-hung")
 out.append(("M2.19 a holder that does not close in time loses the role to the replacement",
-            hung(W // 2, H - band // 2), "0000aa"))
+            hung(button(0), H - band // 2), "0000aa"))
 wait_for(b"m3-background", 40)
 time.sleep(0.3)
 width, height, behind = picture("m3-background")
-out.append(("M2.25 a program given the background role fills the output under the windows and the panel",
-            "%s %s %s" % (behind(1500, 600), behind(400, 260), behind(W // 2, H - band // 2)), "112233 336699 2f3f52"))
+out.append(("M2.25 a program given the background role fills the output under the windows and the panel's tabs, and between them",
+            "%s %s %s %s" % (behind(1500, 600), behind(400, 260), behind(button(-1), H - band // 2), behind(4, H - band // 2)),
+            "112233 336699 000000 112233"))
 wait_for(b"m3-background-late", 40)
 time.sleep(0.3)
 width, height, later = picture("m3-background-late")
@@ -19158,7 +19183,7 @@ wait_for(b"m3-bgkilled", 40)
 time.sleep(0.3)
 width, height, bare = picture("m3-bgkilled")
 out.append(("M2.26 the background holder killed, the desktop's own ink is back",
-            "%s %s" % (bare(1500, 600), bare(400, 260)), "1b2733 336699"))
+            "%s %s" % (bare(1500, 600), bare(400, 260)), "1e1e1e 336699"))
 done4 = wait_for(b"m3-done", 60)
 text = serial().decode("latin1")
 keys3 = re.findall(r"m3 keys: alpha (\d+) beta (\d+)", text)
@@ -19232,15 +19257,15 @@ out.append(("K1.4 the layout set while the compositor runs is the layout it type
             typed("m4-de-dump", "m4-de-end"), "21:122 16:64 44:121"))
 
 #   Alt-Tab and Alt-F9 on three windows. The button in the panel of the window that has
-#   the keys is lit (4c6785) and the others' are not (2b3a4c); a window put away has
+#   the keys is lit (38383c) and the others' are not (000000); a window put away has
 #   only the outline of a button (the panel's own ink inside it) and is not on the
 #   screen (the desktop's ink in its place). The windows are at x 100, 500 and 900, y 100.
 type_text("sh /mnt/m6\n")
 ready6 = wait_for(b"m6-ready", 60)
 time.sleep(0.5)
-lit = lambda at, n: "".join("L" if at(button(i), H - band // 2) == "4c6785" else
-                            "-" if at(button(i), H - band // 2) == "2b3a4c" else
-                            "." if at(button(i), H - band // 2) == "2f3f52" else "?" for i in range(3))
+lit = lambda at, n: "".join("L" if at(x, H - band // 2) == "38383c" else
+                            "-" if at(x, H - band // 2) == "000000" else
+                            "." if at(x, H - band // 2) == "141416" else "?" for x in tabs_of(at)[:3])
 click(160, 200)
 width, height, six = picture("m6-one")
 first = lit(six, 0)
@@ -19270,7 +19295,7 @@ out.append(("M6.1 a click gives the keys to its window: the first window's butto
 out.append(("M6.2 Alt-Tab goes to the window behind the one on top, which is the third, and Alt letting go raises it",
             second, "--L"))
 out.append(("M6.3 Alt-F9 puts the window with the keys away and the keys go to the one under it, which is the first",
-            "%s %s" % (third, away), "L-. 1b2733"))
+            "%s %s" % (third, away), "L-. 1e1e1e"))
 out.append(("M6.4 Alt-Tab with the top window put away brings it back with the keys",
             "%s %s" % (fourth, back), "--L 55aa55"))
 out.append(("M6.5 two Alt-Tab steps with Alt held go down two windows: the second has the keys",
@@ -19356,12 +19381,16 @@ out.append(("P1.4 a window that asked for the wheel alone is sent it (down, -120
 type_text("sh /mnt/m8\n")
 ready8 = wait_for(b"m8-ready", 60)
 time.sleep(0.5)
-def cursor_at(at, x, y, height, width):
+def cursor_at(at, x, y, height, width, base=None):
+    # The cursor's two inks around the pointer, but where the picture with the pointer away (base) has
+    # them already: a window's line is black, and so is the panel's tab.
     white = black = 0
     xs, ys = [], []
     for py in range(max(y - 24, 0), min(y + 80, height)):
         for px in range(max(x - 24, 0), min(x + 64, width)):
             pixel = at(px, py)
+            if base and base(px, py) == pixel:
+                continue
             white += pixel == "ffffff"
             if pixel == "000000":
                 black += 1
@@ -19371,19 +19400,26 @@ def cursor_at(at, x, y, height, width):
         return "%d %d" % (white, black)
     return "%d %d %dx%d %s" % (white, black, max(xs) - min(xs) + 1, max(ys) - min(ys) + 1,
                                "tl" if (min(xs), min(ys)) in zip(xs, ys) else "-")
+cursor_base = []
 def wears(name, x, y):
     # (the tablet reports an axis only when it changed, and the compositor starts mid-screen)
     moveto(x, y)
     time.sleep(0.4)
     width, height, at = picture(name)
-    return cursor_at(at, x, y, height, width)
+    # The first look, with the pointer on the desktop far from the window, is what the rest are read against.
+    if not cursor_base:
+        cursor_base.append(at)
+        return cursor_at(at, x, y, height, width)
+    return cursor_at(at, x, y, height, width, cursor_base[0])
 out.append(("C1.1 the pointer over the desktop is the arrow, drawn by the compositor",
             wears("m8-arrow", 2000, 910), "55 46 11x18 tl"))
-#   The window is 400 by 300 at (600, 300), and its edges are the six pixels just outside it.
+#   The window is 400 by 300 at (600, 300), and its edges are the six pixels just outside it. Two of the
+#   resize arrows' 40 black pixels fall on the window's black line, which is black without them too, so
+#   38 of them are seen.
 out.append(("C1.2 just outside a window's right edge it is the arrow across",
-            wears("m8-right", 1002, 460), "25 40 15x9 -"))
+            wears("m8-right", 1002, 460), "25 38 15x9 -"))
 out.append(("C1.3 just below its bottom edge it is the arrow up and down",
-            wears("m8-bottom", 800, 602), "25 40 9x15 -"))
+            wears("m8-bottom", 800, 602), "25 38 9x15 -"))
 out.append(("C1.4 off its bottom right corner it is the one that leans left",
             wears("m8-corner", 1002, 602), "25 48 13x13 tl"))
 out.append(("C1.5 off its top right corner it is the one that leans right",
@@ -19443,12 +19479,12 @@ def with_alt(do, *where):
 #   Alt and a double click on the second window fill the work area; another gives it back.
 with_alt(quick_double, 500, 230)
 width, height, w3 = picture("m10-maximized")
-out.append(("W3.1 Alt and a double click on a window fill the work area (the panel's zone left alone)",
-            "%s %s %s" % (w3(2000, 600), w3(2000, 1050), w3(2000, 1058)), "996633 996633 2f3f52"))
+out.append(("W3.1 Alt and a double click on a window fill the whole output, the panel's tabs over it",
+            "%s %s %s" % (w3(2000, 600), w3(2000, H - 1), w3(tab_at(tabs_of(w3), -1), H - band // 2)), "996633 996633 000000"))
 with_alt(quick_double, 1200, 12)
 width, height, w4 = picture("m10-restored")
 out.append(("W3.2 and another puts it back where it was",
-            "%s %s" % (w4(2000, 600), w4(500, 400)), "1b2733 996633"))
+            "%s %s" % (w4(2000, 600), w4(500, 400)), "1e1e1e 996633"))
 
 #   A window dragged to the top edge fills the work area, and taken from there it is the size it was.
 with_alt(drag_to, 500, 230, 500, 3)
@@ -19458,15 +19494,15 @@ out.append(("W4.1 a window let go of at the top edge fills the work area",
 with_alt(drag_to, 1000, 12, 1000, 400)
 width, height, w6 = picture("m10-unsnapped")
 out.append(("W4.2 taken from there it is the size it was, under the hand",
-            "%s %s" % (w6(900, 600), w6(2000, 600)), "996633 1b2733"))
+            "%s %s" % (w6(900, 600), w6(2000, 600)), "996633 1e1e1e"))
 with_alt(drag_to, 900, 400, 3, 500)
 width, height, w7 = picture("m10-left")
 out.append(("W4.3 let go of at the left edge it fills the left half",
-            "%s %s" % (w7(600, 700), w7(1400, 700)), "996633 1b2733"))
+            "%s %s" % (w7(600, 700), w7(1400, 700)), "996633 1e1e1e"))
 with_alt(drag_to, 500, 12, 2557, 500)
 width, height, w8 = picture("m10-right")
 out.append(("W4.4 and at the right edge the right half",
-            "%s %s" % (w8(1400, 700), w8(600, 700)), "996633 1b2733"))
+            "%s %s" % (w8(1400, 700), w8(600, 700)), "996633 1e1e1e"))
 
 #   Dragged by the bottom right corner, the first window grows: it is asked for the
 #   size the hand points at and answers with it. (Its body is (300, 200) to
@@ -19475,11 +19511,11 @@ out.append(("W4.4 and at the right edge the right half",
 drag_to(902, 502, 1100, 700)
 width, height, w1 = picture("m10-grown")
 out.append(("W2.1 a window taken by its bottom right corner and dragged is the size the hand points at",
-            "%s %s %s" % (w1(1000, 600), w1(1000, 720), w1(1150, 600)), "336699 1b2733 1b2733"))
+            "%s %s %s" % (w1(1000, 600), w1(1000, 720), w1(1150, 600)), "336699 1e1e1e 1e1e1e"))
 drag_to(297, 197, 197, 147)
 width, height, w2 = picture("m10-grown2")
 out.append(("W2.2 and by its top left corner grows up and to the left, the corner that was not held where it was",
-            "%s %s %s" % (w2(230, 300), w2(1000, 600), w2(150, 300)), "336699 336699 1b2733"))
+            "%s %s %s" % (w2(230, 300), w2(1000, 600), w2(150, 300)), "336699 336699 1e1e1e"))
 
 #   Alt held, a press anywhere on a window takes hold of it.
 send([press("alt", True)])
@@ -19489,7 +19525,7 @@ send([press("alt", False)])
 time.sleep(0.5)
 width, height, w9 = picture("m10-alt")
 out.append(("W5.1 Alt and a press on a window's body moves the window by the hand",
-            "%s %s" % (w9(1250, 700), w9(250, 300)), "336699 1b2733"))
+            "%s %s" % (w9(1250, 700), w9(250, 300)), "336699 1e1e1e"))
 wait_for(b"m10-done", 120)
 
 #   Control-Shift-T, twice: a terminal each, which is the compositor starting a program
@@ -19903,8 +19939,9 @@ def said(row):
 first = compositor()
 width, height, plain = picture("r1-plain")
 out.append(("R1.1 a plain boot reaches the userspace compositor: its ground, its panel, a process of its own",
-            "%s %s %s" % (plain(4, 4), plain(W // 2, H - 12), "alive" if alive(first) else "gone"),
-            "1b2733 2f3f52 alive"))
+            "%s %s %s" % (plain(4, 4), "tabs" if any(plain(x, H - 6) in ("000000", "38383c") for x in range(0, W, 4)) else "no tabs",
+                          "alive" if alive(first) else "gone"),
+            "1e1e1e tabs alive"))
 out.append(("and no tool's start was refused memory by the kernel (the shell's reserve is not counted)",
             shell.number("dmesg | grep -c __vm_enough_memory"), "0"))
 #   The image's fonts start the panel and a terminal with no help: the machine
@@ -19938,7 +19975,8 @@ panel_lit = terminal_lit = 0
 body = None
 for _ in range(6):
     width, height, at = picture("r1-text")
-    panel_lit = bright(at, W - 76, H - 24, W - 2, H)
+    # The panel's text: the titles on its tabs and the time in its tray, along the bottom edge.
+    panel_lit = bright(at, 0, H - 24, W, H)
     #   Where the terminal is: its share of the output puts its top left at 44 and 14 percent, its paper from there.
     body = (width * 44 // 100, height * 14 // 100)
     terminal_lit = bright(at, body[0], body[1], body[0] + 160, body[1] + 24) if body else 0
@@ -20039,7 +20077,7 @@ width, height, data = load("r1-desktop")
 log_x, log_y = width * 3 // 100, height * 6 // 100
 term_x, term_y = width * 44 // 100, height * 14 // 100
 out.append(("R1.2d the panel carries text: its band holds light pixels where the window buttons and the clock are",
-            "yes" if light(data, width, 0, height - 20, width, height - 4, 0xb0) > 150 else "no", "yes"))
+            "yes" if light(data, width, 0, height - 20, width, height - 4, 0xb0) > 60 else "no", "yes"))
 out.append(("R1.2e the kernel log window shows the boot's messages: light text in the part of it the terminal does not cover",
             "yes" if light(data, width, log_x + 4, log_y + 30, width * 40 // 100, log_y + 330) > 2000 else "no", "yes"))
 out.append(("R1.2f the terminal shows its prompt, in the share of the output the machine script's start leaves it",
@@ -20053,7 +20091,7 @@ beside = light(data, width, log_x + 4, term_y + 160, width * 40 // 100, height *
 out.append(("R1.2g the terminal is in front of the log: where they meet, its empty paper hides the log's lines",
             "yes" if meet < 30 and beside > 200 else "%d light where they meet, %d beside" % (meet, beside), "yes"))
 out.append(("R1.2h the terminal is as wide as its share of the output: a pixel at 95 percent across is the terminal's body, not the desktop's ground",
-            "yes" if data[((height * 40 // 100) * width + width * 95 // 100) * 3:][:3] != bytes([0x1b, 0x27, 0x33]) else "no", "yes"))
+            "yes" if data[((height * 40 // 100) * width + width * 95 // 100) * 3:][:3] != bytes([0x1e, 0x1e, 0x1e]) else "no", "yes"))
 
 #   A line written to the kernel log is on the screen in a frame, with nothing polled for it.
 shell.run("echo r1-klog-written-here-one > /dev/kmsg; echo r1-klog-written-here-two > /dev/kmsg", 10)
@@ -20370,11 +20408,11 @@ def picture(name):
         return data[o], data[o + 1], data[o + 2]
     return width, height, at
 
-DESKTOP = (0x1b, 0x27, 0x33)
+DESKTOP = (0x1e, 0x1e, 0x1e)
 
 def window(width, height, at):
     """The terminal's body, as (left, top, right, bottom) of its black: the
-    desktop around it is 1b2733 and the body is black where nothing is drawn.
+    desktop around it is 1e1e1e and the body is black where nothing is drawn.
     Across, the longest run that is not the desktop, so the pointer drawn
     beside the window is not taken for its edge."""
     y = height // 2
@@ -20391,7 +20429,8 @@ def window(width, height, at):
     left, right = max(runs, key=lambda run: run[1] - run[0])
     x = (left + right) // 2
     top = next((v for v in range(height) if at(x, v) == (0, 0, 0)), None)
-    bottom = next((v for v in range(height - 1, -1, -1) if at(x, v) == (0, 0, 0)), None)
+    # Up from above the panel's band: its tabs are black too.
+    bottom = next((v for v in range(height - 25, -1, -1) if at(x, v) == (0, 0, 0)), None)
     return left, top, right, bottom
 
 def lit(at, x0, y0, x1, y1):
@@ -21156,10 +21195,11 @@ def wait_for(marker, seconds):
     return marker.encode() in transcript
 
 def ink(name):
-    # The desktop's ink at the top left and the panel's at the bottom left: the compositor's own picture.
+    # The desktop's ink at the top left and the panel's tabs along the bottom: the compositor's own picture.
     w, h, px = load(name)
     at = lambda x, y: "%02x%02x%02x" % tuple(px[(y * w + x) * 3:(y * w + x) * 3 + 3])
-    return "%s %s" % (at(10, 10), at(300, h - 10))
+    tabs = any(at(x, h - 6) in ("000000", "38383c") for x in range(0, w, 4))
+    return "%s %s" % (at(10, 10), "tabs" if tabs else at(w // 2, h - 6))
 
 def asked(command, marker, seconds=20):
     serial.sendall(command.encode() + b"; echo " + marker.encode() + b"-END\n")
@@ -21170,13 +21210,13 @@ time.sleep(8)
 serial.sendall(b"echo READY-$((20+1))\n")
 out.append((label + ": the serial shell answers", "yes" if wait_for("READY-21", 30) else "no", "yes"))
 shot("up", 1)
-out.append((label + ": the compositor's desktop and panel are on the screen before the sleep", ink("up"), "1b2733 2f3f52"))
+out.append((label + ": the compositor's desktop and panel are on the screen before the sleep", ink("up"), "1e1e1e tabs"))
 mark = len(transcript)
 serial.sendall(b"moonwater sleep > /dev/ttyS0 2>&1\n")
 out.append((label + ": the verb is sleeping", "yes" if wait_for("mem_sleep", 20) else "no", "yes"))
 time.sleep(4)
 shot("during", 1)
-out.append((label + ": the screen is off while it sleeps", ink("during") != "1b2733 2f3f52" and "yes" or ink("during"), "yes"))
+out.append((label + ": the screen is off while it sleeps", ink("during") != "1e1e1e tabs" and "yes" or ink("during"), "yes"))
 key("shift")
 out.append((label + ": a key wakes it", "yes" if wait_for("awake again", 40) else "no", "yes"))
 time.sleep(4)
@@ -21186,7 +21226,7 @@ out.append((label + ": the compositor finds it slept and says so in the log, onc
             counted[-1].decode() if counted else "no answer", "1"))
 time.sleep(3)
 shot("after", 1)
-out.append((label + ": its desktop and panel are on the screen again", ink("after"), "1b2733 2f3f52"))
+out.append((label + ": its desktop and panel are on the screen again", ink("after"), "1e1e1e tabs"))
 pump(1)
 after = bytes(transcript[mark:])
 bad = [word for word in ("WARNING:", "BUG:", "Oops", "Call Trace") if word.encode() in after]

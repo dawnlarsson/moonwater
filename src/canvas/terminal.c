@@ -106,8 +106,8 @@ static struct
         font_engine *engine;
         font_metrics grid;
         unsigned int size; // in 26.6, which is what font.c takes
-        // The paper round the grid: a cell at the left (pad), where a command that failed is marked, a cell at
-        // the right (bar), where the scroll bar is, and a quarter of a cell above and below (pad_y).
+        // The paper round the grid, the same on every side: at the left (pad), where a command that failed is
+        // marked, at the right (bar), where the scroll bar is, and above and below (pad_y).
         unsigned int cell_w, cell_h, bar, pad, pad_y;
         unsigned int width, height; // the surface, in pixels
 
@@ -683,7 +683,7 @@ static void terminal_bar(unsigned int address_to pixels, unsigned int first, uns
         The margin at the left of a row: the paper, and where the line holds a
         prompt whose command ended badly (WINDOW_CELL_FAILED on its first
         cell, which the shell's OSC 133 put there), a dot in the theme's red
-        the middle of the margin, half a cell across, each pixel the share of
+        in the middle of the margin, two thirds of it across, each pixel the share of
         its sixteen sample points inside it mixed with the paper. Drawn
         through the buffer's own top left: the margin is outside the grid.
 */
@@ -691,7 +691,7 @@ static void terminal_mark(unsigned int address_to whole, unsigned int row, b32 f
 {
         unsigned int paper = terminal_colour[0], ink = terminal_colour[1];
         unsigned int top = terminal.pad_y + row * terminal.cell_h, side = terminal.pad;
-        int across = (int)(side < terminal.cell_h ? side : terminal.cell_h) / 2;
+        int across = (int)(side < terminal.cell_h ? side : terminal.cell_h) * 2 / 3;
 
         terminal_fill(whole, 0, (int)top, side, terminal.cell_h, paper);
         if (!failed || across < 2)
@@ -953,12 +953,14 @@ static b32 terminal_frame(void)
 
 /* ---- the program ---- */
 
-// The paper round the grid, for the cell the font gives: a cell each side, a quarter of one above and below.
+// The paper round the grid, for the cell the font gives: a third of a cell's height on every side.
 static void terminal_margins(void)
 {
-        terminal.pad = terminal.cell_w;
-        terminal.bar = terminal.cell_w;
-        terminal.pad_y = terminal.cell_h / 4;
+        unsigned int margin = terminal.cell_h / 3 ? terminal.cell_h / 3 : 1;
+
+        terminal.pad = margin;
+        terminal.bar = margin;
+        terminal.pad_y = margin;
 }
 
 /*
@@ -1105,11 +1107,14 @@ static void terminal_acknowledge(unsigned int serial)
 
 /*
         The window is another size: the grid is cut again, the pty told
-        before the shell is signalled, the surface made at the size the whole
-        cells need and everything drawn at once into it.
+        before the shell is signalled, the surface made at the size asked for
+        and everything drawn at once into it.
 
-        What the compositor asked for is a number of pixels; what this
-        answers is whole cells, and the surface is what they come to.
+        What the compositor asked for is a number of pixels, and that is the
+        surface: the grid is the whole cells it has room for and the paper
+        round them takes the rest, so a window filling the output fills it to
+        the last pixel and a drag on an edge follows the hand. Never less
+        than one cell and its margins.
 */
 static void terminal_configure(b32 master, unsigned int width, unsigned int height, unsigned int serial)
 {
@@ -1121,6 +1126,8 @@ static void terminal_configure(b32 master, unsigned int width, unsigned int heig
         columns = columns ? columns : 1;
         rows = rows ? rows : 1;
         pixels_w = terminal_pixels(columns, rows, &pixels_h);
+        pixels_w = width > pixels_w ? width : pixels_w;
+        pixels_h = height > pixels_h ? height : pixels_h;
 
         // The same size: nothing to draw, and the answer is a commit with no damage in it. The cells have to be the
         // same too: a new text size can keep the pixels and cut the grid another way.

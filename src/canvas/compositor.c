@@ -11,18 +11,17 @@
         if it ever stops answering. When it exits, the card's last file
         closes and Canvas's restore hook redraws the kernel desktop at once.
 
-        What it draws is the desktop ink and each surface's own pixels, with
-        nothing around them: a window has no border, no titlebar and no close
-        box. Surfaces are protocol
-        version 2 (canvas_abi.h, window.c): a program connects to
+        What it draws is the desktop ink and each surface's own pixels inside
+        a black line of one pixel, round at the corners: a window has no
+        titlebar and no close box. Surfaces are protocol version 2 (canvas_abi.h, window.c): a program connects to
         SURFACE_SOCKET, hands over a sealed page, and commits buffers into
         it. A surface has a role (canvas spec 02). An application window
         stacks, the press of a button raises and focuses it, Alt and a press
         anywhere on it drags it, a press just outside its edges resizes it,
         Alt-F4 or a middle press on its button in the panel asks it to go,
-        keys reach it while it has
-        focus and the pointer reaches it when it asks for the pointer, and it
-        is kept on the work area, which is the output less the panel's zone.
+        keys reach it while it has focus and the pointer reaches it when it
+        asks for the pointer, and it is kept on the output, which a window
+        filling it fills whole, the panel's tabs lying over it.
         Any other role is the compositor's to give: a layer, the edges it is
         held to, a size and a place, and what it may not do (be moved, be
         resized, take the keys). It is given to a program that has a grant,
@@ -31,12 +30,14 @@
         and a program that may replace the holder asks it to go and takes the
         role when it has, or when its time is up and it has not. The roles
         that have a built-in are always on the screen: the desktop ink, and
-        the panel with a button for each window and the tray; when no program
+        the panel, a row of tabs in the middle of the bottom edge -- one for
+        each window, as wide as its title, and the tray -- whose rest is off the
+        output and with nothing between them; when no program
         holds the panel role this draws it, and a program that is killed
         leaves it there in the next frame.
 
         Damage is the union of what the programs say changed, composed
-        straight onto the scanout, each pixel once.
+        straight onto the scanout, each pixel once but in the round corners.
 
         What the kernel desktop did for a hand and a keyboard it does here:
         keys are the characters of the layout `moonwater keyboard` set (every
@@ -63,17 +64,19 @@
 
 /* ---- backend: the look on the CPU ---- */
 
-// The palette: the desktop, the panel's band, and its buttons, dark and lit.
-#define COMPOSITOR_INK_DESKTOP 0x1b2733u
-#define COMPOSITOR_INK_PANEL 0x2f3f52u
-#define COMPOSITOR_INK_BUTTON 0x2b3a4cu
-#define COMPOSITOR_INK_BUTTON_LIT 0x4c6785u
-#define COMPOSITOR_INK_TEXT 0xdfe7efu
+// The palette, neutral greys and no hue: the desktop, the panel's tabs (black, lighter while their window
+// has the keys, a little off black while it is put away) and their text, and the black line round a window.
+#define COMPOSITOR_INK_DESKTOP 0x1e1e1eu
+#define COMPOSITOR_INK_PANEL 0x141416u
+#define COMPOSITOR_INK_BUTTON 0x000000u
+#define COMPOSITOR_INK_BUTTON_LIT 0x38383cu
+#define COMPOSITOR_INK_TEXT 0xe4e4e4u
+#define COMPOSITOR_INK_LINE 0x000000u
 
 // The panel's height, the radius of a window's corners and the width of the line round it, in logical
 // pixels; and the largest radius in device pixels, which is what the corners' scratch is made for.
 #define COMPOSITOR_PANEL 24
-#define COMPOSITOR_RADIUS 4
+#define COMPOSITOR_RADIUS 8
 #define COMPOSITOR_LINE 1
 #define COMPOSITOR_RADIUS_MOST 64
 
@@ -106,6 +109,10 @@ struct compositor_frame
         int radius;          // the corners of the window and its line, in device pixels; 0 for square
         int line;            // the line round the contents, outside them, in device pixels; 0 for none
         unsigned int edge;   // the line's colour
+        int square;          // corners kept square though there is a radius: 1 top left, 2 top right, 4, 8 below
+        int slot;            // the compositor's panel: the tab this frame is (-2 tray, 0 up windows)
+        int top;             // the panel is along the top of the output, its tabs hanging down
+        const unsigned char *lengths; // the panel: each window's title in characters, which its tab fits
 };
 
 static void compositor_fill(const struct compositor_target *t, int x, int y, int width,
@@ -144,48 +151,75 @@ static void compositor_blit(const struct compositor_target *t, int x, int y, int
 }
 
 /*
-        The panel, laid out in one band from the left: the launcher button, a
-        button for each window, and the tray well at the right end. The same
-        slots are drawn by the compositor's own panel and by a panel program,
-        and pressed on in both, so a window's button is where it looks to be.
-        Slot -1 is the launcher, -2 the tray, and 0 up the windows; a window
-        whose button would be narrower than a pixel has none.
+        The panel: tabs in a row in the middle of the band, with nothing
+        between them -- a tab for each window and the tray -- each the head
+        of a note whose rest is off the edge of the output: its title and its
+        round corners show, three pixels in from the band's inner side, and
+        it runs to the outer one. A window's tab is as wide as its title
+        needs at a fixed width a character, and never wider than the row has
+        room for each nor eight bands, which the compositor and a panel
+        program both work out from the title alone, without a font, so they
+        agree. The same tabs are drawn by the compositor's own panel and by a
+        panel program, and pressed on in both, so a window's tab is where it
+        looks to be. Slot -2 is the tray and 0 up the windows; a window whose
+        tab would be narrower than a pixel has none.
 */
 #define COMPOSITOR_HIT_NONE (-3)
+
+// A title's length in characters, the bytes that begin one, to its end or the listing's.
+static unsigned char compositor_title_length(const char *title, unsigned int most)
+{
+        unsigned int count = 0;
+
+        for (unsigned int at = 0; at < most && title[at]; at++)
+                count += ((unsigned char)title[at] & 0xc0) != 0x80;
+        return (unsigned char)(count > 255 ? 255 : count);
+}
+
+// A window's tab's width: its title at a width a character, with room each side, up to the most it may be.
+static int compositor_tab_width(const struct compositor_frame *frame, int which, int most)
+{
+        int unit = frame->height, wanted;
+
+        if (!frame->lengths)
+                return most;
+        wanted = frame->lengths[which] * unit * 13 / 40 + unit;
+        wanted = wanted < 2 * unit ? 2 * unit : wanted;
+        return wanted < most ? wanted : most;
+}
 
 static int compositor_panel_slot(const struct compositor_frame *frame, int which, int *x, int *y,
                                  int *width, int *height)
 {
-        int margin = 2 * frame->scale, unit = frame->height;
-        int first = frame->x + margin + 2 * unit + margin * 2;
-        int last = frame->x + frame->width - margin - 3 * unit - margin * 2;
-        int count = (int)frame->mark_count;
-        int each = count ? (last - first - (count - 1) * margin) / count : 0;
+        int gap = 4 * frame->scale, inset = 3 * frame->scale, unit = frame->height;
+        int tray = 3 * unit, count = (int)frame->mark_count;
+        int room = frame->width - tray - (count + 2) * gap;
+        int most = count && room > 0 ? room / count : 0, windows = 0, start;
 
-        *y = frame->y + margin;
-        *height = unit - margin * 2;
+        most = most > 8 * unit ? 8 * unit : most;
+        for (int at = 0; most && at < count; at++)
+                windows += compositor_tab_width(frame, at, most) + gap;
+        start = frame->x + (frame->width - (windows + tray)) / 2;
+        *y = frame->top ? frame->y : frame->y + inset;
+        *height = unit - inset;
 
-        if (which == -1)
+        if (which == -2)
         {
-                *x = frame->x + margin;
-                *width = 2 * unit;
-        }
-        else if (which == -2)
-        {
-                *x = frame->x + frame->width - margin - 3 * unit;
-                *width = 3 * unit;
+                *x = start + windows;
+                *width = tray;
         }
         else
         {
-                each = each > 8 * unit ? 8 * unit : each;
-                if (which < 0 || which >= count || each < 1)
+                if (which < 0 || which >= count || most < 1)
                         return 0;
 
-                *x = first + which * (each + margin);
-                *width = each;
+                *x = start;
+                for (int at = 0; at < which; at++)
+                        *x += compositor_tab_width(frame, at, most) + gap;
+                *width = compositor_tab_width(frame, which, most);
         }
 
-        // A band too narrow for a slot has none: nothing is drawn outside the band.
+        // A band too narrow for a tab has none: nothing is drawn outside the band.
         return *height > 0 && *x >= frame->x && *x + *width <= frame->x + frame->width;
 }
 
@@ -205,75 +239,34 @@ static int compositor_panel_hit(const struct compositor_frame *frame, int px, in
 }
 
 /*
-        The panel: the band in its ink, the launcher button, the windows'
-        buttons (the focused one lit, a put-away one only an outline) and the
-        tray well. Every pixel of the band is written once: the margins above
-        and below, then along the row of slots the gaps between them and the
-        slots themselves, left to right, which is the order they lie in.
+        One tab, its rectangle x, y, width, height: the window's lit while
+        it has the keys and dim while it is put away, the tray for the time.
 */
+static unsigned int compositor_tab_ink(int slot, unsigned int mark)
+{
+        return slot < 0                         ? COMPOSITOR_INK_BUTTON
+               : mark & SURFACE_LIST_MINIMIZED  ? COMPOSITOR_INK_PANEL
+               : mark & SURFACE_LIST_FOCUSED    ? COMPOSITOR_INK_BUTTON_LIT
+                                                : COMPOSITOR_INK_BUTTON;
+}
+
+static void compositor_panel_tab(const struct compositor_target *t, int slot, unsigned int mark, int x, int y,
+                                 int width, int height, int top)
+{
+        (void)top;
+        compositor_fill(t, x, y, width, height, compositor_tab_ink(slot, mark));
+}
+
+// Every tab of a band, for a panel program's buffer.
 static void compositor_panel(const struct compositor_target *t, const struct compositor_frame *frame)
 {
-        int margin = 2 * frame->scale, line = frame->scale, edge = frame->x;
-        int top = frame->y + margin, bottom = frame->y + frame->height - margin;
         int x, y, width, height;
 
-        if (frame->height <= 2 * margin)
-        {
-                compositor_fill(t, frame->x, frame->y, frame->width, frame->height, COMPOSITOR_INK_PANEL);
-                return;
-        }
-
-        compositor_fill(t, frame->x, frame->y, frame->width, margin, COMPOSITOR_INK_PANEL);
-        compositor_fill(t, frame->x, bottom, frame->width, margin, COMPOSITOR_INK_PANEL);
-
-        for (int which = -1; which <= (int)frame->mark_count; which++)
-        {
-                // The launcher, the windows, then the tray at the far end.
-                int slot = which == (int)frame->mark_count ? -2 : which;
-                unsigned int mark = slot >= 0 ? frame->marks[slot] : 0;
-
-                if (!compositor_panel_slot(frame, slot, &x, &y, &width, &height))
-                        continue;
-
-                compositor_fill(t, edge, top, x - edge, bottom - top, COMPOSITOR_INK_PANEL);
-                edge = x + width;
-
-                if (slot == -1)
-                {
-                        int mark_side = height / 2;
-
-                        compositor_fill(t, x, y, width, (height - mark_side) / 2, COMPOSITOR_INK_BUTTON_LIT);
-                        compositor_fill(t, x, y + (height - mark_side) / 2, (width - mark_side) / 2, mark_side,
-                                        COMPOSITOR_INK_BUTTON_LIT);
-                        compositor_fill(t, x + (width - mark_side) / 2, y + (height - mark_side) / 2, mark_side,
-                                        mark_side, COMPOSITOR_INK_TEXT);
-                        compositor_fill(t, x + (width - mark_side) / 2 + mark_side,
-                                        y + (height - mark_side) / 2, width - (width - mark_side) / 2 - mark_side,
-                                        mark_side, COMPOSITOR_INK_BUTTON_LIT);
-                        compositor_fill(t, x, y + (height - mark_side) / 2 + mark_side, width,
-                                        height - (height - mark_side) / 2 - mark_side, COMPOSITOR_INK_BUTTON_LIT);
-                }
-                else if (slot == -2)
-                        compositor_fill(t, x, y, width, height, COMPOSITOR_INK_DESKTOP);
-                else if ((mark & SURFACE_LIST_MINIMIZED) && width > 2 * line && height > 2 * line)
-                {
-                        // Put away: the button is only its outline.
-                        compositor_fill(t, x, y, width, line, COMPOSITOR_INK_BUTTON);
-                        compositor_fill(t, x, y + line, line, height - 2 * line, COMPOSITOR_INK_BUTTON);
-                        compositor_fill(t, x + line, y + line, width - 2 * line, height - 2 * line,
-                                        COMPOSITOR_INK_PANEL);
-                        compositor_fill(t, x + width - line, y + line, line, height - 2 * line,
-                                        COMPOSITOR_INK_BUTTON);
-                        compositor_fill(t, x, y + height - line, width, line, COMPOSITOR_INK_BUTTON);
-                }
-                else
-                        compositor_fill(t, x, y, width, height,
-                                        mark & SURFACE_LIST_FOCUSED ? COMPOSITOR_INK_BUTTON_LIT
-                                                                    : COMPOSITOR_INK_BUTTON);
-        }
-
-        compositor_fill(t, edge, top, frame->x + frame->width - edge, bottom - top, COMPOSITOR_INK_PANEL);
+        for (int slot = -2; slot < (int)frame->mark_count; slot++)
+                if (compositor_panel_slot(frame, slot, &x, &y, &width, &height))
+                        compositor_panel_tab(t, slot, slot >= 0 ? frame->marks[slot] : 0, x, y, width, height, frame->top);
 }
+
 
 /*
         A window's corners are quarters of a circle: the line's outside at
@@ -325,14 +318,14 @@ static void compositor_outline(const struct compositor_frame *frame, int *x, int
 }
 
 /*
-        A frame's radius as it is drawn, the line's outside: none for the
-        panel, at least the line's width so the line has corners of its own,
+        A frame's radius as it is drawn, the line's outside: at least the
+        line's width so the line has corners of its own,
         at most half the smaller side and the scratch's.
 */
 static int compositor_radius(const struct compositor_frame *frame)
 {
         int x, y, width, height, line = frame->builtin || frame->line < 0 ? 0 : frame->line;
-        int radius = frame->builtin ? 0 : frame->radius < line ? line : frame->radius;
+        int radius = frame->radius <= 0 ? 0 : frame->radius < line ? line : frame->radius;
 
         compositor_outline(frame, &x, &y, &width, &height);
         radius = radius > width / 2 ? width / 2 : radius;
@@ -349,28 +342,52 @@ static unsigned int compositor_mix(unsigned int ground, unsigned int ink, unsign
         return out;
 }
 
+// A target drawn on through a clip of its own: the rectangle, and what of it the target allows.
+static struct compositor_target compositor_clipped(const struct compositor_target *t, int x, int y, int width,
+                                                   int height)
+{
+        struct compositor_target part = *t;
+
+        part.x1 = x > t->x1 ? x : t->x1;
+        part.y1 = y > t->y1 ? y : t->y1;
+        part.x2 = x + width < t->x2 ? x + width : t->x2;
+        part.y2 = y + height < t->y2 ? y + height : t->y2;
+        if (part.x2 < part.x1)
+                part.x2 = part.x1;
+        if (part.y2 < part.y1)
+                part.y2 = part.y1;
+        return part;
+}
+
+// What is inside a frame's line, through the target's clip: a window's pixels, or one of the panel's tabs.
+static void compositor_contents(const struct compositor_target *t, const struct compositor_frame *frame)
+{
+        if (frame->builtin)
+                compositor_panel_tab(t, frame->slot,
+                                     frame->slot >= 0 && frame->slot < (int)frame->mark_count ? frame->marks[frame->slot] : 0,
+                                     frame->x, frame->y, frame->width, frame->height, frame->top);
+        else
+                compositor_blit(t, frame->x, frame->y, frame->width, frame->height, frame->pixels, frame->pitch);
+}
+
 /*
-        A frame drawn over what the target holds: the panel, or a window --
-        its line, then its pixels. Square, the line is four bands and the
-        pixels one rectangle. Round, the pixels are a cross that leaves out
-        the four corner squares of the line's radius, the line is four bands
-        between them, and in each square a pixel is the target's with the
-        line's outside mixed over it by the outer mask and the contents'
-        mixed over that by the inner one: the one place anything here reads
-        the target, which the scene makes sure is memory of its own and
-        never the scanout.
+        A frame drawn over what the target holds: a window -- its line, then
+        its pixels -- or a tab of the panel. Square, the line is four bands
+        and the contents one rectangle. Round, the contents are a cross that
+        leaves out the four corner squares of the line's radius, the line is
+        four bands between them, and in each round corner's square a pixel
+        is the target's with the line's outside mixed over it by the outer
+        mask and the contents' mixed over that by the inner one: the one
+        place anything here reads the target, which the scene makes sure is
+        memory of its own and never the scanout. A corner the frame keeps
+        square is its line and its contents as they are.
 */
 static void compositor_draw(const struct compositor_target *t,
                             const struct compositor_frame *frame)
 {
         int r = compositor_radius(frame), x = frame->x, y = frame->y, w = frame->width, h = frame->height;
         int ox, oy, ow, oh, b, ri;
-
-        if (frame->builtin)
-        {
-                compositor_panel(t, frame);
-                return;
-        }
+        struct compositor_target part;
 
         compositor_outline(frame, &ox, &oy, &ow, &oh);
         b = x - ox;
@@ -385,24 +402,43 @@ static void compositor_draw(const struct compositor_target *t,
                 compositor_fill(t, x + w, oy + r, b, oh - 2 * r, frame->edge);
         }
 
-        // The pixels, but for the corners' squares.
+        // The contents, but for the corners' squares.
         if (!r)
         {
-                compositor_blit(t, x, y, w, h, frame->pixels, frame->pitch);
+                compositor_contents(t, frame);
                 return;
         }
-        compositor_blit(t, x + ri, y, w - 2 * ri, ri, frame->pixels + ri, frame->pitch);
-        compositor_blit(t, x, y + ri, w, h - 2 * ri, frame->pixels + (unsigned long)ri * frame->pitch, frame->pitch);
-        compositor_blit(t, x + ri, y + h - ri, w - 2 * ri, ri, frame->pixels + (unsigned long)(h - ri) * frame->pitch + ri,
-                        frame->pitch);
+        part = compositor_clipped(t, x + ri, y, w - 2 * ri, h);
+        compositor_contents(&part, frame);
+        part = compositor_clipped(t, x, y + ri, ri, h - 2 * ri);
+        compositor_contents(&part, frame);
+        part = compositor_clipped(t, x + w - ri, y + ri, ri, h - 2 * ri);
+        compositor_contents(&part, frame);
 
         const unsigned char *outer = compositor_corner_mask(r, 0), *inner = ri ? compositor_corner_mask(ri, 1) : 0;
+        unsigned int tab = frame->builtin ? compositor_tab_ink(frame->slot, frame->slot >= 0 &&
+                                                                                    frame->slot < (int)frame->mark_count
+                                                                                ? frame->marks[frame->slot]
+                                                                                : 0)
+                                          : 0;
 
         for (int corner = 0; corner < 4; corner++)
         {
                 int cx = corner & 1 ? ox + ow - r : ox, cy = corner & 2 ? oy + oh - r : oy;
                 int x1 = cx > t->x1 ? cx : t->x1, y1 = cy > t->y1 ? cy : t->y1;
                 int x2 = cx + r < t->x2 ? cx + r : t->x2, y2 = cy + r < t->y2 ? cy + r : t->y2;
+
+                if (frame->square & (1 << corner))
+                {
+                        if (b)
+                        {
+                                part = compositor_clipped(t, cx, cy, r, r);
+                                compositor_fill(&part, cx, cy, r, r, frame->edge);
+                        }
+                        part = compositor_clipped(t, cx, cy, r, r);
+                        compositor_contents(&part, frame);
+                        continue;
+                }
 
                 for (int py = y1; py < y2; py++)
                         for (int px = x1; px < x2; px++)
@@ -419,7 +455,9 @@ static void compositor_draw(const struct compositor_target *t,
                                 if (px >= x && px < x + w && py >= y && py < y + h)
                                 {
                                         unsigned int in = inner ? inner[(my - b) * ri + (mx - b)] : 0;
-                                        unsigned int ink = frame->pixels[(unsigned long)(py - y) * frame->pitch + (unsigned long)(px - x)];
+                                        unsigned int ink = frame->builtin ? tab
+                                                           : frame->pixels[(unsigned long)(py - y) * frame->pitch +
+                                                                           (unsigned long)(px - x)];
 
                                         if (!b)
                                                 in = cover;
@@ -428,6 +466,40 @@ static void compositor_draw(const struct compositor_target *t,
                                 *at = pixel;
                         }
         }
+}
+
+/*
+        The tabs of a panel as frames of their own, each its tab's rectangle
+        and nothing of the band between them: the compositor's own (no
+        pixels: each draws its tab) or a panel program's (each the part of
+        its buffer the tab is). Round on the side towards the middle of the
+        output, square on the side that is off its edge. Answers how many.
+*/
+static unsigned int compositor_panel_tabs(const struct compositor_frame *band, struct compositor_frame *tabs)
+{
+        unsigned int count = 0;
+        int x, y, width, height;
+
+        for (int slot = 0; slot <= (int)band->mark_count; slot++)
+        {
+                int which = slot == (int)band->mark_count ? -2 : slot;
+
+                if (!compositor_panel_slot(band, which, &x, &y, &width, &height))
+                        continue;
+                tabs[count] = *band;
+                tabs[count].x = x;
+                tabs[count].y = y;
+                tabs[count].width = width;
+                tabs[count].height = height;
+                tabs[count].slot = which;
+                tabs[count].radius = COMPOSITOR_RADIUS * band->scale;
+                tabs[count].line = 0;
+                tabs[count].square = band->top ? 1 | 2 : 4 | 8;
+                if (!band->builtin)
+                        tabs[count].pixels = band->pixels + (unsigned long)(y - band->y) * band->pitch + (unsigned long)(x - band->x);
+                count++;
+        }
+        return count;
 }
 
 /*
@@ -442,16 +514,16 @@ struct compositor_area
         int x1, y1, x2, y2;
 };
 
-// The output less the panel's zone, at the scale and the edge in force.
+// The whole output: the panel's tabs lie over what fills it, and take none of it.
 static void compositor_work(int width, int height, int scale, int bottom,
                             struct compositor_area *area)
 {
-        int zone = COMPOSITOR_PANEL * scale;
-
+        (void)scale;
+        (void)bottom;
         area->x1 = 0;
         area->x2 = width;
-        area->y1 = bottom ? 0 : zone;
-        area->y2 = bottom ? height - zone : height;
+        area->y1 = 0;
+        area->y2 = height;
 }
 
 // The panel's own rectangle.
@@ -515,7 +587,7 @@ static const struct compositor_role compositor_roles[SURFACE_ROLE_LEGACY + 1] = 
 #define COMPOSITOR_MAXIMIZED 1
 #define COMPOSITOR_LEFT 2
 #define COMPOSITOR_RIGHT 3
-#define COMPOSITOR_FRAMES (COMPOSITOR_CLIENTS + 1) // and the compositor's own panel
+#define COMPOSITOR_FRAMES (2 * COMPOSITOR_CLIENTS + 2) // the surfaces, and a tab for each window and the tray
 
 /*
         The scene: inside the target's damage, each surface where nothing
@@ -1575,7 +1647,7 @@ static struct
         positive deadline[SURFACE_ROLE_LEGACY + 1];
         unsigned int list_changed; // the windows or what shows of them changed
         unsigned int list_generation; // of the listing the panel program was last sent
-        unsigned char marks[COMPOSITOR_CLIENTS];
+        unsigned char marks[COMPOSITOR_CLIENTS], lengths[COMPOSITOR_CLIENTS];
         struct compositor_client *listed[COMPOSITOR_CLIENTS];
         unsigned int listing;
 
@@ -1741,15 +1813,15 @@ static void compositor_frame_of(const struct compositor_client *client,
         unsigned int height = client->old.page ? client->old.height : client->height;
         unsigned int slot = client->old.page ? client->old.slot : client->slot;
 
-        // A floating window is round at its corners and has its line, lit while it has the keys; filling
-        // the work area or half of it, it has neither.
+        // A floating window is round at its corners and has its black line; filling the output or half
+        // of it, it has neither.
         *frame = (struct compositor_frame){client->x, client->y, (int)width, (int)height, compositor.scale,
                                            // Not surface_buffer: the page is the program's, and
                                            // its buffer_offset is whatever it last wrote.
                                            surface_slot(page, slot, width, height), width, 0, null, 0,
                                            compositor_line(client) ? COMPOSITOR_RADIUS * compositor.scale : 0,
                                            compositor_line(client),
-                                           client == compositor.focus ? COMPOSITOR_INK_BUTTON_LIT : COMPOSITOR_INK_PANEL};
+                                           COMPOSITOR_INK_LINE};
 }
 
 // The windows a panel lists, in the order they were made, and what shows of each.
@@ -1773,9 +1845,12 @@ static unsigned int compositor_windows(void)
         }
 
         for (unsigned int at = 0; at < count; at++)
+        {
                 compositor.marks[at] =
                     (unsigned char)((compositor.listed[at] == compositor.focus ? SURFACE_LIST_FOCUSED : 0) |
                                     (compositor.listed[at]->style & WINDOW_MINIMIZED ? SURFACE_LIST_MINIMIZED : 0));
+                compositor.lengths[at] = compositor_title_length(compositor.listed[at]->title, SURFACE_LISTING_TITLE);
+        }
 
         return count;
 }
@@ -1793,6 +1868,8 @@ static int compositor_panel_frame(struct compositor_frame *frame)
         compositor.listing = compositor_windows();
         *frame = (struct compositor_frame){x, y, width, height, compositor.scale, null, 0,
                                            1, compositor.marks, compositor.listing};
+        frame->top = !compositor.bottom;
+        frame->lengths = compositor.lengths;
         return 1;
 }
 
@@ -1854,16 +1931,31 @@ static void compositor_present(void)
 
                 if (have_panel && client->layer > SURFACE_LAYER_TOP)
                 {
-                        frames[count++] = panel;
+                        count += compositor_panel_tabs(&panel, &frames[count]);
                         have_panel = 0;
                 }
 
-                if (compositor_visible(client))
-                        compositor_frame_of(client, &frames[count++]);
+                if (!compositor_visible(client))
+                        continue;
+                compositor_frame_of(client, &frames[count]);
+
+                // A panel program's band is shown only where its tabs are, laid out as its own are.
+                if (client->role == SURFACE_ROLE_PANEL)
+                {
+                        struct compositor_frame band = frames[count];
+
+                        band.marks = compositor.marks;
+                        band.mark_count = compositor_windows();
+                        band.top = !compositor.bottom;
+                        band.lengths = compositor.lengths;
+                        count += compositor_panel_tabs(&band, &frames[count]);
+                }
+                else
+                        count++;
         }
 
         if (have_panel)
-                frames[count++] = panel;
+                count += compositor_panel_tabs(&panel, &frames[count]);
 
         for (at = 0; at < compositor.damages; at++)
         {
@@ -2685,24 +2777,36 @@ static unsigned int compositor_edge_zone(const struct compositor_client *client,
         does -- above whatever is under that, as the edge of a window that
         had a frame was.
 */
+// Whether a point is on a tab of a panel program's band: between its tabs it is nothing's.
+static int compositor_on_tab(const struct compositor_client *client, int x, int y)
+{
+        struct compositor_frame band;
+
+        compositor_frame_of(client, &band);
+        band.marks = compositor.marks;
+        band.mark_count = compositor_windows();
+        band.top = !compositor.bottom;
+        band.lengths = compositor.lengths;
+        return compositor_panel_hit(&band, x, y) != COMPOSITOR_HIT_NONE;
+}
+
 static struct compositor_client *compositor_under(int x, int y, int *panel)
 {
-        int bar_x, bar_y, bar_width, bar_height;
-        int bar = !(compositor.holder[SURFACE_ROLE_PANEL] && compositor.holder[SURFACE_ROLE_PANEL]->active);
+        struct compositor_frame bar_frame;
+        int bar = compositor_panel_frame(&bar_frame);
         unsigned int at = compositor.stacked;
 
-        compositor_band(compositor.width, compositor.height, compositor.scale, compositor.bottom,
-                        &bar_x, &bar_y, &bar_width, &bar_height);
         *panel = 0;
 
         for (;;)
         {
                 struct compositor_client *client = at ? compositor.stack[at - 1] : null;
 
+                // The compositor's own panel is its tabs, and a point between them is whatever is below.
                 if (bar && (!client || client->layer <= SURFACE_LAYER_TOP))
                 {
                         bar = 0;
-                        if (x >= bar_x && x < bar_x + bar_width && y >= bar_y && y < bar_y + bar_height)
+                        if (compositor_panel_hit(&bar_frame, x, y) != COMPOSITOR_HIT_NONE)
                         {
                                 *panel = 1;
                                 return null;
@@ -2714,6 +2818,8 @@ static struct compositor_client *compositor_under(int x, int y, int *panel)
 
                 at--;
                 if (!compositor_visible(client) || client->lock & SURFACE_LOCK_PASS_POINTER)
+                        continue;
+                if (client->role == SURFACE_ROLE_PANEL && !compositor_on_tab(client, x, y))
                         continue;
 
                 if ((x >= client->x && x < client->x + (int)client->width && y >= client->y &&
@@ -5531,9 +5637,10 @@ static b32 surface_main()
         panel [-f FONT.ttf]
 
         The panel, as a program that holds the panel role: a band as wide as
-        the output along its edge, with the launcher button, a button for
-        each window, the focused one lit, and at the right end the tray with
-        the time. It draws the shapes the compositor's own panel does, from
+        the output along its edge, of which the compositor shows only the
+        tabs -- one for each window with its title, the focused one lit, and
+        the tray with the time, in a row in the middle. It draws the shapes
+        the compositor's own panel does, from
         the same code, and the same buttons are pressed: a press on one
         asks the compositor to bring that window up, which restores it if
         it was put away. Given a font it writes each window's title on its
@@ -5561,11 +5668,19 @@ static p8 panel_atlas[128 * 128];
 // The window buttons' marks and the frame they are laid out in, which are what is drawn and pressed.
 static void panel_frame(struct compositor_frame *frame, unsigned char *marks)
 {
+        static unsigned char lengths[SURFACE_LISTING_MAX];
+
         for (unsigned int at = 0; at < panel.listing.count; at++)
+        {
                 marks[at] = (unsigned char)panel.listing.entry[at].state;
+                lengths[at] = compositor_title_length(panel.listing.entry[at].title, SURFACE_LISTING_TITLE);
+        }
 
         *frame = (struct compositor_frame){0, 0, panel.width, panel.height, panel.scale, null, 0,
                                            1, marks, panel.listing.count};
+        // Along the top of the output its tabs hang down; along the bottom they stand up.
+        frame->top = panel.surface->window.y == 0;
+        frame->lengths = lengths;
 }
 
 // One line of text at the left of a slot, in the slot's own colour for ground, cut off at its edge.
@@ -5622,10 +5737,7 @@ static void panel_draw(void)
         for (unsigned int at = 0; at < panel.listing.count; at++)
                 if (compositor_panel_slot(&frame, (int)at, &x, &y, &width, &height))
                         panel_text(x, y, width, height, panel.listing.entry[at].title,
-                                   marks[at] & SURFACE_LIST_MINIMIZED ? COMPOSITOR_INK_PANEL
-                                   : marks[at] & SURFACE_LIST_FOCUSED ? COMPOSITOR_INK_BUTTON_LIT
-                                                                     : COMPOSITOR_INK_BUTTON,
-                                   0);
+                                   compositor_tab_ink((int)at, marks[at]), 1);
 
         if (compositor_panel_slot(&frame, -2, &x, &y, &width, &height))
         {
@@ -5644,7 +5756,7 @@ static void panel_draw(void)
                         clock[3] = (char)('0' + broken.tm_min / 10);
                         clock[4] = (char)('0' + broken.tm_min % 10);
                         clock[5] = 0;
-                        panel_text(x, y, width, height, clock, COMPOSITOR_INK_DESKTOP, 1);
+                        panel_text(x, y, width, height, clock, COMPOSITOR_INK_BUTTON, 1);
                 }
         }
 }
