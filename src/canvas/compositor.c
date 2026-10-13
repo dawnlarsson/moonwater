@@ -4158,6 +4158,7 @@ static void compositor_leave(int row)
         compositor_glass_drop(row);
         compositor.glass_side[row] = compositor.glass_told[row] = 0;
         table->ground[row] = 0;
+        table->hover_off[row] = 0;
         table->state[row] = 0;
         table->want_width[row] = table->want_height[row] = 0;
         table->shown[row] = 0;
@@ -4658,9 +4659,13 @@ static void compositor_motion(void)
                 return;
         }
 
-        // A held button keeps the pointer with the window it went down on.
+        // A held button keeps the pointer with the window it went down on. Otherwise a window is told of the motion
+        // over it only when it wants the motion (windows_hover): each report of it wakes the program.
         compositor.hover = under;
-        compositor_pointer_to(compositor.grab >= 0 ? compositor.grab : under);
+        if (compositor.grab >= 0)
+                compositor_pointer_to(compositor.grab);
+        else if (under >= 0 && !__atomic_load_n(&compositor.table->hover_off[under], __ATOMIC_ACQUIRE))
+                compositor_pointer_to(under);
 }
 
 // Where a drag ended, read as an arrangement: the pointer and not the window,

@@ -108748,6 +108748,64 @@ static void check_compositor_cycle(void)
           compositor.cycle == 0 && compositor.focus == 1 && !(compositor.state[1] & WINDOW_MINIMIZED) && compositor.showing[1]);
 }
 
+/*
+        The pointer's motion, as a window hears it. A window that said it wants
+        none (windows_hover) is told nothing of a motion over it, and the program
+        is not woken for it; one held down, or pressed over, is told all the same.
+*/
+static void check_compositor_hover(void)
+{
+    static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+    struct windows address_to table;
+    unsigned int before;
+
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+    compositor.width = compositor.height = GLASS_SIDE;
+    compositor.scale = 1;
+    compositor.card = -1;
+    compositor.scanout = screen;
+    compositor.scanout_pitch = GLASS_SIDE * 4;
+    if (!glass_table_map())
+    {
+        check("hover: the table is mapped", false);
+        return;
+    }
+    table = compositor.table;
+    table->x[1] = 50;
+    table->y[1] = 30;
+    table->width[1] = 120;
+    table->height[1] = 80;
+    glass_paint(1, 0, 0, 120, 80, 0x404040u, true);
+    compositor_present();
+
+    /* Each motion is read by the program before the next: a motion behind an unread one replaces it. */
+    compositor.pointer_x = 55;
+    compositor.pointer_y = 40;
+    table->hover_off[1] = 1;
+    before = table->event_head[1];
+    compositor_motion();
+    check("hover: a window that asked for none is not told of a motion over it", table->event_head[1] == before);
+
+    table->hover_off[1] = 0;
+    compositor.pointer_x = 56;
+    compositor_motion();
+    check("hover: a window that wants the motion is told of it", table->event_head[1] == before + 1);
+    table->event_tail[1] = table->event_head[1];
+
+    table->hover_off[1] = 1;
+    compositor.pointer_x = 57;
+    compositor.grab = 1;
+    compositor_motion();
+    check("hover: a window with a button held over it is told of the motion", table->event_head[1] == before + 2);
+    table->event_tail[1] = table->event_head[1];
+    compositor.grab = COMPOSITOR_NONE;
+    compositor.pointer_x = 58;
+    compositor_motion();
+    check("hover: and nothing once the button is let go", table->event_head[1] == before + 2);
+}
+
 static fn check_glass(void)
 {
         static unsigned int screen[GLASS_SIDE * GLASS_SIDE], made[160 * 160], shown[160 * 160];
@@ -109518,6 +109576,7 @@ b32 main()
         check_glass();
         check_compositor_partial();
         check_compositor_cycle();
+        check_compositor_hover();
         check_settings(program_argument_count() > 3 ? program_argument(3) : program_argument(1),
                        program_argument_count() > 4 ? program_argument(4) : null);
 

@@ -600,6 +600,7 @@ struct windows
         unsigned int glass[WINDOWS];  // the program's: WINDOW_GLASS, read with the first picture
         unsigned int ground[WINDOWS]; // the compositor's: what a glass window's tint came to, 0xrrggbb
         unsigned int lift[WINDOWS];   // anyone's: one more raises the window and gives it the keys
+        unsigned int hover_off[WINDOWS]; // the program's: 1 when it does not want the pointer's motion over it
 
         unsigned int event_head[WINDOWS], event_tail[WINDOWS];
         unsigned short event_type[WINDOWS][WINDOWS_EVENTS], event_flags[WINDOWS][WINDOWS_EVENTS];
@@ -1207,6 +1208,18 @@ static void windows_leave(struct window_row *own)
         window_call(WINDOW_SYS_CLOSE, own->wake, 0, 0, 0, 0, 0);
         window_call(WINDOW_SYS_MUNMAP, (long)own->table, (long)own->bytes, 0, 0, 0, 0);
         own->table = 0;
+}
+
+/*
+        Whether the pointer's motion over the window is wanted. A program that
+        draws no hover -- a terminal that is not in its any-motion mode -- says
+        it does not, and the compositor sends it none, except what a button
+        held or pressed over it needs; every report of the motion is a wakeup
+        for the program otherwise. A program that never says is sent all of it.
+*/
+static void windows_hover(const struct window_row *own, unsigned int wanted)
+{
+        __atomic_store_n(&own->table->hover_off[own->row], wanted ? 0u : 1u, __ATOMIC_RELEASE);
 }
 
 #endif // KERNEL_MODE
