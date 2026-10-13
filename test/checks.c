@@ -108991,6 +108991,62 @@ static bool render_drawn(const p32 address_to pixels, p32 paper, p32 row, p32 co
         return lit && !missing;
 }
 
+/*
+        A forced frame, made while the compositor has not taken the last picture, is drawn into the
+        buffer the compositor has not taken, never into the one it still shows: the picture on the
+        screen does not change until the next one is taken, so the frame leaves the buffer on the
+        screen exactly as it was.
+*/
+static fn check_forced(void)
+{
+        struct windows address_to table = terminal.own.table;
+        positive bytes = (positive)terminal.pitch * terminal.height * 4;
+        p32 address_to kept = render_map(bytes);
+        int shown_before, shown_after, shown_on;
+        b32 framed;
+
+        if (!kept)
+        {
+                check("forced: a picture to keep the screen in", false);
+                return;
+        }
+
+        // The compositor takes the first picture, which is the one on the screen.
+        table->shown[0] = table->frame[0];
+        terminal.forced = false;
+        cursor_hide();
+        term_bytes((const p8 address_to) "\x1b[H\x1b[2Kfirst", 13);
+        cursor_show();
+        framed = terminal_frame();
+        table->shown[0] = table->frame[0];
+        shown_on = terminal.shown;
+        check("forced: the first picture is made and taken", framed && terminal.shown >= 0 && windows_ready(&terminal.own));
+
+        // A second picture the compositor has not taken: it still shows the first.
+        cursor_hide();
+        term_bytes((const p8 address_to) "\x1b[H\x1b[2Ksecond", 14);
+        cursor_show();
+        framed = terminal_frame();
+        table->shown[0] = table->frame[0] - 1;
+        shown_before = terminal.shown;
+        check("forced: the second picture is made and not taken", framed && shown_before != shown_on);
+        memory_copy(kept, windows_buffer(table, 0, shown_on), bytes);
+
+        // A third, forced: it goes somewhere else.
+        cursor_hide();
+        term_bytes((const p8 address_to) "\x1b[H\x1b[2Kthird", 13);
+        cursor_show();
+        terminal.forced = true;
+        framed = terminal_frame();
+        shown_after = terminal.shown;
+        check("forced: the third is made over the second", framed && shown_after == shown_before);
+        check("forced: the buffer the compositor shows is not drawn into",
+              !memory_compare(kept, windows_buffer(table, 0, shown_on), bytes));
+
+        table->shown[0] = table->frame[0];
+        terminal.forced = false;
+}
+
 // The frame just drawn, read back: the buffer that is on the screen, or null when it was refused.
 static p32 address_to render_frame(void)
 {
@@ -109135,6 +109191,7 @@ b32 main()
                 if (!render_step(&compared, &wrong, step))
                         refused++;
 
+        check_forced();
         check_keys();
         check_pointer();
         check_take();

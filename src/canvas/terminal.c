@@ -93,8 +93,9 @@ static const unsigned int terminal_steps[TERMINAL_STEPS] = {8, 10, 12, 14, 16, 1
 #define TERMINAL_FRAME_NANOSECONDS 16666667ll
 // How long the scroll bar takes to fade once the view is back at the live end.
 #define TERMINAL_FADE_NANOSECONDS 250000000ll
-// A frame that has waited this long for a buffer to be released draws into it regardless: the
-// compositor not on the screen is not reading it, and a terminal that never draws again is worse.
+// A frame that has waited this long for the compositor to take the last picture draws into the one it has
+// not taken regardless: the compositor not on the screen is not reading it, and a terminal that never draws
+// again is worse.
 #define TERMINAL_STALL_NANOSECONDS 250000000ll
 
 typedef unsigned long long __attribute__((may_alias)) terminal_word;
@@ -782,15 +783,20 @@ static unsigned int address_to terminal_grid(unsigned int address_to whole)
 /* ---- the buffers ---- */
 
 /*
-        The buffer the next frame goes into: the one not on the screen, once
-        the compositor has taken the last picture and so reads only the one
-        that is; before the first picture, either.
+        The buffer the next frame goes into. The compositor shows the one it
+        took last, and reads only that one: once it has taken the last picture
+        that is the one drawn last, and the frame goes into the other. While
+        it has not, the one drawn last is the one it has not taken, so a frame
+        forced past the wait goes into that one and never into the picture the
+        compositor shows. Before the first picture, either.
 */
 static int terminal_next(void)
 {
-        int slot = terminal.shown < 0 ? 0 : 1 - terminal.shown;
-
-        return terminal.shown < 0 || terminal.forced || windows_ready(&terminal.own) ? slot : -1;
+        if (terminal.shown < 0)
+                return 0;
+        if (windows_ready(&terminal.own))
+                return 1 - terminal.shown;
+        return terminal.forced ? terminal.shown : -1;
 }
 
 // What is held for the next frame's pictures, cut for the grid as it is now.
@@ -844,6 +850,7 @@ static void terminal_discard(void)
 static b32 terminal_frame(void)
 {
         int slot = terminal_next();
+        int front;
         unsigned int address_to pixels, address_to whole;
         struct windows address_to table = terminal.own.table;
         unsigned int own = terminal.own.row;
@@ -855,11 +862,13 @@ static b32 terminal_frame(void)
         int x1 = 0x7fffffff, y1 = 0x7fffffff, x2 = 0, y2 = 0;
         b32 bar, bar_told, any, right = false;
 
-        // A frame forced past a picture the compositor never took is measured against nothing it shows.
-        b32 untaken = terminal.shown >= 0 && !windows_ready(&terminal.own);
-
         if (slot < 0)
                 return false;
+
+        // The picture the compositor shows is the one it took last: the one drawn last once it has taken
+        // it, the other while it has not. Nothing is measured against a picture it never took.
+        front = windows_ready(&terminal.own) ? terminal.shown : terminal.shown < 0 ? -1 : 1 - terminal.shown;
+        screen = front >= 0 && terminal.valid[front] ? terminal.frame[front] : null;
 
         terminal_view_clamp();
         terminal_build(now);
@@ -870,15 +879,13 @@ static b32 terminal_frame(void)
         // The cells are drawn through the grid's own top left, the paper round them through the buffer's.
         whole = pixels;
         pixels = terminal_grid(whole);
-        screen = terminal.shown >= 0 && terminal.valid[terminal.shown] ? terminal.frame[terminal.shown] : null;
 
         // The bar is drawn where the buffer's own was not the same, and the compositor is
         // told where the one on the screen was not.
         bar = !terminal.valid[slot] || terminal.bar_first[slot] != first || terminal.bar_shown[slot] != shown ||
               terminal.bar_total[slot] != total || terminal.bar_drawn[slot] != terminal.bar_level;
-        bar_told = !screen || terminal.bar_first[terminal.shown] != first ||
-                   terminal.bar_shown[terminal.shown] != shown || terminal.bar_total[terminal.shown] != total ||
-                   terminal.bar_drawn[terminal.shown] != terminal.bar_level;
+        bar_told = !screen || terminal.bar_first[front] != first || terminal.bar_shown[front] != shown ||
+                   terminal.bar_total[front] != total || terminal.bar_drawn[front] != terminal.bar_level;
 
         any = bar || bar_told;
 
@@ -927,7 +934,7 @@ static b32 terminal_frame(void)
         // What the compositor reads again: one rectangle round the rows and the bar that differ from what
         // it shows. With nothing on the screen to differ from, all of it (a width of 0); with nothing
         // differing, none (a height of 0).
-        if (screen && ROWS <= 1024 && !untaken)
+        if (screen && ROWS <= 1024)
         {
                 for (unsigned int row = 0; row < ROWS; row++)
                         if (row_x1[row] > row_x0[row])
