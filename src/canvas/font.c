@@ -1866,6 +1866,13 @@ static fn font_snap(font_engine address_to e, const font_face address_to face, p
         font_snap_axis(e, normal, x_height / FONT_ROUND_RUN, scale / 4, null, 0, FONT_ONE * 3 / 4);
 }
 
+//      And a bar's edge the same: the tops and bottoms of o, e, a, s, g, 3
+//      and 8, where a curve is level for a short way, are rows of ink as a
+//      straight bar's are.
+#ifndef FONT_ROUND_BAR
+#define FONT_ROUND_BAR 6
+#endif
+
 //      Horizontal bars, for any fitted text: its baseline is a whole pixel.
 //      The axes are swapped so the bars are the stems above, and the
 //      fitted lines are kept where the fit put them.
@@ -1877,7 +1884,7 @@ static fn font_bars(font_engine address_to e, const font_face address_to face, p
         b64 x_height = font_divide((b64)(face->x_height > 0 ? face->x_height : face->units / 2) * scale, face->units);
 
         font_swap_axes(e);
-        font_snap_axis(e, normal, x_height / 3, scale / 4, fixed, fixes, FONT_BAR_WHOLE);
+        font_snap_axis(e, normal, x_height / FONT_ROUND_BAR, scale / 4, fixed, fixes, FONT_BAR_WHOLE);
         font_swap_axes(e);
 }
 
