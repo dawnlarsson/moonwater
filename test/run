@@ -9636,6 +9636,24 @@ same 'home and end'  '[\e[H\e[F]'                20 3 edit off keys '<home><end>
 same 'delete'        '[\e[3~]'                   20 3 edit off keys '<del>' sent
 same 'control'       '[\x01\x03\x1a]'            20 3 edit off keys '^A^C^Z' sent
 same 'alt character' '[\eb]'                     20 3 edit off keys '<a-b>' sent
+#       Ctrl with a symbol: each of the sixteen is the control code xterm
+#       sends for it, Ctrl+space and Ctrl+2 and Ctrl+@ NUL and so on.
+same 'ctrl  ' '[\x00]' 20 3 edit off keys '<c- >' sent
+same 'ctrl 2' '[\x00]' 20 3 edit off keys '<c-2>' sent
+same 'ctrl @' '[\x00]' 20 3 edit off keys '<c-@>' sent
+same 'ctrl 3' '[\e]' 20 3 edit off keys '<c-3>' sent
+same 'ctrl [' '[\e]' 20 3 edit off keys '<c-[>' sent
+same 'ctrl 4' '[\x1c]' 20 3 edit off keys '<c-4>' sent
+same 'ctrl \' '[\x1c]' 20 3 edit off keys '<c-\>' sent
+same 'ctrl 5' '[\x1d]' 20 3 edit off keys '<c-5>' sent
+same 'ctrl ]' '[\x1d]' 20 3 edit off keys '<c-]>' sent
+same 'ctrl 6' '[\x1e]' 20 3 edit off keys '<c-6>' sent
+same 'ctrl ^' '[\x1e]' 20 3 edit off keys '<c-^>' sent
+same 'ctrl 7' '[\x1f]' 20 3 edit off keys '<c-7>' sent
+same 'ctrl _' '[\x1f]' 20 3 edit off keys '<c-_>' sent
+same 'ctrl /' '[\x1f]' 20 3 edit off keys '<c-/>' sent
+same 'ctrl 8' '[\x7f]' 20 3 edit off keys '<c-8>' sent
+same 'ctrl ?' '[\x7f]' 20 3 edit off keys '<c-?>' sent
 #       Return is CR, as a VT100's and xterm's is, and a line feed is Ctrl+J.
 #       Canvas hands Enter over as a line feed with its key code, and nano,
 #       which turns ICRNL off, read every one as ^J Justify: typing one,

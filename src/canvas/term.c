@@ -3567,12 +3567,14 @@ static fn SPARE term_key_modified(unsigned int character, unsigned int code,
                 static const unsigned char codes[] = {
                     0, 0, 0, 27, 27, 28, 28, 29, 29, 30, 30, 31, 31, 31, 127, 127};
 
-                for (unsigned int i = 0; i < sizeof(codes); i++)
-                {
-                        if (character != (unsigned char)symbols[i])
-                                continue;
+                // A byte search: a character past a byte is none of the
+                // sixteen, where the byte it would truncate to might be one.
+                const char *hit = character < 256 ? (const char *)memory_first_of(
+                    (address_any)symbols, (b8)character, sizeof(symbols) - 1) : 0;
 
-                        character = codes[i];
+                if (hit)
+                {
+                        character = codes[hit - symbols];
 
                         // NUL is the one no character can carry, and a line
                         // being edited has no use for it.
@@ -3586,8 +3588,6 @@ static fn SPARE term_key_modified(unsigned int character, unsigned int code,
                                 }
                                 return;
                         }
-
-                        break;
                 }
         }
 
