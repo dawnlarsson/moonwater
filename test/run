@@ -8837,11 +8837,13 @@ coverage_keep "$work/term"
 #       The same harness with the kernel's queue: TERM_FIXED_QUEUE gives
 #       term.c the fixed 2048-byte buffer ring 0 has, so what ring 0 does
 #       past that size is run here too.
+#       Built without coverage: the coverage map is one file per lane build,
+#       and its addresses belong to the term binary alone.
 # shellcheck disable=SC2086
 if ! $compiler -O2 -static -nostdlib -nostartfiles -fno-stack-protector \
         -fno-builtin -Wall -Wextra -Werror=unused-variable \
         -Werror=unused-but-set-variable -I "$root" -T src/build/spark.ld -Wl,-e,_start \
-        -Wl,--build-id=none -Wl,--no-warn-rwx-segments -DTERM_FIXED_QUEUE $coverage_args \
+        -Wl,--build-id=none -Wl,--no-warn-rwx-segments -DTERM_FIXED_QUEUE \
         -o "$work/term-fixed" "$work/harness.c" 2> "$work/err-fixed"
 then
         echo "  term         fixed-queue harness build failed"
