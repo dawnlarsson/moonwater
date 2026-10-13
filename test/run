@@ -16319,7 +16319,7 @@ COMMANDS
 
 # shellcheck disable=SC2086
 install_boot use $stick
-says use 'leaving the disk alone is live' 'left-evil'
+says_whole use 'leaving the disk alone is live' 'left-evil'
 says use 'a question is asked once'      'asked-once-61'
 says use 'use succeeds'                  'used-70'
 says use 'use brings the data'           'used-root-dnoces'
