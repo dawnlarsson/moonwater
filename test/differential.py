@@ -2544,7 +2544,15 @@ def self_test():
             #      x509_corpus is another: it fetches real server chains over
             #      the network and puts tls_verify_chain's verdicts beside
             #      openssl verify's, which no lane may depend on.
-            BY_HAND = {"https_bench", "tls_verify_fuzz", "x509_corpus"}
+            #
+            #      bowl_matrix needs a booted guest and a disk of five bowl
+            #      distributions it provisions; hot_order rewrites the order
+            #      in src/build/spark.ld from a profiled shell; and
+            #      network_campaign and network_integration write their
+            #      reports and corpora into a directory they are given.
+            BY_HAND = {"https_bench", "tls_verify_fuzz", "x509_corpus",
+                       "bowl_matrix", "hot_order", "network_campaign",
+                       "network_integration"}
 
             unrun = sorted(set(registered) - asked - BY_HAND)
             self.assertEqual(unrun, [],
@@ -2553,6 +2561,51 @@ def self_test():
                              "name it in BY_HAND above: " + ", ".join(unrun))
             self.assertEqual(sorted(BY_HAND & asked), [],
                              "named as hand-run and asked for by a lane anyway")
+
+        def test_every_lane_and_every_file_is_in_one_seam(self):
+            """A change is run by its seam's lanes, so a lane in no seam is a
+            lane --changed never runs, and in two a lane it runs twice, and
+            a file in no seam is a change that selects nothing. The seams
+            are test/run's own list; this holds the lanes it names and the
+            files git tracks to it, so adding either is a decision about
+            which seam owns it, made where it is added."""
+            import subprocess
+            runner = Path(__file__).resolve().parent / "run"
+            if not runner.is_file():
+                self.skipTest("test/run is not beside this file")
+
+            def ask(*arguments):
+                done = subprocess.run(["sh", str(runner), *arguments], capture_output=True,
+                                      text=True, timeout=120)
+                self.assertEqual(done.returncode, 0, done.stderr)
+                return done.stdout.splitlines()
+
+            lanes = [line.split()[0] for line in ask("--list")]
+            assigned = collections.Counter()
+            for line in ask("--seams"):
+                seam, kind, *named = line.split()
+                self.assertIn(kind, ("run", "apart"), line)
+                assigned.update(named)
+            self.assertEqual(sorted(set(assigned) - set(lanes)), [],
+                             "a seam names a lane test/run does not have")
+            self.assertEqual(sorted(set(lanes) - set(assigned)), [],
+                             "a lane is in no seam: add it to seam_lanes or seam_apart in test/run")
+            self.assertEqual(sorted(lane for lane, count in assigned.items() if count > 1), [],
+                             "a lane is in two seams")
+
+            tracked = subprocess.run(["git", "-C", str(runner.parent.parent), "ls-files"],
+                                     capture_output=True, text=True)
+            if tracked.returncode:
+                return
+            paths = [path for path in tracked.stdout.splitlines() if path]
+            known = set(line.split()[0] for line in ask("--seams")) | {"-", "suite"}
+            unowned = []
+            for row in ask("--seam-of", *paths):
+                path, *owners = row.split(" ")
+                if not owners or not set(owners) <= known:
+                    unowned.append(path)
+            self.assertEqual(unowned, [],
+                             "files in no seam: give each one in seam_of_path in test/run")
 
         def test_no_definition_in_this_file_shadows_another(self):
             """The same hazard from the other side. Assembling modules into
@@ -25905,7 +25958,7 @@ def ul_check_lscpu_summary(farm):
         flags = ["-g", "-O1", "-fno-omit-frame-pointer", "-Wno-pointer-sign", "-w"]
         if compiler != "cc":
             flags += ["-fsanitize=address,undefined"]
-        build = subprocess.run([compiler, *flags, str(c_path), "-o", str(binary)], capture_output=True, text=True)
+        build = build_run([compiler, *flags, str(c_path), "-o", str(binary)], capture_output=True, text=True)
         if build.returncode:
             kept = Path(farm).parent / "ul-lscpu-summary.c"
             log = Path(farm).parent / "ul-lscpu-summary.log"
@@ -30333,7 +30386,7 @@ line_add_padded() { line_add "$@"; }
         if os.uname().sysname == "Linux":
             inputs = canvas_sources(Path(work), os.uname().machine)
             executable = str(Path(work) / "canvas-cells")
-            subprocess.run([os.environ.get("CC", "cc"), "-std=gnu11", "-O2", "-fno-builtin",
+            build_run([os.environ.get("CC", "cc"), "-std=gnu11", "-O2", "-fno-builtin",
                             "-I", work, *inputs, "-o", executable], check=True)
             subprocess.run([executable], check=True)
     return 0
@@ -30400,7 +30453,7 @@ int main(void) {
         kernel = work / "kernel.c"
         kernel.write_text(source)
         compiler = os.environ.get("CC", "gcc")
-        subprocess.run([compiler, "-O2", str(kernel), "-o", str(work / "kernel")], check=True)
+        build_run([compiler, "-O2", str(kernel), "-o", str(work / "kernel")], check=True)
         features = subprocess.run([str(work / "kernel")], text=True, stdout=subprocess.PIPE)
         print(features.stdout, end="", flush=True)
         if features.returncode:
@@ -30461,7 +30514,7 @@ int main(void) {
 }
 '''
             (work / "randomize.c").write_text(random_program)
-            built = subprocess.run([compiler, "-O2", "-w", str(work / "randomize.c"), "-o", str(work / "randomize")],
+            built = build_run([compiler, "-O2", "-w", str(work / "randomize.c"), "-o", str(work / "randomize")],
                                    capture_output=True, text=True)
             if built.returncode:
                 print("  FAIL the randomization did not build:\n" + built.stderr[-600:])
@@ -30515,7 +30568,7 @@ int main(int argc, char **argv) {
             (work / "personality.c").write_text(harness)
             for label, (flags, letter) in configs.items():
                 gate += 1
-                built = subprocess.run([compiler, "-O2", "-w", *flags.split(),
+                built = build_run([compiler, "-O2", "-w", *flags.split(),
                                         str(work / "personality.c"), "-o", str(work / "personality")],
                                        capture_output=True, text=True)
                 if built.returncode:
@@ -30535,7 +30588,7 @@ int main(int argc, char **argv) {
             return 1
         if platform.system() == "Linux" and platform.machine() in ("x86_64", "amd64"):
             binary = work / "entry"
-            subprocess.run([compiler, "-O2", "-static", "-nostdlib", "-nostartfiles",
+            build_run([compiler, "-O2", "-static", "-nostdlib", "-nostartfiles",
                             "-fno-stack-protector", "-fno-builtin", "-w",
                             "-T", str(root / "src/build/spark.ld"), "-Wl,-e,spark_entry_probe",
                             "-Wl,--build-id=none", "-Wl,--no-warn-rwx-segments",
@@ -30993,7 +31046,7 @@ def build_tool(root):
     source = pathlib.Path(root) / "src/build/build.c"
 
     if not tool.exists() or source.stat().st_mtime > tool.stat().st_mtime:
-        subprocess.run([os.environ.get("CC_BOOTSTRAP", "cc"), "-O2", "-static",
+        build_run([os.environ.get("CC_BOOTSTRAP", "cc"), "-O2", "-static",
                         "-nostdlib", "-nostartfiles", "-fno-stack-protector",
                         "-fno-builtin", "-w", "-o", str(tool), str(source)],
                        check=True)
@@ -31093,7 +31146,7 @@ b32 main(void)
         program.write_text(source, encoding="utf-8")
         for arch in arches:
             binary = root / ("probe-" + arch)
-            built = subprocess.run([
+            built = build_run([
                 os.environ.get("CC", "cc"), "-arch", arch, "-O2",
                 "-nostdlib", "-fno-stack-protector", "-fno-builtin", "-w",
                 "-Wl,-e,_start", str(program), "-I", str(HARNESS_ROOT / "src"),
@@ -35568,7 +35621,7 @@ int main(void)
             unit = Path(work) / 'confine.c'
             unit.write_text(confine)
             binary = Path(work) / 'confine'
-            built = subprocess.run(shlex.split(os.environ.get('CC', 'cc')) +
+            built = build_run(shlex.split(os.environ.get('CC', 'cc')) +
                                    ['-std=gnu11', '-O1', '-w', str(unit), '-o', str(binary)],
                                    capture_output=True, text=True)
             if built.returncode:
@@ -38018,7 +38071,7 @@ int main(void)
     with tempfile.TemporaryDirectory(prefix="canvas-scale-") as temporary:
         unit = Path(temporary) / "scale.c"
         unit.write_text(source)
-        built = subprocess.run([cc, "-std=gnu11", "-O1", "-g", "-fsanitize=address,undefined",
+        built = build_run([cc, "-std=gnu11", "-O1", "-g", "-fsanitize=address,undefined",
                                 "-fno-sanitize-recover=all", "-Wall", "-Wno-unused-function",
                                 "-Wno-unused-variable", "-o", str(unit.with_suffix("")), str(unit)],
                                capture_output=True, text=True)
@@ -41272,7 +41325,7 @@ int main(void) {
         source_path = work / "session.c"
         source_path.write_text(source)
         compiler = os.environ.get("CC", "gcc")
-        built = subprocess.run(
+        built = build_run(
             [compiler, "-O2", "-std=gnu11", "-w", str(source_path), "-o", str(work / "session")],
             text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         if built.returncode:
@@ -41402,7 +41455,7 @@ int main(void) {
         source_path = work / "roots.c"
         source_path.write_text(source)
         compiler = os.environ.get("CC", "gcc")
-        built = subprocess.run(
+        built = build_run(
             [compiler, "-O2", "-std=gnu11", "-w", str(source_path), "-o", str(work / "roots")],
             text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         if built.returncode:
@@ -42001,7 +42054,7 @@ int main(void) {
         with tempfile.TemporaryDirectory(prefix="host-writes-") as temporary:
             top = Path(temporary).resolve()
             (top / "fixture.c").write_text(shim + body + driver)
-            built = subprocess.run(["cc", "-w", "-o", str(top / "fixture"), str(top / "fixture.c")],
+            built = build_run(["cc", "-w", "-o", str(top / "fixture"), str(top / "fixture.c")],
                                    capture_output=True, text=True)
             if built.returncode:
                 return None, built.stderr[-2000:]
@@ -42326,7 +42379,7 @@ int main(void) {
         with tempfile.TemporaryDirectory(prefix="net-sysctl-") as temporary:
             top = Path(temporary).resolve()
             (top / "fixture.c").write_text(shim + listing + body + driver)
-            built = subprocess.run(["cc", "-w", "-o", str(top / "fixture"), str(top / "fixture.c")],
+            built = build_run(["cc", "-w", "-o", str(top / "fixture"), str(top / "fixture.c")],
                                    capture_output=True, text=True)
             if built.returncode:
                 return None, built.stderr[-2000:]
@@ -42520,7 +42573,7 @@ int main(int argc, char **argv) {
     with tempfile.TemporaryDirectory(prefix="console-queue-") as temporary:
         top = Path(temporary)
         (top / "queue.c").write_text(shim + cut + driver)
-        built = subprocess.run(["cc", "-O2", "-w", "-o", str(top / "queue"), str(top / "queue.c")],
+        built = build_run(["cc", "-O2", "-w", "-o", str(top / "queue"), str(top / "queue.c")],
                                capture_output=True, text=True)
         if built.returncode:
             print("  FAIL the queue did not build:\n" + built.stderr[-3000:])
@@ -42723,7 +42776,7 @@ int main(int argc, char **argv) {
     with tempfile.TemporaryDirectory(prefix="pane-restride-") as temporary:
         top = Path(temporary)
         (top / "restride.c").write_text(shim + body + driver)
-        built = subprocess.run(["cc", "-O2", "-w", "-o", str(top / "restride"), str(top / "restride.c")],
+        built = build_run(["cc", "-O2", "-w", "-o", str(top / "restride"), str(top / "restride.c")],
                                capture_output=True, text=True)
         if built.returncode:
             print("  FAIL the restride did not build:\n" + built.stderr[-3000:])
@@ -42947,7 +43000,7 @@ int main(void) {
     with tempfile.TemporaryDirectory(prefix="pane-pages-") as temporary:
         top = Path(temporary)
         (top / "pages.c").write_text(shim + body + driver)
-        built = subprocess.run(["cc", "-O2", "-w", "-o", str(top / "pages"), str(top / "pages.c")],
+        built = build_run(["cc", "-O2", "-w", "-o", str(top / "pages"), str(top / "pages.c")],
                                capture_output=True, text=True)
         if built.returncode:
             print("  FAIL the pane pages did not build:\n" + built.stderr[-3000:])
@@ -43174,7 +43227,7 @@ int main(int argc, char **argv)
     with tempfile.TemporaryDirectory(prefix="sort-spill-") as work:
         top = Path(work)
         (top / "spill.c").write_text(shim + cut + driver)
-        built = subprocess.run(["cc", "-O2", "-w", "-o", str(top / "spill"), str(top / "spill.c")],
+        built = build_run(["cc", "-O2", "-w", "-o", str(top / "spill"), str(top / "spill.c")],
                                capture_output=True, text=True)
         if built.returncode:
             print("  FAIL the spill namer did not build:\n" + built.stderr[-2000:])
@@ -43720,7 +43773,7 @@ int main(int argc, char **argv) {
         top = Path(temporary)
         (top / "dhcp.c").write_text(shim + head + walk + driver)
         compiler = "clang" if shutil.which("clang") else "cc"
-        built = subprocess.run([compiler, "-O1", "-g", "-w", "-fsanitize=address,undefined",
+        built = build_run([compiler, "-O1", "-g", "-w", "-fsanitize=address,undefined",
                                 "-fno-sanitize-recover=all", "-o", str(top / "dhcp"),
                                 str(top / "dhcp.c")], capture_output=True, text=True)
         if built.returncode:
@@ -44527,7 +44580,7 @@ def fuzz_lib_run(label, tally, source, seeds, max_len, lib=True):
                  "-fno-sanitize-recover=all", "-I", str(HARNESS_ROOT)]
         if lib:
             flags.append("-Dmain=fuzz_unused_main")
-        built = subprocess.run(flags + [sanitize.replace("fuzzer,", "fuzzer-no-link,"),
+        built = build_run(flags + [sanitize.replace("fuzzer,", "fuzzer-no-link,"),
                                         "-c", str(unit), "-o", str(work / "a.o")],
                                capture_output=True, text=True, cwd=HARNESS_ROOT)
         if built.returncode:
@@ -44537,7 +44590,7 @@ def fuzz_lib_run(label, tally, source, seeds, max_len, lib=True):
         local = subprocess.run([objcopy] + (["--keep-global-symbol=LLVMFuzzerTestOneInput"] if lib else [])
                                + [str(work / "a.o"), str(work / "b.o")],
                                capture_output=True, text=True)
-        linked = subprocess.run([clang, sanitize, str(work / "b.o"), "-o", str(work / tally)],
+        linked = build_run([clang, sanitize, str(work / "b.o"), "-o", str(work / tally)],
                                 capture_output=True, text=True)
         if local.returncode or linked.returncode:
             print("  FAIL " + label + " fuzz does not link:\n" + (local.stderr + linked.stderr)[-2000:])
@@ -45011,7 +45064,7 @@ int main(int count, char **argument) {
                 where.mkdir()
                 source = work / (which + scene + ".c")
                 source.write_text(shim + blob + installer + driver)
-                built = subprocess.run(
+                built = build_run(
                     [compiler, "-O1", "-std=gnu11", "-w",
                      '-DROOT="%s"' % (where / "tree"), str(source),
                      "-o", str(work / (which + scene + ".run"))],
@@ -48017,7 +48070,7 @@ int main(void)
     with tempfile.TemporaryDirectory(prefix="machine-reap-") as work:
         unit = Path(work) / "reap.c"
         unit.write_text(source)
-        built = subprocess.run([os.environ.get("CC", "cc"), "-O1", "-w", "-o",
+        built = build_run([os.environ.get("CC", "cc"), "-O1", "-w", "-o",
                                 str(Path(work) / "reap"), str(unit)],
                                capture_output=True, text=True)
         if built.returncode:
@@ -48080,6 +48133,226 @@ def openssl_workbench(work):
     return openssl, issue
 
 
+#       The build cache. A compile that links is a function of the compiler,
+#       the linker, the command line, the files named on it and the text the
+#       preprocessor reads, and a harness that builds the shell the harness
+#       before it built, or the unit the last run built, learns nothing from
+#       building it again: half a minute for the same bytes. build_run is
+#       subprocess.run for a compiler line that answers from the cache. The
+#       key is the digest of those inputs (a file named on the line counts by
+#       its bytes and not its path, which is a temporary directory's), the
+#       entry is the output and what the compiler said, written under a
+#       temporary name and renamed so that two builds of one key never meet
+#       halfway. A line with a path of the run's own in it makes a key of its
+#       own and so never hits, which is a miss and not a wrong answer.
+#
+#       MOONWATER_TEST_CACHE names the directory (default
+#       ~/.cache/moonwater-test, shared with test/run's freestanding),
+#       `off` turns it off, and `verify` builds every time and fails when a
+#       build is not the bytes its key stood for: the proof that the key is
+#       the whole function.
+BUILD_CACHE_TOOLS = {}
+BUILD_CACHE_LINES = {"-E", "-M", "-MM", "-MD", "-MMD", "-"}
+
+
+def build_cache_setting():
+    """(directory or None, verify) for MOONWATER_TEST_CACHE."""
+    setting = os.environ.get("MOONWATER_TEST_CACHE", "")
+    if setting == "off" or os.environ.get("MOONWATER_INTEGRATION_COVERAGE"):
+        return None, False
+    home = os.environ.get("XDG_CACHE_HOME") or (
+        os.path.join(os.environ["HOME"], ".cache") if os.environ.get("HOME") else "")
+    root = setting if setting not in ("", "verify") else (
+        os.path.join(home, "moonwater-test") if home else "")
+    return (Path(root) if root else None), setting == "verify"
+
+
+def build_cache_tool(program, linked=True):
+    """The program's version line and, for a compiler, its linker's, one to a
+    line, as a build is made by both."""
+    if (program, linked) not in BUILD_CACHE_TOOLS:
+        lines = []
+        for command in ([program, "--version"], None):
+            if command is None:
+                if not linked:
+                    break
+                found = subprocess.run([program, "-print-prog-name=ld"], capture_output=True,
+                                       text=True)
+                command = [found.stdout.strip() or "ld", "--version"]
+            try:
+                said = subprocess.run(command, capture_output=True, text=True).stdout
+            except OSError:
+                said = ""
+            if said:
+                lines.append(said.split("\n")[0] + "\n")
+        BUILD_CACHE_TOOLS[(program, linked)] = "".join(lines)
+    return BUILD_CACHE_TOOLS[(program, linked)]
+
+
+def build_cache_key(command, cwd):
+    """(key, output) for a compiler line that links or compiles one output, or None.
+
+    The key is the digest of the text test/run's build_key writes for the
+    same line, so a build made by either is found by the other: a line for
+    the version of the compiler and one for its linker's, then a line for
+    each word of the command but the output and its name, `file` and the
+    digest of its bytes for a word that names a file and `arg` and the word
+    for the rest, then what the preprocessor reads."""
+    words, kept, output, at = [str(word) for word in command], [], None, 0
+    base = Path(cwd) if cwd else Path.cwd()
+    if len(words) < 4 or BUILD_CACHE_LINES & set(words):
+        return None
+    while at < len(words):
+        if words[at] == "-o" and at + 1 < len(words) and output is None:
+            output, at = words[at + 1], at + 2
+            continue
+        kept.append(words[at])
+        at += 1
+    if output is None:
+        return None
+    text = subprocess.run(kept + ["-E", "-P"], capture_output=True, cwd=cwd)
+    if text.returncode:
+        return None
+    digest = hashlib.sha256(b"moonwater build cache sh 1\n")
+    digest.update(build_cache_tool(words[0]).encode())
+    for word in kept:
+        path = base / word
+        #   The anchor and the logs a shell is built with are included by
+        #   name, and what is in the file is in the preprocessed text, so the
+        #   name is a temporary directory's and not part of the program.
+        included = re.fullmatch(r'-D(TLS_BENCH_ANCHOR|TLS_BENCH_CT)="(.*)"', word)
+        if included and (base / included.group(2)).is_file():
+            digest.update(b"arg -D" + included.group(1).encode() + b"=<included>\n")
+        elif word != words[0] and path.is_file():
+            digest.update(b"file " + hashlib.sha256(path.read_bytes()).hexdigest().encode() + b"\n")
+        else:
+            digest.update(b"arg " + word.encode() + b"\n")
+    digest.update(text.stdout)
+    return digest.hexdigest(), output
+
+
+def build_claim(entry):
+    """True when this process is the one to make entry, and False when it was
+    made while waiting for whoever held the claim: a build that two lanes want
+    is made by one of them. A claim is a directory beside the entry holding the
+    pid of its owner, and one whose owner is gone, or that has stood for
+    twenty minutes, is not waited for."""
+    lock = Path(str(entry) + ".lock")
+    entry.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + 1200
+    while True:
+        if entry.is_file():
+            return False
+        try:
+            lock.mkdir()
+            if entry.is_file():
+                #   Made while this was between looking and claiming.
+                lock.rmdir()
+                return False
+            (lock / "owner").write_text("%s %d\n" % (os.uname().nodename, os.getpid()))
+            return True
+        except FileExistsError:
+            pass
+        try:
+            host, _, number = (lock / "owner").read_text().partition(" ")
+            if host == os.uname().nodename:
+                os.kill(int(number), 0)
+        except ProcessLookupError:
+            shutil.rmtree(lock, ignore_errors=True)
+            continue
+        except (OSError, ValueError):
+            pass
+        if time.monotonic() > deadline:
+            shutil.rmtree(lock, ignore_errors=True)
+            continue
+        time.sleep(0.5)
+
+
+def build_run(command, **options):
+    """subprocess.run for a compiler line, from the build cache when it can be.
+
+    What it returns is what run would: the cached compiler's words stand for
+    a build that said them, and a build that failed is never kept."""
+    root, verify = build_cache_setting()
+    began = time.monotonic()
+    keyed = None
+    if root and "input" not in options and not options.get("shell"):
+        try:
+            keyed = build_cache_key(command, options.get("cwd"))
+        except OSError:
+            keyed = None
+    name = "build " + Path(str(command[-1])).name
+    if keyed is None:
+        done = subprocess.run(command, **options)
+        record_time(name, time.monotonic() - began)
+        return done
+    key, output = keyed
+    entry = root / key[:2] / key
+    target = Path(options["cwd"] if options.get("cwd") else ".") / output
+
+    def served():
+        shutil.copyfile(entry, target)
+        os.chmod(target, entry.stat().st_mode & 0o777)
+        os.utime(entry)
+        said = entry.with_suffix(".err").read_bytes() if entry.with_suffix(".err").exists() else b""
+        record_time(name + " (cached)", time.monotonic() - began)
+        text = options.get("text") or options.get("universal_newlines") or options.get("encoding")
+        shaped = said.decode(errors="replace") if text else said
+        captured = options.get("capture_output") or options.get("stderr") == subprocess.PIPE
+        merged = options.get("stderr") == subprocess.STDOUT
+        return subprocess.CompletedProcess(
+            command, 0, shaped if merged else (("" if text else b"") if (
+                captured or options.get("stdout") == subprocess.PIPE) else None),
+            shaped if captured and not merged else None)
+
+    if entry.is_file() and not verify:
+        return served()
+    claimed = verify or build_claim(entry)
+    if not claimed:
+        return served()
+    try:
+        done = subprocess.run(command, **options)
+        record_time(name, time.monotonic() - began)
+        if done.returncode == 0 and target.is_file():
+            said = done.stderr if isinstance(done.stderr, bytes) else (done.stderr or "").encode()
+            #   A program built with debug information or a sanitizer carries
+            #   the path of its source, which is a temporary directory's, so
+            #   only the others are the same bytes each time.
+            debugged = any(str(word).startswith(("-g", "-fsanitize")) for word in command)
+            if verify and not debugged and entry.is_file() and (
+                    entry.read_bytes() != target.read_bytes()):
+                raise RuntimeError("build cache: %s differs from the build its key stood for (%s)"
+                                   % (output, key))
+            entry.parent.mkdir(parents=True, exist_ok=True)
+            staged = entry.with_name(".%s.%d" % (key, os.getpid()))
+            shutil.copyfile(target, staged)
+            os.chmod(staged, target.stat().st_mode & 0o777)
+            staged.with_suffix(".err").write_bytes(said)
+            os.replace(staged.with_suffix(".err"), entry.with_suffix(".err"))
+            os.replace(staged, entry)
+        return done
+    finally:
+        if claimed and not verify:
+            shutil.rmtree(str(entry) + ".lock", ignore_errors=True)
+
+
+def build_together(commands, **options):
+    """build_run for each command at once, in the order the commands were given."""
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(commands))) as pool:
+        return list(pool.map(lambda command: build_run(command, **options), commands))
+
+
+def record_time(name, seconds):
+    """One line in the file test/run keeps for what a run spent its time on."""
+    path = os.environ.get("TEST_TIMES")
+    if path:
+        try:
+            with open(path, "a") as stream:
+                stream.write("%.1f %s\n" % (seconds, name))
+        except OSError:
+            pass
+
+
 def spark_shell_command(cc, output, anchor=None, defines=()):
     """The cc line that builds programs/shell.c as a spark image does, run from HARNESS_ROOT.
 
@@ -48129,6 +48402,44 @@ def spark_shell_command(cc, output, anchor=None, defines=()):
             *(['-DTLS_BENCH_ANCHOR="%s"' % anchor] if anchor else []),
             *("-D" + define for define in defines),
             "-o", str(output), "programs/shell.c"]
+
+
+def bench_root_key(work):
+    """work/root.key, and the key: the P-384 key a harness that builds a shell
+    anchored to a root of its own signs with.
+
+    It is made once and kept beside the build cache, because the anchor a
+    shell is built with is this key's public point: a key made fresh each run
+    was a shell built fresh each run, a minute of the compiler for each shell
+    in each harness, and the same program but for that. The leaves, the serial
+    numbers and the times are fresh each run as they were, and with no cache
+    so is the key."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    root, _ = build_cache_setting()
+    kept = root / "bench-root.pem" if root else None
+    pem = None
+    if kept:
+        try:
+            pem = kept.read_bytes()
+        except OSError:
+            pem = None
+    if pem is None:
+        pem = ec.generate_private_key(ec.SECP384R1()).private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption())
+        if kept:
+            try:
+                kept.parent.mkdir(parents=True, exist_ok=True)
+                staged = kept.with_name(".bench-root.%d" % os.getpid())
+                staged.write_bytes(pem)
+                os.chmod(staged, 0o600)
+                os.replace(staged, kept)
+                pem = kept.read_bytes()
+            except OSError:
+                pass
+    (work / "root.key").write_bytes(pem)
+    return serialization.load_pem_private_key(pem, password=None)
 
 
 def bench_anchor(work):
@@ -48824,8 +49135,10 @@ def harness_tls_chains(argv):
                 rewrite_cert_oids(name, issuer_name, rewrites)
 
         p384 = keys[1][1]
+        bench_root_key(work)
         for root in ("root", "stranger"):
-            openssl("req", "-x509", *p384, "-nodes", "-keyout", root + ".key", "-out",
+            made = ["-key", "root.key"] if root == "root" else [*p384, "-keyout", root + ".key"]
+            openssl("req", "-x509", *made, "-nodes", "-out",
                     root + ".pem", "-days", "3650", "-sha384", "-subj", "/CN=tls chains root",
                     "-addext", "basicConstraints=critical,CA:TRUE",
                     "-addext", "keyUsage=critical,keyCertSign,cRLSign")
@@ -48842,14 +49155,21 @@ def harness_tls_chains(argv):
         #   The shell, the same shell with a distrust-after date on the bench
         #   root, and the same at the tight net tier, built side by side.
         anchor = bench_anchor(work)
-        builds = [subprocess.Popen(spark_shell_command(args.cc, work / name, anchor, defines),
-                                   cwd=HARNESS_ROOT, stdout=subprocess.DEVNULL,
-                                   stderr=subprocess.PIPE, text=True)
-                  for name, defines in (
-                      ("shell", ()),
-                      ("shell_distrust", ("TLS_BENCH_DISTRUST=20240615235959",)),
-                      ("shell_tight", ("MOONWATER_STRICT_NET=2",)))]
-        failed = [build.communicate()[1] for build in builds]
+        wanted = [("shell", ()),
+                  ("shell_distrust", ("TLS_BENCH_DISTRUST=20240615235959",)),
+                  ("shell_tight", ("MOONWATER_STRICT_NET=2",))]
+        #   The same shell with a floor in 2100 (every clock is below it), and
+        #   with the last-known-good file where the harness can write it,
+        #   when a mutation asks for either.
+        for variant, defines in (("floor", ("MOONWATER_CLOCK_FLOOR=4102444800ll",)),
+                                 ("good", ('CLOCK_GOOD_PATH="%s/clock.good"' % work,))):
+            if any(m[3].get("shell") == variant and (not args.only or args.only in m[0])
+                   for m in mutations):
+                wanted.append(("shell_" + variant, defines))
+        builds = build_together(
+            [spark_shell_command(args.cc, work / name, anchor, defines) for name, defines in wanted],
+            cwd=HARNESS_ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        failed = [build.stderr for build in builds]
         if any(build.returncode for build in builds):
             print("".join(failed)[-3000:])
             return 1
@@ -48857,21 +49177,10 @@ def harness_tls_chains(argv):
         for place in ("distrust", "tight"):
             (work / place).mkdir()
             (work / place / "wget").symlink_to(work / ("shell_" + place))
-        #   The same shell with a floor in 2100 (every clock is below it), and
-        #   with the last-known-good file where the harness can write it.
-        for variant, defines in (("floor", ("MOONWATER_CLOCK_FLOOR=4102444800ll",)),
-                                 ("good", ('CLOCK_GOOD_PATH="%s/clock.good"' % work,))):
-            if not any(m[3].get("shell") == variant and (not args.only or args.only in m[0])
-                       for m in mutations):
-                continue
-            built = subprocess.run(spark_shell_command(
-                args.cc, work / ("shell_" + variant), bench_anchor(work), defines),
-                cwd=HARNESS_ROOT, capture_output=True, text=True)
-            if built.returncode:
-                print(built.stderr[-3000:])
-                return 1
+        for name, _ in wanted[3:]:
+            variant = name[len("shell_"):]
             (work / variant).mkdir()
-            (work / variant / "wget").symlink_to(work / ("shell_" + variant))
+            (work / variant / "wget").symlink_to(work / name)
 
         #   caIssuers locations are served from the work directory.
         import functools
@@ -49364,7 +49673,8 @@ def harness_nts(argv):
             openssl, issue = openssl_workbench(work)
             p384 = ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:secp384r1"]
             p256 = ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1"]
-            openssl("req", "-x509", *p384, "-nodes", "-keyout", "root.key", "-out", "root.pem",
+            bench_root_key(work)
+            openssl("req", "-x509", "-key", "root.key", "-out", "root.pem",
                     "-days", "30", "-sha384", "-subj", "/CN=nts root",
                     "-addext", "basicConstraints=critical,CA:TRUE",
                     "-addext", "keyUsage=critical,keyCertSign,cRLSign")
@@ -49389,7 +49699,7 @@ def harness_nts(argv):
                                      ("below", ("MOONWATER_CLOCK_FLOOR=%dll" % (now_s + 86400),)),
                                      ("tight", ("MOONWATER_STRICT=2",))):
                 (work / variant).mkdir()
-                built = subprocess.run(spark_shell_command(args.cc, work / variant / "moonwater",
+                built = build_run(spark_shell_command(args.cc, work / variant / "moonwater",
                                                            bench_anchor(work), defines),
                                        cwd=HARNESS_ROOT, capture_output=True, text=True)
                 if built.returncode:
@@ -50661,7 +50971,7 @@ def harness_tls_peer(argv):
         work = Path(temporary)
         shell = Path(args.shell) if args.shell else work / "shell"
         if not args.shell:
-            built = subprocess.run(spark_shell_command(args.cc, shell), cwd=HARNESS_ROOT,
+            built = build_run(spark_shell_command(args.cc, shell), cwd=HARNESS_ROOT,
                                    capture_output=True, text=True)
             if built.returncode:
                 print(built.stderr[-3000:])
@@ -51088,14 +51398,14 @@ def tls_peer_stapled(args, work, checks, serve, entry_with, app, close, length_h
         ("TLS 1.2 must-staple with none", "staple", None, True),
     ]
     shells = {}
-    builds = []
+    commands = []
     anchor = bench_anchor(pki)
     for level, defines in (("default", ()), ("tight", ("MOONWATER_STRICT_NET=2",))):
         shells[level] = pki / ("shell_" + level)
-        builds.append(subprocess.Popen(
-            spark_shell_command(args.cc, shells[level], anchor, defines), cwd=HARNESS_ROOT,
-            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True))
-    errors = [build.communicate()[1] for build in builds]
+        commands.append(spark_shell_command(args.cc, shells[level], anchor, defines))
+    builds = build_together(commands, cwd=HARNESS_ROOT, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.PIPE, text=True)
+    errors = [build.stderr for build in builds]
     if any(build.returncode for build in builds):
         print("".join(errors)[-3000:])
         checks(False, "stapled OCSP: the anchored shells build")
@@ -51277,9 +51587,8 @@ def harness_https_downgrade(argv):
 
         openssl, issue = openssl_workbench(work)
 
-        openssl("req", "-x509", "-newkey", "ec",
-                "-pkeyopt", "ec_paramgen_curve:secp384r1", "-nodes",
-                "-keyout", "root.key", "-out", "root.pem", "-days", "3650",
+        bench_root_key(work)
+        openssl("req", "-x509", "-key", "root.key", "-out", "root.pem", "-days", "3650",
                 "-sha384", "-subj", "/CN=https downgrade root",
                 "-addext", "basicConstraints=critical,CA:TRUE",
                 "-addext", "keyUsage=critical,keyCertSign,cRLSign")
@@ -51289,7 +51598,7 @@ def harness_https_downgrade(argv):
         (work / "chain.pem").write_text(
             (work / "leaf.pem").read_text() + (work / "root.pem").read_text())
 
-        built = subprocess.run(spark_shell_command(args.cc, work / "shell", bench_anchor(work)),
+        built = build_run(spark_shell_command(args.cc, work / "shell", bench_anchor(work)),
                                cwd=HARNESS_ROOT, capture_output=True, text=True)
         if built.returncode:
             print(built.stderr[-3000:])
@@ -52362,7 +52671,7 @@ int main(void)
             """The matrix through the lifted framing at a MOONWATER_STRICT
             tier: (verdict lines, None), or (None, why it failed)."""
             binary = work / ("http_response_framing_%d" % strict)
-            built = subprocess.run(
+            built = build_run(
                 [compiler, "-O1", "-g", "-std=gnu11", "-Wno-unused-function",
                  "-DMOONWATER_STRICT=%d" % strict,
                  str(work / "http_response_framing.c"), "-o", str(binary)],
@@ -53797,7 +54106,7 @@ def harness_dns_tls(argv):
 
     Builds a shell that trusts a root the harness made (TLS_BENCH_ANCHOR, as
     https_bench does), the same at the tight tier (MOONWATER_STRICT 2) and
-    with a clock floor a day ahead (every clock is unset), and, in user,
+    with a clock floor in 2100 (every clock is unset), and, in user,
     mount and network namespaces of its own, gives loopback 1.1.1.1 and
     10.0.0.1 (a network's own resolver, which offers no TLS), where a script
     answers DNS on UDP 53 with 192.0.2.17 at 1.1.1.1 and 192.0.2.99 at
@@ -53847,7 +54156,7 @@ def harness_dns_tls(argv):
     with tempfile.TemporaryDirectory(prefix="dns-tls-") as temporary:
         work = Path(temporary)
         now = datetime.datetime.now(datetime.timezone.utc)
-        root_key = ec.generate_private_key(ec.SECP384R1())
+        root_key = bench_root_key(work)
         (work / "root.key").write_bytes(root_key.private_bytes(
             serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
             serialization.NoEncryption()))
@@ -53884,13 +54193,17 @@ def harness_dns_tls(argv):
         leaf("1.1.1.1", "expired.pem", expired=True)
         anchor = bench_anchor(work)
         (work / "server.py").write_text(DNS_TLS_SERVER)
-        for variant, defines in (("bin", ()), ("tight", ("MOONWATER_STRICT=2",)),
-                                 ("unset", ("MOONWATER_CLOCK_FLOOR=%dll" %
-                                            (int(now.timestamp()) + 86400),))):
+        variants = (("bin", ()), ("tight", ("MOONWATER_STRICT=2",)),
+                    #   A floor above every clock there will be (2100), which is the
+                    #   one tls_chains builds too, and not a day ahead of this run:
+                    #   a program that is the same from run to run is built once.
+                    ("unset", ("MOONWATER_CLOCK_FLOOR=4102444800ll",)))
+        for variant, _ in variants:
             (work / variant).mkdir()
-            built = subprocess.run(spark_shell_command(os.environ.get("CC", "gcc"),
-                                                       work / variant / "shell", anchor, defines),
-                                   cwd=HARNESS_ROOT, capture_output=True, text=True)
+        for (variant, _), built in zip(variants, build_together(
+                [spark_shell_command(os.environ.get("CC", "gcc"), work / variant / "shell", anchor,
+                                     defines) for variant, defines in variants],
+                cwd=HARNESS_ROOT, capture_output=True, text=True)):
             if built.returncode:
                 print("  FAIL the shell did not build:\n" + built.stderr[-3000:])
                 return 1
@@ -54191,7 +54504,7 @@ def harness_wget_mutation(argv):
         work = Path(temporary)
         shell = Path(args.shell) if args.shell else work / "shell"
         if not args.shell:
-            built = subprocess.run(spark_shell_command(args.cc, shell), cwd=HARNESS_ROOT,
+            built = build_run(spark_shell_command(args.cc, shell), cwd=HARNESS_ROOT,
                                    capture_output=True, text=True)
             if built.returncode:
                 print(built.stderr[-3000:])
@@ -54422,11 +54735,20 @@ def harness_wget_mutation(argv):
             len(procedures), time.monotonic() - started))
         exits = collections.Counter()
         deaths = []
+        #   What each run is given is drawn first, in order, from the one
+        #   seed, and the runs are made side by side: each has a port of its
+        #   own and reads nothing the others write, and a run is judged by how
+        #   it ended and not by when.
+        asked = []
         for number in range(args.runs):
             name, parts = rng.choice(bases)
             tool = rng.choice(("wget", "wget", "fetch"))
-            mutated = [mutate(part) if rng.random() < 0.8 else part for part in parts]
-            code = run_one(work, mutated, tool)
+            asked.append((name, tool, [mutate(part) if rng.random() < 0.8 else part
+                                       for part in parts]))
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=max(2, min(8, os.cpu_count() or 2))) as pool:
+            codes = list(pool.map(lambda one: run_one(work, one[2], one[1]), asked))
+        for (name, tool, mutated), code in zip(asked, codes):
             exits[code if isinstance(code, str) or code < 0 or code > 8 else "exit %d" % code] += 1
             if code == "timeout" or code < 0 or code >= 128:
                 deaths.append((name, tool, code, mutated))
@@ -54988,7 +55310,7 @@ def harness_wget_hostile(argv):
         work = Path(temporary)
         shell = Path(args.shell) if args.shell else work / "shell"
         if not args.shell:
-            built = subprocess.run(spark_shell_command(args.cc, shell), cwd=HARNESS_ROOT,
+            built = build_run(spark_shell_command(args.cc, shell), cwd=HARNESS_ROOT,
                                    capture_output=True, text=True)
             if built.returncode:
                 print(built.stderr[-3000:])
@@ -55048,14 +55370,18 @@ def harness_wget_hostile(argv):
             print("wget hostile: address policy rows skipped (no unshare -Urnm with ip)")
         else:
             levels = {1: shell}
+            asked = []
             for number in (0, 2, 3):
                 if number == 2 and args.tight_shell:
                     levels[number] = Path(args.tight_shell)
                     continue
                 levels[number] = work / ("level%d" % number)
-                built = subprocess.run(spark_shell_command(
-                    args.cc, levels[number], defines=("MOONWATER_STRICT=%d" % number,)),
-                    cwd=HARNESS_ROOT, capture_output=True, text=True)
+                asked.append(number)
+            for number, built in zip(asked, build_together(
+                    [spark_shell_command(args.cc, levels[number],
+                                         defines=("MOONWATER_STRICT=%d" % number,))
+                     for number in asked],
+                    cwd=HARNESS_ROOT, capture_output=True, text=True)):
                 checks(built.returncode == 0, "the MOONWATER_STRICT=%d shell did not build: "
                        % number + built.stderr[-300:])
             for number, path in sorted(levels.items()):
@@ -55365,10 +55691,10 @@ int main(void)
         if platform.system() == "Linux":
             flags.append("-fsanitize=address,undefined")
         (work / "http_urls_tight.c").write_text(tight_source)
-        built = subprocess.run(flags + [str(unit), "-o", str(work / "http_urls")],
+        built = build_run(flags + [str(unit), "-o", str(work / "http_urls")],
                                capture_output=True, text=True)
         if not built.returncode:
-            built = subprocess.run(flags + [str(work / "http_urls_tight.c"), "-o",
+            built = build_run(flags + [str(work / "http_urls_tight.c"), "-o",
                                             str(work / "http_urls_tight")],
                                    capture_output=True, text=True)
         if built.returncode:
@@ -55550,7 +55876,7 @@ def clang_supports_msan(clang):
         unit = work / "probe.c"
         binary = work / "probe"
         unit.write_text("int main(void){return 0;}\n")
-        built = subprocess.run(
+        built = build_run(
             [clang, "-O1", "-fsanitize=memory", str(unit), "-o", str(binary)],
             capture_output=True, text=True)
         return built.returncode == 0
@@ -56210,14 +56536,14 @@ def tls_fuzz_run(label, corpus, source, max_len, extra=()):
         probe = work / "probe.c"
         probe.write_text("int LLVMFuzzerTestOneInput(const unsigned char *d, "
                          "unsigned long n) { (void)d; (void)n; return 0; }\n")
-        if subprocess.run(flags + [str(probe), "-o", str(work / "probe")],
+        if build_run(flags + [str(probe), "-o", str(work / "probe")],
                           capture_output=True, text=True).returncode:
             need = "fuzzer,memory" if moonwater_msan_requested() else "fuzzer"
             print("%s fuzz: NOT RUN -- clang lacks libFuzzer "
                   "(need -fsanitize=%s)" % (label, need))
             return 2
         unit.write_text(source)
-        built = subprocess.run(flags + [str(unit), "-o", str(binary)] + list(extra),
+        built = build_run(flags + [str(unit), "-o", str(binary)] + list(extra),
                                capture_output=True, text=True)
         if retained:
             (retained / "build.log").write_text(built.stdout + built.stderr)
@@ -58706,7 +59032,7 @@ int main(void)
     with tempfile.TemporaryDirectory(prefix="tls-hostnames-") as temporary:
         work = Path(temporary)
         (work / "names.c").write_text(shim + oids + "\n" + parsers + driver)
-        built = subprocess.run([os.environ.get("CC", "cc"), "-O1", "-w", "-fsanitize=address,undefined",
+        built = build_run([os.environ.get("CC", "cc"), "-O1", "-w", "-fsanitize=address,undefined",
                                 "-o", str(work / "names"), str(work / "names.c")],
                                capture_output=True, text=True)
         if built.returncode:
@@ -58870,7 +59196,7 @@ int main(void)
     with tempfile.TemporaryDirectory(prefix="tls-dates-") as temporary:
         work = Path(temporary)
         (work / "dates.c").write_text(shim + oids + "\n" + parsers + driver)
-        built = subprocess.run([os.environ.get("CC", "cc"), "-O1", "-w", "-fsanitize=address,undefined",
+        built = build_run([os.environ.get("CC", "cc"), "-O1", "-w", "-fsanitize=address,undefined",
                                 "-o", str(work / "dates"), str(work / "dates.c")],
                                capture_output=True, text=True)
         if built.returncode:
@@ -59032,7 +59358,7 @@ int main(void)
     with tempfile.TemporaryDirectory(prefix="public-suffixes-") as temporary:
         work = Path(temporary)
         (work / "suffix.c").write_text(shim + oids + "\n" + parsers + driver)
-        built = subprocess.run([os.environ.get("CC", "cc"), "-O1", "-w", "-o",
+        built = build_run([os.environ.get("CC", "cc"), "-O1", "-w", "-o",
                                 str(work / "suffix"), str(work / "suffix.c")],
                                capture_output=True, text=True)
         if built.returncode:
@@ -59539,7 +59865,7 @@ def harness_tls_ct(argv):
                 for at, (operator, retired, interval) in enumerate(logs)) + "};\n")
         (work / "ctd").mkdir()
         (work / "ctd" / "driver.c").write_text(TLS_CT_DRIVER.replace("../src", str(HARNESS_ROOT / "src")))
-        built = subprocess.run(spark_shell_command(args.cc, work / "driver", None,
+        built = build_run(spark_shell_command(args.cc, work / "driver", None,
                                                    ('TLS_BENCH_CT="%s"' % (work / "logs.h"),))
                                [:-1] + [str(work / "ctd" / "driver.c")],
                                cwd=HARNESS_ROOT, capture_output=True, text=True)
@@ -59572,7 +59898,7 @@ def harness_tls_ct(argv):
         if not shutil.which("openssl"):
             print("tls ct: end to end NOT RUN -- no openssl")
             return checks.verdict("tls ct", "tls-ct")
-        root_key = ec.generate_private_key(ec.SECP384R1())
+        root_key = bench_root_key(work)
         (work / "root.key").write_bytes(root_key.private_bytes(
             serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
         anchor = bench_anchor(work)
@@ -59585,13 +59911,13 @@ def harness_tls_ct(argv):
         (work / "inter.pem").write_bytes(intermediate.public_bytes(serialization.Encoding.PEM))
         (work / "leaf.key").write_bytes(leaf_key.private_bytes(
             serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
-        builds = [subprocess.Popen(spark_shell_command(args.cc, work / name, anchor, defines),
-                                   cwd=HARNESS_ROOT, stdout=subprocess.DEVNULL,
-                                   stderr=subprocess.PIPE, text=True)
-                  for name, defines in (
-                      ("shell_tight", ("MOONWATER_STRICT_NET=2", 'TLS_BENCH_CT="%s"' % (work / "logs.h"))),
-                      ("shell", ('TLS_BENCH_CT="%s"' % (work / "logs.h"),)))]
-        errors = [build.communicate()[1] for build in builds]
+        builds = build_together(
+            [spark_shell_command(args.cc, work / name, anchor, defines)
+             for name, defines in (
+                 ("shell_tight", ("MOONWATER_STRICT_NET=2", 'TLS_BENCH_CT="%s"' % (work / "logs.h"))),
+                 ("shell", ('TLS_BENCH_CT="%s"' % (work / "logs.h"),)))],
+            cwd=HARNESS_ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        errors = [build.stderr for build in builds]
         if any(build.returncode for build in builds):
             print("".join(errors)[-3000:])
             checks(False, "the tight and default shells build")
@@ -59920,7 +60246,7 @@ def harness_dns_oracle(argv):
         work = Path(temporary)
         (work / "ctd").mkdir()
         (work / "ctd" / "driver.c").write_text(DNS_ORACLE_DRIVER.replace("../src", str(HARNESS_ROOT / "src")))
-        built = subprocess.run(spark_shell_command(args.cc, work / "driver")[:-1] +
+        built = build_run(spark_shell_command(args.cc, work / "driver")[:-1] +
                                [str(work / "ctd" / "driver.c")],
                                cwd=HARNESS_ROOT, capture_output=True, text=True)
         if built.returncode:
@@ -60001,7 +60327,7 @@ def harness_guest_confinement(argv):
         stick = work / "stick"
         stick.mkdir()
         for name, section in (("netchk", "CHECK_net"), ("bowlchk", "CHECK_bowl")):
-            built = subprocess.run(
+            built = build_run(
                 [cc, "-O2", "-static", "-nostdlib", "-nostartfiles", "-fno-stack-protector",
                  "-fno-builtin", *flags, "-w", "-T", "src/build/spark.ld", "-Wl,-e,_start",
                  "-Wl,--build-id=none", "-Wl,--no-warn-rwx-segments", "-D" + section,
@@ -60327,7 +60653,7 @@ int main(int argc, char **argv)
 """
     source = tls_verify_hosted_source(net, (HARNESS_ROOT / "test/checks.c").read_text(), driver)
     (work / "verify.c").write_text(source)
-    built = subprocess.run(["clang", "-O2", "-std=gnu11", "-w", str(work / "verify.c"),
+    built = build_run(["clang", "-O2", "-std=gnu11", "-w", str(work / "verify.c"),
                             "-o", str(work / "verify")], capture_output=True, text=True)
     if built.returncode:
         print("x509 corpus: FAIL -- the lift does not build:\n" + built.stderr[-2000:])
@@ -60976,7 +61302,7 @@ def harness_sntp_era(argv):
         work = Path(temporary)
         for label, window in (("the shipped window", (least, most)),):
             (work / "era.c").write_text(source)
-            built = subprocess.run([compiler, "-O1", "-g", "-std=gnu11", "-Wno-unused-function",
+            built = build_run([compiler, "-O1", "-g", "-std=gnu11", "-Wno-unused-function",
                                     "-fsanitize=address,undefined", "-fno-sanitize-recover=all",
                                     str(work / "era.c"), "-o", str(work / "era")],
                                    capture_output=True, text=True)
@@ -62519,11 +62845,25 @@ def crypto_vectors_lines(seed):
     #   prime from a key a bit longer and one from a key a bit shorter. Its
     #   primes are above sqrt(2) times their power of two, so the product
     #   has exactly the bits asked for.
+    #   Every prime pair the keys below take is asked for before the first is
+    #   used: OpenSSL makes them without the interpreter's lock, and the
+    #   8192-bit key is most of the time this generator spends on them.
+    rsa_sizes = ((2048, 65537), (2049, 65537), (2055, 3), (3072, 65537),
+                 (4096, 65537), (8192, 65537), (2047, 65537), (2048, 3))
+
+    def prime_pair(size, e):
+        numbers = rsa.generate_private_key(public_exponent=e, key_size=size).private_numbers()
+        return numbers.p, numbers.q
+
+    prime_pool = concurrent.futures.ThreadPoolExecutor(max_workers=max(2, min(8, os.cpu_count() or 2)))
+    prime_pairs = [prime_pool.submit(prime_pair, size, e)
+                   for bits, e in rsa_sizes + ((2048, 65537),)
+                   for size in ((bits,) if bits % 2 == 0 else (bits + 1, bits - 1))
+                   ]
+
     def rsa_key(bits, e):
         def primes(size):
-            numbers = rsa.generate_private_key(public_exponent=e,
-                                               key_size=size).private_numbers()
-            return numbers.p, numbers.q
+            return prime_pairs.pop(0).result()
 
         one, two = primes(bits) if bits % 2 == 0 else (primes(bits + 1)[0],
                                                         primes(bits - 1)[0])
@@ -62584,8 +62924,7 @@ def crypto_vectors_lines(seed):
         emit(scheme, want, be(n, k), be(e, 8), signature,
              message if scheme == "pss" else digest)
 
-    for bits, e in ((2048, 65537), (2049, 65537), (2055, 3), (3072, 65537),
-                    (4096, 65537), (8192, 65537), (2047, 65537), (2048, 3)):
+    for bits, e in rsa_sizes:
         n, (one, two, d) = rsa_key(bits, e)
         k = (bits + 7) // 8
         policy = bits >= 2048
@@ -62682,6 +63021,7 @@ def crypto_vectors_lines(seed):
     #   A modulus that is even, and an exponent that is even or one: refused
     #   before any arithmetic, by policy where OpenSSL has none.
     n, _ = rsa_key(2048, 65537)
+    prime_pool.shutdown()
     digest = draw(32)
     for bad_n, bad_e in ((n + 1, 65537), (n, 65536), (n, 1), (n, 2)):
         rsa_add("pkcs256", bad_n, bad_e, be(12345, 256), digest, policy=False)
@@ -62922,13 +63262,19 @@ def crypto_x25519_instruction_counts():
         glib = subprocess.run(["pkg-config", "--cflags", "glib-2.0"], capture_output=True,
                               text=True)
         plugin = work / "insn.so"
-        if glib.returncode or subprocess.run(
+        if glib.returncode or build_run(
                 [cc, "-O2", "-shared", "-fPIC"] + glib.stdout.split() +
                 ["-o", str(plugin), str(HARNESS_ROOT / "test/insn.c")],
                 capture_output=True).returncode:
             return ["x25519 instructions: NOT RUN -- the qemu plugin does not build"], False
-        unit = work / "count.c"
-        unit.write_text(CRYPTO_X25519_COUNT_C)
+        (work / "count.c").write_text(CRYPTO_X25519_COUNT_C)
+        (work / "secret.c").write_text(CRYPTO_SECRET_COUNT_C)
+
+        #   Every machine's two programs are built side by side, and then
+        #   every run of every program at once: each run is a process of its
+        #   own with a count that depends on nothing but the bytes it ran, the
+        #   emulator and the plugin, so a run is made once and kept.
+        machines = []
         for machine, compiler, flags, runner, cpus in (
                 ("x86_64", "x86_64-linux-gnu-gcc" if os.uname().machine != "x86_64" else "gcc",
                  ["-march=x86-64"], "qemu-x86_64",
@@ -62941,85 +63287,122 @@ def crypto_x25519_instruction_counts():
                 lines.append("x25519 instructions %s: NOT RUN -- no %s or %s"
                              % (machine, compiler, runner))
                 continue
-            binary = work / ("count." + machine)
-            built = subprocess.run(
-                [compiler] + flags + ["-O2", "-static", "-nostdlib", "-nostartfiles",
-                                      "-fno-stack-protector", "-fno-builtin", "-w",
-                                      "-I", str(HARNESS_ROOT), "-T",
-                                      str(HARNESS_ROOT / "src/build/spark.ld"),
-                                      "-Wl,-e,_start", "-Wl,--build-id=none",
-                                      "-Wl,--no-warn-rwx-segments", "-o", str(binary),
-                                      str(unit)], capture_output=True, text=True)
-            if built.returncode:
-                lines.append("x25519 instructions %s: did not build\n%s"
-                             % (machine, built.stderr[-1500:]))
-                failed = True
-                continue
-            secret_binary = work / ("secret." + machine)
-            secret_unit = work / "secret.c"
-            secret_unit.write_text(CRYPTO_SECRET_COUNT_C)
-            built = subprocess.run(
-                [compiler] + flags + ["-O2", "-static", "-nostdlib", "-nostartfiles",
-                                      "-fno-stack-protector", "-fno-builtin", "-w",
-                                      "-I", str(HARNESS_ROOT), "-T",
-                                      str(HARNESS_ROOT / "src/build/spark.ld"),
-                                      "-Wl,-e,_start", "-Wl,--build-id=none",
-                                      "-Wl,--no-warn-rwx-segments", "-o", str(secret_binary),
-                                      str(secret_unit)], capture_output=True, text=True)
-            if built.returncode:
-                lines.append("secret instructions %s: did not build\n%s"
-                             % (machine, built.stderr[-1500:]))
-                failed = True
-                secret_binary = None
-            for body, cpu in cpus:
-                counts = []
-                for which in "anqz19":
-                    ran = subprocess.run([runner] + cpu + ["-plugin", str(plugin), str(binary),
-                                                           which],
-                                         capture_output=True, text=True)
-                    counts.append(ran.stderr.strip().split("\n")[-1] if ran.returncode == 0
-                                  else "exit %d" % ran.returncode)
-                same = len(set(counts)) == 1 and counts[0].isdigit()
-                failed = failed or not same
-                lines.append("x25519 instructions %s%s: %s" % (
-                    machine, " " + body if body else "",
-                    ("%s for each of six keys" % counts[0]) if same else
-                    "FAIL -- they differ: " + ", ".join(counts)))
-                if not secret_binary:
+            machines.append((machine, compiler, flags, runner, cpus))
+
+        def program(machine, compiler, flags, name, unit):
+            binary = work / ("%s.%s" % (name, machine))
+            return binary, [compiler] + flags + [
+                "-O2", "-static", "-nostdlib", "-nostartfiles", "-fno-stack-protector",
+                "-fno-builtin", "-w", "-I", str(HARNESS_ROOT), "-T",
+                str(HARNESS_ROOT / "src/build/spark.ld"), "-Wl,-e,_start",
+                "-Wl,--build-id=none", "-Wl,--no-warn-rwx-segments", "-o", str(binary),
+                str(work / unit)]
+
+        wanted = [(machine, program(machine, compiler, flags, "count", "count.c"),
+                   program(machine, compiler, flags, "secret", "secret.c"))
+                  for machine, compiler, flags, _, _ in machines]
+        built = build_together([command for _, one, two in wanted for _, command in (one, two)],
+                               capture_output=True, text=True)
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=max(2, min(16, os.cpu_count() or 4))) as pool:
+            plan = []
+            for (machine, compiler, flags, runner, cpus), (_, (count, _), (secret, _)) in zip(
+                    machines, wanted):
+                one, two = built[0], built[1]
+                built = built[2:]
+                if one.returncode:
+                    lines.append("x25519 instructions %s: did not build\n%s"
+                                 % (machine, one.stderr[-1500:]))
+                    failed = True
                     continue
-                rows = []
-                for primitive, name in CRYPTO_SECRET_PRIMITIVES:
-                    counts = []
-                    for which in "anqz19":
-                        ran = subprocess.run(
-                            [runner] + cpu + ["-plugin", str(plugin), str(secret_binary),
-                                              primitive, which],
-                            capture_output=True, text=True)
-                        counts.append(ran.stderr.strip().split("\n")[-1] if ran.returncode == 0
-                                      else "exit %d" % ran.returncode)
+                if two.returncode:
+                    lines.append("secret instructions %s: did not build\n%s"
+                                 % (machine, two.stderr[-1500:]))
+                    failed = True
+                    secret = None
+
+                def runs(cpu, option, binary, *which):
+                    return [pool.submit(count_run, [runner] + cpu + ["-plugin", option,
+                                                                    str(binary), *which, key])
+                            for key in "anqz19"]
+
+                for body, cpu in cpus:
+                    plan.append((machine, body, "x25519", None, runs(cpu, str(plugin), count)))
+                    if not secret:
+                        continue
+                    plan.append((machine, body, "secret", None, [
+                        (name, runs(cpu, str(plugin), secret, primitive))
+                        for primitive, name in CRYPTO_SECRET_PRIMITIVES]))
+                    plan.append((machine, body, "traced", None, [
+                        (name, runs(cpu, str(plugin) + ",trace=on", secret, primitive))
+                        for primitive, name in CRYPTO_SECRET_TRACED]))
+            for machine, body, kind, _, futures in plan:
+                suffix = machine + (" " + body if body else "")
+                if kind == "x25519":
+                    counts = [future.result() for future in futures]
                     same = len(set(counts)) == 1 and counts[0].isdigit()
                     failed = failed or not same
-                    rows.append("%s %s" % (name, counts[0] if same else
-                                           "FAIL -- they differ: " + ", ".join(counts)))
-                lines.append("secret instructions %s%s, six secrets each: %s" % (
-                    machine, " " + body if body else "", "; ".join(rows)))
-                rows = []
-                for primitive, name in CRYPTO_SECRET_TRACED:
-                    traces = []
-                    for which in "anqz19":
-                        ran = subprocess.run(
-                            [runner] + cpu + ["-plugin", str(plugin) + ",trace=on",
-                                              str(secret_binary), primitive, which],
-                            capture_output=True, text=True)
-                        traces.append(ran.stderr.strip().split("\n")[-1] if ran.returncode == 0
-                                      else "exit %d" % ran.returncode)
-                    same = len(set(traces)) == 1 and traces[0].count(" ") == 1
-                    failed = failed or not same
-                    rows.append("%s %s" % (name, traces[0].split()[1] if same else
-                                           "FAIL -- the addresses differ: " + ", ".join(traces)))
-                lines.append("secret addresses %s%s, six secrets each: %s" % (
-                    machine, " " + body if body else "", "; ".join(rows)))
+                    lines.append("x25519 instructions %s: %s" % (
+                        suffix, ("%s for each of six keys" % counts[0]) if same else
+                        "FAIL -- they differ: " + ", ".join(counts)))
+                elif kind == "secret":
+                    rows = []
+                    for name, group in futures:
+                        counts = [future.result() for future in group]
+                        same = len(set(counts)) == 1 and counts[0].isdigit()
+                        failed = failed or not same
+                        rows.append("%s %s" % (name, counts[0] if same else
+                                               "FAIL -- they differ: " + ", ".join(counts)))
+                    lines.append("secret instructions %s, six secrets each: %s"
+                                 % (suffix, "; ".join(rows)))
+                else:
+                    rows = []
+                    for name, group in futures:
+                        traces = [future.result() for future in group]
+                        same = len(set(traces)) == 1 and traces[0].count(" ") == 1
+                        failed = failed or not same
+                        rows.append("%s %s" % (name, traces[0].split()[1] if same else
+                                               "FAIL -- the addresses differ: " + ", ".join(traces)))
+                    lines.append("secret addresses %s, six secrets each: %s"
+                                 % (suffix, "; ".join(rows)))
     return lines, failed
+
+
+def count_run(command):
+    """The last line a plugin run of qemu-user wrote, or "exit N": the same
+    for the same emulator, plugin, program and words, so the build cache
+    keeps it (a file named on the line counts by its bytes, ahead of any
+    ,option it carries)."""
+    root, verify = build_cache_setting()
+    entry = None
+    #   Where in their pages the data addresses of a traced run fall depends on
+    #   where the stack was put, which is not the program's alone: only the
+    #   counts, which are, are kept.
+    if root and not any("trace=on" in str(word) for word in command):
+        digest = hashlib.sha256(b"moonwater count cache 1\0")
+        digest.update(build_cache_tool(command[0], False).encode() + b"\0")
+        for word in command:
+            name, comma, option = word.partition(",")
+            path = Path(name)
+            if not word.startswith("-") and path.is_file():
+                digest.update(b"<file>" + hashlib.sha256(path.read_bytes()).digest() +
+                              comma.encode() + option.encode() + b"\0")
+            else:
+                digest.update(word.encode() + b"\0")
+        entry = root / "counts" / digest.hexdigest()[:2] / digest.hexdigest()
+        if entry.is_file() and not verify:
+            return entry.read_text()
+    ran = subprocess.run(command, capture_output=True, text=True)
+    answer = ran.stderr.strip().split("\n")[-1] if ran.returncode == 0 else "exit %d" % ran.returncode
+    if entry and (verify and entry.is_file() and entry.read_text() != answer):
+        raise RuntimeError("count cache: %s answers %r, the entry says %r"
+                           % (command[-2:], answer, entry.read_text()))
+    if entry and not entry.is_file():
+        entry.parent.mkdir(parents=True, exist_ok=True)
+        staged = entry.with_name(".%s.%d.%d" % (entry.name, os.getpid(), time.monotonic_ns()))
+        staged.write_text(answer)
+        os.replace(staged, entry)
+    return answer
 
 
 def wycheproof_lines(directory):
@@ -64248,7 +64631,7 @@ def harness_crypto_fuzz(argv):
             probe = Path(temporary) / "probe.c"
             probe.write_text("#include <openssl/evp.h>\n"
                              "int main(void) { return EVP_aes_128_gcm() == 0; }\n")
-            if subprocess.run([clang, str(probe), "-o", str(Path(temporary) / "probe")] + extra,
+            if build_run([clang, str(probe), "-o", str(Path(temporary) / "probe")] + extra,
                               capture_output=True).returncode:
                 print("crypto fuzz: NOT RUN -- no OpenSSL headers or libcrypto to link")
                 return 2
@@ -65305,7 +65688,7 @@ def harness_msan_net(argv):
         unit = work / (name + ".c")
         binary = work / name
         unit.write_text(source)
-        built = subprocess.run(msan_cc + [str(unit), "-o", str(binary)],
+        built = build_run(msan_cc + [str(unit), "-o", str(binary)],
                                capture_output=True, text=True)
         if built.returncode:
             return None, built.stderr
@@ -66519,7 +66902,7 @@ int main(void) {
             unit = Path(temporary) / "clock.c"
             binary = Path(temporary) / "clock"
             unit.write_text(source)
-            built = subprocess.run([clang, "-std=c11", "-O2",
+            built = build_run([clang, "-std=c11", "-O2",
                                     "-fsanitize=address,undefined", str(unit),
                                     "-o", str(binary)], capture_output=True, text=True)
             if built.returncode:
@@ -66787,7 +67170,7 @@ int main(void)
         unit = Path(temporary) / "wait.c"
         binary = Path(temporary) / "wait"
         unit.write_text(source)
-        built = subprocess.run([compiler, "-std=c11", "-O2",
+        built = build_run([compiler, "-std=c11", "-O2",
                                 "-fsanitize=address,undefined", "-I", str(HARNESS_ROOT),
                                 str(unit), "-o", str(binary)], capture_output=True, text=True)
         checks(built.returncode == 0, "production wait state model compiles")
@@ -66972,7 +67355,7 @@ int main(void)
         unit = Path(temporary) / "work.c"
         binary = Path(temporary) / "work"
         unit.write_text(source)
-        built = subprocess.run([compiler, "-std=c11", "-O2",
+        built = build_run([compiler, "-std=c11", "-O2",
                                 "-fsanitize=address,undefined", str(unit),
                                 "-o", str(binary)], capture_output=True, text=True)
         checks(built.returncode == 0, "production DHCP work model compiles")
@@ -67456,7 +67839,7 @@ int main(void)
         unit = Path(temporary) / "exchange.c"
         binary = Path(temporary) / "exchange"
         unit.write_text(source)
-        built = subprocess.run([compiler, "-std=gnu11", "-O1", "-g", "-w",
+        built = build_run([compiler, "-std=gnu11", "-O1", "-g", "-w",
                                 "-fsanitize=address,undefined", str(unit),
                                 "-o", str(binary)], capture_output=True, text=True)
         checks(built.returncode == 0, "production DHCP exchanges compile over the seam")
@@ -67512,11 +67895,11 @@ def harness_net_exhaustive_proof(argv):
         unit = Path(temporary) / "proof.c"
         binary = Path(temporary) / "proof"
         unit.write_text(source)
-        built = subprocess.run([compiler, "-std=gnu11", "-O2", "-w", str(unit), "-o",
+        built = build_run([compiler, "-std=gnu11", "-O2", "-w", str(unit), "-o",
                                 str(binary)], capture_output=True, text=True)
         guarded = Path(temporary) / "proof-asan"
         if not built.returncode:
-            built = subprocess.run([compiler, "-std=gnu11", "-O1", "-w",
+            built = build_run([compiler, "-std=gnu11", "-O1", "-w",
                                     "-fsanitize=address,undefined",
                                     "-fno-sanitize-recover=all", str(unit), "-o",
                                     str(guarded)], capture_output=True, text=True)
@@ -69315,7 +69698,7 @@ def harness_net_mutation(argv):
             if "MOONWATER_STRICT" in mutant["text"] or mutant["line"] in tier_lines.get(
                     mutant["file"], set()):
                 for tier in ("2", "3"):
-                    built = subprocess.run(build[:-1] + ["-DMOONWATER_STRICT=" + tier, "-o",
+                    built = build_run(build[:-1] + ["-DMOONWATER_STRICT=" + tier, "-o",
                                                          str(tree / "chk"), "test/checks.c"],
                                            cwd=tree, capture_output=True, text=True,
                                            timeout=600)
@@ -69551,7 +69934,7 @@ int main(void) {
             source = Path(temporary) / "proof.c"
             binary = Path(temporary) / "proof"
             source.write_text(proof_c)
-            built = subprocess.run([clang, "-std=c11", "-O2", "-fsanitize=address,undefined",
+            built = build_run([clang, "-std=c11", "-O2", "-fsanitize=address,undefined",
                                     str(source), "-o", str(binary)],
                                    capture_output=True, text=True)
             checks(built.returncode == 0, "production AES proof subject compiles")
@@ -69717,7 +70100,7 @@ def harness_wire_constants(argv):
         missing = set(re.findall(r"[‘'](\w+)[’'] undeclared", probe.stderr))
         known = [n for n in names if n not in missing]
         unit.write_text(program(known))
-        built = subprocess.run(["cc", "-w", str(unit), "-o", str(Path(work) / "wire")],
+        built = build_run(["cc", "-w", str(unit), "-o", str(Path(work) / "wire")],
                                capture_output=True, text=True)
         if built.returncode:
             print("  FAIL wire constants did not build:\n" + built.stderr[-2000:])
@@ -69848,11 +70231,15 @@ def harness_security_hygiene(argv):
         checks(name in HARNESS_CHECKS, "differential.py: %s is not registered" % name)
         checks("--harness " + name in run, "test/run: no lane asks for --harness " + name)
         checks(name + ": skipped (soft)" in run, "test/run: no soft skip for " + name)
+    #   A soft skip is a note of that name, or a job of the soft class, which
+    #   notes it in jobs_wait.
     for name in ("tls_der_fuzz", "tls_ocsp_fuzz", "tls_crl_fuzz", "tls_hs_fuzz",
                  "pathname_race", "dhcp_fuzz", "dhcp_frame_fuzz",
                  "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "http_fuzz", "wifi_eapol_fuzz",
                  "wifi_scan_fuzz", "wifi_sae_fuzz", "bowl_sig_fuzz", "nts_fuzz", "nts"):
-        checks(name + ": skipped (soft)" in run, "test/run: no soft skip for " + name)
+        checks(name + ": skipped (soft)" in run or re.search(
+            r"^\s*job soft python3 test/differential\.py --harness %s(?:\s|$)" % name, run, re.M),
+            "test/run: no soft skip for " + name)
 
     names = set()
     for corpus in ("tls_der", "tls_ocsp", "tls_crl", "tls_hs", "dhcp", "sntp", "dns",
@@ -71720,7 +72107,7 @@ int main(int argc, char **argv)
     with tempfile.TemporaryDirectory(prefix="machine-scan-") as temporary:
         work = Path(temporary)
         (work / "scan.c").write_text(source)
-        built = subprocess.run([cc, "-O1", "-g", "-fsanitize=address,undefined",
+        built = build_run([cc, "-O1", "-g", "-fsanitize=address,undefined",
                                 "-fno-sanitize-recover=all", "-w", "-o", str(work / "scan"),
                                 str(work / "scan.c")], capture_output=True, text=True)
         if built.returncode:
@@ -71860,7 +72247,7 @@ int main(int argc, char **argv)
     with tempfile.TemporaryDirectory(prefix="machine-scan-pin-") as temporary:
         work = Path(temporary)
         (work / "scan.c").write_text(source)
-        subprocess.run([cc, "-O1", "-w", "-o", str(work / "scan"), str(work / "scan.c")], check=True)
+        build_run([cc, "-O1", "-w", "-o", str(work / "scan"), str(work / "scan.c")], check=True)
         pinned = work / "conditional.sh"
         pinned.write_text("if false; then\n moonwater_reset() { :; }\nfi\n")
         said = subprocess.run([str(work / "scan"), str(pinned)], capture_output=True, text=True).stdout.split()
@@ -72029,7 +72416,7 @@ int main(void)
     with tempfile.TemporaryDirectory(prefix="machine-stop-") as temporary:
         work = Path(temporary)
         (work / "stop.c").write_text(stop_source)
-        built = subprocess.run([cc, "-O1", "-g", "-fsanitize=address,undefined", "-w", "-o",
+        built = build_run([cc, "-O1", "-g", "-fsanitize=address,undefined", "-w", "-o",
                                 str(work / "stop"), str(work / "stop.c")],
                                capture_output=True, text=True)
         if built.returncode:
@@ -72149,7 +72536,7 @@ int main(void)
     with tempfile.TemporaryDirectory(prefix="machine-lift-") as temporary:
         work = Path(temporary)
         (work / "lift.c").write_text(lift_source)
-        built = subprocess.run([cc, "-O1", "-g", "-fsanitize=address,undefined", "-w", "-o",
+        built = build_run([cc, "-O1", "-g", "-fsanitize=address,undefined", "-w", "-o",
                                 str(work / "lift"), str(work / "lift.c")],
                                capture_output=True, text=True)
         if built.returncode:
@@ -73022,7 +73409,7 @@ def harness_net_epoch_mutants(argv):
                 continue
             (top / "src/sh/net.c").write_text(original.replace(before, after))
             binary = top / "epoch"
-            built = subprocess.run(
+            built = build_run(
                 [args.cc, "-O2", "-static", "-nostdlib", "-nostartfiles",
                  "-fno-stack-protector", "-fno-builtin", "-march=x86-64", "-w",
                  "-T", str(top / "src/build/spark.ld"), "-Wl,-e,_start",
@@ -73123,7 +73510,7 @@ def harness_net_netem(argv):
         if args.shell:
             shutil.copy(args.shell, top / "shell")
         else:
-            built = subprocess.run(spark_shell_command(args.cc, top / "shell"),
+            built = build_run(spark_shell_command(args.cc, top / "shell"),
                                    cwd=HARNESS_ROOT, capture_output=True, text=True)
             if built.returncode:
                 print(built.stderr[-3000:])
@@ -76398,7 +76785,7 @@ int main(void)
         unit = Path(temporary) / "state.c"
         binary = unit.with_suffix("")
         unit.write_text(source)
-        built = subprocess.run([clang, "-O1", "-g", "-fsanitize=address,undefined",
+        built = build_run([clang, "-O1", "-g", "-fsanitize=address,undefined",
                                 "-fno-sanitize-recover=all", str(unit), "-o", str(binary)],
                                capture_output=True, text=True, timeout=120)
         if built.returncode:
@@ -84284,12 +84671,12 @@ int main(void)
         probe.write_text("int main(void) { return 0; }\n")
         sanitizer_flags = [clang, "-O1", "-g", "-w", "-fsanitize=address,undefined",
                            "-fno-sanitize-recover=all"]
-        if subprocess.run(sanitizer_flags + [str(probe), "-o", str(work / "probe")],
+        if build_run(sanitizer_flags + [str(probe), "-o", str(work / "probe")],
                           capture_output=True, text=True).returncode:
             print("waterlink script scan: NOT RUN -- compiler lacks ASan/UBSan")
             return 2
         (work / "scan.c").write_text(driver)
-        built = subprocess.run([clang, "-O1", "-g", "-w", "-fsanitize=address,undefined",
+        built = build_run([clang, "-O1", "-g", "-w", "-fsanitize=address,undefined",
                                 "-fno-sanitize-recover=all", str(work / "scan.c"), "-o",
                                 str(work / "scan")], capture_output=True, text=True)
         if built.returncode:
@@ -84483,7 +84870,7 @@ int main(int argc, char **argv)
             checks(sabotaged != region, "%s: the constant to change is in its block" % arch)
             for label, text in (("plain", region), ("sabotaged", sabotaged)):
                 (work / ("wide-%s.c" % label)).write_text(macros(arch) + text)
-                built = subprocess.run(compiler + cflags + ["-O2", "-o", str(work / label), str(work / "test.c"),
+                built = build_run(compiler + cflags + ["-O2", "-o", str(work / label), str(work / "test.c"),
                                                             str(work / ("wide-%s.c" % label))],
                                        capture_output=True, text=True)
                 if built.returncode:
@@ -85759,7 +86146,7 @@ def harness_kernel_ports(argv):
                     lines.append('printf("#define %s %%ld\\n", (long)(%s));' % (words[0], rest.split(None, 1)[1]))
             lines.append("return 0; }")
             (work / "offsets.c").write_text("\n".join(lines))
-            built = subprocess.run(["cc", "-w", "-o", str(work / "offsets"), str(work / "offsets.c")], capture_output=True, text=True)
+            built = build_run(["cc", "-w", "-o", str(work / "offsets"), str(work / "offsets.c")], capture_output=True, text=True)
             if built.returncode:
                 print("  the offsets did not build for %s: %s" % (arch, built.stderr[-500:]))
                 return None
@@ -85778,7 +86165,7 @@ def harness_kernel_ports(argv):
                     '#define ASM_FUNC(name) ".globl " #name "\\n.type " #name ", @function\\n" #name ":\\n"\n'
                     '#define ASM_END(name) ".size " #name ", .-" #name "\\n"\n#define ASM_RET "ret\\n"\n' + wide_region)
                 objects.append(str(work / "wide.c"))
-            built = subprocess.run(compiler + cflags + [defines, "-DCONFIG_FS_ENCRYPTION=1", "-DCONFIG_UNICODE=1", "-O2", "-w", "-Wl,--allow-multiple-definition", "-I", str(work), "-o", str(work / "test")] + objects,
+            built = build_run(compiler + cflags + [defines, "-DCONFIG_FS_ENCRYPTION=1", "-DCONFIG_UNICODE=1", "-O2", "-w", "-Wl,--allow-multiple-definition", "-I", str(work), "-o", str(work / "test")] + objects,
                                    capture_output=True, text=True)
             if built.returncode:
                 print("  build failed for %s:\n%s" % (arch, built.stderr[-1500:]))
@@ -90551,13 +90938,13 @@ def harness_font_reference(argv):
         work = Path(temporary)
         (work / "dump.c").write_text(FONT_DUMPER)
         (work / "compare.c").write_text(FONT_COMPARATOR)
-        built = subprocess.run([cc, "-O2", "-Wall", "-o", str(work / "compare"), str(work / "compare.c")] +
+        built = build_run([cc, "-O2", "-Wall", "-o", str(work / "compare"), str(work / "compare.c")] +
                                freetype + ["-lm"], capture_output=True, text=True, check=False)
         if built.returncode:
             print("font reference: NOT RUN -- FreeType does not build here: " + built.stderr.strip()[-300:])
             return 2
         march = ["-march=x86-64"] if platform.machine() == "x86_64" else []
-        built = subprocess.run([cc, "-O2", "-static", "-nostdlib", "-nostartfiles", "-fno-stack-protector",
+        built = build_run([cc, "-O2", "-static", "-nostdlib", "-nostartfiles", "-fno-stack-protector",
                                 "-fno-builtin", "-w"] + march +
                                ["-T", str(root / "src/build/spark.ld"), "-Wl,-e,_start", "-Wl,--build-id=none",
                                 "-Wl,--no-warn-rwx-segments", "-I", str(root / "src"),
@@ -90752,7 +91139,11 @@ def harness_main(argv):
     if not argv or argv[0] not in HARNESS_CHECKS:
         print("harness: one of " + " ".join(HARNESS_CHECKS), file=sys.stderr)
         return 2
-    return HARNESS_CHECKS[argv[0]](argv[1:])
+    began = time.monotonic()
+    try:
+        return HARNESS_CHECKS[argv[0]](argv[1:])
+    finally:
+        record_time(" ".join(["harness", *argv[:1]]), time.monotonic() - began)
 
 
 

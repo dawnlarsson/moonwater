@@ -853,11 +853,23 @@ deliberately non-certifying: a gap is visible work, not a silently skipped test
 or a claim that the risk does not apply.
 
 ```
-sh test/run                     every lane
+sh test/run -j 8 --changed      the seams this tree has changed from main
+sh test/run -j 8 --seam net     one seam's lanes (sh test/run --seams lists them)
 sh test/run shell text          named lanes only
+sh test/run --plan --changed    which lanes that is, and none run
+sh test/run --all               every lane, asked for on purpose
 sh test/run bench               the benchmarks
 sh test/run bench --list        what there is to measure
 ```
+
+The whole suite is hours of a machine, so a command line naming nothing is
+refused (CI, which sets `CI`, still runs it whole) and `--all` asks again on a
+terminal. Every lane is in one seam and every file in the tree is in one, and
+the suite's own three files select none: name the seams they are meant for
+beside `--changed`. Builds are kept under `~/.cache/moonwater-test`, keyed by
+the compiler, the command line and the preprocessed text, so a run builds only
+what changed (`MOONWATER_TEST_CACHE=off` or `=verify`), and a run ends with the
+slowest steps.
 
 For a procedural network campaign with clang's libFuzzer, ASan and UBSan:
 
