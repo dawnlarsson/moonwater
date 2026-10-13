@@ -847,16 +847,36 @@ config MOONWATER_TOOL_BOWL
     bool "bowl"
     default MOONWATER_TOOLS_ALL
 
+config MOONWATER_TOOL_COMPOSITOR
+    bool "compositor"
+    default MOONWATER_TOOLS_ALL
+
 config MOONWATER_TOOL_EDIT
     bool "edit"
+    default MOONWATER_TOOLS_ALL
+
+config MOONWATER_TOOL_KLOG
+    bool "klog"
     default MOONWATER_TOOLS_ALL
 
 config MOONWATER_TOOL_POINTER
     bool "pointer"
     default MOONWATER_TOOLS_ALL
 
+config MOONWATER_TOOL_SETTINGS
+    bool "settings"
+    default MOONWATER_TOOLS_ALL
+
 config MOONWATER_TOOL_SPAWN
     bool "spawn"
+    default MOONWATER_TOOLS_ALL
+
+config MOONWATER_TOOL_SURFACE
+    bool "surface"
+    default MOONWATER_TOOLS_ALL
+
+config MOONWATER_TOOL_TERMINAL
+    bool "terminal"
     default MOONWATER_TOOLS_ALL
 
 config MOONWATER_TOOL_TEXT
